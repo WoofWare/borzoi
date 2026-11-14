@@ -103,6 +103,11 @@ use reads::{EvaluationReads, ReadProbe};
 /// danger zone for hostile inputs.
 const MAX_IMPORT_DEPTH: usize = 64;
 
+/// The assembly MSBuild registers its built-in tasks from, as
+/// `Microsoft.Common.tasks` names it.
+#[cfg(any(test, feature = "test-support"))]
+const MSBUILD_TASKS_ASSEMBLY: &str = "Microsoft.Build.Tasks.Core, Version=15.1.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a";
+
 /// Pure walker reachable from [`super::parse_fsproj`]: no IO, every
 /// `<Import>` element produces an [`DiagnosticKind::UnresolvedImport`]
 /// diagnostic and is *not* followed.
@@ -1792,8 +1797,10 @@ struct State<'r> {
     /// runs before any target a build asks for.
     #[cfg(any(test, feature = "test-support"))]
     initial_targets_named: bool,
-    /// The `TaskName` of every `<UsingTask>` the walk reached: the executor
-    /// runs a built-in task only where none may rebind it.
+    /// The name each `<UsingTask>` the walk reached binds a task under, but
+    /// MSBuild's own registrations of its built-ins
+    /// ([`Self::record_using_task`]): the executor runs a built-in task only
+    /// where none may rebind it.
     #[cfg(any(test, feature = "test-support"))]
     using_task_names: Vec<String>,
     /// What the walk knows, or doesn't, about each property's stored value —
@@ -3706,6 +3713,38 @@ impl<'r> State<'r> {
     /// Every name is seeded by [`properties::well_known`], so the saved
     /// values are always present; the [`ThisFileFrame`] just records them
     /// verbatim for [`Self::exit_this_file`] to restore.
+    /// Record the name a `<UsingTask>` binds a task under
+    /// ([`Self::using_task_names`]), `$(MSBuildThisFileName)` read as the
+    /// file being walked (MSBuild expands the name when it registers it).
+    /// MSBuild's own registration of a built-in, `Microsoft.Build.Tasks.<Task>`
+    /// in its tasks assembly (`Microsoft.Common.tasks`), is the binding the
+    /// executor models, so it binds nothing new.
+    #[cfg(any(test, feature = "test-support"))]
+    fn record_using_task(&mut self, node: Node<'_, '_>) {
+        let name = node.attribute("TaskName").unwrap_or_default();
+        let built_in = name
+            .strip_prefix("Microsoft.Build.Tasks.")
+            .is_some_and(|task| {
+                !task.is_empty() && task.bytes().all(|b| b.is_ascii_alphanumeric())
+            })
+            && node.attribute("AssemblyName") == Some(MSBUILD_TASKS_ASSEMBLY)
+            && node
+                .attributes()
+                .all(|a| matches!(a.name(), "TaskName" | "AssemblyName" | "Condition"))
+            && !node.children().any(|c| c.is_element());
+        if built_in {
+            return;
+        }
+        let name = match self.lookup.get("MSBuildThisFileName") {
+            Some(file) => name.replace(
+                "$(MSBuildThisFileName)",
+                &properties::escaping::unescape(file.as_escaped()),
+            ),
+            None => name.to_owned(),
+        };
+        self.using_task_names.push(name);
+    }
+
     /// Record a `<Target>` element in the file being walked
     /// ([`Self::target_definitions`]).
     #[cfg(any(test, feature = "test-support"))]
@@ -4043,9 +4082,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
             if node.tag_name().name() == "Target" {
                 state.record_target_definition(node);
             } else {
-                state
-                    .using_task_names
-                    .push(node.attribute("TaskName").unwrap_or_default().to_owned());
+                state.record_using_task(node);
             }
             state.push(
                 DiagnosticKind::UnsupportedConstruct {
