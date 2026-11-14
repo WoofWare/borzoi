@@ -11,11 +11,14 @@
 //! - target bodies: `PropertyGroup`s and `ItemGroup` `Include`s with
 //!   conditions and `$(…)` values, `Message`, and what the executor declines
 //!   (another task, `Inputs`/`Outputs`);
+//! - item elements batched over the metadata their condition reads;
+//! - `RemoveDuplicates`, its `Inputs` and the `Output`s that gather it;
 //! - an untrusted property (written under a condition the walk cannot decide).
 //!
 //! Every run the executor commits to must be MSBuild's (the oracle's
 //! `runTargets` op): the same targets in the same order, the same properties,
-//! the same items with the same metadata. A build MSBuild fails must decline.
+//! the same items with the same metadata and, where the executor claims one,
+//! the same escaped spelling. A build MSBuild fails must decline.
 
 mod common;
 
@@ -462,6 +465,19 @@ fn check(oracle: &mut Oracle, xml: &str, tally: &mut Tally) {
         })
         .collect();
     assert_eq!(ours, msbuild, "items of I, in\n{xml}");
+    // A spelling the executor claims is the one MSBuild holds: it is what a
+    // later list expansion, `Output` or batch reads.
+    let spellings = theirs["items"]["I"].as_array().unwrap();
+    for (item, theirs) in items["I"].iter().zip(spellings) {
+        if let Some(spelled) = &item.escaped_identity {
+            assert_eq!(
+                Some(spelled.as_str()),
+                theirs["escaped"].as_str(),
+                "the escaped spelling of {}, in\n{xml}",
+                item.identity
+            );
+        }
+    }
 }
 
 fn sweep(seed: u64, cases: usize) -> Tally {
@@ -833,4 +849,230 @@ fn batched_item_groups_match_msbuild() {
 fn batching_soak() {
     let (seed, cases) = common::soak_parameters("fsproj_target_execution_batching", 3000);
     batching_sweep(seed, cases);
+}
+
+/// Identities the input list `J` may hold for `RemoveDuplicates`: repeats in
+/// either case, an escaped letter that decodes to another entry, escaped
+/// spellings substitution cannot reproduce, and non-ASCII letters in either
+/// case, whose folding the executor leaves to .NET.
+const DEDUP_IDENTITIES: [&str; 13] = [
+    "a.x", "A.X", "b.y", "a.X", "c", "C", "d/e.x", "%61.x", "%2541", "s%20p", "q%3Bx", "\u{e9}",
+    "\u{c9}",
+];
+/// The task's `Inputs`: the list, repeated, beside literals (one repeating an
+/// identity of `J`, padded, one spelt escaped), a property, nothing, an empty
+/// list, and shapes the executor declines (a transform, a wildcard).
+const DEDUP_INPUTS: [&str; 10] = [
+    "@(J)",
+    "@(J);@(J)",
+    "@(J);a.x;B.Y",
+    " c ; @(J) ;C",
+    "$(A);@(J);X",
+    "@(J);%61.X",
+    "@(Missing)",
+    "",
+    "@(J->'%(Filename)')",
+    "@(J);*.x",
+];
+/// The task's `Output`s: each parameter into an item type and a property,
+/// the parameter named in another case, under a condition (one reading what
+/// an earlier output wrote), and outputs MSBuild rejects (a parameter that
+/// is no output, none, both destinations).
+const DEDUP_OUTPUTS: [&str; 11] = [
+    "<Output TaskParameter=\"Filtered\" ItemName=\"I\" />",
+    "<Output TaskParameter=\"filtered\" ItemName=\"I\" />",
+    "<Output TaskParameter=\"Filtered\" PropertyName=\"B\" />",
+    "<Output TaskParameter=\"HadAnyDuplicates\" PropertyName=\"C\" />",
+    "<Output TaskParameter=\"HadAnyDuplicates\" ItemName=\"I\" />",
+    "<Output TaskParameter=\"Filtered\" ItemName=\"I\" Condition=\"'$(A)' == 'x'\" />",
+    "<Output TaskParameter=\"Filtered\" ItemName=\"I\" Condition=\"'$(B)' != ''\" />",
+    "<Output TaskParameter=\"Filtered\" PropertyName=\"A\" Condition=\"'$(C)' == 'True'\" />",
+    "<Output TaskParameter=\"Inputs\" ItemName=\"I\" />",
+    "<Output ItemName=\"I\" />",
+    "<Output TaskParameter=\"Filtered\" ItemName=\"I\" PropertyName=\"B\" />",
+];
+
+fn dedup_project(rng: &mut SplitMix64) -> String {
+    let mut out = String::from("<Project>\n  <PropertyGroup><A>x</A></PropertyGroup>\n");
+    let mut definitions = String::new();
+    if rng.below(4) == 0 {
+        definitions.push_str("<I><M>d</M></I>");
+    }
+    if rng.below(4) == 0 {
+        definitions.push_str("<J><M>j</M><N>j</N></J>");
+    }
+    if !definitions.is_empty() {
+        out.push_str(&format!(
+            "  <ItemDefinitionGroup>{definitions}</ItemDefinitionGroup>\n"
+        ));
+    }
+    if rng.below(10) != 0 {
+        let identities: Vec<&str> = (0..1 + rng.below(5))
+            .map(|_| {
+                if rng.below(6) == 0 {
+                    *rng.pick(&DEDUP_IDENTITIES)
+                } else {
+                    *rng.pick(&DEDUP_IDENTITIES[..10])
+                }
+            })
+            .collect();
+        let metadata = if rng.below(3) == 0 { " N=\"n\"" } else { "" };
+        out.push_str(&format!(
+            "  <ItemGroup><J Include=\"{}\"{metadata} /></ItemGroup>\n",
+            identities.join(";")
+        ));
+    }
+    if rng.below(8) == 0 {
+        out.push_str("  <ItemGroup><I Include=\"pre\" /></ItemGroup>\n");
+    }
+    out.push_str("  <Target Name=\"T0\">\n");
+    let inputs = if rng.below(5) == 0 {
+        *rng.pick(&DEDUP_INPUTS)
+    } else {
+        *rng.pick(&DEDUP_INPUTS[..6])
+    };
+    let inputs = if inputs.is_empty() && rng.below(2) == 0 {
+        String::new()
+    } else {
+        format!(" Inputs=\"{inputs}\"")
+    };
+    let condition = match rng.below(8) {
+        0 => " Condition=\"false\"",
+        1 => " Condition=\"'$(A)' == 'x'\"",
+        _ => "",
+    };
+    out.push_str(&format!("    <RemoveDuplicates{inputs}{condition}>\n"));
+    for _ in 0..1 + rng.below(3) {
+        let output = if rng.below(6) == 0 {
+            *rng.pick(&DEDUP_OUTPUTS)
+        } else {
+            *rng.pick(&DEDUP_OUTPUTS[..8])
+        };
+        out.push_str(&format!("      {output}\n"));
+    }
+    out.push_str("    </RemoveDuplicates>\n");
+    // What the outputs wrote, read by what follows.
+    if rng.below(3) == 0 {
+        out.push_str(
+            "    <PropertyGroup><A Condition=\"'$(C)' == 'True' or '@(I)' == 'a.x'\">read</A></PropertyGroup>\n",
+        );
+    }
+    out.push_str("  </Target>\n</Project>\n");
+    out
+}
+
+fn dedup_sweep(seed: u64, cases: usize) -> Tally {
+    let mut rng = SplitMix64(seed);
+    let mut oracle = Oracle::spawn();
+    let mut tally = Tally::default();
+    for _ in 0..cases {
+        check(&mut oracle, &dedup_project(&mut rng), &mut tally);
+    }
+    tally
+}
+
+/// `RemoveDuplicates` keeps each identity the first time it appears,
+/// compared ignoring case, and its `Output`s gather what it returns into item
+/// types and properties. Every committed run must be MSBuild's, escaped
+/// spellings included. A quarter of the draws are shapes it declines (an
+/// input expression it does not model, an output MSBuild rejects, letters
+/// beyond ASCII), so the floor, which catches a collapse to declining
+/// everything, is half (155 of 200 at this seed).
+#[test]
+fn remove_duplicates_matches_msbuild() {
+    let tally = dedup_sweep(0xdedf_0001, 200);
+    eprintln!(
+        "dedup: {} cases, {} committed, {} rejected, {} failed",
+        tally.cases, tally.committed, tally.rejected, tally.failed
+    );
+    assert!(
+        tally.committed * 2 > tally.cases,
+        "only {} of {} RemoveDuplicates runs committed",
+        tally.committed,
+        tally.cases
+    );
+}
+
+#[test]
+#[ignore = "a fresh-seed soak; BORZOI_MSBUILD_SOAK_SEED / BORZOI_MSBUILD_SOAK_CASES"]
+fn remove_duplicates_soak() {
+    let (seed, cases) = common::soak_parameters("fsproj_target_execution_dedup", 3000);
+    dedup_sweep(seed, cases);
+}
+
+/// `RemoveDuplicates` corners the sweep reaches only now and then: letters
+/// .NET folds beyond ASCII (which the executor declines), a spelling whose
+/// decoding is another escape joined into a property, and an empty `Inputs`
+/// gathered into both.
+#[test]
+fn remove_duplicates_corners() {
+    let task = |items: &str, inputs: &str, outputs: &str| {
+        format!(
+            "<Project>\n  <ItemGroup><J Include=\"{items}\" /></ItemGroup>\n  <Target Name=\"T0\">\n    \
+             <RemoveDuplicates Inputs=\"{inputs}\">{outputs}</RemoveDuplicates>\n  </Target>\n</Project>\n"
+        )
+    };
+    let filtered = "<Output TaskParameter=\"Filtered\" ItemName=\"I\" />\
+                    <Output TaskParameter=\"Filtered\" PropertyName=\"B\" />\
+                    <Output TaskParameter=\"HadAnyDuplicates\" PropertyName=\"C\" />";
+    let mut oracle = Oracle::spawn();
+    let mut tally = Tally::default();
+    for xml in [
+        task("\u{e9};\u{c9}", "@(J)", filtered),
+        task("%2541;%41", "@(J);%2541", filtered),
+        task("a", "", filtered),
+        task("a;A;b", "@(J)", filtered),
+    ] {
+        check(&mut oracle, &xml, &mut tally);
+    }
+    assert_eq!(tally.committed, 3, "the ASCII corners commit");
+}
+
+/// A `UsingTask` that cannot rebind `RemoveDuplicates` leaves it running:
+/// MSBuild's own registration of it (which every SDK project imports from
+/// `Microsoft.Common.tasks`), and a task named after the file declaring it.
+/// One that may rebind it declines.
+#[test]
+fn registrations_that_cannot_rebind_remove_duplicates() {
+    let project = |using_task: &str| {
+        format!(
+            "<Project>\n  {using_task}\n  <ItemGroup><J Include=\"a;A;b\" /></ItemGroup>\n  \
+             <Target Name=\"T0\">\n    <RemoveDuplicates Inputs=\"@(J)\">\
+             <Output TaskParameter=\"Filtered\" ItemName=\"I\" /></RemoveDuplicates>\n  \
+             </Target>\n</Project>\n"
+        )
+    };
+    let assembly = "Microsoft.Build.Tasks.Core, Version=15.1.0.0, Culture=neutral, \
+                    PublicKeyToken=b03f5f7f11d50a3a";
+    let mut oracle = Oracle::spawn();
+    for (using_task, commits) in [
+        (
+            format!(
+                "<UsingTask TaskName=\"Microsoft.Build.Tasks.RemoveDuplicates\" AssemblyName=\"{assembly}\" />"
+            ),
+            true,
+        ),
+        (
+            "<UsingTask TaskName=\"$(MSBuildThisFileName).Tasks.CreateNewImage\" \
+             AssemblyFile=\"missing.dll\" />"
+                .to_owned(),
+            true,
+        ),
+        (
+            format!("<UsingTask TaskName=\"RemoveDuplicates\" AssemblyName=\"{assembly}\" />"),
+            false,
+        ),
+        (
+            format!(
+                "<UsingTask TaskName=\"Microsoft.Build.Tasks.RemoveDuplicates\" AssemblyName=\"{assembly}\" \
+                 Runtime=\"NET\" />"
+            ),
+            false,
+        ),
+    ] {
+        let xml = project(&using_task);
+        let mut tally = Tally::default();
+        check(&mut oracle, &xml, &mut tally);
+        assert_eq!(tally.committed == 1, commits, "commits, in\n{xml}");
+    }
 }

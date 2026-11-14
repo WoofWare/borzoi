@@ -12,8 +12,11 @@
 //!   `BeforeTargets` and `AfterTargets`, a target's `Condition` decided when
 //!   the target comes up, and each target run at most once;
 //! - intrinsic `PropertyGroup`s in a target body;
-//! - intrinsic `ItemGroup` `Include`s without batching;
-//! - the `Message` task, which changes nothing.
+//! - intrinsic `ItemGroup` `Include`s, batched where a condition reads an
+//!   identity's metadata ([`Engine::batch`]);
+//! - the `Message` task, which changes nothing;
+//! - the `RemoveDuplicates` task, and the `Output`s that gather a task's
+//!   results into item types and properties ([`Engine::gather`]).
 //!
 //! Every read must be one the walk vouches for: a property it holds a trusted
 //! value for or knows is unset, an item list it holds exactly. A read of
@@ -519,6 +522,7 @@ impl<'s, 'r> Engine<'s, 'r> {
                 "PropertyGroup" => self.property_group(child)?,
                 "ItemGroup" => self.item_group(child)?,
                 "Message" => self.message(child)?,
+                "RemoveDuplicates" if !task_batches(child) => self.remove_duplicates(child)?,
                 // A task whose condition is false does not run: MSBuild neither
                 // binds it nor reads its parameters.
                 other => {
@@ -574,6 +578,160 @@ impl<'s, 'r> Engine<'s, 'r> {
         Ok(())
     }
 
+    /// The `RemoveDuplicates` task: its `Inputs`, each item kept the first
+    /// time its identity appears, compared ignoring case (`Filtered`), and
+    /// whether it dropped any (`HadAnyDuplicates`), gathered by its `Output`s.
+    fn remove_duplicates(&mut self, task: Node<'_, '_>) -> Result<(), Decline> {
+        if self
+            .state
+            .using_task_names
+            .iter()
+            .any(|name| may_bind(name, "RemoveDuplicates"))
+        {
+            return decline("a UsingTask may rebind RemoveDuplicates");
+        }
+        for attr in task.attributes() {
+            if !matches!(attr.name(), "Inputs" | "Condition") {
+                return decline(format!("RemoveDuplicates has {}", attr.name()));
+            }
+        }
+        let outputs = outputs(task, &["Filtered", "HadAnyDuplicates"])?;
+        if !self.decide(task)? {
+            return Ok(());
+        }
+        let inputs = match attribute(task, "Inputs")? {
+            Some(raw) => self.task_items(&raw)?,
+            None => Vec::new(),
+        };
+        // The task compares `OrdinalIgnoreCase`, whose folding beyond ASCII
+        // is .NET's.
+        if let Some(item) = inputs.iter().find(|item| !item.identity.is_ascii()) {
+            return decline(format!(
+                "RemoveDuplicates compares {:?}, which is not ASCII",
+                item.identity
+            ));
+        }
+        let mut seen = HashSet::new();
+        let filtered: Vec<ExecutedItem> = inputs
+            .iter()
+            .filter(|item| seen.insert(item.identity.to_ascii_lowercase()))
+            .cloned()
+            .collect();
+        let had_any = if filtered.len() == inputs.len() {
+            "False"
+        } else {
+            "True"
+        };
+        for output in outputs {
+            if !self.decide(output.node)? {
+                continue;
+            }
+            let gathered = if output.parameter == "Filtered" {
+                filtered.clone()
+            } else {
+                vec![ExecutedItem {
+                    identity: had_any.to_owned(),
+                    escaped_identity: Some(had_any.to_owned()),
+                    metadata: BTreeMap::new(),
+                }]
+            };
+            self.gather(&output.destination, gathered)?;
+        }
+        Ok(())
+    }
+
+    /// The items a task parameter `raw` passes, as MSBuild expands it for an
+    /// item-array parameter: properties first, then each `;`-separated piece,
+    /// trimmed, a lone plain `@(Type)` passing those items with their
+    /// metadata and any other piece an item of that spelling with none.
+    /// Another item expression declines, as do a wildcard and a backslash,
+    /// which MSBuild's path handling may touch.
+    fn task_items(&mut self, raw: &str) -> Result<Vec<ExecutedItem>, Decline> {
+        let substituted = self.substitute_keeping_items(raw)?;
+        let mut items = Vec::new();
+        for piece in substituted.split(';') {
+            let piece = piece.trim();
+            if piece.is_empty() {
+                continue;
+            }
+            if lone_item_reference(piece) {
+                let source = piece[2..piece.len() - 1].trim().to_owned();
+                items.extend(self.table(&source)?.iter().cloned());
+                continue;
+            }
+            if piece.contains("@(") {
+                return decline(format!("a task is passed {piece}"));
+            }
+            if escaping::filespec_has_wildcards(piece) || piece.contains('\\') {
+                return decline(format!(
+                    "a task is passed {piece}, which a path rule may touch"
+                ));
+            }
+            items.push(ExecutedItem {
+                identity: escaping::unescape(piece),
+                escaped_identity: Some(piece.to_owned()),
+                metadata: BTreeMap::new(),
+            });
+        }
+        Ok(items)
+    }
+
+    /// Gather a task output's `items` as MSBuild's `TaskExecutionHost` does.
+    /// Into an item type, each becomes an item of that type with the same
+    /// escaped spelling, its metadata (its own type's definitions among them)
+    /// over the destination type's definitions. Into a property, the escaped
+    /// spellings joined by `;`.
+    fn gather(
+        &mut self,
+        destination: &Destination,
+        items: Vec<ExecutedItem>,
+    ) -> Result<(), Decline> {
+        match destination {
+            Destination::Item(item_type) => {
+                let definitions = self.definitions(item_type)?;
+                let gathered: Vec<ExecutedItem> = items
+                    .into_iter()
+                    .map(|item| {
+                        let mut metadata = definitions.clone();
+                        metadata.extend(item.metadata);
+                        ExecutedItem { metadata, ..item }
+                    })
+                    .collect();
+                self.table(item_type)?.extend(gathered);
+            }
+            Destination::Property(name) => {
+                self.check_property_write(name)?;
+                let mut spellings = Vec::with_capacity(items.len());
+                for item in &items {
+                    let Some(spelled) = &item.escaped_identity else {
+                        return decline(format!(
+                            "an output to {name} joins {:?}, whose escaped spelling the walk does not keep",
+                            item.identity
+                        ));
+                    };
+                    spellings.push(spelled.as_str());
+                }
+                self.lookup
+                    .insert_escaped(name, escaping::Escaped::from_xml(spellings.join(";")));
+                self.written.insert(name.to_ascii_lowercase());
+            }
+        }
+        Ok(())
+    }
+
+    /// A target may write the property `name`: not a reserved one, nor a
+    /// global one the document cannot change.
+    fn check_property_write(&self, name: &str) -> Result<(), Decline> {
+        let lower = name.to_ascii_lowercase();
+        if lower.starts_with("msbuild")
+            || self.state.protected.contains(&lower)
+            || self.state.is_sticky_global(name)
+        {
+            return decline(format!("a target writes the reserved or global {name}"));
+        }
+        Ok(())
+    }
+
     fn property_group(&mut self, group: Node<'_, '_>) -> Result<(), Decline> {
         if !self.decide(group)? {
             return Ok(());
@@ -583,17 +741,11 @@ impl<'s, 'r> Engine<'s, 'r> {
                 continue;
             }
             let name = property.tag_name().name();
-            let lower = name.to_ascii_lowercase();
-            if lower.starts_with("msbuild")
-                || self.state.protected.contains(&lower)
-                || self.state.is_sticky_global(name)
-            {
-                return decline(format!("a target writes the reserved or global {name}"));
-            }
+            self.check_property_write(name)?;
             let raw = element_text(property)?;
             let value = self.expand(&raw)?;
             self.lookup.insert_escaped(name, value);
-            self.written.insert(lower);
+            self.written.insert(name.to_ascii_lowercase());
         }
         Ok(())
     }
@@ -1416,6 +1568,88 @@ fn item_reference_in_property(raw: &str) -> bool {
 
 /// Whether a task element's parameters or children mention metadata, which
 /// MSBuild batches on.
+/// Where a task's `Output` gathers its parameter.
+enum Destination {
+    Item(String),
+    Property(String),
+}
+
+/// One `Output` child of a task.
+struct TaskOutput<'a, 'input> {
+    node: Node<'a, 'input>,
+    /// The parameter it gathers, as the task declares it.
+    parameter: &'static str,
+    destination: Destination,
+}
+
+/// The `Output` children of `task`, each gathering one of `parameters` (the
+/// task's output parameters, which MSBuild matches ignoring case) into an
+/// item type or a property. Anything else in the task's body declines, as
+/// does an output whose names are not plain names (MSBuild expands them).
+fn outputs<'a, 'input>(
+    task: Node<'a, 'input>,
+    parameters: &[&'static str],
+) -> Result<Vec<TaskOutput<'a, 'input>>, Decline> {
+    let task_name = task.tag_name().name();
+    let blank =
+        |node: Node<'_, '_>| !node.is_text() || node.text().is_none_or(|t| t.trim().is_empty());
+    let mut found = Vec::new();
+    for child in task.children() {
+        if !blank(child) {
+            return decline(format!("{task_name} holds text"));
+        }
+        if !child.is_element() {
+            continue;
+        }
+        if child.tag_name().name() != "Output" {
+            return decline(format!(
+                "{task_name} has a child {}",
+                child.tag_name().name()
+            ));
+        }
+        for attr in child.attributes() {
+            if !matches!(
+                attr.name(),
+                "TaskParameter" | "ItemName" | "PropertyName" | "Condition"
+            ) {
+                return decline(format!("an Output of {task_name} has {}", attr.name()));
+            }
+        }
+        if !child.children().all(|c| blank(c) && !c.is_element()) {
+            return decline(format!("an Output of {task_name} has a body"));
+        }
+        let name = |attr: &str| -> Result<Option<String>, Decline> {
+            match attribute(child, attr)? {
+                Some(value) if !item_name(&value) => {
+                    decline(format!("an Output of {task_name} has {attr} {value}"))
+                }
+                other => Ok(other),
+            }
+        };
+        let Some(asked) = name("TaskParameter")? else {
+            return decline(format!("an Output of {task_name} has no TaskParameter"));
+        };
+        let Some(&parameter) = parameters.iter().find(|p| p.eq_ignore_ascii_case(&asked)) else {
+            return decline(format!("{task_name} has no output parameter {asked}"));
+        };
+        let destination = match (name("ItemName")?, name("PropertyName")?) {
+            (Some(item_type), None) => Destination::Item(item_type),
+            (None, Some(property)) => Destination::Property(property),
+            _ => {
+                return decline(format!(
+                    "an Output of {task_name} names other than one item type or property"
+                ));
+            }
+        };
+        found.push(TaskOutput {
+            node: child,
+            parameter,
+            destination,
+        });
+    }
+    Ok(found)
+}
+
 fn task_batches(task: Node<'_, '_>) -> bool {
     task.descendants().any(|node| {
         node.attributes().any(|a| a.value().contains("%("))

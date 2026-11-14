@@ -93,7 +93,7 @@
 ///   {"op":"runTargets","path":s,"targets":[..],"properties":[..],"items":[..]}
 ///     -> {"ok":true,"succeeded":b,"errors":[..],"targets":[name, ..],
 ///         "properties":{name:value|null, ..},
-///         "items":{type:[{"identity":s,"metadata":{..}}, ..], ..}}
+///         "items":{type:[{"identity":s,"escaped":s,"metadata":{..}}, ..], ..}}
 ///      | {"ok":false}                           // MSBuild rejects the project
 ///     Evaluates the project file at `path`, builds `targets` on it in-process,
 ///     and reads back every target that started, in order, and the properties
@@ -934,8 +934,9 @@ let private respondTargetItems (root: JsonElement) : string =
 /// The `runTargets` op: evaluate the project file at `path`, build `targets`
 /// on that evaluation in-process, and read back every target that started, in
 /// order, each named property (null when unset), and each named item type's
-/// items with their metadata. `None` when MSBuild rejects the project at
-/// evaluation. What A₁.3c's executor is held to on generated targets.
+/// items with their escaped spellings and metadata. `None` when MSBuild
+/// rejects the project at evaluation. What A₁.3c's executor is held to on
+/// generated targets.
 let private runTargets
     (path: string)
     (targets: string list)
@@ -972,6 +973,7 @@ let private runTargets
                         instance.GetItems itemType
                         |> Seq.map (fun item ->
                             {| identity = item.EvaluatedInclude
+                               escaped = (item :> Microsoft.Build.Framework.ITaskItem2).EvaluatedIncludeEscaped
                                metadata =
                                 item.Metadata
                                 |> Seq.sortBy (fun m -> m.Name)

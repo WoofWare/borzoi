@@ -2066,10 +2066,31 @@ redefinitions, cycles, conditions on what earlier targets write) and holds
 every committed run to it. The scheduling rules above came out of its
 failures. Its soak fails when any of the three push rules is changed.
 
+**`RemoveDuplicates` and `Output`.** The task keeps each item of its
+`Inputs` the first time its identity (`ItemSpec`, decoded) appears,
+compared `OrdinalIgnoreCase`, and reports whether it dropped any
+(`HadAnyDuplicates`, `True` or `False`). An identity beyond ASCII declines,
+since that folding is .NET's. `Inputs` expands as an item-array parameter:
+properties first, then each trimmed `;`-separated piece, a lone `@(Type)`
+passing those items with their metadata and any other piece an item of that
+spelling with none. An `Output` gathers a parameter as `TaskExecutionHost`
+does. Into an item type, each item keeps its escaped spelling, and its
+metadata, its own type's definitions among them, lies over the destination
+type's definitions. Into a property, the escaped spellings are joined by
+`;`, and no items give an empty value. Each `Output`'s condition is decided
+after the task runs, so it reads what an earlier `Output` wrote. Names given
+through an expression decline, as does a parameter that is not an output.
+MSBuild's own registration of the task in `Microsoft.Common.tasks` does not
+count as a rebinding, and neither does a `UsingTask` whose
+`$(MSBuildThisFileName)` name cannot end in the task's. The oracle's
+`runTargets` op reports each item's escaped spelling, and the generator
+holds the executor's spelling to it wherever it claims one.
+
 The census runs `GenerateRestoreGraphFile` on every cone and pins where the
 executor stops. Every single-target cone gets past the filter that batches
-over `%(RestoreGraphProjectInputItems.Extension)` and stops at
-`RemoveDuplicates`, the first task with an `Output`. The two
+over `%(RestoreGraphProjectInputItems.Extension)` and past
+`RemoveDuplicates`, and stops at the `MSBuild` task that asks each project
+whether it supports restore (`_IsProjectRestoreSupported`). The two
 multi-targeting outer builds stop at opacity.
 
 **`MSBuildProjectDefaultTargets`.** The hook
