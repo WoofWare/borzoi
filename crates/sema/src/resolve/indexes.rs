@@ -302,7 +302,9 @@ pub(super) struct Indexes {
     /// the arguments as usual under one it can, so whether each occurrence
     /// binds is unknown: the binder-interning loops make each an
     /// [opaque binder](super::ResolvedFile::opaque_binders) whose name
-    /// declines in the scope it would have bound
+    /// declines in the scope it would have bound, except a module value the
+    /// deconstruction exports
+    /// ([`Resolver::prepare_binding`](crate::resolve::Resolver::prepare_binding))
     /// ([`Resolver::undecided_pattern_name`](crate::resolve::Resolver::undecided_pattern_name)).
     /// Keyed and kept like [`Self::excluded_param_ranges`].
     pub(super) undecided_pattern_binders: HashSet<TextRange>,

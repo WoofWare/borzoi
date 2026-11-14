@@ -181,12 +181,29 @@ impl<'a> Resolver<'a> {
                     continue;
                 }
                 // Under a qualified pattern head the walk could not resolve
-                // (`let (Q.R x) = …`): declined, as in `pattern_locals`.
+                // (`let f (Q.R x) = …`): declined, as in `pattern_locals`. Not a
+                // module value the deconstruction exports (`let (Q.R x) = …`),
+                // nor an alias of one: a declined export would have to decline
+                // through every `open` of its module too, which the export
+                // model cannot say, so the walk would commit an open's earlier
+                // binding of the name in its place. FCS binds it whenever the
+                // head resolves, so it is committed as before.
                 let kind = match &pat_name {
                     PatternName::Binder(def) => Some(def.kind),
                     PatternName::Alias { .. } => None,
                 };
-                if let Some(mask) = self.undecided_pattern_name(&pat_name) {
+                let exported = match &pat_name {
+                    PatternName::Binder(def) => {
+                        matches!(def.kind, DefKind::Value { .. }) && !def.provisional
+                    }
+                    PatternName::Alias { binder, .. } => {
+                        matches!(aliases.resolution_of(*binder), Some(Resolution::Item(_)))
+                    }
+                };
+                if let Some(mask) = (!exported)
+                    .then(|| self.undecided_pattern_name(&pat_name))
+                    .flatten()
+                {
                     if let Some(mask) = mask {
                         if matches!(kind, Some(DefKind::Value { .. })) {
                             item_entries.push(mask);

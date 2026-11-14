@@ -17,6 +17,9 @@
 //! they cannot be rows of `binder_site_grid`, which requires FCS to accept a
 //! cell; its `*_abbreviation_qualified_case_field` rows are the accepted
 //! counterpart, a qualified head FCS resolves and the walk declines.
+//!
+//! A module value a deconstruction exports (`let (Q.R x) = …`) is the one
+//! exception, interned as before ([`Expect::ExportedGap`]).
 
 use borzoi_cst::parser::parse;
 use borzoi_cst::syntax::{AstNode, ImplFile, TextRange};
@@ -37,6 +40,11 @@ enum Expect {
     Opaque,
     /// FCS binds nothing here; the walk declines it.
     Abandoned,
+    /// FCS binds nothing here, but the walk interns it: a module value the
+    /// deconstruction exports, which the walk cannot decline through every
+    /// `open` of its module (see `prepare_binding`). FCS binds it whenever the
+    /// head resolves, so the gap is confined to code that does not compile.
+    ExportedGap,
 }
 
 /// A program with its binders marked `«n»` and its uses marked `‹n›`. Each
@@ -114,6 +122,14 @@ const CELLS: &[Cell] = &[
         uses_commit: false,
     },
     Cell {
+        // FCS binds nothing, so its use of `x` is the decoy's; the walk
+        // commits the exported value (and its use) instead.
+        id: "qualified_module_let_head",
+        template: "module Inner =\n    let (Q.R «x») = 1\n    do ignore x\n",
+        binders: &[Expect::ExportedGap],
+        uses_commit: false,
+    },
+    Cell {
         // `Tests.Watson.fs`: the first alternative's `e` sits under a head FCS
         // cannot resolve, so FCS binds the name at the second alternative.
         id: "or_pattern_first_alternative_abandoned",
@@ -184,6 +200,18 @@ fn binders_under_an_unresolved_head_follow_fcs() {
                 .iter()
                 .find(|b| b.range == range && b.introduces_a_name());
             match (expect, oracle) {
+                (Expect::ExportedGap, Some(_)) => failures.push(format!(
+                    "{}: FCS binds {range:?}, which the cell says it abandons",
+                    cell.id
+                )),
+                (Expect::ExportedGap, None) => {
+                    if !rf.defs().any(|d| d.range == range) {
+                        failures.push(format!(
+                            "{}: the exported value {range:?} is no longer interned",
+                            cell.id
+                        ));
+                    }
+                }
                 (Expect::Abandoned, Some(_)) => failures.push(format!(
                     "{}: FCS binds {range:?}, which the cell says it abandons",
                     cell.id
