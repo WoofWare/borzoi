@@ -549,6 +549,13 @@ pub struct ParsedProject {
     /// Sourced from the same merged `lookup` as [`Self::define_constants`], so it
     /// reflects globals/`extra_properties`, not only what the project file wrote.
     pub lang_version: Option<String>,
+    /// [`Self::lang_version`] as the build holds it, untrimmed: the value the
+    /// `Fsc` task hands the compiler. `None` when unset or empty.
+    pub lang_version_untrimmed: Option<String>,
+    /// The evaluated `$(OtherFlags)`, from the same merged lookup (globals and
+    /// the environment included), untrimmed; `None` when unset or empty. The
+    /// `Fsc` task appends it to the compiler's arguments.
+    pub other_flags: Option<String>,
     /// The evaluated output-file base name — MSBuild writes
     /// `$(TargetName)$(TargetExt)`, and `TargetName` defaults to
     /// `$(AssemblyName)` (probed, dotnet 10.0.301, 2026-07-10:

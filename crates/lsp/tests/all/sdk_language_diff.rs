@@ -1252,3 +1252,38 @@ fn every_variable_the_compile_task_reads_is_accounted_for() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The version the compiler is handed is read from the effective values, so
+/// a global `LangVersion=?` (the compiler's version query) and a global
+/// `OtherFlags` naming a version report no refusal either.
+#[test]
+fn a_global_carrier_reports_no_refusal() {
+    let compiler = graded_compilers()
+        .into_iter()
+        .find(|c| SdkLanguageFacts::for_sdk(&c.sdk).unwrap().floor > LanguageVersion::V7_0)
+        .expect("an installed graded SDK with a floor above F# 7.0");
+    let (_, env, _) = environments().remove(0);
+    for (project_lang, global, value) in [
+        (None, "LangVersion", "?"),
+        (Some("7.0"), "OtherFlags", "--langversion:8.0"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let fsproj = pinned_project(dir.path(), &compiler.sdk, project_lang, STRADDLING);
+        let globals = HashMap::from([(global.to_string(), value.to_string())]);
+        let workspace = Workspace::with_env_and_extra_build_properties(env.clone(), globals);
+        let text = host_fs::read_to_string(&fsproj).unwrap();
+        let diags = borzoi::fsproj_diagnostics::diagnostics_for(
+            &text,
+            &fsproj,
+            &env,
+            &workspace.build_properties(),
+        );
+        assert!(
+            diags.iter().all(|d| !matches!(
+                &d.code,
+                Some(lsp_types::NumberOrString::String(code)) if code == "FS0246" || code == "FS3880"
+            )),
+            "{global}={value}: {diags:#?}"
+        );
+    }
+}

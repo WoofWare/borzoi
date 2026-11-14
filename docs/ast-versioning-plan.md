@@ -689,7 +689,11 @@ diagnostic for its feature" rather than "under a `Legality` one".
   `SKIP_VERSION_SUPPORTED_CHECK=1` in the build's environment lifts the floor,
   as the compiler does. The LSP crate's `sdk_language_diff` grades every
   row against each installed SDK's `fsc.dll`. #732 can narrow a guessed
-  version's ladder by the same rows' floors.
+  version's ladder by the same rows' floors. The compiler is taken to be the
+  resolved SDK's own unless a replacement is visible outside the SDK; one
+  hidden in an SDK-performed import a project property steers
+  (`NuGetBuildTasksPackTargets`) or in a response file (`Directory.Build.rsp`)
+  is unmodelled (`sdk_language.rs`, "The boundary").
 - **The facade mechanism** (#618,
   [`ast-versioning-nullness-proof.md`](completed/ast-versioning-nullness-proof.md))
   and its productionisation: astgen generates `syntax::v8` (the union minus

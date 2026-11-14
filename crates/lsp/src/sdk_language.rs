@@ -29,6 +29,33 @@
 //! may narrow its ladder to [`SdkLanguageFacts::floor`] only for an SDK that
 //! has a row, since a row's floor is graded and no row means the full ladder.
 //!
+//! # The boundary
+//!
+//! The LSP as a whole takes the project's compiler to be the one it models: it
+//! parses every file with the pinned compiler's grammar, whatever compiler the
+//! project builds with. This module refines that, and no more. The compiler is
+//! taken to be the resolved SDK's own unless a replacement is *visible outside
+//! the SDK* ([`project_compiler`]): a compiler selector written, or set in the
+//! environment or as a global; any target, task or target selection of a
+//! project's own; a reshaped target graph; an SDK file the project imports
+//! itself; content the walk could not see. Each of those declines, and the
+//! value the compiler is handed is likewise doubted wherever something visible
+//! may change it after evaluation ([`lang_version_untrusted_cause`]).
+//!
+//! What stays **unmodelled**, by the same assumption the rest of the LSP makes:
+//!
+//! - a replacement hidden in an import the SDK performs that a project property
+//!   steers: `NuGetBuildTasksPackTargets` with
+//!   `ImportNuGetBuildTasksPackTargetsFromSdk`, pointed at
+//!   `Microsoft.CSharp.targets`, has the SDK itself import a different
+//!   `CoreCompile`;
+//! - arguments the build is given outside the project: a `Directory.Build.rsp`
+//!   response file, or a command line's `-p:` and `-t:`.
+//!
+//! A route of either kind is known and out of scope; closing one would need the
+//! evaluator to track which properties a foreign file wrote into each SDK
+//! import, not another case here.
+//!
 //! [`SdkDiscovery`]: crate::sdk_discovery::SdkDiscovery
 
 use std::collections::HashMap;
@@ -557,16 +584,11 @@ pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedC
             "a target that may write `{carrier}` before `CoreCompile` reads it"
         )));
     }
-    let property = |wanted: &str| {
-        parsed
-            .properties
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
-            .map(|(_, value)| value.as_str())
-    };
+    // The effective values, globals and the environment included.
     // `ParsedProject::lang_version` is trimmed, but the task hands the
     // compiler the value as it stands.
-    if property("LangVersion").is_some_and(|value| value.trim() != value) {
+    let lang_version = parsed.lang_version_untrimmed.as_deref();
+    if lang_version.is_some_and(|value| value.trim() != value) {
         return Some(UntrustedCause::Unentered(
             "a `$(LangVersion)` with surrounding whitespace, which the compiler is handed as \
              it stands"
@@ -575,12 +597,14 @@ pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedC
     }
     // `--langversion:?` asks the compiler to list its versions, and it checks
     // nothing.
-    if property("LangVersion").is_some_and(|value| value == "?") {
+    if lang_version == Some("?") {
         return Some(UntrustedCause::Unentered(
             "`$(LangVersion)` `?`, the compiler's version query".to_string(),
         ));
     }
-    let other_flags = property("OtherFlags")
+    let other_flags = parsed
+        .other_flags
+        .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
     if other_flags.contains("langversion") || other_flags.contains('@') {
@@ -987,9 +1011,7 @@ mod tests {
         assert!(!doubted(&on_sdk("10.0.401")));
         for flags in ["--warnon:3390", "--LangVersion:8.0", "@/w/more.rsp"] {
             let mut parsed = on_sdk("10.0.401");
-            parsed
-                .properties
-                .insert("OtherFlags".to_string(), flags.to_string());
+            parsed.other_flags = Some(flags.to_string());
             assert_eq!(doubted(&parsed), flags != "--warnon:3390", "{flags}");
         }
         for carrier in LANG_VERSION_CARRIERS {
@@ -1015,15 +1037,11 @@ mod tests {
         assert!(doubted(&parsed), "content unseen");
         for value in [" 7.0", "8.0 ", "\t11", "?"] {
             let mut parsed = on_sdk("10.0.401");
-            parsed
-                .properties
-                .insert("LangVersion".to_string(), value.to_string());
+            parsed.lang_version_untrimmed = Some(value.to_string());
             assert!(doubted(&parsed), "{value:?}");
         }
         let mut parsed = on_sdk("10.0.401");
-        parsed
-            .properties
-            .insert("LangVersion".to_string(), "8.0".to_string());
+        parsed.lang_version_untrimmed = Some("8.0".to_string());
         assert!(!doubted(&parsed));
     }
 

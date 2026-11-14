@@ -356,7 +356,11 @@ This is a Cargo workspace with nine members:
   alone), and the walk hid nothing (`ParsedProject::hidden_content`). The same
   test derives the selector set from each SDK's own F# files, accounts for
   every variable the `Fsc` task's assembly names, and checks real MSBuild runs
-  the compiler named.
+  the compiler named. Routes the evaluation cannot see stay unmodelled, as the
+  rest of the LSP already assumes its own compiler: an SDK-performed import a
+  project property steers (`NuGetBuildTasksPackTargets`), and response files
+  (`Directory.Build.rsp`); the boundary is stated in `sdk_language.rs`'s module
+  docs, so a review finding of that kind is known and out of scope.
   Hover's XML documentation lives in `crates/lsp/src/xml_doc/`. Its
   `<inheritdoc>` work is held to Roslyn's IDE through
   `tools/inheritdoc-oracle`, a test-only C# JSONL batch tool (the

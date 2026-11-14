@@ -2989,8 +2989,16 @@ impl<'r> State<'r> {
             .unwrap_or_default();
         // `<LangVersion>` from the same merged map. Trim and drop empties so an
         // unset (or whitespace-only) value reads as `None` rather than `Some("")`.
-        let lang_version = lookup
+        let lang_version_untrimmed = lookup
             .get_unescaped("LangVersion")
+            .map(|v| v.to_string())
+            .filter(|s| !s.is_empty());
+        let other_flags = lookup
+            .get_unescaped("OtherFlags")
+            .map(|v| v.to_string())
+            .filter(|s| !s.is_empty());
+        let lang_version = lang_version_untrimmed
+            .as_deref()
             .map(|v| v.trim().to_string())
             .filter(|s| !s.is_empty());
         ParsedProject {
@@ -3005,6 +3013,8 @@ impl<'r> State<'r> {
             properties,
             define_constants,
             lang_version,
+            lang_version_untrimmed,
+            other_flags,
             target_name,
             untrusted_properties,
             foreign_definitions,
