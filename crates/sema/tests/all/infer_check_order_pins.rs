@@ -31,14 +31,20 @@ use borzoi_sema::{PrecedingTypes, ProjectItems, SyntaxRecovery, infer_file, reso
 use crate::common::corpus_manifest::{check_manifest, regenerate};
 use crate::common::{GradedDumps, full_bcl_env, invoke_fcs_dump, temp_fs_file};
 
-/// The shared header: the functions the cases apply.
+/// The shared header: the functions the cases apply. `singleton` is
+/// `List.singleton`'s application rather than `[x]`, a list expression
+/// inference does not model, which would leave it untyped and every case
+/// applying it silent whatever the order.
 const HEADER: &str = "module Pins\n\
                       let idf x = x\n\
-                      let singleton x = [x]\n\
+                      let singleton x = List.singleton x\n\
                       let g (xs: obj list) = 0\n\
                       let gs (xs: string list) = 0\n\
                       let apply (k: string -> int) = k \"x\"\n\
                       let monos (t: string) = 2\n\
+                      let gi (i: int) = 0\n\
+                      let both (x: 'a) (y: 'a) = x\n\
+                      let applyObj (k: obj -> int) = k\n\
                       let uu = fst ((7, \"u\"), 1)\n";
 
 /// Each case: its name, its `let`, and what entry and exit order each make of
@@ -51,6 +57,13 @@ const CASES: &[(&str, &str, &str)] = &[
          before `y` is checked, and `y` coerces to it; FCS accepts. exit: walking \
          `singleton y` first fixes its element type to `string`, and `string list` is \
          not `obj list`",
+    ),
+    (
+        "singleton-into-obj-list-beside-a-check",
+        "let r9 (y: string) = (g (singleton y), idf 3)",
+        "entry: as `r1`, and `idf 3`'s check is decided at its own argument. exit: the \
+         failed check of `singleton y` against `obj list` is one FCS never made, and \
+         it takes every check of the binding with it, `idf 3`'s included",
     ),
     (
         "singleton-into-string-list",
@@ -92,6 +105,53 @@ const CASES: &[(&str, &str, &str)] = &[
         "let r8 () = (idf uu, Unchecked.defaultof<_>)",
         "as above, with a suffix inference does not model: today the binding is \
          incomplete and the check never fires; FCS's type for `idf uu` is the same",
+    ),
+    (
+        "condition-before-a-check",
+        "let r10 x = if x then (gi x, x) else (0, x)",
+        "the condition fixes `x` to `bool` before `gi x` is checked, so FCS rejects the \
+         check and keeps `x : bool`. A check decided at its argument must see the \
+         condition's equality, which inference applies to the parameter's private slot \
+         and not to the variable its uses read",
+    ),
+    (
+        "declared-variable-fixed-by-a-check",
+        "let r11<'a> (x: 'a) = gi x",
+        "the check of `x` against `int` fixes the declared `'a`, which FCS rejects \
+         (FS0670 or FS0064): nothing of the declaration may be published",
+    ),
+    (
+        "declared-variable-beside-a-failed-check",
+        "let r12<'a> (x: 'a) = (gi \"s\", gi (both x 1))",
+        "a check failing between ground types, with no other check discharged \
+         before it, then one that fixes the declared `'a` through `both`",
+    ),
+    (
+        "branch-relates-before-its-arguments",
+        "let c1 b p = ((if b then \"s\" else both p (gi p)), p)",
+        "FCS relates the else-branch's result to `string` before checking its \
+         arguments, so `both`'s `'a`, and `p` with it, are `string` when `gi p` is \
+         checked, which FCS rejects. A relation dropped at the branch's exit leaves \
+         `p` open there, and `gi p` would fix it to `int`",
+    ),
+    (
+        "unique-overload-relates-before-its-arguments",
+        "let c2 (s: string) p = (both p (s.Insert(gi p, \"z\")), p)",
+        "`Insert` has one overload of two arguments, whose return FCS relates to the \
+         call's expected type, `both`'s `'a`, before the arguments are checked \
+         (`UnifyUniqueOverloading`): `p` is `string` when `gi p` is checked",
+    ),
+    (
+        "annotation-relates-before-the-body",
+        "let c4 p : string = both p (gi p)",
+        "the return annotation is the body's expected type before the body is \
+         checked, so `p` is `string` at `gi p`",
+    ),
+    (
+        "parameter-loosened-once-known",
+        "let c6 x y = (applyObj x, x y, y)",
+        "once `applyObj x` fixes `x : obj -> int`, FCS loosens `x` at its next use, \
+         so `x y` leaves `y` generic rather than fixing it to `obj`",
     ),
 ];
 

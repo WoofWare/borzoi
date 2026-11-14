@@ -29,7 +29,8 @@
 //!
 //! Each inference is spelled ([`dump_file`]) as its expression types, binder
 //! types, member resolutions, `(expr).Member` receiver types, incompleteness
-//! census, type-budget verdict and deepest expression walk, each type through
+//! census, type-budget verdict, deepest expression walk and refused equalities
+//! ([`InferredFile::refused_equalities`]), each type through
 //! [`spelled_debug`] and each table sorted by range. [`InferredFile::type_walks`]
 //! is left out: how large a type walk was is a measurement of how inference
 //! computed, which a refactor may legitimately change. A file's dump in its
@@ -129,6 +130,7 @@ pub fn dump_file(
     let mut commits = 0;
     writeln!(out, "budget {:?}", inferred.type_budget_exceeded()).unwrap();
     writeln!(out, "deepest {}", inferred.deepest_expression_walk()).unwrap();
+    writeln!(out, "refused {}", inferred.refused_equalities()).unwrap();
     writeln!(out, "incompleteness").unwrap();
     for (i, reasons) in inferred.incompleteness().iter().enumerate() {
         writeln!(out, "  {i} {reasons:?}").unwrap();

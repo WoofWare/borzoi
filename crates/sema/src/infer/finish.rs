@@ -15,6 +15,7 @@ pub(super) struct Walked {
     pub(super) deepest_expr_depth: usize,
     pub(super) type_budget_exceeded: Option<TypeBudgetExceeded>,
     pub(super) type_walks: TypeWalks,
+    pub(super) refused_equalities: usize,
 }
 
 impl<'a> Gen<'a> {
@@ -213,6 +214,7 @@ impl<'a> Gen<'a> {
             deepest_expr_depth: emitted.deepest_expr_depth,
             type_budget_exceeded: None,
             type_walks: solver.table.walks(),
+            refused_equalities: solver.refused_equalities,
         }
     }
 
@@ -252,6 +254,7 @@ impl<'a> Gen<'a> {
             deepest_expr_depth,
             type_budget_exceeded: Some(why),
             type_walks: solver.table.walks(),
+            refused_equalities: solver.refused_equalities,
         }
     }
 }

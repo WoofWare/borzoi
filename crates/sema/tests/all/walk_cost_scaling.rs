@@ -127,6 +127,23 @@ const FLAT_FORMS: &[Shape] = &[
         "  s.Length |> ignore\n",
         "  ()\n",
     ),
+    // Each condition is a decision on its parameter, which asks whether the
+    // parameter's class holds a variable older than its binding.
+    flat(
+        "distinct_conditions",
+        "",
+        "let c{i} x = if x then 1 else 2\n",
+        "",
+    ),
+    // Each `hash` instantiates a type variable that carries `equality`, one
+    // constraint more in the binding, which every later unification that
+    // can move it checks.
+    flat(
+        "constrained_statements",
+        "let h (x: int) =\n",
+        "  ignore (hash x)\n",
+        "  ()\n",
+    ),
 ];
 
 /// A walk of the file.
@@ -151,13 +168,6 @@ const EXEMPT: &[(&str, Walk, &str)] = &[
         Walk::Inference,
         "quadratic before the flat syntax table too (59x from 512 to 4096 \
          records on 7b4a7975); the cause is not yet diagnosed",
-    ),
-    (
-        "member_statements",
-        Walk::Inference,
-        "each statement settles the binding's constraints so far, and a \
-         member access that cannot resolve stays parked and is read again \
-         by every later settle",
     ),
 ];
 

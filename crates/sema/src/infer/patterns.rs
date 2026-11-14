@@ -500,6 +500,10 @@ impl<'a> Gen<'a> {
     fn register_binder(&mut self, scope: &mut Scope, def: DefId, site: BinderSite) -> TyVid {
         match site {
             BinderSite::Param => {
+                // The binder's own variable is made here, with the head, so
+                // that it is older than anything the body makes: once the
+                // prefix ends, no equality binds it ([`Scope::lost_at`]).
+                self.def_var(def);
                 let slot = self.solver.table.fresh();
                 self.binders.register_param(def, slot);
                 scope.params.push((def, slot));

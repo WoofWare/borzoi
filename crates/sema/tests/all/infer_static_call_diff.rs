@@ -379,13 +379,19 @@ fn wrong_arity_static_call_defers() {
 }
 
 #[test]
-fn void_static_call_records_member_but_defers_type() {
+fn void_static_call_records_member_and_is_unit() {
     // `System.GC.Collect()` — arity 0 leaves the parameterless overload as the
-    // unique survivor, but its return is `void` (F# `unit`, unmodelled): the wake
-    // records the member's identity (hover / go-to-def) and skips the type.
+    // unique survivor, whose return is `void`, F#'s `unit`: the wake records
+    // the member's identity (hover / go-to-def), and the call is `unit`, as
+    // FCS types it.
     let src = "module M\nlet u = System.GC.Collect()\n";
+    assert_sound(src);
     let (inferred, def_types) = infer_bcl(src);
-    assert_eq!(def_types.get("u"), None, "a void static call's type defers");
+    assert_eq!(
+        def_types.get("u").map(String::as_str),
+        Some("Microsoft.FSharp.Core.Unit"),
+        "a void static call is unit"
+    );
     assert!(
         matches!(
             inferred.member_resolution_at(ident_range(src, "Collect")),

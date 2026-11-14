@@ -27,14 +27,17 @@
 //! (`crates/sema/tests/all/infer_literals_diff.rs`), which exercises both the sound
 //! positions (must agree) and the unsound ones (must stay silent).
 //!
-//! **Unification as the walk goes, suspension where it cannot.** Per the
-//! plan's [D8], a fold over each binding unifies every equality it generates
-//! in the [`InferTable`] substrate at the point it generates it ([`Gen::eq`]),
-//! and suspends the relations it cannot decide there — a member access and an
-//! argument check ([`Constraint`]) — for a solve that decides them mid-walk
-//! ([`Gen::settle`]) or at the binding's end ([`Gen::solve`]). Each
-//! expression's type is read back by resolving its variable — emitted only
-//! when it is fully [`ground`](TyTable::is_ground) (D5: silence otherwise).
+//! **Unification as the walk goes, decisions where FCS takes them.** Per
+//! the plan's [D8], a fold over each binding unifies every equality it
+//! generates in the [`InferTable`] substrate at the point it generates it
+//! ([`Gen::eq`]), and takes each order-dependent decision — an expression's
+//! relation to its expected type, a condition, a pattern of structure — at the
+//! point in FCS's checking order where FCS takes it ([`Gen::decide`]), while
+//! the binding's prefix is faithful (*The faithful prefix and taint*, below).
+//! A member access is settled where it is generated ([`Gen::settle_access`]).
+//! Each expression's type is read back by resolving its variable — emitted
+//! only when it is fully [`ground`](TyTable::is_ground) (D5: silence
+//! otherwise).
 //!
 //! **Value-reference propagation.** Generation consults name resolution
 //! ([`crate::resolve_file`]) to connect a value *use* to its binder:
@@ -194,8 +197,9 @@
 //! **genuinely true**: applying an in-file value forces a function shape (an
 //! in-file binder cannot be a method group). The `App` node emits `r` in synth
 //! positions (D5-safe: `r` is fixed by the `Eq` against the function's *own* type,
-//! independent of how the argument coerces). Curried `f x y` falls out of nested
-//! `App`s, and so does an **infix** application (see *Infix operators* below); a
+//! independent of how the argument coerces). A curried `f x y` is one spine,
+//! split over every argument before any is checked, and so is an **infix**
+//! application (see *Infix operators* below); a
 //! **bracket indexer** (`arr[i]`, which the parser stores under `APP_EXPR` but F#
 //! lowers to a member lookup, not an application), `TypeApp`, and applied
 //! `DotGet` stay unmodelled ⇒ incomplete.
@@ -215,15 +219,17 @@
 //!   result) **and** at the receiver (its own value), never at the bare `.Name` —
 //!   so generation emits the receiver at its own range (synth: a member access
 //!   never coerces its receiver) and the whole access at the node range.
-//! - **The worklist.** `Constraint` holds a suspended
-//!   [`Constraint::HasMember`] `{ recv, name, result }`. [`Gen::solve`]
-//!   fixpoints: wake each parked member whose `recv`
-//!   resolves to a concrete head ([`Gen::wake_member`]), unify `result` with
-//!   the member's type, repeat until none fires (each fires
-//!   at most once; a wake can ground a later chained member's receiver). A
-//!   `Named` head is looked up; an `Array`/`Tuple`/`Fun`/`Param` head is dropped
-//!   (arrays' `.Length` is intrinsic, out of scope); an unresolved receiver stays
-//!   parked and is dropped with the batch.
+//! - **Settled at the access.** `Constraint` holds a suspended
+//!   [`Constraint::HasMember`] `{ recv, name, result }`, and the access
+//!   settles it where it is generated ([`Gen::settle_access`]): each member
+//!   whose `recv` resolves to a concrete head wakes ([`Gen::wake_member`]),
+//!   unifying `result` with the member's type (a chain wakes segment by
+//!   segment). FCS decides an access at the access, so one still suspended
+//!   there — a variable receiver (FS0072), a generic one, an overload whose
+//!   arguments are not known — is **declined**: it records nothing, its
+//!   result is tainted, and the prefix ends ([`Incomplete::UndecidedAccess`]).
+//!   So is an `Array`/`Tuple`/`Fun`/`Param` head (arrays' `.Length` is
+//!   intrinsic, out of scope), and a `Named` one no member answers.
 //! - **Lookup + bridge.** [`AssemblyEnv::lookup_type`] (the receiver type, arity 0)
 //!   then `AssemblyEnv::instance_data_member_ty` (a *single unambiguous* public
 //!   instance field / non-indexer property, resolved across the receiver's base
@@ -248,36 +254,53 @@
 //! resolver's `Deferred(QualifiedAccess)` at a member-name range for hover /
 //! go-to-definition; dot-completion is served from the receiver's inferred type.
 //!
-//! **The application wake rule (suspended arg↔param).** The
-//! worklist's second client: `let g y = id y` ⇒
-//! `g : 'a -> 'a`, `let n = id 42` ⇒ `n : int`, `let h y = fb y` (in-file
-//! `fb : bool -> int`) ⇒ `h : bool -> int`, and chained `let c x = id (id x)` ⇒
-//! `'a -> 'a`.
+//! **Argument checks at the argument's entry.** FCS relates an expression to
+//! its expected type (`UnifyOverallType`) by an equality first, undone if it
+//! fails, then a conversion that binds nothing inference models; subsumption
+//! enters only through the flexible variables of a loosened use (below) and
+//! of an applied union case's fields ([`Gen::case_use`]). It takes the
+//! relation at a point fixed by the expression's form: an application relates
+//! its result before its arguments are checked (`Propagate`), a tuple splits a
+//! tuple or variable expected type before its elements, a branch is checked
+//! against the overall type itself, a body against its return annotation, a
+//! leaf as it is checked, a member access once it is resolved. The walk hands
+//! the expected type down ([`Expected`]) and each form relates it there
+//! ([`Gen::relate`]): `g (singleton y)` with `g : obj list -> int` relates
+//! `'T list` to `obj list` before `y` is checked, so `y : string` coerces to
+//! `obj` where checking `singleton y` first would fail. An expected type FCS
+//! knows and inference does not — a method argument's, which FCS may relate to
+//! the parameter of the one overload the arity leaves
+//! (`UnifyUniqueOverloading`) before anything inside the argument — is
+//! [`Expected::Unknown`]: each relation FCS would take against it taints what
+//! it touches, where FCS would take it.
 //!
-//! Each modelled application generates a **suspended**
-//! [`Constraint::ArgCheck`] `{ arg, dom, r }` for the argument↔parameter
-//! subsumption (the argument walk does not take the [`Gen::infer_expr`] poison
-//! wrapper — [`Gen::infer_arg`] opts the application path out; every *other* check
-//! site takes it).
+//! **The faithful prefix and taint.** A decision ([`Gen::decide`]) is taken
+//! only while the binding's prefix is faithful ([`Scope::complete`]): the
+//! table then holds what FCS's does, but for its *tainted* classes — those a
+//! relation FCS took and inference did not may have bound
+//! ([`Gen::taint`]). The prefix ends, and is never regained in the binding,
+//! at an unmodelled construct (every [`Scope::mark_incomplete`]), a declined
+//! access, a unification that fails with an open variable on one side
+//! ([`Incomplete::OpenUnifyFailure`]: FCS's error path is not atomic), a
+//! decision that would fix a loosened variable bounded by a type other than
+//! `obj` ([`Incomplete::BoundedFlex`]), and a constraint a unification leaves
+//! violated or undecided. A failure between two ground types does not end it:
+//! FCS binds nothing there either. A decision touching a tainted class, or a
+//! variable an earlier binding owns, declines: its sides are tainted and
+//! poisoned. Three invariants make reading the final table sound:
 //!
-//! **The wake rule** runs in the same per-binding fixpoint as `HasMember`
-//! ([`Gen::solve`]). An `ArgCheck` discharges as a genuine `Eq(arg, dom)` (via
-//! `unify_atomic`) iff **both**:
-//! - the **enclosing binding is walk-complete** — the soundness gate. On a
-//!   complete binding every constraint FCS has on the argument's variables among
-//!   the shapes we model is present (the same subset argument that justifies the
-//!   slot=binder reunification), so grounding the relation cannot disagree with
-//!   FCS. Anything unmodelled — an annotation, an ascription, a compound
-//!   condition — sets the binding *incomplete* and so protects the relation; and
-//! - `dom` resolves to a **no-subsumption** type ([`Gen::no_subsumption_domain`]):
-//!   a sealed BCL primitive (the set [`literal_ty`] produces — via
-//!   [`is_sealed_primitive`]), a tuple of such (recursively), or an unbound root
-//!   that is a **scheme-instantiation variable of ours** (a provenance set
-//!   [`Solver::scheme_inst_vars`] populated by [`Solver::instantiate`], membership
-//!   checked against union-find roots), or a **function type**
-//!   ([`Solver::function_domain`]), which F# relates to an argument by equality
-//!   alone. `obj`, arbitrary named types and arrays are excluded — F# admits a
-//!   coercion there, so equality would be wrong.
+//! - every site that can bind a variable it did not just create to a term is
+//!   a decision that reads the flag and the taint — enforced in [`Gen::eq`],
+//!   which while the prefix is faithful refuses to bind a tainted class
+//!   ([`InferredFile::refused_equalities`] counts what it refuses, and the
+//!   corpus expects none);
+//! - taint is placed where FCS takes the relation inference does not;
+//! - no decision is taken once the prefix has ended.
+//!
+//! Generalisation still needs the whole binding complete, and a binding that
+//! declares type variables is still held to them at its close
+//! ([`Gen::withhold_if_not_rigid`]): a later construct can make FCS reject the
+//! whole declaration.
 //!
 //! **Loosening at each use.** FCS gives a use of a value a type the
 //! definition does not have (`MakeApplicableExprWithFlex`): every parameter of
@@ -286,33 +309,6 @@
 //! `let g = fo` is `'a -> int` too. [`Gen::value_use`] models that wherever
 //! the value's type is known at the use, so an argument check against a
 //! function type relates the argument's type FCS has.
-//!
-//! **Verification.** FCS checks in source order; the worklist does not. On a
-//! body FCS rejects, a check can fire that FCS never applied — `(p |> fs, fi p,
-//! p)` fixes `p` to `string` in FCS, which then rejects `fi p`. So
-//! [`Gen::solve`] fires the checks under a snapshot and keeps them only when
-//! [`Gen::verified`]: every relation the binding holds is consistent as an
-//! equality, so FCS, which tries an equality first, applies all of them, in
-//! whatever order. Otherwise no check fires at all.
-//!
-//! **Deferred poisoning** (poison is never removed, only not added). At binding
-//! finalisation (in [`Gen::solve`], before the poison
-//! closure / generalisation) every `ArgCheck` that did **not** successfully
-//! discharge — never woken, gate failed, or the `Eq` itself failed on ill-typed
-//! code (the atomic rollback leaves no trace) — poisons its `arg`, `dom`, **and**
-//! the result `r`. A successful discharge poisons nothing (the relation is now
-//! modelled); a ground result still emits (poison bites only open vars). So a
-//! failed-shape `n 3` poisons its dangling `r`, and a polymorphic result that
-//! never wakes defers.
-//!
-//! **The soundness hazard this design closes.** *Unconditional* discharge would
-//! be a D5 violation on ill-typed mid-edit code: `let h (y: string) = (y, f y)`
-//! with `f : int -> int` would ground `y := int` through the wake (the annotation
-//! is unmodelled), and `y`'s synth-mode tuple use would emit `int` where FCS keeps
-//! `string`. The completeness gate blocks it: the annotated parameter `(y:
-//! string)` marks the binding incomplete, so the `ArgCheck` never discharges and
-//! `y` stays open (silent). Argument-node *emission* stays off (a check-mode arg
-//! records no node even when its relation discharges).
 //!
 //! **Method-call typing.** A method call
 //! `recv.Method(args)` types as the method's **return** type:
@@ -343,10 +339,10 @@
 //!   FCS elaborates as a method-value `application`, so only the one call-parenthesis
 //!   layer is peeled and it counts as a single argument). Conservative on
 //!   `[<Optional>]` / `params` / named-argument methods, never wrong.
-//! - **Void returns defer.** A `void`-returning method's call type is F# `unit`
-//!   (unmodelled), so [`Gen::wake_member`] records the member's identity but skips
-//!   the type unify when the return `TypeRef` is [`Primitive::Void`] — bridging it
-//!   would emit the wrong `System.Void`.
+//! - **Void returns are `unit`.** A `void`-returning method's call type is F#'s
+//!   `unit`, which [`Gen::wake_member`] unifies the result with when the return
+//!   `TypeRef` is [`Primitive::Void`] — bridging it would give the wrong
+//!   `System.Void`.
 //! - **A method call emits no node inside itself** (`gen_member_access`'s receiver,
 //!   the argument's sub-expressions). FCS lowers a rejected / ill-formed call to a
 //!   single node and emits nothing inside it, and a receiver's `result` can even be
@@ -358,10 +354,13 @@
 //!   dropped. The whole-call node (emitted by the caller) is read back only when
 //!   ground, and a rejected call's `result` stays open in synth position (and a
 //!   check-position call emits no whole-call node), so it drops naturally.
-//! - **The argument** is walked in check mode (poisoning any generalisable parameter
-//!   use — a method arg↔param subsumption we drop and never discharge, since F# does
-//!   not generalise a method argument); a **unit** `()` argument is skipped (no
-//!   parameters, and modelled — so it does not mark the binding incomplete).
+//! - **The argument** is checked against an unknown expected type
+//!   ([`Expected::Unknown`]): FCS relates it to the parameter of the overload it
+//!   resolves, possibly before anything inside it is checked. The call's own
+//!   expected type is tainted before the arguments are walked, since FCS may
+//!   relate the method's return to it first. A **unit** `()` argument is
+//!   skipped (no parameters, and modelled — so it does not mark the binding
+//!   incomplete).
 //! - **Chaining is free.** A method result feeding a further access
 //!   (`s.ToLowerInvariant().Length`) resolves through the same fixpoint — the inner
 //!   call grounds the receiver, then the outer member wakes.
@@ -377,10 +376,9 @@
 //! - **A local is typed only when its RHS is ground on its own.** F# generalises
 //!   an eligible local, so a variable shared by every use is wrong for it (see
 //!   [`Gen::local_binding`]). After the RHS is walked, the constraints so far are
-//!   [settled](Gen::settle) — equalities and member wakes, the two kinds that do
-//!   not depend on the rest of the binding — and a binder still open marks the
-//!   binding incomplete. Argument checks, the only channel through which a use
-//!   could ground the local, then never fire.
+//!   [settled](Gen::settle) — the relations FCS has applied by then — and a
+//!   binder still open marks the binding incomplete, which ends its prefix, so
+//!   no later decision can ground the local.
 //! - **A statement is a check position whose unit relation is dropped.** FCS
 //!   unifies a statement's type with `unit`; a statement type that is not ground
 //!   after settling therefore marks the binding incomplete too.
@@ -399,10 +397,13 @@
 //!   where FCS rejects an application; and a member access's receiver is
 //!   **guarded** on the access resolving ([`emissions::Guard`]), since FCS drops the
 //!   receiver of `(1).Length` or `s.Length.Foo` too.
-//! - **A condition grounds a parameter only at its first occurrence.** FCS
-//!   unifies in source order, so a statement (`x; if x …`) or any earlier use
-//!   fixes the parameter first; our solver is unordered, so a condition grounds
-//!   its slot only when nothing could have come before it
+//! - **A condition is a decision on the parameter.** While the prefix is
+//!   faithful a condition on a parameter is FCS's equality at that point, on
+//!   the parameter's one variable: it binds the binder's variable, which the
+//!   uses read, to `bool`, and the slot with it ([`Gen::constrain_bool`]);
+//!   an earlier use that fixed the parameter makes it a failure between ground
+//!   types, which binds nothing. Once the prefix has ended, a condition
+//!   grounds only the slot, and only when nothing could have come before it
 //!   ([`Gen::is_first_occurrence`]). A parameter whose annotation names an
 //!   implicitly scoped type variable (below) is reached through every other
 //!   mention of the variable too, so a condition on it never grounds.
@@ -422,18 +423,15 @@
 //! **Infix operators.** `a OP b` parses as `App(App(OP, a), b)` with the inner
 //! application marked infix, and FCS checks it exactly as the application
 //! `OP a b`: the operator's value, then the left operand, then the right. So it
-//! is typed as one ([`Gen::infer_infix`]), the outer application an ordinary
-//! one and the inner one a callee — no node inside, as for any curried call.
+//! is typed as one spine ([`Gen::infer_app`]) with the operator at its head —
+//! no node inside, as for any curried call.
 //! The operator's value is whatever the resolver says its token names
 //! ([`Gen::operator_value`]): an in-file definition is an applied value like
 //! any other, and an assembly's operator is a use of an assembly value (below).
 //! Only a signature with no constraint on any type parameter
-//! qualifies — `+` and `=` decline — since the instantiated variables are
-//! scheme-instantiation variables, against which an argument check discharges
-//! as an equality. Everything else declines with an [`Incomplete::Operator`]
-//! reason. A result fixed only through a function-typed domain (`|>`'s
-//! `'T1 -> 'U`) is fixed by the check against it, where the binding's checks
-//! are verified.
+//! qualifies — `+` and `=` decline — since an unconstrained type parameter is
+//! all an instantiation models. Everything else declines with an
+//! [`Incomplete::Operator`] reason.
 //!
 //! **Assembly values.** A use the resolver resolved to a referenced F#
 //! assembly's module function or value — a bare name at its token, a
@@ -488,13 +486,16 @@ use crate::overload::arity_window;
 use crate::qnof::QualifiedNameOfFile;
 use crate::resolve::{CaseKind, ItemId, Resolution, ResolvedFile};
 use crate::ty::{MAX_TYPE_DEPTH, Ty, TyKind, TyPath, TyTable, TyVid, TypeBudgetExceeded};
-use crate::unify::{Head, InferTable, TypeWalks};
+#[cfg(test)]
+use crate::unify::Head;
+use crate::unify::{InferTable, TypeWalks};
 
 mod annotations;
 mod application;
 mod binder_env;
 mod bindings;
 mod builtins;
+mod decide;
 mod emissions;
 mod expr;
 mod extension_scope;
@@ -519,6 +520,7 @@ mod values;
 // `use super::*`: the names below are what each makes visible to the rest.
 use annotations::*;
 use binder_env::BinderEnv;
+use decide::*;
 use emissions::{EmissionMark, Emissions};
 use extension_scope::*;
 use facts::*;
@@ -533,6 +535,7 @@ use solver::*;
 use subsumption::*;
 use syntax::*;
 use typar_constraints::*;
+use values::Use;
 
 pub(crate) use annotations::{constrained_parameter, rejected_by_attributes};
 pub(crate) use builtins::is_conversion_target;
@@ -597,6 +600,8 @@ pub struct InferredFile {
     type_budget_exceeded: Option<TypeBudgetExceeded>,
     /// See [`Self::type_walks`].
     type_walks: TypeWalks,
+    /// See [`Self::refused_equalities`].
+    refused_equalities: usize,
 }
 
 impl InferredFile {
@@ -618,6 +623,7 @@ impl InferredFile {
             deepest_expr_depth,
             type_budget_exceeded,
             type_walks,
+            refused_equalities,
         } = self;
         let tys = |map: &HashMap<TextRange, Ty>| {
             map.iter()
@@ -650,6 +656,7 @@ impl InferredFile {
             deepest_expr_depth: *deepest_expr_depth,
             type_budget_exceeded: *type_budget_exceeded,
             type_walks: *type_walks,
+            refused_equalities: *refused_equalities,
         }
     }
 
@@ -687,6 +694,14 @@ impl InferredFile {
     /// how far real code sits below the type budget.
     pub fn type_walks(&self) -> TypeWalks {
         self.type_walks
+    }
+
+    /// How many equalities the walk did not apply because each would have
+    /// bound a variable whose type FCS may know and inference does not (a
+    /// tainted one) to a term: a measurement of the invariant that only a
+    /// decision binds such a variable, which expects none.
+    pub fn refused_equalities(&self) -> usize {
+        self.refused_equalities
     }
 
     /// The inferred type of the expression at `range`, if one was assigned.
@@ -876,6 +891,18 @@ pub enum Incomplete {
     /// typed through that loosening: `let f (g: obj -> 'a) = g` is
     /// `(obj -> 'a) -> 'b -> 'a` in FCS. Its variables are poisoned.
     LoosenedUse,
+    /// A member access whose receiver is not known at the access, once what
+    /// came before it is settled: a variable, a generic receiver, an overload
+    /// whose arguments are not yet known. FCS decides the access there
+    /// (FS0072 on a variable), so the access is declined and records nothing.
+    UndecidedAccess,
+    /// A unification that failed with an open variable on one side: FCS's
+    /// error path may bind part of it, so what FCS knows afterwards is not
+    /// known here.
+    OpenUnifyFailure,
+    /// A relation that would fix a loosened variable standing for a subtype
+    /// of a type other than `obj`, a constraint inference does not check.
+    BoundedFlex,
     /// A use of a referenced assembly's union case whose F# type is not read
     /// off its maker, and why (`function_ty::union_case_scheme`).
     AssemblyCase(FunctionTyGap),

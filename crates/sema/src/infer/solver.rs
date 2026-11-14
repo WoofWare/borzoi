@@ -51,6 +51,9 @@ pub(super) enum Constraint {
     /// application result `r` (deferred poison), so nothing bogus generalises. `r`
     /// is carried only to drive that deferred poison; the discharge reads only
     /// `arg`/`dom`.
+    // No walk generates one: argument checks are decided where FCS decides
+    // them ([`Gen::decide`]). The solve still reads the variant.
+    #[allow(dead_code)]
     ArgCheck(ArgCheck),
 }
 
@@ -122,6 +125,9 @@ pub(super) struct Solver<'a> {
     /// about its variable. A check reads a window of them
     /// ([`ConstraintMark`]).
     constrained: Vec<(TyVid, EqualityComparison)>,
+    /// How many equalities [`Gen::eq`] refused to apply because they would
+    /// bind a tainted class to a term ([`InferredFile::refused_equalities`]).
+    pub(super) refused_equalities: usize,
 }
 
 /// A position in [`Solver`]'s per-variable constraints
@@ -137,6 +143,9 @@ pub(super) struct ConstraintMark(usize);
 pub(super) enum Refusal {
     /// The two types do not unify.
     Mismatch,
+    /// They unify only by binding a tainted class to a term, which the table
+    /// was set to refuse ([`InferTable::refusing_tainted`]).
+    Tainted,
     /// They unify, but the unification takes a constrained variable of the
     /// window to a strictly worse verdict that the constraint must not
     /// reach: from holding or open to provably failing
@@ -156,13 +165,16 @@ impl<'a> Solver<'a> {
             settled_args: Vec::new(),
             scheme_inst_vars: HashSet::default(),
             constrained: Vec::new(),
+            refused_equalities: 0,
         }
     }
 
     /// Record that the variable `v` must satisfy `req`, checked by every
     /// [`Self::unify_checked`] whose window holds it.
     pub(super) fn constrain(&mut self, v: TyVid, req: EqualityComparison) {
+        let n = u32::try_from(self.constrained.len()).expect("constraints fit a u32");
         self.constrained.push((v, req));
+        self.table.attach_constraint(self.tys.var(v), n);
     }
 
     /// The mark from which a check reads the constraints recorded after this
@@ -231,9 +243,13 @@ impl<'a> Solver<'a> {
             .map(|&c| constraint_verdict_of(&mut self.table, env, self.tys, &[c]))
             .collect();
         let snapshot = self.table.snapshot();
-        if self.table.unify(a, b).is_err() {
+        if let Err(e) = self.table.unify(a, b) {
             self.table.rollback_to(snapshot);
-            return Err(Refusal::Mismatch);
+            return Err(if e == crate::unify::UnifyError::Tainted {
+                Refusal::Tainted
+            } else {
+                Refusal::Mismatch
+            });
         }
         let mut broken = Verdict::Holds;
         for (&c, &was) in affected.iter().zip(&before) {
@@ -256,11 +272,35 @@ impl<'a> Solver<'a> {
 
     /// The constraints recorded since `since` whose variable's resolution
     /// mentions an open variable of `a`'s or `b`'s: the only ones unifying
-    /// `a` with `b` can move. A verdict ([`satisfies`]) is read only of
-    /// those it returns, and telling which they are costs constant time per
-    /// constraint whose variable is unbound or bound to a ground type, a
-    /// resolution of its type per other constraint.
+    /// `a` with `b` can move. The table carries each constraint's number on
+    /// the classes of its variable's resolution ([`InferTable::attach_constraint`]),
+    /// so finding them costs what the classes of `a` and `b` carry, not the
+    /// window's size.
     fn affected_constraints(
+        &mut self,
+        a: Ty,
+        b: Ty,
+        since: ConstraintMark,
+    ) -> Vec<(TyVid, EqualityComparison)> {
+        if self.constrained.len() == since.0 {
+            return Vec::new();
+        }
+        let mut numbers = Vec::new();
+        self.table.constraints_touching(a, &mut numbers);
+        self.table.constraints_touching(b, &mut numbers);
+        numbers.sort_unstable();
+        numbers
+            .into_iter()
+            .map(|n| n as usize)
+            .filter(|&n| n >= since.0)
+            .map(|n| self.constrained[n])
+            .collect()
+    }
+
+    /// [`Self::affected_constraints`] by scanning the window: the reference
+    /// the index is held to.
+    #[cfg(test)]
+    fn affected_constraints_by_scan(
         &mut self,
         a: Ty,
         b: Ty,
@@ -422,8 +462,90 @@ impl<'a> Gen<'a> {
     /// ([`Gen::rigid_under_every_relation`]), and a match clause whose pattern
     /// failed declines.
     pub(super) fn eq(&mut self, scope: &mut Scope, a: Ty, b: Ty) {
-        if self.solver.table.unify_atomic(a, b).is_err() {
-            scope.eq_failures += 1;
+        if !scope.complete {
+            if self.solver.table.unify_atomic(a, b).is_err() {
+                scope.eq_failures += 1;
+            }
+            return;
+        }
+        // While the prefix is faithful, no equality may bind a tainted class
+        // to a term: that would ground a variable whose type FCS may already
+        // have fixed otherwise. Such an equality is not applied but dropped,
+        // its sides tainted, and counted — it is never expected to happen,
+        // since every site that binds a variable it did not just create is a
+        // decision ([`Self::decide`]), which a tainted class declines. And
+        // every per-variable constraint it moves is checked
+        // ([`Solver::unify_checked`]): one it leaves violated or undecided is
+        // one FCS reports where it solves it, after which what FCS knows is
+        // not known here.
+        let was = self.solver.table.refusing_tainted(true);
+        let unified = self
+            .solver
+            .unify_checked(self.facts.env, a, b, scope.constraints);
+        self.solver.table.refusing_tainted(was);
+        match unified {
+            Ok(()) => {}
+            Err(Refusal::Tainted) => {
+                self.solver.refused_equalities += 1;
+                self.taint(scope, a);
+                self.taint(scope, b);
+            }
+            Err(Refusal::Constraint(gap)) => {
+                scope.eq_failures += 1;
+                scope.mark_incomplete(Incomplete::Constraint(gap));
+            }
+            Err(Refusal::Mismatch) => {
+                scope.eq_failures += 1;
+                let tys = self.solver.tys;
+                let ground = |t: &mut InferTable, ty: Ty| tys.is_ground(t.resolve(ty));
+                if !ground(&mut self.solver.table, a) || !ground(&mut self.solver.table, b) {
+                    scope.mark_incomplete(Incomplete::OpenUnifyFailure);
+                }
+            }
+        }
+    }
+}
+
+impl<'a> Gen<'a> {
+    /// The vid mark at which the binding's prefix ended, taken the first
+    /// time the walk meets it ended ([`Scope::lost_at`]) — at the next
+    /// expression, so every variable the ending construct made counts as
+    /// older; 0 while the prefix holds.
+    pub(super) fn note_lost_prefix(&mut self, scope: &mut Scope) -> u32 {
+        if scope.complete {
+            return 0;
+        }
+        *scope
+            .lost_at
+            .get_or_insert_with(|| self.solver.table.mark())
+    }
+
+    /// Relate `a` and `b` after the prefix has ended, unless that binds a
+    /// variable made before it ended ([`Scope::lost_at`]) to a term: FCS may
+    /// have bound such a variable by the construct that ended the prefix.
+    /// A class whose oldest variable is in `own` — the relation's own fresh
+    /// variables, which FCS binds only through this relation — is spared.
+    /// `false` when refused, the table then unchanged; a relation that fails
+    /// otherwise counts as [`Gen::eq`]'s does.
+    pub(super) fn eq_sparing_older(
+        &mut self,
+        scope: &mut Scope,
+        a: Ty,
+        b: Ty,
+        own: std::ops::Range<u32>,
+    ) -> bool {
+        debug_assert!(!scope.complete, "only once the prefix has ended");
+        let lost_at = self.note_lost_prefix(scope);
+        let was = self.solver.table.refusing_older((lost_at, own));
+        let unified = self.solver.table.unify_atomic(a, b);
+        self.solver.table.refusing_older(was);
+        match unified {
+            Ok(()) => true,
+            Err(crate::unify::UnifyError::Tainted) => false,
+            Err(_) => {
+                scope.eq_failures += 1;
+                true
+            }
         }
     }
 }
@@ -680,6 +802,13 @@ mod tests {
         for op in &case.ops {
             let (a, b) = &op.pair;
             let (ta, tb) = (a.build(&env, &tys, &pool), b.build(&env, &tys, &pool));
+            // The index finds every constraint the scan of the window does.
+            let by_index = solver.affected_constraints(ta, tb, mark);
+            let by_scan = solver.affected_constraints_by_scan(ta, tb, mark);
+            prop_assert!(
+                by_scan.iter().all(|c| by_index.contains(c)),
+                "the index missed {by_scan:?} \\ {by_index:?}"
+            );
             if !op.checked {
                 if solver.table.unify_atomic(ta, tb).is_ok() {
                     accepted.push(&op.pair);
@@ -720,6 +849,7 @@ mod tests {
                     accepted.push(&op.pair);
                 }
                 Err(Refusal::Mismatch) => seen.mismatch += 1,
+                Err(Refusal::Tainted) => prop_assert!(false, "nothing is tainted"),
                 Err(Refusal::Constraint(gap)) => {
                     match gap {
                         ConstraintGap::Violated => seen.violated += 1,

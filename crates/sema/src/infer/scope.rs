@@ -24,15 +24,24 @@ pub(super) struct Scope {
     pub(super) mark: u32,
     /// [`Emissions::mark`] at the binding's start.
     pub(super) emissions: EmissionMark,
-    /// Walk-completeness (Stage 3.2c-2c): cleared by any unmodelled
-    /// sub-expression or pattern. A binding may generalise only if it stays
-    /// complete — the proof that every constraint FCS has on its open variables is
-    /// one we modelled. Ground emission is *not* gated on this (the subset
-    /// argument in the module docs).
+    /// Whether the binding's prefix is **faithful**: everything walked so far
+    /// is modelled, so the table holds what FCS's does at this point in its
+    /// checking order, but for its tainted classes ([`Gen::taint`]). Cleared,
+    /// never to be set again, by any unmodelled sub-expression or pattern, a
+    /// declined access, and a unification that fails with an open variable
+    /// ([`Self::mark_incomplete`]). A decision ([`Gen::decide`]) is taken only
+    /// while it holds. At the binding's end it says the whole binding is
+    /// complete, which generalisation needs — the proof that every constraint
+    /// FCS has on its open variables is one we modelled.
     pub(super) complete: bool,
     /// Why the binding is incomplete, in the order the walk found out: its
     /// census entry ([`InferredFile::incompleteness`]).
     pub(super) reasons: Vec<Incomplete>,
+    /// The table's vid mark when the walk first met the prefix ended
+    /// ([`Gen::note_lost_prefix`]): FCS may have bound any variable older
+    /// than it by what inference did not model, so a pattern of structure
+    /// afterwards does not bind one to a term ([`Gen::pattern_rhs`]).
+    pub(super) lost_at: Option<u32>,
     /// The body of the function binding being walked, for
     /// [`Gen::is_first_occurrence`]. `None` outside a function binding.
     pub(super) body: Option<SyntaxNode>,
@@ -183,6 +192,7 @@ impl<'a> Gen<'a> {
             constraints: self.solver.constraint_mark(),
             complete: true,
             reasons: Vec::new(),
+            lost_at: None,
             body: None,
             poison: Vec::new(),
             params: Vec::new(),

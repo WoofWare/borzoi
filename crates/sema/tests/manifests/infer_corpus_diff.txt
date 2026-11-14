@@ -1945,7 +1945,11 @@ tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/ConsList/E_cons
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/ConsList/E_consPattern01.fs:12:12-12:13 binder	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/Regression01.fs	compared
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/Regression01.fs:12:11-12:15 expr	agree
+tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/Regression01.fs:12:17-12:26 expr	agree
+tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/Regression01.fs:18:11-18:20 expr	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/Regression01.fs:18:22-18:26 expr	agree
+tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/Regression01.fs:9:17-9:29 expr	agree
+tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/Regression01.fs:9:5-9:14 binder	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Expression/NoCounterExampleTryWith01.fs	compared
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/AsHighOrderFunc01.fs	compared
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/AsHighOrderFunc01.fs:7:19-7:20 binder	agree
@@ -2117,6 +2121,8 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction09b.fs	
 tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction18.fs	compared
 tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction24.fs	compared
 tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction24.fs:11:5-12:14 unconverted-decl	"pinRef"
+tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction24.fs:12:17-12:23 expr	unconverted ours="Microsoft.FSharp.Core.FSharpRef<System.Int32>"
+tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction24.fs:12:9-12:14 binder	unconverted ours="Microsoft.FSharp.Core.FSharpRef<System.Int32>"
 tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction24.fs:16:5-17:12 unconverted-decl	"pinArray1"
 tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction24.fs:21:5-22:12 unconverted-decl	"pinArray2"
 tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction24.fs:27:5-28:12 unconverted-decl	"pinString"
@@ -2347,6 +2353,8 @@ tests/benchmarks/FCSBenchmarks/BenchmarkComparison/HistoricalBenchmark.Runner/Ru
 tests/benchmarks/FCSBenchmarks/BenchmarkComparison/HistoricalBenchmark.Runner/Runner.fs:330:21-330:27 binder	agree
 tests/benchmarks/FCSBenchmarks/BenchmarkComparison/HistoricalBenchmark.Runner/Runner.fs:330:42-330:49 binder	agree
 tests/benchmarks/FCSBenchmarks/BenchmarkComparison/HistoricalBenchmark.Runner/Runner.fs:337:20-337:27 binder	agree
+tests/benchmarks/FCSBenchmarks/BenchmarkComparison/HistoricalBenchmark.Runner/Runner.fs:338:13-338:20 binder	agree
+tests/benchmarks/FCSBenchmarks/BenchmarkComparison/HistoricalBenchmark.Runner/Runner.fs:339:13-340:52 expr	agree
 tests/benchmarks/FCSBenchmarks/BenchmarkComparison/HistoricalBenchmark.Runner/Runner.fs:359:30-359:34 binder	agree
 tests/benchmarks/FCSBenchmarks/BenchmarkComparison/HistoricalBenchmark.Runner/Runner.fs:359:46-359:53 binder	agree
 tests/benchmarks/FCSBenchmarks/BenchmarkComparison/HistoricalBenchmark.Runner/Runner.fs:363:29-363:33 binder	agree
@@ -2708,7 +2716,14 @@ vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:173:13-186:8 e
 vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:198:13-198:25 binder	agree
 vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:199:13-222:8 expr	agree
 vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:29:36-29:37 binder	agree
+vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:32:16-32:22 binder	agree
+vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:32:23-32:27 binder	agree
+vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:32:28-32:32 binder	agree
+vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:32:9-32:15 binder	agree
 vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:33:9-33:84 expr	agree
+vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:35:16-35:22 binder	agree
+vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:35:23-35:27 binder	agree
+vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:35:9-35:15 binder	agree
 vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:36:9-36:55 expr	agree
 vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:38:16-38:22 binder	agree
 vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs:38:25-38:48 expr	agree
@@ -2737,6 +2752,8 @@ vsintegration/tests/UnitTests/TestLib.Salsa.fs:25:36-25:38 binder	agree
 vsintegration/tests/UnitTests/TestLib.Salsa.fs:38:20-38:25 binder	agree
 vsintegration/tests/UnitTests/TestLib.Salsa.fs:38:35-38:44 binder	agree
 vsintegration/tests/UnitTests/TestLib.Salsa.fs:41:39-41:40 binder	agree
+vsintegration/tests/UnitTests/TestLib.Salsa.fs:42:17-42:26 expr	agree
+vsintegration/tests/UnitTests/TestLib.Salsa.fs:42:9-42:14 binder	agree
 vsintegration/tests/UnitTests/TestLib.Salsa.fs:49:23-49:24 binder	agree
 vsintegration/tests/UnitTests/TestLib.Salsa.fs:54:20-54:21 binder	agree
 vsintegration/tests/UnitTests/TestLib.Salsa.fs:54:32-54:33 binder	agree
