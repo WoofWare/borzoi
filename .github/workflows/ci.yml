@@ -356,6 +356,18 @@ jobs:
         run: |
           nix develop --command cargo test -p borzoi-cst --verbose
 
+      - name: Build the test binary under the gate profile
+        if: steps.gate.outputs.run == 'true'
+        # The sweeps below that never ask FCS are all CPU in our own crate,
+        # which the dev profile leaves unoptimised. The `gate` profile keeps
+        # the debug assertions and overflow checks a test build has, so a sweep
+        # reaches the same verdict and manifest under either, and runs three to
+        # nine times faster under it, which pays for compiling the test binary
+        # a second time many times over. The sweeps that drive FCS stay on the
+        # dev binary: the oracle is most of their time.
+        run: |
+          nix develop --command cargo test --profile gate -p borzoi-cst --test all --no-run
+
       - name: Gate on the parser corpus sweeps
         if: steps.gate.outputs.run == 'true'
         # `stats.yml` sweeps this same corpus and publishes the divergence
@@ -376,13 +388,13 @@ jobs:
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
         run: |
-          nix develop --command cargo test -p borzoi-cst --test all \
+          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
             parser_corpus:: -- --ignored --nocapture
           nix develop --command cargo test -p borzoi-cst --test all \
             parser_corpus_diff:: -- --ignored --nocapture
           nix develop --command cargo test -p borzoi-cst --test all \
             parser_diff_feature_gates:: -- --ignored --nocapture
-          nix develop --command cargo test -p borzoi-cst --test all \
+          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
             version_dependence_census:: -- --ignored --nocapture
 
       - name: Gate on parser recovery under deliberate damage
@@ -394,10 +406,13 @@ jobs:
         # damage to survive unchanged, and grade a sample against FCS, pinned in
         # `crates/cst/tests/manifests/recovery_sweep.txt`. See
         # docs/parser-recovery-oracle.md.
+        #
+        # The FCS half grades a sample; the deletion half parses every case
+        # and is most of the step's time, so it runs under the gate profile.
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
         run: |
-          nix develop --command cargo test -p borzoi-cst --test all \
+          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
             recovery_sweep:: -- --ignored --nocapture
 
       - name: Grade the lex filter over declaration sequences
@@ -421,7 +436,7 @@ jobs:
         # holds every corpus file's elements to rowan's on the same green
         # tree, so a navigation bug that needs real code's shapes cannot land.
         run: |
-          nix develop --command cargo test -p borzoi-cst --test all \
+          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
             flat_tree_reference::corpus -- --ignored --nocapture
 
       - name: Hold every per-version facade to the union over the corpus
@@ -431,7 +446,7 @@ jobs:
         # facade serves, and requires every facade accessor to run on some
         # fixture or corpus file.
         run: |
-          nix develop --command cargo test -p borzoi-cst --test all \
+          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
             facade_properties::corpus -- --ignored --nocapture
 
       - name: Sweep the parser for panics on adversarial input
@@ -444,7 +459,7 @@ jobs:
         # exhaustive halves run in the ordinary suite; this is the fresh-seed
         # one, which takes a new seed each run and prints it.
         run: |
-          nix develop --command cargo test -p borzoi-cst --test all \
+          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
             parser_panic_sweep::fresh_seed -- --ignored --nocapture
 
       - name: Sweep the parser for panics on layout damage
@@ -454,12 +469,8 @@ jobs:
         # the raw stream would otherwise stamp as a real token (`bump_into`
         # panics on that in a debug build). The soup above reaches that state
         # only by chance; this puts every production in the corpus in front of
-        # it.
-        #
-        # It is a quarter of a million whole-file parses, all CPU in our own
-        # crate, which the dev profile leaves unoptimised: the `gate` profile
-        # parses about nine times faster and keeps the debug assertions the
-        # sweep exists to trip, which pays for compiling the test binary again.
+        # it. It is a quarter of a million whole-file parses, and the debug
+        # assertions it exists to trip are ones the `gate` profile keeps.
         run: |
           nix develop --command cargo test --profile gate -p borzoi-cst --test all \
             layout_perturbation_sweep:: -- --ignored --nocapture

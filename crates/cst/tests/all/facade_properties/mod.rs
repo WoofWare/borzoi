@@ -785,24 +785,35 @@ proptest! {
 
 /// Every `step`th corpus file, parsed at a version each distinct facade
 /// serves and read through that facade, into `indexes`.
+///
+/// The files are checked on every core, each with indexes of its own; only
+/// the accessors each one ran are merged into `indexes`, and that union does
+/// not depend on the order the files finish in.
 fn corpus_holds(step: usize, indexes: &mut [Index]) {
     let root = crate::common::corpus_root();
     let files = crate::common::collect_fsharp_corpus_files(&root).expect("walk the corpus");
-    let mut checked = 0;
-    for path in files.iter().step_by(step) {
-        let Ok(src) = std::fs::read_to_string(path) else {
-            continue;
-        };
+    let picked: Vec<&Path> = files.iter().step_by(step).map(|p| p.as_path()).collect();
+    let ran: Vec<Option<Vec<HashSet<usize>>>> = crate::common::par_map(picked.len(), |i| {
+        let path = picked[i];
+        let src = std::fs::read_to_string(path).ok()?;
         let kind = if path.extension().is_some_and(|e| e == "fsi") {
             FileKind::Sig
         } else {
             FileKind::Impl
         };
-        let what = Path::new(path).display().to_string();
+        let what = path.display().to_string();
+        let mut mine = new_indexes();
         for facade in FACADES {
             let lang = facade.versions[0];
             let parse = parse_at(&src, kind, lang);
-            check_parse(&parse, &format!("{what} at {lang}"), indexes, true);
+            check_parse(&parse, &format!("{what} at {lang}"), &mut mine, true);
+        }
+        Some(mine.into_iter().map(|index| index.ran).collect())
+    });
+    let mut checked = 0;
+    for file in ran.into_iter().flatten() {
+        for (index, ran) in indexes.iter_mut().zip(file) {
+            index.ran.extend(ran);
         }
         checked += 1;
     }
