@@ -2016,13 +2016,16 @@ the two differ where it matters:
   decides exactly runs: one qualified type, each reference inside a quoted
   string, reading `Identity`, `Filename` or `Extension`
   (`Path.GetFileNameWithoutExtension` and `Path.GetExtension` of the item
-  spec), of an identity holding nothing MSBuild escapes, no backslash and
-  no whitespace. An element whose own type already holds items declines,
+  spec, which MSBuild takes escaped: `a%2Ex` has no extension, and buckets
+  apart from `a.x`), of an item whose escaped spelling is known and is its
+  identity, with no backslash and no whitespace. A batched element's
+  metadata may not read an item list or metadata: MSBuild decides it per
+  bucket, and batches on metadata even a skipped child reads. An element whose own type already holds items declines,
   since MSBuild batches that type too, as does an empty source, which it
   decides in one bucket without values. The generator
   (`batched_item_groups_match_msbuild`) fails when the grouping, the
-  case-folded keys, a modifier's derivation or the metadata layering is
-  changed.
+  case-folded keys, a modifier's derivation, the spelling check, the
+  metadata decline or the metadata layering is changed.
 - **A task whose condition is false** does not run, in MSBuild or here: only
   one that would run declines. But MSBuild looks for batching in a task's
   parameters before its condition, so a task mentioning `%(…)` declines

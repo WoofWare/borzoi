@@ -704,11 +704,13 @@ fn quoted_expressions_read_as_msbuild_reads_them() {
 }
 
 /// Identities an item list `J` may hold for batching: extensions of either
-/// case, none, a trailing dot, a dotfile, a dot in a directory, two dots, and
-/// identities substitution cannot spell (an escaped `;`, a space).
-const BATCH_IDENTITIES: [&str; 13] = [
-    "a.x", "b.y", "c.x", "C.X", "d/e.x", "noext", "dot.", ".rc", "m.n.x", "p.Y", "d.x/f", "q%3Bx",
-    "s%20p.x",
+/// case, none, a trailing dot, a dotfile, a dot in a directory, two dots; a
+/// `.` spelt escaped, which decodes to `a.x` but which MSBuild derives no
+/// extension from, nor buckets with `a.x`; and identities substitution cannot
+/// spell (an escaped `;`, a space, an escaped letter).
+const BATCH_IDENTITIES: [&str; 15] = [
+    "a.x", "b.y", "c.x", "C.X", "d/e.x", "noext", "dot.", ".rc", "m.n.x", "p.Y", "d.x/f", "a%2Ex",
+    "q%3Bx", "s%20p.x", "%61.x",
 ];
 /// Conditions an element batched over `J` may carry: each identity modifier,
 /// case-folded comparisons and names, two references in one string, and
@@ -734,7 +736,7 @@ fn batching_project(rng: &mut SplitMix64) -> String {
     if rng.below(4) == 0 {
         out.push_str("  <ItemDefinitionGroup><I><M>d</M></I></ItemDefinitionGroup>\n");
     }
-    let identities: Vec<&str> = (0..1 + rng.below(5))
+    let mut identities: Vec<&str> = (0..1 + rng.below(5))
         .map(|_| {
             if rng.below(6) == 0 {
                 *rng.pick(&BATCH_IDENTITIES)
@@ -743,6 +745,11 @@ fn batching_project(rng: &mut SplitMix64) -> String {
             }
         })
         .collect();
+    // Now and then the escaped `.`, beside whatever else the list holds.
+    if rng.below(6) == 0 {
+        let at = rng.below(identities.len() + 1);
+        identities.insert(at, "a%2Ex");
+    }
     let metadata = if rng.below(3) == 0 { " N=\"n\"" } else { "" };
     out.push_str(&format!(
         "  <ItemGroup><J Include=\"{}\"{metadata} /></ItemGroup>\n",
@@ -800,10 +807,12 @@ fn batching_sweep(seed: u64, cases: usize) -> Tally {
 
 /// An item element whose condition reads `%(J.…)` batches over `J`: its
 /// buckets, in first-appearance order, each decided with their own values,
-/// copy their items. Every committed run must be MSBuild's. About half the
+/// copy their items. Every committed run must be MSBuild's. Over half the
 /// draws are shapes the executor declines by design (unmodelled references,
 /// other includes, a second element of `I`, identities substitution cannot
-/// spell, metadata reading the list), so the floor is two fifths.
+/// spell or whose spelling is not the identity, metadata reading the list),
+/// so the floor, which catches a collapse to declining everything, is three
+/// tenths (76 of 200 at this seed).
 #[test]
 fn batched_item_groups_match_msbuild() {
     let tally = batching_sweep(0xba7c_4ed1, 200);
@@ -812,7 +821,7 @@ fn batched_item_groups_match_msbuild() {
         tally.cases, tally.committed, tally.rejected, tally.failed
     );
     assert!(
-        tally.committed * 5 > tally.cases * 2,
+        tally.committed * 10 > tally.cases * 3,
         "only {} of {} batched runs committed",
         tally.committed,
         tally.cases

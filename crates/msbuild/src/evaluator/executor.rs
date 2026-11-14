@@ -61,6 +61,9 @@ pub enum ExecutionRead {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutedItem {
     pub identity: String,
+    /// The identity as MSBuild holds it, still escaped, or `None` where that
+    /// is not known ([`super::reads::ItemRow::escaped_identity`]).
+    pub escaped_identity: Option<String>,
     pub metadata: BTreeMap<String, String>,
 }
 
@@ -693,6 +696,7 @@ impl<'s, 'r> Engine<'s, 'r> {
                         carried.extend(metadata.clone());
                         added.push(ExecutedItem {
                             identity: copy.identity,
+                            escaped_identity: copy.escaped_identity,
                             metadata: carried,
                         });
                     }
@@ -712,6 +716,7 @@ impl<'s, 'r> Engine<'s, 'r> {
                 carried.extend(metadata.clone());
                 added.push(ExecutedItem {
                     identity: escaping::unescape(fragment),
+                    escaped_identity: Some(fragment.to_owned()),
                     metadata: carried,
                 });
             }
@@ -785,7 +790,7 @@ impl<'s, 'r> Engine<'s, 'r> {
         for row in rows {
             let values = references
                 .iter()
-                .map(|r| identity_modifier(&row.identity, r.modifier))
+                .map(|r| identity_modifier(&row, r.modifier))
                 .collect::<Result<Vec<_>, _>>()?;
             let bucket = buckets.iter_mut().find(|(key, _)| {
                 key.iter()
@@ -814,6 +819,7 @@ impl<'s, 'r> Engine<'s, 'r> {
                     carried.extend(metadata.clone());
                     added.push(ExecutedItem {
                         identity: copy.identity,
+                        escaped_identity: copy.escaped_identity,
                         metadata: carried,
                     });
                 }
@@ -872,6 +878,7 @@ impl<'s, 'r> Engine<'s, 'r> {
                 }
                 items.push(ExecutedItem {
                     identity: row.identity.clone(),
+                    escaped_identity: row.escaped_identity.clone(),
                     metadata: row.metadata.clone(),
                 });
             }
@@ -1230,13 +1237,20 @@ fn batched_references(condition: &str) -> Result<Vec<BatchedReference>, Decline>
     Ok(references)
 }
 
-/// `modifier` of an item whose identity is `identity`, as MSBuild derives it
+/// `modifier` of `item`, as MSBuild derives it: from the escaped item spec
 /// (`FileUtilities.ItemSpecModifiers`: `Path.GetFileNameWithoutExtension` and
-/// `Path.GetExtension` on the item spec). The identity must spell no
-/// character MSBuild escapes (so the escaped value MSBuild reads is the
-/// identity), no backslash (which its Unix path fixup may respell), and
-/// nothing a quoted condition string reads, nor whitespace.
-fn identity_modifier(identity: &str, modifier: IdentityModifier) -> Result<String, Decline> {
+/// `Path.GetExtension`), so `a%2Ex` has no extension. The spelling must be
+/// known and be the identity itself, spelling no character MSBuild escapes
+/// (so the value, and the bucket key, MSBuild reads are the identity); with
+/// no backslash (which its Unix path fixup may respell), and nothing a quoted
+/// condition string reads, nor whitespace.
+fn identity_modifier(item: &ExecutedItem, modifier: IdentityModifier) -> Result<String, Decline> {
+    let identity = item.identity.as_str();
+    if item.escaped_identity.as_deref() != Some(identity) {
+        return decline(format!(
+            "batching reads the identity {identity}, whose spelling is not the identity's"
+        ));
+    }
     let plain = identity.bytes().all(|b| {
         b.is_ascii_graphic()
             && !matches!(
