@@ -347,7 +347,13 @@ This is a Cargo workspace with nine members:
   recognised and oldest supported version, per feature band). Only bands
   `sdk_language_diff` grades against an installed SDK's own `fsc.dll` have a
   row, and that test fails on a row no installed SDK grades, so an SDK bump in
-  the devshell can fail it until the table follows.
+  the devshell can fail it until the table follows. The compiler is named as
+  the SDK's own only while nothing outside the SDK can choose another: no
+  document the evaluation entered outside the SDK's version directory defines a
+  compiler selector, whatever its condition
+  (`ParsedProject::foreign_definitions`), and the walk hid nothing
+  (`ParsedProject::hidden_content`). The same test derives the selector set
+  from each SDK's own F# files and checks real MSBuild runs the compiler named.
   Hover's XML documentation lives in `crates/lsp/src/xml_doc/`. Its
   `<inheritdoc>` work is held to Roslyn's IDE through
   `tools/inheritdoc-oracle`, a test-only C# JSONL batch tool (the

@@ -80,7 +80,7 @@ pub fn msbuild_boolean(value: &str) -> Option<bool> {
     condition::parse_msbuild_bool(value)
 }
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::ops::Range;
@@ -590,6 +590,15 @@ pub struct ParsedProject {
     /// The value is the cause in force when the property's value was computed
     /// ([`Self::property_untrusted_cause`]).
     pub untrusted_properties: HashMap<String, UntrustedCause>,
+    /// What the documents the walk entered from outside the entry .NET SDK
+    /// define, read off their text whatever the conditions around it say.
+    pub foreign_definitions: ForeignDefinitions,
+    /// Why the walk did not see all of the build's content (an import it could
+    /// not follow, or one whose gate it could not decide), or `None` when it
+    /// entered everything the build imports. Content it did not see may define
+    /// anything, so [`Self::foreign_definitions`] is complete only when this is
+    /// `None`.
+    pub hidden_content: Option<UntrustedCause>,
     pub diagnostics: Vec<Diagnostic>,
     /// `true` if any diagnostic was emitted — i.e. the result may diverge
     /// from what MSBuild itself would produce, including in ways that don't
@@ -792,6 +801,64 @@ pub struct ParsedProject {
     /// How many file-system calls of each kind the evaluation made, repeats
     /// included.
     pub read_counts: observed::ReadCounts,
+}
+
+/// The names the documents of an evaluation define from outside the entry
+/// .NET SDK (the `…/sdk/<version>` directory its `Sdk` resolved into, or every
+/// document when it resolved none): the entry project, `Directory.Build.*`,
+/// user imports, package build files, and anything else reached outside that
+/// directory. Each name, lowercased, maps to the files that define it.
+///
+/// Read off each document's text, not off the walk: a definition counts
+/// whether its condition held, failed, or could not be decided, and whether or
+/// not the evaluation runs it (a `<Target>` body runs at build time). So a name
+/// absent here is defined by no file the walk entered outside the SDK, which,
+/// with [`ParsedProject::hidden_content`] `None`, is every such file the build
+/// imports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForeignDefinitions {
+    /// Properties: every element directly inside a `<PropertyGroup>`,
+    /// wherever the group sits, and every task `<Output PropertyName="…">`.
+    pub properties: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// `<Target Name="…">` definitions.
+    pub targets: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// `<UsingTask TaskName="…">` registrations.
+    pub tasks: BTreeMap<String, BTreeSet<PathBuf>>,
+}
+
+impl ForeignDefinitions {
+    /// Record every definition in the document rooted at `root`, read from
+    /// `file`.
+    pub(crate) fn record_document(&mut self, root: roxmltree::Node<'_, '_>, file: &Path) {
+        for node in root.descendants().filter(roxmltree::Node::is_element) {
+            let tag = node.tag_name().name();
+            let attribute = |name: &str| {
+                node.attributes()
+                    .find(|a| a.name().eq_ignore_ascii_case(name))
+                    .map(|a| a.value())
+            };
+            let in_property_group = node
+                .parent_element()
+                .is_some_and(|p| p.tag_name().name().eq_ignore_ascii_case("PropertyGroup"));
+            let (table, name) = if in_property_group {
+                (&mut self.properties, Some(tag))
+            } else if tag.eq_ignore_ascii_case("Output") {
+                (&mut self.properties, attribute("PropertyName"))
+            } else if tag.eq_ignore_ascii_case("Target") {
+                (&mut self.targets, attribute("Name"))
+            } else if tag.eq_ignore_ascii_case("UsingTask") {
+                (&mut self.tasks, attribute("TaskName"))
+            } else {
+                continue;
+            };
+            if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+                table
+                    .entry(name.to_ascii_lowercase())
+                    .or_default()
+                    .insert(file.to_path_buf());
+            }
+        }
+    }
 }
 
 impl ParsedProject {

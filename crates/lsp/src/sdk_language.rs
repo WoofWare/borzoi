@@ -4,8 +4,9 @@
 //! the .NET SDK the project resolves (honouring `global.json`, through
 //! [`SdkDiscovery`]): `Microsoft.FSharp.NetSdk.props` points
 //! `$(DotnetFscCompilerPath)` at the one beside itself, `<root>/sdk/<version>/FSharp/fsc.dll`.
-//! [`compiler_sdk`] reads that SDK's version off the evaluation, and declines
-//! wherever the project or its environment chooses another compiler. Four facts about `<LangVersion>` vary by compiler:
+//! [`project_compiler`] names that SDK, and declines wherever something outside
+//! the SDK could choose another compiler. Four facts about `<LangVersion>` vary
+//! by compiler:
 //!
 //! - the version an absent `<LangVersion>` (or `default`) selects;
 //! - the versions `latest` and `latestmajor` spell;
@@ -155,55 +156,120 @@ impl SdkLanguageFacts {
     }
 }
 
-/// The properties a build's choice of compiler reads besides the SDK's own
-/// defaults: `Microsoft.FSharp.NetSdk.props` writes `DotnetFscCompilerPath`
-/// (with `FscToolPath`/`FscToolExe`, the `dotnet` host that runs it) only
-/// where it is empty, and not at all under `DisableAutoSetFscCompilerPath`.
-const COMPILER_SELECTORS: [&str; 4] = [
+/// The properties the F# SDK reads in choosing the compiler a build runs:
+/// which F# props and targets the SDK imports, which assembly's `Fsc` task
+/// runs, and the tool path, executable and compiler path that task is handed.
+/// Inside the SDK only its own F# files write any of them (`sdk_language_diff`
+/// derives the set from each installed SDK's files and fails on a name missing
+/// here).
+pub const COMPILER_SELECTORS: &[&str] = &[
     "DotnetFscCompilerPath",
     "DisableAutoSetFscCompilerPath",
     "FscToolPath",
     "FscToolExe",
+    "DOTNET_HOST_PATH",
+    "FSharp_Shim_Present",
+    "FSharpPreferNetFrameworkTools",
+    "FSharpPreferAnyCpuTools",
+    "FSharpPrefer64BitTools",
+    "Fsc_Dotnet_ToolPath",
+    "Fsc_Dotnet_ToolExe",
+    "Fsc_Dotnet_DotnetFscCompilerPath",
+    "Fsc_NetFramework_ToolPath",
+    "Fsc_NetFramework_AnyCpu_ToolExe",
+    "Fsc_NetFramework_PlatformSpecific_ToolExe",
+    "FSharpBuildAssemblyFile",
+    "UseBundledFSharpTargets",
+    "FSharpPropsShim",
+    "FSharpTargetsShim",
+    // Gates the import of `$(FSharpTargetsShim)`.
+    "IsCrossTargetingBuild",
 ];
 
-/// The SDK whose compiler builds `parsed`, evaluated under `environment` (the
+/// The target that runs the `Fsc` task, and the task: a definition of either
+/// outside the SDK replaces the SDK's.
+const COMPILE_TARGET: &str = "corecompile";
+const COMPILE_TASK: &str = "fsc";
+
+/// The compiler that builds a project, as far as reading its `<LangVersion>`
+/// goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectCompiler {
+    /// The SDK whose `FSharp/fsc.dll` it is.
+    pub sdk: SdkVersion,
+    /// The build's environment sets `SKIP_VERSION_SUPPORTED_CHECK` to `1`,
+    /// under which the compiler checks below its floor rather than refusing
+    /// (FS3880).
+    pub support_check_skipped: bool,
+}
+
+/// Whether `environment` lifts the compiler's support floor. The compiler reads
+/// the variable itself (`LanguageVersion.IsVersionSupported`) and lifts the
+/// floor for the value `1` exactly; a build hands its environment to the
+/// compiler it spawns.
+pub fn support_check_skipped(environment: &HashMap<String, String>) -> bool {
+    const NAME: &str = "SKIP_VERSION_SUPPORTED_CHECK";
+    environment.iter().any(|(name, value)| {
+        let named = if cfg!(windows) {
+            name.eq_ignore_ascii_case(NAME)
+        } else {
+            name == NAME
+        };
+        named && value == "1"
+    })
+}
+
+/// The compiler that builds `parsed`, evaluated under `environment` (the
 /// process environment its evaluation saw), or `None` when it cannot be said.
 ///
-/// A real `dotnet build` runs with `DOTNET_HOST_PATH` set, under which
-/// `Microsoft.FSharp.NetSdk.props` sets `$(DotnetFscCompilerPath)` to the
-/// `fsc.dll` beside itself unless something set it first. So:
+/// The claim is that it is the entry SDK's own `fsc.dll`, and it rests on
+/// what the build cannot be told rather than on what the evaluation computed:
 ///
-/// - An environment variable naming any of [`COMPILER_SELECTORS`] chooses the
-///   compiler in a way the evaluation does not see (it outranks the SDK's
-///   conditional writes): unknown. So does an untrusted selector, which the
-///   real build may write whether or not the evaluation did.
-/// - A written `$(DotnetFscCompilerPath)` decides, if it names an SDK's own
-///   `fsc.dll`. (The evaluation writes it itself when the
-///   server's environment carries `DOTNET_HOST_PATH`.)
-/// - Otherwise a written `DisableAutoSetFscCompilerPath`, `FscToolPath` or
-///   `FscToolExe` takes the build off the SDK's default: unknown.
-/// - Otherwise the compiler is the one beside the F# props the SDK imports:
-///   `$(FSharpPropsShim)`, under `$(UseBundledFSharpTargets)` = `true`, both
-///   trusted, naming an SDK's own `FSharp/Microsoft.FSharp.NetSdk.props`.
-pub fn compiler_sdk(
+/// - Inside the SDK, the choice of compiler is made by its F# props and
+///   targets alone. They choose between `dotnet <sdk>/FSharp/fsc.dll` (when
+///   `DOTNET_HOST_PATH` is set, as `dotnet build` sets it) and the compiler
+///   beside the SDK's own `Fsc` task assembly, the same file; the evaluation
+///   cannot decide that gate (it does not model `DOTNET_HOST_PATH`), and need
+///   not. `sdk_language_diff` grades both arms against each installed SDK.
+/// - So the build runs another compiler only if something outside the SDK
+///   defines one of [`COMPILER_SELECTORS`], the `CoreCompile` target or the
+///   `Fsc` task, or sets a selector in the environment. A definition anywhere
+///   in a document the walk entered outside the SDK declines, whatever its
+///   condition ([`ParsedProject::foreign_definitions`]), and so does any
+///   content the walk did not enter ([`ParsedProject::hidden_content`]).
+/// - The SDK must be the canonical layout with a graded row
+///   ([`SdkLanguageFacts::for_sdk`]): the argument above is about its files,
+///   and only a graded SDK's files have been checked. Its F# props and targets
+///   (`$(FSharpPropsShim)`, `$(FSharpTargetsShim)`, imported under
+///   `$(UseBundledFSharpTargets)` = `true`) must be its own, and trusted.
+///
+/// `DOTNET_HOST_PATH` in the environment is not a selector: the `dotnet` host
+/// sets it for the build whatever the caller's value.
+pub fn project_compiler(
     parsed: &ParsedProject,
     environment: &HashMap<String, String>,
-) -> Option<SdkVersion> {
+) -> Option<ProjectCompiler> {
     let set_in_environment = environment.iter().any(|(name, value)| {
         !value.is_empty()
+            && !name.eq_ignore_ascii_case("DOTNET_HOST_PATH")
             && COMPILER_SELECTORS
                 .iter()
                 .any(|selector| name.eq_ignore_ascii_case(selector))
     });
-    // An untrusted selector may be written in the real build whether or not the
-    // evaluation wrote it.
-    if set_in_environment
-        || COMPILER_SELECTORS
-            .iter()
-            .any(|name| parsed.property_provenance_untrusted(name))
+    if set_in_environment || parsed.hidden_content.is_some() {
+        return None;
+    }
+    let foreign = &parsed.foreign_definitions;
+    if COMPILER_SELECTORS
+        .iter()
+        .any(|name| foreign.properties.contains_key(&name.to_ascii_lowercase()))
+        || foreign.targets.contains_key(COMPILE_TARGET)
+        || foreign.tasks.contains_key(COMPILE_TASK)
     {
         return None;
     }
+    let sdk = entry_sdk_version(parsed.resolved_sdk_root.as_deref()?)?;
+    SdkLanguageFacts::for_sdk(&sdk)?;
     let written = |name: &str| {
         parsed
             .properties
@@ -218,25 +284,45 @@ pub fn compiler_sdk(
             written(name)
         }
     };
-    if written("DotnetFscCompilerPath").is_some() {
-        return sdk_version_of_sdk_file(written("DotnetFscCompilerPath")?, &["FSharp", "fsc.dll"]);
-    }
-    if COMPILER_SELECTORS[1..]
-        .iter()
-        .any(|name| written(name).is_some_and(|v| !v.trim().is_empty()))
+    let names_own = |name: &str, file: &str| {
+        trusted(name).and_then(|value| sdk_version_of_sdk_file(value, &["FSharp", file]))
+            == Some(sdk.clone())
+    };
+    let bundled = trusted("UseBundledFSharpTargets")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"));
+    if !bundled
+        || !names_own("FSharpPropsShim", "Microsoft.FSharp.NetSdk.props")
+        || !names_own("FSharpTargetsShim", "Microsoft.FSharp.NetSdk.targets")
     {
         return None;
     }
-    if !trusted("UseBundledFSharpTargets")?
-        .trim()
-        .eq_ignore_ascii_case("true")
+    // Only the SDK's props can have written it, and they name their own.
+    if written("DotnetFscCompilerPath").is_some() && !names_own("DotnetFscCompilerPath", "fsc.dll")
     {
         return None;
     }
-    sdk_version_of_sdk_file(
-        trusted("FSharpPropsShim")?,
-        &["FSharp", "Microsoft.FSharp.NetSdk.props"],
-    )
+    Some(ProjectCompiler {
+        sdk,
+        support_check_skipped: support_check_skipped(environment),
+    })
+}
+
+/// The version of the canonical-layout SDK `root` (`…/sdk/<version>/Sdks/<name>/Sdk`).
+fn entry_sdk_version(root: &std::path::Path) -> Option<SdkVersion> {
+    let mut components = root.components().rev().map(|c| c.as_os_str().to_str());
+    let mut next = || components.next().flatten();
+    if !next()?.eq_ignore_ascii_case("Sdk") {
+        return None;
+    }
+    next()?;
+    if !next()?.eq_ignore_ascii_case("Sdks") {
+        return None;
+    }
+    let version = next()?;
+    if !next()?.eq_ignore_ascii_case("sdk") {
+        return None;
+    }
+    SdkVersion::parse(version)
 }
 
 /// The version of the SDK whose own file `value` names: a path
@@ -327,14 +413,13 @@ pub struct LangVersionSelection {
 }
 
 impl LangVersionSelection {
-    /// The selection for `parsed`, built by the compiler of `compiler_sdk`
-    /// ([`compiler_sdk`]'s answer): that compiler's reading of its
-    /// `$(LangVersion)` when its SDK has a graded row, else the pinned
-    /// compiler's.
-    pub fn of(parsed: &ParsedProject, compiler_sdk: Option<&SdkVersion>) -> LangVersionSelection {
+    /// The selection for `parsed`, built by `compiler` ([`project_compiler`]'s
+    /// answer): that compiler's reading of its `$(LangVersion)` when its SDK
+    /// has a graded row, else the pinned compiler's.
+    pub fn of(parsed: &ParsedProject, compiler: Option<&ProjectCompiler>) -> LangVersionSelection {
         let text = parsed.lang_version.as_deref();
-        let Some((sdk, facts)) =
-            compiler_sdk.and_then(|sdk| SdkLanguageFacts::for_sdk(sdk).map(|f| (sdk, f)))
+        let Some((compiler, facts)) =
+            compiler.and_then(|c| SdkLanguageFacts::for_sdk(&c.sdk).map(|f| (c, f)))
         else {
             return LangVersionSelection {
                 version: text
@@ -347,7 +432,7 @@ impl LangVersionSelection {
         };
         let refusal = |kind| {
             Some(LangVersionRefusal {
-                sdk: sdk.clone(),
+                sdk: compiler.sdk.clone(),
                 text: text.unwrap_or_default().to_string(),
                 kind,
             })
@@ -357,6 +442,12 @@ impl LangVersionSelection {
                 version,
                 refusal: None,
             },
+            LangVersionReading::OutOfSupport(version) if compiler.support_check_skipped => {
+                LangVersionSelection {
+                    version,
+                    refusal: None,
+                }
+            }
             LangVersionReading::OutOfSupport(version) => LangVersionSelection {
                 version,
                 refusal: refusal(RefusalKind::OutOfSupport { floor: facts.floor }),
@@ -488,84 +579,189 @@ mod tests {
         .expect("the project evaluates")
     }
 
-    const FSC: &str =
-        r#"<DotnetFscCompilerPath>"/d/sdk/10.0.401/FSharp/fsc.dll"</DotnetFscCompilerPath>"#;
-    const SHIM: &str = "<UseBundledFSharpTargets>true</UseBundledFSharpTargets>\
-         <FSharpPropsShim>/d/sdk/10.0.112/FSharp/Microsoft.FSharp.NetSdk.props</FSharpPropsShim>";
-
-    /// Each route [`compiler_sdk`] takes, and each way off the SDK's default
-    /// compiler it declines on.
-    #[test]
-    fn the_compiler_sdk_follows_the_build_s_choice_of_compiler() {
-        let none = HashMap::new();
-        let cases: &[(String, &HashMap<String, String>, Option<&str>)] = &[
-            (FSC.to_string(), &none, Some("10.0.401")),
-            (SHIM.to_string(), &none, Some("10.0.112")),
-            // A written compiler path outranks the shim.
-            (format!("{SHIM}{FSC}"), &none, Some("10.0.401")),
+    /// An evaluation of an ordinary project on the canonical-layout SDK
+    /// `version`: what the evaluator reports for one, with nothing defined
+    /// outside the SDK.
+    fn on_sdk(version: &str) -> ParsedProject {
+        let mut parsed = evaluate("");
+        let root = format!("/d/sdk/{version}");
+        parsed.resolved_sdk_root = Some(format!("{root}/Sdks/Microsoft.NET.Sdk/Sdk").into());
+        for (name, value) in [
+            ("UseBundledFSharpTargets", "true".to_string()),
             (
-                format!("{SHIM}<DotnetFscCompilerPath>/opt/fsc.dll</DotnetFscCompilerPath>"),
-                &none,
-                None,
+                "FSharpPropsShim",
+                format!(r"{root}\FSharp\Microsoft.FSharp.NetSdk.props"),
             ),
             (
-                format!("{SHIM}<FscToolPath>/opt</FscToolPath>"),
-                &none,
-                None,
+                "FSharpTargetsShim",
+                format!(r"{root}\FSharp\Microsoft.FSharp.NetSdk.targets"),
             ),
-            (
-                format!(
-                    "{SHIM}<DisableAutoSetFscCompilerPath>true</DisableAutoSetFscCompilerPath>"
-                ),
-                &none,
-                None,
-            ),
-            (SHIM.replace(">true<", ">false<"), &none, None),
-            (
-                format!(
-                    r#"{SHIM}<DotnetFscCompilerPath Condition="'@(Nothing)' == ''">"/d/sdk/10.0.401/FSharp/fsc.dll"</DotnetFscCompilerPath>"#
-                ),
-                &none,
-                None,
-            ),
-            (String::new(), &none, None),
-        ];
-        for (body, environment, expected) in cases {
-            assert_eq!(
-                compiler_sdk(&evaluate(body), environment),
-                expected.map(sdk),
-                "{body}"
-            );
+        ] {
+            parsed.properties.insert(name.to_string(), value);
         }
-        // A selector written under a gate the evaluation cannot decide, whichever
-        // way the evaluation took it.
-        for op in ["==", "!="] {
-            let body = format!(
-                r#"{SHIM}<FscToolPath Condition="'@(Nothing)' {op} ''">/opt</FscToolPath>"#
+        assert_eq!(parsed.foreign_definitions, Default::default());
+        parsed
+    }
+
+    fn compiler_of(parsed: &ParsedProject, environment: &[(&str, &str)]) -> Option<SdkVersion> {
+        let environment = environment
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        project_compiler(parsed, &environment).map(|c| c.sdk)
+    }
+
+    /// The compiler is the entry SDK's own while nothing outside the SDK can
+    /// choose another, and each way something could declines.
+    #[test]
+    fn the_compiler_is_the_sdk_s_own_unless_something_outside_it_chooses() {
+        let ten_four = Some(sdk("10.0.401"));
+        assert_eq!(compiler_of(&on_sdk("10.0.401"), &[]), ten_four);
+        assert_eq!(compiler_of(&on_sdk("10.0.112"), &[]), Some(sdk("10.0.112")));
+        // An SDK whose files no compiler in the table grades.
+        assert_eq!(compiler_of(&on_sdk("9.0.100"), &[]), None);
+        assert_eq!(compiler_of(&on_sdk("10.0.100-rc.2.25502.107"), &[]), None);
+        // `dotnet build` sets it, and the host overrides the caller's value.
+        assert_eq!(
+            compiler_of(&on_sdk("10.0.401"), &[("DOTNET_HOST_PATH", "/d/dotnet")]),
+            ten_four
+        );
+        for selector in COMPILER_SELECTORS
+            .iter()
+            .filter(|s| !s.eq_ignore_ascii_case("DOTNET_HOST_PATH"))
+        {
+            let lower = selector.to_ascii_lowercase();
+            assert_eq!(
+                compiler_of(&on_sdk("10.0.401"), &[(&lower, "x")]),
+                None,
+                "{selector} in the environment"
             );
-            let parsed = evaluate(&body);
-            assert!(
-                parsed.property_provenance_untrusted("FscToolPath"),
-                "{body}"
-            );
-            assert_eq!(compiler_sdk(&parsed, &none), None, "{body}");
         }
         for selector in COMPILER_SELECTORS {
-            let environment = HashMap::from([(selector.to_ascii_lowercase(), "x".to_string())]);
-            assert_eq!(
-                compiler_sdk(&evaluate(SHIM), &environment),
+            let mut parsed = on_sdk("10.0.401");
+            parsed
+                .foreign_definitions
+                .properties
+                .entry(selector.to_ascii_lowercase())
+                .or_default()
+                .insert("/w/Directory.Build.props".into());
+            assert_eq!(compiler_of(&parsed, &[]), None, "{selector} defined");
+        }
+        let mut parsed = on_sdk("10.0.401");
+        parsed
+            .foreign_definitions
+            .properties
+            .entry("langversion".to_string())
+            .or_default()
+            .insert("/w/App.fsproj".into());
+        assert_eq!(compiler_of(&parsed, &[]), ten_four, "not a selector");
+        let mut parsed = on_sdk("10.0.401");
+        parsed
+            .foreign_definitions
+            .targets
+            .entry(COMPILE_TARGET.to_string())
+            .or_default()
+            .insert("/w/Directory.Build.targets".into());
+        assert_eq!(compiler_of(&parsed, &[]), None, "CoreCompile redefined");
+        let mut parsed = on_sdk("10.0.401");
+        parsed
+            .foreign_definitions
+            .tasks
+            .entry(COMPILE_TASK.to_string())
+            .or_default()
+            .insert("/w/Directory.Build.props".into());
+        assert_eq!(compiler_of(&parsed, &[]), None, "Fsc registered");
+        let mut parsed = on_sdk("10.0.401");
+        parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
+        assert_eq!(compiler_of(&parsed, &[]), None, "content unseen");
+
+        let with = |name: &str, value: &str| {
+            let mut parsed = on_sdk("10.0.401");
+            parsed
+                .properties
+                .insert(name.to_string(), value.to_string());
+            parsed
+        };
+        let props = "FSharpPropsShim";
+        for (name, value, expected) in [
+            (
+                props,
+                "/d/sdk/10.0.112/FSharp/Microsoft.FSharp.NetSdk.props",
                 None,
-                "{selector}"
+            ),
+            (props, "/opt/FSharp/Microsoft.FSharp.NetSdk.props", None),
+            (
+                "FSharpTargetsShim",
+                "/d/sdk/10.0.112/FSharp/Microsoft.FSharp.NetSdk.targets",
+                None,
+            ),
+            ("UseBundledFSharpTargets", "false", None),
+            (
+                "DotnetFscCompilerPath",
+                r#""/d/sdk/10.0.401/FSharp/fsc.dll""#,
+                ten_four.clone(),
+            ),
+            (
+                "DotnetFscCompilerPath",
+                r#""/d/sdk/10.0.112/FSharp/fsc.dll""#,
+                None,
+            ),
+        ] {
+            assert_eq!(
+                compiler_of(&with(name, value), &[]),
+                expected,
+                "{name}={value}"
             );
         }
+        let mut parsed = on_sdk("10.0.401");
+        parsed.properties.remove("FSharpTargetsShim");
+        assert_eq!(compiler_of(&parsed, &[]), None, "no targets shim");
+        let mut parsed = on_sdk("10.0.401");
+        parsed.untrusted_properties.insert(
+            "fsharppropsshim".to_string(),
+            UntrustedCause::Unentered("a gate".to_string()),
+        );
+        assert_eq!(compiler_of(&parsed, &[]), None, "untrusted props shim");
+        let mut parsed = on_sdk("10.0.401");
+        parsed.resolved_sdk_root = Some("/opt/my-sdk".into());
+        assert_eq!(compiler_of(&parsed, &[]), None, "not the canonical layout");
+    }
+
+    /// The compiler lifts its floor for `SKIP_VERSION_SUPPORTED_CHECK=1`
+    /// exactly.
+    #[test]
+    fn the_support_check_is_skipped_for_one_exactly() {
+        let parsed = on_sdk("10.0.401");
+        let skipped = |value: &str| {
+            let environment = HashMap::from([(
+                "SKIP_VERSION_SUPPORTED_CHECK".to_string(),
+                value.to_string(),
+            )]);
+            project_compiler(&parsed, &environment)
+                .unwrap()
+                .support_check_skipped
+        };
+        assert!(skipped("1"));
+        for other in ["", "0", "true", " 1", "yes"] {
+            assert!(!skipped(other), "{other:?}");
+        }
+        assert!(
+            !project_compiler(&parsed, &HashMap::new())
+                .unwrap()
+                .support_check_skipped
+        );
     }
 
     /// A compiler with no row reads the value as the pinned compiler does and
-    /// claims no floor.
+    /// claims no floor; a skipped support check lifts the floor.
     #[test]
     fn an_sdk_with_no_row_gets_the_pinned_reading_and_no_floor() {
+        let compiler = |version: &str, support_check_skipped| ProjectCompiler {
+            sdk: sdk(version),
+            support_check_skipped,
+        };
         let parsed = evaluate("<LangVersion>4.6</LangVersion>");
-        let selection = LangVersionSelection::of(&parsed, Some(&sdk("9.0.100")));
+        let selection = LangVersionSelection::of(&parsed, Some(&compiler("9.0.100", false)));
         assert_eq!(
             selection,
             LangVersionSelection {
@@ -576,14 +772,26 @@ mod tests {
         let parsed = evaluate("");
         let selection = LangVersionSelection::of(&parsed, None);
         assert_eq!(selection.version, LanguageVersion::DEFAULT);
-        let refused = LangVersionSelection::of(
-            &evaluate("<LangVersion>4.6</LangVersion>"),
-            Some(&sdk("10.0.401")),
-        );
+        let below_floor = evaluate("<LangVersion>4.6</LangVersion>");
+        let refused = LangVersionSelection::of(&below_floor, Some(&compiler("10.0.401", false)));
         assert_eq!(refused.version, V4_6);
         assert_eq!(
             refused.refusal.map(|r| r.kind),
             Some(RefusalKind::OutOfSupport { floor: V8_0 })
+        );
+        assert_eq!(
+            LangVersionSelection::of(&below_floor, Some(&compiler("10.0.401", true))),
+            LangVersionSelection {
+                version: V4_6,
+                refusal: None
+            }
+        );
+        let unrecognised = evaluate("<LangVersion>12.0</LangVersion>");
+        assert_eq!(
+            LangVersionSelection::of(&unrecognised, Some(&compiler("10.0.401", true)))
+                .refusal
+                .map(|r| r.kind),
+            Some(RefusalKind::Unrecognised)
         );
     }
 }

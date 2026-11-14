@@ -133,6 +133,9 @@ pub fn walk(
         &observer,
     );
     let project_dir = project_path.parent().unwrap_or_else(|| Path::new(""));
+    state
+        .foreign_definitions
+        .record_document(root, project_path);
     // SDK resolution requires IO, which the pure walker doesn't do.
     // Surface the attribute so the caller knows the result may be
     // incomplete (Compile defaults, etc.). Mirrors what
@@ -484,6 +487,10 @@ fn walk_once<'r>(
         observer,
     );
     state.target_framework_reads = target_framework_reads;
+    // The entry project is never inside an SDK.
+    state
+        .foreign_definitions
+        .record_document(root, project_path);
     // Seed `imports_seen` with the entry project so an import that names
     // the entry — directly or through a chain — is skipped the way
     // MSBuild skips it (warning MSB4210, "attempting to import itself";
@@ -1671,6 +1678,12 @@ struct State<'r> {
     /// entry. Surfaced on [`ParsedProject::resolved_sdk_root`] by
     /// [`Self::into_project`].
     resolved_sdk_root: Option<PathBuf>,
+    /// The canonical `…/sdk/<version>` directory of the entry project's own SDK,
+    /// when it resolved into the canonical .NET layout. A document outside it
+    /// has its definitions recorded in [`Self::foreign_definitions`].
+    entry_sdk_version_dir: Option<PathBuf>,
+    /// Surfaced on [`ParsedProject::foreign_definitions`].
+    foreign_definitions: crate::ForeignDefinitions,
     /// `true` while the walk is inside a context whose uncertainty would
     /// affect the **Compile item set**: a source-set-changing
     /// `<Compile>`/`<CompileBefore>`/`<CompileAfter>` element, or an
@@ -2236,6 +2249,8 @@ impl<'r> State<'r> {
             pending_directory_build_props: None,
             in_entry_body: false,
             resolved_sdk_root: None,
+            entry_sdk_version_dir: None,
+            foreign_definitions: crate::ForeignDefinitions::default(),
             compile_context: false,
             in_sdk_subtree: false,
             sdk_tolerance_roots: Vec::new(),
@@ -2491,6 +2506,7 @@ impl<'r> State<'r> {
     /// probe. `first`-wins is therefore moot in practice (one entry SDK), but
     /// kept so a future explicit-form change can't double-record.
     fn record_sdk_root(&mut self, root: &Path) {
+        let first = self.resolved_sdk_root.is_none();
         self.resolved_sdk_root
             .get_or_insert_with(|| root.to_path_buf());
         // Also tolerate it: this is the entry chokepoint for both the `Sdk`
@@ -2498,7 +2514,10 @@ impl<'r> State<'r> {
         // "Sdk.props"/>` as the first body element), and the latter resolves on
         // a path that never reaches `resolve_project_sdk`. Without this its SDK
         // props/targets would be judged user-authored.
-        self.note_sdk_tolerance(root);
+        let version_dir = self.note_sdk_tolerance(root);
+        if first {
+            self.entry_sdk_version_dir = version_dir;
+        }
     }
 
     /// Add an SDK root to the tolerance set ([`Self::sdk_tolerance_roots`]).
@@ -2521,20 +2540,28 @@ impl<'r> State<'r> {
     /// (both the file's own canonical path and the canonicalisation of an
     /// imported file's parent directory). Deduplicated (resolution sites
     /// overlap).
-    fn note_sdk_tolerance(&mut self, root: &Path) {
-        let boundaries: Vec<&Path> = if let Some(version_dir) = dotnet_sdk_version_dir(root) {
+    ///
+    /// Returns the canonical version directory, for the canonical layout.
+    fn note_sdk_tolerance(&mut self, root: &Path) -> Option<PathBuf> {
+        let version_dir = dotnet_sdk_version_dir(root);
+        let boundaries: Vec<&Path> = if let Some(version_dir) = version_dir {
             self.seed_toolset_properties(version_dir);
             vec![root.parent().unwrap_or(root), version_dir]
         } else {
             vec![root]
         };
+        let mut canonical_version_dir = None;
         for boundary in boundaries {
             let canon = observed::canonicalize(self.observer, boundary)
                 .unwrap_or_else(|_| boundary.to_path_buf());
+            if Some(boundary) == version_dir {
+                canonical_version_dir = Some(canon.clone());
+            }
             if !self.sdk_tolerance_roots.contains(&canon) {
                 self.sdk_tolerance_roots.push(canon);
             }
         }
+        canonical_version_dir
     }
 
     /// Seed the MSBuild toolset properties from a canonical .NET SDK
@@ -2731,6 +2758,10 @@ impl<'r> State<'r> {
             .iter()
             .filter_map(|(name, trust)| Some((name.clone(), trust.untrusted_cause()?)))
             .collect();
+        let hidden_content = self
+            .walk_opaque
+            .as_ref()
+            .map(crate::UntrustedCause::of_opacity);
         let State {
             lookup,
             protected: _,
@@ -2803,6 +2834,8 @@ impl<'r> State<'r> {
             pending_directory_build_props: _,
             in_entry_body: _,
             resolved_sdk_root,
+            entry_sdk_version_dir: _,
+            foreign_definitions,
             locally_overridable,
             compile_context: _,
             in_sdk_subtree: _,
@@ -2966,6 +2999,8 @@ impl<'r> State<'r> {
             lang_version,
             target_name,
             untrusted_properties,
+            foreign_definitions,
+            hidden_content,
             diagnostics,
             is_partial,
             items_uncertain,
@@ -5214,7 +5249,7 @@ fn is_env_ignored_toolset_name(lower: &str) -> bool {
 /// `MSBuildSDKsPath`, `MSBuildFrameworkToolsRoot`, `LocalAppData`,
 /// `VisualStudioVersion` — MSBuild deliberately keeps these overridable from
 /// the environment.
-fn is_msbuild_reserved_name(lower: &str) -> bool {
+pub(crate) fn is_msbuild_reserved_name(lower: &str) -> bool {
     matches!(
         lower,
         "msbuildprojectdirectory"
@@ -6643,6 +6678,20 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
                 .as_deref()
                 .is_some_and(|dir| dir.starts_with(root))
     });
+    // The same two arms, against the entry SDK's version directory alone: a
+    // file another SDK resolution brought into the tolerance set (a NuGet
+    // MSBuild SDK, say) is still foreign to the entry .NET SDK.
+    let in_entry_sdk = state.entry_sdk_version_dir.as_deref().is_some_and(|root| {
+        canon.starts_with(root)
+            || reach_parent_canon
+                .as_deref()
+                .is_some_and(|dir| dir.starts_with(root))
+    });
+    if !in_entry_sdk {
+        state
+            .foreign_definitions
+            .record_document(doc.root_element(), path);
+    }
     // Pin `import_site_span` on the *first* descent (when it's None)
     // and preserve it on nested descents. All diagnostics and items
     // produced inside this — and any further nested — file will be

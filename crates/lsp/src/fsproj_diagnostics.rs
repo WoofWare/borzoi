@@ -488,23 +488,25 @@ fn assets_present(project_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// A project-level WARNING when `unrestored`. Anchored at the file head
-/// (`Range::default()`) — the module's convention for whole-file diagnostics
-/// (see the malformed-XML error) — which also avoids mis-anchoring inside a
-/// leading comment. Pure: the SDK / restore-state checks are the caller's.
 /// The compiler's refusal of the project's `<LangVersion>`, when the SDK the
 /// project resolves ships a compiler [`crate::sdk_language`] knows and it
 /// refuses the value (FS3880 below its floor, FS0246 for a value it does not
 /// recognise). An `ERROR`: the build fails on it. File-level, as the compiler
 /// reports it without a location, and the `<LangVersion>` that decides may be
 /// written in an import.
+///
+/// Only for a trusted `$(LangVersion)`: an untrusted one is the evaluation's
+/// best guess, and the value the build holds may be one the compiler takes.
 fn lang_version_refusal_diagnostic(
     parsed: &borzoi_msbuild::ParsedProject,
     environment: &HashMap<String, String>,
 ) -> Option<Diagnostic> {
-    let compiler_sdk = crate::sdk_language::compiler_sdk(parsed, environment);
+    if parsed.property_provenance_untrusted("LangVersion") {
+        return None;
+    }
+    let compiler = crate::sdk_language::project_compiler(parsed, environment);
     let refusal =
-        crate::sdk_language::LangVersionSelection::of(parsed, compiler_sdk.as_ref()).refusal?;
+        crate::sdk_language::LangVersionSelection::of(parsed, compiler.as_ref()).refusal?;
     Some(Diagnostic {
         range: Range::default(),
         severity: Some(DiagnosticSeverity::ERROR),
@@ -517,6 +519,10 @@ fn lang_version_refusal_diagnostic(
     })
 }
 
+/// A project-level WARNING when `unrestored`. Anchored at the file head
+/// (`Range::default()`) — the module's convention for whole-file diagnostics
+/// (see the malformed-XML error) — which also avoids mis-anchoring inside a
+/// leading comment. Pure: the SDK / restore-state checks are the caller's.
 fn restore_diagnostic(unrestored: bool) -> Option<Diagnostic> {
     if !unrestored {
         return None;

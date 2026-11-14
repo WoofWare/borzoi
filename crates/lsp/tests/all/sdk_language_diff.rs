@@ -31,7 +31,7 @@
 //!
 //! Requires the devshell's `$DOTNET_ROOT`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,7 +39,8 @@ use std::time::Duration;
 
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::sdk_language::{
-    LangVersionReading, LangVersionSelection, RefusalKind, SdkLanguageFacts,
+    COMPILER_SELECTORS, LangVersionReading, LangVersionSelection, ProjectCompiler, RefusalKind,
+    SdkLanguageFacts,
 };
 use borzoi::workspace::Workspace;
 use borzoi_cst::language_version::LanguageVersion;
@@ -166,16 +167,21 @@ fn has_error(output: &str, code: &str) -> bool {
 /// Run `compiler` with `args`, `SKIP_VERSION_SUPPORTED_CHECK` set to `1` when
 /// `skip` and unset otherwise, and return its output.
 fn run(compiler: &Compiler, args: &[OsString], skip: bool) -> String {
+    run_with(compiler, args, skip.then_some("1"))
+}
+
+/// Run `compiler` with `args` and `SKIP_VERSION_SUPPORTED_CHECK` set to
+/// `skip`, or unset for `None`, and return its output.
+fn run_with(compiler: &Compiler, args: &[OsString], skip: Option<&str>) -> String {
     let mut cmd = Command::new("dotnet");
     cmd.arg("exec")
         .arg(&compiler.fsc)
         .arg("--nologo")
         .args(args);
-    if skip {
-        cmd.env("SKIP_VERSION_SUPPORTED_CHECK", "1");
-    } else {
-        cmd.env_remove("SKIP_VERSION_SUPPORTED_CHECK");
-    }
+    match skip {
+        Some(value) => cmd.env("SKIP_VERSION_SUPPORTED_CHECK", value),
+        None => cmd.env_remove("SKIP_VERSION_SUPPORTED_CHECK"),
+    };
     // A refusal or a probe's error exits non-zero; the output is the answer.
     let output = BoundedCommand::new(cmd)
         .timeout(Duration::from_secs(300))
@@ -453,6 +459,27 @@ fn every_installed_compiler_reads_langversion_as_its_row_says() {
                 )),
             }
         }
+        // `1` lifts the floor (graded above); `project_compiler` claims no
+        // other value does.
+        if let Some(below) = LanguageVersion::NUMBERED
+            .iter()
+            .rev()
+            .find(|v| **v < facts.floor)
+        {
+            let mut args = lang_arg(Some(&below.to_string()));
+            args.push("--parseonly".into());
+            args.extend(probes.parse.iter().map(|p| p.as_os_str().to_owned()));
+            for value in ["true", "0", " 1"] {
+                let output = run_with(compiler, &args, Some(value));
+                if !has_error(&output, "FS3880") {
+                    failures.push(format!(
+                        "SDK {}: F# {below} with SKIP_VERSION_SUPPORTED_CHECK={value:?} is not \
+                         refused, but only `1` lifts the floor in borzoi's model:\n{output}",
+                        compiler.sdk
+                    ));
+                }
+            }
+        }
     }
     for (major, minor, band) in SdkLanguageFacts::graded_bands() {
         let graded = compilers.iter().any(|c| {
@@ -501,18 +528,30 @@ fn pinned_project(dir: &Path, sdk: &SdkVersion, lang: Option<&str>, source: &str
 /// boundary.
 const STRADDLING: &str = "match x with\n";
 
-/// The environments a project is evaluated under: the test's own, where the
-/// compiler is the one beside the F# props the SDK imports, and one with
-/// `DOTNET_HOST_PATH` set, as `dotnet build` sets it, where the SDK writes
-/// `$(DotnetFscCompilerPath)` and that decides.
-fn environments() -> Vec<(&'static str, SdkDiscoveryEnv)> {
-    let plain = SdkDiscoveryEnv::from_process_env();
+/// The environments a project is evaluated under, each with whether it skips
+/// the compiler's support check: the test's own, one with `DOTNET_HOST_PATH`
+/// set, as `dotnet build` sets it (the evaluation cannot decide the SDK's gate
+/// on it either way, and the compiler is the SDK's under both arms), and one
+/// with `SKIP_VERSION_SUPPORTED_CHECK=1`, which lifts the floor.
+fn environments() -> Vec<(&'static str, SdkDiscoveryEnv, bool)> {
+    let mut plain = SdkDiscoveryEnv::from_process_env();
+    plain
+        .build_environment
+        .retain(|name, _| name != "SKIP_VERSION_SUPPORTED_CHECK");
     let mut hosted = plain.clone();
     hosted.build_environment.insert(
         "DOTNET_HOST_PATH".to_string(),
         dotnet_root().join("dotnet").display().to_string(),
     );
-    vec![("props shim", plain), ("DotnetFscCompilerPath", hosted)]
+    let mut skipped = plain.clone();
+    skipped
+        .build_environment
+        .insert("SKIP_VERSION_SUPPORTED_CHECK".to_string(), "1".to_string());
+    vec![
+        ("plain", plain, false),
+        ("DOTNET_HOST_PATH", hosted, false),
+        ("support check skipped", skipped, true),
+    ]
 }
 
 #[test]
@@ -522,27 +561,30 @@ fn a_project_reads_langversion_with_its_sdks_compiler() {
         if compiler.sdk.is_prerelease() {
             continue;
         }
-        for (lang, (route, env)) in [None, Some("7.0"), Some("11")]
+        for (lang, (route, env, skipped)) in [None, Some("7.0"), Some("11")]
             .into_iter()
             .flat_map(|lang| environments().into_iter().map(move |env| (lang, env)))
         {
             let dir = tempfile::tempdir().unwrap();
             let fsproj = pinned_project(dir.path(), &compiler.sdk, lang, STRADDLING);
             let mut workspace = Workspace::with_env(env.clone());
+            let facts = SdkLanguageFacts::for_sdk(&compiler.sdk);
             assert_eq!(
                 workspace.compiler_sdk_for_project(&fsproj).as_ref(),
-                Some(&compiler.sdk),
-                "a project pinned to SDK {} builds with its compiler ({route})",
+                facts.map(|_| &compiler.sdk),
+                "a project pinned to SDK {} builds with its compiler ({route}), named for a \
+                 graded SDK",
                 compiler.sdk
             );
             let selection = workspace.lang_version_selection(&fsproj);
-            let Some(facts) = SdkLanguageFacts::for_sdk(&compiler.sdk) else {
+            let Some(facts) = facts else {
                 assert_eq!(selection.refusal, None, "no floor for an SDK with no row");
                 continue;
             };
             graded += 1;
             let expected = match facts.reading(lang) {
                 LangVersionReading::Checks(v) => (v, None),
+                LangVersionReading::OutOfSupport(v) if skipped => (v, None),
                 LangVersionReading::OutOfSupport(v) => {
                     (v, Some(RefusalKind::OutOfSupport { floor: facts.floor }))
                 }
@@ -558,12 +600,19 @@ fn a_project_reads_langversion_with_its_sdks_compiler() {
                     selection.refusal.as_ref().map(|r| r.kind)
                 ),
                 expected,
-                "SDK {}, LangVersion {lang:?}",
+                "SDK {}, LangVersion {lang:?} ({route})",
                 compiler.sdk
             );
+            let project_compiler = ProjectCompiler {
+                sdk: compiler.sdk.clone(),
+                support_check_skipped: skipped,
+            };
             assert_eq!(
                 selection,
-                LangVersionSelection::of(workspace.project(&fsproj).unwrap(), Some(&compiler.sdk))
+                LangVersionSelection::of(
+                    workspace.project(&fsproj).unwrap(),
+                    Some(&project_compiler)
+                )
             );
 
             // The `.fsproj` diagnostics report the refusal, and only it.
@@ -607,5 +656,417 @@ fn a_project_reads_langversion_with_its_sdks_compiler() {
     assert!(
         graded > 0,
         "no installed SDK has a row to check the plumbing with"
+    );
+}
+
+/// The installed SDKs with a graded row, newest first.
+fn graded_compilers() -> Vec<Compiler> {
+    let mut graded: Vec<Compiler> = installed_compilers()
+        .into_iter()
+        .filter(|c| SdkLanguageFacts::for_sdk(&c.sdk).is_some())
+        .collect();
+    graded.reverse();
+    assert!(!graded.is_empty(), "no installed SDK has a row");
+    graded
+}
+
+/// What MSBuild evaluates each of `names` to in `fsproj`, run through the
+/// `dotnet` host as `dotnet build` runs it (so with `DOTNET_HOST_PATH` set).
+fn msbuild_properties(fsproj: &Path, names: &[&str]) -> BTreeMap<String, String> {
+    let mut cmd = Command::new("dotnet");
+    cmd.current_dir(fsproj.parent().unwrap())
+        .arg("msbuild")
+        .arg(fsproj)
+        .args(["-nologo", "-nodeReuse:false"])
+        .args(names.iter().map(|n| format!("-getProperty:{n}")))
+        .env_remove("SKIP_VERSION_SUPPORTED_CHECK");
+    let output = BoundedCommand::new(cmd)
+        .timeout(Duration::from_secs(300))
+        .run()
+        .unwrap_or_else(|e| panic!("dotnet msbuild {}: {e}", fsproj.display()));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "dotnet msbuild -getProperty output is not JSON ({e}):\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    names
+        .iter()
+        .map(|name| {
+            let value = json["Properties"][name]
+                .as_str()
+                .unwrap_or_else(|| panic!("no {name} in {json}"));
+            (name.to_string(), value.to_string())
+        })
+        .collect()
+}
+
+/// The compiler a build of an ordinary project on each graded SDK runs is that
+/// SDK's `fsc.dll`, under either arm of the SDK's `DOTNET_HOST_PATH` gate, and
+/// the server names it under both.
+///
+/// MSBuild, run through the host as `dotnet build` is, takes the set arm:
+/// `$(DotnetFscCompilerPath)` names the SDK's `fsc.dll`, and no F# shim
+/// overrides it. Under the unset arm the `Fsc` task runs the tool beside its
+/// own assembly, `$(FSharpBuildAssemblyFile)`, which is the SDK's, beside the
+/// same `fsc.dll`.
+#[test]
+fn the_build_runs_the_compiler_the_server_names() {
+    for compiler in graded_compilers() {
+        let dir = tempfile::tempdir().unwrap();
+        let fsproj = pinned_project(dir.path(), &compiler.sdk, None, STRADDLING);
+        let props = msbuild_properties(
+            &fsproj,
+            &[
+                "DotnetFscCompilerPath",
+                "FSharpBuildAssemblyFile",
+                "FSharp_Shim_Present",
+            ],
+        );
+        let sdk_file = |name: &str, file: &str| {
+            borzoi::sdk_language::sdk_version_of_sdk_file(&props[name], &["FSharp", file])
+        };
+        assert_eq!(
+            sdk_file("DotnetFscCompilerPath", "fsc.dll").as_ref(),
+            Some(&compiler.sdk),
+            "{props:?}"
+        );
+        assert_eq!(
+            sdk_file("FSharpBuildAssemblyFile", "FSharp.Build.dll").as_ref(),
+            Some(&compiler.sdk),
+            "{props:?}"
+        );
+        assert!(
+            compiler
+                .fsc
+                .with_file_name("FSharp.Build.dll")
+                .host_is_file(),
+            "the task assembly sits beside {}",
+            compiler.fsc.display()
+        );
+        assert_eq!(props["FSharp_Shim_Present"], "", "{props:?}");
+        for (route, env, _) in environments() {
+            let mut workspace = Workspace::with_env(env);
+            assert_eq!(
+                workspace.compiler_sdk_for_project(&fsproj).as_ref(),
+                Some(&compiler.sdk),
+                "{route}"
+            );
+        }
+    }
+}
+
+/// Where a test project defines something: the project body, an imported
+/// file, under a condition the evaluation cannot decide, in a target body,
+/// and as a task output.
+#[derive(Debug, Clone, Copy)]
+enum Site {
+    Body,
+    DirectoryBuildProps,
+    Undecidable,
+    TargetBody,
+    TaskOutput,
+}
+
+const SITES: [Site; 5] = [
+    Site::Body,
+    Site::DirectoryBuildProps,
+    Site::Undecidable,
+    Site::TargetBody,
+    Site::TaskOutput,
+];
+
+/// A project on `sdk` whose `site` defines `property` as `value`, plus
+/// `targets` in its `Directory.Build.targets`.
+fn project_defining(
+    dir: &Path,
+    sdk: &SdkVersion,
+    site: Site,
+    property: &str,
+    targets: &str,
+) -> PathBuf {
+    let fsproj = pinned_project(dir, sdk, None, STRADDLING);
+    let write = format!("<{property}>/opt/elsewhere</{property}>");
+    let (body, props) = match site {
+        Site::Body => (
+            format!("<PropertyGroup>{write}</PropertyGroup>"),
+            String::new(),
+        ),
+        Site::DirectoryBuildProps => (
+            String::new(),
+            format!("<PropertyGroup>{write}</PropertyGroup>"),
+        ),
+        Site::Undecidable => (
+            format!(
+                r#"<PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''">{write}</PropertyGroup>"#
+            ),
+            String::new(),
+        ),
+        Site::TargetBody => (
+            format!(
+                r#"<Target Name="Pick" BeforeTargets="CoreCompile"><PropertyGroup>{write}</PropertyGroup></Target>"#
+            ),
+            String::new(),
+        ),
+        Site::TaskOutput => (
+            format!(
+                r#"<Target Name="Pick" BeforeTargets="CoreCompile"><CreateProperty Value="/opt/elsewhere"><Output TaskParameter="Value" PropertyName="{property}" /></CreateProperty></Target>"#
+            ),
+            String::new(),
+        ),
+    };
+    let text = host_fs::read_to_string(&fsproj).unwrap();
+    std::fs::write(
+        &fsproj,
+        text.replace("</Project>", &format!("{body}\n</Project>")),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Directory.Build.props"),
+        format!("<Project>{props}</Project>"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Directory.Build.targets"),
+        format!("<Project>{targets}</Project>"),
+    )
+    .unwrap();
+    fsproj
+}
+
+/// Anything outside the SDK that could choose the compiler makes the server
+/// decline to name it: every selector, at every site in turn (each site meets
+/// every fourth or fifth selector, and `DotnetFscCompilerPath` meets all of
+/// them), a redefined `CoreCompile`, a registered `Fsc` task, and a selector in
+/// the environment. Defining anything else leaves the SDK's compiler named.
+#[test]
+fn a_compiler_choice_from_outside_the_sdk_declines() {
+    let compiler = graded_compilers().remove(0);
+    let (_, plain, _) = environments().remove(0);
+    let named = |fsproj: &Path, env: &SdkDiscoveryEnv| {
+        Workspace::with_env(env.clone()).compiler_sdk_for_project(fsproj)
+    };
+    let mut cases: Vec<(Site, &str)> = COMPILER_SELECTORS
+        .iter()
+        .enumerate()
+        .map(|(i, selector)| (SITES[i % SITES.len()], *selector))
+        .collect();
+    cases.extend(SITES.iter().map(|site| (*site, "DotnetFscCompilerPath")));
+    for (site, selector) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let fsproj = project_defining(dir.path(), &compiler.sdk, site, selector, "");
+        assert_eq!(named(&fsproj, &plain), None, "{selector} at {site:?}");
+    }
+    for site in SITES {
+        let dir = tempfile::tempdir().unwrap();
+        let fsproj = project_defining(dir.path(), &compiler.sdk, site, "LangVersionNote", "");
+        assert_eq!(
+            named(&fsproj, &plain).as_ref(),
+            Some(&compiler.sdk),
+            "a non-selector at {site:?}"
+        );
+    }
+    for targets in [
+        r#"<Target Name="CoreCompile" />"#,
+        r#"<UsingTask TaskName="Fsc" AssemblyFile="/opt/My.Build.dll" />"#,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let fsproj = project_defining(
+            dir.path(),
+            &compiler.sdk,
+            Site::Body,
+            "LangVersionNote",
+            targets,
+        );
+        assert_eq!(named(&fsproj, &plain), None, "{targets}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let fsproj = pinned_project(dir.path(), &compiler.sdk, None, STRADDLING);
+    for selector in COMPILER_SELECTORS
+        .iter()
+        .filter(|s| !s.eq_ignore_ascii_case("DOTNET_HOST_PATH"))
+    {
+        let mut env = plain.clone();
+        env.build_environment
+            .insert(selector.to_string(), "/opt/elsewhere".to_string());
+        assert_eq!(named(&fsproj, &env), None, "{selector} in the environment");
+    }
+}
+
+/// The SDK's files that choose its F# compiler: its F# props and targets, and
+/// the .NET SDK's F# shims that import them.
+fn compiler_choice_files(sdk_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let fsharp = sdk_dir.join("FSharp");
+    let shims = sdk_dir
+        .join("Sdks")
+        .join("Microsoft.NET.Sdk")
+        .join("targets");
+    for (dir, keep) in [
+        (&fsharp, (|_: &str| true) as fn(&str) -> bool),
+        (&shims, |name: &str| {
+            name.starts_with("Microsoft.NET.Sdk.FSharp")
+        }),
+    ] {
+        for entry in
+            host_fs::read_dir(dir).unwrap_or_else(|e| panic!("list {}: {e}", dir.display()))
+        {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let lower = name.to_ascii_lowercase();
+            if keep(&name) && (lower.ends_with(".props") || lower.ends_with(".targets")) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Every property the SDK's own files read in choosing the compiler a build
+/// runs: the `Fsc` task's `ToolPath`, `ToolExe` and `DotnetFscCompilerPath`,
+/// the assembly its `UsingTask` names, and, transitively, every property
+/// read by a write (its value, its condition, its group's) of a name already
+/// in the set. The names whose final value `project_compiler` checks directly
+/// are kept but not followed: what feeds them cannot move the compiler without
+/// moving their value.
+fn compiler_choice_reads(sdk_dir: &Path) -> BTreeSet<String> {
+    const CHECKED: &[&str] = &[
+        "fsharppropsshim",
+        "fsharptargetsshim",
+        "usebundledfsharptargets",
+    ];
+    let texts: Vec<String> = compiler_choice_files(sdk_dir)
+        .iter()
+        .map(|f| host_fs::read_to_string(f).unwrap())
+        .collect();
+    let docs: Vec<roxmltree::Document<'_>> = texts
+        .iter()
+        .map(|t| roxmltree::Document::parse(t).expect("an SDK file parses"))
+        .collect();
+    let refs = |raw: &str| -> Vec<String> {
+        borzoi_msbuild::test_support::property_references(raw)
+            .into_iter()
+            .map(str::to_ascii_lowercase)
+            .collect()
+    };
+    let mut set = BTreeSet::new();
+    let elements = || {
+        docs.iter()
+            .flat_map(|d| d.descendants().filter(|n| n.is_element()))
+    };
+    for node in elements() {
+        let tag = node.tag_name().name();
+        let attrs: &[&str] = match tag {
+            "Fsc" => &["ToolPath", "ToolExe", "DotnetFscCompilerPath"],
+            "UsingTask" if node.attribute("TaskName") == Some("Fsc") => {
+                &["AssemblyFile", "Condition"]
+            }
+            _ => &[],
+        };
+        for attr in attrs {
+            set.extend(node.attribute(*attr).map(refs).unwrap_or_default());
+        }
+    }
+    set.extend(CHECKED.iter().map(|s| s.to_string()));
+    loop {
+        let before = set.len();
+        for node in elements() {
+            let Some(group) = node.parent_element() else {
+                continue;
+            };
+            let name = node.tag_name().name().to_ascii_lowercase();
+            if group.tag_name().name() != "PropertyGroup"
+                || !set.contains(&name)
+                || CHECKED.contains(&name.as_str())
+            {
+                continue;
+            }
+            let text: String = node.descendants().filter_map(|n| n.text()).collect();
+            for raw in [
+                Some(text.as_str()),
+                node.attribute("Condition"),
+                group.attribute("Condition"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                set.extend(refs(raw));
+            }
+        }
+        if set.len() == before {
+            return set;
+        }
+    }
+}
+
+/// [`COMPILER_SELECTORS`] covers every property each installed graded SDK reads
+/// in choosing its compiler, but the names MSBuild reserves, which nothing
+/// outside the SDK can set (`MSBuildThisFileDirectory` and the like).
+#[test]
+fn the_selectors_cover_what_each_sdk_reads_to_choose_its_compiler() {
+    let selectors: BTreeSet<String> = COMPILER_SELECTORS
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    let mut missing = Vec::new();
+    for compiler in graded_compilers() {
+        let sdk_dir = compiler.fsc.parent().unwrap().parent().unwrap();
+        let reads = compiler_choice_reads(sdk_dir);
+        eprintln!("SDK {}: the compiler choice reads {reads:?}", compiler.sdk);
+        for name in reads {
+            if !selectors.contains(&name)
+                && !borzoi_msbuild::test_support::is_msbuild_reserved_name(&name)
+            {
+                missing.push(format!("SDK {}: {name}", compiler.sdk));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "the SDK reads these in choosing its compiler, and COMPILER_SELECTORS lacks them:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// A refusal read from an untrusted `$(LangVersion)` is not reported: the
+/// value the build holds may be one the compiler takes. Here the evaluation
+/// keeps `7.0`, below the floor, but cannot decide the gate on the `8.0`
+/// write after it.
+#[test]
+fn an_untrusted_langversion_reports_no_refusal() {
+    let compiler = graded_compilers()
+        .into_iter()
+        .find(|c| SdkLanguageFacts::for_sdk(&c.sdk).unwrap().floor > LanguageVersion::V7_0)
+        .expect("an installed graded SDK with a floor above F# 7.0");
+    let dir = tempfile::tempdir().unwrap();
+    let fsproj = pinned_project(dir.path(), &compiler.sdk, Some("7.0"), STRADDLING);
+    let text = host_fs::read_to_string(&fsproj).unwrap();
+    let text = text.replace(
+        "</PropertyGroup>",
+        r#"</PropertyGroup><PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''"><LangVersion>8.0</LangVersion></PropertyGroup>"#,
+    );
+    std::fs::write(&fsproj, &text).unwrap();
+    let (_, env, _) = environments().remove(0);
+    let mut workspace = Workspace::with_env(env.clone());
+    let parsed = workspace.project(&fsproj).unwrap();
+    assert!(parsed.property_provenance_untrusted("LangVersion"));
+    assert_eq!(parsed.lang_version.as_deref(), Some("7.0"));
+    assert!(
+        workspace.lang_version_selection(&fsproj).refusal.is_some(),
+        "the best guess is below the floor"
+    );
+    let diags = borzoi::fsproj_diagnostics::diagnostics_for(
+        &text,
+        &fsproj,
+        &env,
+        &workspace.build_properties(),
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(lsp_types::NumberOrString::String("FS3880".to_string()))),
+        "{diags:#?}"
     );
 }

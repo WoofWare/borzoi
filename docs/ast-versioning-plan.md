@@ -684,8 +684,10 @@ diagnostic for its feature" rather than "under a `Legality` one".
   `latestmajor` spell, the newest version it recognises and the oldest it
   supports, per graded feature band, with the pinned compiler's reading
   (above) and no floor for any other SDK. A value the compiler refuses
-  (FS3880, FS0246) is an error on the `.fsproj` and doubts the version as
-  untrusted provenance does. The LSP crate's `sdk_language_diff` grades every
+  (FS3880, FS0246) is an error on the `.fsproj` (unless the value's provenance
+  is untrusted) and doubts the version as untrusted provenance does;
+  `SKIP_VERSION_SUPPORTED_CHECK=1` in the build's environment lifts the floor,
+  as the compiler does. The LSP crate's `sdk_language_diff` grades every
   row against each installed SDK's `fsc.dll`. #732 can narrow a guessed
   version's ladder by the same rows' floors.
 - **The facade mechanism** (#618,
