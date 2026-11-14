@@ -342,6 +342,12 @@ This is a Cargo workspace with nine members:
   everywhere else; test code reaches them through `host_fs` (the lib's
   `observed::host_fs`, `tests/all/common/host_fs.rs`), never through a
   wholesale allow, which would also lift the spawn ban.
+  A project's `<LangVersion>` is read as the F# compiler of its resolved SDK
+  reads it (`crates/lsp/src/sdk_language.rs`: default, aliases, newest
+  recognised and oldest supported version, per feature band). Only bands
+  `sdk_language_diff` grades against an installed SDK's own `fsc.dll` have a
+  row, and that test fails on a row no installed SDK grades, so an SDK bump in
+  the devshell can fail it until the table follows.
   Hover's XML documentation lives in `crates/lsp/src/xml_doc/`. Its
   `<inheritdoc>` work is held to Roslyn's IDE through
   `tools/inheritdoc-oracle`, a test-only C# JSONL batch tool (the

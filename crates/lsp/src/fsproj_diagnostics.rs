@@ -12,7 +12,9 @@
 //!
 //! Severities are uniformly `WARNING`: the parser is by-design best-effort
 //! and each diagnostic records a *divergence from MSBuild*, not a fatal
-//! syntax error. The one `ERROR` case is when the XML itself doesn't
+//! syntax error. One `ERROR` case is the compiler's refusal of the project's
+//! `<LangVersion>` ([`crate::sdk_language`]), which fails the build. The other
+//! is when the XML itself doesn't
 //! parse — `parse_fsproj_with_imports` returns `Err(ParseError::Xml)`,
 //! which surfaces as a single error at the document head with the
 //! roxmltree message.
@@ -81,6 +83,8 @@ pub fn diagnostics_for(
         discovery.as_ref().ok(),
     ) {
         Ok(parsed) => {
+            let lang_version_refusal =
+                lang_version_refusal_diagnostic(&parsed, &env.build_environment);
             let mut diags: Vec<Diagnostic> = parsed
                 .diagnostics
                 .into_iter()
@@ -127,6 +131,7 @@ pub fn diagnostics_for(
             if let Some(d) = restore_diagnostic(unrestored) {
                 diags.push(d);
             }
+            diags.extend(lang_version_refusal);
             diags
         }
         Err(ParseError::Xml(e)) => vec![lsp_error_at_origin(format!("malformed XML: {e}"))],
@@ -487,6 +492,31 @@ fn assets_present(project_path: &Path) -> bool {
 /// (`Range::default()`) — the module's convention for whole-file diagnostics
 /// (see the malformed-XML error) — which also avoids mis-anchoring inside a
 /// leading comment. Pure: the SDK / restore-state checks are the caller's.
+/// The compiler's refusal of the project's `<LangVersion>`, when the SDK the
+/// project resolves ships a compiler [`crate::sdk_language`] knows and it
+/// refuses the value (FS3880 below its floor, FS0246 for a value it does not
+/// recognise). An `ERROR`: the build fails on it. File-level, as the compiler
+/// reports it without a location, and the `<LangVersion>` that decides may be
+/// written in an import.
+fn lang_version_refusal_diagnostic(
+    parsed: &borzoi_msbuild::ParsedProject,
+    environment: &HashMap<String, String>,
+) -> Option<Diagnostic> {
+    let compiler_sdk = crate::sdk_language::compiler_sdk(parsed, environment);
+    let refusal =
+        crate::sdk_language::LangVersionSelection::of(parsed, compiler_sdk.as_ref()).refusal?;
+    Some(Diagnostic {
+        range: Range::default(),
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(lsp_types::NumberOrString::String(
+            refusal.code().to_string(),
+        )),
+        source: Some("borzoi".to_string()),
+        message: refusal.message(),
+        ..Default::default()
+    })
+}
+
 fn restore_diagnostic(unrestored: bool) -> Option<Diagnostic> {
     if !unrestored {
         return None;

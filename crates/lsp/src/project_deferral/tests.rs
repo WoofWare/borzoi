@@ -703,7 +703,7 @@ fn a_fold_stage_refusal_is_reported_with_its_own_reason() {
         (
             FoldRefusal::LanguageVersionShape {
                 file: PathBuf::from("/w/Straddle.fs"),
-                cause: UntrustedCause::SdkPackageInput,
+                cause: LangVersionDoubt::Provenance(UntrustedCause::SdkPackageInput),
             },
             "Straddle.fs",
         ),
@@ -1030,7 +1030,7 @@ fn a_language_version_refusal_names_what_the_version_rests_on() {
     for (cause, needles) in cases {
         let refusal = FoldRefusal::LanguageVersionShape {
             file: PathBuf::from("/w/Straddle.fs"),
-            cause: cause.clone(),
+            cause: LangVersionDoubt::Provenance(cause.clone()),
         };
         let ds = deferrals(evaluated(&parsed), FoldOutcome::Refused(&refusal));
         let message =
@@ -1041,5 +1041,32 @@ fn a_language_version_refusal_names_what_the_version_rests_on() {
                 "{cause:?}: the message must say {needle:?}: {message}"
             );
         }
+    }
+}
+
+/// A version-shape refusal under a version the project's compiler refuses
+/// names the refusal: pinning a supported `LangVersion` is the fix there.
+#[test]
+fn a_refused_language_version_names_the_compiler_refusal() {
+    use crate::sdk_language::{LangVersionRefusal, RefusalKind};
+    let parsed = certain_project();
+    let refusal = FoldRefusal::LanguageVersionShape {
+        file: PathBuf::from("/w/Straddle.fs"),
+        cause: LangVersionDoubt::Refused(LangVersionRefusal {
+            sdk: borzoi_msbuild::SdkVersion::parse("10.0.401").unwrap(),
+            text: "7.0".to_string(),
+            kind: RefusalKind::OutOfSupport {
+                floor: borzoi_cst::language_version::LanguageVersion::V8_0,
+            },
+        }),
+    };
+    let ds = deferrals(evaluated(&parsed), FoldOutcome::Refused(&refusal));
+    let message =
+        deferral_message(Path::new("/w/Demo.fsproj"), &ds).expect("a fold refusal is reported");
+    for needle in ["Straddle.fs", "FS3880", "'7.0'", "10.0.401", "8.0"] {
+        assert!(
+            message.contains(needle),
+            "the message must say {needle:?}: {message}"
+        );
     }
 }

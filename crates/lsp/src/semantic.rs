@@ -25,8 +25,8 @@ use borzoi_assembly::doc_id::DocIdDialect;
 use borzoi_assembly::{AssemblyIdentity, Ecma335Assembly, EcmaView, Entity, ImportError, Version};
 use borzoi_cst::language_version::LanguageVersion;
 use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
+use borzoi_msbuild::ItemKind;
 use borzoi_msbuild::observed::{self as msbuild_observed, EntryKind, Observer, ReadSet};
-use borzoi_msbuild::{ItemKind, UntrustedCause};
 use borzoi_sema::{
     AbbreviationVisibility, AssemblyEnv, InferredProject, ProjectFile, ResolvedProject, SourceFile,
     SyntaxRecovery,
@@ -42,6 +42,7 @@ use crate::project_deferral::{FoldOutcome, FoldRefusal};
 use crate::project_graph::{NodeTfm, ProjectGraph, ProjectKind};
 use crate::restore::{RestoreOutcome, restore_to_scratch_assemblies};
 use crate::sdk_discovery::SdkDiscoveryEnv;
+use crate::sdk_language::LangVersionDoubt;
 use crate::sidecar_manager::SidecarManager;
 use crate::workspace::{EnvChecks, EvaluationId, ProjectsGeneration, ServedTfm, Workspace};
 use crate::xml_doc::inherit::{Expansion, expand};
@@ -2402,10 +2403,10 @@ struct ParseInputs {
     symbols: HashSet<String>,
     /// The language version every item is parsed at.
     lang: LanguageVersion,
-    /// Why the evaluation's `LangVersion` is untrusted, if it is: the
-    /// version-boundary gate runs exactly when it is, and a refusal it
+    /// Why `lang` may not be the version the build checks at, if it may not:
+    /// the version-boundary gate runs exactly when it is set, and a refusal it
     /// makes names it.
-    lang_version_untrust: Option<UntrustedCause>,
+    lang_version_untrust: Option<LangVersionDoubt>,
 }
 
 impl ParseInputs {
@@ -2414,7 +2415,8 @@ impl ParseInputs {
     /// fold.
     fn of(project: &Path, workspace: &mut Workspace) -> Result<ParseInputs, FoldRefusal> {
         let symbols = workspace.symbols_for_project(project);
-        let lang = workspace.lang_version_for_project(project);
+        let selection = workspace.lang_version_selection(project);
+        let lang = selection.version;
         // Every exit below is a *value*, not a bare `None`: a refusal the user is
         // never told about is the defect `crate::project_deferral` exists to close,
         // and only a typed refusal makes "we went quiet" and "we said why" the same
@@ -2455,13 +2457,16 @@ impl ParseInputs {
         // SDK's own `LangVersion` writes sit under gates the walker decides —
         // `sdk_project_fold_e2e::ordinary_sdk_projects_have_trusted_langversion_provenance`),
         // so this axis bites only on a project whose `LangVersion` write sits under
-        // a gate the walker cannot pin. Even there the mark alone would refuse
-        // every file, however version-invariant; instead each parse reports
-        // whether its shape actually depends on the version
-        // (`Parse::shape_depends_on_language_version`, whose `false` *proves*
-        // version-invariance), and the fold refuses only the intersection:
-        // untrusted provenance × a file that genuinely straddles the boundary.
-        let lang_version_untrust = parsed.property_untrusted_cause("LangVersion").cloned();
+        // a gate the walker cannot pin. A version the project's compiler refuses
+        // (FS3880, FS0246; `crate::sdk_language`) is doubted the same way: the
+        // build checks at no version, so the one parsed at is a guess. Even there
+        // the mark alone would refuse every file, however version-invariant;
+        // instead each parse reports whether its shape actually depends on the
+        // version (`Parse::shape_depends_on_language_version`, whose `false`
+        // *proves* version-invariance), and the fold refuses only the
+        // intersection: a doubted version × a file that genuinely straddles the
+        // boundary.
+        let lang_version_untrust = LangVersionDoubt::of(parsed, &selection);
         // Accept every Compile flavour `ParsedProject.items` produces:
         // `[CompileBefore, Compile, CompileAfter]` — F#-specific item kinds the
         // msbuild parser already orders for us. Excluding any of them would

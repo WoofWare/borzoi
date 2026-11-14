@@ -53,6 +53,7 @@ mod restore_graph;
 mod restore_hostile_config_matrix;
 mod restore_on_demand_e2e;
 mod restore_to_scratch_diff;
+mod sdk_language_diff;
 mod sdk_project_fold_e2e;
 mod sdk_resolution_exactness_diff;
 mod sdk_resolution_oracle;
