@@ -10,26 +10,29 @@
 > channels are now one `Trust` value with a property-tested join, so a fourth
 > would be a compile error rather than a review item.
 >
-> **Open, in the order I would take them:**
+> The systematic gate this plan called for is in place:
+> `tests/taint_closure_metamorphic.rs` holds every fact a project publishes
+> as certain to the worlds an undecided write leaves open, with no oracle
+> (see "As landed: the world-bracketing gate"). On `main` it found three
+> wrong-answer classes nothing else saw (#780, #781, #782).
 >
-> 1. The three remaining **precision** items under P2″ — declines, not wrong
->    answers, and each carries regression risk (see the fifth-round entry).
-> 2. P1′, P4.
+> **P3 is scheduled** (2026-11). The census argument for deferring it was
+> that the committed surface is small; the A₁.3c executor has since grown it,
+> and #614 is a wrong commit whose sound fix is a per-value fact. P3 is
+> taken as a representation change with every differential, census and
+> manifest unmoved, and the #614 fix as the stage after it.
 >
-> **P3 is deferred on measurement, not on effort** — the census (re-run
-> 2026-08-02, zero wrong commits) shows we commit on 17% of the SDK's call
-> expressions and 5% of its conditions, so the surface a laundering defect
-> could reach is small. Its previously-stated trigger — "land trusted seeding" —
-> was **void**, and is corrected under "The census, re-run"; the seeding lever
-> is worth +4 and +30 committed values (ceiling +52/+145), and the work it named
-> was never scheduled
-> ([`msbuild-reserved-seeding-plan.md`](msbuild-reserved-seeding-plan.md)).
+> **Open, in order:** P3; the #614 staleness channel on top of it (measured
+> under "#614: what each rule costs"); P4; the three P2″ precision items;
+> P1′.
 >
-> **Known wrong commit, reproducible, not fixed:** a `Directory.Build.*` gate
-> written from a property an opaque *SDK-subtree* import may have redefined
-> commits a wrong Compile set. It is the measured residual of P2″'s stated
-> tolerance, and a sound fix wants per-value staleness — P3's shape, not a
-> fourth side channel. See "A third round produced the witness".
+> **Known wrong commits, reproducible, not fixed:** #614 (a
+> `Directory.Build.*` gate written from a property an opaque *SDK-subtree*
+> import may have redefined — see "A third round produced the witness"),
+> #780 (a refused write reads as never written), #781 (a file spliced on an
+> undecided gate publishes trusted values) and #782 (a single-witness root
+> lets the `DefineConstants` self-append exemption drop a cause). Each is
+> pinned by an ignored test that asserts the right answer.
 
 ## The rule
 
@@ -937,6 +940,67 @@ name is never a splice property, and the unpinned root subsumes the refusal —
 so neither carries a test. Naming an outcome that cannot be wrong is the price
 of a struct that forces every write to name one.
 
+#### #614: what each rule costs
+
+Measured 2026-11-14 with throwaway instrumentation (never committed) at the
+one point every `Directory.Build.*` splice verdict passes through
+(`directory_build_splice_is_untrusted`): a probe line per verdict, and a
+switch between four rules for what makes the gate or path untrusted.
+
+- **base** — today: the name-keyed trust only.
+- **blunt** — base, or the walk has latched `walk_opaque`.
+- **stale** — base, or the gate or path *binding* may be stale: written
+  before an opacity event, or written from a value or own condition that read
+  such a binding. Names the document cannot write (`protected`: reserved
+  names and sticky globals) are never stale, since hidden content cannot
+  rewrite them either. An *unbound* gate or path is not stale.
+- **stale_any** — as stale, but an unbound name read after opacity also
+  counts: hidden content may have defined it.
+
+Staleness was tracked name-keyed for the measurement (marked at every
+`latch_walk_opaque`, propagated at the clean-write site); the proposed fix
+carries it on the value instead.
+
+| population | rule | splice verdicts flipped | projects whose Compile facet moves | #614 witness |
+| --- | --- | ---: | ---: | --- |
+| crate unit suite (1 360 tests) | blunt | — | 5 tests fail | declines |
+| | stale_any | — | 5 tests fail (the same five) | declines |
+| | stale | — | **0** | **declines** |
+| F# corpus, real SDK (71 projects, 568 verdicts) | blunt | 80 | 5 (`match` → `decline`) | — |
+| | stale_any | 80 | 5 (the same) | — |
+| | stale | **0** | **0** | — |
+| LSP project corpus (6 projects, 120 verdicts; `project-corpus-gate.sh resolution`) | blunt | 10 | 0 (manifest unmoved) | — |
+| | stale | **0** | **0** (manifest unmoved) | — |
+
+**Exposure.** On the F# corpus, 80 of 568 splice verdicts, in 31 of 71
+projects, are made after the walk has latched opacity; on the LSP's project
+corpus, 10 of 120, all in `TypeEquality`, and every one of those is a
+pre-`Sdk.targets` snapshot verdict the chain's own import point later
+discards, which is why even blunt leaves that manifest unmoved — the shape #614 needs.
+None of them reads a gate or path whose binding is stale: 50 read bindings
+the SDK wrote *after* the opacity with its default-fill idiom
+(`<ImportDirectoryBuildTargets Condition="'$(ImportDirectoryBuildTargets)' ==
+''">true</…>`), and 30 are the pre-`Sdk.targets` snapshot, read before the SDK
+bound either name. A first cut that let reserved names go stale flipped 50
+verdicts in 24 projects (`MSBuildProjectDirectory` feeds the path); hidden
+content cannot write a reserved name, which is why the rule excludes them.
+
+**What separates stale from stale_any** is exactly the default-fill idiom
+under opacity: the gate's own condition reads the gate while it is unbound.
+That is the over-commitment `self_default_absence_is_a_fact` already makes
+deliberately (it believes an undefined read under `walk_opaque`, because the
+SDK leans on the idiom and flagging it refuses every real project), so
+stale_any re-litigates a documented trade-off rather than closing #614, and
+costs what blunt costs.
+
+**Recommendation: stale**, carried on the value (a fourth `Trust` channel set
+at each opacity latch over the bound, unprotected entries, joined through
+every expansion, stored by the write verdict, consulted at the splice). It
+closes the witness at no measured cost; blunt and stale_any cost five
+committed Compile sets on the F# corpus. The residual it leaves — an
+*unbound* gate that hidden content may have defined — is the default-fill
+trade-off above, already documented where it is made.
+
 ### The census, re-run — and what it says about P3's priority
 
 Measured 2026-08-02 against the pinned SDK **10.0.301** (the P1 member table
@@ -1015,7 +1079,7 @@ constants for exactly that reason, but it only covers the names it knows;
 a genuinely new read is still caught by review rather than by the machine.
 That, not the current numbers, is P3's standing argument.
 
-### P3 — value-carried — **deferred on measurement** (see "The census, re-run")
+### P3 — value-carried — **scheduled** (deferred on measurement in 2026-08; see "The census, re-run")
 
 `PropertyMap`'s `Entry` gains `trust: Trust` beside its `Escaped` value.
 `PropertyMap::get` returns the pair; `substitute` returns
@@ -1125,6 +1189,81 @@ one level up.
 Also required, per the "perturbation floors must exclude swept inputs" note: the
 floor must be on the *derived complement* (values that read `P`), not on `P`
 itself, or it is circular.
+
+### As landed: the world-bracketing gate
+
+`crates/msbuild/tests/taint_closure_metamorphic.rs`. The property above,
+generalised from "every value that read `P` is untrusted" to a statement
+about every fact the project publishes, because the narrower form needs a
+notion of "read `P`" that the harness would have to compute with the very
+machinery under test:
+
+> Put one construct `c` of a generated document `D` behind something the
+> walker cannot decide, giving `D′`. The real build sees one of a small set
+> of *worlds* — `c` taken, `c` not taken, or `c`'s value replaced — and the
+> walker cannot tell which. So every fact `D′` publishes as certain must be
+> published, certain and identical, by every world that publishes it, and
+> by at least one.
+
+The facts are the consumer surface: each property not in
+`untrusted_properties`, the Compile items while `items_uncertain` is clear,
+`define_constants` while `define_constants_uncertain` is clear, the
+`ProjectReference` list while `project_references_uncertain` is clear
+(graded as "no phantom edge", the contract that list has), and a known
+`target_name`. The undecided constructs are four wraps of one property write:
+an undecidable conjunct on its condition, on its group's condition, the group
+moved into an undecidable `<Choose>` arm, and the body replaced by one the
+walker refuses (worlds: seven replacement values). Two tiers: the pure walk,
+and a with-imports walk over a `Directory.Build.targets` fixture whose writes
+include the splice's gate and path.
+
+Each world is evaluated by the walker too, so the property is monotonicity,
+not exactness, and needs no oracle. A world that declines while the rest
+agree is counted rather than failed: the worlds are evaluated by the walker,
+and one can decline for a reason that cannot move the fact (an untrusted
+group gate over a write whose own condition is exactly false). The floors
+are on the derived complement — cases where the worlds commit a fact
+differently, so `D′` owes a decline — per facet, at about half what the
+fixed seeds produce.
+
+**Planted bugs.** Run against eight plants, it catches seven:
+
+| plant | pure | with `Directory.Build` |
+| --- | ---: | ---: |
+| drop the expansion's root at the write site | 70 | 14 |
+| the splice reads its gate without trust (`gate_value_is_exact` → `true`) | 0 | 181 |
+| a condition ignores the unpinned roots it reads | 8 | 3 |
+| `Trust::is_certain` forgets `refused` | 130 | 115 |
+| `Trust::is_certain` forgets `unpinned` | 53 | 14 |
+| `Trust::reference_is_untrusted` forgets `unpinned` | 9 | 1 |
+| the reference scan drops a member-access receiver (`$(X.Length)`) | 77 | 13 |
+| `Trust::join` forgets the right operand's `refused` | 0 | 0 |
+
+The miss is an equivalent mutant: nothing reads the `refused` channel of a
+*joined* trust. Every consumer of `refused` asks `trust_of(name)` of one
+name, never of the join `trust_for_raw` builds, because a refused name is
+unbound and its readers see an undefined read, which the unpinned channel
+then carries. So `join`'s refused arm is dead today, which is worth knowing
+before P3 makes the join the thing every value carries.
+
+**What it found on `main`,** none of it the plants':
+
+- #780: a refused write reads as never written. `properties` and
+  `untrusted_properties` both omit it, `target_name` falls through it, and a
+  `ProjectReference` gate reading it captures a phantom edge. The
+  `refused` channel's own docs explain why `reference_is_untrusted` excludes
+  it, and the explanation holds only for readers that go through the
+  undefined-read guard.
+- #781: a `Directory.Build.targets` spliced on an undecided gate withdraws
+  the item facets (P2″) but publishes the file's property writes as trusted.
+- #782 (soak only, seed 1): a value with two reasons to be unpinned keeps one
+  witness, and the `DefineConstants` self-append exemption, keyed on the
+  witness's name, then drops the other.
+
+The first two are set aside by the gate, each counted and the count pinned
+for the fixed seeds, so a fix must move the pin; the third is pinned as an
+ignored witness. #614 is outside what this harness wraps (it wraps writes,
+not imports inside the SDK), and stays pinned by its own ignored test.
 
 ### The census ratchet — resolved by construction, not by a change
 
