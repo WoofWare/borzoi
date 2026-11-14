@@ -39,8 +39,8 @@ use std::time::Duration;
 
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::sdk_language::{
-    COMPILER_SELECTORS, LangVersionReading, LangVersionSelection, ProjectCompiler, RefusalKind,
-    SdkLanguageFacts,
+    COMPILER_ENVIRONMENT, COMPILER_SELECTORS, LangVersionReading, LangVersionSelection,
+    ProjectCompiler, RefusalKind, SdkLanguageFacts,
 };
 use borzoi::workspace::Workspace;
 use borzoi_cst::language_version::LanguageVersion;
@@ -901,6 +901,12 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
             "{selector} as a global"
         );
     }
+    for variable in COMPILER_ENVIRONMENT {
+        let mut env = plain.clone();
+        env.build_environment
+            .insert(variable.to_string(), "/opt/elsewhere".to_string());
+        assert_eq!(named(&fsproj, &env), None, "{variable} in the environment");
+    }
 }
 
 /// A target outside the SDK that may write `$(LangVersion)` before
@@ -1120,4 +1126,86 @@ fn an_untrusted_langversion_reports_no_refusal() {
             .all(|d| d.code != Some(lsp_types::NumberOrString::String("FS3880".to_string()))),
         "{diags:#?}"
     );
+}
+
+/// The environment-variable-shaped strings in `dll`'s UTF-16 literals, at
+/// either byte alignment (a user-string heap entry starts wherever its length
+/// prefix ends).
+fn variable_literals(dll: &Path) -> BTreeSet<String> {
+    let bytes = host_fs::read(dll).unwrap_or_else(|e| panic!("read {}: {e}", dll.display()));
+    let shaped = |s: &str| {
+        s.len() >= 4
+            && s.starts_with(|c: char| c.is_ascii_uppercase())
+            && s.contains('_')
+            && !s.starts_with('_')
+            && !s.ends_with('_')
+            && !s.contains("__")
+    };
+    let mut found = BTreeSet::new();
+    for offset in [0, 1] {
+        let mut run = String::new();
+        for pair in bytes[offset..].chunks_exact(2) {
+            let c = (pair[1] == 0)
+                .then_some(pair[0] as char)
+                .filter(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_');
+            match c {
+                Some(c) => run.push(c),
+                None => {
+                    if shaped(&run) {
+                        found.insert(std::mem::take(&mut run));
+                    }
+                    run.clear();
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The variable-shaped strings in `FSharp.Build.dll` that choose no compiler.
+const NOT_COMPILER_CHOICE: &[(&str, &str)] = &[
+    (
+        "DOTNET_HOST_PATH",
+        "the shared host discovery, which finds a `dotnet` to run a compiler; the \
+         props' read of it is a selector",
+    ),
+    ("DOTNET_MULTILEVEL_LOOKUP", "the same host discovery"),
+    ("VS_VERSION_INFO", "the Win32 version resource's name"),
+    (
+        "BUILDING_WITH_LKG",
+        "a preprocessor symbol in the source `FSharpEmbedResourceText` generates",
+    ),
+];
+
+/// Every variable the SDK's `Fsc` task could read is accounted for: each
+/// variable-shaped literal in each graded SDK's `FSharp.Build.dll` is in
+/// [`COMPILER_ENVIRONMENT`] or known to choose no compiler, and each entry of
+/// [`COMPILER_ENVIRONMENT`] is still read.
+#[test]
+fn every_variable_the_compile_task_reads_is_accounted_for() {
+    let mut failures = Vec::new();
+    for compiler in graded_compilers() {
+        let literals = variable_literals(&compiler.fsc.with_file_name("FSharp.Build.dll"));
+        eprintln!("SDK {}: FSharp.Build.dll names {literals:?}", compiler.sdk);
+        for literal in &literals {
+            let known = COMPILER_ENVIRONMENT.contains(&literal.as_str())
+                || NOT_COMPILER_CHOICE.iter().any(|(name, _)| name == literal);
+            if !known {
+                failures.push(format!(
+                    "SDK {}: FSharp.Build.dll names {literal}, which may choose the compiler: \
+                     add it to COMPILER_ENVIRONMENT, or to NOT_COMPILER_CHOICE with the reason",
+                    compiler.sdk
+                ));
+            }
+        }
+        for variable in COMPILER_ENVIRONMENT {
+            if !literals.contains(*variable) {
+                failures.push(format!(
+                    "SDK {}: FSharp.Build.dll no longer names {variable}",
+                    compiler.sdk
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

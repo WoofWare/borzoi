@@ -186,6 +186,13 @@ pub const COMPILER_SELECTORS: &[&str] = &[
     "IsCrossTargetingBuild",
 ];
 
+/// The environment variables the SDK's `Fsc` task reads itself in locating its
+/// compiler when it is handed no compiler path (`FSHARP_COMPILER_BIN` names
+/// the directory instead of the task's own). `sdk_language_diff` reads every
+/// variable-shaped string in each installed SDK's `FSharp.Build.dll` and fails
+/// on one neither here nor known to choose something else.
+pub const COMPILER_ENVIRONMENT: &[&str] = &["FSHARP_COMPILER_BIN"];
+
 /// The target that runs the `Fsc` task, and the task: a definition of either
 /// outside the SDK replaces the SDK's.
 const COMPILE_TARGET: &str = "corecompile";
@@ -234,7 +241,8 @@ pub fn support_check_skipped(environment: &HashMap<String, String>) -> bool {
 ///   not. `sdk_language_diff` grades both arms against each installed SDK.
 /// - So the build runs another compiler only if something outside the SDK
 ///   defines one of [`COMPILER_SELECTORS`], the `CoreCompile` target or an
-///   `Fsc` task, or sets a selector in the environment or as a global. A
+///   `Fsc` task, or sets a selector in the environment or as a global, or sets
+///   one of [`COMPILER_ENVIRONMENT`], which the task reads itself. A
 ///   definition anywhere in a document the walk entered outside the SDK
 ///   declines, whatever its condition, and so does one whose name the build
 ///   computes ([`ParsedProject::foreign_definitions`]), and any content the
@@ -258,7 +266,11 @@ pub fn project_compiler(
             .any(|selector| name.eq_ignore_ascii_case(selector))
     };
     let set_in_environment = environment.iter().any(|(name, value)| {
-        !value.is_empty() && !name.eq_ignore_ascii_case("DOTNET_HOST_PATH") && is_selector(name)
+        !value.is_empty()
+            && ((!name.eq_ignore_ascii_case("DOTNET_HOST_PATH") && is_selector(name))
+                || COMPILER_ENVIRONMENT
+                    .iter()
+                    .any(|variable| name.eq_ignore_ascii_case(variable)))
     });
     let set_globally = globals.keys().any(|name| is_selector(name));
     if set_in_environment || set_globally || parsed.hidden_content.is_some() {
@@ -398,8 +410,8 @@ impl LangVersionRefusal {
             RefusalKind::Unrecognised => format!(
                 "{}: the F# compiler in .NET SDK {} does not recognise language version '{}'",
                 self.code(),
-                self.text,
                 self.sdk,
+                self.text,
             ),
         }
     }
@@ -856,5 +868,34 @@ mod tests {
                 .map(|r| r.kind),
             Some(RefusalKind::Unrecognised)
         );
+    }
+
+    /// The task's own environment reads choose the compiler too.
+    #[test]
+    fn a_compiler_location_in_the_environment_declines() {
+        for variable in COMPILER_ENVIRONMENT {
+            assert_eq!(
+                compiler_of(&on_sdk("10.0.401"), &[(variable, "/opt/fsc")]),
+                None,
+                "{variable}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_sdk_and_the_value() {
+        for kind in [
+            RefusalKind::Unrecognised,
+            RefusalKind::OutOfSupport { floor: V8_0 },
+        ] {
+            let message = LangVersionRefusal {
+                sdk: sdk("10.0.112"),
+                text: "11".to_string(),
+                kind,
+            }
+            .message();
+            assert!(message.contains(".NET SDK 10.0.112"), "{message}");
+            assert!(message.contains("language version '11'"), "{message}");
+        }
     }
 }
