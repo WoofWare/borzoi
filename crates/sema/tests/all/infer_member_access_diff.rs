@@ -2513,10 +2513,10 @@ fn string_env_with_void_method(name: &str) -> AssemblyEnv {
 }
 
 #[test]
-fn void_method_call_defers_type_but_records_resolution() {
-    // A `void`-returning method's call type is `unit` (unmodelled), so the type
-    // defers — but the member's identity is still recorded (hover / go-to-def), and
-    // crucially no `System.Void` (the bridge's literal mapping) is ever emitted.
+fn void_method_call_is_unit_and_records_resolution() {
+    // A `void`-returning method's call type is F#'s `unit`, as FCS types it;
+    // the member's identity is recorded (hover / go-to-def), and no
+    // `System.Void` (the bridge's literal mapping) is ever emitted.
     let env = string_env_with_void_method("Poke");
     let src = "module M\nlet n = \"hi\".Poke()\n";
     let parsed = parse(src);
@@ -2541,9 +2541,9 @@ fn void_method_call_defers_type_but_records_resolution() {
             inferred.member_resolution_at(ident_range(src, "Poke")),
             Some(Resolution::Member { .. })
         ),
-        "a void method's identity is recorded even though its type defers"
+        "a void method's identity is recorded"
     );
-    // …but the (unit) call type defers, and no `System.Void` leaks anywhere.
+    // …the call is `unit`, and no `System.Void` leaks anywhere.
     let def_types: HashMap<String, String> = inferred
         .def_types()
         .iter()
@@ -2554,7 +2554,11 @@ fn void_method_call_defers_type_but_records_resolution() {
             )
         })
         .collect();
-    assert_eq!(def_types.get("n"), None, "a void call type defers (unit)");
+    assert_eq!(
+        def_types.get("n").map(String::as_str),
+        Some("Microsoft.FSharp.Core.Unit"),
+        "a void call is unit"
+    );
     assert!(
         !inferred
             .types()
@@ -2720,21 +2724,22 @@ fn method_named_argument_use_blocks_generalisation() {
 }
 
 #[test]
-fn overload_argument_grounded_by_argcheck_commits() {
-    // OV-6 review (P2 retry): the overload argument grounds via an `ArgCheck` wake,
-    // which fires only after the outer `StartsWith` is first scanned:
-    // `let id x = x` then `s.StartsWith(id "h")`. On the first scan the argument
-    // `id "h"` is still `Ty::Var`, so the overload must **retry** (not drop) and
-    // commit once the ArgCheck grounds it to `string` ⇒ `b : System.Boolean`,
-    // agreeing with FCS.
+fn overload_argument_inside_an_unknown_parameter_declines() {
+    // `let id x = x` then `s.StartsWith(id "h")`. FCS checks a method's
+    // argument against the parameter of the one overload its arity leaves,
+    // relating it before anything inside it is checked
+    // (`UnifyUniqueOverloading`); which overloads the arity leaves is not
+    // known while the argument is walked, so the argument's expected type is
+    // unknown, and `id`'s result, related there, is tainted. Its argument
+    // check then declines, the overload's argument is not known at the call,
+    // and the call declines: silence, where FCS has `System.Boolean`
+    // (`StartsWith` has two one-argument overloads, so FCS checks the
+    // argument against a fresh type). Looking the method group up before the
+    // arguments (#662 L3) is what lets this commit.
     let src = "module M\nlet id x = x\nlet s = \"hi\"\nlet b = s.StartsWith(id \"h\")\n";
     assert_sound(src);
     let (_, def_types) = infer_bcl(src);
-    assert_eq!(
-        def_types.get("b").map(String::as_str),
-        Some("System.Boolean"),
-        "an overload argument grounded by a later ArgCheck wake commits (OV-6 retry)"
-    );
+    assert_eq!(def_types.get("b").map(String::as_str), None);
 }
 
 #[test]

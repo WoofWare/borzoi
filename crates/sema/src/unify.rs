@@ -11,11 +11,11 @@
 //! The terms are ids of the inference session's [`TyTable`], which the
 //! table borrows and builds resolved terms in.
 //!
-//! The table's value type is `Option<Binding>` — `None` for an unbound
-//! variable, `Some(t)` for one bound to a term `t` (which may itself contain
-//! variables). `ena` merges two values via [`ena::unify::UnifyValue`]; we make
-//! [`Binding`] an [`EqUnifyValue`] so a `Some`/`Some` merge succeeds only on
-//! syntactic equality. That branch is in fact never reached: every call here
+//! The table's value type is [`Slot`]: an optional binding — `None` for an
+//! unbound variable, `Some(t)` for one bound to a term `t` (which may itself
+//! contain variables) — and a taint mark ([`InferTable::taint`]). `ena` merges
+//! two values via [`ena::unify::UnifyValue`]; a bound/bound merge succeeds only
+//! on syntactic equality. That branch is in fact never reached: every call here
 //! resolves both operands to a *root* before unioning, so the table only ever
 //! merges an unbound (`None`) root with something — structural unification of
 //! two bound terms is our job, done by [`InferTable::unify`], not `ena`'s. This
@@ -24,14 +24,16 @@
 //!
 //! [`type-checker-plan`]: ../../../docs/type-checker-plan.md
 
-use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey};
+use std::rc::Rc;
+
+use ena::unify::{InPlaceUnificationTable, UnifyKey, UnifyValue};
 
 use crate::ty::{
     MAX_TYPE_DEPTH, MAX_TYPE_NODES, Ty, TyKind, TySize, TyTable, TyVid, TypeBudgetExceeded,
 };
 
 impl UnifyKey for TyVid {
-    type Value = Option<Binding>;
+    type Value = Slot;
 
     fn index(&self) -> u32 {
         self.0
@@ -54,11 +56,75 @@ impl UnifyKey for TyVid {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Binding(Ty);
 
-// A `Some`/`Some` merge succeeds only when the two bound terms are syntactically
+/// What the table holds for a class of variables: the term it is bound to,
+/// if any, and whether it is **tainted** — a class whose type the caller knows
+/// it does not know, because something it does not model may have related
+/// it ([`InferTable::taint`]). Two classes merge into one tainted if either
+/// was.
+///
+/// `pub` only because it is [`TyVid`]'s `UnifyKey::Value`; the module is
+/// private.
+#[derive(Debug, Clone)]
+pub struct Slot {
+    binding: Option<Binding>,
+    tainted: bool,
+    /// The index of the class's oldest variable ([`InferTable::any_older_unioned`]):
+    /// a merge keeps the smaller. `u32::MAX` in a value merged in only to set
+    /// another field.
+    oldest: u32,
+    /// The constraints whose variable's resolution mentions this class
+    /// ([`InferTable::attach_constraint`]), as the caller numbers them.
+    constraints: Option<Rc<Attached>>,
+}
+
+/// A set of constraint numbers, as a tree so that merging two classes' sets
+/// costs nothing: a class's constraints are read only when a unification
+/// touches it ([`InferTable::constraints_touching`]).
+#[derive(Debug)]
+enum Attached {
+    One(u32),
+    Both(Rc<Attached>, Rc<Attached>),
+}
+
+/// The union of two attached sets.
+fn join(a: &Option<Rc<Attached>>, b: &Option<Rc<Attached>>) -> Option<Rc<Attached>> {
+    match (a, b) {
+        (None, x) | (x, None) => x.clone(),
+        (Some(x), Some(y)) if Rc::ptr_eq(x, y) => Some(x.clone()),
+        (Some(x), Some(y)) => Some(Rc::new(Attached::Both(x.clone(), y.clone()))),
+    }
+}
+
+impl Default for Slot {
+    fn default() -> Slot {
+        Slot {
+            binding: None,
+            tainted: false,
+            oldest: u32::MAX,
+            constraints: None,
+        }
+    }
+}
+
+// A bound/bound merge succeeds only when the two bound terms are syntactically
 // equal. Our algorithm resolves to roots before unioning, so this is never hit
-// with two `Some`s in practice — but the bound is what lets `Option<Binding>`
-// be a `UnifyValue`.
-impl EqUnifyValue for Binding {}
+// with two bound values in practice.
+impl UnifyValue for Slot {
+    type Error = ();
+
+    fn unify_values(a: &Slot, b: &Slot) -> Result<Slot, ()> {
+        let binding = match (a.binding, b.binding) {
+            (Some(x), Some(y)) if x != y => return Err(()),
+            (x, y) => x.or(y),
+        };
+        Ok(Slot {
+            binding,
+            tainted: a.tainted || b.tainted,
+            oldest: a.oldest.min(b.oldest),
+            constraints: join(&a.constraints, &b.constraints),
+        })
+    }
+}
 
 /// Why a [`InferTable::unify`] failed. Best-effort inference treats a
 /// mismatch or an occurs failure as "leave the variables unsolved" (D5: say
@@ -75,6 +141,9 @@ pub(crate) enum UnifyError {
     /// records ([`InferTable::over_budget`]): whether the terms unify is not
     /// known.
     OverBudget(TypeBudgetExceeded),
+    /// The unification would bind a tainted class to a term, which the table
+    /// was set to refuse ([`InferTable::refusing_tainted`]).
+    Tainted,
 }
 
 impl From<TypeBudgetExceeded> for UnifyError {
@@ -213,6 +282,13 @@ pub(crate) struct InferTable<'t> {
     budget: TypeBudget,
     exceeded: Option<TypeBudgetExceeded>,
     walks: TypeWalks,
+    /// Whether a unification in progress refuses to bind a tainted class to
+    /// a term ([`Self::refusing_tainted`]).
+    refuse_tainted: bool,
+    /// A unification in progress refuses to bind a class to a term when its
+    /// oldest variable is below the first bound and outside the range
+    /// ([`Self::refusing_older`]); `(0, 0..0)` refuses none.
+    refuse_older: (u32, std::ops::Range<u32>),
 }
 
 impl<'t> InferTable<'t> {
@@ -226,6 +302,8 @@ impl<'t> InferTable<'t> {
             budget: TypeBudget::default(),
             exceeded: None,
             walks: TypeWalks::default(),
+            refuse_tainted: false,
+            refuse_older: (0, 0..0),
         }
     }
 
@@ -257,7 +335,128 @@ impl<'t> InferTable<'t> {
 
     /// A fresh, unbound inference variable.
     pub(crate) fn fresh(&mut self) -> TyVid {
-        self.table.new_key(None)
+        let index = self.table.len() as u32;
+        self.table.new_key(Slot {
+            oldest: index,
+            ..Slot::default()
+        })
+    }
+
+    /// Mark the class of each open variable of `ty`'s resolution
+    /// **tainted**: the caller does not know what has been done to it. A
+    /// class merged with a tainted one is tainted; a tainted class bound to a
+    /// term stays marked, but its term's variables are not, which a guarded
+    /// unification ([`Self::refusing_tainted`]) is what prevents.
+    pub(crate) fn taint(&mut self, ty: Ty) {
+        let resolved = self.resolve(ty);
+        let mut roots = Vec::new();
+        self.open_roots_into(resolved, &mut roots);
+        for v in roots {
+            self.table
+                .unify_var_value(
+                    v,
+                    Slot {
+                        tainted: true,
+                        ..Slot::default()
+                    },
+                )
+                .expect("tainting a class is infallible");
+        }
+    }
+
+    /// Attach constraint number `n` to every class an open variable of
+    /// `ty`'s resolution is in: the classes whose binding can move the
+    /// constraint's verdict. A class bound to a term passes what it carries
+    /// to the term's classes ([`Self::bind`]), and two merged classes carry
+    /// both sets, so a constrained variable's resolution's classes always
+    /// carry its number.
+    pub(crate) fn attach_constraint(&mut self, ty: Ty, n: u32) {
+        let resolved = self.resolve(ty);
+        let mut roots = Vec::new();
+        self.open_roots_into(resolved, &mut roots);
+        let one = Some(Rc::new(Attached::One(n)));
+        for v in roots {
+            self.attach(v, &one);
+        }
+    }
+
+    /// Merge `set` into the class of the unbound root `v`.
+    fn attach(&mut self, v: TyVid, set: &Option<Rc<Attached>>) {
+        if set.is_none() {
+            return;
+        }
+        self.table
+            .unify_var_value(
+                v,
+                Slot {
+                    constraints: set.clone(),
+                    ..Slot::default()
+                },
+            )
+            .expect("attaching to a class is infallible");
+    }
+
+    /// The numbers of the constraints attached to a class an open variable
+    /// of `ty`'s resolution is in, without repeats, in no particular order:
+    /// the constraints a unification of `ty` can move.
+    pub(crate) fn constraints_touching(&mut self, ty: Ty, out: &mut Vec<u32>) {
+        let resolved = self.resolve(ty);
+        let mut roots = Vec::new();
+        self.open_roots_into(resolved, &mut roots);
+        let mut stack: Vec<Rc<Attached>> = roots
+            .into_iter()
+            .filter_map(|v| self.table.probe_value(v).constraints)
+            .collect();
+        let mut seen: crate::hash::HashSet<*const Attached> = Default::default();
+        let mut found: crate::hash::HashSet<u32> = out.iter().copied().collect();
+        while let Some(node) = stack.pop() {
+            if !seen.insert(Rc::as_ptr(&node)) {
+                continue;
+            }
+            match &*node {
+                Attached::One(n) => {
+                    if found.insert(*n) {
+                        out.push(*n);
+                    }
+                }
+                Attached::Both(a, b) => {
+                    stack.push(a.clone());
+                    stack.push(b.clone());
+                }
+            }
+        }
+    }
+
+    /// Whether any open variable of `ty`'s resolution is in a tainted class.
+    pub(crate) fn touches_taint(&mut self, ty: Ty) -> bool {
+        let resolved = self.resolve(ty);
+        let mut roots = Vec::new();
+        self.open_roots_into(resolved, &mut roots);
+        roots.into_iter().any(|v| self.table.probe_value(v).tainted)
+    }
+
+    /// The roots of the variables of a resolved term, pushed onto `out`.
+    fn open_roots_into(&mut self, ty: Ty, out: &mut Vec<TyVid>) {
+        match self.tys.kind(ty) {
+            TyKind::Var(v) => {
+                let r = self.table.find(*v);
+                if !out.contains(&r) {
+                    out.push(r);
+                }
+            }
+            TyKind::Param(_) => {}
+            TyKind::Named { args, .. } | TyKind::Project { args, .. } | TyKind::Tuple(args) => {
+                for &a in args.iter() {
+                    self.open_roots_into(a, out);
+                }
+            }
+            TyKind::Array { elem, .. } => self.open_roots_into(*elem, out),
+            TyKind::Fun { arg, ret } => {
+                let (arg, ret) = (*arg, *ret);
+                self.open_roots_into(arg, out);
+                self.open_roots_into(ret, out);
+            }
+        }
     }
 
     /// The number of inference variables allocated so far — the **vid mark** the
@@ -279,9 +478,10 @@ impl<'t> InferTable<'t> {
     /// binding's `mark`) is unioned with it; such an inherited variable must defer
     /// the function rather than be captured into its scheme. Since `ena` may pick
     /// either member as a class root, this checks the class directly rather than
-    /// relying on the root's index. O(`mark`) per call — fine at per-file scale.
+    /// relying on the root's index: each class carries its oldest member's
+    /// index ([`Slot`]), so the check costs a find.
     pub(crate) fn any_older_unioned(&mut self, v: TyVid, mark: u32) -> bool {
-        (0..mark).any(|k| self.table.unioned(TyVid(k), v))
+        self.table.probe_value(v).oldest < mark
     }
 
     /// Whether `a` and `b` share an equivalence class (are unioned). Used by the
@@ -351,6 +551,7 @@ impl<'t> InferTable<'t> {
     /// Look through the variable `v` one level ([`Self::head`]), without a
     /// walk: what a caller asking whether `v`'s class is bound, and to what,
     /// pays for in constant time.
+    #[cfg(test)]
     pub(crate) fn var_head(&mut self, v: TyVid) -> Head {
         self.head(self.tys.var(v))
     }
@@ -359,7 +560,7 @@ impl<'t> InferTable<'t> {
     /// to its canonical unbound root; any other term to itself.
     fn head(&mut self, ty: Ty) -> Head {
         match self.tys.kind(ty) {
-            TyKind::Var(v) => match self.table.probe_value(*v) {
+            TyKind::Var(v) => match self.table.probe_value(*v).binding {
                 Some(Binding(bound)) => {
                     debug_assert!(
                         !matches!(self.tys.kind(bound), TyKind::Var(_)),
@@ -504,6 +705,36 @@ impl<'t> InferTable<'t> {
     /// trace.
     pub(crate) fn unify_atomic(&mut self, a: Ty, b: Ty) -> Result<(), UnifyError> {
         self.probe(|t| t.unify(a, b))
+    }
+
+    /// [`Self::unify_atomic`], refusing — with [`UnifyError::Tainted`], and
+    /// leaving no trace — to bind a [tainted](Self::taint) class to a term.
+    /// Merging a tainted class with another variable is allowed: the merged
+    /// class is tainted.
+    #[cfg(test)]
+    pub(crate) fn unify_atomic_guarded(&mut self, a: Ty, b: Ty) -> Result<(), UnifyError> {
+        let was = self.refusing_tainted(true);
+        let unified = self.unify_atomic(a, b);
+        self.refusing_tainted(was);
+        unified
+    }
+
+    /// Set whether a unification refuses to bind a [tainted](Self::taint)
+    /// class to a term ([`UnifyError::Tainted`]), returning the setting it
+    /// replaces.
+    pub(crate) fn refusing_tainted(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.refuse_tainted, on)
+    }
+
+    /// Set the index below which a unification refuses to bind a class to a
+    /// term ([`UnifyError::Tainted`]) — judged by the class's oldest variable,
+    /// unless that variable lies in `spared` — returning the setting it
+    /// replaces; `(0, 0..0)` refuses none.
+    pub(crate) fn refusing_older(
+        &mut self,
+        setting: (u32, std::ops::Range<u32>),
+    ) -> (u32, std::ops::Range<u32>) {
+        std::mem::replace(&mut self.refuse_older, setting)
     }
 
     /// Run `f` against a **scoped snapshot** of the table: keep its effects iff it
@@ -677,14 +908,36 @@ impl<'t> InferTable<'t> {
         depth: usize,
         walk: &mut Walk,
     ) -> Result<(), UnifyError> {
+        let slot = self.table.probe_value(v);
+        let (below, spared) = &self.refuse_older;
+        if (self.refuse_tainted && slot.tainted)
+            || (slot.oldest < *below && !spared.contains(&slot.oldest))
+        {
+            return Err(UnifyError::Tainted);
+        }
         if self.occurs_in(v, term, depth, walk)? {
             return Err(UnifyError::Occurs);
         }
         // `v` is an unbound root (value `None`), so binding it cannot
         // conflict — see the module docs.
         self.table
-            .unify_var_value(v, Some(Binding(term)))
+            .unify_var_value(
+                v,
+                Slot {
+                    binding: Some(Binding(term)),
+                    ..Slot::default()
+                },
+            )
             .expect("binding an unbound variable is infallible");
+        // What the class carried now rides on the term's classes.
+        if slot.constraints.is_some() {
+            let resolved = self.resolve(term);
+            let mut roots = Vec::new();
+            self.open_roots_into(resolved, &mut roots);
+            for r in roots {
+                self.attach(r, &slot.constraints);
+            }
+        }
         Ok(())
     }
 }
@@ -701,6 +954,7 @@ mod tests {
     //! table's: the table's answers are read back into trees to compare.
 
     use proptest::prelude::*;
+    use proptest::strategy::ValueTree;
 
     use super::{InferTable, TypeBudget, UnifyError};
     use crate::hash::HashMap;
@@ -1077,6 +1331,140 @@ mod tests {
 
     fn constraint_list() -> impl Strategy<Value = Vec<(SpelledTy, SpelledTy)>> {
         prop::collection::vec((ty_strategy(), ty_strategy()), 0..12)
+    }
+
+    /// Taint law 1: with nothing tainted, a guarded unification is the
+    /// unguarded one — same verdict, same table.
+    #[test]
+    fn guarded_unification_without_taint_is_unguarded() {
+        let mut runner = proptest::test_runner::TestRunner::deterministic();
+        let strategy = (constraint_list(), constraint_list());
+        for _ in 0..256 {
+            let (pre, extra) = strategy.new_tree(&mut runner).expect("a case").current();
+            let g_tys = TyTable::session();
+            let mut guarded = Session::pooled(&g_tys, None);
+            let u_tys = TyTable::session();
+            let mut plain = Session::pooled(&u_tys, None);
+            for (a, b) in &pre {
+                let _ = guarded.unify_atomic(a, b);
+                let _ = plain.unify_atomic(a, b);
+            }
+            for (a, b) in &extra {
+                let (ga, gb) = (guarded.ty(a), guarded.ty(b));
+                let g = guarded.table.unify_atomic_guarded(ga, gb);
+                let p = plain.unify_atomic(a, b);
+                assert_eq!(g, p, "{pre:?} then {a:?} ~ {b:?}");
+            }
+            assert_eq!(canonicalize(&guarded.pool()), canonicalize(&plain.pool()));
+        }
+    }
+
+    /// Taint law 2: a guarded unification refuses exactly when the unguarded
+    /// one would bind a variable of a tainted class to a term, and a refusal
+    /// leaves the table as it was; one that succeeds leaves the table the
+    /// unguarded one does, with every tainted class it did not bind still
+    /// tainted (a class merged with a tainted one is). Tainting a variable
+    /// taints every open variable of its resolution.
+    #[test]
+    fn guarded_unification_refuses_exactly_a_tainted_binding() {
+        let mut runner = proptest::test_runner::TestRunner::deterministic();
+        let strategy = (
+            constraint_list(),
+            proptest::collection::vec(0..POOL, 1..4),
+            ty_strategy(),
+            ty_strategy(),
+            0..3usize,
+            0..POOL,
+        );
+        let (mut refused, mut applied, mut failed) = (0, 0, 0);
+        for _ in 0..1024 {
+            let (pre, tainted, a, b, shape, k) =
+                strategy.new_tree(&mut runner).expect("a case").current();
+            // A third of the cases unify a tainted variable itself, so that
+            // the refusal is reached often, and a third a term with any
+            // variable, so that a unification often applies.
+            let (a, b) = match shape {
+                0 => (var(tainted[0]), b),
+                1 => (a, var(k)),
+                _ => (a, b),
+            };
+            let g_tys = TyTable::session();
+            let mut guarded = Session::pooled(&g_tys, None);
+            let u_tys = TyTable::session();
+            let mut plain = Session::pooled(&u_tys, None);
+            for (x, y) in &pre {
+                let _ = guarded.unify_atomic(x, y);
+                let _ = plain.unify_atomic(x, y);
+            }
+            for &k in &tainted {
+                let t = guarded.ty(&var(k));
+                guarded.table.taint(t);
+                let r = guarded.table.resolve(t);
+                let mut roots = Vec::new();
+                guarded.table.open_roots_into(r, &mut roots);
+                for v in roots {
+                    let tv = guarded.tys.var(v);
+                    assert!(guarded.table.touches_taint(tv), "{pre:?}: {k}'s roots");
+                }
+            }
+            // The pool's variables that are open and in a tainted class.
+            let tainted_open: Vec<u32> = (0..POOL)
+                .filter(|&k| {
+                    let open = matches!(guarded.resolve(&var(k)), SpelledTy::Var(_));
+                    let t = guarded.ty(&var(k));
+                    open && guarded.table.touches_taint(t)
+                })
+                .collect();
+            let before = guarded.pool();
+            let (ga, gb) = (guarded.ty(&a), guarded.ty(&b));
+            let g = guarded.table.unify_atomic_guarded(ga, gb);
+            let p = plain.unify_atomic(&a, &b);
+            let binds_tainted = p.is_ok()
+                && tainted_open
+                    .iter()
+                    .any(|&k| !matches!(plain.resolve(&var(k)), SpelledTy::Var(_)));
+            let case = format!("{pre:?}, tainted {tainted:?}, then {a:?} ~ {b:?}");
+            if binds_tainted {
+                refused += 1;
+                assert_eq!(g, Err(UnifyError::Tainted), "{case}");
+                assert_eq!(
+                    canonicalize(&before),
+                    canonicalize(&guarded.pool()),
+                    "{case}"
+                );
+            } else if p.is_ok() {
+                applied += 1;
+                assert_eq!(g, Ok(()), "{case}");
+                assert_eq!(
+                    canonicalize(&guarded.pool()),
+                    canonicalize(&plain.pool()),
+                    "{case}"
+                );
+                for &k in &tainted_open {
+                    let t = guarded.ty(&var(k));
+                    assert!(guarded.table.touches_taint(t), "{case}: {k} lost its taint");
+                }
+            } else {
+                failed += 1;
+                assert!(g.is_err(), "{case}");
+            }
+            // A class's oldest member is the least index unioned with it.
+            for k in 0..POOL {
+                for mark in 0..POOL {
+                    let scan = (0..mark).any(|j| guarded.table.unioned(TyVid(j), TyVid(k)));
+                    assert_eq!(
+                        guarded.table.any_older_unioned(TyVid(k), mark),
+                        scan,
+                        "{case}: oldest of {k} against {mark}"
+                    );
+                }
+            }
+        }
+        assert!(
+            refused >= 100 && applied >= 100 && failed >= 20,
+            "the cases should reach every verdict: {refused} refused, {applied} applied, \
+             {failed} failed"
+        );
     }
 
     proptest! {

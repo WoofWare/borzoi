@@ -31,33 +31,46 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         func: &Expr,
         arg: &Expr,
+        expected: Expected,
     ) -> Option<Option<TyVid>> {
-        let (builtin, operands) = match func {
-            Expr::App(inner) if inner.is_infix() => {
-                let (op, lhs) = (inner.func()?, inner.arg()?);
-                let builtin = self.builtin_callee(&op)?;
-                if !matches!(
-                    builtin,
-                    Builtin::Arith(_) | Builtin::Bitwise | Builtin::Shift
-                ) {
-                    return None;
-                }
-                (builtin, vec![lhs, arg.clone()])
+        let (builtin, operands) = self.builtin_shape(func, arg)?;
+        // FCS relates the application's result to its expected type before
+        // it checks the operands (`Propagate`). A conversion's signature fixes
+        // that result (`^T -> int`), so it is related there. An operator's
+        // result shares variables with its operands in its signature (`-` is
+        // `^T -> ^T`), which inference does not model: whatever the expected
+        // type holds open is tainted there instead, and the result is related
+        // once the operands are walked.
+        let fixed = match &builtin {
+            Builtin::Convert { target } => {
+                let r = self.solver.table.fresh();
+                let ty = self.solver.tys.import(
+                    self.facts.env.types(),
+                    *target,
+                    &mut HashMap::default(),
+                );
+                self.eq(scope, self.solver.tys.var(r), ty);
+                self.relate(scope, r, expected);
+                Some(r)
             }
-            Expr::Ident(_) | Expr::LongIdent(_) => {
-                let builtin = self.builtin_callee(func)?;
-                if !matches!(builtin, Builtin::Negate | Builtin::Convert { .. }) {
-                    return None;
-                }
-                (builtin, vec![arg.clone()])
+            _ => {
+                self.taint_expected(scope, expected);
+                None
             }
-            _ => return None,
         };
         let mut vars = Vec::new();
         let mut walked = true;
         for operand in &operands {
-            let d = self.solver.table.fresh();
-            match self.infer_expr(scope, operand, Some(d)) {
+            // A conversion's operand is checked against its signature's own
+            // type variable, which nothing else relates: a fresh type. An
+            // operator's is checked against a type its signature shares with
+            // the result and the other operand, which inference does not
+            // model: an unknown one.
+            let operand_expected = match builtin {
+                Builtin::Convert { .. } => Expected::Known(self.solver.table.fresh()),
+                _ => Expected::Unknown,
+            };
+            match self.infer_expr(scope, operand, operand_expected) {
                 Some(v) => vars.push(v),
                 // The operand's own walk recorded why it is not typed.
                 None => walked = false,
@@ -91,9 +104,47 @@ impl<'a> Gen<'a> {
                 .import(self.facts.env.types(), *target, &mut HashMap::default()),
             _ => return Some(None),
         };
-        let r = self.solver.table.fresh();
-        self.eq(scope, self.solver.tys.var(r), result);
-        Some(Some(r))
+        match fixed {
+            Some(r) => {
+                self.eq(scope, self.solver.tys.var(r), result);
+                Some(Some(r))
+            }
+            None => {
+                let r = self.solver.table.fresh();
+                self.eq(scope, self.solver.tys.var(r), result);
+                self.relate(scope, r, expected);
+                Some(Some(r))
+            }
+        }
+    }
+
+    /// Whether `func` applied to `arg` is the application of a built-in
+    /// operator [`Self::builtin_application`] types.
+    pub(super) fn is_builtin_application(&self, func: &Expr, arg: &Expr) -> bool {
+        self.builtin_shape(func, arg).is_some()
+    }
+
+    /// The built-in operator `func` applied to `arg` applies, and its
+    /// operands: `a OP b` with a binary one, a unary one applied by name or
+    /// as a prefix operator.
+    fn builtin_shape(&self, func: &Expr, arg: &Expr) -> Option<(Builtin, Vec<Expr>)> {
+        match func {
+            Expr::App(inner) if inner.is_infix() => {
+                let (op, lhs) = (inner.func()?, inner.arg()?);
+                let builtin = self.builtin_callee(&op)?;
+                matches!(
+                    builtin,
+                    Builtin::Arith(_) | Builtin::Bitwise | Builtin::Shift
+                )
+                .then(|| (builtin, vec![lhs, arg.clone()]))
+            }
+            Expr::Ident(_) | Expr::LongIdent(_) => {
+                let builtin = self.builtin_callee(func)?;
+                matches!(builtin, Builtin::Negate | Builtin::Convert { .. })
+                    .then(|| (builtin, vec![arg.clone()]))
+            }
+            _ => None,
+        }
     }
 
     /// The [`Builtin`] the callee `e` names, if it names one: a bare name or

@@ -388,10 +388,11 @@ fn a_condition_before_the_statement_still_grounds_the_parameter() {
     assert_eq!(c.binders, 3, "`r` and `h`: {c:?}");
 }
 
-/// FCS unifies in source order: an earlier use fixes a parameter, and a later
-/// condition on it is the error, not a retyping. So a condition grounds the
-/// parameter only when it is the parameter's first occurrence — through a
-/// statement, a local, or a plain tuple (the last predates CE-1).
+/// FCS unifies in its checking order: an earlier use fixes a parameter, and a
+/// later condition on it is the error, not a retyping — through a statement,
+/// a local, or a plain tuple. The argument check of `mono x` is decided where
+/// FCS decides it, so `f` is `string -> int`, and the condition does not make
+/// `x` a `bool` (`check` holds every commit to FCS's).
 #[test]
 fn an_earlier_use_fixes_a_parameter_before_a_condition() {
     for body in [
@@ -403,9 +404,9 @@ fn an_earlier_use_fixes_a_parameter_before_a_condition() {
             &format!("module M\nlet mono (s: string) = 1\nlet f x = {body}\n"),
             false,
         );
-        // Of the declarations, only `mono : string -> int`; `f` stays silent. (A
-        // local `y : int` is right, and is not what this case is about.)
-        assert_eq!(c.binders - c.local_binders, 2, "{body}: {c:?}");
+        // `mono` and its `s`, `f` and its `x`. (A local `y : int` is right,
+        // and is not what this case is about.)
+        assert_eq!(c.binders - c.local_binders, 4, "{body}: {c:?}");
     }
 }
 
@@ -530,10 +531,9 @@ fn a_generalisable_element_of_a_local_tuple_is_not_monomorphised() {
 #[test]
 fn a_local_pattern_over_a_bare_value_keeps_no_rhs_node() {
     for rhs in ["p", "(p)", "pr", "idf p"] {
-        // An application's result waits on its argument check, which does not
-        // fire mid-walk, so `idf p` leaves the locals open: only agreement is
-        // asserted for it.
-        let locals = if rhs == "idf p" { 0 } else { 2 };
+        // `idf p`'s argument check is decided at the argument, so its locals
+        // are as known as the others'.
+        let locals = 2;
         let c = check(
             &format!(
                 "module M\nlet idf x = x\nlet pr = (1, \"s\")\nlet n (p: int * string) = let (u, v) = {rhs} in (v, u)\n"

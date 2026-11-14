@@ -342,12 +342,15 @@ fn return_annotation_grounds_parameter_through_body() {
 }
 
 #[test]
-fn subsumption_return_annotation_defers_the_open_parameter() {
-    // `let f x : obj = x` is legal via subsumption; the dropped relation
-    // must not ground `x` (FCS: `obj -> obj`). The undischarged check
-    // poisons `x`, so `f` defers — silence, never `'a -> obj`.
+fn return_annotation_relates_the_open_parameter_by_equality() {
+    // `let f x : obj = x`: FCS relates the body to the annotation by an
+    // equality first, which the open `x` satisfies — `obj -> obj`, never
+    // `'a -> obj`.
     let types = def_types("module M\nlet f x : obj = x\n");
-    assert_eq!(types.get("f"), None);
+    assert_eq!(
+        types.get("f").map(String::as_str),
+        Some("System.Object -> System.Object")
+    );
     // With a ground parameter side the annotated return still emits.
     let ground = def_types("module M\nlet f (b: bool) : obj = b\n");
     assert_eq!(
@@ -640,26 +643,24 @@ fn incomplete_body_blocks_generalisation() {
 }
 
 #[test]
-fn poisoned_param_via_dropped_else_relation_defers() {
+fn else_branch_related_to_the_then_branch_generalises() {
     // `let f c x = if c then x else x`: the else-branch `x` is checked against
-    // the then-branch `x` (a dropped check-mode relation), poisoning `x`. FCS
-    // relates the two through that relation; we drop it, so `x` must not
-    // generalise. The binding defers.
+    // the then-branch's type, an equality FCS takes before the branch, so the
+    // binding generalises as FCS's does.
     let types = def_types("module M\nlet f c x = if c then x else x\n");
     assert_eq!(
-        types.get("f"),
-        None,
-        "a poisoned parameter must block generalisation"
+        types.get("f").map(String::as_str),
+        Some("System.Boolean -> 'a -> 'a"),
+        "the else branch's relation is FCS's equality"
     );
 
     // `let f b x = if b then (x, 1) else (x, 2)`: the else-tuple is checked
-    // against the then-tuple, poisoning `x` (through the tuple's component
-    // relation). FCS relates `x` across the branches; we defer.
+    // against the then-tuple, element by element, as FCS splits it.
     let types2 = def_types("module M\nlet f b x = if b then (x, 1) else (x, 2)\n");
     assert_eq!(
-        types2.get("f"),
-        None,
-        "a component-poisoned parameter must block generalisation"
+        types2.get("f").map(String::as_str),
+        Some("System.Boolean -> 'a -> 'a * System.Int32"),
+        "the else tuple is split against the then tuple"
     );
 }
 

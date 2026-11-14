@@ -36,7 +36,11 @@
 //! calls with checks in their arguments — one against a tuple-typed parameter
 //! (`xs.Add((I, S))`), one against `obj` (`(box 1).Equals((I, S))`) — and a
 //! parameter fixed to `obj -> int` and then applied (`applyObj x, x (A)`;
-//! the head takes `x` only then).
+//! the head takes `x` only then), and three forms whose own expected type FCS
+//! relates at their entry, each mentioning `p` both where that relation fixes
+//! it and where a check inside would fix it otherwise: a conversion
+//! (`both p (int (both (p) (S)))`), a loop (`both p (while p do ())`) and a
+//! `let` pattern of structure (`let (u, w) = pick p (both (p) (S)) in u`).
 //! `p` may be used several times, so the first relation FCS applies to it is
 //! the one that fixes it. With a probability drawn per file, a leaf is
 //! replaced by one of the wrong type (an ill-typed argument), and a
@@ -85,6 +89,7 @@ const HEADER: &str = "module EntryOrder\n\
                       let idf x = x\n\
                       let singleton x = List.singleton x\n\
                       let both (x: 'a) (y: 'a) = x\n\
+                      let pick (x: 'a) (y: 'b) = x\n\
                       let app (f: 'a -> 'b) (x: 'a) = f x\n\
                       let applyObj (k: obj -> int) = k\n\
                       let monos (t: string) = 2\n\
@@ -96,7 +101,9 @@ const HEADER: &str = "module EntryOrder\n\
                       let gt (t: int * string) = 0\n\
                       let gf (k: string -> int) = 0\n\
                       let gpo (o: obj option) = 0\n\
-                      let xs = ResizeArray<int * string>()\n";
+                      let xs = ResizeArray<int * string>()\n\
+                      type U1 = U1 of (obj * int)\n\
+                      type U2 = U2 of obj * int\n";
 
 /// The types the generator builds an argument against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +170,10 @@ struct Features {
     applied_fn: bool,
     /// The body is under a return annotation.
     annotated: bool,
+    /// A built-in conversion (`int (S)`), whose result its signature fixes.
+    conversion: bool,
+    /// A `while` loop or a `let` pattern of structure in an argument.
+    statement_form: bool,
 }
 
 impl Features {
@@ -175,7 +186,9 @@ impl Features {
             || self.branch
             || self.method_arg
             || self.applied_fn
-            || self.annotated)
+            || self.annotated
+            || self.conversion
+            || self.statement_form)
     }
 }
 
@@ -245,6 +258,11 @@ impl ArgGen<'_> {
                 }
                 _ => {}
             }
+        }
+        if depth > 0 && *want == Want::Int && self.rng.chance(self.regime.method_pct) {
+            self.features.conversion = true;
+            let s = self.expr(&Want::Str, depth - 1, false);
+            return format!("int ({s})");
         }
         if depth == 0 || self.rng.chance(25) {
             return self.leaf(want, under_obj_element);
@@ -353,7 +371,120 @@ impl ArgGen<'_> {
     /// An element after the sink: a method call whose argument holds checks,
     /// or a parameter fixed to `obj -> int` and then applied.
     fn extra(&mut self, depth: usize) -> String {
-        match self.rng.below(4) {
+        // The last three relate an expected type at a form's entry that a
+        // decision inside the form would otherwise run ahead of: each mentions
+        // `p` where the entry relation fixes it, and again where a check would
+        // fix it otherwise.
+        match self.rng.below(17) {
+            16 => {
+                // A union case whose result fails its expected type: FCS
+                // never checks its fields, so they fix nothing of `p`.
+                self.features.statement_form = true;
+                self.p_uses += 2;
+                self.features.multi_p = true;
+                let case = if self.rng.chance(50) { "U1" } else { "U2" };
+                if self.rng.chance(50) {
+                    format!("gi ({case} (p, 1)), monos p")
+                } else {
+                    format!("(let () = {case} (p, 1) in 0), monos p")
+                }
+            }
+            15 => {
+                // An unmodelled construct may fix `p` (to `int`, here), after
+                // which nothing may bind it otherwise: a later pattern meets
+                // it at `unit`, which FCS rejects.
+                self.features.statement_form = true;
+                self.p_uses += 3;
+                self.features.multi_p = true;
+                "(idf p, (p : int), (let () = p in ()))".into()
+            }
+            13 => {
+                // A pattern of structure the right-hand side's branches do
+                // not fit: FCS keeps nothing of them at their own types.
+                self.features.statement_form = true;
+                let a = self.expr(&Want::Int, depth, false);
+                format!("(let () = (if b then {a} else 2) in 0)")
+            }
+            14 => {
+                self.features.statement_form = true;
+                let a = self.expr(&Want::Int, depth, false);
+                format!("(let () = (match n with 0 -> {a} | _ -> 2) in 0)")
+            }
+            12 => {
+                // An `if` without `else` is `unit`, a strict equality FCS
+                // takes before its branch, failing here against `int`.
+                self.features.statement_form = true;
+                self.p_uses += 2;
+                self.features.multi_p = true;
+                "gi (if b then p), monos p".into()
+            }
+            11 => {
+                // An operator's operand is checked against the type its
+                // signature shares with its result, fixed here to `int64`.
+                self.features.conversion = true;
+                self.p_uses += 1;
+                self.features.multi_p |= self.p_uses > 1;
+                "both (int64 0) (-(if b then p else 1))".into()
+            }
+            9 => {
+                // A homogeneous operator shares its operand's type with its
+                // result, related before the operand is checked.
+                self.features.conversion = true;
+                self.p_uses += 2;
+                self.features.multi_p = true;
+                "both p (-(monos p))".into()
+            }
+            10 => {
+                // A method is looked up on its receiver at the dot, before
+                // its arguments: on an unknown receiver FCS reports FS0072.
+                self.features.method_arg = true;
+                self.p_uses += 2;
+                self.features.multi_p = true;
+                "p.Substring(monos p)".into()
+            }
+            7 => {
+                // A pattern of structure over branches: the `else` branch is
+                // checked against the type the `then` branch fixed, and
+                // coerces to it.
+                self.features.statement_form = true;
+                self.p_uses += 1;
+                self.features.multi_p |= self.p_uses > 1;
+                let a = self.expr(&Want::Str, depth, false);
+                format!("(let (u, w) = (if b then (p, 1) else ({a}, 2)) in u)")
+            }
+            8 => {
+                // A union case's one tuple-typed field against two fields:
+                // each is one field to flex, or not.
+                self.features.statement_form = true;
+                self.p_uses += 2;
+                self.features.multi_p = true;
+                let case = if self.rng.chance(50) { "U1" } else { "U2" };
+                format!("{case} (p, 1), gi p")
+            }
+            4 => {
+                // The loop's `unit` is related before its condition.
+                self.features.statement_form = true;
+                self.p_uses += 2;
+                self.features.multi_p = true;
+                "both p (while p do ())".into()
+            }
+            5 => {
+                // The pattern's tuple is related to `pick`'s result before
+                // its arguments are checked.
+                self.features.statement_form = true;
+                self.p_uses += 2;
+                self.features.multi_p = true;
+                let a = self.expr(&Want::Str, depth, false);
+                format!("(let (u, w) = pick p (both (p) ({a})) in u)")
+            }
+            6 => {
+                // The conversion's `int` is related before its operand.
+                self.features.conversion = true;
+                self.p_uses += 2;
+                self.features.multi_p = true;
+                let a = self.expr(&Want::Str, depth, false);
+                format!("both p (int (both (p) ({a})))")
+            }
             0 => {
                 self.features.method_arg = true;
                 let i = self.expr(&Want::Int, depth, false);
@@ -409,7 +540,7 @@ fn regime_for(seed: u64) -> Regime {
         multi_p_pct: [0, 40, 80][rng.below(3)],
         branch_pct: [0, 10, 25][rng.below(3)],
         method_pct: [0, 10, 25][rng.below(3)],
-        extra_pct: [0, 25, 50][rng.below(3)],
+        extra_pct: [10, 40, 70][rng.below(3)],
         annotated_pct: [0, 15, 30][rng.below(3)],
     }
 }
@@ -520,7 +651,7 @@ struct Tally {
 
 #[test]
 fn argument_checks_are_decided_at_the_arguments_entry() {
-    let files = env_usize_or("BORZOI_ENTRY_ORDER_FILES", 24);
+    let files = env_usize_or("BORZOI_ENTRY_ORDER_FILES", 32);
     let env = full_bcl_env();
     let mut tally = Tally::default();
     let mut unsound: Vec<String> = Vec::new();
@@ -616,6 +747,8 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
                 ("method argument", f.method_arg),
                 ("applied parameter", f.applied_fn),
                 ("annotated", f.annotated),
+                ("conversion", f.conversion),
+                ("statement form", f.statement_form),
                 (
                     "clean-coerced-inside",
                     clean && f.coerced_inside && f.plain(),
@@ -714,11 +847,21 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
         "method argument",
         "applied parameter",
         "annotated",
+        "conversion",
+        "statement form",
         "clean-coerced-inside",
         "clean-plain",
     ] {
         let n = tally.with.get(name).copied().unwrap_or(0);
-        assert!(n >= min, "only {n} cases with {name}: {tally:?}");
+        // A clean case with a coercion inside needs a lambda-free,
+        // ill-typed-free draw that reaches an `obj` element: rarer than the
+        // rest by about half.
+        let floor = if name == "clean-coerced-inside" {
+            min / 3
+        } else {
+            min
+        };
+        assert!(n >= floor, "only {n} cases with {name}: {tally:?}");
     }
     assert!(
         tally.clean >= min * 4 && tally.rejected >= min,

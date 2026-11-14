@@ -159,7 +159,7 @@ impl<'a> Gen<'a> {
         // fired-and-succeeded one poisons nothing.) Members that never woke are
         // dropped.
         if !scope.rigid_typars.is_empty() {
-            scope.rigid_rejected = !self.rigid_under_every_relation(scope, &outcome);
+            scope.rigid_rejected |= !self.rigid_under_every_relation(scope, &outcome);
         }
         // The loosening invariant holds of the solution, however it was
         // reached: [`Self::verified`] checks it of a speculative one, and a
@@ -398,6 +398,34 @@ impl<'a> Gen<'a> {
         self.solver.settled_args = outcome.args;
     }
 
+    /// Settle at a member access, where FCS decides it: wake what can wake,
+    /// and **decline** every access still suspended — its receiver is not
+    /// known at the access (a variable, a generic receiver, an overload whose
+    /// arguments are not known), which FCS rejects or decides by what
+    /// inference does not see. A declined access records nothing, its result
+    /// is [tainted](Self::taint), and the binding's prefix ends
+    /// ([`Incomplete::UndecidedAccess`]); it never wakes later, since a later
+    /// wake is one FCS did not make at the access.
+    ///
+    /// Every access settles where it is generated, so what is still suspended
+    /// after the settle is this access's.
+    pub(super) fn settle_access(&mut self, scope: &mut Scope) {
+        self.settle(scope);
+        let mut declined = false;
+        for c in std::mem::take(&mut self.solver.constraints) {
+            match c {
+                Constraint::HasMember { result, .. } => {
+                    self.taint(scope, self.solver.tys.var(result));
+                    declined = true;
+                }
+                other => self.solver.constraints.push(other),
+            }
+        }
+        if declined {
+            scope.mark_incomplete(Incomplete::UndecidedAccess);
+        }
+    }
+
     /// The worklist behind [`Self::solve`] and [`Self::settle`]: discharge every
     /// pending constraint to a fixpoint and report what it did, with the
     /// suspensions that never fired. `fire` gates the [`ArgCheck`] wake —
@@ -454,13 +482,33 @@ impl<'a> Gen<'a> {
                     }
                     TyKind::Named { path, .. } => {
                         let path = path.spelled(self.facts.env.names());
-                        if self.wake_member(scope, &path, &m.name, m.result, m.use_range, &m.kind) {
-                            woke = true;
-                            if m.late(latest_discharge) {
-                                outcome.late_member = true;
+                        match self.wake_member(
+                            scope,
+                            &path,
+                            &m.name,
+                            m.result,
+                            m.use_range,
+                            &m.kind,
+                        ) {
+                            Wake::Retry => still_pending.push(m),
+                            wake => {
+                                woke = true;
+                                if m.late(latest_discharge) {
+                                    outcome.late_member = true;
+                                }
+                                // A result the wake did not bind (a `void`
+                                // return, a type the bridge does not carry) is
+                                // one FCS knows; an access no member answers
+                                // is declined.
+                                if !self.solver.tys.is_ground(
+                                    self.solver.table.resolve(self.solver.tys.var(m.result)),
+                                ) {
+                                    self.taint(scope, self.solver.tys.var(m.result));
+                                }
+                                if wake == Wake::Declined {
+                                    scope.mark_incomplete(Incomplete::UndecidedAccess);
+                                }
                             }
-                        } else {
-                            still_pending.push(m);
                         }
                     }
                     // A field of a project record, read off its declaration.
@@ -474,19 +522,23 @@ impl<'a> Gen<'a> {
                     // quantified param) has no assembly entity to look a member up
                     // on in this stage — drop the constraint (defer, D5). Arrays'
                     // `.Length` is an intrinsic, out of scope.
+                    // The access is declined where FCS decides it, so its
+                    // result is tainted and the prefix ends.
                     TyKind::Array { .. }
                     | TyKind::Tuple(_)
                     | TyKind::Fun { .. }
                     | TyKind::Param(_) => {
                         woke = true;
+                        self.taint(scope, self.solver.tys.var(m.result));
+                        scope.mark_incomplete(Incomplete::UndecidedAccess);
                     }
                     // Any other member of a project type is not modelled: drop
                     // the constraint, leaving the access's (poisoned) result
-                    // open, and say so in the census, which would otherwise
-                    // count the binding complete with an untyped access in it.
+                    // open and tainted, and say so in the census.
                     TyKind::Project { .. } => {
                         woke = true;
-                        scope.reasons.push(Incomplete::ProjectTypeMember);
+                        self.taint(scope, self.solver.tys.var(m.result));
+                        scope.mark_incomplete(Incomplete::ProjectTypeMember);
                     }
                 }
             }
@@ -525,7 +577,7 @@ impl<'a> Gen<'a> {
                             outcome.discharged += 1;
                             latest_discharge = latest_discharge.max(Some(ac.span.end()));
                         }
-                        Err(Refusal::Mismatch) => {
+                        Err(Refusal::Mismatch | Refusal::Tainted) => {
                             self.poison_arg_check(scope, ac);
                             outcome.failed += 1;
                         }
@@ -594,28 +646,24 @@ impl<'a> Gen<'a> {
     /// call's argument, which FCS fixes against the method's parameter
     /// ([`Scope::opaque`]).
     fn arg_check_binds_only_current_vars(&mut self, scope: &Scope, ac: ArgCheck) -> bool {
-        !self.touches_opaque(scope, ac.arg, ac.dom, ac.span)
+        !self.touches_opaque(scope, ac.arg, ac.dom)
     }
 
-    /// Whether relating `a` to `b`, at `span` in the source, could bind a
-    /// variable whose type FCS decides by something inference does not see:
-    /// one older than this binding, or one an [`Scope::opaque`] entry's
-    /// resolution mentions — unless that entry is a method argument whose
-    /// span holds `span`, a relation FCS checks before it relates the argument
-    /// to the method's parameter.
-    pub(super) fn touches_opaque(
-        &mut self,
-        scope: &Scope,
-        a: TyVid,
-        b: TyVid,
-        span: TextRange,
-    ) -> bool {
-        let roots = self.solver.relation_roots(a, b);
-        if roots.is_empty() {
-            return false;
+    /// Whether relating `a` to `b` could bind a variable whose type FCS
+    /// decides by something inference does not see: one older than this
+    /// binding, whose type FCS fixed at its own binding, or one
+    /// [tainted](Self::taint) by a relation FCS took and inference did not.
+    pub(super) fn touches_opaque(&mut self, scope: &Scope, a: TyVid, b: TyVid) -> bool {
+        let tys = self.solver.tys;
+        if self.solver.table.touches_taint(tys.var(a))
+            || self.solver.table.touches_taint(tys.var(b))
+        {
+            return true;
         }
-        let opaque = self.opaque_roots(scope);
-        self.roots_touch_opaque(scope, roots, span, &opaque)
+        let roots = self.solver.relation_roots(a, b);
+        roots
+            .into_iter()
+            .any(|v| self.solver.table.any_older_unioned(v, scope.mark))
     }
 
     /// The open variables of every [`Scope::opaque`] entry's resolution, as

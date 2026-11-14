@@ -34,6 +34,18 @@ pub(super) enum MemberAccessKind {
     },
 }
 
+/// What a wake ([`Gen::wake_member`]) made of a member access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wake {
+    /// The member was identified and its resolution recorded; its result is
+    /// bound to the member's type where that type is read.
+    Resolved,
+    /// No member is identified: the access is declined.
+    Declined,
+    /// An overload whose arguments are not yet known.
+    Retry,
+}
+
 impl<'a> Gen<'a> {
     /// Push a suspended member constraint: `recv` has an instance data member
     /// named by the token `member` whose type is `result`; the token's range is
@@ -64,9 +76,9 @@ impl<'a> Gen<'a> {
         // ([`Self::gen_member_access`]) and the method call ([`Self::infer_method_call`]).
         scope.poison.push(recv);
         scope.poison.push(result);
-        // Until the wake binds it to the member's type, the result is one FCS
-        // knows and inference does not; once bound it has no variable left.
-        scope.opaque.push((result, None));
+        // The access is settled where it is generated ([`Self::settle_access`]):
+        // the wake binds the result to the member's type, or the access is
+        // declined and its result tainted.
     }
 
     /// Generate a **data-member** access chain over a receiver variable `recv`, one
@@ -145,55 +157,56 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         callee: &Expr,
         arg: &Expr,
+        expected: Expected,
     ) -> Option<TyVid> {
         // Snapshot the emissions: everything `method_callee` and the argument
         // walk record inside the call — nodes and local binders alike — is
         // discarded below (see the doc).
         let emit_mark = self.out.mark();
-        if let Some((path, method_tok)) = self.static_callee(callee) {
-            let arg_vids = self.method_arg_vids(scope, arg);
-            // The static receiver's type is the rooting entity itself, ground at
-            // generation time.
+        let (recv, method_tok, is_static) = if let Some((path, method_tok)) =
+            self.static_callee(callee)
+        {
+            // The static receiver's type is the rooting entity itself, ground
+            // at generation time.
             let recv = self.solver.table.fresh();
             self.eq(
                 scope,
                 self.solver.tys.var(recv),
                 self.solver.tys.named_path(self.facts.env.names(), &path),
             );
-            let result = self.solver.table.fresh();
-            self.has_member(
-                scope,
-                recv,
-                &method_tok,
-                result,
-                MemberAccessKind::Method {
-                    args: arg_vids,
-                    is_static: true,
-                },
-                self.facts.node_span(arg.syntax()).end(),
-            );
-            // Discard any argument sub-expression nodes (the shared method-call
-            // rule: a method call emits nothing inside itself).
-            self.out.discard_since(emit_mark);
-            return Some(result);
-        }
-        let recorded = scope.reasons_recorded();
-        let Some((recv, method_tok)) = self.method_callee(scope, callee) else {
-            self.out.discard_since(emit_mark);
-            scope.mark_consequence(recorded, Incomplete::MethodCallee(callee.syntax().kind()));
-            return None;
+            (recv, method_tok, true)
+        } else {
+            let recorded = scope.reasons_recorded();
+            let Some((recv, method_tok)) = self.method_callee(scope, callee) else {
+                self.out.discard_since(emit_mark);
+                scope.mark_consequence(recorded, Incomplete::MethodCallee(callee.syntax().kind()));
+                return None;
+            };
+            // FCS resolves a data-member prefix of the callee
+            // (`s.Field.M(…)`) at its dot, before the arguments.
+            self.settle_access(scope);
+            // FCS looks the method up on the receiver at the dot, before its
+            // arguments: on a receiver it does not know there it reports
+            // FS0072, so nothing after is decided against it.
+            let head = self.solver.table.resolve(self.solver.tys.var(recv));
+            if matches!(self.solver.tys.kind(head), TyKind::Var(_)) {
+                scope.mark_incomplete(Incomplete::UndecidedAccess);
+            }
+            (recv, method_tok, false)
         };
-        // Walk each positional argument in **check mode**, collecting the
-        // per-argument inference variable the OV-6 overload engine reads at the
-        // wake (its length is the argument count the arity gate uses). The
-        // check-mode walk (each element against a fresh expected) both suppresses
-        // the element's node emission and poisons its generalisable parameter uses
-        // — exactly as the pre-OV-6 whole-argument check walk did (the tuple arm
-        // already walks its elements this way), so `let f x = s.CompareTo x` stays
-        // `obj -> int`, not `'a -> int`. `None` means the argument shape is not a
-        // plain positional list (a named argument, a recovery hole); the wake
-        // defers such a call. A direct unit `()` is `Some([])` (no walk, no
-        // gratuitous incompleteness — the common `s.M()` shape).
+        // FCS relates the call's return type to its expected type before it
+        // checks the arguments when the method's arity leaves one overload
+        // (`UnifyUniqueOverloading`), which inference does not know yet: so
+        // whatever the expected type holds open is tainted first.
+        self.taint_expected(scope, expected);
+        // Walk each positional argument against an unknown expected type (the
+        // parameter of the overload FCS resolves), collecting the per-argument
+        // inference variable the OV-6 overload engine reads at the wake (its
+        // length is the argument count the arity gate uses). `None` means the
+        // argument shape is not a plain positional list (a named argument, a
+        // recovery hole); the wake defers such a call. A direct unit `()` is
+        // `Some([])` (no walk, no gratuitous incompleteness — the common `s.M()`
+        // shape).
         let arg_vids = self.method_arg_vids(scope, arg);
         // Suspend the method lookup; `result` is the whole call's (return) type.
         // `has_member` poisons `recv` and `result` — an unwoken method relation must
@@ -206,13 +219,16 @@ impl<'a> Gen<'a> {
             result,
             MemberAccessKind::Method {
                 args: arg_vids,
-                is_static: false,
+                is_static,
             },
             self.facts.node_span(arg.syntax()).end(),
         );
+        // FCS resolves the overload once the arguments are checked.
+        self.settle_access(scope);
         // Discard every node emitted inside the call (receiver + argument
         // sub-expressions): a method call emits nothing inside itself (see the doc).
         self.out.discard_since(emit_mark);
+        self.relate(scope, result, expected);
         Some(result)
     }
 
@@ -369,26 +385,21 @@ impl<'a> Gen<'a> {
     /// variable carrying its type. An element that cannot be typed (a unit, or an
     /// unmodelled sub-expression) leaves an **unbound** fresh var — so the argument
     /// *count* stays exact while its type reads as Deferred at the wake — and marks
-    /// the binding walk-incomplete. The check-mode walk (a fresh expected)
-    /// suppresses the element's node emission and poisons its generalisable
-    /// parameter uses; the overload wake later resolves the variable to a ground
-    /// [`Ty`] for [`AssemblyEnv::may_apply`] / [`AssemblyEnv::must_apply`].
+    /// the binding walk-incomplete. The element is checked against an unknown
+    /// expected type ([`Expected::Unknown`]): FCS checks it against the
+    /// parameter of the overload it resolves, which may relate it before
+    /// anything inside it is checked, so whatever FCS would relate is tainted
+    /// where FCS relates it. The overload wake later resolves the variable to
+    /// a ground [`Ty`] for [`AssemblyEnv::may_apply`] /
+    /// [`AssemblyEnv::must_apply`].
     fn walk_arg_element(&mut self, scope: &mut Scope, el: &Expr) -> TyVid {
-        let expected = self.solver.table.fresh();
-        let v = match self.infer_expr(scope, el, Some(expected)) {
+        match self.infer_expr(scope, el, Expected::Unknown) {
             Some(v) => v,
             None => {
                 scope.mark_incomplete_propagated();
                 self.solver.table.fresh()
             }
-        };
-        // The relation to the parameter is not the stand-in's but unknown, so
-        // it is opaque rather than dropped.
-        scope.dropped.retain(|&(_, e, _)| e != expected);
-        scope
-            .opaque
-            .push((v, Some(self.facts.node_span(el.syntax()))));
-        v
+        }
     }
 
     /// Resolve a **method-call callee** (a member access in function position) into
@@ -425,7 +436,7 @@ impl<'a> Gen<'a> {
                 let (method, prefix) = rest.split_last()?;
                 let head_var = self.receiver_var(scope, head)?;
                 // Emit the receiver's own value node (coercion-free — synth).
-                self.emit(head.text_range(), head_var, None);
+                self.emit(head.text_range(), head_var, Expected::Synth);
                 let recv = self.chain_prefix(scope, head_var, prefix)?;
                 Some((recv, method.clone()))
             }
@@ -440,7 +451,7 @@ impl<'a> Gen<'a> {
                 // The receiver is a coercion-free (synth) sub-position — a member
                 // access never coerces its receiver — so synthesize it (emitting its
                 // own node).
-                let head_var = self.infer_expr(scope, &recv_expr, None)?;
+                let head_var = self.infer_expr(scope, &recv_expr, Expected::Synth)?;
                 let recv = self.chain_prefix(scope, head_var, prefix)?;
                 Some((recv, method.clone()))
             }
@@ -489,7 +500,7 @@ impl<'a> Gen<'a> {
         &mut self,
         scope: &mut Scope,
         li: &LongIdentExpr,
-        expected: Option<TyVid>,
+        expected: Expected,
     ) -> Option<TyVid> {
         let Some(long_ident) = li.long_ident() else {
             scope.mark_incomplete(Incomplete::Recovery);
@@ -498,10 +509,11 @@ impl<'a> Gen<'a> {
         // A module-qualified value (`List.length`), whose node FCS keys at
         // the whole path.
         if let Some(whole) = self.module_value_path(li) {
-            let uv = self.nonlocal_value_or_incomplete(scope, whole)?;
+            let uv = self.nonlocal_value_or_incomplete(scope, whole, Use::Value)?;
             if !self.facts.case_of_fields_at(whole) {
                 self.emit(whole, uv, expected);
             }
+            self.relate(scope, uv, expected);
             return Some(uv);
         }
         // An active-pattern name segment cannot be projected as a plain member
@@ -530,10 +542,14 @@ impl<'a> Gen<'a> {
         // Emit the receiver's own value node (coercion-free — synth), guarded on
         // the access resolving: FCS keeps no receiver node for a rejected one.
         self.out.open_receiver_guards(segments);
-        self.emit(head.text_range(), recv, None);
+        self.emit(head.text_range(), recv, Expected::Synth);
         self.out.close_guards(segments.len());
         let result = self.gen_member_access(scope, recv, segments)?;
+        self.settle_access(scope);
         self.emit(self.facts.node_span(li.syntax()), result, expected);
+        // FCS relates a member access to what its context expects once the
+        // access is resolved (`Propagate` stops at a dot).
+        self.relate(scope, result, expected);
         Some(result)
     }
 
@@ -546,7 +562,7 @@ impl<'a> Gen<'a> {
         &mut self,
         scope: &mut Scope,
         dg: &DotGetExpr,
-        expected: Option<TyVid>,
+        expected: Expected,
     ) -> Option<TyVid> {
         let Some(recv_expr) = dg.expr() else {
             scope.mark_incomplete(Incomplete::Recovery);
@@ -570,12 +586,14 @@ impl<'a> Gen<'a> {
         // guarded on the access resolving: FCS keeps nothing inside the receiver
         // of a rejected one.
         self.out.open_receiver_guards(&segments);
-        let recv = self.infer_expr(scope, &recv_expr, None);
+        let recv = self.infer_expr(scope, &recv_expr, Expected::Synth);
         self.out.close_guards(segments.len());
         let recv = recv?;
         self.out.dot_get_receiver(dg.syntax().text_range(), recv);
         let result = self.gen_member_access(scope, recv, &segments)?;
+        self.settle_access(scope);
         self.emit(self.facts.node_span(dg.syntax()), result, expected);
+        self.relate(scope, result, expected);
         Some(result)
     }
 
@@ -624,7 +642,7 @@ impl<'a> Gen<'a> {
         let dv = self.def_var(def);
         if !scope.is_param(def) {
             scope.poison.push(dv);
-            scope.opaque.push((dv, None));
+            self.taint(scope, self.solver.tys.var(dv));
         }
         Some(dv)
     }
@@ -708,9 +726,9 @@ impl<'a> Gen<'a> {
         result: TyVid,
         use_range: TextRange,
         kind: &MemberAccessKind,
-    ) -> bool {
+    ) -> Wake {
         let Some((type_name, namespace)) = path.split_last() else {
-            return true;
+            return Wake::Declined;
         };
         // The receiver is a non-generic `TyKind::Named`, so arity 0. A missing entity is
         // silence. The member lookup below walks this entity's base chain (Stage
@@ -731,7 +749,7 @@ impl<'a> Gen<'a> {
             .env
             .lookup_type_if_certain(namespace, type_name, 0)
         else {
-            return true;
+            return Wake::Declined;
         };
         let looked_up = match kind {
             MemberAccessKind::Data => self.facts.env.instance_data_member(handle, name),
@@ -741,7 +759,7 @@ impl<'a> Gen<'a> {
                 // member resolution recorded, since an ill-formed call has no
                 // resolution FCS would agree on).
                 let Some(arg_vids) = args else {
-                    return true;
+                    return Wake::Declined;
                 };
                 // Resolve each argument's inference variable to its (possibly still
                 // open) ground type — the applicability matcher's input.
@@ -761,7 +779,7 @@ impl<'a> Gen<'a> {
                     .ext_scope
                     .absent(self.facts.env, name, *is_static)
                 {
-                    return true;
+                    return Wake::Declined;
                 }
                 // The provably-complete intrinsic method group (§4.1(1)(2)(3)(5)),
                 // instance or static per the call shape (OV-7); an incomplete group
@@ -773,7 +791,7 @@ impl<'a> Gen<'a> {
                     self.facts.env.instance_method_group(handle, name)
                 };
                 let Some(group) = group else {
-                    return true;
+                    return Wake::Declined;
                 };
                 // **Curried-member gate** (OV-6.1; plan §5). An F# member with
                 // several argument groups (`member x.M a b`) compiles to a
@@ -793,7 +811,7 @@ impl<'a> Gen<'a> {
                 if group.iter().any(|(_, _, m)| {
                     m.signature.parameters.len() >= 2 && m.arg_group_count != Some(1)
                 }) {
-                    return true;
+                    return Wake::Declined;
                 }
                 match group.as_slice() {
                     // FCS's **single-candidate shortcut** (§2.2): one intrinsic
@@ -860,7 +878,7 @@ impl<'a> Gen<'a> {
                     // ([`AssemblyEnv::resolve_overload`]).
                     _ => {
                         if !arg_tys.iter().all(|&t| self.solver.tys.is_ground(t)) {
-                            return false;
+                            return Wake::Retry;
                         }
                         // The matcher reads each candidate's parameter types,
                         // and an IL parameter type with an erased unit of
@@ -872,7 +890,7 @@ impl<'a> Gen<'a> {
                         if !group.iter().all(|(level, _, _)| {
                             self.facts.env.member_types_keep_their_measures(*level)
                         }) {
-                            return true;
+                            return Wake::Declined;
                         }
                         self.facts
                             .env
@@ -890,7 +908,7 @@ impl<'a> Gen<'a> {
         // (Stage 3.x-inh). The member resolution is recorded under it so hover /
         // go-to-def point at the declaring type.
         let Some((decl_handle, idx, member_ty_ref)) = looked_up else {
-            return true;
+            return Wake::Declined;
         };
         // Bridge the member type before touching `self` mutably (the borrow of
         // `member_ty_ref` from `self.facts.env` would otherwise conflict with the insert
@@ -930,11 +948,25 @@ impl<'a> Gen<'a> {
         if !fsharp_field_carrier && !self.facts.env.identities_incomplete() {
             self.out.confirm_guard(use_range);
         }
+        // A `void` method's call is F#'s `unit`, which FCS types it as —
+        // unless the projection is incomplete, where the member read is not
+        // provably the one FCS binds (the seal below).
         if is_void {
-            return true;
+            if !self.facts.env.identities_incomplete() {
+                let unit = self.solver.tys.named(self.facts.env.names(), UNIT);
+                if self
+                    .solver
+                    .table
+                    .unify_atomic(self.solver.tys.var(result), unit)
+                    .is_err()
+                {
+                    scope.eq_failures += 1;
+                }
+            }
+            return Wake::Resolved;
         }
         let Some(member_ty) = member_ty else {
-            return true;
+            return Wake::Resolved;
         };
         // IL erases units of measure, so the signature read above is the
         // member's F# type only when its declaring entity's pickle says no
@@ -942,7 +974,7 @@ impl<'a> Gen<'a> {
         // types the access `float<m>`. The member's identity is known either
         // way, and stays recorded above.
         if !self.facts.env.member_types_keep_their_measures(decl_handle) {
-            return true;
+            return Wake::Resolved;
         }
         // **The seal, drawn at the door** (see [`Self::finish`]). Under an
         // incomplete projection the unread DLL could declare a colliding
@@ -955,7 +987,7 @@ impl<'a> Gen<'a> {
         // `int`. The member's *identity* is still recorded above — and sealed
         // with the rest — so the LSP can say why the type is missing.
         if self.facts.env.identities_incomplete() {
-            return true;
+            return Wake::Resolved;
         }
         if self
             .solver
@@ -965,7 +997,7 @@ impl<'a> Gen<'a> {
         {
             scope.eq_failures += 1;
         }
-        true
+        Wake::Resolved
     }
 }
 

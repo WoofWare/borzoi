@@ -2,41 +2,43 @@
 
 use super::*;
 
+/// What an application spine applies: an expression in function position, or
+/// the operator of an infix application.
+enum SpineHead {
+    Callee(Expr),
+    Operator(Expr),
+}
+
 impl<'a> Gen<'a> {
     /// Type a **modelled** (non-infix) function application `f x`, returning its
-    /// **result** variable `r` (Stage 3.2c-3). It generates the application's
-    /// constraints but records **no** node — the caller decides emission, since
-    /// whether the node is emitted depends on position: a top-level application in a
-    /// synth position emits `r`, but an application in the **function position** of
-    /// an outer application does not (FCS collapses a curried spine into one typed
-    /// node at the whole application — confirmed by probing the `types` oracle).
+    /// **result** variable `r`. It generates the application's constraints but
+    /// records **no** node — the caller decides emission, since whether the node
+    /// is emitted depends on position: a top-level application in a synth
+    /// position emits `r`, but an application in the **function position** of
+    /// an outer application does not (FCS collapses a curried spine into one
+    /// typed node at the whole application — confirmed by probing the `types`
+    /// oracle).
     ///
-    /// The function position is synthesized by [`Self::infer_callee`] (which also
-    /// records no node — FCS emits no typed node at a bare function-position use).
-    /// Fresh domain `d` and result `r` variables are created and `Eq(tf, Fun(d, r))`
-    /// is pushed — a **genuine** equality: applying an in-file value forces a
-    /// function shape (an in-file binder cannot be a method group). The argument is
-    /// walked in **check mode** against `d` via [`Self::infer_arg`], which opts the
-    /// application path *out* of the poison wrapper's automatic poison of `d`/arg —
-    /// F# relates them by *subsumption*, and 3.3c defers that relation as a
-    /// suspended [`Constraint::ArgCheck`] rather than poisoning it eagerly. `r` is
-    /// D5-safe to emit: it is fixed by the `Eq` against the function's *own* type,
-    /// independent of how the argument coerces.
+    /// The application is checked in FCS's order (`TcExprThen`, `Propagate`):
+    /// the curried spine `f a1 … an` is collected — through applications and
+    /// an infix operator, not through parentheses, which FCS checks as an
+    /// expression of their own — and its head synthesized ([`Self::infer_callee`],
+    /// no node). Then, before any argument is checked, its type is split into
+    /// `d1 -> … -> dn -> r` by genuine equalities (applying a value forces a
+    /// function shape), and `r` is related to what the application's context
+    /// expects ([`Self::relate`]); only then is each argument checked against
+    /// its domain, left to right ([`Self::infer_arg`]). So an argument that is
+    /// itself an application, `g (singleton y)`, has its result related to
+    /// `g`'s domain before `y` is checked.
     ///
     /// Application does **not** mark the binding incomplete: the construct is
-    /// modelled, and the dropped argument↔parameter relation is exactly what the
-    /// `ArgCheck` (and the deferred poison on undischarged ones) accounts for. (An
-    /// argument that itself fails to walk clears completeness via the existing
-    /// per-arm rule, which is correct — and, having no `arg` endpoint, falls back to
-    /// the 3.2c-3 eager `d`/`r` poison.)
-    ///
-    /// The polymorphic gap 3.2c-3 left open is closed by the wake (Stage 3.3c):
-    /// `let g y = id y` generalises to `'a -> 'a` because the `ArgCheck` discharges
-    /// (`id`'s domain is a scheme-instantiation var of ours, a no-subsumption
-    /// domain), grounding `y ↔ d ↔ r`. A ground `f : bool -> int` applied to any
-    /// argument still grounds `r` (a ground var is unaffected by poison). See
-    /// [`Self::solve`] for the wake rule and its completeness gate.
-    pub(super) fn infer_app(&mut self, scope: &mut Scope, app: &AppExpr) -> Option<TyVid> {
+    /// modelled. An argument that fails to walk does, in its own arm.
+    pub(super) fn infer_app(
+        &mut self,
+        scope: &mut Scope,
+        app: &AppExpr,
+        expected: Expected,
+    ) -> Option<TyVid> {
         let Some(func) = app.func() else {
             scope.mark_incomplete(Incomplete::Recovery);
             return None;
@@ -45,94 +47,143 @@ impl<'a> Gen<'a> {
             scope.mark_incomplete(Incomplete::Recovery);
             return None;
         };
-        // A **method call** `recv.Method(args)` is an application whose callee is a
-        // member access (Stage 3.3d). `infer_callee` never modelled such a callee
-        // (it always deferred), so routing it to method typing only adds coverage —
-        // no value-application emission changes.
-        // A module-qualified function (`List.map f`, `(List.map) f`) is a
-        // value, applied with value semantics, not a method call.
+        // Asked first: a prefix operator (`-a`) is a bare `LONG_IDENT_EXPR`
+        // callee, which is otherwise read as a member access. The built-in
+        // application relates its own result.
+        if let Some(r) = self.builtin_application(scope, &func, &arg, expected) {
+            return r;
+        }
+        // A **method call** `recv.Method(args)` is an application whose callee
+        // is a member access. A module-qualified function (`List.map f`,
+        // `(List.map) f`) is a value, applied with value semantics, not a
+        // method call.
+        if self.is_method_call(&func) {
+            return self.infer_method_call(scope, &func, &arg, expected);
+        }
+        let mut args = vec![arg];
+        let mut head = func;
+        let head = loop {
+            match head {
+                Expr::App(ref inner) if inner.is_infix() => {
+                    let (Some(op), Some(lhs)) = (inner.func(), inner.arg()) else {
+                        scope.mark_incomplete(Incomplete::Recovery);
+                        return None;
+                    };
+                    args.push(lhs);
+                    break SpineHead::Operator(op);
+                }
+                Expr::App(ref inner) if self.continues_spine(inner) => {
+                    let (Some(f), Some(a)) = (inner.func(), inner.arg()) else {
+                        scope.mark_incomplete(Incomplete::Recovery);
+                        return None;
+                    };
+                    args.push(a);
+                    head = f;
+                }
+                _ => break SpineHead::Callee(head),
+            }
+        };
+        args.reverse();
+        // A union case applied to its one argument relates its result by an
+        // equality FCS does not recover from (`UnifyOverallType` in
+        // `TcUnionCaseOrExnCaseOrActivePatternResultItemThen`): when it fails,
+        // the fields are never checked. A parenthesized case is an expression
+        // applied as any other is.
+        let case = matches!(&head, SpineHead::Callee(c) if args.len() == 1 && self.names_case(c));
+        let tf = match head {
+            SpineHead::Operator(op) => self.operator_value(scope, &op)?,
+            SpineHead::Callee(callee) => self.infer_callee(scope, &callee)?,
+        };
+        Some(self.apply(scope, tf, &args, expected, case))
+    }
+
+    /// Whether the callee `e` is a bare union case, by name or by qualified
+    /// path.
+    fn names_case(&self, e: &Expr) -> bool {
+        let at = match e {
+            Expr::Ident(ident) => ident.ident().map(|t| t.text_range()),
+            Expr::LongIdent(li) => self.module_value_path(li),
+            _ => None,
+        };
+        at.is_some_and(|at| self.is_case_at(at))
+    }
+
+    /// Whether the application `inner`, in the function position of another,
+    /// is a link of the same curried spine — a plain value application, as
+    /// opposed to a bracket indexer, a method call or a built-in operator's
+    /// application, which are checked as expressions of their own.
+    fn continues_spine(&self, inner: &AppExpr) -> bool {
+        if inner.is_infix() || inner.is_bracket_indexer() {
+            return false;
+        }
+        let (Some(func), Some(arg)) = (inner.func(), inner.arg()) else {
+            return false;
+        };
+        !self.is_method_call(&func) && !self.is_builtin_application(&func, &arg)
+    }
+
+    /// Whether an application whose function position is `func` is a method
+    /// call: a member access that is not a module-qualified value.
+    fn is_method_call(&self, func: &Expr) -> bool {
         let module_value = matches!(
             unparenthesize(func.clone()),
             Some(Expr::LongIdent(li)) if self.module_value_path(&li).is_some()
         );
-        // Asked first: a prefix operator (`-a`) is a bare `LONG_IDENT_EXPR`
-        // callee, which is otherwise read as a member access.
-        if let Some(r) = self.builtin_application(scope, &func, &arg) {
-            return r;
-        }
-        if !module_value && is_member_access_callee(&func) {
-            return self.infer_method_call(scope, &func, &arg);
-        }
-        // Synthesize the function position (no node emitted).
-        let tf = self.infer_callee(scope, &func)?;
-        Some(self.apply(scope, tf, &arg))
+        !module_value && is_member_access_callee(func)
     }
 
-    /// Apply a synthesized function `tf` to `arg`: the half of
-    /// [`Self::infer_app`] after the callee, shared with the infix operator
-    /// application ([`Self::infer_infix`]). Returns the result variable.
-    fn apply(&mut self, scope: &mut Scope, tf: TyVid, arg: &Expr) -> TyVid {
-        let d = self.solver.table.fresh();
-        let r = self.solver.table.fresh();
-        // Genuinely true: applying `func` forces it to a function shape.
-        self.eq(
-            scope,
-            self.solver.tys.var(tf),
-            self.solver
-                .tys
-                .fun(self.solver.tys.var(d), self.solver.tys.var(r)),
-        );
-        // The argument is a check position against the domain `d`, so it is walked
-        // in check mode (its node is not emitted) — but **without** the poison
-        // wrapper's automatic poison of `d`/arg ([`Self::infer_arg`]). Stage 3.3c
-        // replaces that eager poison with a *suspended* `ArgCheck`: the dropped
-        // subsumption relation is discharged as a genuine `Eq(arg, d)` when it is
-        // provably coercion-free (a walk-complete binding and a no-subsumption
-        // domain), and only poisoned if it stays undischarged. The argument's var,
-        // if we could synthesize one, is the `ArgCheck`'s `arg` endpoint.
-        let arg_var = self.infer_arg(scope, arg, d);
-        match arg_var {
-            Some(arg_var) => {
-                // Suspend the arg↔param relation. `solve` wakes it (a complete
-                // binding + a no-subsumption `d`) or, failing that, poisons
-                // `arg`/`d`/`r` — so an unwoken relation never generalises anything.
-                self.solver.constraints.push(Constraint::ArgCheck(ArgCheck {
-                    arg: arg_var,
-                    dom: d,
-                    r,
-                    span: self.facts.node_span(arg.syntax()),
-                }));
+    /// Apply a synthesized function `tf` to `args` in FCS's order: split its
+    /// type over every argument, relate the result to `expected`, then check
+    /// each argument against its domain — unless `tf` is a union `case`
+    /// whose result failed that relation, whose fields FCS then never checks.
+    /// Returns the result variable.
+    fn apply(
+        &mut self,
+        scope: &mut Scope,
+        tf: TyVid,
+        args: &[Expr],
+        expected: Expected,
+        case: bool,
+    ) -> TyVid {
+        let tys = self.solver.tys;
+        let mut f = tf;
+        let mut domains = Vec::with_capacity(args.len());
+        for _ in args {
+            let d = self.solver.table.fresh();
+            let r = self.solver.table.fresh();
+            // Genuinely true: applying `f` forces it to a function shape. But
+            // a tainted unbound `f` (an earlier binding's open value, say) has
+            // a type FCS may know: it is not given this shape, and what the
+            // shape would relate is tainted with it. A tainted `f` that has
+            // a function shape already splits by unions, which bind nothing
+            // tainted.
+            let fr = self.solver.table.resolve(tys.var(f));
+            if scope.complete
+                && matches!(tys.kind(fr), TyKind::Var(_))
+                && self.solver.table.touches_taint(fr)
+            {
+                self.taint(scope, tys.var(d));
+                self.taint(scope, tys.var(r));
+            } else {
+                self.eq(scope, tys.var(f), tys.fun(tys.var(d), tys.var(r)));
             }
-            None => {
-                // The argument did not synthesize a variable (an unmodelled
-                // shape — the arg's own recursion already marked incomplete). There
-                // is no `arg` endpoint to relate, so fall back to the 3.2c-3 eager
-                // poison of `d`/`r`: an unwoken relation must not let either
-                // generalise. A *ground* `r` (a ground function's result) is
-                // unaffected, so ground payoffs still emit.
-                scope.poison.push(d);
-                scope.poison.push(r);
-            }
+            domains.push(d);
+            f = r;
         }
-        r
+        if self.relate(scope, f, expected) == Some(Decision::Failed) && case {
+            return f;
+        }
+        for (arg, d) in args.iter().zip(domains) {
+            self.infer_arg(scope, arg, d);
+        }
+        f
     }
 
-    /// The partial application `OP lhs` inside an infix application
-    /// `lhs OP rhs` — the parser's `App(App(OP, lhs), rhs)`, whose inner
-    /// application `inner` is marked infix — returning its result variable,
-    /// which the outer application applies to `rhs`. FCS checks the two
-    /// exactly as it checks `OP lhs rhs`: an application of the operator's
-    /// value, the left operand first. So this is [`Self::apply`] over the
-    /// operator's value ([`Self::operator_value`]), and the outer application
-    /// is an ordinary one; neither records a node inside the application, as
-    /// for any curried call.
-    fn infer_infix(&mut self, scope: &mut Scope, inner: &AppExpr) -> Option<TyVid> {
-        let (Some(op), Some(lhs)) = (inner.func(), inner.arg()) else {
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
-        };
-        let tf = self.operator_value(scope, &op)?;
-        Some(self.apply(scope, tf, &lhs))
+    /// Check an application's argument against its domain `d`
+    /// ([`Expected::Known`]): the relation is taken where FCS takes it inside
+    /// the argument ([`Self::infer_expr`]).
+    pub(super) fn infer_arg(&mut self, scope: &mut Scope, arg: &Expr, d: TyVid) -> Option<TyVid> {
+        self.infer_expr(scope, arg, Expected::Known(d))
     }
 
     /// The type variable of an infix operator's value, as [`Self::infer_callee`]
@@ -176,7 +227,7 @@ impl<'a> Gen<'a> {
             }
             return Some(self.value_use(scope, def));
         }
-        match self.nonlocal_value_use(scope, tok.text_range()) {
+        match self.nonlocal_value_use(scope, tok.text_range(), Use::Applied) {
             Ok(v) => Some(v),
             Err(why) => {
                 let why = match why {
@@ -191,41 +242,6 @@ impl<'a> Gen<'a> {
                 scope.mark_incomplete(why);
                 None
             }
-        }
-    }
-
-    /// Walk a modelled application's **argument** in check mode against the
-    /// domain `d`, returning its synthesized variable, but **suppressing** the
-    /// [`Self::infer_expr`] poison wrapper's poison of the top-level arg↔`d`
-    /// relation (Stage 3.3c). At an application site that relation is not poisoned
-    /// eagerly; it becomes a suspended [`Constraint::ArgCheck`] the solver may
-    /// later discharge. Every *other* check site keeps the wrapper's poison — only
-    /// this application path opts out.
-    ///
-    /// Two shapes get the opt-out, since they preserve the "this whole thing is the
-    /// argument" position transparently:
-    /// - **Parentheses** — peeled and recursed as an argument (a member access
-    ///   never coerces its receiver; a paren never coerces its content), so
-    ///   `id (id x)`'s inner application relates its result to the outer domain via
-    ///   an `ArgCheck`, not the wrapper's poison.
-    /// - **A nested application** in argument position — `infer_construct`'s
-    ///   `App` arm ([`Self::infer_app`]) already suspends its *own* arg and returns
-    ///   its result without emitting a node.
-    ///
-    /// Any other argument shape recurses through [`Self::infer_expr_inner`] once,
-    /// so its *sub*-positions (e.g. a tuple's elements, an `if`'s branches) keep
-    /// the wrapper's poison — the subsumption dropped *there* is genuinely eager;
-    /// only the top-level arg↔`d` relation is deferred.
-    pub(super) fn infer_arg(&mut self, scope: &mut Scope, arg: &Expr, d: TyVid) -> Option<TyVid> {
-        match arg {
-            Expr::Paren(p) => match p.inner() {
-                Some(inner) => self.infer_arg(scope, &inner, d),
-                None => {
-                    scope.mark_incomplete(Incomplete::Recovery);
-                    None
-                }
-            },
-            _ => self.infer_expr_inner(scope, arg, Some(d)),
         }
     }
 
@@ -273,10 +289,8 @@ impl<'a> Gen<'a> {
             // `App` in the callee spine is unmodelled (⇒ the catch-all below
             // marks incomplete and the whole application defers).
             Expr::App(inner) if !inner.is_infix() && !inner.is_bracket_indexer() => {
-                self.infer_app(scope, inner)
+                self.infer_app(scope, inner, Expected::Synth)
             }
-            // The operator applied to its left operand, inside `lhs OP rhs`.
-            Expr::App(inner) if inner.is_infix() => self.infer_infix(scope, inner),
             // A value/function reference: mirror the ident arm's resolution, but
             // *do not* emit a node.
             Expr::Ident(ident) => {
@@ -289,7 +303,11 @@ impl<'a> Gen<'a> {
                     .def_at(tok.text_range())
                     .filter(|_| !self.facts.own_union_case_at(tok.text_range()));
                 let Some(def) = def else {
-                    return self.nonlocal_value_or_incomplete(scope, tok.text_range());
+                    return self.nonlocal_value_or_incomplete(
+                        scope,
+                        tok.text_range(),
+                        Use::Applied,
+                    );
                 };
                 if self.declines_use(scope, def) {
                     return None;
@@ -298,7 +316,7 @@ impl<'a> Gen<'a> {
             }
             // A module-qualified value (`List.map f`).
             Expr::LongIdent(li) => match self.module_value_path(li) {
-                Some(whole) => self.nonlocal_value_or_incomplete(scope, whole),
+                Some(whole) => self.nonlocal_value_or_incomplete(scope, whole, Use::Applied),
                 None => {
                     scope.mark_incomplete(Incomplete::CalleeShape(e.syntax().kind()));
                     None

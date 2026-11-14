@@ -115,6 +115,18 @@ const CASES: &[(&str, &str, &str)] = &[
          and not to the variable its uses read",
     ),
     (
+        "declared-variable-fixed-by-a-check",
+        "let r11<'a> (x: 'a) = gi x",
+        "the check of `x` against `int` fixes the declared `'a`, which FCS rejects \
+         (FS0670 or FS0064): nothing of the declaration may be published",
+    ),
+    (
+        "declared-variable-beside-a-failed-check",
+        "let r12<'a> (x: 'a) = (gi \"s\", gi (both x 1))",
+        "a check failing between ground types, with no other check discharged \
+         before it, then one that fixes the declared `'a` through `both`",
+    ),
+    (
         "branch-relates-before-its-arguments",
         "let c1 b p = ((if b then \"s\" else both p (gi p)), p)",
         "FCS relates the else-branch's result to `string` before checking its \

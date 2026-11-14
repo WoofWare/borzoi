@@ -178,14 +178,16 @@ fn annotated_and_bare_parameters_compose() {
     );
     assert_eq!(assert_binder_sound(source), 2);
 
-    // The branch-tuple variant `if b then (1, x) else (2, x)` keeps `x` in a
-    // check-mode else branch, whose dropped relation poisons it — so the
-    // function defers (silence, where FCS generalises the same scheme). A
-    // poison-rule refinement could lift this; the pin is that nothing *wrong*
-    // is emitted.
-    let deferred = "module M\nlet f (b: bool) x = if b then (1, x) else (2, x)\n";
-    assert_eq!(binder_render(deferred, "f"), None);
-    assert_binder_sound(deferred);
+    // The branch-tuple variant `if b then (1, x) else (2, x)`: the `else`
+    // branch is checked against the type the `then` branch fixed, an equality
+    // between `(int * 'a)` and `(int * 'a)` taken where FCS takes it, so the
+    // same scheme.
+    let branches = "module M\nlet f (b: bool) x = if b then (1, x) else (2, x)\n";
+    assert_eq!(
+        binder_render(branches, "f").as_deref(),
+        Some("System.Boolean -> 'a -> System.Int32 * 'a")
+    );
+    assert_eq!(assert_binder_sound(branches), 2);
 }
 
 /// The ill-typed-condition counterpart of the R2-a ill-typed-RHS differential:
@@ -255,15 +257,24 @@ fn parameter_and_return_annotations_compose() {
     assert_eq!(assert_binder_sound(source), 2);
 }
 
-/// The `obj` defer pin: `let f x : obj = x` is legal via subsumption
-/// (FCS: `obj -> obj`), but the dropped body↔annotation relation must not
-/// ground `x` — the wake's no-subsumption gate excludes `obj`, the
-/// undischarged check poisons `x`, and `f` defers. Nothing wrong is emitted.
+/// `let f x : obj = x`: the body is checked against `obj`, and FCS's relation
+/// there tries the equality first, which an open `x` satisfies — `obj ->
+/// obj`. A coercion would have been FCS's only had `x` been known otherwise
+/// at that point (`let f (x: string) : obj = x` is `string -> obj`).
 #[test]
-fn subsumption_return_annotation_defers() {
+fn return_annotation_relates_an_open_body_by_equality() {
     let source = "module M\nlet f x : obj = x\n";
-    assert_eq!(binder_render(source, "f"), None);
-    assert_eq!(assert_binder_sound(source), 0);
+    assert_eq!(
+        binder_render(source, "f").as_deref(),
+        Some("System.Object -> System.Object")
+    );
+    assert_binder_sound(source);
+    let coerced = "module M\nlet f (x: string) : obj = x\n";
+    assert_eq!(
+        binder_render(coerced, "f").as_deref(),
+        Some("System.String -> System.Object")
+    );
+    assert_binder_sound(coerced);
 }
 
 /// A subsumption-possible return annotation still emits when the parameter
@@ -472,17 +483,29 @@ fn unused_parameter_generalises_over_ground_return() {
     assert_eq!(assert_binder_sound(source), 1);
 }
 
+/// The `else` branch is checked against the `then` branch's type, an
+/// equality FCS takes before anything in the branch: `let f c x = if c then x
+/// else x` is `bool -> 'a -> 'a`.
+#[test]
+fn an_else_branch_related_to_an_open_then_branch_generalises() {
+    let source = "module M\nlet f c x = if c then x else x\n";
+    assert_eq!(
+        binder_render(source, "f").as_deref(),
+        Some("System.Boolean -> 'a -> 'a")
+    );
+    assert_binder_sound(source);
+}
+
 /// Defer cases stay silent (nothing wrong emitted): an unmodelled body
-/// (`let f x = x + 1`), a poisoned parameter (`let f c x = if c then x else x`),
-/// and a compound condition (`let f x y = if x && y then 1 else 2`). Each is a
-/// case where FCS grounds or relates a variable through a constraint we drop, so
-/// we must not generalise — `assert_binder_sound` confirms we say nothing.
+/// (`let f x = x + 1`) and a compound condition (`let f x y = if x && y then 1
+/// else 2`). Each is a case where FCS grounds or relates a variable through a
+/// constraint we drop, so we must not generalise — `assert_binder_sound`
+/// confirms we say nothing.
 #[test]
 fn generalisation_defer_cases_stay_silent() {
     let env = crate::common::full_bcl_env();
     for source in [
         "module M\nlet f x = x + 1\n",
-        "module M\nlet f c x = if c then x else x\n",
         "module M\nlet f x y = if x && y then 1 else 2\n",
     ] {
         let (_, inferred) = resolve_and_infer(source);

@@ -4,6 +4,32 @@
 use super::*;
 
 impl<'a> Gen<'a> {
+    /// [`is_sealed`], knowing which of the file's own types are unions or
+    /// records ([`FileFacts::sealed_project_types`]), which F# seals.
+    fn is_sealed_here(&self, ty: Ty) -> bool {
+        if is_sealed(self.facts.env, self.solver.tys, ty) {
+            return true;
+        }
+        match self.solver.tys.kind(ty) {
+            TyKind::Project { path, args } => self
+                .facts
+                .sealed_project_types
+                .get(path)
+                .is_some_and(|arities| arities.contains(&args.len())),
+            _ => false,
+        }
+    }
+}
+
+/// How a value is used: as a value, or in an application's function
+/// position, where a union case's fields are flexible ([`Gen::case_use`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Use {
+    Value,
+    Applied,
+}
+
+impl<'a> Gen<'a> {
     /// Whether a use of the in-file binder `def` is left untyped, marking the
     /// binding incomplete for why: F# may reject the use for the binder's
     /// attributes ([`FileFacts::use_may_be_rejected`]), or the binder is a function
@@ -48,18 +74,13 @@ impl<'a> Gen<'a> {
         &mut self,
         scope: &mut Scope,
         at: TextRange,
+        how: Use,
     ) -> Result<TyVid, Incomplete> {
+        if self.is_case_at(at) {
+            return self.case_use(scope, at, how);
+        }
         let (parent, idx) = match self.facts.resolved.resolution_at(at) {
             Some(Resolution::Member { parent, idx }) => (parent, idx),
-            Some(Resolution::Item(id))
-                if self.facts.own_union_cases.contains(&id)
-                    || self.facts.preceding.case(id).is_some() =>
-            {
-                return self.case_use(scope, at);
-            }
-            Some(Resolution::Local(_)) if self.facts.own_union_case_at(at) => {
-                return self.case_use(scope, at);
-            }
             Some(Resolution::Item(id)) if !self.facts.resolved.owns_item(id) => {
                 let ty = *self
                     .facts
@@ -68,7 +89,6 @@ impl<'a> Gen<'a> {
                     .map_err(Incomplete::PrecedingValue)?;
                 return Ok(self.scheme_use(scope, self.facts.env.types(), ty));
             }
-            Some(Resolution::UnionCase { .. }) => return self.case_use(scope, at),
             _ => return Err(Incomplete::NotInFileValue),
         };
         let scheme = match self.facts.env.member_at(parent, idx) {
@@ -79,24 +99,80 @@ impl<'a> Gen<'a> {
         Ok(self.constrained_scheme_use(scope, &scheme))
     }
 
+    /// Whether the use at `at` is of a union case, which
+    /// [`Self::nonlocal_value_use`] reads as a case ([`Self::case_use`]).
+    pub(super) fn is_case_at(&self, at: TextRange) -> bool {
+        match self.facts.resolved.resolution_at(at) {
+            Some(Resolution::Item(id)) => {
+                self.facts.own_union_cases.contains(&id) || self.facts.preceding.case(id).is_some()
+            }
+            Some(Resolution::Local(_)) => self.facts.own_union_case_at(at),
+            Some(Resolution::UnionCase { .. }) => true,
+            _ => false,
+        }
+    }
+
     /// The type variable of a use of the case the resolver reads at `at`
     /// ([`FileFacts::case_at`]), as a value: the union for a nullary case (`None`), else the
     /// function from its field, or the tuple of its fields, to the union
     /// (`Some`, `UPair`), each of the union's type parameters instantiated
     /// fresh. Unlike a value's use, a case's is not loosened
     /// (`MakeApplicableExprWithFlex` is `TcVal`'s): unapplied, FCS
-    /// eta-expands it at exactly its field types (`UObj` is `obj -> UObj`),
-    /// and applied, it checks each argument against an unsealed field by
-    /// coercion (`TcExprsWithFlexes`), which an application's argument check
-    /// reproduces — as `infer_union_case_diff`'s unsealed and many-field rows
-    /// hold it to.
-    fn case_use(&mut self, scope: &mut Scope, at: TextRange) -> Result<TyVid, Incomplete> {
+    /// eta-expands it at exactly its field types (`UObj` is `obj -> UObj`).
+    /// Applied, it checks each argument against a fresh flexible type wherever
+    /// the instantiated field type is not a type variable (`TcExprsWithFlexes`,
+    /// flexes computed before the case's result meets its expected type), a
+    /// subtype of the field's type: so the applied case's fields are loosened
+    /// as a value's parameters are ([`Self::loosened`]), and its result is then
+    /// related as any application's is.
+    fn case_use(
+        &mut self,
+        scope: &mut Scope,
+        at: TextRange,
+        how: Use,
+    ) -> Result<TyVid, Incomplete> {
         let (_, scheme) = self.facts.case_at(at)?;
         let env_tys = self.facts.env.types();
-        let ty = self.solver.instantiate(env_tys, scheme.value_ty(env_tys));
+        let mut ty = self.solver.instantiate(env_tys, scheme.value_ty(env_tys));
+        if how == Use::Applied {
+            ty = self.flexible_fields(scope, ty, scheme.fields.len());
+        }
         let uv = self.solver.table.fresh();
         self.eq(scope, self.solver.tys.var(uv), ty);
         Ok(uv)
+    }
+
+    /// An applied case's type `ty` (`field -> union`, or `f1 * … * fn ->
+    /// union` for `n` fields) with each field whose type is not sealed
+    /// replaced by a flexible variable, as [`Self::loosened`] replaces a
+    /// value's parameter: one field is one field, even when its type is a
+    /// tuple (`U of (obj * int)`), which is sealed.
+    fn flexible_fields(&mut self, scope: &mut Scope, ty: Ty, n: usize) -> Ty {
+        let tys = self.solver.tys;
+        let TyKind::Fun { arg, ret } = *tys.kind(ty) else {
+            return ty;
+        };
+        let fields: Vec<Ty> = match (n, tys.kind(arg)) {
+            (1, _) => vec![arg],
+            (_, TyKind::Tuple(elems)) if elems.len() == n => elems.to_vec(),
+            _ => return ty,
+        };
+        let flexed: Vec<Ty> = fields
+            .into_iter()
+            .map(|f| {
+                if self.is_sealed_here(f) {
+                    return f;
+                }
+                let v = self.solver.table.fresh();
+                scope.poison.push(v);
+                if !tys.is_named(self.facts.env.names(), f, &OBJECT_PATH) {
+                    scope.bounded_flex.push(v);
+                }
+                tys.var(v)
+            })
+            .collect();
+        let arg = if n == 1 { flexed[0] } else { tys.tuple(flexed) };
+        tys.fun(arg, ret)
     }
 
     /// [`Self::scheme_use`] over a module function's reading: each type
@@ -183,8 +259,9 @@ impl<'a> Gen<'a> {
         &mut self,
         scope: &mut Scope,
         at: TextRange,
+        how: Use,
     ) -> Option<TyVid> {
-        match self.nonlocal_value_use(scope, at) {
+        match self.nonlocal_value_use(scope, at, how) {
             Ok(v) => Some(v),
             Err(why) => {
                 scope.mark_incomplete(why);
@@ -226,23 +303,35 @@ impl<'a> Gen<'a> {
         let match_local = scope.match_locals.contains(&def);
         let current_param = scope.is_param(def) || match_local;
         if !current_param {
+            self.taint(scope, self.solver.tys.var(dv));
             scope.poison.push(dv);
-            scope.opaque.push((dv, None));
         }
+        // FCS loosens the use by the type it knows there: a variable is
+        // sealed, so an unbound one loosens to itself, and anything with
+        // shape — even partly open — loosens as resolved. While the prefix is
+        // faithful and the variable untainted, what is known here is what FCS
+        // knows; otherwise it is not, and the use is the binder's tainted
+        // variable, which nothing decides through.
         let known = match self.binders.param_annotation(def) {
             Some(ann) => Some(ann),
-            // A match's pattern variable is typed by its pattern before its
-            // clause is walked: a use of one whose type is known then is
-            // loosened as FCS loosens it (`Some g -> g` with
-            // `g : obj -> int` is `'a -> int` at the use).
-            None if match_local => Some(self.solver.table.resolve(self.solver.tys.var(dv)))
-                .filter(|&t| self.solver.tys.is_ground(t)),
-            None if current_param => None,
-            None => Some(self.solver.table.resolve(self.solver.tys.var(dv)))
-                .filter(|&t| self.solver.tys.is_ground(t)),
+            None => {
+                let resolved = self.solver.table.resolve(self.solver.tys.var(dv));
+                let ground = self.solver.tys.is_ground(resolved);
+                let tainted = !ground
+                    && (!scope.complete
+                        || !current_param
+                        || self.solver.table.touches_taint(resolved));
+                if tainted {
+                    self.taint(scope, resolved);
+                    None
+                } else if matches!(self.solver.tys.kind(resolved), TyKind::Var(_)) {
+                    None
+                } else {
+                    Some(resolved)
+                }
+            }
         };
         let Some(known) = known else {
-            scope.undecided_uses.push(dv);
             return dv;
         };
         match self.loosened(scope, known) {
@@ -276,11 +365,10 @@ impl<'a> Gen<'a> {
             TyKind::Tuple(elems) => elems.to_vec(),
             _ => vec![group],
         };
-        if groups.iter().all(|&g| {
-            elements(g)
-                .iter()
-                .all(|&e| is_sealed(self.facts.env, tys, e))
-        }) {
+        if groups
+            .iter()
+            .all(|&g| elements(g).iter().all(|&e| self.is_sealed_here(e)))
+        {
             return None;
         }
         let mut loosened = Vec::new();
@@ -288,7 +376,7 @@ impl<'a> Gen<'a> {
             let mut elems: Vec<Ty> = elements(group)
                 .into_iter()
                 .map(|e| {
-                    if is_sealed(self.facts.env, tys, e) {
+                    if self.is_sealed_here(e) {
                         return e;
                     }
                     let v = self.solver.table.fresh();

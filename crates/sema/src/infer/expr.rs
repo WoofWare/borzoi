@@ -5,57 +5,40 @@ use super::*;
 
 impl<'a> Gen<'a> {
     /// Synthesize the type variable of expression `e`, generating its
-    /// constraints, in **bidirectional** style. `expected` is the type the
-    /// surrounding context demands and acts here as a *mode flag*:
+    /// constraints, in **bidirectional** style, against what its context
+    /// expects ([`Expected`]):
     ///
-    /// - `None` — *synth mode*, a **coercion-free** position (the bare `let` RHS,
-    ///   an unannotated tuple element, an `if` *then*-branch). No expected type
-    ///   reaches the expression, so its elaborated type *is* its synthesized
-    ///   type, and the node is **recorded** for emission.
-    /// - `Some(exp)` — *check mode*, a coercion-**possible** position (an `if`
-    ///   *else*-branch against the result; a check-mode tuple's elements; later,
-    ///   a function argument against the parameter). The node is **not** recorded
-    ///   — its elaborated type may be a coercion of the synthesized type, which
-    ///   this stage cannot model (no subtype relation yet), so emitting the
-    ///   synthesized type could be wrong (D5). Crucially the variable is **not**
-    ///   unified with `exp`: with no subtype relation a cross-constraint could
-    ///   only force *equality*, which would either wrongly reject a legal
-    ///   coercion or, on an unbound `exp`, back-flow a coerced type onto a binder.
-    ///   So check mode today *only* suppresses emission and propagates the mode to
-    ///   children; the threaded `exp` is inert payload, reserved for the future.
+    /// - [`Expected::Synth`] — a **coercion-free** position (the bare `let`
+    ///   RHS, an unannotated tuple element, an `if` *then*-branch). No expected
+    ///   type reaches the expression, so its elaborated type *is* its
+    ///   synthesized type, and the node is **recorded** for emission.
+    /// - [`Expected::Known`] / [`Expected::Unknown`] — a *check* position (a
+    ///   function argument against the domain, an `else` branch against the
+    ///   result, a method argument against the parameter). The node is **not**
+    ///   recorded: its elaborated type may be a coercion of the synthesized one.
+    ///   The relation to the expected type is taken where FCS takes it, by
+    ///   each form ([`Self::relate`]).
     ///
-    /// The recursive traversal, the per-construct constraints, and the `expected`
-    /// threading are the permanent HM spine. When subtype-aware checking lands,
-    /// check mode is *completed* (not replaced): `exp` becomes a real expected
-    /// type, the variable is related to it by subtyping, and the coerced `exp` is
-    /// emitted when the synthesized type is a subtype.
-    ///
-    /// This wrapper adds the **poison** step (Stage 3.2c-2c): a check-mode call
-    /// (`expected.is_some()`) drops the relation between the checked expression and
-    /// its expected type, which FCS keeps — so poison both endpoints (the expected
-    /// and returned variables). Centralising it here means every present and future
-    /// check site inherits it, so a variable FCS might ground through a dropped
-    /// relation is never wrongly generalised.
+    /// A check-position form that does not synthesize a variable (an
+    /// unmodelled one, which ends the prefix where it is met) leaves its
+    /// expected variable related by nothing FCS's derivation lacks, but poisoned
+    /// so it does not generalise.
     pub(super) fn infer_expr(
         &mut self,
         scope: &mut Scope,
         e: &Expr,
-        expected: Option<TyVid>,
+        expected: Expected,
     ) -> Option<TyVid> {
         let result = self.infer_expr_inner(scope, e, expected);
-        if let Some(exp) = expected {
-            scope.poison.push(exp);
-            if let Some(r) = result {
-                scope.poison.push(r);
-                scope
-                    .dropped
-                    .push((r, exp, self.facts.node_span(e.syntax())));
-            }
+        if result.is_none()
+            && let Some(d) = expected.target()
+        {
+            scope.poison.push(d);
         }
         result
     }
 
-    /// [`Self::infer_expr`] without its poison wrapper: the per-construct rules
+    /// [`Self::infer_expr`] without its poison: the per-construct rules
     /// ([`Self::infer_construct`]), with a **check-mode subtree recording
     /// nothing**.
     ///
@@ -72,34 +55,36 @@ impl<'a> Gen<'a> {
         &mut self,
         scope: &mut Scope,
         e: &Expr,
-        expected: Option<TyVid>,
+        expected: Expected,
     ) -> Option<TyVid> {
         self.out.enter_expression();
-        let result = match expected {
-            None => self.infer_construct(scope, e, None),
-            Some(_) => {
-                let mark = self.out.mark();
-                let result = self.infer_construct(scope, e, expected);
-                self.out.discard_since(mark);
-                result
-            }
+        self.note_lost_prefix(scope);
+        let result = if expected.records() {
+            self.infer_construct(scope, e, expected)
+        } else {
+            let mark = self.out.mark();
+            let result = self.infer_construct(scope, e, expected);
+            self.out.discard_since(mark);
+            result
         };
         self.out.leave_expression();
         result
     }
 
     /// The per-construct generation rules (the body of [`Self::infer_expr`],
-    /// without its poison wrapper or [`Self::infer_expr_inner`]'s check-mode
+    /// without its poison or [`Self::infer_expr_inner`]'s check-mode
     /// barrier). Every arm that returns `None` because a sub-expression is
     /// unmodelled, and every unwalked child, marks the binding walk-incomplete
-    /// ([`Scope::mark_incomplete`]) — the seed of Stage 3.2c-2c's generalisation
-    /// gate. (Ground emission is unaffected: it does not read the completeness
-    /// flag.)
+    /// ([`Scope::mark_incomplete`]), which ends its faithful prefix there:
+    /// such an arm marks it *before* walking anything beneath it, so no
+    /// decision below is taken against a relation FCS took and inference
+    /// skipped. Each arm relates its type to `expected` where FCS does
+    /// ([`Self::relate`]).
     fn infer_construct(
         &mut self,
         scope: &mut Scope,
         e: &Expr,
-        expected: Option<TyVid>,
+        expected: Expected,
     ) -> Option<TyVid> {
         match e {
             // A bare literal. A measure literal (`1.0<kg>`) is an
@@ -124,6 +109,7 @@ impl<'a> Gen<'a> {
                 } else if let Some(lit) = c.literal() {
                     self.emit(lit.text_range(), v, expected);
                 }
+                self.relate(scope, v, expected);
                 Some(v)
             }
             // A value use: its type is the referenced binder's. In synth mode the
@@ -146,10 +132,12 @@ impl<'a> Gen<'a> {
                     // A referenced assembly's value, read off its signature, or
                     // a union case; anything else that is not an in-file binder
                     // (a preceding file's, a deferred name) is unmodelled.
-                    let uv = self.nonlocal_value_or_incomplete(scope, tok.text_range())?;
+                    let uv =
+                        self.nonlocal_value_or_incomplete(scope, tok.text_range(), Use::Value)?;
                     if !self.facts.case_of_fields_at(tok.text_range()) {
                         self.emit(tok.text_range(), uv, expected);
                     }
+                    self.relate(scope, uv, expected);
                     return Some(uv);
                 };
                 if self.declines_use(scope, def) {
@@ -157,6 +145,7 @@ impl<'a> Gen<'a> {
                 }
                 let uv = self.value_use(scope, def);
                 self.emit(tok.text_range(), uv, expected);
+                self.relate(scope, uv, expected);
                 Some(uv)
             }
             // Parentheses are transparent: the type, position (so `expected`
@@ -178,6 +167,13 @@ impl<'a> Gen<'a> {
             // An element we can't type becomes a fresh unbound var, so the *tuple*
             // is omitted (not ground) while typeable synth-mode elements emit.
             // (3.2b-2, mode propagation 3.2c-1)
+            //
+            // Against a known expected type FCS splits it before checking the
+            // elements (`TcExprTuple`) when it is a tuple or a variable, so
+            // each element is checked against its element type; against any
+            // other it checks the tuple on its own and relates it at the end
+            // ([`Self::tuple_element_expectations`]). Under an unknown
+            // expected type each element's is unknown too.
             Expr::Tuple(t) => {
                 // Struct tuples (`struct (a, b)`) have a distinct runtime type
                 // and canonical rendering; defer them (unmodelled).
@@ -185,13 +181,15 @@ impl<'a> Gen<'a> {
                     scope.mark_incomplete(Incomplete::StructTuple);
                     return None;
                 }
+                let arity = t.elements().count();
+                let (elem_expected, relate_at_end) =
+                    self.tuple_element_expectations(scope, expected, arity);
                 let elems: Vec<Ty> = t
                     .elements()
-                    .map(|el| {
-                        // Propagate the tuple's mode: synth elements when the tuple
-                        // is synth, otherwise a fresh per-element expected (check —
-                        // suppresses the element's emission).
-                        let elem_expected = expected.map(|_| self.solver.table.fresh());
+                    .enumerate()
+                    .map(|(i, el)| {
+                        let elem_expected =
+                            elem_expected.get(i).copied().unwrap_or(Expected::Unknown);
                         match self.infer_expr(scope, &el, elem_expected) {
                             Some(v) => self.solver.tys.var(v),
                             None => {
@@ -214,6 +212,9 @@ impl<'a> Gen<'a> {
                 let tv = self.solver.table.fresh();
                 self.eq(scope, self.solver.tys.var(tv), self.solver.tys.tuple(elems));
                 self.emit(self.facts.node_span(t.syntax()), tv, expected);
+                if relate_at_end {
+                    self.relate(scope, tv, expected);
+                }
                 Some(tv)
             }
             // `if c then a else b`: F# uses the *then*-branch's type as the result
@@ -240,7 +241,7 @@ impl<'a> Gen<'a> {
                 // grounds a parameter used directly as a condition (3.2c-2b).
                 self.constrain_bool(scope, if_expr.condition());
                 match expected {
-                    None => {
+                    Expected::Synth => {
                         // An `if` with no final `else` desugars to `else ()`
                         // (result `unit`), which this stage does not model — defer,
                         // and mark incomplete (its then-branch's true type is a
@@ -255,21 +256,74 @@ impl<'a> Gen<'a> {
                         };
                         // A then-branch that cannot synthesize leaves the `if`'s
                         // result unknown; its recursion already set incomplete.
-                        let then_var = self.infer_expr(scope, &then_branch, None)?;
+                        let then_var = self.infer_expr(scope, &then_branch, Expected::Synth)?;
+                        // FCS checks the `else` branch against the overall
+                        // type the `then` branch fixed, before anything in it.
                         if let Some(else_branch) = if_expr.else_branch() {
-                            self.infer_expr(scope, &else_branch, Some(then_var));
+                            self.infer_expr(scope, &else_branch, Expected::Known(then_var));
                         }
-                        self.emit(self.facts.node_span(if_expr.syntax()), then_var, None);
+                        self.emit(
+                            self.facts.node_span(if_expr.syntax()),
+                            then_var,
+                            Expected::Synth,
+                        );
                         Some(then_var)
                     }
-                    Some(exp) => {
+                    // Each branch is checked against the overall type itself,
+                    // known or not, which relates it where FCS does.
+                    Expected::Known(_) | Expected::Equal(_) | Expected::Unknown => {
+                        // Without an `else` FCS relates the overall type to
+                        // `unit` before the branch, which it then checks
+                        // against `unit`. (An `elif` chain is an `if` in the
+                        // `else` of another, which meets this rule itself.)
+                        if if_expr.else_branch().is_none() {
+                            let unit = self.solver.table.fresh();
+                            let unit_ty = self.solver.tys.named(self.facts.env.names(), UNIT);
+                            self.eq(scope, self.solver.tys.var(unit), unit_ty);
+                            // FCS's `unit` equality is strict: where it fails, or
+                            // against a type not known here, FCS reports it and
+                            // what it checks next is not known, so the prefix
+                            // ends before the branch.
+                            let related = match expected.target() {
+                                Some(d) => self.decide(scope, unit, d) == Decision::Taken,
+                                None => false,
+                            };
+                            let branch_expected = if related {
+                                Expected::Known(unit)
+                            } else {
+                                scope.mark_incomplete(Incomplete::ElselessIf);
+                                Expected::Unknown
+                            };
+                            if let Some(then_branch) = if_expr.then_branch() {
+                                self.infer_expr(scope, &then_branch, branch_expected);
+                            }
+                            return Some(unit);
+                        }
+                        // Under an equality the `then` branch is exact, but
+                        // the `else` branch is checked against the type the
+                        // `then` branch fixed, which admits a coercion: it
+                        // records nothing.
+                        let else_expected = match expected {
+                            Expected::Equal(d) => Expected::Known(d),
+                            other => other,
+                        };
+                        let mut result = None;
                         if let Some(then_branch) = if_expr.then_branch() {
-                            self.infer_expr(scope, &then_branch, Some(exp));
+                            result = self.infer_expr(scope, &then_branch, expected);
                         }
                         if let Some(else_branch) = if_expr.else_branch() {
-                            self.infer_expr(scope, &else_branch, Some(exp));
+                            self.infer_expr(scope, &else_branch, else_expected);
                         }
-                        Some(exp)
+                        if let Expected::Equal(exp) = expected {
+                            self.emit(self.facts.node_span(if_expr.syntax()), exp, expected);
+                        }
+                        // Against a known expected type the `if` is that type;
+                        // under an equality it is what its `then` branch is,
+                        // which the caller compares with what it expected.
+                        match expected {
+                            Expected::Known(d) => Some(d),
+                            _ => result,
+                        }
                     }
                 }
             }
@@ -305,7 +359,7 @@ impl<'a> Gen<'a> {
                     return None;
                 }
                 let mark = self.out.mark();
-                let sv = self.infer_expr(scope, &scrutinee, None)?;
+                let sv = self.infer_expr(scope, &scrutinee, Expected::Synth)?;
                 // FCS may bind the scrutinee to a temporary at the
                 // scrutinee's own range — a `let` node typed as the whole
                 // match (`match c with 'a' -> true | _ -> false` reports
@@ -313,7 +367,7 @@ impl<'a> Gen<'a> {
                 // walk emitted, is not one FCS's dump can grade. What it
                 // contains is.
                 self.out.ungrade_last_since(mark);
-                let mut result = expected;
+                let mut first: Option<TyVid> = None;
                 let mut any = false;
                 for clause in m.clauses() {
                     let (Some(pat), Some(body)) = (clause.pat(), clause.result()) else {
@@ -354,7 +408,7 @@ impl<'a> Gen<'a> {
                     self.settle(scope);
                     if !matches!(self.solver.tys.kind(pt), TyKind::Var(_))
                         && (self.mentions_inherited_open(scope, sv)
-                            || self.touches_opaque(scope, sv, sv, self.facts.node_span(m.syntax())))
+                            || self.touches_opaque(scope, sv, sv))
                     {
                         scope.mark_incomplete(Incomplete::InheritedOpen);
                         return None;
@@ -403,11 +457,19 @@ impl<'a> Gen<'a> {
                     if clause.guard().is_some() {
                         self.constrain_bool(scope, clause.guard());
                     }
-                    match result {
-                        None => result = Some(self.infer_expr(scope, &body, None)?),
-                        Some(exp) => {
-                            self.infer_expr(scope, &body, Some(exp));
-                        }
+                    // With no expected type the first clause's result fixes
+                    // the overall type, and each later one is checked against
+                    // it; otherwise each is checked against the expected type.
+                    let arm_expected = match (expected, first) {
+                        (Expected::Synth, Some(first)) => Expected::Known(first),
+                        // Under an equality only the first clause is exact:
+                        // the rest are checked against the type it fixed.
+                        (Expected::Equal(d), Some(_)) => Expected::Known(d),
+                        _ => expected,
+                    };
+                    let v = self.infer_expr(scope, &body, arm_expected);
+                    if first.is_none() {
+                        first = Some(v?);
                     }
                     any = true;
                 }
@@ -419,7 +481,10 @@ impl<'a> Gen<'a> {
                 // some matches to other nodes (a single irrefutable clause,
                 // `match o with x -> x`, is a `let`), so whether its dump has
                 // a node there is its decision compiler's to say.
-                result
+                match expected {
+                    Expected::Known(d) => Some(d),
+                    _ => first,
+                }
             }
             // A lambda `fun x … -> body`. Walk the body so its sub-expressions get
             // typed, carrying the lambda's **mode**: coercion-free (synth) only when
@@ -430,8 +495,19 @@ impl<'a> Gen<'a> {
             // yet (`TyKind::Fun` is a later slice), so it defers. A param use in the
             // body binds lazily via name resolution. (3.2c-2a)
             Expr::Fun(fun) => {
+                // The lambda's own function type is not modelled yet (`TyKind::Fun` on
+                // a `fun` value is a later slice), so it defers — and marks the
+                // binding incomplete, since a body containing a lambda has an FCS
+                // type we cannot reproduce. FCS relates the expected type to the
+                // lambda's before its body, so the prefix ends here, before
+                // anything in the body is decided.
+                scope.mark_incomplete(Incomplete::Lambda);
                 if let Some(body) = fun.body() {
-                    let body_expected = expected.map(|_| self.solver.table.fresh());
+                    let body_expected = if expected.is_synth() {
+                        Expected::Synth
+                    } else {
+                        Expected::Unknown
+                    };
                     // A lambda's parameters are elaborated as a function's
                     // are: behind a non-simple one the body's nodes move, so
                     // it records nothing (see [`is_simple_param`]).
@@ -441,11 +517,6 @@ impl<'a> Gen<'a> {
                         self.out.discard_since(body_mark);
                     }
                 }
-                // The lambda's own function type is not modelled yet (`TyKind::Fun` on
-                // a `fun` value is a later slice), so it defers — and marks the
-                // binding incomplete, since a body containing a lambda has an FCS
-                // type we cannot reproduce.
-                scope.mark_incomplete(Incomplete::Lambda);
                 None
             }
             // A `while c do body`: the condition is constrained to `bool`
@@ -455,14 +526,15 @@ impl<'a> Gen<'a> {
             // body's synthesized type). The loop's own `unit` type is left to a
             // later slice. (3.2c-2a / 3.2c-2b)
             Expr::While(while_expr) => {
+                // A `while` expression's own `unit` type is not modelled yet, so it
+                // defers — and marks the binding incomplete. FCS relates that type
+                // to the expected one before the condition, so the prefix ends
+                // before anything in the loop is decided.
+                scope.mark_incomplete(Incomplete::While);
                 self.constrain_bool(scope, while_expr.cond());
                 if let Some(body) = while_expr.body() {
-                    let unit_check = self.solver.table.fresh();
-                    self.infer_expr(scope, &body, Some(unit_check));
+                    self.infer_expr(scope, &body, Expected::Unknown);
                 }
-                // A `while` expression's own `unit` type is not modelled yet, so it
-                // defers — and marks the binding incomplete.
-                scope.mark_incomplete(Incomplete::While);
                 None
             }
             // Function application `f x` (Stage 3.2c-3). Both `APP_EXPR` and
@@ -479,7 +551,7 @@ impl<'a> Gen<'a> {
             // succeeds (see `AppExpr::is_bracket_indexer`); when it fails, the
             // result is poisoned, as for any failed application.
             Expr::App(app) if !app.is_infix() && !app.is_bracket_indexer() => {
-                let r = self.infer_app(scope, app)?;
+                let r = self.infer_app(scope, app, expected)?;
                 self.emit(self.facts.node_span(app.syntax()), r, expected);
                 Some(r)
             }
@@ -536,7 +608,7 @@ impl<'a> Gen<'a> {
         &mut self,
         scope: &mut Scope,
         e: &LetOrUseExpr,
-        expected: Option<TyVid>,
+        expected: Expected,
     ) -> Option<TyVid> {
         for binding in e.bindings() {
             // A local that may carry `[<EntryPoint>]` is not typed, as at
@@ -597,6 +669,7 @@ impl<'a> Gen<'a> {
             return;
         }
         let recorded = scope.reasons_recorded();
+        let pat_from = self.solver.table.mark();
         let pat_ty = match self.binding_pattern_ty(scope, binding, &pat, BinderSite::Local) {
             Ok(t) => t,
             Err(why) => {
@@ -604,7 +677,7 @@ impl<'a> Gen<'a> {
                 return;
             }
         };
-        self.pattern_rhs(scope, &pat, pat_ty, &rhs, BinderSite::Local);
+        self.pattern_rhs(scope, &pat, pat_ty, pat_from, &rhs, BinderSite::Local);
         // The whole pattern's type, not just its names': a wildcard binds
         // nothing, but an RHS still open under it is as unsettled as a named
         // one.
@@ -654,6 +727,7 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         pat: &Pat,
         pat_ty: Ty,
+        pat_from: u32,
         rhs: &Expr,
         site: BinderSite,
     ) {
@@ -663,9 +737,10 @@ impl<'a> Gen<'a> {
             .next()
             .is_some();
         if annotated {
-            let expected = self.solver.table.fresh();
-            self.infer_expr(scope, rhs, Some(expected));
+            // FCS relates the RHS to the annotation as it enters it, so the
+            // prefix ends before the RHS is walked.
             scope.mark_incomplete(Incomplete::CoercedPattern);
+            self.infer_expr(scope, rhs, Expected::Unknown);
             self.settle(scope);
             return;
         }
@@ -675,25 +750,65 @@ impl<'a> Gen<'a> {
                 unparenthesize(rhs.clone()),
                 Some(Expr::Ident(_) | Expr::LongIdent(_))
             );
-        let expected = bound_directly.then(|| self.solver.table.fresh());
-        let mark = self.out.mark();
-        let rhs_var = self.infer_expr(scope, rhs, expected);
-        self.settle(scope);
         // A pattern that is a single variable (a name, a wildcard) imposes no
         // structure, so its check cannot fail, and the RHS's nodes stand even
         // when the RHS itself does not synthesize.
         let structural = !matches!(self.solver.tys.kind(pat_ty), TyKind::Var(_));
-        if structural && rhs_var.is_some_and(|v| self.mentions_inherited_open(scope, v)) {
+        // The pattern's own variables: every one made since `pat_from`, the
+        // pattern being the last thing typed.
+        let own = pat_from..self.solver.table.mark();
+        // FCS checks the RHS against the pattern's type, by equality: a
+        // pattern of structure is related where the RHS's form relates its
+        // expected type — an application's result before its arguments.
+        let expected = if bound_directly {
+            Expected::Known(self.solver.table.fresh())
+        } else if structural && scope.complete {
+            let pv = self.solver.table.fresh();
+            self.eq(scope, self.solver.tys.var(pv), pat_ty);
+            Expected::Equal(pv)
+        } else {
+            Expected::Synth
+        };
+        let mark = self.out.mark();
+        let rhs_var = self.infer_expr(scope, rhs, expected);
+        self.settle(scope);
+        if structural
+            && rhs_var.is_some_and(|v| {
+                self.mentions_inherited_open(scope, v)
+                    || (scope.complete && self.touches_opaque(scope, v, v))
+            })
+        {
             // The equality would give an earlier binding's open variable a
             // structure of this binding's fresh variables, which then pass for
             // this binding's own: an argument check could ground them, and so
-            // retype the earlier binder. The relation is dropped instead.
+            // retype the earlier binder. Nor, while the prefix is faithful,
+            // may it give one whose type FCS may know and inference does not
+            // (a tainted one) a structure: that is a decision, which such a
+            // variable declines. (Once the prefix has ended no decision is
+            // taken, and the equality is applied unless it binds a variable
+            // older than that end, below.) The relation is dropped instead.
             scope.mark_incomplete(Incomplete::InheritedOpen);
             self.out.discard_since(mark);
             return;
         }
-        if let Some(rhs_var) = rhs_var {
-            self.eq(scope, pat_ty, self.solver.tys.var(rhs_var));
+        // Related inside the walk where it was decided, the prefix faithful
+        // throughout ([`Expected::Equal`]); otherwise here.
+        if let Some(rhs_var) = rhs_var
+            && !(matches!(expected, Expected::Equal(_)) && scope.complete)
+        {
+            let rhs_ty = self.solver.tys.var(rhs_var);
+            if structural && !scope.complete {
+                if !self.eq_sparing_older(scope, pat_ty, rhs_ty, own) {
+                    // FCS may have bound the variable through the construct
+                    // that ended the prefix (`(p : int), (let () = p in ())`),
+                    // so the pattern's structure is not imposed on it.
+                    scope.mark_incomplete(Incomplete::InheritedOpen);
+                    self.out.discard_since(mark);
+                    return;
+                }
+            } else {
+                self.eq(scope, pat_ty, rhs_ty);
+            }
         }
         self.settle(scope);
         let agrees = rhs_var.is_some_and(|v| {
@@ -707,7 +822,7 @@ impl<'a> Gen<'a> {
     /// Whether `v`'s type mentions an open variable an earlier binding owns —
     /// the variables [`Self::arg_check_binds_only_current_vars`] refuses to
     /// let an argument check ground.
-    fn mentions_inherited_open(&mut self, scope: &Scope, v: TyVid) -> bool {
+    pub(super) fn mentions_inherited_open(&mut self, scope: &Scope, v: TyVid) -> bool {
         let mut roots = HashSet::default();
         collect_var_roots(
             self.solver.tys,
@@ -742,7 +857,7 @@ impl<'a> Gen<'a> {
         &mut self,
         scope: &mut Scope,
         seq: &SequentialExpr,
-        expected: Option<TyVid>,
+        expected: Expected,
     ) -> Option<TyVid> {
         let stmts: Vec<Expr> = seq.statements().collect();
         let Some((last, init)) = stmts.split_last() else {
@@ -755,11 +870,13 @@ impl<'a> Gen<'a> {
             return None;
         }
         for stmt in init {
-            let unit_check = self.solver.table.fresh();
+            // FCS checks a statement against a fresh type, and relates it to
+            // `unit` afterwards.
+            let fresh = Expected::Known(self.solver.table.fresh());
             // A statement that does not synthesize a variable has already marked
             // the binding incomplete in its own arm.
             let recorded = scope.reasons_recorded();
-            if let Some(v) = self.infer_expr(scope, stmt, Some(unit_check)) {
+            if let Some(v) = self.infer_expr(scope, stmt, fresh) {
                 self.settle(scope);
                 if !self
                     .solver
@@ -822,9 +939,36 @@ impl<'a> Gen<'a> {
                     .ident()
                     .and_then(|tok| self.facts.def_at(tok.text_range()))
                     .is_some_and(|def| scope.typar_params.contains(&def));
+                let def = ident
+                    .ident()
+                    .and_then(|tok| self.facts.def_at(tok.text_range()));
                 match slot {
                     Some(_) if shares_typar => {
                         scope.mark_incomplete(Incomplete::ConditionNotFirstOccurrence);
+                    }
+                    // While the prefix is faithful, the condition is FCS's
+                    // equality at this point in its checking order, on the
+                    // parameter's one variable: a decision on the binder's
+                    // variable, which its uses read, and on the slot with it.
+                    // A tainted binder declines it, and the slot-only rule
+                    // below applies.
+                    Some(slot)
+                        if scope.complete
+                            && def.is_some_and(|def| {
+                                let dv = self.def_var(def);
+                                !self.solver.table.touches_taint(self.solver.tys.var(dv))
+                            }) =>
+                    {
+                        let dv = self.def_var(def.expect("checked above"));
+                        let bool_ty = self
+                            .solver
+                            .tys
+                            .named(self.facts.env.names(), "System.Boolean");
+                        let b = self.solver.table.fresh();
+                        self.eq(scope, self.solver.tys.var(b), bool_ty);
+                        if self.decide(scope, dv, b) == Decision::Taken {
+                            self.eq(scope, self.solver.tys.var(slot), bool_ty);
+                        }
                     }
                     Some(slot)
                         if ident
@@ -898,8 +1042,8 @@ impl<'a> Gen<'a> {
     /// binder, could otherwise back-flow a coerced expected onto it). The
     /// threaded `expected` type is what subtype-aware checking will later consume
     /// here — emitting the coerced type when the synthesized one is a subtype.
-    pub(super) fn emit(&mut self, range: TextRange, v: TyVid, expected: Option<TyVid>) {
-        if expected.is_none() {
+    pub(super) fn emit(&mut self, range: TextRange, v: TyVid, expected: Expected) {
+        if expected.records() {
             self.out.node(range, v);
         }
     }

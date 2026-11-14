@@ -582,12 +582,8 @@ fn the_deepest_admissible_type_fits_under_the_tallest_expression() {
             ));
         }
         // Every level is an expression level, so the walk reached the
-        // innermost binding; an addition is one tree level too, so that nest
-        // takes the expression walk to the tree bound itself (a `let` costs
-        // the tree several levels, an application two).
-        if facts.expression_nesting < n
-            || (nest == Nest::Additions && facts.expression_nesting < MAX_TREE_HEIGHT - 128)
-        {
+        // innermost binding.
+        if facts.expression_nesting < n {
             failures.push(format!(
                 "{case}: the expression walk should reach the innermost binding: {facts:?}"
             ));

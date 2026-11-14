@@ -117,6 +117,7 @@ impl<'a> FileFacts<'a> {
             deepest_expr_depth,
             type_budget_exceeded,
             type_walks,
+            refused_equalities,
         } = walked;
         InferredFile {
             types,
@@ -141,6 +142,7 @@ impl<'a> FileFacts<'a> {
             deepest_expr_depth,
             type_budget_exceeded,
             type_walks,
+            refused_equalities,
         }
     }
 

@@ -196,7 +196,7 @@ impl<'a> Gen<'a> {
             // rejects `let g = id` / `let x = []` with FS0030), so it just
             // links and solves.
             Some(Pat::Named(named)) => {
-                let rhs_var = self.infer_expr(scope, rhs, None);
+                let rhs_var = self.infer_expr(scope, rhs, Expected::Synth);
                 if let Some(tok) = named.ident()
                     && let Some(def) = self.facts.def_at(tok.text_range())
                 {
@@ -244,7 +244,7 @@ impl<'a> Gen<'a> {
                 // function's result, exactly, so it is walked as usual, but
                 // nothing it records is kept.
                 let body_mark = self.out.mark();
-                let ret = self.infer_expr(scope, rhs, None);
+                let ret = self.infer_expr(scope, rhs, Expected::Synth);
                 if !head.args().all(|arg| is_simple_param(&arg)) {
                     self.out.discard_since(body_mark);
                 }
@@ -283,10 +283,11 @@ impl<'a> Gen<'a> {
             // open is an environment reference, which is poisoned and so
             // never generalises.
             Some(pat @ (Pat::Paren(_) | Pat::Tuple(_))) => {
+                let pat_from = self.solver.table.mark();
                 let census = match self.binding_pattern_ty(scope, binding, &pat, BinderSite::Module)
                 {
                     Ok(pat_ty) => {
-                        self.pattern_rhs(scope, &pat, pat_ty, rhs, BinderSite::Module);
+                        self.pattern_rhs(scope, &pat, pat_ty, pat_from, rhs, BinderSite::Module);
                         Census::Record
                     }
                     // Not walked, but counted: an annotation in the
@@ -391,17 +392,9 @@ impl<'a> Gen<'a> {
                     .is_none(),
                 "a LET_DECL nested inside a walked binding's body breaks sequential solve"
             );
-            // The body walk: check mode against the annotation, the top-level
-            // relation suspended rather than eagerly poisoned (the
-            // [`Self::infer_arg`] opt-out, shared with application arguments).
-            if let Some(bv) = self.infer_arg(scope, &rhs, r) {
-                self.solver.constraints.push(Constraint::ArgCheck(ArgCheck {
-                    arg: bv,
-                    dom: r,
-                    r,
-                    span: self.facts.node_span(rhs.syntax()),
-                }));
-            }
+            // The body is checked against the annotation, which FCS relates
+            // where it relates any expected type ([`Self::relate`]).
+            self.infer_arg(scope, &rhs, r);
         } else {
             scope.mark_incomplete(Incomplete::Recovery);
         }
@@ -464,7 +457,7 @@ impl<'a> Gen<'a> {
                         .is_none(),
                     "a LET_DECL nested inside a walked binding's RHS breaks sequential solve"
                 );
-                let _ = self.infer_expr(scope, &rhs, Some(dv));
+                let _ = self.infer_expr(scope, &rhs, Expected::Known(dv));
             }
             Census::Record
         } else {

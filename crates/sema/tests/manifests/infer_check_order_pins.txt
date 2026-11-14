@@ -3,14 +3,14 @@
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all infer_check_order_pins::
 access-before-grounding binder 4-6 `r6`	ours - fcs System.String -> 'a * System.Int32
 access-before-grounding binder 7-8 `x`	ours - fcs System.String
-access-before-grounding census	[]
+access-before-grounding census	[UndecidedAccess]
 access-before-grounding fcs	errors FS0072
 access-before-grounding node 12-20 `x.Length`	ours - fcs 'a
 access-before-grounding node 12-29 `x.Length, monos x`	ours - fcs 'a * System.Int32
 access-before-grounding node 22-29 `monos x`	ours System.Int32 fcs System.Int32
 access-before-grounding node 28-29 `x`	ours - fcs System.String
-annotation-relates-before-the-body binder 4-6 `c4`	ours - fcs System.String -> System.String
-annotation-relates-before-the-body binder 7-8 `p`	ours - fcs System.String
+annotation-relates-before-the-body binder 4-6 `c4`	ours System.String -> System.String fcs System.String -> System.String
+annotation-relates-before-the-body binder 7-8 `p`	ours System.String fcs System.String
 annotation-relates-before-the-body census	[]
 annotation-relates-before-the-body fcs	errors FS0001
 annotation-relates-before-the-body node 20-33 `both p (gi p)`	ours - fcs System.String
@@ -28,23 +28,23 @@ argument-check-before-an-unmodelled-suffix binder 4-6 `r8`	ours - fcs Microsoft.
 argument-check-before-an-unmodelled-suffix binder 7-9 `()`	ours - fcs Microsoft.FSharp.Core.Unit
 argument-check-before-an-unmodelled-suffix census	[Unmodelled(TYPE_APP_EXPR)]
 argument-check-before-an-unmodelled-suffix fcs	clean
-argument-check-before-an-unmodelled-suffix node 13-19 `idf uu`	ours - fcs System.Int32 * System.String
+argument-check-before-an-unmodelled-suffix node 13-19 `idf uu`	ours System.Int32 * System.String fcs System.Int32 * System.String
 argument-check-before-an-unmodelled-suffix node 13-43 `idf uu, Unchecked.defaultof<_>`	ours - fcs (System.Int32 * System.String) * 'a
 argument-check-before-an-unmodelled-suffix node 17-19 `uu`	ours - fcs System.Int32 * System.String
 argument-check-before-an-unmodelled-suffix node 21-40 `Unchecked.defaultof`	ours - fcs 'a
-branch-relates-before-its-arguments binder 4-6 `c1`	ours - fcs System.Boolean -> System.String -> System.String * System.String
-branch-relates-before-its-arguments binder 7-8 `b`	ours - fcs System.Boolean
-branch-relates-before-its-arguments binder 9-10 `p`	ours - fcs System.String
+branch-relates-before-its-arguments binder 4-6 `c1`	ours System.Boolean -> System.String -> System.String * System.String fcs System.Boolean -> System.String -> System.String * System.String
+branch-relates-before-its-arguments binder 7-8 `b`	ours System.Boolean fcs System.Boolean
+branch-relates-before-its-arguments binder 9-10 `p`	ours System.String fcs System.String
 branch-relates-before-its-arguments census	[]
 branch-relates-before-its-arguments fcs	errors FS0001
-branch-relates-before-its-arguments node 14-51 `(if b then "s" else both p (gi p)), p`	ours - fcs System.String * System.String
+branch-relates-before-its-arguments node 14-51 `(if b then "s" else both p (gi p)), p`	ours System.String * System.String fcs System.String * System.String
 branch-relates-before-its-arguments node 15-47 `if b then "s" else both p (gi p)`	ours System.String fcs System.String
 branch-relates-before-its-arguments node 18-19 `b`	ours - fcs System.Boolean
 branch-relates-before-its-arguments node 25-28 `"s"`	ours System.String fcs System.String
 branch-relates-before-its-arguments node 34-47 `both p (gi p)`	ours - fcs System.String
 branch-relates-before-its-arguments node 39-40 `p`	ours - fcs System.String
 branch-relates-before-its-arguments node 42-46 `gi p`	ours - fcs System.String
-branch-relates-before-its-arguments node 50-51 `p`	ours - fcs System.String
+branch-relates-before-its-arguments node 50-51 `p`	ours System.String fcs System.String
 condition-before-a-check binder 4-7 `r10`	ours System.Boolean -> System.Int32 * System.Boolean fcs System.Boolean -> System.Int32 * System.Boolean
 condition-before-a-check binder 8-9 `x`	ours System.Boolean fcs System.Boolean
 condition-before-a-check census	[]
@@ -58,6 +58,23 @@ condition-before-a-check node 29-30 `x`	ours System.Boolean fcs System.Boolean
 condition-before-a-check node 38-39 `0`	ours - fcs System.Int32
 condition-before-a-check node 38-42 `0, x`	ours - fcs System.Int32 * System.Boolean
 condition-before-a-check node 41-42 `x`	ours - fcs System.Boolean
+declared-variable-beside-a-failed-check binder 13-14 `x`	ours - fcs 'a
+declared-variable-beside-a-failed-check binder 4-7 `r12`	ours - fcs 'a -> System.Int32 * System.Int32
+declared-variable-beside-a-failed-check census	[RigidTypeVariable]
+declared-variable-beside-a-failed-check fcs	errors FS0001
+declared-variable-beside-a-failed-check node 23-29 `gi "s"`	ours - fcs System.Int32
+declared-variable-beside-a-failed-check node 23-44 `gi "s", gi (both x 1)`	ours - fcs System.Int32 * System.Int32
+declared-variable-beside-a-failed-check node 26-29 `"s"`	ours - fcs System.Int32
+declared-variable-beside-a-failed-check node 31-44 `gi (both x 1)`	ours - fcs System.Int32
+declared-variable-beside-a-failed-check node 35-43 `both x 1`	ours - fcs System.Int32
+declared-variable-beside-a-failed-check node 40-41 `x`	ours - fcs System.Int32
+declared-variable-beside-a-failed-check node 42-43 `1`	ours - fcs System.Int32
+declared-variable-fixed-by-a-check binder 13-14 `x`	ours - fcs 'a
+declared-variable-fixed-by-a-check binder 4-7 `r11`	ours - fcs 'a -> System.Int32
+declared-variable-fixed-by-a-check census	[RigidTypeVariable]
+declared-variable-fixed-by-a-check fcs	errors FS0001
+declared-variable-fixed-by-a-check node 22-26 `gi x`	ours - fcs System.Int32
+declared-variable-fixed-by-a-check node 25-26 `x`	ours - fcs System.Int32
 id-wrapped-access binder 4-6 `r5`	ours System.String -> System.Int32 fcs System.String -> System.Int32
 id-wrapped-access binder 8-9 `x`	ours System.String fcs System.String
 id-wrapped-access census	[]
@@ -66,7 +83,7 @@ id-wrapped-access node 21-35 `(idf x).Length`	ours System.Int32 fcs System.Int32
 id-wrapped-access node 22-27 `idf x`	ours System.String fcs System.String
 id-wrapped-access node 26-27 `x`	ours - fcs System.String
 id-wrapped-lambda-access binder 4-6 `r3`	ours System.Int32 fcs System.Int32
-id-wrapped-lambda-access census	[Lambda]
+id-wrapped-lambda-access census	[Lambda, UndecidedAccess]
 id-wrapped-lambda-access fcs	clean
 id-wrapped-lambda-access node 16-39 `idf (fun s -> s.Length)`	ours - fcs System.String -> System.Int32
 id-wrapped-lambda-access node 21-38 `fun s -> s.Length`	ours - fcs System.String -> System.Int32
@@ -74,7 +91,7 @@ id-wrapped-lambda-access node 30-31 `s`	ours - fcs System.String
 id-wrapped-lambda-access node 30-38 `s.Length`	ours - fcs System.Int32
 id-wrapped-lambda-access node 9-40 `apply (idf (fun s -> s.Length))`	ours System.Int32 fcs System.Int32
 lambda-access binder 4-6 `r4`	ours System.Int32 fcs System.Int32
-lambda-access census	[Lambda]
+lambda-access census	[Lambda, UndecidedAccess]
 lambda-access fcs	clean
 lambda-access node 16-33 `fun s -> s.Length`	ours - fcs System.String -> System.Int32
 lambda-access node 25-26 `s`	ours - fcs System.String
@@ -89,7 +106,7 @@ parameter-loosened-once-known node 14-24 `applyObj x`	ours - fcs 'a -> System.In
 parameter-loosened-once-known node 14-32 `applyObj x, x y, y`	ours - fcs ('a -> System.Int32) * System.Int32 * 'b
 parameter-loosened-once-known node 23-24 `x`	ours - fcs System.Object -> System.Int32
 parameter-loosened-once-known node 26-27 `x`	ours - fcs 'a -> System.Int32
-parameter-loosened-once-known node 26-29 `x y`	ours - fcs System.Int32
+parameter-loosened-once-known node 26-29 `x y`	ours System.Int32 fcs System.Int32
 parameter-loosened-once-known node 28-29 `y`	ours - fcs 'a
 parameter-loosened-once-known node 31-32 `y`	ours - fcs 'a
 singleton-into-obj-list binder 4-6 `r1`	ours System.String -> System.Int32 fcs System.String -> System.Int32
@@ -99,15 +116,15 @@ singleton-into-obj-list fcs	clean
 singleton-into-obj-list node 21-36 `g (singleton y)`	ours System.Int32 fcs System.Int32
 singleton-into-obj-list node 24-35 `singleton y`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.Object>
 singleton-into-obj-list node 34-35 `y`	ours - fcs System.Object
-singleton-into-obj-list-beside-a-check binder 4-6 `r9`	ours - fcs System.String -> System.Int32 * System.Int32
+singleton-into-obj-list-beside-a-check binder 4-6 `r9`	ours System.String -> System.Int32 * System.Int32 fcs System.String -> System.Int32 * System.Int32
 singleton-into-obj-list-beside-a-check binder 8-9 `y`	ours System.String fcs System.String
 singleton-into-obj-list-beside-a-check census	[]
 singleton-into-obj-list-beside-a-check fcs	clean
 singleton-into-obj-list-beside-a-check node 22-37 `g (singleton y)`	ours System.Int32 fcs System.Int32
-singleton-into-obj-list-beside-a-check node 22-44 `g (singleton y), idf 3`	ours - fcs System.Int32 * System.Int32
+singleton-into-obj-list-beside-a-check node 22-44 `g (singleton y), idf 3`	ours System.Int32 * System.Int32 fcs System.Int32 * System.Int32
 singleton-into-obj-list-beside-a-check node 25-36 `singleton y`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.Object>
 singleton-into-obj-list-beside-a-check node 35-36 `y`	ours - fcs System.Object
-singleton-into-obj-list-beside-a-check node 39-44 `idf 3`	ours - fcs System.Int32
+singleton-into-obj-list-beside-a-check node 39-44 `idf 3`	ours System.Int32 fcs System.Int32
 singleton-into-obj-list-beside-a-check node 43-44 `3`	ours - fcs System.Int32
 singleton-into-string-list binder 4-6 `r2`	ours System.String -> System.Int32 fcs System.String -> System.Int32
 singleton-into-string-list binder 8-9 `y`	ours System.String fcs System.String

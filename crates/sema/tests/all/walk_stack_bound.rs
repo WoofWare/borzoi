@@ -263,13 +263,19 @@ fn every_walk_fits_half_the_walk_stack() {
         "BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all \
          walk_stack_bound::every_walk_fits_half_the_walk_stack",
     );
+    // Inference recurses once per expression level, and every expression
+    // form but an application spine (which it walks iteratively) costs the
+    // tree at least two levels, so its deepest nesting is held to half the
+    // height.
     assert!(
-        [tallest, tallest_clean, deepest_resolved, deepest_inferred]
+        [tallest, tallest_clean, deepest_resolved]
             .iter()
-            .all(|&reach| reach >= CLEAN_REACH),
+            .all(|&reach| reach >= CLEAN_REACH)
+            && deepest_inferred >= CLEAN_REACH / 2,
         "no case reached the height the bound is about: tallest tree {tallest}, tallest \
          clean tree {tallest_clean}, deepest resolution {deepest_resolved}, deepest \
-         inference nesting {deepest_inferred}, against {CLEAN_REACH}"
+         inference nesting {deepest_inferred}, against {CLEAN_REACH} (half of it for \
+         inference)"
     );
 }
 
