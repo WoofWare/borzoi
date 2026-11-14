@@ -21,6 +21,7 @@ pub mod pull;
 pub mod read_checks;
 pub mod restore;
 pub mod sdk_discovery;
+pub mod sdk_language;
 pub mod semantic;
 pub mod server;
 pub mod sidecar_manager;

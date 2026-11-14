@@ -44,6 +44,8 @@ use borzoi_msbuild::{
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::sdk_language::LangVersionDoubt;
+
 /// How many causes a single capability's explanation renders before summarising
 /// the rest. A `window/showMessage` is a one-line toast in most clients, and a
 /// project with a broken import chain can accumulate dozens of causes.
@@ -333,12 +335,11 @@ pub enum FoldRefusal {
     /// The CST parser panicked on a Compile item.
     ParserPanic { file: PathBuf },
     /// A Compile item parses to a differently *shaped* tree either side of the
-    /// F# 8 strict-indentation boundary, and the project's `LangVersion`
-    /// provenance can't say which side the real build uses, because of
-    /// `cause`.
+    /// F# 8 strict-indentation boundary, and the project's language version is
+    /// not one the real build is known to check at, because of `cause`.
     LanguageVersionShape {
         file: PathBuf,
-        cause: UntrustedCause,
+        cause: LangVersionDoubt,
     },
     /// A Compile item parsed to a root node that is neither an implementation
     /// nor a signature file — an internal invariant break, like a panic.
@@ -359,16 +360,30 @@ impl FoldRefusal {
                 file.display()
             )),
             FoldRefusal::LanguageVersionShape { file, cause } => Some(format!(
-                "{} parses differently either side of the F# 8 indentation rule, and I can't \
-                 trust this project's LangVersion: it depends on {}",
+                "{} parses differently either side of the F# 8 indentation rule, and {}",
                 file.display(),
-                untrusted_cause_phrase(cause)
+                lang_version_doubt_phrase(cause)
             )),
             FoldRefusal::UnexpectedParseRoot { file } => Some(format!(
                 "the Compile item {} parsed to something borzoi didn't expect (a bug)",
                 file.display()
             )),
         }
+    }
+}
+
+/// Why the project's language version may not be the one its build checks at,
+/// as the end of a sentence.
+fn lang_version_doubt_phrase(doubt: &LangVersionDoubt) -> String {
+    match doubt {
+        LangVersionDoubt::Provenance(cause) => format!(
+            "I can't trust this project's LangVersion: it depends on {}",
+            untrusted_cause_phrase(cause)
+        ),
+        LangVersionDoubt::Refused(refusal) => format!(
+            "the build checks it at no language version: {}",
+            refusal.message()
+        ),
     }
 }
 

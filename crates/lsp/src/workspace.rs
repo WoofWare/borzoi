@@ -56,7 +56,7 @@ use std::path::{Component, Path, PathBuf};
 
 use borzoi_cst::language_version::LanguageVersion;
 use borzoi_msbuild::{
-    GlobResolver, ParsedProject, ResolvedItem, SdkResolution, SdkResolver,
+    GlobResolver, ParsedProject, ResolvedItem, SdkResolution, SdkResolver, SdkVersion,
     parse_fsproj_with_imports_reusing, target_frameworks,
 };
 
@@ -66,6 +66,7 @@ use crate::project_graph::{
     Edge, EdgeKind, NodeResult, NodeTfm, ProjectGraph, ProjectKind, build_graph, classify,
 };
 use crate::sdk_discovery::{SdkDiscovery, SdkDiscoveryEnv};
+use crate::sdk_language::LangVersionSelection;
 use crate::semantic::ProjectId;
 use crate::tfm_policy::{self, caller_owns_target_framework, seed_target_framework_global};
 use borzoi_msbuild::ItemMetadataValue;
@@ -193,6 +194,10 @@ struct EvaluatedProject {
     /// the resolver was disabled / failed); the consumer
     /// ([`Workspace::dotnet_root_for_project`]) then falls back to the probe.
     sdk_install_root: Option<PathBuf>,
+    /// The SDK whose F# compiler builds the project
+    /// ([`crate::sdk_language::project_compiler`] under the evaluation's
+    /// environment), or `None` when it cannot be said.
+    compiler: Option<crate::sdk_language::ProjectCompiler>,
     /// The target framework `parsed` was evaluated under (fsproj 3.3c,
     /// `docs/completed/fsproj-tfm-selection-plan.md` E1/E2): the caller-seeded or
     /// body-written `TargetFramework` when non-empty, else the first-declared
@@ -1567,8 +1572,9 @@ impl Workspace {
     /// context we cannot know the intended version, so we decline to guess-flag
     /// (e.g. report a spurious `#elif` feature error on a scratch buffer). A file
     /// that *does* resolve to a project, by contrast, gets that project's version
-    /// — defaulting to FCS's 10.0 when the project sets none, which correctly
-    /// flags an `#elif` in a project that never opted into F# 11.
+    /// — defaulting to its compiler's default when the project sets none (F# 10.0
+    /// for SDK 10), which correctly flags an `#elif` in a project that never
+    /// opted into F# 11.
     pub fn lang_version_for(&mut self, file: &Path) -> LanguageVersion {
         if is_script_path(file) {
             if let Some(project_path) = self.owning_project(file)
@@ -1585,11 +1591,33 @@ impl Workspace {
     }
 
     /// The F# language version the project at `project_path` selects, for the
-    /// language-version feature gate (today: `#elif`). Resolves the evaluated
-    /// `<LangVersion>` via [`LanguageVersion::from_lang_version_text`]; an unset
-    /// value falls back to [`LanguageVersion::DEFAULT`] (FCS's default, 10.0), as
-    /// does an unrecognised one (logged). A project that failed to evaluate also
-    /// yields `DEFAULT`.
+    /// language-version feature gates: [`Self::lang_version_selection`]'s
+    /// version.
+    pub fn lang_version_for_project(&mut self, project_path: &Path) -> LanguageVersion {
+        self.lang_version_selection(project_path).version
+    }
+
+    /// The SDK whose F# compiler builds the project at `project_path`
+    /// ([`crate::sdk_language::project_compiler`]), or `None` when it cannot be said
+    /// or the project failed to evaluate. With
+    /// [`SdkLanguageFacts::for_sdk`](crate::sdk_language::SdkLanguageFacts::for_sdk)
+    /// it says what that compiler makes of each language version.
+    pub fn compiler_sdk_for_project(&mut self, project_path: &Path) -> Option<SdkVersion> {
+        self.evaluated(project_path)?
+            .compiler
+            .as_ref()
+            .map(|c| c.sdk.clone())
+    }
+
+    /// The language version the project at `project_path` parses at, and
+    /// whether its compiler refuses it ([`LangVersionSelection::of`]). The
+    /// evaluated `<LangVersion>` is read the way the compiler of the project's
+    /// resolved SDK reads it ([`crate::sdk_language`]): an unset value is that
+    /// compiler's default, and a value it refuses (FS3880, FS0246) is a
+    /// [`LangVersionSelection::refusal`]. Where the compiler is unknown, the
+    /// value is read the pinned compiler's way, and an unset or unrecognised
+    /// value falls back to [`LanguageVersion::DEFAULT`] (an unrecognised one is
+    /// logged). A project that failed to evaluate also yields `DEFAULT`.
     ///
     /// **Provenance is deliberately not consulted here** (unlike
     /// [`Workspace::served_tfm_for_project`], 3.3d round 19): an untrusted
@@ -1608,30 +1636,34 @@ impl Workspace {
     /// the walker cannot pin. The version does shape the *token
     /// stream* (the lex-filter's `relaxWhitespace2` pops at F# 6 and its
     /// strict-indentation push decision at F# 8); the cross-file fold
-    /// covers that exactly, refusing only untrusted provenance × a file
+    /// covers that exactly, refusing only a doubted version
+    /// ([`LangVersionDoubt`](crate::sdk_language::LangVersionDoubt): untrusted
+    /// provenance or a refusal) × a file
     /// whose parse shape provably depends on the version
     /// (`Parse::shape_depends_on_language_version` in `build_parses`), while
     /// this accessor keeps serving the best-guess value to the single-file
     /// surface.
-    pub fn lang_version_for_project(&mut self, project_path: &Path) -> LanguageVersion {
-        let Some(parsed) = self.project(project_path) else {
-            return LanguageVersion::DEFAULT;
+    pub fn lang_version_selection(&mut self, project_path: &Path) -> LangVersionSelection {
+        let Some(evaluated) = self.evaluated(project_path) else {
+            return LangVersionSelection {
+                version: LanguageVersion::DEFAULT,
+                refusal: None,
+            };
         };
-        let Some(text) = parsed.lang_version.as_deref() else {
-            return LanguageVersion::DEFAULT;
-        };
-        match LanguageVersion::from_lang_version_text(text) {
-            Some(v) => v,
-            None => {
-                crate::log_warn!(
-                    "unrecognised <LangVersion>; parsing as the default version",
-                    value = text,
-                    project = project_path.display(),
-                    default_version = LanguageVersion::DEFAULT
-                );
-                LanguageVersion::DEFAULT
-            }
+        let parsed = &evaluated.parsed;
+        let selection = LangVersionSelection::of(parsed, evaluated.compiler.as_ref());
+        if let Some(text) = parsed.lang_version.as_deref()
+            && selection.refusal.is_none()
+            && LanguageVersion::from_lang_version_text(text).is_none()
+        {
+            crate::log_warn!(
+                "unrecognised <LangVersion>; parsing as the default version",
+                value = text,
+                project = project_path.display(),
+                default_version = selection.version
+            );
         }
+        selection
     }
 
     /// Add the project's evaluated `$(DefineConstants)` to `symbols`. A no-op if
@@ -2840,10 +2872,12 @@ fn evaluate_project(
     // The install the SDK resolved from, as the evaluation spelt its reads
     // there (a root SDK discovery names may reach it through a symlink).
     immutable.dotnet.extend(sdk_install_root.clone());
+    let compiler = crate::sdk_language::project_compiler(&parsed, &env.build_environment, &extras);
     Evaluation {
         evaluated: Some(EvaluatedProject {
             parsed,
             sdk_install_root,
+            compiler,
             chosen_tfm,
             declared_tfms,
             body_target_framework,

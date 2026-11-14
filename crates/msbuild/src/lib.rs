@@ -80,7 +80,7 @@ pub fn msbuild_boolean(value: &str) -> Option<bool> {
     condition::parse_msbuild_bool(value)
 }
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::ops::Range;
@@ -549,6 +549,13 @@ pub struct ParsedProject {
     /// Sourced from the same merged `lookup` as [`Self::define_constants`], so it
     /// reflects globals/`extra_properties`, not only what the project file wrote.
     pub lang_version: Option<String>,
+    /// [`Self::lang_version`] as the build holds it, untrimmed: the value the
+    /// `Fsc` task hands the compiler. `None` when unset or empty.
+    pub lang_version_untrimmed: Option<String>,
+    /// The evaluated `$(OtherFlags)`, from the same merged lookup (globals and
+    /// the environment included), untrimmed; `None` when unset or empty. The
+    /// `Fsc` task appends it to the compiler's arguments.
+    pub other_flags: Option<String>,
     /// The evaluated output-file base name — MSBuild writes
     /// `$(TargetName)$(TargetExt)`, and `TargetName` defaults to
     /// `$(AssemblyName)` (probed, dotnet 10.0.301, 2026-07-10:
@@ -590,6 +597,25 @@ pub struct ParsedProject {
     /// The value is the cause in force when the property's value was computed
     /// ([`Self::property_untrusted_cause`]).
     pub untrusted_properties: HashMap<String, UntrustedCause>,
+    /// What the documents the walk entered from outside the entry .NET SDK
+    /// define, read off their text whatever the conditions around it say.
+    /// Workload manifests are not among them.
+    pub foreign_definitions: ForeignDefinitions,
+    /// The same, for the workload manifests the walk entered: files of the
+    /// .NET install (under its `sdk-manifests`) outside the SDK's version
+    /// directory, reached as SDK content, which every SDK project imports.
+    pub workload_definitions: ForeignDefinitions,
+    /// Files inside the entry SDK's version directory that a file outside it
+    /// imported directly, other than an SDK's `Sdk.props`/`Sdk.targets`: the
+    /// SDK's own content in an arrangement it did not choose (a project
+    /// importing `$(MSBuildToolsPath)/Microsoft.CSharp.targets`, say).
+    pub sdk_files_imported_from_outside: BTreeSet<PathBuf>,
+    /// Why the walk did not see all of the build's content (an import it could
+    /// not follow, or one whose gate it could not decide), or `None` when it
+    /// entered everything the build imports. Content it did not see may define
+    /// anything, so [`Self::foreign_definitions`] is complete only when this is
+    /// `None`.
+    pub hidden_content: Option<UntrustedCause>,
     pub diagnostics: Vec<Diagnostic>,
     /// `true` if any diagnostic was emitted — i.e. the result may diverge
     /// from what MSBuild itself would produce, including in ways that don't
@@ -792,6 +818,175 @@ pub struct ParsedProject {
     /// How many file-system calls of each kind the evaluation made, repeats
     /// included.
     pub read_counts: observed::ReadCounts,
+}
+
+/// The names the documents of an evaluation define from outside the entry
+/// .NET SDK (the `…/sdk/<version>` directory its `Sdk` resolved into, or every
+/// document when it resolved none): the entry project, `Directory.Build.*`,
+/// user imports, package build files, and anything else reached outside that
+/// directory. Each name, lowercased and as written, maps to the files that
+/// define it.
+///
+/// Read off each document's text, not off the walk: a definition counts
+/// whether its condition held, failed, or could not be decided, and whether or
+/// not the evaluation runs it (a `<Target>` body runs at build time). So a name
+/// no query here matches is defined by no file the walk entered outside the
+/// SDK, which, with [`ParsedProject::hidden_content`] `None`, is every such
+/// file the build imports. Ask through the query methods, which also match a
+/// name the build computes (`PropertyName="$(Name)"`) to every query.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForeignDefinitions {
+    /// Properties: every element directly inside a `<PropertyGroup>`,
+    /// wherever the group sits, and every task `<Output PropertyName="…">`.
+    pub properties: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// The subset of [`Self::properties`] written inside a `<Target>`, which
+    /// the build runs after evaluation.
+    pub build_time_properties: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// `<Target Name="…">` definitions.
+    pub targets: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// `<UsingTask TaskName="…">` registrations, possibly namespace-qualified.
+    pub tasks: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// `<Project DefaultTargets="…">` and `<Project InitialTargets="…">`, by
+    /// attribute (lowercased): which targets a build runs.
+    pub target_selections: BTreeMap<String, BTreeSet<PathBuf>>,
+}
+
+/// Whether a recorded name may stand for a name other than its spelling: one
+/// the build computes (`$(…)`, `@(…)`, `%(…)`), or one carrying an escape
+/// (`%56`), which MSBuild decodes. Either may be any name.
+fn computed_name(name: &str) -> bool {
+    name.contains("$(") || name.contains("@(") || name.contains('%')
+}
+
+impl ForeignDefinitions {
+    /// Whether a document outside the SDK may define property `name`.
+    pub fn defines_property(&self, name: &str) -> bool {
+        Self::matches(&self.properties, name, |key, name| key == name)
+    }
+
+    /// Whether a document outside the SDK may define a property whose
+    /// lowercased name satisfies `matches`.
+    pub fn defines_property_where(&self, matches: impl Fn(&str) -> bool) -> bool {
+        self.properties
+            .keys()
+            .any(|key| matches(key) || computed_name(key))
+    }
+
+    /// Whether a document outside the SDK defines any target, registers any
+    /// task, or selects the targets a build runs: code the build runs, or the
+    /// choice of it, which may do anything.
+    pub fn defines_build_code(&self) -> bool {
+        !self.targets.is_empty() || !self.tasks.is_empty() || !self.target_selections.is_empty()
+    }
+
+    /// Whether a document outside the SDK may write property `name` at build
+    /// time, from a target.
+    pub fn writes_property_at_build_time(&self, name: &str) -> bool {
+        Self::matches(&self.build_time_properties, name, |key, name| key == name)
+    }
+
+    /// Whether a document outside the SDK may define target `name`.
+    pub fn defines_target(&self, name: &str) -> bool {
+        Self::matches(&self.targets, name, |key, name| key == name)
+    }
+
+    /// Whether a document outside the SDK may register a task that an
+    /// invocation `<name>` runs: one registered as `name` or under any
+    /// namespace (`Namespace.name`), as MSBuild matches a short task name.
+    pub fn defines_task(&self, name: &str) -> bool {
+        Self::matches(&self.tasks, name, |key, name| {
+            key == name
+                || key
+                    .strip_suffix(name)
+                    .is_some_and(|namespace| namespace.ends_with('.'))
+        })
+    }
+
+    fn matches(
+        table: &BTreeMap<String, BTreeSet<PathBuf>>,
+        name: &str,
+        same: impl Fn(&str, &str) -> bool,
+    ) -> bool {
+        let name = name.to_ascii_lowercase();
+        table
+            .keys()
+            .any(|key| same(key, &name) || computed_name(key))
+    }
+
+    /// Record every definition in the document rooted at `root`, read from
+    /// `file`.
+    pub(crate) fn record_document(&mut self, root: roxmltree::Node<'_, '_>, file: &Path) {
+        // Preorder, on an explicit stack carrying whether the node sits inside
+        // a `<Target>`, so the pass is linear in the document however deep it
+        // nests.
+        let mut stack = vec![(root, false)];
+        while let Some((node, in_target)) = stack.pop() {
+            let tag = node.tag_name().name();
+            // MSBuild does not read inside it.
+            if tag.eq_ignore_ascii_case("ProjectExtensions") {
+                continue;
+            }
+            let is_target = tag.eq_ignore_ascii_case("Target");
+            stack.extend(
+                node.children()
+                    .filter(roxmltree::Node::is_element)
+                    .map(|child| (child, in_target || is_target))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            );
+            self.record_element(node, in_target, file);
+        }
+    }
+
+    fn record_element(&mut self, node: roxmltree::Node<'_, '_>, in_target: bool, file: &Path) {
+        let tag = node.tag_name().name();
+        let attribute = |name: &str| {
+            node.attributes()
+                .find(|a| a.name().eq_ignore_ascii_case(name))
+                .map(|a| a.value())
+        };
+        if tag.eq_ignore_ascii_case("Project") {
+            for selection in ["DefaultTargets", "InitialTargets"] {
+                if attribute(selection).is_some_and(|v| !v.trim().is_empty()) {
+                    self.target_selections
+                        .entry(selection.to_ascii_lowercase())
+                        .or_default()
+                        .insert(file.to_path_buf());
+                }
+            }
+            return;
+        }
+        let in_property_group = node
+            .parent_element()
+            .is_some_and(|p| p.tag_name().name().eq_ignore_ascii_case("PropertyGroup"));
+        let (table, name) = if in_property_group {
+            (&mut self.properties, Some(tag))
+        } else if tag.eq_ignore_ascii_case("Output") {
+            (&mut self.properties, attribute("PropertyName"))
+        } else if tag.eq_ignore_ascii_case("Target") {
+            (&mut self.targets, attribute("Name"))
+        } else if tag.eq_ignore_ascii_case("UsingTask") {
+            (&mut self.tasks, attribute("TaskName"))
+        } else {
+            return;
+        };
+        let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
+            return;
+        };
+        let name = name.to_ascii_lowercase();
+        let property = in_property_group || tag.eq_ignore_ascii_case("Output");
+        table
+            .entry(name.clone())
+            .or_default()
+            .insert(file.to_path_buf());
+        if property && in_target {
+            self.build_time_properties
+                .entry(name)
+                .or_default()
+                .insert(file.to_path_buf());
+        }
+    }
 }
 
 impl ParsedProject {

@@ -342,6 +342,25 @@ This is a Cargo workspace with nine members:
   everywhere else; test code reaches them through `host_fs` (the lib's
   `observed::host_fs`, `tests/all/common/host_fs.rs`), never through a
   wholesale allow, which would also lift the spawn ban.
+  A project's `<LangVersion>` is read as the F# compiler of its resolved SDK
+  reads it (`crates/lsp/src/sdk_language.rs`: default, aliases, newest
+  recognised and oldest supported version, per feature band). Only bands
+  `sdk_language_diff` grades against an installed SDK's own `fsc.dll` have a
+  row, and that test fails on a row no installed SDK grades, so an SDK bump in
+  the devshell can fail it until the table follows. The compiler is named as
+  the SDK's own only while nothing outside the SDK can choose another: no
+  document the evaluation entered outside the SDK's version directory defines a
+  compiler selector or runs build code of its own (a target or task), whatever
+  its condition (`ParsedProject::foreign_definitions`; the install's workload
+  manifests, `ParsedProject::workload_definitions`, are held to the selectors
+  alone), and the walk hid nothing (`ParsedProject::hidden_content`). The same
+  test derives the selector set from each SDK's own F# files, accounts for
+  every variable the `Fsc` task's assembly names, and checks real MSBuild runs
+  the compiler named. Routes the evaluation cannot see stay unmodelled, as the
+  rest of the LSP already assumes its own compiler: an SDK-performed import a
+  project property steers (`NuGetBuildTasksPackTargets`), and response files
+  (`Directory.Build.rsp`); the boundary is stated in `sdk_language.rs`'s module
+  docs, so a review finding of that kind is known and out of scope.
   Hover's XML documentation lives in `crates/lsp/src/xml_doc/`. Its
   `<inheritdoc>` work is held to Roslyn's IDE through
   `tools/inheritdoc-oracle`, a test-only C# JSONL batch tool (the

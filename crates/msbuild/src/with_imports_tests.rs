@@ -23,6 +23,7 @@ mod cycles_and_failures;
 mod directory_build;
 mod directory_build_position;
 mod explicit_imports;
+mod foreign_definitions;
 mod fsharp_core_netsdk_props;
 mod globs;
 mod import_dag;
