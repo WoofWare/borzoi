@@ -831,9 +831,11 @@ pub struct ForeignDefinitions {
     pub tasks: BTreeMap<String, BTreeSet<PathBuf>>,
 }
 
-/// Whether a recorded name is one the build computes, which may be any name.
+/// Whether a recorded name may stand for a name other than its spelling: one
+/// the build computes (`$(…)`, `@(…)`, `%(…)`), or one carrying an escape
+/// (`%56`), which MSBuild decodes. Either may be any name.
 fn computed_name(name: &str) -> bool {
-    name.contains("$(") || name.contains("@(") || name.contains("%(")
+    name.contains("$(") || name.contains("@(") || name.contains('%')
 }
 
 impl ForeignDefinitions {
@@ -879,52 +881,64 @@ impl ForeignDefinitions {
     /// Record every definition in the document rooted at `root`, read from
     /// `file`.
     pub(crate) fn record_document(&mut self, root: roxmltree::Node<'_, '_>, file: &Path) {
-        for node in root.descendants().filter(roxmltree::Node::is_element) {
+        // Preorder, on an explicit stack carrying whether the node sits inside
+        // a `<Target>`, so the pass is linear in the document however deep it
+        // nests.
+        let mut stack = vec![(root, false)];
+        while let Some((node, in_target)) = stack.pop() {
             let tag = node.tag_name().name();
-            let attribute = |name: &str| {
-                node.attributes()
-                    .find(|a| a.name().eq_ignore_ascii_case(name))
-                    .map(|a| a.value())
-            };
-            let in_property_group = node
-                .parent_element()
-                .is_some_and(|p| p.tag_name().name().eq_ignore_ascii_case("PropertyGroup"));
-            let (property, name) = if in_property_group {
-                (true, Some(tag))
-            } else if tag.eq_ignore_ascii_case("Output") {
-                (true, attribute("PropertyName"))
-            } else if tag.eq_ignore_ascii_case("Target") {
-                (false, attribute("Name"))
-            } else if tag.eq_ignore_ascii_case("UsingTask") {
-                (false, attribute("TaskName"))
-            } else {
+            // MSBuild does not read inside it.
+            if tag.eq_ignore_ascii_case("ProjectExtensions") {
                 continue;
-            };
-            let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
-                continue;
-            };
-            let name = name.to_ascii_lowercase();
-            let mut tables = Vec::new();
-            if property {
-                tables.push(&mut self.properties);
-            } else if tag.eq_ignore_ascii_case("Target") {
-                tables.push(&mut self.targets);
-            } else {
-                tables.push(&mut self.tasks);
             }
-            let in_target = node
-                .ancestors()
-                .skip(1)
-                .any(|a| a.tag_name().name().eq_ignore_ascii_case("Target"));
-            if property && in_target {
-                tables.push(&mut self.build_time_properties);
-            }
-            for table in tables {
-                table
-                    .entry(name.clone())
-                    .or_default()
-                    .insert(file.to_path_buf());
-            }
+            let is_target = tag.eq_ignore_ascii_case("Target");
+            stack.extend(
+                node.children()
+                    .filter(roxmltree::Node::is_element)
+                    .map(|child| (child, in_target || is_target))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            );
+            self.record_element(node, in_target, file);
+        }
+    }
+
+    fn record_element(&mut self, node: roxmltree::Node<'_, '_>, in_target: bool, file: &Path) {
+        let tag = node.tag_name().name();
+        let attribute = |name: &str| {
+            node.attributes()
+                .find(|a| a.name().eq_ignore_ascii_case(name))
+                .map(|a| a.value())
+        };
+        let in_property_group = node
+            .parent_element()
+            .is_some_and(|p| p.tag_name().name().eq_ignore_ascii_case("PropertyGroup"));
+        let (table, name) = if in_property_group {
+            (&mut self.properties, Some(tag))
+        } else if tag.eq_ignore_ascii_case("Output") {
+            (&mut self.properties, attribute("PropertyName"))
+        } else if tag.eq_ignore_ascii_case("Target") {
+            (&mut self.targets, attribute("Name"))
+        } else if tag.eq_ignore_ascii_case("UsingTask") {
+            (&mut self.tasks, attribute("TaskName"))
+        } else {
+            return;
+        };
+        let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
+            return;
+        };
+        let name = name.to_ascii_lowercase();
+        let property = in_property_group || tag.eq_ignore_ascii_case("Output");
+        table
+            .entry(name.clone())
+            .or_default()
+            .insert(file.to_path_buf());
+        if property && in_target {
+            self.build_time_properties
+                .entry(name)
+                .or_default()
+                .insert(file.to_path_buf());
         }
     }
 }

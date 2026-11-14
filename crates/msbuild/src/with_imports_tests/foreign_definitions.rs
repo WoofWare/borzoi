@@ -200,3 +200,21 @@ fn the_queries_match_computed_names_and_short_task_names() {
     assert!(computed.defines_task("Fsc"));
     assert!(!computed.defines_target("CoreCompile"));
 }
+
+/// MSBuild decodes an escape in a name, so an escaped spelling may be any
+/// name; and it does not read inside `<ProjectExtensions>`.
+#[test]
+fn an_escaped_name_matches_every_query_and_extensions_define_nothing() {
+    let doc = roxmltree::Document::parse(
+        r#"<Project>
+  <Target Name="T"><CreateProperty Value="8.0"><Output TaskParameter="Value" PropertyName="Lang%56ersion" /></CreateProperty></Target>
+  <ProjectExtensions><PropertyGroup><FscToolPath>x</FscToolPath></PropertyGroup><Target Name="CoreCompile" /></ProjectExtensions>
+</Project>"#,
+    )
+    .unwrap();
+    let mut foreign = ForeignDefinitions::default();
+    foreign.record_document(doc.root_element(), Path::new("/w/x.targets"));
+    assert!(foreign.writes_property_at_build_time("LangVersion"));
+    assert_eq!(names(&foreign.targets), ["t"]);
+    assert_eq!(names(&foreign.properties), ["lang%56ersion"]);
+}
