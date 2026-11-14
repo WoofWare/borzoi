@@ -764,9 +764,25 @@ fn batching_project(rng: &mut SplitMix64) -> String {
             _ => "@(J)",
         };
         let own = if rng.below(4) == 0 { " M=\"own\"" } else { "" };
-        out.push_str(&format!(
-            "      <I Include=\"{include}\" Condition=\"{condition}\"{own} />\n"
-        ));
+        // A metadata child, which MSBuild decides per bucket: plain, reading
+        // the bucket's list, or reading metadata (which batches even where
+        // its condition skips it).
+        let child = match rng.below(16) {
+            0 => "<M>plain</M>",
+            1 => "<M Condition=\"'@(J)' == 'a.x'\">one</M>",
+            2 => "<M Condition=\"false\">%(J.Filename)</M>",
+            3 => "<M>%(J.Extension)</M>",
+            _ => "",
+        };
+        if child.is_empty() {
+            out.push_str(&format!(
+                "      <I Include=\"{include}\" Condition=\"{condition}\"{own} />\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "      <I Include=\"{include}\" Condition=\"{condition}\"{own}>{child}</I>\n"
+            ));
+        }
     }
     out.push_str("    </ItemGroup>\n  </Target>\n</Project>\n");
     out
@@ -784,8 +800,10 @@ fn batching_sweep(seed: u64, cases: usize) -> Tally {
 
 /// An item element whose condition reads `%(J.…)` batches over `J`: its
 /// buckets, in first-appearance order, each decided with their own values,
-/// copy their items. Every committed run must be MSBuild's, and most must
-/// commit.
+/// copy their items. Every committed run must be MSBuild's. About half the
+/// draws are shapes the executor declines by design (unmodelled references,
+/// other includes, a second element of `I`, identities substitution cannot
+/// spell, metadata reading the list), so the floor is two fifths.
 #[test]
 fn batched_item_groups_match_msbuild() {
     let tally = batching_sweep(0xba7c_4ed1, 200);
@@ -794,7 +812,7 @@ fn batched_item_groups_match_msbuild() {
         tally.cases, tally.committed, tally.rejected, tally.failed
     );
     assert!(
-        tally.committed * 2 > tally.cases,
+        tally.committed * 5 > tally.cases * 2,
         "only {} of {} batched runs committed",
         tally.committed,
         tally.cases

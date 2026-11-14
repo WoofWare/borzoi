@@ -612,6 +612,29 @@ impl<'s, 'r> Engine<'s, 'r> {
             if batched.is_none() && !self.decide(item)? {
                 continue;
             }
+            // MSBuild decides a batched element's metadata per bucket, against
+            // that bucket's items, and finds the metadata it batches on in
+            // every expression the element holds, a skipped child's among
+            // them: metadata reading an item list or metadata declines.
+            if batched.is_some() {
+                let metadata_text = item
+                    .attributes()
+                    .filter(|a| !matches!(a.name(), "Include" | "Condition" | "Label"))
+                    .map(|a| a.value().to_owned())
+                    .chain(item.children().filter(Node::is_element).flat_map(|child| {
+                        let condition = child.attribute("Condition").map(str::to_owned);
+                        let text = child
+                            .descendants()
+                            .filter_map(|n| n.text())
+                            .collect::<String>();
+                        condition.into_iter().chain([text])
+                    }));
+                for text in metadata_text {
+                    if text.contains("@(") || text.contains("%(") {
+                        return decline(format!("a batched {item_type}'s metadata reads {text}"));
+                    }
+                }
+            }
             // The type's item-definition defaults go beneath everything else,
             // and the element's own metadata on top.
             let definitions = self.definitions(item_type)?;
