@@ -677,6 +677,23 @@ impl Oracle {
         item_type: &str,
         metadata: &[&str],
     ) -> Option<Vec<(String, HashMap<String, String>)>> {
+        Some(
+            self.items_meta_spelled(xml, path, item_type, metadata)?
+                .into_iter()
+                .map(|item| (item.identity, item.metadata))
+                .collect(),
+        )
+    }
+
+    /// [`Self::items_meta`], each item with its identity's escaped spelling too
+    /// (MSBuild's `EvaluatedIncludeEscaped`).
+    pub fn items_meta_spelled(
+        &mut self,
+        xml: &str,
+        path: &Path,
+        item_type: &str,
+        metadata: &[&str],
+    ) -> Option<Vec<OracleItem>> {
         let resp = self.request(&serde_json::json!({
             "op": "itemsMeta",
             "xml": xml,
@@ -697,7 +714,11 @@ impl Oracle {
                         .as_str()
                         .expect("each item carries a string identity")
                         .to_string();
-                    let values = item["metadata"]
+                    let escaped = item["escaped"]
+                        .as_str()
+                        .expect("each item carries its escaped spelling")
+                        .to_string();
+                    let metadata = item["metadata"]
                         .as_object()
                         .expect("each item carries a metadata object")
                         .iter()
@@ -708,7 +729,11 @@ impl Oracle {
                             )
                         })
                         .collect();
-                    (identity, values)
+                    OracleItem {
+                        identity,
+                        escaped,
+                        metadata,
+                    }
                 })
                 .collect(),
         )
@@ -982,6 +1007,16 @@ pub fn soak_parameters(name: &str, default_cases: usize) -> (u64, usize) {
     let cases = env_u64("BORZOI_MSBUILD_SOAK_CASES").map_or(default_cases, |n| n as usize);
     println!("{name} soak: BORZOI_MSBUILD_SOAK_SEED={seed} BORZOI_MSBUILD_SOAK_CASES={cases}");
     (seed, cases)
+}
+
+/// One item of the oracle's `itemsMeta` answer.
+pub struct OracleItem {
+    /// `EvaluatedInclude`: the identity, decoded.
+    pub identity: String,
+    /// `EvaluatedIncludeEscaped`: the identity as MSBuild holds it.
+    pub escaped: String,
+    /// The requested metadata's evaluated values (`""` where unset).
+    pub metadata: HashMap<String, String>,
 }
 
 /// SplitMix64: tiny, deterministic mixing for reproducible input generation.
