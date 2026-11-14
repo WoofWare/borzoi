@@ -246,6 +246,24 @@ const CONSTRUCTS: &[Construct] = &[
         status: Status::Interned,
     },
     Construct {
+        id: "match_qualified_case_field",
+        fcs: "SynPat.LongIdent (qualified head) argPats",
+        template: "type U = A of int | B\nlet f (o: U) =\n    match o with\n    | U.A «x» -> ignore USE\n    | U.B -> ()\n",
+        status: Status::Interned,
+    },
+    Construct {
+        id: "match_abbreviation_qualified_case_field",
+        fcs: "SynPat.LongIdent (head through a type abbreviation) argPats",
+        template: "type U = A of int | B\ntype W = U\nlet f (o: W) =\n    match o with\n    | W.A «x» -> ignore USE\n    | _ -> ()\n",
+        status: Status::Opaque,
+    },
+    Construct {
+        id: "match_assembly_abbreviation_qualified_case_field",
+        fcs: "SynPat.LongIdent (head through an assembly type abbreviation) argPats",
+        template: "type O = Option<int>\nlet f (o: O) =\n    match o with\n    | O.Some «x» -> ignore USE\n    | _ -> ()\n",
+        status: Status::Opaque,
+    },
+    Construct {
         id: "match_guard",
         fcs: "SynMatchClause whenExpr",
         template: "let f (o: int) =\n    match o with\n    | «x» when (ignore USE; true) -> ()\n    | _ -> ()\n",

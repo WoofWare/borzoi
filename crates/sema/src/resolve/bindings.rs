@@ -180,6 +180,22 @@ impl<'a> Resolver<'a> {
                 if self.index.excluded_param_ranges.contains(&pat_name.range()) {
                     continue;
                 }
+                // Under a qualified pattern head the walk could not resolve
+                // (`let (Q.R x) = …`): declined, as in `pattern_locals`.
+                let kind = match &pat_name {
+                    PatternName::Binder(def) => Some(def.kind),
+                    PatternName::Alias { .. } => None,
+                };
+                if let Some(mask) = self.undecided_pattern_name(&pat_name) {
+                    if let Some(mask) = mask {
+                        if matches!(kind, Some(DefKind::Value { .. })) {
+                            item_entries.push(mask);
+                        } else {
+                            param_entries.push(mask);
+                        }
+                    }
+                    continue;
+                }
                 let def = match pat_name {
                     PatternName::Alias { range, binder } => {
                         if let Some(res) = aliases.resolution_of(binder) {
@@ -412,6 +428,22 @@ impl<'a> Resolver<'a> {
                     // An active-pattern *parameter* argument: excluded whichever
                     // kind it is, as in `prepare_binding`.
                     if self.index.excluded_param_ranges.contains(&pat_name.range()) {
+                        continue;
+                    }
+                    // Under a qualified pattern head the walk could not
+                    // resolve: declined, as in `prepare_binding`.
+                    let kind = match &pat_name {
+                        PatternName::Binder(def) => Some(def.kind),
+                        PatternName::Alias { .. } => None,
+                    };
+                    if let Some(mask) = self.undecided_pattern_name(&pat_name) {
+                        if let Some(mask) = mask {
+                            if matches!(kind, Some(DefKind::Value { .. })) {
+                                value_entries.push(mask);
+                            } else {
+                                params.push(mask);
+                            }
+                        }
                         continue;
                     }
                     let def = match pat_name {

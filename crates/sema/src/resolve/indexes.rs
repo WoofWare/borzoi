@@ -295,6 +295,21 @@ pub(super) struct Indexes {
     /// per-file, byte ranges are unique within a file, and a range excluded as a
     /// parameter is never a legitimate binder elsewhere.
     pub(super) excluded_param_ranges: HashSet<TextRange>,
+    /// The ident-token ranges of every name occurrence under an applied
+    /// pattern whose qualified head the walk could not resolve
+    /// ([`Resolver::mark_undecided_pattern_args`](crate::resolve::Resolver::mark_undecided_pattern_args)).
+    /// FCS binds nothing under a qualified head it cannot resolve, and binds
+    /// the arguments as usual under one it can, so whether each occurrence
+    /// binds is unknown: the binder-interning loops make each an
+    /// [opaque binder](super::ResolvedFile::opaque_binders) whose name
+    /// declines in the scope it would have bound
+    /// ([`Resolver::undecided_pattern_name`](crate::resolve::Resolver::undecided_pattern_name)).
+    /// Keyed and kept like [`Self::excluded_param_ranges`].
+    pub(super) undecided_pattern_binders: HashSet<TextRange>,
+    /// How many undecided pattern heads enclose the arguments being walked:
+    /// the outermost one marks its whole subtree, so the ones inside it need
+    /// not.
+    pub(super) undecided_pattern_depth: u32,
     /// Member path → how many of [`Output::export_decls`](super::output::Output::export_decls) declare a member
     /// there ([`ExportDecl::member_path`](super::model::ExportDecl::member_path)): the same-file half of
     /// [`Resolver::member_declarations`](crate::resolve::Resolver::member_declarations), kept beside the list by its one writer

@@ -31,6 +31,15 @@
 //!   re-raised while solving witnesses, a recovered pattern match), so FCS
 //!   reported no node there at all. Ungraded, and recorded as such: it is
 //!   neither an agreement nor a disagreement, whatever FCS's errors say.
+//! * **absent** — FCS has no node there, and its typed tree holds nothing at
+//!   all in the declaration the commit sits in: no expression node and no
+//!   binder. FCS never checked that declaration — its parse recovery dropped
+//!   it, after an error earlier in the file that left no diagnostic of its
+//!   own on the declaration (`src/FSharp.Core/array2.fs`, where FCS stops at
+//!   inline IL it only accepts inside FSharp.Core's own build). There is no
+//!   answer to compare with, so the commit is ungraded rather than a
+//!   divergence; a declaration FCS did check, with no node at the commit, is
+//!   still graded as above.
 //!
 //! # The manifest
 //!
@@ -186,6 +195,8 @@ struct Tally {
     unconverted_commits: usize,
     /// Files skipped because an unconverted declaration could not be placed.
     unlocated_unconverted: usize,
+    /// Commits in a declaration FCS's typed tree does not hold: ungraded.
+    absent_commits: usize,
     divergences: Vec<Site>,
     error_lines: Vec<Site>,
     /// Per FCS node kind: `(nodes on clean lines, of which we committed)`.
@@ -534,6 +545,17 @@ fn compare_file_with(path: &Path, rel: &str, tally: &Mutex<Tally>, oracle: Oracl
             entry.1 += 1;
         }
     }
+    // Whether FCS's typed tree holds anything in `[d0, d1)`: an expression
+    // node or a binder. A declaration with neither is not in the tree at all,
+    // which happens when FCS's parse recovery drops it (an error earlier in
+    // the file, with no diagnostic of its own), so FCS never checked it and
+    // has no answer to compare a commit there with.
+    let fcs_checked = |d0: usize, d1: usize| {
+        fcs_types
+            .keys()
+            .chain(fcs_binders.keys())
+            .any(|&(s, e)| d0 <= s && e <= d1)
+    };
     let grade = |kind: &'static str,
                  commits: &[((usize, usize), String)],
                  fcs: &crate::common::FcsTypeMap,
@@ -584,7 +606,10 @@ fn compare_file_with(path: &Path, rel: &str, tally: &Mutex<Tally>, oracle: Oracl
             let (d0, d1) = file_for_decls
                 .as_ref()
                 .map_or((*s, *e), |f| enclosing_decl(f, *s, *e));
-            if touches_error(&lines, &errors, d0, d1) {
+            if theirs.is_none() && file_for_decls.is_some() && !fcs_checked(d0, d1) {
+                t.absent_commits += 1;
+                t.manifest.push((key, format!("absent ours={ours:?}")));
+            } else if touches_error(&lines, &errors, d0, d1) {
                 t.manifest
                     .push((key, format!("error-recovered {disagreement}")));
                 t.error_lines.push(site);
@@ -675,9 +700,9 @@ fn inferred_types_match_fcs_over_corpus() {
 
     eprintln!(
         "infer-diff: {} files compared | {} expr + {} binder agree | {} diverge | {} in \
-         error-recovered declarations | {} in {} unconverted declarations | {} \
-         our-parse-errors | {} line-directive files | {} our-panics | {} fcs-failed | {} \
-         unlocated-unconverted",
+         error-recovered declarations | {} in {} unconverted declarations | {} in \
+         declarations absent from FCS | {} our-parse-errors | {} line-directive files | \
+         {} our-panics | {} fcs-failed | {} unlocated-unconverted",
         t.files_compared,
         t.agree_exprs,
         t.agree_binders,
@@ -685,6 +710,7 @@ fn inferred_types_match_fcs_over_corpus() {
         t.error_lines.len(),
         t.unconverted_commits,
         t.unconverted_decls,
+        t.absent_commits,
         t.our_parse_errors,
         t.line_directives,
         t.our_panics,
@@ -883,6 +909,29 @@ fn a_line_directive_file_is_skipped_not_compared() {
     assert_eq!((t.line_directives, t.files_compared), (1, 0), "{t:?}");
     assert!(has_line_directive("# 7 \"x.fs\"\n"));
     assert!(!has_line_directive("#if DEBUG\n#endif\n"));
+}
+
+/// FCS's parse recovery drops a declaration it never reports an error on:
+/// after the `type ('T)` form of inline IL, which FCS accepts only inside
+/// FSharp.Core's own build (`src/FSharp.Core/array2.fs`), its tree ends at
+/// `get`, so `later` (line 5) has no node and no diagnostic. Every commit of
+/// ours in `later` is ungraded, not a divergence: FCS never checked it.
+#[test]
+fn a_declaration_absent_from_fcs_is_ungraded() {
+    let src = "module M\nlet get (array: 'T[,]) (index1:int) (index2:int) =\n    (# \"ldelem.multi 2 !0\" type ('T) array index1 index2 : 'T #)\n\nlet later (n: int) = n + 1\n";
+    let path = crate::common::temp_fs_file("infer_corpus_absent", src);
+    let tally = Mutex::new(Tally::default());
+    compare_file(&path, "case.fs", &tally);
+    let _ = std::fs::remove_file(&path);
+    let t = tally.into_inner().unwrap();
+    assert_eq!(t.files_compared, 1, "{t:#?}");
+    let later = commits_on_line(&t, 5);
+    assert!(
+        !later.is_empty() && later.iter().all(|m| m.starts_with("absent ")),
+        "every commit in `later` is ungraded: {t:#?}"
+    );
+    assert_eq!(t.absent_commits, later.len(), "{t:#?}");
+    assert!(t.divergences.is_empty(), "{:#?}", t.divergences);
 }
 
 /// The constraint-violating shape fcs-dump cannot convert: `g = g` with
