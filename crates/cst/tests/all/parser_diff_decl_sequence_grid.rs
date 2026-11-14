@@ -192,20 +192,24 @@ fn every_declaration_pair_in_every_layout() {
 /// divergent cell is pinned, keyed by its source, in
 /// `tests/manifests/decl_sequence_grid_streams.txt` (`stream@<i>` at the first
 /// differing token, or `fs0058`). Ignored for its cost (one FCS round trip per
-/// cell for the stream and one for the diagnostics); CI runs it.
+/// cell for the stream and one for the diagnostics); CI runs it. The cells
+/// are independent, so they are graded on every core (and every child of the
+/// two `fcs-dump` pools), and come back in cell order.
 #[test]
 #[ignore]
 fn every_declaration_pair_streams() {
     use crate::common::corpus_manifest::{check_manifest, regenerate_ignored};
-    use crate::common::filtered_stream_divergence;
+    use crate::common::{filtered_stream_divergence, par_map};
     use borzoi_oracle_harness::manifest::Manifest;
-    let divergent: Vec<(String, String)> = cells()
-        .into_iter()
-        .filter_map(|source| {
-            let how = filtered_stream_divergence(&source)?;
-            Some((format!("{source:?}"), how))
-        })
-        .collect();
+    let cells = cells();
+    let divergent: Vec<(String, String)> = par_map(cells.len(), |i| {
+        let source = &cells[i];
+        let how = filtered_stream_divergence(source)?;
+        Some((format!("{source:?}"), how))
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     let actual = Manifest::from_keyed(divergent).expect("one entry per cell");
     check_manifest(
         "decl_sequence_grid_streams",
