@@ -31,7 +31,7 @@
 //!
 //! Requires the devshell's `$DOTNET_ROOT`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -870,6 +870,8 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
     for targets in [
         r#"<Target Name="CoreCompile" />"#,
         r#"<UsingTask TaskName="Fsc" AssemblyFile="/opt/My.Build.dll" />"#,
+        r#"<UsingTask TaskName="Review.Fsc" AssemblyFile="/opt/My.Build.dll" Override="true" />"#,
+        r#"<PropertyGroup><Selector>DotnetFscCompilerPath</Selector></PropertyGroup><Target Name="Pick" BeforeTargets="CoreCompile"><CreateProperty Value="x"><Output TaskParameter="Value" PropertyName="$(Selector)" /></CreateProperty></Target>"#,
     ] {
         let dir = tempfile::tempdir().unwrap();
         let fsproj = project_defining(
@@ -891,7 +893,56 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
         env.build_environment
             .insert(selector.to_string(), "/opt/elsewhere".to_string());
         assert_eq!(named(&fsproj, &env), None, "{selector} in the environment");
+        let globals = HashMap::from([(selector.to_string(), "/opt/elsewhere".to_string())]);
+        let mut workspace = Workspace::with_env_and_extra_build_properties(plain.clone(), globals);
+        assert_eq!(
+            workspace.compiler_sdk_for_project(&fsproj),
+            None,
+            "{selector} as a global"
+        );
     }
+}
+
+/// A target outside the SDK that may write `$(LangVersion)` before
+/// `CoreCompile` reads it leaves the value the compiler is handed
+/// unestablished: no refusal is reported, and the version is doubted.
+#[test]
+fn a_build_time_langversion_write_reports_no_refusal() {
+    let compiler = graded_compilers()
+        .into_iter()
+        .find(|c| SdkLanguageFacts::for_sdk(&c.sdk).unwrap().floor > LanguageVersion::V7_0)
+        .expect("an installed graded SDK with a floor above F# 7.0");
+    let dir = tempfile::tempdir().unwrap();
+    let fsproj = pinned_project(dir.path(), &compiler.sdk, Some("7.0"), STRADDLING);
+    let text = host_fs::read_to_string(&fsproj).unwrap().replace(
+        "</Project>",
+        r#"<Target Name="Raise" BeforeTargets="CoreCompile"><PropertyGroup><LangVersion>8.0</LangVersion></PropertyGroup></Target></Project>"#,
+    );
+    std::fs::write(&fsproj, &text).unwrap();
+    let (_, env, _) = environments().remove(0);
+    let mut workspace = Workspace::with_env(env.clone());
+    let parsed = workspace.project(&fsproj).unwrap();
+    assert!(!parsed.property_provenance_untrusted("LangVersion"));
+    assert!(borzoi::sdk_language::lang_version_untrusted_cause(parsed).is_some());
+    let diags = borzoi::fsproj_diagnostics::diagnostics_for(
+        &text,
+        &fsproj,
+        &env,
+        &workspace.build_properties(),
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(lsp_types::NumberOrString::String("FS3880".to_string()))),
+        "{diags:#?}"
+    );
+    let mut sema = borzoi::semantic::SemanticState::new();
+    let docs = borzoi::vfs::Vfs::new();
+    assert!(
+        sema.parses_for_project(&fsproj, &mut workspace, &docs)
+            .is_none(),
+        "the straddling file is refused under a doubted version"
+    );
 }
 
 /// The SDK's files that choose its F# compiler: its F# props and targets, and

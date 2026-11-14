@@ -807,26 +807,75 @@ pub struct ParsedProject {
 /// .NET SDK (the `…/sdk/<version>` directory its `Sdk` resolved into, or every
 /// document when it resolved none): the entry project, `Directory.Build.*`,
 /// user imports, package build files, and anything else reached outside that
-/// directory. Each name, lowercased, maps to the files that define it.
+/// directory. Each name, lowercased and as written, maps to the files that
+/// define it.
 ///
 /// Read off each document's text, not off the walk: a definition counts
 /// whether its condition held, failed, or could not be decided, and whether or
 /// not the evaluation runs it (a `<Target>` body runs at build time). So a name
-/// absent here is defined by no file the walk entered outside the SDK, which,
-/// with [`ParsedProject::hidden_content`] `None`, is every such file the build
-/// imports.
+/// no query here matches is defined by no file the walk entered outside the
+/// SDK, which, with [`ParsedProject::hidden_content`] `None`, is every such
+/// file the build imports. Ask through the query methods, which also match a
+/// name the build computes (`PropertyName="$(Name)"`) to every query.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForeignDefinitions {
     /// Properties: every element directly inside a `<PropertyGroup>`,
     /// wherever the group sits, and every task `<Output PropertyName="…">`.
     pub properties: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// The subset of [`Self::properties`] written inside a `<Target>`, which
+    /// the build runs after evaluation.
+    pub build_time_properties: BTreeMap<String, BTreeSet<PathBuf>>,
     /// `<Target Name="…">` definitions.
     pub targets: BTreeMap<String, BTreeSet<PathBuf>>,
-    /// `<UsingTask TaskName="…">` registrations.
+    /// `<UsingTask TaskName="…">` registrations, possibly namespace-qualified.
     pub tasks: BTreeMap<String, BTreeSet<PathBuf>>,
 }
 
+/// Whether a recorded name is one the build computes, which may be any name.
+fn computed_name(name: &str) -> bool {
+    name.contains("$(") || name.contains("@(") || name.contains("%(")
+}
+
 impl ForeignDefinitions {
+    /// Whether a document outside the SDK may define property `name`.
+    pub fn defines_property(&self, name: &str) -> bool {
+        Self::matches(&self.properties, name, |key, name| key == name)
+    }
+
+    /// Whether a document outside the SDK may write property `name` at build
+    /// time, from a target.
+    pub fn writes_property_at_build_time(&self, name: &str) -> bool {
+        Self::matches(&self.build_time_properties, name, |key, name| key == name)
+    }
+
+    /// Whether a document outside the SDK may define target `name`.
+    pub fn defines_target(&self, name: &str) -> bool {
+        Self::matches(&self.targets, name, |key, name| key == name)
+    }
+
+    /// Whether a document outside the SDK may register a task that an
+    /// invocation `<name>` runs: one registered as `name` or under any
+    /// namespace (`Namespace.name`), as MSBuild matches a short task name.
+    pub fn defines_task(&self, name: &str) -> bool {
+        Self::matches(&self.tasks, name, |key, name| {
+            key == name
+                || key
+                    .strip_suffix(name)
+                    .is_some_and(|namespace| namespace.ends_with('.'))
+        })
+    }
+
+    fn matches(
+        table: &BTreeMap<String, BTreeSet<PathBuf>>,
+        name: &str,
+        same: impl Fn(&str, &str) -> bool,
+    ) -> bool {
+        let name = name.to_ascii_lowercase();
+        table
+            .keys()
+            .any(|key| same(key, &name) || computed_name(key))
+    }
+
     /// Record every definition in the document rooted at `root`, read from
     /// `file`.
     pub(crate) fn record_document(&mut self, root: roxmltree::Node<'_, '_>, file: &Path) {
@@ -840,20 +889,39 @@ impl ForeignDefinitions {
             let in_property_group = node
                 .parent_element()
                 .is_some_and(|p| p.tag_name().name().eq_ignore_ascii_case("PropertyGroup"));
-            let (table, name) = if in_property_group {
-                (&mut self.properties, Some(tag))
+            let (property, name) = if in_property_group {
+                (true, Some(tag))
             } else if tag.eq_ignore_ascii_case("Output") {
-                (&mut self.properties, attribute("PropertyName"))
+                (true, attribute("PropertyName"))
             } else if tag.eq_ignore_ascii_case("Target") {
-                (&mut self.targets, attribute("Name"))
+                (false, attribute("Name"))
             } else if tag.eq_ignore_ascii_case("UsingTask") {
-                (&mut self.tasks, attribute("TaskName"))
+                (false, attribute("TaskName"))
             } else {
                 continue;
             };
-            if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
+                continue;
+            };
+            let name = name.to_ascii_lowercase();
+            let mut tables = Vec::new();
+            if property {
+                tables.push(&mut self.properties);
+            } else if tag.eq_ignore_ascii_case("Target") {
+                tables.push(&mut self.targets);
+            } else {
+                tables.push(&mut self.tasks);
+            }
+            let in_target = node
+                .ancestors()
+                .skip(1)
+                .any(|a| a.tag_name().name().eq_ignore_ascii_case("Target"));
+            if property && in_target {
+                tables.push(&mut self.build_time_properties);
+            }
+            for table in tables {
                 table
-                    .entry(name.to_ascii_lowercase())
+                    .entry(name.clone())
                     .or_default()
                     .insert(file.to_path_buf());
             }

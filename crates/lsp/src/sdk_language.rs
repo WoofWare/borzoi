@@ -220,7 +220,8 @@ pub fn support_check_skipped(environment: &HashMap<String, String>) -> bool {
 }
 
 /// The compiler that builds `parsed`, evaluated under `environment` (the
-/// process environment its evaluation saw), or `None` when it cannot be said.
+/// process environment its evaluation saw) and the global properties
+/// `globals`, or `None` when it cannot be said.
 ///
 /// The claim is that it is the entry SDK's own `fsc.dll`, and it rests on
 /// what the build cannot be told rather than on what the evaluation computed:
@@ -232,11 +233,12 @@ pub fn support_check_skipped(environment: &HashMap<String, String>) -> bool {
 ///   cannot decide that gate (it does not model `DOTNET_HOST_PATH`), and need
 ///   not. `sdk_language_diff` grades both arms against each installed SDK.
 /// - So the build runs another compiler only if something outside the SDK
-///   defines one of [`COMPILER_SELECTORS`], the `CoreCompile` target or the
-///   `Fsc` task, or sets a selector in the environment. A definition anywhere
-///   in a document the walk entered outside the SDK declines, whatever its
-///   condition ([`ParsedProject::foreign_definitions`]), and so does any
-///   content the walk did not enter ([`ParsedProject::hidden_content`]).
+///   defines one of [`COMPILER_SELECTORS`], the `CoreCompile` target or an
+///   `Fsc` task, or sets a selector in the environment or as a global. A
+///   definition anywhere in a document the walk entered outside the SDK
+///   declines, whatever its condition, and so does one whose name the build
+///   computes ([`ParsedProject::foreign_definitions`]), and any content the
+///   walk did not enter ([`ParsedProject::hidden_content`]).
 /// - The SDK must be the canonical layout with a graded row
 ///   ([`SdkLanguageFacts::for_sdk`]): the argument above is about its files,
 ///   and only a graded SDK's files have been checked. Its F# props and targets
@@ -248,23 +250,26 @@ pub fn support_check_skipped(environment: &HashMap<String, String>) -> bool {
 pub fn project_compiler(
     parsed: &ParsedProject,
     environment: &HashMap<String, String>,
+    globals: &HashMap<String, String>,
 ) -> Option<ProjectCompiler> {
+    let is_selector = |name: &str| {
+        COMPILER_SELECTORS
+            .iter()
+            .any(|selector| name.eq_ignore_ascii_case(selector))
+    };
     let set_in_environment = environment.iter().any(|(name, value)| {
-        !value.is_empty()
-            && !name.eq_ignore_ascii_case("DOTNET_HOST_PATH")
-            && COMPILER_SELECTORS
-                .iter()
-                .any(|selector| name.eq_ignore_ascii_case(selector))
+        !value.is_empty() && !name.eq_ignore_ascii_case("DOTNET_HOST_PATH") && is_selector(name)
     });
-    if set_in_environment || parsed.hidden_content.is_some() {
+    let set_globally = globals.keys().any(|name| is_selector(name));
+    if set_in_environment || set_globally || parsed.hidden_content.is_some() {
         return None;
     }
     let foreign = &parsed.foreign_definitions;
     if COMPILER_SELECTORS
         .iter()
-        .any(|name| foreign.properties.contains_key(&name.to_ascii_lowercase()))
-        || foreign.targets.contains_key(COMPILE_TARGET)
-        || foreign.tasks.contains_key(COMPILE_TASK)
+        .any(|name| foreign.defines_property(name))
+        || foreign.defines_target(COMPILE_TARGET)
+        || foreign.defines_task(COMPILE_TASK)
     {
         return None;
     }
@@ -470,7 +475,8 @@ impl LangVersionSelection {
 /// (`SyntaxRecovery::of_guessed_version`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LangVersionDoubt {
-    /// The evaluation cannot pin the `$(LangVersion)` write.
+    /// The value the compiler is handed is not established
+    /// ([`lang_version_untrusted_cause`]).
     Provenance(UntrustedCause),
     /// The project's compiler refuses its `<LangVersion>`, so the build checks
     /// at no version.
@@ -482,11 +488,34 @@ impl LangVersionDoubt {
     /// provenance comes first: a refusal read from an untrusted value is
     /// itself a guess.
     pub fn of(parsed: &ParsedProject, selection: &LangVersionSelection) -> Option<Self> {
-        if let Some(cause) = parsed.property_untrusted_cause("LangVersion") {
-            return Some(LangVersionDoubt::Provenance(cause.clone()));
+        if let Some(cause) = lang_version_untrusted_cause(parsed) {
+            return Some(LangVersionDoubt::Provenance(cause));
         }
         selection.refusal.clone().map(LangVersionDoubt::Refused)
     }
+}
+
+/// Why the evaluated `$(LangVersion)` may not be the value the compiler is
+/// handed, or `None` when it is. The compiler takes the value `CoreCompile`
+/// reads at build time, so besides an untrusted evaluation of it, a target
+/// outside the SDK that may write it ([`ForeignDefinitions`]) and content the
+/// walk did not enter (which may hold such a target) leave it unestablished.
+/// The SDK writes it only at evaluation.
+///
+/// [`ForeignDefinitions`]: borzoi_msbuild::ForeignDefinitions
+pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedCause> {
+    if let Some(cause) = parsed.property_untrusted_cause("LangVersion") {
+        return Some(cause.clone());
+    }
+    if parsed
+        .foreign_definitions
+        .writes_property_at_build_time("LangVersion")
+    {
+        return Some(UntrustedCause::Unentered(
+            "a target that may write `LangVersion` before `CoreCompile` reads it".to_string(),
+        ));
+    }
+    parsed.hidden_content.clone()
 }
 
 #[cfg(test)]
@@ -608,7 +637,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        project_compiler(parsed, &environment).map(|c| c.sdk)
+        project_compiler(parsed, &environment, &HashMap::new()).map(|c| c.sdk)
     }
 
     /// The compiler is the entry SDK's own while nothing outside the SDK can
@@ -671,6 +700,40 @@ mod tests {
             .or_default()
             .insert("/w/Directory.Build.props".into());
         assert_eq!(compiler_of(&parsed, &[]), None, "Fsc registered");
+        for (table, name) in [
+            ("tasks", "my.ns.fsc"),
+            ("tasks", "$(task)"),
+            ("properties", "$(selector)"),
+        ] {
+            let mut parsed = on_sdk("10.0.401");
+            let foreign = &mut parsed.foreign_definitions;
+            let table = if table == "tasks" {
+                &mut foreign.tasks
+            } else {
+                &mut foreign.properties
+            };
+            table
+                .entry(name.to_string())
+                .or_default()
+                .insert("/w/Directory.Build.targets".into());
+            assert_eq!(compiler_of(&parsed, &[]), None, "{name}");
+        }
+        let mut parsed = on_sdk("10.0.401");
+        parsed
+            .foreign_definitions
+            .tasks
+            .entry("notfsc".to_string())
+            .or_default()
+            .insert("/w/Directory.Build.targets".into());
+        assert_eq!(compiler_of(&parsed, &[]), ten_four, "another task");
+        for selector in COMPILER_SELECTORS {
+            let globals = HashMap::from([(selector.to_ascii_lowercase(), "x".to_string())]);
+            assert_eq!(
+                project_compiler(&on_sdk("10.0.401"), &HashMap::new(), &globals),
+                None,
+                "{selector} as a global"
+            );
+        }
         let mut parsed = on_sdk("10.0.401");
         parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
         assert_eq!(compiler_of(&parsed, &[]), None, "content unseen");
@@ -737,7 +800,7 @@ mod tests {
                 "SKIP_VERSION_SUPPORTED_CHECK".to_string(),
                 value.to_string(),
             )]);
-            project_compiler(&parsed, &environment)
+            project_compiler(&parsed, &environment, &HashMap::new())
                 .unwrap()
                 .support_check_skipped
         };
@@ -746,7 +809,7 @@ mod tests {
             assert!(!skipped(other), "{other:?}");
         }
         assert!(
-            !project_compiler(&parsed, &HashMap::new())
+            !project_compiler(&parsed, &HashMap::new(), &HashMap::new())
                 .unwrap()
                 .support_check_skipped
         );

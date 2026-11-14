@@ -119,6 +119,13 @@ fn every_definition_outside_the_sdk_is_recorded_whatever_its_condition() {
         ["Directory.Build.props"]
     );
     assert_eq!(files_of(&foreign.properties, "skipped"), ["Demo.fsproj"]);
+    assert_eq!(
+        names(&foreign.build_time_properties),
+        ["fsctoolexe", "picked"],
+        "a target's writes run at build time"
+    );
+    assert!(foreign.writes_property_at_build_time("FscToolExe"));
+    assert!(!foreign.writes_property_at_build_time("Skipped"));
     assert_eq!(names(&foreign.targets), ["corecompile"]);
     assert_eq!(names(&foreign.tasks), ["fsc"]);
 }
@@ -164,4 +171,32 @@ fn an_sdk_outside_the_canonical_layout_is_foreign_throughout() {
         names(&result.foreign_definitions.properties),
         ["fsctoolpath"]
     );
+}
+
+/// A name the build computes may be any name, and a task registration
+/// answers to its short name under any namespace.
+#[test]
+fn the_queries_match_computed_names_and_short_task_names() {
+    let parse = |text: &str| {
+        let doc = roxmltree::Document::parse(text).unwrap();
+        let mut foreign = ForeignDefinitions::default();
+        foreign.record_document(doc.root_element(), Path::new("/w/x.targets"));
+        foreign
+    };
+    let plain = parse(
+        r#"<Project><UsingTask TaskName="My.Ns.Fsc" AssemblyFile="a.dll" /><Target Name="T"><PropertyGroup><A>1</A></PropertyGroup></Target></Project>"#,
+    );
+    assert!(plain.defines_task("Fsc"));
+    assert!(plain.defines_task("fsc"));
+    assert!(!plain.defines_task("Csc"));
+    assert!(!plain.defines_task("Ns.Fsc.Other"));
+    assert!(plain.defines_property("A") && !plain.defines_property("B"));
+    assert!(plain.defines_target("t") && !plain.defines_target("CoreCompile"));
+    let computed = parse(
+        r#"<Project><Target Name="T"><CreateProperty Value="v"><Output TaskParameter="Value" PropertyName="$(Selector)" /></CreateProperty></Target><UsingTask TaskName="$(Task)" AssemblyFile="a.dll" /></Project>"#,
+    );
+    assert!(computed.defines_property("DotnetFscCompilerPath"));
+    assert!(computed.writes_property_at_build_time("LangVersion"));
+    assert!(computed.defines_task("Fsc"));
+    assert!(!computed.defines_target("CoreCompile"));
 }

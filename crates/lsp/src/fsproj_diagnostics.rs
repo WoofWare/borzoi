@@ -84,7 +84,7 @@ pub fn diagnostics_for(
     ) {
         Ok(parsed) => {
             let lang_version_refusal =
-                lang_version_refusal_diagnostic(&parsed, &env.build_environment);
+                lang_version_refusal_diagnostic(&parsed, &env.build_environment, build_properties);
             let mut diags: Vec<Diagnostic> = parsed
                 .diagnostics
                 .into_iter()
@@ -495,16 +495,19 @@ fn assets_present(project_path: &Path) -> bool {
 /// reports it without a location, and the `<LangVersion>` that decides may be
 /// written in an import.
 ///
-/// Only for a trusted `$(LangVersion)`: an untrusted one is the evaluation's
-/// best guess, and the value the build holds may be one the compiler takes.
+/// Only for an established `$(LangVersion)`
+/// ([`crate::sdk_language::lang_version_untrusted_cause`]): otherwise the
+/// evaluated value is a best guess, and the value the compiler is handed may be
+/// one it takes.
 fn lang_version_refusal_diagnostic(
     parsed: &borzoi_msbuild::ParsedProject,
     environment: &HashMap<String, String>,
+    globals: &HashMap<String, String>,
 ) -> Option<Diagnostic> {
-    if parsed.property_provenance_untrusted("LangVersion") {
+    if crate::sdk_language::lang_version_untrusted_cause(parsed).is_some() {
         return None;
     }
-    let compiler = crate::sdk_language::project_compiler(parsed, environment);
+    let compiler = crate::sdk_language::project_compiler(parsed, environment, globals);
     let refusal =
         crate::sdk_language::LangVersionSelection::of(parsed, compiler.as_ref()).refusal?;
     Some(Diagnostic {

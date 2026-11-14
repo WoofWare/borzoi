@@ -2872,7 +2872,7 @@ fn evaluate_project(
     // The install the SDK resolved from, as the evaluation spelt its reads
     // there (a root SDK discovery names may reach it through a symlink).
     immutable.dotnet.extend(sdk_install_root.clone());
-    let compiler = crate::sdk_language::project_compiler(&parsed, &env.build_environment);
+    let compiler = crate::sdk_language::project_compiler(&parsed, &env.build_environment, &extras);
     Evaluation {
         evaluated: Some(EvaluatedProject {
             parsed,
