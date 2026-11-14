@@ -170,11 +170,11 @@ pub fn msbuild_files(dir: &Path) -> Vec<PathBuf> {
 /// MSBuild ever sees the condition text, so a raw scan would census a string
 /// the evaluator is never handed.
 pub fn extract_conditions(text: &str, out: &mut BTreeSet<String>) {
-    let Ok(doc) = roxmltree::Document::parse(text) else {
+    let Ok(doc) = borzoi_msbuild::document::parse(text) else {
         return;
     };
     for node in doc.descendants() {
-        if let Some(cond) = borzoi_msbuild::test_support::attribute(node, "Condition")
+        if let Some(cond) = borzoi_msbuild::document::attribute(node, "Condition")
             && !cond.contains("@(")
             && !cond.contains("%(")
         {

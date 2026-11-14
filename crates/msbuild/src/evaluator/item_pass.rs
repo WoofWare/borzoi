@@ -3532,8 +3532,8 @@ pub(super) fn body_is_plain(element: Node<'_, '_>) -> bool {
 /// evaluates: it reads such spellings otherwise (a literal tab survives; an
 /// encoded CDATA section is decoded).
 pub(super) fn attribute_is_plain(node: Node<'_, '_>, attr: &roxmltree::Attribute<'_, '_>) -> bool {
-    let raw = node.document().input_text().get(attr.range_value());
-    raw == Some(attr.value()) && !attr.value().contains(['\t', '\n', '\r', '&'])
+    crate::document::attribute_source(node, attr) == attr.value()
+        && !attr.value().contains(['\t', '\n', '\r', '&'])
 }
 
 /// Set [`State::quiet_target_framework_reads`] for a metadatum named `name`

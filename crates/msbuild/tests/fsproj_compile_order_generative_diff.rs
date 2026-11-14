@@ -678,13 +678,13 @@ fn lift_order_target(oracle: &mut Oracle) -> String {
     let path = Path::new(&bin).join("FSharp/Microsoft.FSharp.Targets");
     let text = borzoi_msbuild::observed::host_fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let doc = roxmltree::Document::parse(&text)
+    let doc = borzoi_msbuild::document::parse(&text)
         .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
     let target = doc
         .descendants()
         .find(|n| {
             n.has_tag_name("Target")
-                && borzoi_msbuild::test_support::attribute(*n, "Name").as_deref()
+                && borzoi_msbuild::document::attribute(*n, "Name").as_deref()
                     == Some("FSharpSourceCodeCompileOrder")
         })
         .unwrap_or_else(|| panic!("{} defines no FSharpSourceCodeCompileOrder", path.display()));

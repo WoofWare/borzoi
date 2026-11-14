@@ -32,14 +32,14 @@ fn self_default_names() -> BTreeSet<String> {
         let Ok(text) = borzoi_msbuild::observed::host_fs::read_to_string(&file) else {
             continue;
         };
-        let Ok(doc) = roxmltree::Document::parse(&text) else {
+        let Ok(doc) = borzoi_msbuild::document::parse(&text) else {
             continue;
         };
         for node in doc.descendants().filter(|n| n.is_element()) {
             let in_property_group = node
                 .parent_element()
                 .is_some_and(|p| p.tag_name().name() == "PropertyGroup");
-            let Some(condition) = borzoi_msbuild::test_support::attribute(node, "Condition") else {
+            let Some(condition) = borzoi_msbuild::document::attribute(node, "Condition") else {
                 continue;
             };
             let name = node.tag_name().name();

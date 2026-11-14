@@ -1149,7 +1149,7 @@ pub fn parse_fsproj(
     environment: &HashMap<String, String>,
 ) -> Result<ParsedProject, ParseError> {
     validate_inputs(project_path, extra_properties)?;
-    let doc = roxmltree::Document::parse(source)?;
+    let doc = crate::document::parse(source)?;
     Ok(evaluator::walk(
         &doc,
         project_path,
@@ -1434,7 +1434,7 @@ fn parse_fsproj_observed(
             }
         }
     }
-    let doc = match roxmltree::Document::parse(source) {
+    let doc = match crate::document::parse(source) {
         Ok(doc) => doc,
         Err(error) => return (Err(error.into()), observer.finish_with_documents().2),
     };

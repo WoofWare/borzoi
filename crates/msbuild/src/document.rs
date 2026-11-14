@@ -1,14 +1,69 @@
 //! An XML document parsed once and held with its text, so that evaluations
 //! can share it: [`crate::observed::ImportDocuments`] keeps one per imported
 //! file across evaluations, and the item pass replays deferred groups
-//! against the document the property pass walked. And an attribute read from
-//! such a document as MSBuild reads it ([`attribute`]).
+//! against the document the property pass walked. Every document the crate
+//! reads is parsed through [`parse`], and its attributes read through
+//! [`attribute`], as MSBuild reads them.
 
 use std::borrow::Cow;
 
-use roxmltree::{Document, Node};
+use roxmltree::{Attribute, Document, Node};
 
 use crate::observed::TextDigest;
+
+/// Parse project text, refusing a document `roxmltree` reads apart from
+/// MSBuild in a way no reader here can recover.
+///
+/// `roxmltree` reads a character reference to a code point that is not a
+/// Unicode scalar value (a surrogate, `&#xD800;`, or one past `U+10FFFF`) as
+/// `U+FFFD`, which no reading of MSBuild's can be, and which a Rust string
+/// cannot spell otherwise; a document holding one is refused here. The scan
+/// covers the whole text, comments and CDATA sections included, where such a
+/// reference is only text: refusing those too costs a decline, never a wrong
+/// value. Without a DTD (which `roxmltree` refuses by default) every other
+/// reference it accepts is one of XML's five entities or names a character.
+/// The crate's `clippy.toml` bans `Document::parse` in favour of this.
+pub fn parse(text: &str) -> Result<Document<'_>, roxmltree::Error> {
+    #[allow(clippy::disallowed_methods)] // the one parse, held to the rule above
+    let document = Document::parse(text)?;
+    let mut rest = text;
+    while let Some(at) = rest.find("&#") {
+        let reference = &rest[at + 2..];
+        let (digits, radix) = match reference.strip_prefix('x') {
+            Some(hex) => (hex, 16),
+            None => (reference, 10),
+        };
+        let digits = &digits[..digits.find(';').unwrap_or(digits.len())];
+        // Digits that are no `u32` fail `roxmltree`'s parse wherever they
+        // form a reference, so here they are text.
+        let names_no_character =
+            u32::from_str_radix(digits, radix).is_ok_and(|code| char::from_u32(code).is_none());
+        if names_no_character {
+            let offset = text.len() - rest.len() + at;
+            return Err(roxmltree::Error::MalformedEntityReference(
+                document.text_pos_at(offset),
+            ));
+        }
+        rest = reference;
+    }
+    Ok(document)
+}
+
+/// `attr`'s value as it stands in the source text of `node`'s document,
+/// between its quotes. `Attribute::range_value` is not that: `roxmltree` keeps
+/// the run of whitespace around `=` in a byte, so past 255 characters of it
+/// the range starts early. The full range is exact, and an attribute's name,
+/// `=` and whitespace hold no quote, so the value starts after the first.
+pub(crate) fn attribute_source<'input>(
+    node: Node<'_, 'input>,
+    attr: &Attribute<'_, 'input>,
+) -> &'input str {
+    let full = &node.document().input_text()[attr.range()];
+    let open = full
+        .find(['"', '\''])
+        .expect("a parsed attribute's value is quoted");
+    &full[open + 1..full.len() - 1]
+}
 
 /// `node`'s attribute `name` (in no namespace) as MSBuild reads it: the source
 /// text with its entity and character references decoded, and nothing
@@ -23,12 +78,11 @@ use crate::observed::TextDigest;
 /// (#750). Every attribute the walk reads by name goes through here (the
 /// crate's `clippy.toml` bans `Node::attribute`). A metadatum written as an
 /// attribute is read by the item pass, which MSBuild reads differently again.
-pub(crate) fn attribute<'a>(node: Node<'a, '_>, name: &str) -> Option<Cow<'a, str>> {
+pub fn attribute<'a>(node: Node<'a, '_>, name: &str) -> Option<Cow<'a, str>> {
     let attr = node
         .attributes()
         .find(|a| a.namespace().is_none() && a.name() == name)?;
-    let raw = &node.document().input_text()[attr.range_value()];
-    Some(read_attribute(raw, attr.value()))
+    Some(read_attribute(attribute_source(node, &attr), attr.value()))
 }
 
 /// MSBuild's reading of an attribute whose source text is `raw` and whose
@@ -45,10 +99,9 @@ fn read_attribute<'a>(raw: &'a str, normalised: &'a str) -> Cow<'a, str> {
     let mut rest = raw;
     while let Some(c) = rest.chars().next() {
         if c == '&' {
-            // `roxmltree` parsed the document, which it does only without a
-            // DTD (`ParsingOptions::allow_dtd` is off), so every reference in
-            // it is one of XML's five entities or a well-formed character
-            // reference to a legal character.
+            // [`parse`] parsed the document, so every reference in it is one
+            // of XML's five entities or a well-formed character reference to
+            // a Unicode scalar value.
             let end = rest.find(';').expect("a parsed reference ends in `;`");
             let decoded = match &rest[1..end] {
                 "lt" => '<',
@@ -114,7 +167,7 @@ impl ParsedDocument {
     /// Parse `text`, whose digest is `digest`.
     pub fn parse(text: String, digest: TextDigest) -> Result<Self, roxmltree::Error> {
         debug_assert_eq!(digest, TextDigest::of(&text));
-        let cell = Cell::try_new(text, |text| Document::parse(text))?;
+        let cell = Cell::try_new(text, |text| parse(text))?;
         Ok(Self { cell, digest })
     }
 
@@ -146,6 +199,8 @@ impl std::fmt::Debug for ParsedDocument {
 mod tests {
     use std::sync::Arc;
 
+    use proptest::strategy::Strategy;
+
     use super::*;
 
     #[test]
@@ -171,7 +226,7 @@ mod tests {
         let source = "<A \
              a=\"x\ty\" b=\"x\r\ny\" c=\"x\ry\" d=\"x\ny\" e=\"&apos;&#10;&#x9;&#13;&lt;\" \
              f=\"plain\" g=\"caf\u{e9}&#x1D11E;\" h=\"&amp;#10;\" />";
-        let doc = Document::parse(source).unwrap();
+        let doc = parse(source).unwrap();
         let root = doc.root_element();
         for (name, msbuild, normalised) in [
             ("a", "x\ty", "x y"),
@@ -191,9 +246,10 @@ mod tests {
         assert_eq!(attribute(root, "missing"), None);
     }
 
-    /// One way to spell `c` in a double-quoted attribute: as itself where XML
-    /// allows that, or as an entity or a decimal or hex character reference.
-    fn spell(c: char, how: u8) -> String {
+    /// One way to spell `c` in an attribute quoted with `quote`: as itself
+    /// where XML allows that, or as an entity or a decimal or hex character
+    /// reference.
+    fn spell(c: char, how: u8, quote: char) -> String {
         let entity = match c {
             '<' => Some("&lt;"),
             '>' => Some("&gt;"),
@@ -203,15 +259,26 @@ mod tests {
             _ => None,
         };
         match how % 3 {
-            0 if !matches!(c, '<' | '&' | '"') => c.to_string(),
+            0 if !matches!(c, '<' | '&') && c != quote => c.to_string(),
             0 | 1 => entity.map_or_else(|| format!("&#{};", u32::from(c)), str::to_owned),
             _ => format!("&#x{:x};", u32::from(c)),
         }
     }
 
+    /// Whitespace XML allows around an attribute's `=`.
+    fn separator() -> impl proptest::strategy::Strategy<Value = String> {
+        proptest::prop_oneof![
+            proptest::collection::vec(proptest::sample::select(vec![' ', '\t', '\n', '\r']), 0..4)
+                .prop_map(|cs| cs.into_iter().collect()),
+            // Past the byte `roxmltree` keeps the run's length in.
+            (250usize..600).prop_map(|n| " ".repeat(n)),
+        ]
+    }
+
     proptest::proptest! {
-        /// Any value, each character spelt any legal way, reads back as
-        /// itself; and [`read_attribute`]'s check that its folding is
+        /// Any value, each character spelt any legal way, in either quote and
+        /// with any whitespace around `=`, after another attribute, reads back
+        /// as itself; and [`read_attribute`]'s check that its folding is
         /// roxmltree's normalisation holds throughout (a `debug_assert`).
         #[test]
         fn every_spelling_of_a_value_reads_back_as_it(
@@ -219,19 +286,49 @@ mod tests {
                 (
                     proptest::sample::select(vec![
                         'a', ' ', '\t', '\n', '\r', '<', '>', '&', '"', '\'', '%', ';',
-                        '$', '\u{e9}', '\u{a0}', '\u{1d11e}',
+                        '$', '=', '\u{e9}', '\u{a0}', '\u{1d11e}',
                     ]),
                     0u8..3,
                 ),
                 0..24,
-            )
+            ),
+            quote in proptest::sample::select(vec!['"', '\'']),
+            before in separator(),
+            after in separator(),
         ) {
             let value: String = chars.iter().map(|(c, _)| *c).collect();
-            let spelt: String = chars.iter().map(|(c, how)| spell(*c, *how)).collect();
-            let source = format!("<A v=\"{spelt}\" />");
-            let doc = Document::parse(&source).unwrap();
+            let spelt: String = chars.iter().map(|(c, how)| spell(*c, *how, quote)).collect();
+            let source = format!("<A w=\"=\" v{before}={after}{quote}{spelt}{quote} />");
+            let doc = parse(&source).unwrap();
             let read = attribute(doc.root_element(), "v");
             proptest::prop_assert_eq!(read.as_deref(), Some(&*value));
+        }
+    }
+
+    /// A character reference to a code point that is no Unicode scalar value,
+    /// which `roxmltree` reads as `U+FFFD`, refuses the document wherever it
+    /// stands; one that names a character, `U+FFFD` itself included, does not.
+    #[test]
+    fn a_reference_to_no_character_refuses_the_document() {
+        for refused in [
+            "<A v=\"&#xD800;\" />",
+            "<A v=\"&#55296;\" />",
+            "<A v=\"&#x110000;\" />",
+            "<A v=\"&#4294967295;\" />",
+            "<A>&#xDFFF;</A>",
+            // Only text inside a comment, but refused all the same: a decline.
+            "<A><!-- &#xD800; --></A>",
+        ] {
+            #[allow(clippy::disallowed_methods)] // what roxmltree alone admits
+            let admitted = Document::parse(refused).is_ok();
+            assert!(admitted, "{refused}");
+            assert!(parse(refused).is_err(), "{refused}");
+        }
+        for admitted in [
+            "<A v=\"&#xFFFD;&#x10FFFF;&#9;\" />",
+            "<A><!-- &#xyz; &#99999999999; --></A>",
+        ] {
+            assert!(parse(admitted).is_ok(), "{admitted}");
         }
     }
 
@@ -240,7 +337,7 @@ mod tests {
     #[test]
     fn a_document_with_a_dtd_does_not_parse() {
         let source = "<!DOCTYPE A [<!ENTITY e \"x\">]><A a=\"&e;\" />";
-        assert!(Document::parse(source).is_err());
+        assert!(parse(source).is_err());
     }
 
     #[test]
@@ -248,6 +345,7 @@ mod tests {
         let source = String::from("<Project>");
         let ours =
             ParsedDocument::parse(source.clone(), TextDigest::of(&source)).expect_err("malformed");
+        #[allow(clippy::disallowed_methods)] // the error roxmltree gives
         let theirs = Document::parse(&source).expect_err("malformed");
         assert_eq!(ours, theirs);
     }

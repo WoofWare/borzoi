@@ -24,10 +24,9 @@ mod common;
 
 use std::collections::{BTreeMap, HashMap};
 
+use borzoi_msbuild::document::attribute;
 use borzoi_msbuild::observed::host_fs;
-use borzoi_msbuild::test_support::{
-    ExecutionProbe, ExecutionRead, ReadProbe, attribute, parse_fsproj_reads,
-};
+use borzoi_msbuild::test_support::{ExecutionProbe, ExecutionRead, ReadProbe, parse_fsproj_reads};
 use common::{Oracle, SplitMix64};
 
 const TARGETS: [&str; 4] = ["T0", "T1", "T2", "T3"];
@@ -314,7 +313,7 @@ fn target(rng: &mut SplitMix64, index: usize, out: &mut String) {
 /// finish such a build (two targets `AfterTargets` each other hang it), so the
 /// oracle is not asked; the executor must decline.
 fn triggers_cycle(xml: &str) -> bool {
-    let document = roxmltree::Document::parse(xml).unwrap();
+    let document = borzoi_msbuild::document::parse(xml).unwrap();
     // The last definition of each name counts.
     let mut last: BTreeMap<String, roxmltree::Node<'_, '_>> = BTreeMap::new();
     for target in document.descendants().filter(|n| n.has_tag_name("Target")) {

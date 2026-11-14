@@ -140,7 +140,7 @@ struct Target {
 
 impl Target {
     fn document(&self) -> Result<Document<'_>, Decline> {
-        Document::parse(&self.xml)
+        crate::document::parse(&self.xml)
             .or_else(|e| decline(format!("target {} does not parse alone: {e}", self.name)))
     }
 }
@@ -202,7 +202,7 @@ impl<'s, 'r> Engine<'s, 'r> {
                 return decline(format!("target {name} is not known exactly"));
             }
             let definition = read.definition.expect("a recorded target reads back");
-            let declared = Document::parse(&definition.xml)
+            let declared = crate::document::parse(&definition.xml)
                 .ok()
                 .and_then(|d| {
                     crate::document::attribute(d.root_element(), "Name").map(Cow::into_owned)
@@ -223,7 +223,7 @@ impl<'s, 'r> Engine<'s, 'r> {
         for key in &kept {
             let xml = engine.targets[key].xml.clone();
             let name = engine.targets[key].name.clone();
-            let document = Document::parse(&xml)
+            let document = crate::document::parse(&xml)
                 .or_else(|e| decline(format!("target {name} does not parse alone: {e}")))?;
             let root = document.root_element();
             for (attribute, before) in [("BeforeTargets", true), ("AfterTargets", false)] {
@@ -382,7 +382,7 @@ impl<'s, 'r> Engine<'s, 'r> {
                 let target = &self.targets[&key];
                 let declared = target.name.clone();
                 let xml = target.xml.clone();
-                let document = Document::parse(&xml)
+                let document = crate::document::parse(&xml)
                     .or_else(|e| decline(format!("target {declared} does not parse alone: {e}")))?;
                 self.order.push(declared.clone());
                 self.body(document.root_element(), &declared)?;
@@ -408,7 +408,7 @@ impl<'s, 'r> Engine<'s, 'r> {
         let target = &self.targets[&key];
         let declared = target.name.clone();
         let xml = target.xml.clone();
-        let document = Document::parse(&xml)
+        let document = crate::document::parse(&xml)
             .or_else(|e| decline(format!("target {declared} does not parse alone: {e}")))?;
         let root = document.root_element();
         // `Inputs`/`Outputs` decide whether the target is up to date, from the

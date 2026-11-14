@@ -71,7 +71,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use borzoi_msbuild::test_support::attribute;
+use borzoi_msbuild::document::attribute;
 use borzoi_oracle_harness::corpus_key::corpus_relative;
 use borzoi_oracle_harness::manifest::{Manifest, UPDATE_ENV, check};
 use borzoi_oracle_harness::restore_globals::{
@@ -605,7 +605,7 @@ fn cone_text(cone: &Cone, key: &str) -> ConeText {
             host_fs::read_to_string(file)
                 .unwrap_or_else(|e| panic!("{key}: read {}: {e}", file.display()))
         });
-        let doc = roxmltree::Document::parse(source)
+        let doc = borzoi_msbuild::document::parse(source)
             .unwrap_or_else(|e| panic!("{key}: parse {}: {e}", file.display()));
         let target = doc
             .descendants()
