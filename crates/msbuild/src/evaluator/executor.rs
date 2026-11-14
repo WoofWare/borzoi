@@ -22,6 +22,7 @@
 //! value for or knows is unset, an item list it holds exactly. A read of
 //! anything else declines.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use roxmltree::{Document, Node};
@@ -203,7 +204,9 @@ impl<'s, 'r> Engine<'s, 'r> {
             let definition = read.definition.expect("a recorded target reads back");
             let declared = Document::parse(&definition.xml)
                 .ok()
-                .and_then(|d| d.root_element().attribute("Name").map(str::to_owned))
+                .and_then(|d| {
+                    crate::document::attribute(d.root_element(), "Name").map(Cow::into_owned)
+                })
                 .unwrap_or_else(|| name.clone());
             engine.targets.insert(
                 key,
@@ -224,7 +227,7 @@ impl<'s, 'r> Engine<'s, 'r> {
                 .or_else(|e| decline(format!("target {name} does not parse alone: {e}")))?;
             let root = document.root_element();
             for (attribute, before) in [("BeforeTargets", true), ("AfterTargets", false)] {
-                let Some(raw) = expression_attribute(root, attribute)? else {
+                let Some(raw) = expression_attribute(root, attribute) else {
                     continue;
                 };
                 let expanded = engine.expand(&raw)?;
@@ -262,7 +265,7 @@ impl<'s, 'r> Engine<'s, 'r> {
             next.extend(self.before.get(key).into_iter().flatten().cloned());
             next.extend(self.after.get(key).into_iter().flatten().cloned());
             let document = target.document()?;
-            if let Some(raw) = expression_attribute(document.root_element(), "DependsOnTargets")?
+            if let Some(raw) = expression_attribute(document.root_element(), "DependsOnTargets")
                 && !raw.contains('$')
             {
                 next.extend(
@@ -413,7 +416,7 @@ impl<'s, 'r> Engine<'s, 'r> {
         // once the target has run. (`Returns` is checked then too: see
         // [`Self::check_returns`].)
         for unmodelled in ["Inputs", "Outputs", "KeepDuplicateOutputs"] {
-            if root.attribute(unmodelled).is_some() {
+            if root.has_attribute(unmodelled) {
                 return decline(format!("target {declared} has {unmodelled}"));
             }
         }
@@ -422,7 +425,7 @@ impl<'s, 'r> Engine<'s, 'r> {
             return Ok(Vec::new());
         }
         self.entries[entry].state = EntryState::Execution;
-        let Some(raw) = expression_attribute(root, "DependsOnTargets")? else {
+        let Some(raw) = expression_attribute(root, "DependsOnTargets") else {
             return Ok(Vec::new());
         };
         let expanded = self.expand(&raw)?;
@@ -763,7 +766,7 @@ impl<'s, 'r> Engine<'s, 'r> {
             };
             // A condition reading metadata batches the element
             // ([`Self::batch`]), deciding it once per bucket.
-            let batched = expression_attribute(item, "Condition")?.filter(|c| c.contains("%("));
+            let batched = expression_attribute(item, "Condition").filter(|c| c.contains("%("));
             if batched.is_none() && !self.decide(item)? {
                 continue;
             }
@@ -777,7 +780,8 @@ impl<'s, 'r> Engine<'s, 'r> {
                     .filter(|a| !matches!(a.name(), "Include" | "Condition" | "Label"))
                     .map(|a| a.value().to_owned())
                     .chain(item.children().filter(Node::is_element).flat_map(|child| {
-                        let condition = child.attribute("Condition").map(str::to_owned);
+                        let condition =
+                            crate::document::attribute(child, "Condition").map(Cow::into_owned);
                         let text = child
                             .descendants()
                             .filter_map(|n| n.text())
@@ -1041,7 +1045,7 @@ impl<'s, 'r> Engine<'s, 'r> {
 
     /// Decide `node`'s `Condition` (true when it has none).
     fn decide(&mut self, node: Node<'_, '_>) -> Result<bool, Decline> {
-        let Some(raw) = expression_attribute(node, "Condition")? else {
+        let Some(raw) = expression_attribute(node, "Condition") else {
             return Ok(true);
         };
         self.decide_text(&raw)
@@ -1469,57 +1473,10 @@ fn respellable(identity: &str) -> bool {
 const QUOTES: [char; 3] = ['\'', '"', '`'];
 
 /// `node`'s attribute `name` holding an expression (a condition, a target
-/// list), as MSBuild reads it: the source text with its entities decoded and
-/// its whitespace kept. MSBuild normalises neither attribute values nor line
-/// ends (probed: a quoted CRLF reaches a property function as two characters,
-/// a lone CR as one), so a tab, line feed or carriage return reaches the
-/// expression as itself, where the XML reader's value has a space for each
-/// (and for each CRLF); that value serves only to check that this is the one
-/// difference. A character reference or an entity other than XML's five
-/// declines. (The walk still reads its conditions normalised: #750.)
-fn expression_attribute(node: Node<'_, '_>, name: &str) -> Result<Option<String>, Decline> {
-    let Some(attr) = node.attributes().find(|a| a.name() == name) else {
-        return Ok(None);
-    };
-    let raw = node
-        .document()
-        .input_text()
-        .get(attr.range_value())
-        .unwrap_or_default();
-    let Some(text) = decode_predefined_entities(raw) else {
-        return decline(format!(
-            "the {name} {raw} holds a character reference or an entity of its own"
-        ));
-    };
-    if text.replace("\r\n", "\n").replace(['\t', '\n', '\r'], " ") != attr.value() {
-        return decline(format!(
-            "the {name} {raw} reads apart from the XML reader's value"
-        ));
-    }
-    Ok(Some(text))
-}
-
-/// `raw` with XML's five predefined entities decoded; `None` for any other
-/// `&`, a character reference among them.
-fn decode_predefined_entities(raw: &str) -> Option<String> {
-    const ENTITIES: [(&str, char); 5] = [
-        ("&lt;", '<'),
-        ("&gt;", '>'),
-        ("&amp;", '&'),
-        ("&quot;", '"'),
-        ("&apos;", '\''),
-    ];
-    let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
-    while let Some(at) = rest.find('&') {
-        out.push_str(&rest[..at]);
-        rest = &rest[at..];
-        let (entity, c) = ENTITIES.iter().find(|(e, _)| rest.starts_with(e))?;
-        out.push(*c);
-        rest = &rest[entity.len()..];
-    }
-    out.push_str(rest);
-    Some(out)
+/// list), as MSBuild reads it ([`crate::document::attribute`]): a tab, line
+/// feed or carriage return reaches the expression as itself.
+fn expression_attribute(node: Node<'_, '_>, name: &str) -> Option<String> {
+    crate::document::attribute(node, name).map(Cow::into_owned)
 }
 
 /// Whether an `@(` in `raw` sits inside a `$(…)` (a property function's

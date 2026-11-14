@@ -112,3 +112,13 @@ pub fn parse_fsproj_reads(
     let reads = walked.reads.expect("a probed walk answers its probe");
     Ok((walked.project, reads))
 }
+
+/// `node`'s attribute `name` as MSBuild reads it
+/// ([`crate::document::attribute`]), for the harnesses that read project
+/// text: the crate's `clippy.toml` holds every reader to it.
+pub fn attribute<'a>(
+    node: roxmltree::Node<'a, '_>,
+    name: &str,
+) -> Option<std::borrow::Cow<'a, str>> {
+    crate::document::attribute(node, name)
+}

@@ -683,7 +683,9 @@ fn lift_order_target(oracle: &mut Oracle) -> String {
     let target = doc
         .descendants()
         .find(|n| {
-            n.has_tag_name("Target") && n.attribute("Name") == Some("FSharpSourceCodeCompileOrder")
+            n.has_tag_name("Target")
+                && borzoi_msbuild::test_support::attribute(*n, "Name").as_deref()
+                    == Some("FSharpSourceCodeCompileOrder")
         })
         .unwrap_or_else(|| panic!("{} defines no FSharpSourceCodeCompileOrder", path.display()));
     text[target.range()].to_string()

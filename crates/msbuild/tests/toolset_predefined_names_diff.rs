@@ -39,7 +39,7 @@ fn self_default_names() -> BTreeSet<String> {
             let in_property_group = node
                 .parent_element()
                 .is_some_and(|p| p.tag_name().name() == "PropertyGroup");
-            let Some(condition) = node.attribute("Condition") else {
+            let Some(condition) = borzoi_msbuild::test_support::attribute(node, "Condition") else {
                 continue;
             };
             let name = node.tag_name().name();

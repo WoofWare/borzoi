@@ -629,8 +629,8 @@ fn project_reference_group_risk(
         if modelled_item_kind_for_element(child) != Some(ItemKind::ProjectReference) {
             continue;
         }
-        let mutation = child.attribute("Update").is_some() || child.attribute("Remove").is_some();
-        if !mutation && child.attribute("Include").is_none() {
+        let mutation = child.has_attribute("Update") || child.has_attribute("Remove");
+        if !mutation && !child.has_attribute("Include") {
             continue;
         }
         if !reference_gate_may_run(child, state) {
@@ -684,9 +684,9 @@ impl UndecidedChooseItems {
         for child in group.children().filter(Node::is_element) {
             match modelled_item_kind_for_element(child) {
                 Some(ItemKind::ProjectReference) => {
-                    let plain_include = child.attribute("Include").is_some()
-                        && child.attribute("Update").is_none()
-                        && child.attribute("Remove").is_none();
+                    let plain_include = child.has_attribute("Include")
+                        && !child.has_attribute("Update")
+                        && !child.has_attribute("Remove");
                     if plain_include {
                         self.project_reference_include = true;
                     } else {
@@ -807,7 +807,7 @@ fn walk_item_child_unattributed(node: Node<'_, '_>, state: &mut State<'_>) {
     if let Some(item_type) = batched
         && update_strands_late(node, item_type, state)
     {
-        let update = node.attribute("Update").unwrap_or_default().to_string();
+        let update = attribute(node, "Update").unwrap_or_default().to_string();
         if item_type == "Compile" {
             let previous = state.compile_context;
             state.compile_context = true;
@@ -893,7 +893,7 @@ fn walk_item_child_unattributed(node: Node<'_, '_>, state: &mut State<'_>) {
     // means the captured list may lack an item MSBuild has. (A diagnostic about
     // a captured item's metadata lands here too; that only costs precision.)
     if kind == ItemKind::ProjectReference
-        && node.attribute("Include").is_some()
+        && node.has_attribute("Include")
         && state.diagnostics.len() != diagnostics_before
     {
         state.project_reference_includes_hidden = true;
@@ -916,7 +916,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     let untrusted_reference_op = kind == ItemKind::ProjectReference
         && modelled_item_list_operation_may_change_list(node, kind)
         && state.condition_reads_untrusted_value(node);
-    let is_mutation = node.attribute("Update").is_some() || node.attribute("Remove").is_some();
+    let is_mutation = node.has_attribute("Update") || node.has_attribute("Remove");
     match evaluate_item_condition(node, state) {
         CondGate::Run => {
             // Kept only on an untrusted true: an Include the real build may
@@ -957,9 +957,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
         }
         return;
     }
-    if node.attribute("Include").is_some()
-        || node.attribute("Update").is_some()
-        || node.attribute("Remove").is_some()
+    if node.has_attribute("Include") || node.has_attribute("Update") || node.has_attribute("Remove")
     {
         state.mark_untracked_item_list(item_type);
     }
@@ -993,7 +991,8 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
             ItemPlacement::Compile(effect)
         }
     };
-    let Some(include) = node.attribute("Include") else {
+    let include = attribute(node, "Include");
+    let Some(include) = include.as_deref() else {
         return;
     };
     // `ReferenceOutputAssembly` / `ExcludeAssets` shape what a
@@ -1128,8 +1127,8 @@ fn project_reference_has_unmodelled_significant_metadata(
 /// consuming dependency item may override or ignore it.
 fn walk_generic_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
     let item_type = node.tag_name().name();
-    let has_update = node.attribute("Update").is_some();
-    let remove = node.attribute("Remove");
+    let has_update = node.has_attribute("Update");
+    let remove = attribute(node, "Remove");
     // The item's own condition gates the operation. A cleanly-false Remove or
     // Update is not an item-list uncertainty; MSBuild ignores it entirely.
     let (gate, condition_tainted) = evaluate_item_condition_silent_with_sdk_taint(node, state);
@@ -1144,7 +1143,7 @@ fn walk_generic_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
         CondGate::Run => {}
         CondGate::Skip | CondGate::Unsupported => return,
     }
-    if let Some(remove) = remove {
+    if let Some(remove) = remove.as_deref() {
         if remove_stands_alone(node) {
             apply_generic_item_remove(item_type, remove, state);
         } else {
@@ -1156,7 +1155,8 @@ fn walk_generic_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
         state.invalidate_item_list(item_type);
         return;
     }
-    let Some(include) = node.attribute("Include") else {
+    let include = attribute(node, "Include");
+    let Some(include) = include.as_deref() else {
         return;
     };
     let identity_uses_sdk_taint = state.raw_uses_sdk_package_taint(include);
@@ -1305,7 +1305,8 @@ impl ExcludeSet {
 }
 
 fn resolve_generic_exclude_set(node: Node<'_, '_>, state: &mut State<'_>) -> Option<ExcludeSet> {
-    let Some(exclude) = node.attribute("Exclude") else {
+    let exclude = attribute(node, "Exclude");
+    let Some(exclude) = exclude.as_deref() else {
         return Some(ExcludeSet(HashSet::new()));
     };
     let item_type = node.tag_name().name();
@@ -1551,7 +1552,8 @@ fn remove_stands_alone(node: Node<'_, '_>) -> bool {
 /// ([`resolve_item_spec`]) and every identity it is compared with must lie in
 /// the domain [`item_spec::comparison_key`] reproduces.
 fn apply_project_reference_remove(node: Node<'_, '_>, state: &mut State<'_>) -> bool {
-    let Some(remove) = node.attribute("Remove") else {
+    let remove = attribute(node, "Remove");
+    let Some(remove) = remove.as_deref() else {
         return false;
     };
     if !remove_stands_alone(node) {
@@ -1754,7 +1756,8 @@ fn resolve_compile_update_targets(
     if diagnose_item_op(node, "Exclude", state) {
         return None;
     }
-    let raw = node.attribute("Update")?;
+    let raw = attribute(node, "Update")?;
+    let raw: &str = &raw;
     let expansion = state.expand(raw, node.range());
     if expansion.had_issue() {
         return None;
@@ -2184,14 +2187,15 @@ fn walk_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
             return;
         }
     }
-    let (op, target) = if let Some(inc) = node.attribute("Include") {
+    let (include, update) = (attribute(node, "Include"), attribute(node, "Update"));
+    let (op, target) = if let Some(inc) = include.as_deref() {
         (PackageRefOp::Include, inc)
-    } else if let Some(upd) = node.attribute("Update") {
+    } else if let Some(upd) = update.as_deref() {
         (PackageRefOp::Update, upd)
     } else {
         // Remove (or a malformed reference with no target): we don't model
         // item removal, so a Remove may make the captured set wrong.
-        if node.attribute("Remove").is_some() {
+        if node.has_attribute("Remove") {
             state.note_package_uncertain(
                 PackageReferenceUncertaintyCauseKind::UnsupportedItemOperation {
                     item: "PackageReference".to_string(),
@@ -2397,7 +2401,8 @@ pub(super) struct UpdateBatchRun {
 /// decide does not flush.
 fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> bool {
     let key = item_key(item_type);
-    let update = match (node.attribute("Include"), node.attribute("Update")) {
+    let (include, update) = (attribute(node, "Include"), attribute(node, "Update"));
+    let update = match (include.as_deref(), update.as_deref()) {
         (None, Some(update)) => update,
         _ => {
             // Another operation flushes a pending batch, if it runs.
@@ -2658,8 +2663,9 @@ fn walk_package_version(node: Node<'_, '_>, state: &mut State<'_>) {
         node,
         state,
     );
-    let Some(include) = node.attribute("Include") else {
-        if node.attribute("Remove").is_some() || node.attribute("Update").is_some() {
+    let include = attribute(node, "Include");
+    let Some(include) = include.as_deref() else {
+        if node.has_attribute("Remove") || node.has_attribute("Update") {
             state.package_versions_untracked = true;
             state.mark_untracked_item_list("PackageVersion");
         }
@@ -2723,8 +2729,9 @@ fn walk_global_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
         node,
         state,
     );
-    let Some(include) = node.attribute("Include") else {
-        if node.attribute("Remove").is_some() || node.attribute("Update").is_some() {
+    let include = attribute(node, "Include");
+    let Some(include) = include.as_deref() else {
+        if node.has_attribute("Remove") || node.has_attribute("Update") {
             #[cfg(any(test, feature = "test-support"))]
             {
                 state.global_package_references_mutated = true;
@@ -2879,11 +2886,12 @@ fn walk_framework_reference(node: Node<'_, '_>, state: &mut State<'_>) {
             return;
         }
     }
-    let Some(target) = node.attribute("Include") else {
+    let target = attribute(node, "Include");
+    let Some(target) = target.as_deref() else {
         if let Some(operation) = node
-            .attribute("Remove")
-            .map(|_| "Remove")
-            .or_else(|| node.attribute("Update").map(|_| "Update"))
+            .has_attribute("Remove")
+            .then_some("Remove")
+            .or_else(|| node.has_attribute("Update").then_some("Update"))
         {
             state.note_package_uncertain(
                 PackageReferenceUncertaintyCauseKind::UnsupportedItemOperation {
@@ -2961,7 +2969,8 @@ fn included_row(
 /// empty set returned, so nothing is silently mis-excluded (and, crucially,
 /// nothing an `Exclude` would remove is left in as an over-resolution).
 fn resolve_exclude_set(node: Node<'_, '_>, state: &mut State<'_>) -> ExcludeSet {
-    let Some(raw) = node.attribute("Exclude") else {
+    let raw = attribute(node, "Exclude");
+    let Some(raw) = raw.as_deref() else {
         return ExcludeSet(HashSet::new());
     };
     state.note_package_uncertain_from_sdk_property_taint(raw);
@@ -3635,7 +3644,8 @@ fn mark_generic_metadata_uncertain(
 }
 
 fn evaluate_item_condition_silent(node: Node<'_, '_>, state: &State<'_>) -> (CondGate, bool) {
-    let Some(cond) = node.attribute("Condition") else {
+    let cond = attribute(node, "Condition");
+    let Some(cond) = cond.as_deref() else {
         return (CondGate::Run, false);
     };
     let eval = if state.follow_imports {
@@ -3668,12 +3678,14 @@ fn evaluate_item_condition_silent_with_sdk_taint(
     state: &State<'_>,
 ) -> (CondGate, bool) {
     let (gate, condition_tainted) = evaluate_item_condition_silent(node, state);
-    let sdk_tainted = node.attribute("Condition").is_some_and(|condition| {
-        state
-            .condition_trust(condition, None)
-            .sdk_package()
-            .is_some()
-    });
+    let sdk_tainted = attribute(node, "Condition")
+        .as_deref()
+        .is_some_and(|condition| {
+            state
+                .condition_trust(condition, None)
+                .sdk_package()
+                .is_some()
+        });
     (gate, condition_tainted || sdk_tainted)
 }
 
@@ -3827,7 +3839,7 @@ fn route_item_through_resolver(
     let any_glob = include_specs
         .iter()
         .any(|s| escaping::filespec_has_wildcards(s));
-    let exclude_attr = node.attribute("Exclude");
+    let exclude_attr = attribute(node, "Exclude");
     // A pure-literal include with no Exclude can't gain anything from the
     // resolver — keep the literal fast path (same items, no IO).
     if !any_glob && exclude_attr.is_none() {
@@ -3837,7 +3849,7 @@ fn route_item_through_resolver(
         return;
     }
     let mut excludes: Vec<SpecFragment> = Vec::new();
-    if let Some(raw) = exclude_attr {
+    if let Some(raw) = exclude_attr.as_deref() {
         let expansion = state.expand(raw, node.range());
         if expansion.had_issue() {
             return;
@@ -4184,18 +4196,14 @@ fn package_item_kind_for_name(name: &str) -> Option<PackageItemKind> {
 }
 
 fn is_metadata_only_item_update(node: Node<'_, '_>) -> bool {
-    node.attribute("Update").is_some()
-        && node.attribute("Include").is_none()
-        && node.attribute("Remove").is_none()
+    node.has_attribute("Update") && !node.has_attribute("Include") && !node.has_attribute("Remove")
 }
 
 fn modelled_item_list_operation_may_change_list(node: Node<'_, '_>, kind: ItemKind) -> bool {
     if is_compile_item_kind(kind) && is_metadata_only_item_update(node) {
         return false;
     }
-    node.attribute("Include").is_some()
-        || node.attribute("Update").is_some()
-        || node.attribute("Remove").is_some()
+    node.has_attribute("Include") || node.has_attribute("Update") || node.has_attribute("Remove")
 }
 
 fn generic_helper_item_type(node: Node<'_, '_>) -> Option<String> {
@@ -4236,10 +4244,10 @@ fn item_lists_gated_by_group_condition(
 ) -> ItemListsGatedByGroupCondition {
     let mut result = ItemListsGatedByGroupCondition::default();
     for child in node.children().filter(Node::is_element) {
-        let item_has_operation = child.attribute("Include").is_some()
-            || child.attribute("Update").is_some()
-            || child.attribute("Remove").is_some()
-            || child.attribute("Exclude").is_some();
+        let item_has_operation = child.has_attribute("Include")
+            || child.has_attribute("Update")
+            || child.has_attribute("Remove")
+            || child.has_attribute("Exclude");
         if !item_has_operation || !item_child_condition_may_run(child, state) {
             continue;
         }

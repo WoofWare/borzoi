@@ -174,7 +174,7 @@ pub fn extract_conditions(text: &str, out: &mut BTreeSet<String>) {
         return;
     };
     for node in doc.descendants() {
-        if let Some(cond) = node.attribute("Condition")
+        if let Some(cond) = borzoi_msbuild::test_support::attribute(node, "Condition")
             && !cond.contains("@(")
             && !cond.contains("%(")
         {

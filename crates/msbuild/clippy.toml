@@ -45,6 +45,10 @@ disallowed-methods = [
     { path = "std::path::Path::canonicalize", reason = "observe the file system through borzoi_msbuild::observed — see crates/msbuild/clippy.toml" },
     { path = "std::path::Path::read_dir", reason = "observe the file system through borzoi_msbuild::observed — see crates/msbuild/clippy.toml" },
     { path = "std::path::Path::read_link", reason = "observe the file system through borzoi_msbuild::observed — see crates/msbuild/clippy.toml" },
+    # `roxmltree` normalises an attribute's whitespace, where MSBuild reads it
+    # as written (#750); `borzoi_msbuild::document::attribute` reads it as
+    # MSBuild does.
+    { path = "roxmltree::Node::attribute", reason = "read an attribute as MSBuild does, through borzoi_msbuild::document::attribute — see crates/msbuild/clippy.toml" },
 ]
 
 # `lsp_types::Uri` wraps a `fluent_uri::Uri`, which caches its parsed

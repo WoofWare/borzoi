@@ -179,18 +179,27 @@ let private ResultItem = "_ConditionResult"
 [<Literal>]
 let private ResultProperty = "_ExpandResult"
 
-/// `s` escaped as element text. The XML reader folds a carriage return (and a
-/// CRLF) to a line feed, where MSBuild reading a project file keeps it
-/// (probed: a CRLF in a property body counts two characters), so each is
-/// written as a character reference, which survives.
+/// `s` escaped as element text, with a carriage return written as a character
+/// reference: MSBuild reading a project file keeps a CR (probed: a CRLF in a
+/// property body counts two characters), and a reference reads as itself under
+/// any XML reader, normalising or not.
 let private escapeText (s: string) : string =
     (SecurityElement.Escape s).Replace("\r", "&#13;")
 
 /// `s` escaped as an attribute value: as [`escapeText`], and a tab or line
-/// feed, which the reader normalises to a space where MSBuild keeps it, as a
-/// character reference too.
+/// feed as a character reference too, which an attribute-normalising reader
+/// would otherwise read as a space.
 let private escapeAttribute (s: string) : string =
     (escapeText s).Replace("\t", "&#9;").Replace("\n", "&#10;")
+
+/// A reader over project text that reads it as MSBuild reads a project file
+/// (`XmlReaderExtension.GetXmlReader`): an `XmlTextReader`, whose
+/// `Normalization` is off, so a tab, line feed or carriage return in an
+/// attribute value, and a CRLF anywhere, reach the evaluator as written. The
+/// readers `XmlReader.Create` makes normalise both, so a document loaded
+/// through one evaluates apart from the same document on disk.
+let private projectReader (xml: string) : XmlReader =
+    new XmlTextReader(new StringReader(xml), DtdProcessing = DtdProcessing.Ignore)
 
 /// Build the stub project XML: the supplied properties in a `<PropertyGroup>`,
 /// then a single `<_ConditionResult>` item guarded by `condition` — present iff
@@ -223,7 +232,7 @@ let private stubXml (condition: string) (properties: (string * string) seq) : st
 let private evalCondition (condition: string) (properties: (string * string) seq) : bool option =
     let xml = stubXml condition properties
     use collection = new ProjectCollection()
-    use reader = XmlReader.Create(new StringReader(xml))
+    use reader = projectReader xml
     // Create the root *in the throwaway collection* (the parameterless
     // overload caches it in the global collection instead, so a long batch
     // would accumulate thousands of roots there). Disposing `collection`
@@ -284,7 +293,7 @@ let private expandStubXml (value: string) (properties: (string * string) seq) : 
 let private evalExpand (value: string) (properties: (string * string) seq) : string option =
     let xml = expandStubXml value properties
     use collection = new ProjectCollection()
-    use reader = XmlReader.Create(new StringReader(xml))
+    use reader = projectReader xml
     let root = Microsoft.Build.Construction.ProjectRootElement.Create(reader, collection)
 
     try
@@ -349,7 +358,7 @@ let private evalProject
                 File.WriteAllText(path, xml)
                 Some(Project(path, globals, null, collection))
             | None ->
-                use reader = XmlReader.Create(new StringReader(xml))
+                use reader = projectReader xml
                 let root = Microsoft.Build.Construction.ProjectRootElement.Create(reader, collection)
                 Some(Project(root, globals, null, collection))
         with :? InvalidProjectFileException ->
