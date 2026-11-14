@@ -606,7 +606,10 @@ impl<'s, 'r> Engine<'s, 'r> {
                     "a target changes {item_type} other than by Include"
                 ));
             };
-            if !self.decide(item)? {
+            // A condition reading metadata batches the element
+            // ([`Self::batch`]), deciding it once per bucket.
+            let batched = expression_attribute(item, "Condition")?.filter(|c| c.contains("%("));
+            if batched.is_none() && !self.decide(item)? {
                 continue;
             }
             // The type's item-definition defaults go beneath everything else,
@@ -641,6 +644,11 @@ impl<'s, 'r> Engine<'s, 'r> {
                 let raw = element_text(child)?;
                 let value = self.metadata_value(&raw)?;
                 metadata.insert(child.tag_name().name().to_ascii_lowercase(), value);
+            }
+            if let Some(condition) = batched {
+                let added = self.batch(item_type, &include, &condition, &definitions, &metadata)?;
+                self.table(item_type)?.extend(added);
+                continue;
             }
             // Properties first, item references left in place; then each
             // `;`-separated piece. One that is a lone plain `@(Type)` copies
@@ -687,6 +695,108 @@ impl<'s, 'r> Engine<'s, 'r> {
             self.table(item_type)?.extend(added);
         }
         Ok(())
+    }
+
+    /// The items an `item_type` element whose `condition` reads metadata adds,
+    /// as MSBuild's batching engine adds them (`BatchingEngine`,
+    /// `ItemGroupIntrinsicTask`). The items of the type the metadata is
+    /// qualified with fall into buckets by the values the condition reads,
+    /// compared ignoring case, in the order each first appears; the condition
+    /// is decided once per bucket, with that bucket's values, and the
+    /// `Include`, a lone `@(Type)`, copies the bucket's items where it holds.
+    ///
+    /// Only the shape whose outcome substitution decides exactly runs: every
+    /// reference `%(Type.Metadata)` qualified with one type, inside a quoted
+    /// string, reading a value derived from the identity alone
+    /// ([`identity_modifier`]). An element whose own type already holds items
+    /// declines, since MSBuild batches that type too, and its buckets could
+    /// reorder the others; so does an empty source, which MSBuild decides in
+    /// one bucket without values.
+    fn batch(
+        &mut self,
+        item_type: &str,
+        include: &str,
+        condition: &str,
+        definitions: &BTreeMap<String, String>,
+        metadata: &BTreeMap<String, String>,
+    ) -> Result<Vec<ExecutedItem>, Decline> {
+        let references = batched_references(condition)?;
+        let source = references[0].item_type.clone();
+        if references
+            .iter()
+            .any(|r| !r.item_type.eq_ignore_ascii_case(&source))
+        {
+            return decline(format!("{condition} batches over more than one item type"));
+        }
+        if source.eq_ignore_ascii_case(item_type) {
+            return decline(format!("{condition} batches {item_type} over itself"));
+        }
+        if condition.contains("@(") {
+            return decline(format!(
+                "the batched condition {condition} reads an item list"
+            ));
+        }
+        let substituted = self.substitute_keeping_items(include)?;
+        let fragment = substituted.trim();
+        if !lone_item_reference(fragment)
+            || !fragment[2..fragment.len() - 1]
+                .trim()
+                .eq_ignore_ascii_case(&source)
+        {
+            return decline(format!(
+                "a {item_type} batched over {source} includes {include}"
+            ));
+        }
+        if !self.table(item_type)?.is_empty() {
+            return decline(format!(
+                "{item_type} already holds items, which batch beside {source}'s"
+            ));
+        }
+        let rows = self.table(&source)?.clone();
+        if rows.is_empty() {
+            return decline(format!(
+                "{source}, which {condition} batches over, is empty"
+            ));
+        }
+        let mut buckets: Vec<(Vec<String>, Vec<ExecutedItem>)> = Vec::new();
+        for row in rows {
+            let values = references
+                .iter()
+                .map(|r| identity_modifier(&row.identity, r.modifier))
+                .collect::<Result<Vec<_>, _>>()?;
+            let bucket = buckets.iter_mut().find(|(key, _)| {
+                key.iter()
+                    .zip(&values)
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
+            });
+            match bucket {
+                Some((_, items)) => items.push(row),
+                None => buckets.push((values, vec![row])),
+            }
+        }
+        let mut added = Vec::new();
+        for (values, items) in buckets {
+            let mut text = String::with_capacity(condition.len());
+            let mut last = 0;
+            for (reference, value) in references.iter().zip(&values) {
+                text.push_str(&condition[last..reference.span.start]);
+                text.push_str(value);
+                last = reference.span.end;
+            }
+            text.push_str(&condition[last..]);
+            if self.decide_text(&text)? {
+                for copy in items {
+                    let mut carried = definitions.clone();
+                    carried.extend(copy.metadata);
+                    carried.extend(metadata.clone());
+                    added.push(ExecutedItem {
+                        identity: copy.identity,
+                        metadata: carried,
+                    });
+                }
+            }
+        }
+        Ok(added)
     }
 
     /// A metadatum's value: `raw` expanded and unescaped. A backslash is one
@@ -752,7 +862,12 @@ impl<'s, 'r> Engine<'s, 'r> {
         let Some(raw) = expression_attribute(node, "Condition")? else {
             return Ok(true);
         };
-        let raw = self.with_items(&raw, true)?;
+        self.decide_text(&raw)
+    }
+
+    /// Decide the condition `raw`.
+    fn decide_text(&mut self, raw: &str) -> Result<bool, Decline> {
+        let raw = self.with_items(raw, true)?;
         self.check_references(&raw)?;
         if holds_reference(properties::substitute(&raw, &self.lookup).0.as_escaped()) {
             return decline(format!(
@@ -1023,6 +1138,104 @@ fn lone_item_reference(piece: &str) -> bool {
         .and_then(|rest| rest.strip_suffix(')'))
         .map(str::trim)
         .is_some_and(item_name)
+}
+
+/// A value derived from an item's identity alone, which batching may read.
+#[derive(Clone, Copy)]
+enum IdentityModifier {
+    Identity,
+    Filename,
+    Extension,
+}
+
+/// One `%(Type.Metadata)` in a batched condition.
+struct BatchedReference {
+    span: std::ops::Range<usize>,
+    item_type: String,
+    modifier: IdentityModifier,
+}
+
+/// Every `%(…)` in `condition`, each of which must be `%(Type.Metadata)`
+/// inside a quoted string, `Metadata` one of [`IdentityModifier`]'s.
+/// Substituting a value inside quotes is then exact, as long as the value
+/// holds nothing a condition's string reads ([`identity_modifier`]).
+fn batched_references(condition: &str) -> Result<Vec<BatchedReference>, Decline> {
+    let mut references = Vec::new();
+    let mut quoted = false;
+    let mut at = 0;
+    while at < condition.len() {
+        let rest = &condition[at..];
+        if rest.starts_with('\'') {
+            quoted = !quoted;
+            at += 1;
+            continue;
+        }
+        if !rest.starts_with("%(") {
+            at += rest.chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        let Some(close) = rest.find(')') else {
+            return decline(format!("{condition} leaves a metadata reference open"));
+        };
+        let inner = &rest[2..close];
+        let parsed = inner.split_once('.').and_then(|(item_type, name)| {
+            let modifier = match name.to_ascii_lowercase().as_str() {
+                "identity" => IdentityModifier::Identity,
+                "filename" => IdentityModifier::Filename,
+                "extension" => IdentityModifier::Extension,
+                _ => return None,
+            };
+            item_name(item_type).then(|| (item_type.to_owned(), modifier))
+        });
+        let Some((item_type, modifier)) = parsed.filter(|_| quoted) else {
+            return decline(format!(
+                "{condition} reads %({inner}), which batching does not model"
+            ));
+        };
+        references.push(BatchedReference {
+            span: at..at + close + 1,
+            item_type,
+            modifier,
+        });
+        at += close + 1;
+    }
+    if references.is_empty() {
+        return decline(format!(
+            "{condition} reads metadata batching does not model"
+        ));
+    }
+    Ok(references)
+}
+
+/// `modifier` of an item whose identity is `identity`, as MSBuild derives it
+/// (`FileUtilities.ItemSpecModifiers`: `Path.GetFileNameWithoutExtension` and
+/// `Path.GetExtension` on the item spec). The identity must spell no
+/// character MSBuild escapes (so the escaped value MSBuild reads is the
+/// identity), no backslash (which its Unix path fixup may respell), and
+/// nothing a quoted condition string reads, nor whitespace.
+fn identity_modifier(identity: &str, modifier: IdentityModifier) -> Result<String, Decline> {
+    let plain = identity.bytes().all(|b| {
+        b.is_ascii_graphic()
+            && !matches!(
+                b,
+                b'%' | b'*' | b'?' | b'@' | b'$' | b'(' | b')' | b';' | b'\'' | b'\\'
+            )
+    });
+    if !plain {
+        return decline(format!(
+            "batching reads the identity {identity}, which substitution cannot spell"
+        ));
+    }
+    let name = identity.rsplit('/').next().unwrap_or(identity);
+    let dot = name.rfind('.');
+    Ok(match modifier {
+        IdentityModifier::Identity => identity.to_owned(),
+        IdentityModifier::Filename => dot.map_or(name, |i| &name[..i]).to_owned(),
+        IdentityModifier::Extension => match dot {
+            Some(i) if i + 1 < name.len() => name[i..].to_owned(),
+            _ => String::new(),
+        },
+    })
 }
 
 /// Whether `name` is an item type name MSBuild expands in `@(…)`: a letter or

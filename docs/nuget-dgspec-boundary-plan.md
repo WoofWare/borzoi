@@ -2007,6 +2007,22 @@ the two differ where it matters:
   `property_expr_diff` (the oracle's `eval` op writes the condition's
   whitespace as character references, so MSBuild sees it unnormalised). The
   walk still reads its own conditions normalised (#750).
+- **Item batching**: an item element whose condition reads
+  `%(Type.Metadata)` runs as MSBuild's batching engine runs it. `Type`'s
+  items fall into buckets by the values read, compared ignoring case, in
+  the order each first appears; the condition is decided once per bucket,
+  with that bucket's values; and the `Include`, a lone `@(Type)`, copies
+  the items of each bucket it holds for, in order. Only what substitution
+  decides exactly runs: one qualified type, each reference inside a quoted
+  string, reading `Identity`, `Filename` or `Extension`
+  (`Path.GetFileNameWithoutExtension` and `Path.GetExtension` of the item
+  spec), of an identity holding nothing MSBuild escapes, no backslash and
+  no whitespace. An element whose own type already holds items declines,
+  since MSBuild batches that type too, as does an empty source, which it
+  decides in one bucket without values. The generator
+  (`batched_item_groups_match_msbuild`) fails when the grouping, the
+  case-folded keys, a modifier's derivation or the metadata layering is
+  changed.
 - **A task whose condition is false** does not run, in MSBuild or here: only
   one that would run declines. But MSBuild looks for batching in a task's
   parameters before its condition, so a task mentioning `%(…)` declines
@@ -2048,8 +2064,9 @@ every committed run to it. The scheduling rules above came out of its
 failures. Its soak fails when any of the three push rules is changed.
 
 The census runs `GenerateRestoreGraphFile` on every cone and pins where the
-executor stops. Every single-target cone stops at item batching, a
-condition reading `%(RestoreGraphProjectInputItems.Extension)`. The two
+executor stops. Every single-target cone gets past the filter that batches
+over `%(RestoreGraphProjectInputItems.Extension)` and stops at
+`RemoveDuplicates`, the first task with an `Output`. The two
 multi-targeting outer builds stop at opacity.
 
 **`MSBuildProjectDefaultTargets`.** The hook
