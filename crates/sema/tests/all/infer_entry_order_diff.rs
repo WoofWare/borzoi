@@ -65,6 +65,19 @@
 //! (`let x2 p = ((p : string), (let z = idf p in (let () = z in z)), p)`
 //! keeps `z : string`, #774).
 //!
+//! # The alphabet
+//!
+//! The random cases reach forms by what the generator happens to draw.
+//! [`every_arm_in_every_context_is_certain_implies_exact`] reaches them all,
+//! by construction: one case per cell of every modelled form ([`Arm`], one
+//! per arm of `Gen::infer_construct`, the dispatching arms split) × every
+//! context that hands it an expected type ([`Context`]) × the prefix
+//! faithful or lost before it, each graded certain-implies-exact against
+//! FCS, and each checked to parse as the arm its cell names.
+//! [`the_alphabet_names_every_arm_inference_models`] reads
+//! `Gen::infer_construct`'s arms from its source, so an arm inference gains
+//! fails it until the alphabet has a form for it.
+//!
 //! The other cases are a body under a return annotation,
 //! `let cK (y: string) (n: int) (b: bool) p : T = ARG`, with `ARG` generated
 //! against `T` (`let c4 p : string = both p (gi p)`).
@@ -94,7 +107,7 @@
 use std::collections::BTreeMap;
 
 use borzoi_cst::parser::parse;
-use borzoi_cst::syntax::{AstNode, ImplFile};
+use borzoi_cst::syntax::{AstNode, Expr, ImplFile, Pat, SyntaxNode};
 use borzoi_sema::{PrecedingTypes, ProjectItems, SyntaxRecovery, infer_file, resolve_file};
 
 use crate::common::{GradedDumps, env_usize_or, full_bcl_env, temp_fs_file, try_invoke_fcs_dump};
@@ -1099,4 +1112,691 @@ fn generated_cases_parse_and_place_their_points() {
             assert_eq!(&src[case.start..case.start + case.text.len()], case.text);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The alphabet: every modelled form in every expected-carrying context, with
+// the prefix faithful and with it lost before the form.
+// ---------------------------------------------------------------------------
+
+/// A form inference models: one arm of `Gen::infer_construct`, with the
+/// arms that dispatch on what they hold split by it — a literal from `()`,
+/// an `if` with an `else` from one without, an application by what it
+/// applies, a dotted name by its head, a `let` by its pattern.
+///
+/// [`Arm::variant`] names the `Expr` variant each matches, and
+/// [`the_alphabet_names_every_arm_inference_models`] holds the set of them to
+/// the arms `Gen::infer_construct` has, read from its source: an arm added
+/// there with no form here fails it, and so does a form here whose arm
+/// inference does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Arm {
+    Literal,
+    Unit,
+    Ident,
+    Paren,
+    Tuple,
+    If,
+    ElselessIf,
+    Match,
+    Lambda,
+    While,
+    /// A value applied to an argument.
+    Apply,
+    /// An infix operator's application (`a |> f`).
+    Infix,
+    /// A built-in conversion (`int x`).
+    Convert,
+    /// A built-in prefix operator (`-x`).
+    Operator,
+    MethodCall,
+    /// A union case applied to its field.
+    CaseApply,
+    /// `v.Member`, whose head is a value.
+    MemberAccess,
+    /// `M.v`, whose head is a module.
+    ModuleValue,
+    DotGet,
+    /// `let x = … in …`.
+    Let,
+    /// `let (…) = … in …`, a pattern of structure.
+    LetPattern,
+    Sequential,
+}
+
+impl Arm {
+    const ALL: [Arm; 22] = [
+        Arm::Literal,
+        Arm::Unit,
+        Arm::Ident,
+        Arm::Paren,
+        Arm::Tuple,
+        Arm::If,
+        Arm::ElselessIf,
+        Arm::Match,
+        Arm::Lambda,
+        Arm::While,
+        Arm::Apply,
+        Arm::Infix,
+        Arm::Convert,
+        Arm::Operator,
+        Arm::MethodCall,
+        Arm::CaseApply,
+        Arm::MemberAccess,
+        Arm::ModuleValue,
+        Arm::DotGet,
+        Arm::Let,
+        Arm::LetPattern,
+        Arm::Sequential,
+    ];
+
+    /// The arm's position in [`Self::ALL`]: an exhaustive match, so a new
+    /// arm cannot compile without a place there.
+    fn index(self) -> usize {
+        match self {
+            Arm::Literal => 0,
+            Arm::Unit => 1,
+            Arm::Ident => 2,
+            Arm::Paren => 3,
+            Arm::Tuple => 4,
+            Arm::If => 5,
+            Arm::ElselessIf => 6,
+            Arm::Match => 7,
+            Arm::Lambda => 8,
+            Arm::While => 9,
+            Arm::Apply => 10,
+            Arm::Infix => 11,
+            Arm::Convert => 12,
+            Arm::Operator => 13,
+            Arm::MethodCall => 14,
+            Arm::CaseApply => 15,
+            Arm::MemberAccess => 16,
+            Arm::ModuleValue => 17,
+            Arm::DotGet => 18,
+            Arm::Let => 19,
+            Arm::LetPattern => 20,
+            Arm::Sequential => 21,
+        }
+    }
+
+    /// The `Expr` variant `Gen::infer_construct` matches this arm on.
+    fn variant(self) -> &'static str {
+        match self {
+            Arm::Literal | Arm::Unit => "Const",
+            Arm::Ident => "Ident",
+            Arm::Paren => "Paren",
+            Arm::Tuple => "Tuple",
+            Arm::If | Arm::ElselessIf => "IfThenElse",
+            Arm::Match => "Match",
+            Arm::Lambda => "Fun",
+            Arm::While => "While",
+            Arm::Apply
+            | Arm::Infix
+            | Arm::Convert
+            | Arm::Operator
+            | Arm::MethodCall
+            | Arm::CaseApply => "App",
+            Arm::MemberAccess | Arm::ModuleValue => "LongIdent",
+            Arm::DotGet => "DotGet",
+            Arm::Let | Arm::LetPattern => "LetOrUse",
+            Arm::Sequential => "Sequential",
+        }
+    }
+
+    /// A form of this arm, its parts drawn from `g` ([`ArgGen::term`]): terms
+    /// whose type FCS may know where inference does not.
+    fn production(self, g: &mut ArgGen<'_>, depth: usize) -> String {
+        match self {
+            Arm::Literal => ["1", "\"s\"", "true"][g.rng.below(3)].into(),
+            Arm::Unit => "()".into(),
+            Arm::Ident => {
+                if g.rng.chance(50) {
+                    g.p_uses += 1;
+                    "p".into()
+                } else {
+                    ["y", "n"][g.rng.below(2)].into()
+                }
+            }
+            Arm::Paren => format!("({})", g.term(depth)),
+            Arm::Tuple => format!("{}, 1", g.term(depth)),
+            Arm::If => format!("if b then {} else {}", g.term(depth), g.term(depth)),
+            Arm::ElselessIf => format!("if b then {}", g.term(depth)),
+            Arm::Match => format!(
+                "match n with 0 -> {} | _ -> {}",
+                g.term(depth),
+                g.term(depth)
+            ),
+            Arm::Lambda => format!("fun () -> {}", g.term(depth)),
+            Arm::While => format!("while b do ignore ({})", g.term(depth)),
+            Arm::Apply => format!("idf ({})", g.term(depth)),
+            Arm::Infix => format!("({}) |> idf", g.term(depth)),
+            Arm::Convert => format!("int ({})", g.term(depth)),
+            Arm::Operator => format!("-({})", g.term(depth)),
+            Arm::MethodCall => format!("y.Insert(n, {})", g.term(depth)),
+            Arm::CaseApply => format!("Some ({})", g.term(depth)),
+            Arm::MemberAccess => {
+                if g.rng.chance(50) {
+                    g.p_uses += 1;
+                    "p.Length".into()
+                } else {
+                    "y.Length".into()
+                }
+            }
+            Arm::ModuleValue => "List.empty".into(),
+            Arm::DotGet => format!("({}).Length", g.term(depth)),
+            Arm::Let => format!("let z = {} in z", g.term(depth)),
+            Arm::LetPattern => format!("let (a, ()) = ({}, ()) in a", g.term(depth)),
+            Arm::Sequential => format!("ignore 1; {}", g.term(depth)),
+        }
+    }
+}
+
+/// The arm an expression is, or `None` for a form inference does not model.
+/// An exhaustive match over the union's `Expr`, so a variant the parser
+/// gains cannot compile without being placed here.
+fn arm_of(e: &Expr) -> Option<Arm> {
+    match e {
+        Expr::Const(c) => Some(if c.syntax().text().to_string().trim() == "()" {
+            Arm::Unit
+        } else {
+            Arm::Literal
+        }),
+        Expr::Ident(_) => Some(Arm::Ident),
+        Expr::Paren(_) => Some(Arm::Paren),
+        Expr::Tuple(t) => (!t.is_struct()).then_some(Arm::Tuple),
+        Expr::IfThenElse(i) => Some(if i.else_branch().is_some() {
+            Arm::If
+        } else {
+            Arm::ElselessIf
+        }),
+        Expr::Match(_) => Some(Arm::Match),
+        Expr::Fun(_) => Some(Arm::Lambda),
+        Expr::While(_) => Some(Arm::While),
+        Expr::App(a) if a.is_infix() || a.is_bracket_indexer() => None,
+        Expr::App(a) => Some(match a.func()? {
+            Expr::App(inner) if inner.is_infix() => Arm::Infix,
+            Expr::DotGet(_) => Arm::MethodCall,
+            Expr::LongIdent(li) => {
+                let segments = li.long_ident()?.idents().count();
+                if segments >= 2 {
+                    Arm::MethodCall
+                } else {
+                    Arm::Operator
+                }
+            }
+            Expr::Ident(i) => match i.ident()?.text() {
+                "int" | "int64" | "string" => Arm::Convert,
+                "Some" | "WA" | "U1" | "U2" => Arm::CaseApply,
+                _ => Arm::Apply,
+            },
+            _ => Arm::Apply,
+        }),
+        Expr::LongIdent(li) => {
+            let head = li.long_ident()?.idents().next()?;
+            Some(if matches!(head.text(), "List" | "Option" | "Seq") {
+                Arm::ModuleValue
+            } else {
+                Arm::MemberAccess
+            })
+        }
+        Expr::DotGet(_) => Some(Arm::DotGet),
+        Expr::LetOrUse(l) if l.is_bang() || l.is_use() || l.is_rec() => None,
+        Expr::LetOrUse(l) => {
+            let named = l
+                .bindings()
+                .next()
+                .and_then(|b| b.pat())
+                .is_some_and(|p| matches!(p, Pat::Named(_)));
+            Some(if named { Arm::Let } else { Arm::LetPattern })
+        }
+        Expr::Sequential(_) => Some(Arm::Sequential),
+        Expr::MeasureLit(_)
+        | Expr::Null(_)
+        | Expr::Typar(_)
+        | Expr::Dynamic(_)
+        | Expr::DotLambda(_)
+        | Expr::DotIndexedGet(_)
+        | Expr::TypeApp(_)
+        | Expr::IndexRange(_)
+        | Expr::IndexFromEnd(_)
+        | Expr::AddressOf(_)
+        | Expr::New(_)
+        | Expr::ObjExpr(_)
+        | Expr::InferredUpcast(_)
+        | Expr::InferredDowncast(_)
+        | Expr::Lazy(_)
+        | Expr::Assert(_)
+        | Expr::Fixed(_)
+        | Expr::Assign(_)
+        | Expr::Typed(_)
+        | Expr::TypeTest(_)
+        | Expr::Upcast(_)
+        | Expr::Downcast(_)
+        | Expr::Cons(_)
+        | Expr::JoinIn(_)
+        | Expr::InterpString(_)
+        | Expr::Quote(_)
+        | Expr::InlineIl(_)
+        | Expr::TraitCall(_)
+        | Expr::StaticOptimization(_)
+        | Expr::LibraryOnlyFieldGet(_)
+        | Expr::DotMissing(_)
+        | Expr::Computation(_)
+        | Expr::Record(_)
+        | Expr::AnonRecd(_)
+        | Expr::ArrayOrList(_)
+        | Expr::Yield(_)
+        | Expr::DoBang(_)
+        | Expr::Do(_)
+        | Expr::MatchLambda(_)
+        | Expr::MatchBang(_)
+        | Expr::WhileBang(_)
+        | Expr::ForEach(_)
+        | Expr::For(_)
+        | Expr::Try(_) => None,
+    }
+}
+
+/// A position that hands an expression an expected type, as FCS's checking
+/// order does ([`Context::template`]): each [`Expected`] state, reached
+/// through each form that passes one down.
+///
+/// [`Expected`]: the walk's `Expected` in `borzoi_sema::infer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Context {
+    /// A `let`'s right-hand side: no expected type.
+    LetRhs,
+    /// An application's argument: its domain.
+    Argument,
+    /// An `if`'s branch, under an application's domain.
+    BranchUnderArgument,
+    /// An `else` branch: the type its `then` branch fixed.
+    Else,
+    /// A later `match` arm: the type the first arm fixed.
+    LaterArm,
+    /// A `()` pattern's right-hand side: an equality.
+    UnitPattern,
+    /// A tuple element under a pattern of structure: an equality, split.
+    TuplePattern,
+    /// A method's argument: a type inference does not know.
+    MethodArg,
+    /// An operator's operand: a type its signature shares.
+    Operand,
+    /// A conversion's operand: a fresh type.
+    ConvertOperand,
+    /// A statement: a fresh type, related to `unit` after.
+    Statement,
+    /// A `match`'s scrutinee: no expected type.
+    Scrutinee,
+    /// A member access's receiver: no expected type.
+    Receiver,
+    /// A union case's field: its (loosened) type.
+    CaseField,
+    /// A body under a return annotation.
+    Annotated,
+}
+
+impl Context {
+    const ALL: [Context; 15] = [
+        Context::LetRhs,
+        Context::Argument,
+        Context::BranchUnderArgument,
+        Context::Else,
+        Context::LaterArm,
+        Context::UnitPattern,
+        Context::TuplePattern,
+        Context::MethodArg,
+        Context::Operand,
+        Context::ConvertOperand,
+        Context::Statement,
+        Context::Scrutinee,
+        Context::Receiver,
+        Context::CaseField,
+        Context::Annotated,
+    ];
+
+    /// The context's position in [`Self::ALL`]: an exhaustive match, so a
+    /// new context cannot compile without a place there.
+    fn index(self) -> usize {
+        match self {
+            Context::LetRhs => 0,
+            Context::Argument => 1,
+            Context::BranchUnderArgument => 2,
+            Context::Else => 3,
+            Context::LaterArm => 4,
+            Context::UnitPattern => 5,
+            Context::TuplePattern => 6,
+            Context::MethodArg => 7,
+            Context::Operand => 8,
+            Context::ConvertOperand => 9,
+            Context::Statement => 10,
+            Context::Scrutinee => 11,
+            Context::Receiver => 12,
+            Context::CaseField => 13,
+            Context::Annotated => 14,
+        }
+    }
+
+    /// The text around the hole, `{H}` marking it, always in parentheses of
+    /// its own so that every form fits it; [`Context::Annotated`] is the
+    /// case's head instead ([`alphabet_case`]).
+    fn template(self) -> &'static str {
+        match self {
+            Context::LetRhs => "(let z = ({H}) in z)",
+            Context::Argument => "gi ({H})",
+            Context::BranchUnderArgument => "gi (if b then ({H}) else 1)",
+            Context::Else => "(let z = (if b then 1 else ({H})) in z)",
+            Context::LaterArm => "(let z = (match n with 0 -> 1 | _ -> ({H})) in z)",
+            Context::UnitPattern => "(let () = ({H}) in 0)",
+            Context::TuplePattern => "(let (a, ()) = (({H}), ()) in a)",
+            Context::MethodArg => "y.Insert(0, ({H}))",
+            Context::Operand => "-({H})",
+            Context::ConvertOperand => "int ({H})",
+            Context::Statement => "(({H}); 0)",
+            Context::Scrutinee => "(match ({H}) with 1 -> 1 | _ -> 2)",
+            Context::Receiver => "({H}).Length",
+            Context::CaseField => "WA ({H})",
+            Context::Annotated => "({H})",
+        }
+    }
+}
+
+/// One cell of the alphabet: a form, the context it is put in, and whether
+/// a construct that ends the prefix comes before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Cell {
+    arm: Arm,
+    context: Context,
+    lost: bool,
+}
+
+/// Every cell, in a fixed order.
+fn alphabet() -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for lost in [false, true] {
+        for context in Context::ALL {
+            for arm in Arm::ALL {
+                cells.push(Cell { arm, context, lost });
+            }
+        }
+    }
+    cells
+}
+
+/// One alphabet case: its text, and the range of its form within it.
+struct AlphabetCase {
+    cell: Cell,
+    text: String,
+    hole: (usize, usize),
+}
+
+/// The case for `cell`, its parts drawn from `seed`:
+///
+/// ```text
+/// let aK (y: string) (n: int) (b: bool) p = (BEFORE, CONTEXT[FORM], p)
+/// let aK (y: string) (n: int) (b: bool) p : int = (ignore (BEFORE); (FORM))
+/// ```
+///
+/// `BEFORE` is a construct that ends the prefix ([`ArgGen::loss`]) when the
+/// cell says so, and the witness `idf 3` otherwise.
+fn alphabet_case(k: usize, cell: Cell, seed: u64) -> AlphabetCase {
+    let mut rng = Rng(seed ^ (k as u64).wrapping_mul(0x9e37_79b9));
+    let regime = regime_for(seed);
+    let mut g = ArgGen {
+        rng: &mut rng,
+        regime: Regime {
+            depth: 1,
+            lambda_pct: 0,
+            ill_pct: 0,
+            ..regime
+        },
+        features: Features::default(),
+        p_uses: 0,
+    };
+    let before = if cell.lost { g.loss() } else { "idf 3".into() };
+    let form = cell.arm.production(&mut g, 1);
+    let (head, prefix, suffix) = if cell.context == Context::Annotated {
+        (
+            format!("let a{k:03} (y: string) (n: int) (b: bool) p : int = "),
+            format!("(ignore ({before}); "),
+            ")".to_string(),
+        )
+    } else {
+        (
+            format!("let a{k:03} (y: string) (n: int) (b: bool) p = "),
+            format!("({before}, "),
+            ", p)".to_string(),
+        )
+    };
+    let (pre, post) = cell
+        .context
+        .template()
+        .split_once("{H}")
+        .expect("a template has one hole");
+    let start = head.len() + prefix.len() + pre.len();
+    let text = format!("{head}{prefix}{pre}{form}{post}{suffix}");
+    AlphabetCase {
+        cell,
+        text,
+        hole: (start, start + form.len()),
+    }
+}
+
+/// Every alphabet case, `per_cell` per cell, in files of
+/// [`CASES_PER_FILE`].
+fn alphabet_files(per_cell: usize) -> Vec<(String, Vec<(usize, AlphabetCase)>)> {
+    let cases: Vec<AlphabetCase> = (0..per_cell)
+        .flat_map(|round| {
+            alphabet()
+                .into_iter()
+                .enumerate()
+                .map(move |(i, cell)| (round, i, cell))
+        })
+        .enumerate()
+        .map(|(k, (round, i, cell))| alphabet_case(k, cell, (round * 7919 + i) as u64))
+        .collect();
+    let mut files = Vec::new();
+    let mut cases = cases.into_iter().peekable();
+    while cases.peek().is_some() {
+        let mut src = HEADER.to_string();
+        let mut placed = Vec::new();
+        for case in cases.by_ref().take(CASES_PER_FILE) {
+            let start = src.len();
+            src.push_str(&case.text);
+            src.push('\n');
+            placed.push((start, case));
+        }
+        files.push((src, placed));
+    }
+    files
+}
+
+/// The expression whose range is exactly `at`, outermost first.
+fn expr_at(root: &SyntaxNode, at: (usize, usize)) -> Option<Expr> {
+    root.descendants().find_map(|n| {
+        let r = n.text_range();
+        let span = (u32::from(r.start()) as usize, u32::from(r.end()) as usize);
+        if span == at { Expr::cast(n) } else { None }
+    })
+}
+
+/// Every modelled form, in every context that hands it an expected type,
+/// with the prefix faithful and with it lost before the form, graded
+/// against FCS: what inference commits anywhere in the file, FCS has, the
+/// same. And each case's form is the arm its cell names, so the alphabet is
+/// what the cells say it is.
+#[test]
+fn every_arm_in_every_context_is_certain_implies_exact() {
+    let per_cell = env_usize_or("BORZOI_ALPHABET_PER_CELL", 1);
+    let env = full_bcl_env();
+    let mut graded: BTreeMap<Cell, usize> = BTreeMap::new();
+    let mut misplaced = Vec::new();
+    let mut unsound = Vec::new();
+    let (mut certain, mut uncheckable, mut files) = (0, 0, 0);
+    for (src, cases) in alphabet_files(per_cell) {
+        files += 1;
+        let parsed = parse(&src);
+        assert!(parsed.errors.is_empty(), "{:?}\n{src}", parsed.errors);
+        let root = parsed.root.clone();
+        for (start, case) in &cases {
+            let at = (start + case.hole.0, start + case.hole.1);
+            let found = expr_at(&root, at).as_ref().and_then(arm_of);
+            if found != Some(case.cell.arm) {
+                misplaced.push(format!("{:?} reads as {found:?}: {}", case.cell, case.text));
+            }
+        }
+        let recovery = SyntaxRecovery::of(&parsed);
+        let file = ImplFile::cast(parsed.root).expect("impl file");
+        let resolved = resolve_file(&file, &ProjectItems::default(), env, &recovery);
+        let inferred = infer_file(&file, &resolved, env, &PrecedingTypes::default());
+        let path = temp_fs_file("infer_alphabet", &src);
+        let jsons = try_invoke_fcs_dump("types", &path)
+            .and_then(|t| try_invoke_fcs_dump("binder-types", &path).map(|b| (t, b)));
+        let _ = std::fs::remove_file(&path);
+        let Ok((types_json, binders_json)) = jsons else {
+            uncheckable += 1;
+            continue;
+        };
+        let Some(dumps) = GradedDumps::read(&types_json, &binders_json, &src, Some(&file)) else {
+            uncheckable += 1;
+            continue;
+        };
+        let header_lines = HEADER.matches('\n').count() as u32;
+        assert!(
+            dumps.errors.iter().all(|e| e.line > header_lines),
+            "FCS rejects the header: {:?}",
+            dumps.errors
+        );
+        let span = |r: borzoi_cst::syntax::TextRange| {
+            (u32::from(r.start()) as usize, u32::from(r.end()) as usize)
+        };
+        let ours_types: BTreeMap<(usize, usize), String> = inferred
+            .types()
+            .iter()
+            .map(|(r, t)| (span(*r), t.render(env)))
+            .collect();
+        let ours_binders: BTreeMap<(usize, usize), String> = inferred
+            .def_types()
+            .iter()
+            .map(|(d, t)| (span(resolved.def(*d).range), t.render(env)))
+            .collect();
+        for (table, ours, theirs) in [
+            ("node", &ours_types, &dumps.types),
+            ("binder", &ours_binders, &dumps.binders),
+        ] {
+            for (&at, ty) in ours {
+                if dumps.is_ungraded(at) {
+                    continue;
+                }
+                certain += 1;
+                if theirs.get(&at) != Some(ty) {
+                    let line_start = src[..at.0].rfind('\n').map_or(0, |i| i + 1);
+                    let line_end = src[at.0..].find('\n').map_or(src.len(), |i| at.0 + i);
+                    unsound.push(format!(
+                        "{table} `{}` ours {ty}, FCS {:?}: {}",
+                        &src[at.0..at.1],
+                        theirs.get(&at),
+                        &src[line_start..line_end]
+                    ));
+                }
+            }
+        }
+        for (_, case) in &cases {
+            *graded.entry(case.cell).or_default() += 1;
+        }
+    }
+    eprintln!(
+        "alphabet sweep: {} cells, {files} files, {certain} commits graded, {uncheckable} \
+         uncheckable",
+        graded.len()
+    );
+    assert!(
+        misplaced.is_empty(),
+        "{} forms are not the arm their cell names:\n{}",
+        misplaced.len(),
+        misplaced.join("\n")
+    );
+    assert!(
+        unsound.is_empty(),
+        "{} commits FCS does not have:\n{}",
+        unsound.len(),
+        unsound.join("\n")
+    );
+    assert_eq!(uncheckable, 0, "FCS could not check every alphabet file");
+    let missing: Vec<Cell> = alphabet()
+        .into_iter()
+        .filter(|c| graded.get(c).copied().unwrap_or(0) < per_cell)
+        .collect();
+    assert!(missing.is_empty(), "cells not graded: {missing:?}");
+    assert!(certain > 0, "nothing committed, so nothing graded");
+}
+
+/// [`Arm::ALL`] and [`Context::ALL`] hold each value once, at its index.
+#[test]
+fn the_alphabet_lists_are_closed() {
+    for (i, arm) in Arm::ALL.iter().enumerate() {
+        assert_eq!(arm.index(), i, "{arm:?}");
+    }
+    for (i, context) in Context::ALL.iter().enumerate() {
+        assert_eq!(context.index(), i, "{context:?}");
+    }
+}
+
+/// The `Expr` variants the alphabet's arms name ([`Arm::variant`]) are the
+/// ones `Gen::infer_construct` has arms for, read from its source with
+/// `syn`: an arm inference gains with no form in the alphabet fails here,
+/// and so does a form for an arm inference does not have.
+#[test]
+fn the_alphabet_names_every_arm_inference_models() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/infer/expr.rs");
+    let source = std::fs::read_to_string(&path).expect("read infer/expr.rs");
+    let file = syn::parse_file(&source).expect("parse infer/expr.rs");
+    struct Arms(std::collections::BTreeSet<String>, bool);
+    impl<'ast> syn::visit::Visit<'ast> for Arms {
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            if f.sig.ident == "infer_construct" {
+                self.1 = true;
+                syn::visit::visit_impl_item_fn(self, f);
+                self.1 = false;
+            }
+        }
+        fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+            if self.1 {
+                let mut pats = vec![&arm.pat];
+                while let Some(p) = pats.pop() {
+                    match p {
+                        syn::Pat::Or(or) => pats.extend(or.cases.iter()),
+                        syn::Pat::TupleStruct(ts) => {
+                            let segs: Vec<String> = ts
+                                .path
+                                .segments
+                                .iter()
+                                .map(|s| s.ident.to_string())
+                                .collect();
+                            if let [head, variant] = segs.as_slice()
+                                && head == "Expr"
+                            {
+                                self.0.insert(variant.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            syn::visit::visit_arm(self, arm);
+        }
+    }
+    let mut arms = Arms(Default::default(), false);
+    syn::visit::Visit::visit_file(&mut arms, &file);
+    assert!(
+        !arms.0.is_empty(),
+        "no `Expr` arm found in `infer_construct`"
+    );
+    let named: std::collections::BTreeSet<String> =
+        Arm::ALL.iter().map(|a| a.variant().to_string()).collect();
+    assert_eq!(
+        arms.0, named,
+        "the alphabet's arms and `Gen::infer_construct`'s differ: add a form for each arm \
+         inference models ([`Arm`]), and none for one it does not"
+    );
 }

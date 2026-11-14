@@ -31,6 +31,14 @@ pub(super) enum MemberAccessKind {
         /// ([`Gen::static_callee`]) — the wake then consults the static method
         /// group. An instance call through a value receiver is `false`.
         is_static: bool,
+        /// Whether an argument is a lambda ([`has_lambda_argument`]). FCS
+        /// checks such an argument against its parameter's type before it
+        /// resolves the call, and where the lambda does not convert to it
+        /// the call is not typed as the member: `y.Insert(0, (fun () -> 1))`
+        /// is `'a`, where `y.Insert(0, 1)` is `string`. Whether it converts
+        /// is not modelled, so the call's type is not read off the member;
+        /// its identity still is.
+        lambda_arg: bool,
     },
 }
 
@@ -210,6 +218,7 @@ impl<'a> Gen<'a> {
             MemberAccessKind::Method {
                 args: arg_vids,
                 is_static,
+                lambda_arg: has_lambda_argument(arg),
             },
         );
         // FCS resolves the overload once the arguments are checked.
@@ -759,7 +768,9 @@ impl<'a> Gen<'a> {
         };
         let looked_up = match kind {
             MemberAccessKind::Data => self.facts.env.instance_data_member(handle, name),
-            MemberAccessKind::Method { args, is_static } => {
+            MemberAccessKind::Method {
+                args, is_static, ..
+            } => {
                 // A non-positional argument shape (named argument, recovery hole) is
                 // not typed by FCS as the method return — defer fully (no type, no
                 // member resolution recorded, since an ill-formed call has no
@@ -954,6 +965,17 @@ impl<'a> Gen<'a> {
         if !fsharp_field_carrier && !self.facts.env.identities_incomplete() {
             self.out.confirm_guard(use_range);
         }
+        // A lambda argument may not convert to its parameter, which leaves
+        // the call untyped in FCS ([`MemberAccessKind::Method::lambda_arg`]).
+        if matches!(
+            kind,
+            MemberAccessKind::Method {
+                lambda_arg: true,
+                ..
+            }
+        ) {
+            return Wake::Resolved;
+        }
         // A `void` method's call is F#'s `unit`, which FCS types it as —
         // unless the projection is incomplete, where the member read is not
         // provably the one FCS binds (the seal below).
@@ -995,6 +1017,30 @@ impl<'a> Gen<'a> {
             Own::var(result),
         );
         Wake::Resolved
+    }
+}
+
+/// Whether a method call's argument `arg` — the call's parentheses, or a bare
+/// argument — holds a lambda (`fun …` or `function …`, under parentheses) as
+/// one of its positional arguments: the arguments FCS checks against their
+/// parameters' types before it resolves the call.
+fn has_lambda_argument(arg: &Expr) -> bool {
+    let is_lambda = |e: &Expr| {
+        matches!(
+            unparenthesize(e.clone()),
+            Some(Expr::Fun(_) | Expr::MatchLambda(_))
+        )
+    };
+    let inner = match arg {
+        Expr::Paren(p) => match p.inner() {
+            Some(inner) => inner,
+            None => return false,
+        },
+        other => other.clone(),
+    };
+    match &inner {
+        Expr::Tuple(t) if !t.is_struct() => t.elements().any(|el| is_lambda(&el)),
+        other => is_lambda(other),
     }
 }
 

@@ -172,6 +172,19 @@ const CASES: &[(&str, &str, &str)] = &[
         "a list expression, which inference does not model, is `string list`; `z` is that, \
          and the `()` pattern is FCS's error (#774)",
     ),
+    (
+        "lambda-method-argument-checked-before-resolution",
+        "let m1 (y: string) = (y.Insert(0, (fun () -> 1)), 0)",
+        "FCS checks a lambda argument against its parameter before it resolves the call: \
+         the lambda does not convert to `string`, and the call is `'a`, not `Insert`'s \
+         `string` (an argument that is not a lambda, `y.Insert(0, 1)`, keeps `string`)",
+    ),
+    (
+        "lambda-method-argument-control",
+        "let m2 (y: string) = (y.Insert(0, idf (fun () -> 1)), 0)",
+        "control: a lambda under an application is not a lambda argument, and FCS types \
+         the call `string` by the single-candidate shortcut",
+    ),
 ];
 
 /// The file every case is a `let` of.
