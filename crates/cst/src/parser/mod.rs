@@ -678,6 +678,15 @@ fn parse_inner_stopping_at(
     // it reports the feature error and recovers, leaving the parse unchanged.
     let langversion_errors = langversion_diagnostics(elif_directives, lang);
 
+    // The `#nowarn` / `#warnon` directives, read off the raw table's kind
+    // column: the tree emits each raw entry as one token, so these are the
+    // tree's `WARN_DIRECTIVE` tokens, found without materialising a red node
+    // per element of the file.
+    let warn_directive_spans: Vec<Range<usize>> = (0..raw_tokens.len())
+        .filter(|&i| raw_tokens.kind(i) == RawKind::WarnDirective)
+        .map(|i| raw_tokens.span(i))
+        .collect();
+
     let mut parser = Parser::new(source, raw_tokens, filtered_tokens);
     parser.tree_height_stop = initial_stop;
     // The parse stops once the tree would reach `tree_height_stop`, but that
@@ -758,7 +767,7 @@ fn parse_inner_stopping_at(
     errors.extend(filter_gates);
     errors.extend(extended_interpolation_errors);
     let (warn_errors, warn_warnings) =
-        warn_directives::warn_directive_diagnostics(&root, source, lang);
+        warn_directives::warn_directive_diagnostics(&root, source, &warn_directive_spans, lang);
     errors.extend(warn_errors);
     // Warnings come from the productions and the lex-filter's offside
     // diagnostics; directive/tab/langversion problems are all errors.

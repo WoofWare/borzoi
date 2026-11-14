@@ -602,8 +602,9 @@ fn fcs_sites_match_a_census_of_the_parse_pipeline() {
     report("the parse pipeline's feature checks", failures);
 }
 
-/// The features the parser consults directly — `supports(LanguageFeature::X)`
-/// or a `gate(LanguageFeature::X, …)` — are live rows, and every live row
+/// The features the parser consults directly — `supports(LanguageFeature::X)`,
+/// a `gate(LanguageFeature::X, …)`, or a feature-gate walk entry
+/// `positional(LanguageFeature::X, …)` — are live rows, and every live row
 /// with an item other than `Kind` (which the parser reaches through the
 /// generated `kind_feature`) is consulted.
 #[test]
@@ -615,9 +616,19 @@ fn live_rows_are_the_features_the_parser_consults() {
     let mut consulted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for file in &files {
         let text = read(file);
-        for pattern in ["supports(LanguageFeature::", "gate(LanguageFeature::"] {
-            for (at, _) in text.match_indices(pattern) {
-                let case = ident(&text[at + pattern.len()..]).to_string();
+        for call in ["supports(", "gate(", "positional("] {
+            for (at, _) in text.match_indices(call) {
+                // rustfmt may break the line after the parenthesis.
+                let Some(rest) = text[at + call.len()..]
+                    .trim_start()
+                    .strip_prefix("LanguageFeature::")
+                else {
+                    continue;
+                };
+                let case = ident(rest).to_string();
+                if case.is_empty() {
+                    continue;
+                }
                 let rel = file.strip_prefix(&src_dir).unwrap().display().to_string();
                 consulted.entry(case).or_default().insert(rel);
             }
@@ -664,7 +675,8 @@ fn live_rows_are_the_features_the_parser_consults() {
         if direct && !consulted.contains_key(&row.name) {
             failures.push(format!(
                 "{} is live with {:?}, but nothing in crates/cst/src consults it through \
-                 `supports(LanguageFeature::{0})` or `gate(LanguageFeature::{0}, …)`; wire the \
+                 `supports(LanguageFeature::{0})`, `gate(LanguageFeature::{0}, …)` or \
+                 `positional(LanguageFeature::{0}, …)`; wire the \
                  gate or mark the row deferred(…)",
                 row.name, row.borzoi,
             ));

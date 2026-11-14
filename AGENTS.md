@@ -14,7 +14,10 @@ This is a Cargo workspace with nine members:
   under which every parse also builds rowan's green tree and asserts the two
   trees are the same, and `token-reference`, under which every lex asserts
   that the raw token table rebuilds the full-trivia driver iterator's stream
-  (`docs/token-pipeline-soa-plan.md`). Self-contained: depends only on `logos` and
+  (`docs/token-pipeline-soa-plan.md`), and `walk-reference`, under which every
+  parse asserts that the diagnostics' partial scans (the warn directives off the
+  raw table, the feature gates' kind-filtered walk) find what a walk over every
+  element of the tree finds. Self-contained: depends only on `logos` and
   `text-size` (and, behind that test-only feature, `rowan`). Intended to be
   reusable outside this repo, through its *substrate*: the untyped tree
   (`SyntaxNode`, `SyntaxKind`, `AstNode`) and the version gate
