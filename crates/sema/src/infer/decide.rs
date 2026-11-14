@@ -40,6 +40,21 @@ pub(super) enum Expected {
     Unknown,
 }
 
+/// What becomes of a tuple's expected type when its elements' are split from
+/// it ([`Gen::tuple_element_expectations`]).
+#[derive(Debug)]
+pub(super) enum TupleSplit {
+    /// Discharged by the split itself: there was nothing to relate, or the
+    /// expected variable was decided against a tuple of the elements' types.
+    Split(Discharged),
+    /// Discharged through the elements: each is checked against its part of
+    /// the expected type, so the tuple holds their proofs.
+    ByElements,
+    /// Related to the tuple once its elements are walked, each against a
+    /// fresh type ([`Gen::relate`]).
+    AtEnd,
+}
+
 /// What [`Gen::decide`] did with a relation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Decision {
@@ -72,6 +87,79 @@ impl Expected {
     }
 }
 
+/// Proof that a form discharged what its context expects of it
+/// ([`Expected`]): every form the walk meets must say what became of the
+/// relation FCS takes against its expected type, and this is how it says so.
+///
+/// Its field is private to this module, so outside it the proof is had only
+/// from the functions here that discharge an expected type, each one of the
+/// ways a form may:
+///
+/// - **relating** it, where FCS relates it ([`Gen::relate`]);
+/// - **tainting** it, where FCS relates it by what inference does not model
+///   ([`Gen::taint_expected`]);
+/// - **handing it to a child**, whose walk returns the proof
+///   ([`Inferred`]), or splitting it among the children
+///   ([`Gen::tuple_element_expectations`], [`Discharged::and`]);
+/// - **ending the prefix**, after which nothing is decided and nothing
+///   generalises ([`Gen::decline_expected`] and its kin).
+///
+/// So a form that forgets its expected type does not compile, and one that
+/// lets a child's proof stand for its own says so where it does. It is a
+/// zero-sized type: the proof costs nothing at run time.
+#[must_use = "a form's expected type is discharged only when its proof reaches the form's caller"]
+#[derive(Debug)]
+pub(super) struct Discharged(());
+
+impl Discharged {
+    /// Both proofs, as one: a form that discharged its expected type twice
+    /// (tainted at its entry and related at its exit), or through each of
+    /// its children.
+    pub(super) fn and(self, other: Discharged) -> Discharged {
+        let Discharged(()) = other;
+        self
+    }
+}
+
+/// What a walk of an expression gives back: the type variable it
+/// synthesized, where it did, and the proof that the expected type it was
+/// handed is discharged ([`Discharged`]).
+#[must_use = "an expression's walk carries the proof that its expected type is discharged"]
+#[derive(Debug)]
+pub(super) struct Inferred {
+    /// The expression's type variable; `None` where it is not modelled,
+    /// which has ended the prefix.
+    pub(super) var: Option<TyVid>,
+    /// The proof.
+    pub(super) discharged: Discharged,
+}
+
+impl Inferred {
+    /// A walk that synthesized `var`.
+    pub(super) fn typed(var: TyVid, discharged: Discharged) -> Inferred {
+        Inferred {
+            var: Some(var),
+            discharged,
+        }
+    }
+
+    /// A walk that synthesized nothing.
+    pub(super) fn untyped(discharged: Discharged) -> Inferred {
+        Inferred {
+            var: None,
+            discharged,
+        }
+    }
+
+    /// The variable alone, the proof dropped: for a walk handed an expected
+    /// type of the caller's own making (a domain, a fresh statement type, a
+    /// synth position), which the walk itself discharged.
+    pub(super) fn var(self) -> Option<TyVid> {
+        let Discharged(()) = self.discharged;
+        self.var
+    }
+}
+
 impl<'a> Gen<'a> {
     /// Relate `actual`, the type of an expression, to what its context
     /// expects, at the point FCS relates them: nothing in a synth position;
@@ -84,8 +172,8 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         actual: TyVid,
         expected: Expected,
-    ) -> Option<Decision> {
-        match expected {
+    ) -> (Option<Decision>, Discharged) {
+        let decision = match expected {
             Expected::Synth => None,
             Expected::Known(d) => Some(self.decide(scope, actual, d)),
             Expected::Equal(d) => Some(self.decide_equal(scope, actual, d)),
@@ -93,7 +181,38 @@ impl<'a> Gen<'a> {
                 self.taint(scope, self.solver.tys.var(actual));
                 None
             }
-        }
+        };
+        (decision, Discharged(()))
+    }
+
+    /// Discharge a form's expected type by ending the prefix for `why`
+    /// ([`Scope::mark_incomplete`]): the form is not modelled, so no decision
+    /// follows it and nothing in the binding generalises. The expected type's
+    /// variable is poisoned where the form returns no variable
+    /// ([`Self::infer_expr`]).
+    pub(super) fn decline_expected(&mut self, scope: &mut Scope, why: Incomplete) -> Discharged {
+        scope.mark_incomplete(why);
+        Discharged(())
+    }
+
+    /// [`Self::decline_expected`] where a sub-walk has recorded why already
+    /// ([`Scope::mark_incomplete_propagated`]).
+    pub(super) fn decline_expected_propagated(&mut self, scope: &mut Scope) -> Discharged {
+        scope.mark_incomplete_propagated();
+        Discharged(())
+    }
+
+    /// [`Self::decline_expected`] for a reason that may be only the
+    /// consequence of the sub-walk begun at `recorded`
+    /// ([`Scope::mark_consequence`]).
+    pub(super) fn decline_expected_consequence(
+        &mut self,
+        scope: &mut Scope,
+        recorded: usize,
+        why: Incomplete,
+    ) -> Discharged {
+        scope.mark_consequence(recorded, why);
+        Discharged(())
     }
 
     /// FCS's relation between an expression's type `actual` and its expected
@@ -163,8 +282,8 @@ impl<'a> Gen<'a> {
     }
 
     /// What each element of a tuple of `arity` elements is checked against,
-    /// when the tuple is checked against `expected`, and whether the tuple
-    /// itself is then related to `expected` once its elements are walked.
+    /// when the tuple is checked against `expected`, and what becomes of
+    /// `expected` itself ([`TupleSplit`]).
     ///
     /// FCS (`TcExprTuple`) splits an expected type that is a tuple or a
     /// variable before it checks the elements, so each element is checked
@@ -178,9 +297,10 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         expected: Expected,
         arity: usize,
-    ) -> (Vec<Expected>, bool) {
+    ) -> (Vec<Expected>, TupleSplit) {
         let (d, wrap): (TyVid, fn(TyVid) -> Expected) = match expected {
-            Expected::Synth | Expected::Unknown => return (vec![expected; arity], false),
+            Expected::Synth => return (vec![expected; arity], TupleSplit::Split(Discharged(()))),
+            Expected::Unknown => return (vec![expected; arity], TupleSplit::ByElements),
             Expected::Known(d) => (d, Expected::Known),
             Expected::Equal(d) => (d, Expected::Equal),
         };
@@ -201,7 +321,7 @@ impl<'a> Gen<'a> {
                         _ => wrap(self.fresh_equal(scope, e)),
                     })
                     .collect();
-                (known, false)
+                (known, TupleSplit::ByElements)
             }
             TyKind::Var(_) => {
                 let vars: Vec<TyVid> = (0..arity).map(|_| self.solver.table.fresh()).collect();
@@ -212,10 +332,11 @@ impl<'a> Gen<'a> {
                 } else {
                     self.decide(scope, tv, d)
                 };
+                let split = TupleSplit::Split(Discharged(()));
                 match decision {
-                    Decision::Taken => (vars.into_iter().map(wrap).collect(), false),
+                    Decision::Taken => (vars.into_iter().map(wrap).collect(), split),
                     Decision::Declined | Decision::Failed => {
-                        (vec![Expected::Unknown; arity], false)
+                        (vec![Expected::Unknown; arity], split)
                     }
                 }
             }
@@ -223,7 +344,7 @@ impl<'a> Gen<'a> {
                 let fresh = (0..arity)
                     .map(|_| Expected::Known(self.solver.table.fresh()))
                     .collect();
-                (fresh, true)
+                (fresh, TupleSplit::AtEnd)
             }
         }
     }
@@ -255,7 +376,7 @@ impl<'a> Gen<'a> {
     /// type still unbound ([`Expected::Equal`]) needs nothing: it is the
     /// pattern's own fresh variables, which nothing in the right-hand side
     /// can mention, so no check inside can observe what FCS bound them to.
-    pub(super) fn taint_expected(&mut self, scope: &mut Scope, expected: Expected) {
+    pub(super) fn taint_expected(&mut self, scope: &mut Scope, expected: Expected) -> Discharged {
         let tys = self.solver.tys;
         match expected {
             Expected::Known(d) => self.taint(scope, tys.var(d)),
@@ -267,6 +388,7 @@ impl<'a> Gen<'a> {
             }
             Expected::Synth | Expected::Unknown => {}
         }
+        Discharged(())
     }
 
     /// Decline a relation FCS takes and inference does not: neither side may
