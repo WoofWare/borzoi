@@ -592,7 +592,12 @@ pub struct ParsedProject {
     pub untrusted_properties: HashMap<String, UntrustedCause>,
     /// What the documents the walk entered from outside the entry .NET SDK
     /// define, read off their text whatever the conditions around it say.
+    /// Workload manifests are not among them.
     pub foreign_definitions: ForeignDefinitions,
+    /// The same, for the workload manifests the walk entered: files of the
+    /// .NET install (under its `sdk-manifests`) outside the SDK's version
+    /// directory, reached as SDK content, which every SDK project imports.
+    pub workload_definitions: ForeignDefinitions,
     /// Why the walk did not see all of the build's content (an import it could
     /// not follow, or one whose gate it could not decide), or `None` when it
     /// entered everything the build imports. Content it did not see may define
@@ -842,6 +847,20 @@ impl ForeignDefinitions {
     /// Whether a document outside the SDK may define property `name`.
     pub fn defines_property(&self, name: &str) -> bool {
         Self::matches(&self.properties, name, |key, name| key == name)
+    }
+
+    /// Whether a document outside the SDK may define a property whose
+    /// lowercased name satisfies `matches`.
+    pub fn defines_property_where(&self, matches: impl Fn(&str) -> bool) -> bool {
+        self.properties
+            .keys()
+            .any(|key| matches(key) || computed_name(key))
+    }
+
+    /// Whether a document outside the SDK defines any target or registers any
+    /// task: code the build runs, which may do anything.
+    pub fn defines_build_code(&self) -> bool {
+        !self.targets.is_empty() || !self.tasks.is_empty()
     }
 
     /// Whether a document outside the SDK may write property `name` at build

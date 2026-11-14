@@ -218,3 +218,25 @@ fn an_escaped_name_matches_every_query_and_extensions_define_nothing() {
     assert_eq!(names(&foreign.targets), ["t"]);
     assert_eq!(names(&foreign.properties), ["lang%56ersion"]);
 }
+
+/// Only a file the walk reached as SDK content counts as a workload manifest:
+/// one a project imports from a directory that happens to be named
+/// `sdk-manifests` is foreign.
+#[test]
+fn a_user_import_named_like_a_workload_manifest_is_foreign() {
+    let tmp = TempDir::new().unwrap();
+    let resolver = canonical_sdk(tmp.path(), "<Project/>", "<Project/>", &[]);
+    write_at(
+        &tmp.path().join("sdk-manifests"),
+        "WorkloadManifest.targets",
+        r#"<Project><Target Name="Mine" /></Project>"#,
+    );
+    let project_path = write_at(
+        tmp.path(),
+        "Demo.fsproj",
+        r#"<Project Sdk="MySdk"><Import Project="sdk-manifests/WorkloadManifest.targets" /></Project>"#,
+    );
+    let result = parse_file_with_sdk_env(&project_path, resolver, HashMap::new(), HashMap::new());
+    assert_eq!(names(&result.foreign_definitions.targets), ["mine"]);
+    assert!(result.workload_definitions.targets.is_empty());
+}

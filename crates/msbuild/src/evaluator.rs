@@ -1684,6 +1684,8 @@ struct State<'r> {
     entry_sdk_version_dir: Option<PathBuf>,
     /// Surfaced on [`ParsedProject::foreign_definitions`].
     foreign_definitions: crate::ForeignDefinitions,
+    /// Surfaced on [`ParsedProject::workload_definitions`].
+    workload_definitions: crate::ForeignDefinitions,
     /// `true` while the walk is inside a context whose uncertainty would
     /// affect the **Compile item set**: a source-set-changing
     /// `<Compile>`/`<CompileBefore>`/`<CompileAfter>` element, or an
@@ -2251,6 +2253,7 @@ impl<'r> State<'r> {
             resolved_sdk_root: None,
             entry_sdk_version_dir: None,
             foreign_definitions: crate::ForeignDefinitions::default(),
+            workload_definitions: crate::ForeignDefinitions::default(),
             compile_context: false,
             in_sdk_subtree: false,
             sdk_tolerance_roots: Vec::new(),
@@ -2836,6 +2839,7 @@ impl<'r> State<'r> {
             resolved_sdk_root,
             entry_sdk_version_dir: _,
             foreign_definitions,
+            workload_definitions,
             locally_overridable,
             compile_context: _,
             in_sdk_subtree: _,
@@ -3000,6 +3004,7 @@ impl<'r> State<'r> {
             target_name,
             untrusted_properties,
             foreign_definitions,
+            workload_definitions,
             hidden_content,
             diagnostics,
             is_partial,
@@ -6687,7 +6692,18 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
                 .as_deref()
                 .is_some_and(|dir| dir.starts_with(root))
     });
-    if !in_entry_sdk {
+    // A workload manifest ships with the .NET install, outside the version
+    // directory (and, in a symlink-merged install, in another tree), and is
+    // reached as tolerated SDK content.
+    let workload_manifest = state.in_sdk_subtree
+        && path
+            .components()
+            .any(|c| c.as_os_str().eq_ignore_ascii_case("sdk-manifests"));
+    if workload_manifest && !in_entry_sdk {
+        state
+            .workload_definitions
+            .record_document(doc.root_element(), path);
+    } else if !in_entry_sdk {
         state
             .foreign_definitions
             .record_document(doc.root_element(), path);

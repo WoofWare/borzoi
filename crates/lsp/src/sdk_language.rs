@@ -184,6 +184,7 @@ pub const COMPILER_SELECTORS: &[&str] = &[
     "FSharpTargetsShim",
     // Gates the import of `$(FSharpTargetsShim)`.
     "IsCrossTargetingBuild",
+    "SkipCompilerExecution",
 ];
 
 /// The environment variables the SDK's `Fsc` task reads itself in locating its
@@ -193,10 +194,14 @@ pub const COMPILER_SELECTORS: &[&str] = &[
 /// on one neither here nor known to choose something else.
 pub const COMPILER_ENVIRONMENT: &[&str] = &["FSHARP_COMPILER_BIN"];
 
-/// The target that runs the `Fsc` task, and the task: a definition of either
-/// outside the SDK replaces the SDK's.
-const COMPILE_TARGET: &str = "corecompile";
-const COMPILE_TASK: &str = "fsc";
+/// The suffix of the properties a target's `DependsOnTargets` reads by
+/// convention (`BuildDependsOn`, `CoreCompileDependsOn`, …): a write of one
+/// reshapes which targets run.
+const TARGET_GRAPH_SUFFIX: &str = "dependson";
+
+/// The target that runs the `Fsc` task, and the task.
+const COMPILE_TARGET: &str = "CoreCompile";
+const COMPILE_TASK: &str = "Fsc";
 
 /// The compiler that builds a project, as far as reading its `<LangVersion>`
 /// goes.
@@ -239,12 +244,14 @@ pub fn support_check_skipped(environment: &HashMap<String, String>) -> bool {
 ///   beside the SDK's own `Fsc` task assembly, the same file; the evaluation
 ///   cannot decide that gate (it does not model `DOTNET_HOST_PATH`), and need
 ///   not. `sdk_language_diff` grades both arms against each installed SDK.
-/// - So the build runs another compiler only if something outside the SDK
-///   defines one of [`COMPILER_SELECTORS`], the `CoreCompile` target or an
-///   `Fsc` task, or sets a selector in the environment or as a global, or sets
-///   one of [`COMPILER_ENVIRONMENT`], which the task reads itself. A
-///   definition anywhere in a document the walk entered outside the SDK
-///   declines, whatever its condition, and so does one whose name the build
+/// - So the build runs another compiler, or none, only if something outside
+///   the SDK chooses: defines one of [`COMPILER_SELECTORS`], runs build code of
+///   its own (any target or task: a replaced `Build` or `CoreCompile`, or a
+///   target that rewrites a selector, may do anything), reshapes the target
+///   graph (a `…DependsOn` property), sets a selector in the environment or as
+///   a global, or sets one of [`COMPILER_ENVIRONMENT`], which the task reads
+///   itself. A definition anywhere in a document the walk entered outside the
+///   SDK declines, whatever its condition, and so does one whose name the build
 ///   computes ([`ParsedProject::foreign_definitions`]), and any content the
 ///   walk did not enter ([`ParsedProject::hidden_content`]).
 /// - The SDK must be the canonical layout with a graded row
@@ -276,13 +283,18 @@ pub fn project_compiler(
     if set_in_environment || set_globally || parsed.hidden_content.is_some() {
         return None;
     }
+    let chooses = |defined: &borzoi_msbuild::ForeignDefinitions| {
+        COMPILER_SELECTORS
+            .iter()
+            .any(|name| defined.defines_property(name))
+            || defined.defines_property_where(|name| name.ends_with(TARGET_GRAPH_SUFFIX))
+            || defined.defines_target(COMPILE_TARGET)
+            || defined.defines_task(COMPILE_TASK)
+    };
+    // A workload manifest is the install's own build code, held to what it
+    // touches; anything else outside the SDK may not run build code at all.
     let foreign = &parsed.foreign_definitions;
-    if COMPILER_SELECTORS
-        .iter()
-        .any(|name| foreign.defines_property(name))
-        || foreign.defines_target(COMPILE_TARGET)
-        || foreign.defines_task(COMPILE_TASK)
-    {
+    if chooses(foreign) || foreign.defines_build_code() || chooses(&parsed.workload_definitions) {
         return None;
     }
     let sdk = entry_sdk_version(parsed.resolved_sdk_root.as_deref()?)?;
@@ -507,24 +519,45 @@ impl LangVersionDoubt {
     }
 }
 
-/// Why the evaluated `$(LangVersion)` may not be the value the compiler is
-/// handed, or `None` when it is. The compiler takes the value `CoreCompile`
-/// reads at build time, so besides an untrusted evaluation of it, a target
-/// outside the SDK that may write it ([`ForeignDefinitions`]) and content the
-/// walk did not enter (which may hold such a target) leave it unestablished.
-/// The SDK writes it only at evaluation.
+/// The properties `CoreCompile` hands the compiler its language version
+/// through: `$(LangVersion)`, and `$(OtherFlags)` (as `$(FscOtherFlags)`),
+/// appended after it, where a `--langversion` or a response file overrides it.
+const LANG_VERSION_CARRIERS: [&str; 3] = ["LangVersion", "OtherFlags", "FscOtherFlags"];
+
+/// Why the evaluated `$(LangVersion)` may not be the version the compiler is
+/// handed, or `None` when it is. The compiler takes what `CoreCompile` reads at
+/// build time, so besides an untrusted evaluation, a target outside the SDK
+/// that may write one of [`LANG_VERSION_CARRIERS`] ([`ForeignDefinitions`]),
+/// content the walk did not enter (which may hold such a target), and
+/// `$(OtherFlags)` that may name a version (`langversion`, or an `@` response
+/// file) leave it unestablished. The SDK writes `LangVersion` only at
+/// evaluation.
 ///
 /// [`ForeignDefinitions`]: borzoi_msbuild::ForeignDefinitions
 pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedCause> {
-    if let Some(cause) = parsed.property_untrusted_cause("LangVersion") {
-        return Some(cause.clone());
+    for carrier in ["LangVersion", "OtherFlags"] {
+        if let Some(cause) = parsed.property_untrusted_cause(carrier) {
+            return Some(cause.clone());
+        }
     }
-    if parsed
-        .foreign_definitions
-        .writes_property_at_build_time("LangVersion")
-    {
+    if let Some(carrier) = LANG_VERSION_CARRIERS.iter().find(|carrier| {
+        [&parsed.foreign_definitions, &parsed.workload_definitions]
+            .iter()
+            .any(|defined| defined.writes_property_at_build_time(carrier))
+    }) {
+        return Some(UntrustedCause::Unentered(format!(
+            "a target that may write `{carrier}` before `CoreCompile` reads it"
+        )));
+    }
+    let other_flags = parsed
+        .properties
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("OtherFlags"))
+        .map(|(_, value)| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if other_flags.contains("langversion") || other_flags.contains('@') {
         return Some(UntrustedCause::Unentered(
-            "a target that may write `LangVersion` before `CoreCompile` reads it".to_string(),
+            "`$(OtherFlags)`, which may name a language version after `$(LangVersion)`".to_string(),
         ));
     }
     parsed.hidden_content.clone()
@@ -700,7 +733,7 @@ mod tests {
         parsed
             .foreign_definitions
             .targets
-            .entry(COMPILE_TARGET.to_string())
+            .entry("corecompile".to_string())
             .or_default()
             .insert("/w/Directory.Build.targets".into());
         assert_eq!(compiler_of(&parsed, &[]), None, "CoreCompile redefined");
@@ -708,7 +741,7 @@ mod tests {
         parsed
             .foreign_definitions
             .tasks
-            .entry(COMPILE_TASK.to_string())
+            .entry("fsc".to_string())
             .or_default()
             .insert("/w/Directory.Build.props".into());
         assert_eq!(compiler_of(&parsed, &[]), None, "Fsc registered");
@@ -737,7 +770,26 @@ mod tests {
             .entry("notfsc".to_string())
             .or_default()
             .insert("/w/Directory.Build.targets".into());
-        assert_eq!(compiler_of(&parsed, &[]), ten_four, "another task");
+        assert_eq!(compiler_of(&parsed, &[]), None, "any task is build code");
+        for (table, name, expected) in [
+            ("targets", "stampversion", None),
+            ("properties", "builddependson", None),
+            ("properties", "corecompiledependson", None),
+            ("properties", "versionprefix", ten_four.clone()),
+        ] {
+            let mut parsed = on_sdk("10.0.401");
+            let foreign = &mut parsed.foreign_definitions;
+            let table = if table == "targets" {
+                &mut foreign.targets
+            } else {
+                &mut foreign.properties
+            };
+            table
+                .entry(name.to_string())
+                .or_default()
+                .insert("/w/Directory.Build.targets".into());
+            assert_eq!(compiler_of(&parsed, &[]), expected, "{name}");
+        }
         for selector in COMPILER_SELECTORS {
             let globals = HashMap::from([(selector.to_ascii_lowercase(), "x".to_string())]);
             assert_eq!(
@@ -896,6 +948,74 @@ mod tests {
             .message();
             assert!(message.contains(".NET SDK 10.0.112"), "{message}");
             assert!(message.contains("language version '11'"), "{message}");
+        }
+    }
+
+    /// The version the compiler is handed is established only while nothing
+    /// that carries it may move after evaluation.
+    #[test]
+    fn the_language_version_is_established_only_while_nothing_carries_another() {
+        let doubted = |parsed: &ParsedProject| lang_version_untrusted_cause(parsed).is_some();
+        assert!(!doubted(&on_sdk("10.0.401")));
+        for flags in ["--warnon:3390", "--LangVersion:8.0", "@/w/more.rsp"] {
+            let mut parsed = on_sdk("10.0.401");
+            parsed
+                .properties
+                .insert("OtherFlags".to_string(), flags.to_string());
+            assert_eq!(doubted(&parsed), flags != "--warnon:3390", "{flags}");
+        }
+        for carrier in LANG_VERSION_CARRIERS {
+            let mut parsed = on_sdk("10.0.401");
+            parsed
+                .foreign_definitions
+                .build_time_properties
+                .entry(carrier.to_ascii_lowercase())
+                .or_default()
+                .insert("/w/Directory.Build.targets".into());
+            assert!(doubted(&parsed), "{carrier} written by a target");
+        }
+        let mut parsed = on_sdk("10.0.401");
+        parsed
+            .foreign_definitions
+            .properties
+            .entry("langversion".to_string())
+            .or_default()
+            .insert("/w/App.fsproj".into());
+        assert!(!doubted(&parsed), "an evaluation-time write is evaluated");
+        let mut parsed = on_sdk("10.0.401");
+        parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
+        assert!(doubted(&parsed), "content unseen");
+    }
+
+    /// A workload manifest is the install's own build code: its targets stand,
+    /// but a selector, a reshaped graph or a replaced compile step declines.
+    #[test]
+    fn a_workload_manifest_is_held_to_what_it_touches() {
+        let ten_four = Some(sdk("10.0.401"));
+        for (table, name, expected) in [
+            ("targets", "_workloadtelemetry", ten_four.clone()),
+            (
+                "properties",
+                "usingmicrosoftnetsdkwebassembly",
+                ten_four.clone(),
+            ),
+            ("properties", "fsctoolpath", None),
+            ("properties", "builddependson", None),
+            ("targets", "corecompile", None),
+            ("tasks", "my.fsc", None),
+        ] {
+            let mut parsed = on_sdk("10.0.401");
+            let workload = &mut parsed.workload_definitions;
+            let table = match table {
+                "targets" => &mut workload.targets,
+                "tasks" => &mut workload.tasks,
+                _ => &mut workload.properties,
+            };
+            table
+                .entry(name.to_string())
+                .or_default()
+                .insert("/d/sdk-manifests/x/WorkloadManifest.targets".into());
+            assert_eq!(compiler_of(&parsed, &[]), expected, "{name}");
         }
     }
 }

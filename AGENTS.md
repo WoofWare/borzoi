@@ -350,10 +350,13 @@ This is a Cargo workspace with nine members:
   the devshell can fail it until the table follows. The compiler is named as
   the SDK's own only while nothing outside the SDK can choose another: no
   document the evaluation entered outside the SDK's version directory defines a
-  compiler selector, whatever its condition
-  (`ParsedProject::foreign_definitions`), and the walk hid nothing
-  (`ParsedProject::hidden_content`). The same test derives the selector set
-  from each SDK's own F# files and checks real MSBuild runs the compiler named.
+  compiler selector or runs build code of its own (a target or task), whatever
+  its condition (`ParsedProject::foreign_definitions`; the install's workload
+  manifests, `ParsedProject::workload_definitions`, are held to the selectors
+  alone), and the walk hid nothing (`ParsedProject::hidden_content`). The same
+  test derives the selector set from each SDK's own F# files, accounts for
+  every variable the `Fsc` task's assembly names, and checks real MSBuild runs
+  the compiler named.
   Hover's XML documentation lives in `crates/lsp/src/xml_doc/`. Its
   `<inheritdoc>` work is held to Roslyn's IDE through
   `tools/inheritdoc-oracle`, a test-only C# JSONL batch tool (the

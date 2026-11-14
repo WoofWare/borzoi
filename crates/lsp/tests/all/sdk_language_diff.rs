@@ -746,6 +746,16 @@ fn the_build_runs_the_compiler_the_server_names() {
             compiler.fsc.display()
         );
         assert_eq!(props["FSharp_Shim_Present"], "", "{props:?}");
+        // The install's workload manifests are held apart from foreign build
+        // code, or no project on a real install would have its compiler named.
+        let (_, plain, _) = environments().remove(0);
+        let mut workspace = Workspace::with_env(plain);
+        let parsed = workspace.project(&fsproj).unwrap();
+        assert!(
+            !parsed.workload_definitions.targets.is_empty(),
+            "the install's workload manifests define targets"
+        );
+        assert!(!parsed.foreign_definitions.defines_build_code());
         for (route, env, _) in environments() {
             let mut workspace = Workspace::with_env(env);
             assert_eq!(
@@ -838,8 +848,9 @@ fn project_defining(
 /// Anything outside the SDK that could choose the compiler makes the server
 /// decline to name it: every selector, at every site in turn (each site meets
 /// every fourth or fifth selector, and `DotnetFscCompilerPath` meets all of
-/// them), a redefined `CoreCompile`, a registered `Fsc` task, and a selector in
-/// the environment. Defining anything else leaves the SDK's compiler named.
+/// them), any build code (a target or task, whatever it does), a reshaped
+/// target graph, and a selector in the environment or as a global. An
+/// evaluation-time write of anything else leaves the SDK's compiler named.
 #[test]
 fn a_compiler_choice_from_outside_the_sdk_declines() {
     let compiler = graded_compilers().remove(0);
@@ -861,9 +872,11 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
     for site in SITES {
         let dir = tempfile::tempdir().unwrap();
         let fsproj = project_defining(dir.path(), &compiler.sdk, site, "LangVersionNote", "");
+        // A target body or a task output is build code, which may do anything.
+        let build_code = matches!(site, Site::TargetBody | Site::TaskOutput);
         assert_eq!(
             named(&fsproj, &plain).as_ref(),
-            Some(&compiler.sdk),
+            (!build_code).then_some(&compiler.sdk),
             "a non-selector at {site:?}"
         );
     }
@@ -871,6 +884,9 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
         r#"<Target Name="CoreCompile" />"#,
         r#"<UsingTask TaskName="Fsc" AssemblyFile="/opt/My.Build.dll" />"#,
         r#"<UsingTask TaskName="Review.Fsc" AssemblyFile="/opt/My.Build.dll" Override="true" />"#,
+        r#"<Target Name="Build"><Exec Command="dotnet /opt/fsc.dll" /></Target>"#,
+        r#"<Target Name="Note" AfterTargets="Build"><Message Text="built" /></Target>"#,
+        r#"<PropertyGroup><BuildDependsOn>Mine</BuildDependsOn></PropertyGroup>"#,
         r#"<PropertyGroup><Selector>DotnetFscCompilerPath</Selector></PropertyGroup><Target Name="Pick" BeforeTargets="CoreCompile"><CreateProperty Value="x"><Output TaskParameter="Value" PropertyName="$(Selector)" /></CreateProperty></Target>"#,
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -1016,7 +1032,13 @@ fn compiler_choice_reads(sdk_dir: &Path) -> BTreeSet<String> {
     for node in elements() {
         let tag = node.tag_name().name();
         let attrs: &[&str] = match tag {
-            "Fsc" => &["ToolPath", "ToolExe", "DotnetFscCompilerPath"],
+            "Fsc" => &[
+                "ToolPath",
+                "ToolExe",
+                "DotnetFscCompilerPath",
+                "SkipCompilerExecution",
+            ],
+            "Target" if node.attribute("Name") == Some("CoreCompile") => &["Condition"],
             "UsingTask" if node.attribute("TaskName") == Some("Fsc") => {
                 &["AssemblyFile", "Condition"]
             }
@@ -1144,7 +1166,7 @@ fn variable_literals(dll: &Path) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for offset in [0, 1] {
         let mut run = String::new();
-        for pair in bytes[offset..].chunks_exact(2) {
+        for pair in bytes[offset..].as_chunks::<2>().0 {
             let c = (pair[1] == 0)
                 .then_some(pair[0] as char)
                 .filter(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_');
