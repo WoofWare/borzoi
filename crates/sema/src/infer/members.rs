@@ -159,10 +159,8 @@ impl<'a> Gen<'a> {
         {
             // The static receiver's type is the rooting entity itself, ground
             // at generation time.
-            let recv = self.solver.table.fresh();
-            self.eq(
+            let recv = self.fresh_equal(
                 scope,
-                self.solver.tys.var(recv),
                 self.solver.tys.named_path(self.facts.env.names(), &path),
             );
             (recv, method_tok, true)
@@ -219,7 +217,14 @@ impl<'a> Gen<'a> {
         // sub-expressions): a method call emits nothing inside itself (see the doc).
         self.out.discard_since(emit_mark);
         self.relate(scope, result, expected);
-        Some(result)
+        // Under an equality (a `let` pattern's type) FCS checks the call
+        // against that type itself — `TcMethodApplicationThen` passes the
+        // overall type down when nothing follows the call — and its node has
+        // that type even where the call fails to resolve or to fit it.
+        Some(match expected {
+            Expected::Equal(d) => d,
+            _ => result,
+        })
     }
 
     /// Recognise a **static-call callee** `Type.Method` (stage OV-7): a
@@ -615,9 +620,7 @@ impl<'a> Gen<'a> {
                 }
             };
             let body = self.solver.instantiate(self.facts.env.types(), ty);
-            let uv = self.solver.table.fresh();
-            self.eq(scope, self.solver.tys.var(uv), body);
-            return Some(uv);
+            return Some(self.fresh_equal(scope, body));
         };
         if self.binders.is_withheld(def) {
             scope.mark_incomplete(Incomplete::RigidTypeVariable);
@@ -625,9 +628,7 @@ impl<'a> Gen<'a> {
         }
         if let Some(scheme) = self.binders.scheme(def) {
             let body = self.solver.instantiate(self.solver.tys, scheme);
-            let uv = self.solver.table.fresh();
-            self.eq(scope, self.solver.tys.var(uv), body);
-            return Some(uv);
+            return Some(self.fresh_equal(scope, body));
         }
         let dv = self.def_var(def);
         if !scope.is_param(def) {
@@ -678,10 +679,19 @@ impl<'a> Gen<'a> {
         let declared = record.record;
         let env_tys = self.facts.env.types();
         let mut fresh: HashMap<u32, TyVid> = HashMap::default();
+        let from = self.solver.table.mark();
         let receiver = self.solver.instantiate_rec(env_tys, declared, &mut fresh);
         let field = self.solver.instantiate_rec(env_tys, field, &mut fresh);
-        self.eq(scope, receiver, head);
-        self.eq(scope, self.solver.tys.var(m.result), field);
+        // The record's instance is this wake's own; so is the access's
+        // result, which the access made and settles at once.
+        let own = self.own_since(from);
+        self.eq(scope, receiver, head, own);
+        self.eq(
+            scope,
+            self.solver.tys.var(m.result),
+            field,
+            Own::var(m.result),
+        );
         true
     }
 
@@ -944,14 +954,7 @@ impl<'a> Gen<'a> {
         if is_void {
             if !self.facts.env.identities_incomplete() {
                 let unit = self.solver.tys.named(self.facts.env.names(), UNIT);
-                if self
-                    .solver
-                    .table
-                    .unify_atomic(self.solver.tys.var(result), unit)
-                    .is_err()
-                {
-                    scope.eq_failures += 1;
-                }
+                self.eq(scope, self.solver.tys.var(result), unit, Own::var(result));
             }
             return Wake::Resolved;
         }
@@ -979,14 +982,12 @@ impl<'a> Gen<'a> {
         if self.facts.env.identities_incomplete() {
             return Wake::Resolved;
         }
-        if self
-            .solver
-            .table
-            .unify_atomic(self.solver.tys.var(result), member_ty)
-            .is_err()
-        {
-            scope.eq_failures += 1;
-        }
+        self.eq(
+            scope,
+            self.solver.tys.var(result),
+            member_ty,
+            Own::var(result),
+        );
         Wake::Resolved
     }
 }

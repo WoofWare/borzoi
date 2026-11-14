@@ -428,10 +428,10 @@ impl<'a> Gen<'a> {
             PatShape::Annotated(def, t) => {
                 let t = *t;
                 let v = self.register_binder(scope, *def, site);
-                self.eq(scope, self.solver.tys.var(v), t);
+                self.eq(scope, self.solver.tys.var(v), t, Own::var(v));
                 if site == BinderSite::Param {
                     let dv = self.def_var(*def);
-                    self.eq(scope, self.solver.tys.var(dv), t);
+                    self.eq(scope, self.solver.tys.var(dv), t, Own::var(dv));
                     // An annotation mentioning an implicitly scoped type
                     // variable ([`Self::open_head_typars`]) fixes the
                     // parameter's structure but not its type, which the body
@@ -464,6 +464,7 @@ impl<'a> Gen<'a> {
             PatShape::Const(t, _) => *t,
             PatShape::Case(_, scheme, arg) => {
                 let env_tys = self.facts.env.types();
+                let from = self.solver.table.mark();
                 let instance = self.solver.instantiate(env_tys, scheme.value_ty(env_tys));
                 match *self.solver.tys.kind(instance) {
                     TyKind::Fun { arg: fields, ret } => {
@@ -471,7 +472,10 @@ impl<'a> Gen<'a> {
                             && !matches!(**arg, PatShape::Wildcard)
                         {
                             let at = self.gen_pattern(scope, arg, site);
-                            self.eq(scope, at, fields);
+                            // The case's instance and the argument pattern's
+                            // variables, all made here.
+                            let own = self.own_since(from);
+                            self.eq(scope, at, fields, own);
                         }
                         ret
                     }
@@ -491,7 +495,8 @@ impl<'a> Gen<'a> {
             BinderSite::Param => {
                 // The binder's own variable is made here, with the head, so
                 // that it is older than anything the body makes: once the
-                // prefix ends, no equality binds it ([`Scope::lost_at`]).
+                // prefix ends, no equality the body generates binds it
+                // ([`Gen::eq`]).
                 self.def_var(def);
                 let slot = self.solver.table.fresh();
                 self.binders.register_param(def, slot);

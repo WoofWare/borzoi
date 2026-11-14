@@ -149,6 +149,7 @@ impl<'a> Gen<'a> {
         let mut f = tf;
         let mut domains = Vec::with_capacity(args.len());
         for _ in args {
+            let from = self.solver.table.mark();
             let d = self.solver.table.fresh();
             let r = self.solver.table.fresh();
             // Genuinely true: applying `f` forces it to a function shape. But
@@ -165,7 +166,8 @@ impl<'a> Gen<'a> {
                 self.taint(scope, tys.var(d));
                 self.taint(scope, tys.var(r));
             } else {
-                self.eq(scope, tys.var(f), tys.fun(tys.var(d), tys.var(r)));
+                let own = self.own_since(from);
+                self.eq(scope, tys.var(f), tys.fun(tys.var(d), tys.var(r)), own);
             }
             domains.push(d);
             f = r;
