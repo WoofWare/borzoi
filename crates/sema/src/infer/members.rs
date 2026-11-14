@@ -60,7 +60,6 @@ impl<'a> Gen<'a> {
         member: &SyntaxToken,
         result: TyVid,
         kind: MemberAccessKind,
-        args_by: TextSize,
     ) {
         self.solver.constraints.push(Constraint::HasMember {
             recv,
@@ -68,7 +67,6 @@ impl<'a> Gen<'a> {
             result,
             use_range: member.text_range(),
             kind,
-            args_by,
         });
         // Poison both endpoints: an unwoken (open) member relation must not let its
         // receiver or result generalise. A ground endpoint is unaffected (poison
@@ -103,14 +101,7 @@ impl<'a> Gen<'a> {
         let mut last = None;
         for seg in segments {
             let result = self.solver.table.fresh();
-            self.has_member(
-                scope,
-                cur,
-                seg,
-                result,
-                MemberAccessKind::Data,
-                seg.text_range().start(),
-            );
+            self.has_member(scope, cur, seg, result, MemberAccessKind::Data);
             cur = result;
             last = Some(result);
         }
@@ -221,7 +212,6 @@ impl<'a> Gen<'a> {
                 args: arg_vids,
                 is_static,
             },
-            self.facts.node_span(arg.syntax()).end(),
         );
         // FCS resolves the overload once the arguments are checked.
         self.settle_access(scope);

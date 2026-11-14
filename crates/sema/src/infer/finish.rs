@@ -39,7 +39,7 @@ impl<'a> Gen<'a> {
         // ([`Self::solve`]) leaves none behind: nothing is left for a solve
         // outside one.
         debug_assert!(
-            solver.constraints.is_empty() && solver.settled_args.is_empty(),
+            solver.constraints.is_empty(),
             "a constraint outlived its binding's solve"
         );
         let emitted = out.into_emitted();

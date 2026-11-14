@@ -283,12 +283,12 @@ impl<'a> Gen<'a> {
     /// walked before the pattern. Each kind is decided here, so a new kind of
     /// suspended constraint must be:
     ///
-    /// - an equality is already in the table ([`Self::eq`]);
-    /// - a pending argument check or dropped check-mode relation
-    ///   ([`Scope::dropped`]) is applied as an equality under a snapshot, rolled
-    ///   back after, and the pattern contradicts them if any of them, or
-    ///   relating `pt` after them, fails (a check FCS meets by coercion fails
-    ///   here where FCS succeeds, which only declines);
+    /// - an equality is already in the table ([`Self::eq`]), and so is every
+    ///   relation to an expected type, decided where FCS decides it
+    ///   ([`Self::decide`]);
+    /// - a parameter's slot and its binder variable, one variable in FCS, are
+    ///   related under a snapshot, rolled back after, and the pattern
+    ///   contradicts them if that, or relating `pt` after it, fails;
     /// - a suspended member lookup whose receiver the pattern could make
     ///   known is one FCS made on a receiver it did not yet know, an error
     ///   (FS0072), so the pattern must not wake it
@@ -299,37 +299,26 @@ impl<'a> Gen<'a> {
         sv: TyVid,
         pt: Ty,
     ) -> bool {
-        let mut eqs: Vec<(Ty, Ty)> = self
+        let receivers: Vec<TyVid> = self
             .solver
-            .settled_args
+            .constraints
             .iter()
-            .map(|ac| (self.solver.tys.var(ac.arg), self.solver.tys.var(ac.dom)))
+            .map(|Constraint::HasMember { recv, .. }| *recv)
             .collect();
-        let mut receivers: Vec<TyVid> = Vec::new();
-        for c in &self.solver.constraints {
-            match c {
-                Constraint::ArgCheck(ac) => {
-                    eqs.push((self.solver.tys.var(ac.arg), self.solver.tys.var(ac.dom)))
-                }
-                Constraint::HasMember { recv, .. } => receivers.push(*recv),
-            }
-        }
-        eqs.extend(
-            scope
-                .dropped
-                .iter()
-                .map(|&(a, b, _)| (self.solver.tys.var(a), self.solver.tys.var(b))),
-        );
         // A parameter's private slot and its binder variable are one variable
         // in FCS ([`Self::slot_binder_reunify`]), so what a condition fixed on
         // the slot (`if x then (match x with 1 -> …)`) FCS applied before the
         // pattern too. A binder with no variable yet has had no use the
         // scrutinee could read.
-        eqs.extend(scope.params.iter().filter_map(|&(def, slot)| {
-            self.binders
-                .var(def)
-                .map(|dv| (self.solver.tys.var(slot), self.solver.tys.var(dv)))
-        }));
+        let eqs: Vec<(Ty, Ty)> = scope
+            .params
+            .iter()
+            .filter_map(|&(def, slot)| {
+                self.binders
+                    .var(def)
+                    .map(|dv| (self.solver.tys.var(slot), self.solver.tys.var(dv)))
+            })
+            .collect();
         let mut scrutinee_roots: HashSet<TyVid> = HashSet::default();
         collect_var_roots(
             self.solver.tys,

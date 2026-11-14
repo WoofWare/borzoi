@@ -31,8 +31,7 @@ impl<'a> Gen<'a> {
 
     /// Withhold the function `f_def` where the solved binding breaks a declared
     /// variable's rigidity ([`Incomplete::RigidTypeVariable`]): as solved, or
-    /// with every relation it holds applied as an equality
-    /// ([`Self::rigid_under_every_relation`]). A variable declared twice
+    /// with no equality failed ([`Self::rigid_stays_rigid`]). A variable declared twice
     /// (`<'a, 'a>`, which FCS rejects) is one variable listed twice, so it is
     /// never distinct from itself and fails here too. Called after
     /// [`Self::solve`].
@@ -200,17 +199,6 @@ fn subst_params(tys: &TyTable, ty: Ty, assign: &HashMap<TyVid, u32>) -> Ty {
     }
 }
 
-/// Whether `path` is a **sealed BCL primitive** — the no-subsumption named types
-/// against which a Stage-3.3c [`Constraint::ArgCheck`] may discharge
-/// ([`Gen::no_subsumption_domain`]). This is exactly the set of scalar primitives
-/// [`literal_ty`] produces (the numeric primitives plus `Boolean`, `String`,
-/// `Char`, `Decimal`) — every one sealed, so F# admits no coercion *into* it, and
-/// relating an argument to it by equality is what FCS does. `System.Object`,
-/// `byte[]` (a literal produces an *array*, not a named type here), and any other
-/// named type are deliberately absent (subsumption is possible or unproven).
-///
-/// Kept in lock-step with [`literal_ty`] by a shared list would over-engineer a
-/// 16-entry match; instead a unit test asserts the two agree.
 /// Every variable still standing in the resolved type `ty`.
 fn free_vars(tys: &TyTable, ty: Ty, out: &mut Vec<TyVid>) {
     match tys.kind(ty) {

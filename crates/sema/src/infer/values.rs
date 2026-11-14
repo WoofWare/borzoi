@@ -293,8 +293,8 @@ impl<'a> Gen<'a> {
     /// known here too — a scheme, an earlier binder's ground type, a settled
     /// local, a parameter's annotation ([`Self::loosened`]). Where it is not —
     /// an unannotated parameter, an earlier binder left open — the use keeps
-    /// the binder's variable and is recorded as **undecided**, which
-    /// [`Self::verified`] checks once the binding is solved.
+    /// the binder's variable, untainted, or is [tainted](Self::taint) where
+    /// FCS may know a type inference does not.
     pub(super) fn value_use(&mut self, scope: &mut Scope, def: DefId) -> TyVid {
         if let Some(scheme) = self.binders.scheme(def) {
             return self.scheme_use(scope, self.solver.tys, scheme);
