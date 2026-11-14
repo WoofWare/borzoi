@@ -19,7 +19,7 @@ Two kinds of difference are deliberately *not* counted as divergences:
   FCS's *public* API (e.g. FCS reporting IL accessor visibility as `Public`).
   These are not divergences in our reimplementation; they have their own section.
 - **Language-version pinning.** Since `42265b3` (#613) the LSP resolves each
-  project's `<LangVersion>` (absent → 10.0, FCS's default; orphan/non-file
+  project's `<LangVersion>` (absent → 11.0, FCS's default; orphan/non-file
   buffers → `preview`) and threads it through the parse, so wired feature gates
   such as `#elif`/FS3350 and the lex-filter's offside gates honour it and
   *match* FCS (not a divergence). Nullness honours it too, but differently from
@@ -431,7 +431,7 @@ recovering ~36 members per framework. It was never a feature gap. (`#711`)
 The LSP now resolves each project's `<LangVersion>` and threads it through the
 parse (`6e9377f`/#606 added the seam, `42265b3`/#613 wired it into the LSP):
 `#elif`/FS3350 honours it and *matches* FCS, so it is **not** a
-divergence (absent `<LangVersion>` → 10.0, FCS's default; orphan/non-file
+divergence (absent `<LangVersion>` → 11.0, FCS's default; orphan/non-file
 buffers → `preview` to avoid guess-flagging). Every lexer and lex-filter gate
 FCS consults (`RelaxWhitespace`, `RelaxWhitespace2`, `StrictIndentation`,
 `NullnessChecking`, `ErrorOnInvalidDeclsInTypeDefinitions`) is version-aware

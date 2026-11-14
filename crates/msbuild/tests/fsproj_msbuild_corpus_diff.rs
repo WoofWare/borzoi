@@ -272,7 +272,11 @@ impl Run {
         };
 
         for project in &self.config.projects {
-            let report = compare_project(project);
+            let report =
+                match DotnetHost::for_project(project, self.config.pinned_corpus.as_deref()) {
+                    Ok(host) => compare_project(project, &host),
+                    Err(e) => ProjectReport::error(project.display().to_string(), Stage::Setup, e),
+                };
             print_report(&report);
             if let Some(w) = writer.as_mut() {
                 serde_json::to_writer(&mut *w, &report)
@@ -410,7 +414,7 @@ fn visited_movement(expected: &Manifest, actual: &Manifest) -> ManifestDiff {
     expected.diff(actual)
 }
 
-fn compare_project(project: &Path) -> ProjectReport {
+fn compare_project(project: &Path, host: &DotnetHost) -> ProjectReport {
     let display = project.display().to_string();
     let fsproj = match host_fs::canonicalize(project) {
         Ok(p) => p,
@@ -423,7 +427,7 @@ fn compare_project(project: &Path) -> ProjectReport {
         Err(e) => return ProjectReport::error(display, Stage::Setup, format!("read: {e}")),
     };
 
-    let sdk = match SdkContext::for_project(&fsproj) {
+    let sdk = match SdkContext::for_project(&fsproj, host) {
         Ok(sdk) => sdk,
         Err(e) => return ProjectReport::error(display, Stage::Setup, e),
     };
@@ -435,7 +439,7 @@ fn compare_project(project: &Path) -> ProjectReport {
         &source,
         &fsproj,
         &extra_properties,
-        &common::oracle_environment(),
+        &host.environment,
         Some(&resolver),
         // The resolver the LSP passes: without it every wildcard or `Exclude`
         // item declines, and the comparison cannot see them at all.
@@ -456,7 +460,7 @@ fn compare_project(project: &Path) -> ProjectReport {
         counts.canonicalizations,
     );
 
-    let msbuild = match run_msbuild(&fsproj) {
+    let msbuild = match run_msbuild(&fsproj, host) {
         Ok(msbuild) => msbuild,
         Err(e) => return ProjectReport::error(display, Stage::Oracle, e),
     };
@@ -504,24 +508,76 @@ fn compare_project(project: &Path) -> ProjectReport {
 /// corpus sweep records it against that project and moves on.
 const MSBUILD_TIMEOUT: Duration = Duration::from_secs(1800);
 
-fn run_msbuild(fsproj: &Path) -> Result<MsbuildOutput, String> {
-    let mut cmd = Command::new("dotnet");
+/// The dotnet installation a project is evaluated against, the same on both
+/// sides: the root our SDK resolver searches, and the environment both our
+/// evaluator and the `dotnet msbuild` child see.
+#[derive(Debug)]
+struct DotnetHost {
+    root: PathBuf,
+    /// [`common::oracle_environment`] with `DOTNET_ROOT` set to [`Self::root`]
+    /// and the root first on `PATH`.
+    environment: HashMap<String, String>,
+}
+
+/// The devshell's second dotnet root (flake.nix, `dotnet-sdk-corpus`): the
+/// default root's SDKs plus SDK 11.
+const SDK11_ROOT_VAR: &str = "BORZOI_DOTNET_ROOT_SDK11";
+
+impl DotnetHost {
+    /// A project in the pinned corpus is evaluated against [`SDK11_ROOT_VAR`]:
+    /// the corpus's `global.json` asks for SDK 11 (11.0.100-rc.1 or later,
+    /// rolling forward within 11.x), which the default root lacks. Any other
+    /// project is evaluated against `DOTNET_ROOT`.
+    fn for_project(project: &Path, pinned_corpus: Option<&Path>) -> Result<Self, String> {
+        let in_pinned_corpus = pinned_corpus.is_some_and(|root| {
+            host_fs::canonicalize(project)
+                .unwrap_or_else(|_| project.to_path_buf())
+                .starts_with(root)
+        });
+        let var = if in_pinned_corpus {
+            SDK11_ROOT_VAR
+        } else {
+            "DOTNET_ROOT"
+        };
+        let root = std::env::var_os(var)
+            .map(PathBuf::from)
+            .ok_or_else(|| format!("{var} is not set; run under nix develop"))?;
+        let mut environment = common::oracle_environment();
+        let path = std::env::join_paths(
+            std::iter::once(root.clone()).chain(
+                environment
+                    .get("PATH")
+                    .map(|p| std::env::split_paths(p).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            ),
+        )
+        .map_err(|e| format!("PATH with {} first: {e}", root.display()))?;
+        environment.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+        environment.insert(
+            "DOTNET_ROOT".to_string(),
+            root.to_string_lossy().into_owned(),
+        );
+        Ok(Self { root, environment })
+    }
+
+    /// The `dotnet msbuild` child's environment: [`Self::environment`] less
+    /// the one name in it that is not a real variable of the child.
+    fn child_environment(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.environment
+            .iter()
+            .filter(|(name, _)| *name != "MSBuildUserExtensionsPath")
+    }
+}
+
+fn run_msbuild(fsproj: &Path, host: &DotnetHost) -> Result<MsbuildOutput, String> {
+    let mut cmd = Command::new(host.root.join("dotnet"));
     cmd.current_dir(
         fsproj
             .parent()
             .ok_or_else(|| format!("{} has no parent directory", fsproj.display()))?,
     );
     cmd.env_clear();
-    for var in ["PATH", "HOME", "TMPDIR"] {
-        if let Ok(value) = std::env::var(var) {
-            cmd.env(var, value);
-        }
-    }
-    for (key, value) in std::env::vars() {
-        if key.starts_with("DOTNET_") || key.starts_with("NUGET_") {
-            cmd.env(key, value);
-        }
-    }
+    cmd.envs(host.child_environment());
     cmd.args([
         "msbuild",
         "-nologo",
@@ -573,6 +629,13 @@ fn compare_compile(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetRepo
 }
 
 fn compare_project_references(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> FacetReport {
+    if parsed.project_references_uncertain {
+        return FacetReport::skipped(
+            "project_references",
+            "project_references_uncertain=true".to_string(),
+        )
+        .classed("decline(project_references_uncertain)".to_string());
+    }
     let ours: Vec<String> = parsed
         .project_references
         .iter()
@@ -793,12 +856,12 @@ struct SdkContext {
 }
 
 impl SdkContext {
-    fn for_project(project: &Path) -> Result<Self, String> {
+    fn for_project(project: &Path, host: &DotnetHost) -> Result<Self, String> {
         let project_dir = project
             .parent()
             .ok_or_else(|| format!("{} has no parent directory", project.display()))?;
-        let dotnet_root = std::env::var_os("DOTNET_ROOT").map(PathBuf::from);
-        let nuget_packages_dir = resolve_nuget_packages_dir(project_dir);
+        let dotnet_root = Some(host.root.clone());
+        let nuget_packages_dir = resolve_nuget_packages_dir(project_dir, host);
 
         let Some(global_json_path) =
             find_global_json(project_dir, &borzoi_msbuild::observed::Observer::new())
@@ -928,13 +991,11 @@ fn expand_sdk_paths(
 /// The global packages folder the real `dotnet msbuild` child's NuGet SDK
 /// resolver reads versioned SDKs from for a project in `project_dir`: what
 /// NuGet's settings choose under the child's environment
-/// ([`common::oracle_environment`], less the one name in it that is not a real
-/// variable of the child). Another folder would hand the evaluator a different
-/// SDK from the one the comparison's other side imports.
-fn resolve_nuget_packages_dir(project_dir: &Path) -> Result<PathBuf, String> {
-    let environment: BTreeMap<OsString, OsString> = common::oracle_environment()
-        .into_iter()
-        .filter(|(name, _)| name != "MSBuildUserExtensionsPath")
+/// ([`DotnetHost::child_environment`]). Another folder would hand the
+/// evaluator a different SDK from the one the comparison's other side imports.
+fn resolve_nuget_packages_dir(project_dir: &Path, host: &DotnetHost) -> Result<PathBuf, String> {
+    let environment: BTreeMap<OsString, OsString> = host
+        .child_environment()
         .map(|(name, value)| (name.into(), value.into()))
         .collect();
     borzoi_nuget::settings::global_packages_folder(project_dir, &environment)
@@ -1649,6 +1710,34 @@ mod tests {
         let report = compare_define_constants(&parsed, &msbuild);
 
         assert_eq!(report.status, FacetStatus::Matched);
+    }
+
+    /// An `Update` of the reference list is not modelled, so the evaluator
+    /// declines the list, and a declined list makes no claim to compare.
+    #[test]
+    fn declined_project_references_are_not_compared() {
+        let parsed = parse_fsproj(
+            r#"<Project><ItemGroup>
+                 <ProjectReference Include="../Core/Core.fsproj" />
+                 <ProjectReference Update="@(ProjectReference)" SetTargetFramework="x" />
+               </ItemGroup></Project>"#,
+            Path::new("/repo/proj/Demo.fsproj"),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("well-formed XML parses");
+        assert!(parsed.project_references_uncertain);
+
+        let report = compare_project_references(
+            &parsed,
+            &MsbuildOutput {
+                items: MsbuildItems::default(),
+                properties: MsbuildProperties::default(),
+            },
+        );
+
+        assert_eq!(report.status, FacetStatus::Skipped);
+        assert_eq!(report.outcome, "decline(project_references_uncertain)");
     }
 
     fn parsed_with_define_constants(symbols: &[&str]) -> ParsedProject {

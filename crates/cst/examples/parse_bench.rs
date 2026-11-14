@@ -19,10 +19,10 @@
 //!     `COMPILED`+`EDITING` for a compiled `.fs`/`.fsi` and `INTERACTIVE`+
 //!     `EDITING` for a `.fsx` script, even with empty `ConditionalDefines`.
 //!     We pass the matching set so `#if COMPILED` etc. select the same branch.
-//!   * **Language version.** We parse at [`LanguageVersion::DEFAULT`] (F# 10.0),
-//!     which equals FCS's own default when `BORZOI_FCS_LANGVERSION` is
-//!     unset — so no environment configuration is needed to keep the version-
-//!     gated behaviour (strict indentation, `#elif`) aligned.
+//!   * **Language version.** We parse at [`LanguageVersion::DEFAULT`] (F# 11.0).
+//!     Where the FCS side's own default differs, run it with
+//!     `BORZOI_FCS_LANGVERSION` set to the same version, to keep the version-
+//!     gated behaviour (`#elif`) aligned.
 //!   * **Encoding.** Both sides decode strict UTF-8 and skip anything else
 //!     (`String::from_utf8` here; a throwing `UTF8Encoding` on the FCS side),
 //!     so the parsed file set is identical rather than differing by the corpus's

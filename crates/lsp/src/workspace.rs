@@ -3250,7 +3250,7 @@ mod tests {
     }
 
     #[test]
-    fn lang_version_for_project_absent_is_fcs_default_10() {
+    fn lang_version_for_project_absent_is_the_default() {
         let tmp = TempDir::new().unwrap();
         let proj = tmp.path().join("Sample.fsproj");
         write_file(&proj, &fsproj_with_defines("")); // no <LangVersion>

@@ -238,8 +238,7 @@ let private isScriptPath (absolute: string) =
 /// `FSharpParsingOptions.LangVersionText` by [`withLangVersion`] so the *parse*
 /// (hence the lex-filter's `StrictIndentation` feature gate, which governs both
 /// the FS0058 severity and whether an offside push is kept) takes the requested
-/// version. Unset means the SDK/FCS default, which our `LanguageVersion::DEFAULT`
-/// already agrees with.
+/// version. Unset means FCS's own default.
 let private langVersionEnv () : string option =
     match Option.ofObj (Environment.GetEnvironmentVariable "BORZOI_FCS_LANGVERSION") with
     | None -> None

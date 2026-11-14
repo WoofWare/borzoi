@@ -44,78 +44,130 @@ pub enum FcsEffect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LanguageFeature {
     /// F# 4.7: `` single underscore pattern `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     SingleUnderscorePattern,
     /// F# 4.7: `` wild card in for loop `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     WildCardInForLoop,
     /// F# 4.7: `` whitespace relaxation `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     RelaxWhitespace,
     /// F# 4.7: `` implicit yield `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     ImplicitYield,
     /// F# 5.0: `` fixed-index slice 3d/4d `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     FixedIndexSlice3d4d,
     /// F# 5.0: `` dotless float32 literal `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     DotlessFloat32Literal,
     /// F# 5.0: `` applicative computation expressions `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     AndBang,
     /// F# 5.0: `` nullable optional interop `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     NullableOptionalInterop,
     /// F# 5.0: `` default interface member consumption `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     DefaultInterfaceMemberConsumption,
     /// F# 5.0: `` open type declaration `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     OpenTypeDeclaration,
     /// F# 5.0: `` package management `` (its FS3350 name).
     PackageManagement,
     /// F# 5.0: `` witness passing for trait constraints in F# quotations `` (its FS3350 name).
     WitnessPassing,
     /// F# 5.0: `` interfaces with multiple generic instantiation `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     InterfacesWithMultipleGenericInstantiation,
     /// F# 5.0: `` nameof `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     NameOf,
     /// F# 5.0: `` string interpolation `` (its FS3350 name).
     StringInterpolation,
     /// F# 6.0: `` additional type-directed conversions `` (its FS3350 name).
     AdditionalTypeDirectedConversions,
     /// F# 6.0: `` whitespace relaxation v2 `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     RelaxWhitespace2,
     /// F# 6.0: `` overloads for custom operations `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     OverloadsForCustomOperations,
     /// F# 6.0: `` more types support units of measure `` (its FS3350 name).
     ExpandedMeasurables,
     /// F# 6.0: `` resumable state machines `` (its FS3350 name).
     ResumableStateMachines,
     /// F# 6.0: `` struct representation for active patterns `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     StructActivePattern,
     /// F# 6.0: `` binary formatting for integers `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     PrintfBinaryFormat,
     /// F# 6.0: `` expr[idx] notation for indexing and slicing `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     IndexerNotationWithoutDot,
     /// F# 6.0: `` informational messages related to reference cells `` (its FS3350 name).
     RefCellNotationInformationals,
     /// F# 6.0: `` discard pattern in use binding `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     UseBindingValueDiscard,
     /// F# 6.0: `` non-variable patterns to the right of 'as' patterns `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     NonVariablePatternsToRightOfAsPatterns,
     /// F# 6.0: `` attributes to the right of the 'module' keyword `` (its FS3350 name).
     AttributesToRightOfModuleKeyword,
     /// F# 6.0: `` fix to resolution of delegate type names, see https://github.com/dotnet/fsharp/issues/10228 `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     DelegateTypeNameResolutionFix,
     /// F# 7.0: `` automatic generation of 'Message' property for 'exception' declarations `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     BetterExceptionPrinting,
     /// F# 7.0: `` list literals of any size `` (its FS3350 name).
     ReallyLongLists,
     /// F# 7.0: `` give error on deprecated access of construct with RequireQualifiedAccess attribute `` (its FS3350 name).
     ErrorOnDeprecatedRequireQualifiedAccess,
     /// F# 7.0: `` support for required properties `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     RequiredPropertiesSupport,
     /// F# 7.0: `` support for consuming init properties `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     InitPropertiesSupport,
     /// F# 7.0: `` Allow lowercase DU when RequireQualifiedAccess attribute `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     LowercaseDUWhenRequireQualifiedAccess,
     /// F# 7.0: `` static abstract interface members `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     InterfacesWithAbstractStaticMembers,
     /// F# 7.0: `` self type constraints `` (its FS3350 name).
     SelfTypeConstraints,
     /// F# 8.0: `` underscore dot shorthand for accessor only function `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     AccessorFunctionShorthand,
     /// F# 8.0: `` Pattern match discard is not allowed for union case that takes no data. `` (its FS3350 name).
     MatchNotAllowedForUnionCaseWithNoData,
@@ -124,44 +176,74 @@ pub enum LanguageFeature {
     /// F# 8.0: `` Raises errors for non-virtual members overrides `` (its FS3350 name).
     ErrorForNonVirtualMembersOverrides,
     /// F# 8.0: `` Raises warnings when 'let inline ... =' is used together with [<MethodImpl(MethodImplOptions.NoInlining)>] attribute. Function is not getting inlined. `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     WarningWhenInliningMethodImplNoInlineMarkedFunction,
     /// F# 8.0: `` Escapes curly braces before calling FormattableStringFactory.Create when interpolated string literal is typed as FormattableString `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     EscapeDotnetFormattableStrings,
     /// F# 8.0: `` Arithmetic and logical operations in literals, enum definitions and attributes `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     ArithmeticInLiterals,
     /// F# 8.0: `` Error reporting on static classes `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     ErrorReportingOnStaticClasses,
     /// F# 8.0: `` Support for try-with in sequence expressions `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     TryWithInSeqExpression,
     /// F# 8.0: `` Raises warnings when an copy-and-update record expression changes all fields of a record. `` (its FS3350 name).
     WarningWhenCopyAndUpdateRecordChangesAllFields,
     /// F# 8.0: `` Static members in interfaces `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     StaticMembersInInterfaces,
     /// F# 8.0: `` String values marked as literals and IL constants as printf format `` (its FS3350 name).
     NonInlineLiteralsAsPrintfFormat,
     /// F# 8.0: `` Nested record field copy-and-update `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     NestedCopyAndUpdate,
     /// F# 8.0: `` Extended string interpolation similar to C# raw string literals. `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     ExtendedStringInterpolation,
     /// F# 8.0: `` Raises warnings when multiple record type matches were found during name resolution because of overlapping field names. `` (its FS3350 name).
     WarningWhenMultipleRecdTypeChoice,
     /// F# 8.0: `` Improved implied argument names `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     ImprovedImpliedArgumentNames,
     /// F# 8.0: `` Diagnostic 3559 (warn when obj inferred) at informational level, off by default `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     DiagnosticForObjInference,
     /// F# 8.0: `` Raises warnings if a member or function has the 'TailCall' attribute, but is not being used in a tail recursive way. `` (its FS3350 name).
     WarningWhenTailRecAttributeButNonTailRecUsage,
     /// F# 8.0: `` Allow static let bindings in union, record, struct, non-incremental-class types `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     StaticLetInRecordsDusEmptyTypes,
     /// F# 8.0: `` Raises errors on incorrect indentation, allows better recovery and analysis during editing `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     StrictIndentation,
     /// F# 8.0: `` Constraint intersection on flexible types `` (its FS3350 name).
     ConstraintIntersectionOnFlexibleTypes,
     /// F# 8.0: `` 'while!' expression `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     WhileBang,
     /// F# 8.0: `` extended fixed bindings for byref and GetPinnableReference `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     ExtendedFixedBindings,
     /// F# 8.0: `` prefer String.GetPinnableReference in fixed bindings `` (its FS3350 name).
+    ///
+    /// Retired: the compiler no longer declares it; last transcribed from `fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03`.
     PreferStringGetPinnableReference,
     /// F# 9.0: `` nullness checking `` (its FS3350 name).
     NullnessChecking,
@@ -223,15 +305,49 @@ pub enum LanguageFeature {
     PreprocessorElif,
     /// F# preview: `` from-end slicing `` (its FS3350 name).
     FromEndSlicing,
-    /// F# preview: `` Support for caching method overload resolution results for improved compilation performance. `` (its FS3350 name).
+    /// F# 11.0: `` Support for caching method overload resolution results for improved compilation performance. `` (its FS3350 name).
     MethodOverloadsCache,
     /// F# 11.0: `` Implicit dispatch slot coverage for default interface member implementations `` (its FS3350 name).
     ImplicitDIMCoverage,
+    /// F# preview: `` Use 'most concrete' tiebreaker for overload resolution when methods differ only by type parameter concreteness. `` (its FS3350 name).
+    MoreConcreteTiebreaker,
+    /// F# preview: `` Support for OverloadResolutionPriorityAttribute to prioritize method overloads. `` (its FS3350 name).
+    OverloadResolutionPriority,
+    /// F# 11.0: `` Error when bitwise operators are used on enums whose underlying type is not an integer type (e.g. char). `` (its FS3350 name).
+    ErrorOnBitwiseOpsOnNonIntegralEnums,
+    /// F# 11.0: `` emit GetObjectData and field-restoring deserialization constructor for exception types `` (its FS3350 name).
+    ExceptionFieldSerializationSupport,
+    /// F# 11.0: `` honor the 'NotNullIfNotNull' attribute on a method's return value `` (its FS3350 name).
+    NotNullIfNotNull,
+    /// F# 11.0: `` Improved implied argument names with partial application `` (its FS3350 name).
+    ImprovedImpliedArgumentNamesPartTwo,
+    /// F# 11.0: `` error (rather than warning) when an enforced compiler-semantic attribute is present in the .fs but missing from the .fsi `` (its FS3350 name).
+    ErrorOnMissingSignatureAttribute,
+    /// F# 11.0: `` construct delegates that point directly at the target method, avoiding an intermediate closure `` (its FS3350 name).
+    DirectDelegateConstruction,
+    /// F# 11.0: `` Access a protected base-class field from a closure inside a member `` (its FS3350 name).
+    AccessProtectedBaseFieldFromClosure,
+    /// F# 11.0: `` record type and expression spreads `` (its FS3350 name).
+    RecordSpreads,
+    /// F# 11.0: `` ordering explicit type arguments by their constraint dependencies `` (its FS3350 name).
+    TypeArgumentDependencyOrdering,
+    /// F# 11.0: `` optimize a curried closure argument when its inlining fails `` (its FS3350 name).
+    OptimizeClosureIfNotInlined,
+    /// F# preview: `` runtime async `` (its FS3350 name).
+    RuntimeAsync,
+    /// F# preview: `` Constructing a record via its all-fields constructor `` (its FS3350 name).
+    RecordConstructorSyntax,
+    /// F# preview: `` enforce named arguments at call sites of methods annotated with RequireNamedArgumentsAttribute `` (its FS3350 name).
+    RequireNamedArguments,
+    /// F# preview: `` calls to 'reraise' in a computation expression handler `` (its FS3350 name).
+    ReraiseInComputationExpressions,
+    /// F# preview: `` Allow extension members to participate in SRTP constraint resolution `` (its FS3350 name).
+    ExtensionConstraintSolutions,
 }
 
 impl LanguageFeature {
     /// Every feature, in table order.
-    pub const ALL: [LanguageFeature; 92] = [
+    pub const ALL: [LanguageFeature; 109] = [
         LanguageFeature::SingleUnderscorePattern,
         LanguageFeature::WildCardInForLoop,
         LanguageFeature::RelaxWhitespace,
@@ -324,6 +440,23 @@ impl LanguageFeature {
         LanguageFeature::FromEndSlicing,
         LanguageFeature::MethodOverloadsCache,
         LanguageFeature::ImplicitDIMCoverage,
+        LanguageFeature::MoreConcreteTiebreaker,
+        LanguageFeature::OverloadResolutionPriority,
+        LanguageFeature::ErrorOnBitwiseOpsOnNonIntegralEnums,
+        LanguageFeature::ExceptionFieldSerializationSupport,
+        LanguageFeature::NotNullIfNotNull,
+        LanguageFeature::ImprovedImpliedArgumentNamesPartTwo,
+        LanguageFeature::ErrorOnMissingSignatureAttribute,
+        LanguageFeature::DirectDelegateConstruction,
+        LanguageFeature::AccessProtectedBaseFieldFromClosure,
+        LanguageFeature::RecordSpreads,
+        LanguageFeature::TypeArgumentDependencyOrdering,
+        LanguageFeature::OptimizeClosureIfNotInlined,
+        LanguageFeature::RuntimeAsync,
+        LanguageFeature::RecordConstructorSyntax,
+        LanguageFeature::RequireNamedArguments,
+        LanguageFeature::ReraiseInComputationExpressions,
+        LanguageFeature::ExtensionConstraintSolutions,
     ];
 
     /// The features the parser gates where they occur: the live rows with a
@@ -351,7 +484,172 @@ impl LanguageFeature {
     /// transcribed from: a later compiler deleted the case, and borzoi keeps
     /// its variant, its version and its gates (`docs/ast-versioning-plan.md`,
     /// D12).
-    pub const RETIRED: [(LanguageFeature, &str); 0] = [];
+    pub const RETIRED: [(LanguageFeature, &str); 41] = [
+        (
+            LanguageFeature::SingleUnderscorePattern,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::WildCardInForLoop,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::RelaxWhitespace,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::ImplicitYield,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::FixedIndexSlice3d4d,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::DotlessFloat32Literal,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::AndBang,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::NullableOptionalInterop,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::DefaultInterfaceMemberConsumption,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::OpenTypeDeclaration,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::InterfacesWithMultipleGenericInstantiation,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::NameOf,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::RelaxWhitespace2,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::OverloadsForCustomOperations,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::StructActivePattern,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::PrintfBinaryFormat,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::IndexerNotationWithoutDot,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::UseBindingValueDiscard,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::NonVariablePatternsToRightOfAsPatterns,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::DelegateTypeNameResolutionFix,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::BetterExceptionPrinting,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::RequiredPropertiesSupport,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::InitPropertiesSupport,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::LowercaseDUWhenRequireQualifiedAccess,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::InterfacesWithAbstractStaticMembers,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::AccessorFunctionShorthand,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::WarningWhenInliningMethodImplNoInlineMarkedFunction,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::EscapeDotnetFormattableStrings,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::ArithmeticInLiterals,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::ErrorReportingOnStaticClasses,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::TryWithInSeqExpression,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::StaticMembersInInterfaces,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::NestedCopyAndUpdate,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::ExtendedStringInterpolation,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::ImprovedImpliedArgumentNames,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::DiagnosticForObjInference,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::StaticLetInRecordsDusEmptyTypes,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::StrictIndentation,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::WhileBang,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::ExtendedFixedBindings,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+        (
+            LanguageFeature::PreferStringGetPinnableReference,
+            "fsharp@c3c01c991d17643700d343cee5c5a1e20c06ce03",
+        ),
+    ];
 
     /// The `fsharp@<commit>` this feature was last transcribed from, if a
     /// later compiler deleted it ([`Self::RETIRED`]); `None` while the
@@ -455,10 +753,26 @@ impl LanguageFeature {
             | LanguageFeature::ErrorOnInvalidDeclsInTypeDefinitions => LanguageVersion::V10_0,
             LanguageFeature::WarnWhenFunctionValueUsedAsInterpolatedStringArg
             | LanguageFeature::PreprocessorElif
-            | LanguageFeature::ImplicitDIMCoverage => LanguageVersion::V11_0,
-            LanguageFeature::FromEndSlicing | LanguageFeature::MethodOverloadsCache => {
-                LanguageVersion::Preview
-            }
+            | LanguageFeature::MethodOverloadsCache
+            | LanguageFeature::ImplicitDIMCoverage
+            | LanguageFeature::ErrorOnBitwiseOpsOnNonIntegralEnums
+            | LanguageFeature::ExceptionFieldSerializationSupport
+            | LanguageFeature::NotNullIfNotNull
+            | LanguageFeature::ImprovedImpliedArgumentNamesPartTwo
+            | LanguageFeature::ErrorOnMissingSignatureAttribute
+            | LanguageFeature::DirectDelegateConstruction
+            | LanguageFeature::AccessProtectedBaseFieldFromClosure
+            | LanguageFeature::RecordSpreads
+            | LanguageFeature::TypeArgumentDependencyOrdering
+            | LanguageFeature::OptimizeClosureIfNotInlined => LanguageVersion::V11_0,
+            LanguageFeature::FromEndSlicing
+            | LanguageFeature::MoreConcreteTiebreaker
+            | LanguageFeature::OverloadResolutionPriority
+            | LanguageFeature::RuntimeAsync
+            | LanguageFeature::RecordConstructorSyntax
+            | LanguageFeature::RequireNamedArguments
+            | LanguageFeature::ReraiseInComputationExpressions
+            | LanguageFeature::ExtensionConstraintSolutions => LanguageVersion::Preview,
         }
     }
 
@@ -676,6 +990,53 @@ impl LanguageFeature {
             LanguageFeature::ImplicitDIMCoverage => {
                 "Implicit dispatch slot coverage for default interface member implementations"
             }
+            LanguageFeature::MoreConcreteTiebreaker => {
+                "Use 'most concrete' tiebreaker for overload resolution when methods differ only by type parameter concreteness."
+            }
+            LanguageFeature::OverloadResolutionPriority => {
+                "Support for OverloadResolutionPriorityAttribute to prioritize method overloads."
+            }
+            LanguageFeature::ErrorOnBitwiseOpsOnNonIntegralEnums => {
+                "Error when bitwise operators are used on enums whose underlying type is not an integer type (e.g. char)."
+            }
+            LanguageFeature::ExceptionFieldSerializationSupport => {
+                "emit GetObjectData and field-restoring deserialization constructor for exception types"
+            }
+            LanguageFeature::NotNullIfNotNull => {
+                "honor the 'NotNullIfNotNull' attribute on a method's return value"
+            }
+            LanguageFeature::ImprovedImpliedArgumentNamesPartTwo => {
+                "Improved implied argument names with partial application"
+            }
+            LanguageFeature::ErrorOnMissingSignatureAttribute => {
+                "error (rather than warning) when an enforced compiler-semantic attribute is present in the .fs but missing from the .fsi"
+            }
+            LanguageFeature::DirectDelegateConstruction => {
+                "construct delegates that point directly at the target method, avoiding an intermediate closure"
+            }
+            LanguageFeature::AccessProtectedBaseFieldFromClosure => {
+                "Access a protected base-class field from a closure inside a member"
+            }
+            LanguageFeature::RecordSpreads => "record type and expression spreads",
+            LanguageFeature::TypeArgumentDependencyOrdering => {
+                "ordering explicit type arguments by their constraint dependencies"
+            }
+            LanguageFeature::OptimizeClosureIfNotInlined => {
+                "optimize a curried closure argument when its inlining fails"
+            }
+            LanguageFeature::RuntimeAsync => "runtime async",
+            LanguageFeature::RecordConstructorSyntax => {
+                "Constructing a record via its all-fields constructor"
+            }
+            LanguageFeature::RequireNamedArguments => {
+                "enforce named arguments at call sites of methods annotated with RequireNamedArgumentsAttribute"
+            }
+            LanguageFeature::ReraiseInComputationExpressions => {
+                "calls to 'reraise' in a computation expression handler"
+            }
+            LanguageFeature::ExtensionConstraintSolutions => {
+                "Allow extension members to participate in SRTP constraint resolution"
+            }
         }
     }
 
@@ -782,6 +1143,23 @@ impl LanguageFeature {
             LanguageFeature::FromEndSlicing => &[FcsStage::Check],
             LanguageFeature::MethodOverloadsCache => &[FcsStage::Check],
             LanguageFeature::ImplicitDIMCoverage => &[FcsStage::Check],
+            LanguageFeature::MoreConcreteTiebreaker => &[FcsStage::Check],
+            LanguageFeature::OverloadResolutionPriority => &[FcsStage::Check],
+            LanguageFeature::ErrorOnBitwiseOpsOnNonIntegralEnums => &[FcsStage::Check],
+            LanguageFeature::ExceptionFieldSerializationSupport => &[FcsStage::Check],
+            LanguageFeature::NotNullIfNotNull => &[FcsStage::Check],
+            LanguageFeature::ImprovedImpliedArgumentNamesPartTwo => &[FcsStage::Check],
+            LanguageFeature::ErrorOnMissingSignatureAttribute => &[FcsStage::Check],
+            LanguageFeature::DirectDelegateConstruction => &[FcsStage::Check],
+            LanguageFeature::AccessProtectedBaseFieldFromClosure => &[FcsStage::Check],
+            LanguageFeature::RecordSpreads => &[FcsStage::Check],
+            LanguageFeature::TypeArgumentDependencyOrdering => &[FcsStage::Check],
+            LanguageFeature::OptimizeClosureIfNotInlined => &[FcsStage::Check],
+            LanguageFeature::RuntimeAsync => &[FcsStage::Check],
+            LanguageFeature::RecordConstructorSyntax => &[FcsStage::Check],
+            LanguageFeature::RequireNamedArguments => &[FcsStage::Check],
+            LanguageFeature::ReraiseInComputationExpressions => &[FcsStage::Check],
+            LanguageFeature::ExtensionConstraintSolutions => &[FcsStage::Check],
         }
     }
 
@@ -883,6 +1261,23 @@ impl LanguageFeature {
             LanguageFeature::FromEndSlicing => &[],
             LanguageFeature::MethodOverloadsCache => &[],
             LanguageFeature::ImplicitDIMCoverage => &[],
+            LanguageFeature::MoreConcreteTiebreaker => &[],
+            LanguageFeature::OverloadResolutionPriority => &[],
+            LanguageFeature::ErrorOnBitwiseOpsOnNonIntegralEnums => &[],
+            LanguageFeature::ExceptionFieldSerializationSupport => &[],
+            LanguageFeature::NotNullIfNotNull => &[],
+            LanguageFeature::ImprovedImpliedArgumentNamesPartTwo => &[],
+            LanguageFeature::ErrorOnMissingSignatureAttribute => &[],
+            LanguageFeature::DirectDelegateConstruction => &[],
+            LanguageFeature::AccessProtectedBaseFieldFromClosure => &[],
+            LanguageFeature::RecordSpreads => &[],
+            LanguageFeature::TypeArgumentDependencyOrdering => &[],
+            LanguageFeature::OptimizeClosureIfNotInlined => &[],
+            LanguageFeature::RuntimeAsync => &[],
+            LanguageFeature::RecordConstructorSyntax => &[],
+            LanguageFeature::RequireNamedArguments => &[],
+            LanguageFeature::ReraiseInComputationExpressions => &[],
+            LanguageFeature::ExtensionConstraintSolutions => &[],
         }
     }
 }

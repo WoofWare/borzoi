@@ -628,6 +628,12 @@ nix develop -c cargo test -p borzoi-msbuild --test fsproj_msbuild_corpus_diff --
 nix develop -c cargo test -p borzoi-msbuild --test sdk_chain_decline_attribution -- --ignored  # ~1 s
 ```
 
+The MSBuild corpus differential evaluates the F# compiler's own projects,
+whose `global.json` asks for SDK 11, so it evaluates them against the
+devshell's second dotnet root, `BORZOI_DOTNET_ROOT_SDK11` (`dotnet-sdk-corpus`
+in `flake.nix`). Keep SDK 11 out of the default root: with no `global.json`
+above them, every temporary fixture would resolve it as the newest SDK.
+
 The cst and sema sweeps, `borzoi-assembly`'s reference-pack sweep (an
 ordinary test rather than an ignored one), the MSBuild corpus differential, and
 the whole-project gate

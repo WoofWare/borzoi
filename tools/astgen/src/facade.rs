@@ -116,9 +116,9 @@ pub fn versions() -> Vec<Version> {
 /// break. Each of these modules has a frozen consumer fixture
 /// (`crates/cst/tests/all/facade_consumers/`) if it is a distinct facade.
 ///
-/// The numbered versions up to F# 10.0, the compiler's default, are published;
-/// `v11` waits for the compiler upgrade that completes its surface, and
-/// `preview` is never published.
+/// The numbered versions up to F# 10.0 are published; `v11` waits until the
+/// union models the syntax F# 11.0 adds (record spreads), and `preview` is
+/// never published.
 pub const PUBLISHED: &[&str] = &["v4_6", "v4_7", "v5", "v6", "v7", "v8", "v9", "v10"];
 
 /// The freeze epoch: the only route by which a published facade's lock is

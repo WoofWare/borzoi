@@ -1973,8 +1973,12 @@ fn filtered_streams_at(
 pub fn filtered_stream_divergence(source: &str) -> Option<String> {
     let mut tmp = NamedTempFile::with_suffix(".fs").expect("create temp .fs file");
     tmp.write_all(source.as_bytes()).expect("write source");
-    let ((rust_tokens, rust_offside), (fcs_tokens, fcs_offside)) =
-        filtered_streams_at(tmp.path(), source, LanguageVersion::DEFAULT, "10.0");
+    let ((rust_tokens, rust_offside), (fcs_tokens, fcs_offside)) = filtered_streams_at(
+        tmp.path(),
+        source,
+        LanguageVersion::DEFAULT,
+        &LanguageVersion::DEFAULT.to_string(),
+    );
     if rust_tokens != fcs_tokens {
         let at = rust_tokens
             .iter()

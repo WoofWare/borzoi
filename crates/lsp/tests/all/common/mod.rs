@@ -410,9 +410,10 @@ pub enum OracleRefScope {
 /// `scope` says whether `refs` supplements the oracle's own SDK references or
 /// replaces them; see [`OracleRefScope`].
 ///
-/// `lang_version` should be `None` when the project uses the SDK-default version
-/// (FCS's default already agrees with our `LanguageVersion::DEFAULT`, so no
-/// `--langversion` flag is threaded) and `Some(canonical)` for a non-default pin.
+/// `lang_version` is `Some(canonical)` to check at that version, or `None` to
+/// check at the oracle's own default, which need not be
+/// `LanguageVersion::DEFAULT`: a caller whose side parsed at a known version
+/// passes it.
 pub fn invoke_fcs_dump_project_with_refs(
     paths: &[&Path],
     refs: &[&Path],

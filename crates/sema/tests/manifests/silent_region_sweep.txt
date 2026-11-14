@@ -6,38 +6,43 @@ buildtools/fsyacc/Parsing.fs member-of-augmentation x5
 buildtools/fsyacc/fsyaccast.fs let_decl x2
 docs/fcs-samples/FscExe/FscMain.fs attribute
 docs/fcs-samples/FsiExe/fsimain.fs attribute
+src/Compiler/AbstractIL/ILMetadataHeaps.fs member-of-augmentation x3
 src/Compiler/AbstractIL/il.fs attribute x16
 src/Compiler/AbstractIL/il.fs let_decl
-src/Compiler/AbstractIL/il.fs type_defn x2
+src/Compiler/AbstractIL/il.fs type_defn x4
 src/Compiler/AbstractIL/ilnativeres.fs type_defn x3
 src/Compiler/AbstractIL/ilreflect.fs let_decl
 src/Compiler/AbstractIL/ilreflect.fs member-of-augmentation x505
 src/Compiler/AbstractIL/ilsign.fs attribute
 src/Compiler/AbstractIL/ilwrite.fs member-of-augmentation x37
-src/Compiler/Checking/AttributeChecking.fs let_decl
+src/Compiler/Checking/AttributeChecking.fs let_decl x2
 src/Compiler/Checking/AugmentWithHashCompare.fs let_decl
-src/Compiler/Checking/CheckDeclarations.fs let_decl x3
+src/Compiler/Checking/CheckDeclarations.fs let_decl x7
 src/Compiler/Checking/CheckPatterns.fs let_decl
+src/Compiler/Checking/CheckRecordSyntaxHelpers.fs let_decl
 src/Compiler/Checking/ConstraintSolver.fs let_decl x7
 src/Compiler/Checking/Expressions/CheckComputationExpressions.fs let_decl
 src/Compiler/Checking/Expressions/CheckExpressions.fs let_decl x16
 src/Compiler/Checking/MethodOverrides.fs let_decl
 src/Compiler/Checking/NicePrint.fs let_decl x3
-src/Compiler/Checking/infos.fs member-of-augmentation x70
+src/Compiler/Checking/Spreads.fs let_decl
+src/Compiler/Checking/infos.fs member-of-augmentation x71
 src/Compiler/CodeGen/EraseUnions.Types.fs let_decl x12
 src/Compiler/CodeGen/IlxGen.fs let_decl x5
-src/Compiler/Driver/CompilerDiagnostics.fs member-of-augmentation x1736
+src/Compiler/Driver/CompilerDiagnostics.fs member-of-augmentation x1871
 src/Compiler/Driver/CompilerImports.fs member-of-augmentation x205
 src/Compiler/Driver/CompilerOptions.fs attribute
 src/Compiler/Driver/GraphChecking/GraphProcessing.fs type_defn x2
 src/Compiler/Driver/GraphChecking/TrieMapping.fs let_decl
 src/Compiler/Driver/GraphChecking/Types.fs type_defn
-src/Compiler/Driver/fsc.fs member-of-augmentation x5
+src/Compiler/Driver/StaticLinking.fs let_decl x2
+src/Compiler/Driver/fsc.fs member-of-augmentation x7
 src/Compiler/Driver/fsc.fs type_defn
 src/Compiler/Facilities/AsyncMemoize.fs member-of-type x2
 src/Compiler/Facilities/DiagnosticsLogger.fs member x23
 src/Compiler/Facilities/DiagnosticsLogger.fs member-of-augmentation x52
 src/Compiler/Facilities/DiagnosticsLogger.fs type_defn
+src/Compiler/Facilities/RichText.fs type_defn
 src/Compiler/Facilities/TextLayoutRender.fs type_defn x2
 src/Compiler/Facilities/prim-parsing.fs member-of-augmentation x5
 src/Compiler/Interactive/fsi.fs member-of-augmentation x7
@@ -48,7 +53,7 @@ src/Compiler/Service/FSharpParseFileResults.fs member-of-type x7
 src/Compiler/Service/FSharpProjectSnapshot.fs member-of-type x2
 src/Compiler/Service/FSharpProjectSnapshot.fs type_defn
 src/Compiler/Service/FSharpWorkspaceState.fs member-of-type x11
-src/Compiler/Service/SemanticClassification.fs member-of-augmentation x415
+src/Compiler/Service/SemanticClassification.fs member-of-augmentation x450
 src/Compiler/Service/ServiceInterfaceStubGenerator.fs let_decl x3
 src/Compiler/Service/ServiceInterfaceStubGenerator.fs member-of-type x3
 src/Compiler/Service/ServiceParseTreeWalk.fs attribute x3
@@ -71,11 +76,12 @@ src/Compiler/SyntaxTree/SyntaxTree.fs member-of-type
 src/Compiler/SyntaxTree/SyntaxTreeOps.fs let_decl
 src/Compiler/SyntaxTree/UnicodeLexing.fs member-of-augmentation x13
 src/Compiler/SyntaxTree/WarnScopes.fs let_decl x3
+src/Compiler/TypedTree/GeneratedNames.fs let_decl
 src/Compiler/TypedTree/TcGlobals.fs attribute x2
 src/Compiler/TypedTree/TypeProviders.fs type_defn x14
 src/Compiler/TypedTree/TypedTree.fs attribute x56
 src/Compiler/TypedTree/TypedTree.fs let_decl x3
-src/Compiler/TypedTree/TypedTreeBasics.fs let_decl x4
+src/Compiler/TypedTree/TypedTreeBasics.fs let_decl x6
 src/Compiler/TypedTree/TypedTreeBasics.fs member-of-augmentation x11
 src/Compiler/TypedTree/TypedTreeOps.Attributes.fs let_decl x3
 src/Compiler/TypedTree/TypedTreeOps.Attributes.fs member-of-augmentation x21
@@ -85,17 +91,18 @@ src/Compiler/TypedTree/TypedTreeOps.FreeVars.fs member-of-object-expression
 src/Compiler/TypedTree/TypedTreeOps.Remap.fs member-of-augmentation x29
 src/Compiler/TypedTree/TypedTreeOps.Transforms.fs let_decl x43
 src/Compiler/TypedTree/TypedTreeOps.Transforms.fs member-of-augmentation x101
+src/Compiler/TypedTree/TypedTreePickle.fs let_decl
 src/Compiler/TypedTree/tainted.fs let_decl x2
 src/Compiler/Utilities/Activity.fs let_decl
 src/Compiler/Utilities/Activity.fs member-of-augmentation x13
 src/Compiler/Utilities/Caches.fs let_decl
-src/Compiler/Utilities/FileSystem.fs member-of-augmentation x112
+src/Compiler/Utilities/FileSystem.fs member-of-augmentation x111
 src/Compiler/Utilities/FileSystem.fs member-of-type x6
 src/Compiler/Utilities/LruCache.fs member-of-type
 src/Compiler/Utilities/ResizeArray.fs attribute
 src/Compiler/Utilities/TaggedCollections.fs attribute x2
 src/Compiler/Utilities/TaggedCollections.fs type_defn x3
-src/Compiler/Utilities/illib.fs member-of-augmentation x47
+src/Compiler/Utilities/illib.fs member-of-augmentation x41
 src/Compiler/Utilities/lib.fs member-of-augmentation x3
 src/FSharp.Build/MapSourceRoots.fs type_defn x2
 src/FSharp.Compiler.LanguageServer/Common/FSharpRequestContext.fs member-of-type
@@ -109,9 +116,10 @@ src/FSharp.Core/Linq.fs let_decl x116
 src/FSharp.Core/Nullable.fs attribute
 src/FSharp.Core/Random.fs attribute
 src/FSharp.Core/array.fs attribute
-src/FSharp.Core/array2.fs attribute
+src/FSharp.Core/array2.fs attribute x4
 src/FSharp.Core/array3.fs attribute x2
-src/FSharp.Core/async.fs member-of-augmentation x120
+src/FSharp.Core/async.fs attribute
+src/FSharp.Core/async.fs member-of-augmentation x136
 src/FSharp.Core/async.fs member-of-object-expression x2
 src/FSharp.Core/eventmodule.fs attribute
 src/FSharp.Core/fslib-extra-pervasives.fs attribute x11
@@ -135,6 +143,7 @@ src/FSharp.Core/seq.fs attribute
 src/FSharp.Core/set.fs attribute x10
 src/FSharp.Core/set.fs type_defn x2
 src/FSharp.Core/string.fs attribute
+src/FSharp.Core/tasks.fs attribute
 src/FSharp.Core/tasks.fs member-of-augmentation x228
 src/FSharp.DependencyManager.Nuget/FSharp.DependencyManager.Utilities.fs attribute x2
 src/LegacyMSBuildResolver/LegacyMSBuildReferenceResolver.fs let_decl x2
@@ -145,6 +154,10 @@ tests/EndToEndBuildTests/BasicProvider/BasicProvider.DesignTime/BasicProvider.Pr
 tests/EndToEndBuildTests/ComboProvider/ComboProvider/ComboProvider.fs type_defn
 tests/EndToEndBuildTests/ProvidedTypes/ProvidedTypes.fs let_decl x25
 tests/EndToEndBuildTests/ProvidedTypes/ProvidedTypes.fs member-of-augmentation x304
+tests/FSharp.Build.UnitTests/FileTaskEnvironmentTests.fs attribute x8
+tests/FSharp.Build.UnitTests/FileTaskEnvironmentTests.fs member-of-type
+tests/FSharp.Build.UnitTests/MultiThreadedTaskTests.fs attribute x6
+tests/FSharp.Build.UnitTests/MultiThreadedTaskTests.fs member-of-type
 tests/FSharp.Compiler.ComponentTests/CompilerDirectives/Line.fs attribute x3
 tests/FSharp.Compiler.ComponentTests/CompilerDirectives/Nowarn.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/highentropyva.fs attribute x16
@@ -191,9 +204,12 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttr
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_StructLayoutSequentialNeg_DU2.fs attribute
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_StructLayoutSequentialNeg_Delegate.fs attribute
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_StructLayoutSequentialNeg_Interface.fs attribute
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_StructLayout_Extended.fs attribute
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_UseNullAsTrueValue01.fs attribute x7
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/EnumValueAsObjectArg01.fs attribute x3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/FreeTypeVariable01.fs attribute x3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ReturnType03.fs attribute
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ReturnType04.fs attribute
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/SanityCheck01.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/StructLayout.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/StructLayoutSequentialPos_Exception.fs attribute
@@ -289,11 +305,15 @@ tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/ByrefSafety
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/ByrefSafetyAnalysis/ByrefReturnMember/TestBaseCall.fs type_defn
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodApplicationResolution/MultiExtensionMethods01.fs member-of-augmentation x2
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/TypeInference/RegressionTest01.fs member-of-augmentation x15
+tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/ByteStrings.fs let_decl x3
+tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/CharByteLiterals.fs let_decl
+tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/Strings.fs let_decl
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/AbstractMembers/E_InlineVirtualMember02.fs type_defn x2
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/Misc/AbstractClassMultipleConstructors01.fs type_defn x2
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/Misc/E_ExplicitConstructor.fs member-of-type
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/BinaryOr01.fs attribute x4
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/E_NamedTypeInScope.fs top
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/EnumTypes/ExtensionBitwiseOrOnCharEnum.fs member-of-augmentation
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/StructTypes/E_StructInheritance01.fs type_defn x2
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/StructTypes/E_StructInheritance01b.fs type_defn x2
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/E_ExtensionOperator01.fs member-of-augmentation x2
@@ -326,18 +346,37 @@ tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/Recursive
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/activePatterns02.fs let_decl x2
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/activePatterns08.fs let_decl x2
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/CodeGenReg01.fs let_decl x2
+tests/FSharp.Compiler.ComponentTests/Conformance/Tiebreakers/TiebreakerTests.fs attribute x26
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/CheckingSyntacticTypes/E_CannotInlineVirtualMethod2.fs type_defn x2
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/AllowOverloadOnReturnType.fs member-of-augmentation x3
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/BasicExtensionOperators.fs member-of-augmentation x18
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/DuplicateBuiltinOperatorDistinctScopes.fs member-of-augmentation x7
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/DuplicateBuiltinOperatorGenericInstantiations.fs member-of-augmentation x9
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/DuplicateBuiltinOperatorInlineDistinctScopes.fs member-of-augmentation x7
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/DuplicateBuiltinOperatorOpenOne.fs member-of-augmentation x7
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/DuplicateBuiltinOperatorReturnTypeInstantiations.fs member-of-augmentation x2
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/DuplicateBuiltinOperatorShadow.fs member-of-augmentation x7
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/DuplicateBuiltinOperatorSymmetricOperands.fs member-of-augmentation x4
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ExtensionAccessibility.fs member-of-augmentation
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ExtensionPrecedence.fs member-of-augmentation x10
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/NestedTraverseSequenceSRTP.fs member-of-augmentation x30
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/OpExplicitOptionalExtension.fs member-of-augmentation x6
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ScopeCapture.fs member-of-augmentation x4
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/StructExtensionMemberSRTP.fs member-of-augmentation x5
 tests/FSharp.Compiler.ComponentTests/ConstraintSolver/ObjInference.fs attribute x14
-tests/FSharp.Compiler.ComponentTests/EmittedIL/AsyncExpressionStepping/AsyncExpressionStepping.fs attribute x6
+tests/FSharp.Compiler.ComponentTests/EmittedIL/AsyncExpressionStepping/AsyncExpressionStepping.fs attribute x12
 tests/FSharp.Compiler.ComponentTests/EmittedIL/AttributeTargets/AttributeTargets.fs attribute x3
 tests/FSharp.Compiler.ComponentTests/EmittedIL/AttributeTargets/Default.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/EmittedIL/AttributeTargets/Field.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/EmittedIL/AttributeTargets/Property.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/EmittedIL/CCtorDUWithMember/CCtorDUWithMember.fs attribute x4
 tests/FSharp.Compiler.ComponentTests/EmittedIL/CompiledNameAttribute/CompiledNameAttribute.fs attribute
+tests/FSharp.Compiler.ComponentTests/EmittedIL/CompiledNameAttribute/CompiledNameAttribute07.fs member-of-augmentation x2
 tests/FSharp.Compiler.ComponentTests/EmittedIL/ComputationExpressions/ComputationExprLibrary.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/ComputationExpressions/ComputationExpressions.fs attribute x8
-tests/FSharp.Compiler.ComponentTests/EmittedIL/ComputedCollections/ComputedCollections.fs attribute x24
+tests/FSharp.Compiler.ComponentTests/EmittedIL/ComputedCollections/ComputedCollections.fs attribute x26
+tests/FSharp.Compiler.ComponentTests/EmittedIL/DebugInlineAsCall.fs attribute
+tests/FSharp.Compiler.ComponentTests/EmittedIL/DirectDelegates/DirectDelegates.fs attribute x26
 tests/FSharp.Compiler.ComponentTests/EmittedIL/FixedBindings/PinIntByrefOfLocalVariable.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/FixedBindings/PinNullValueOfTypeWithGetPinnableReference.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/FixedBindings/PinStructTypeWithGetPinnableReferenceReturningByref.fs attribute
@@ -348,7 +387,9 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/FixedBindings/PinTypeWithGetPinna
 tests/FSharp.Compiler.ComponentTests/EmittedIL/FixedBindings/PinTypeWithGetPinnableReferenceReturningInref.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/ForLoop/ForLoop.fs attribute x58
 tests/FSharp.Compiler.ComponentTests/EmittedIL/GeneratedIterators/GeneratedIterators.fs attribute
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Inlining/Inlining.fs attribute x3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Inlining/Inlining.fs attribute x8
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Inlining/Regression_RealsigAugmentationClosure.fs attribute x2
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Inlining/StackGuardInlineIfLambda.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/ListExpressionStepping/ListExpressionStepping.fs attribute x6
 tests/FSharp.Compiler.ComponentTests/EmittedIL/MethodImplAttribute/MethodImplAttribute.AggressiveInlining.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/MethodImplAttribute/MethodImplAttribute.ForwardRef.fs attribute
@@ -359,14 +400,18 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/MethodImplAttribute/MethodImplAtt
 tests/FSharp.Compiler.ComponentTests/EmittedIL/MethodImplAttribute/MethodImplAttribute.PreserveSig.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/MethodImplAttribute/MethodImplAttribute.Synchronized.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/MethodImplAttribute/MethodImplAttribute.Unmanaged.fs attribute
+tests/FSharp.Compiler.ComponentTests/EmittedIL/MethodImplAttribute/MethodImplAttribute.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/Marshal.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/MethodImplNoInline.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/MethodImplNoInline02.fs attribute
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/Misc.fs attribute x15
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/Misc.fs attribute x30
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Nullness/NullAsTrueValue.fs attribute x3
 tests/FSharp.Compiler.ComponentTests/EmittedIL/QueryExpressionStepping/QueryExpressionStepping.fs attribute x10
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SeqExpressionStepping/SeqExpressionStepping.fs attribute x6
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SerializableAttribute/SerializableAttribute.fs attribute x2
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/AnonymousRecordExpressionSpreads.fs attribute x20
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/NominalRecordExpressionSpreads.fs attribute x22
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/RecordTypeSpreads.fs attribute x18
 tests/FSharp.Compiler.ComponentTests/EmittedIL/StaticInit/StaticInit.fs attribute x4
 tests/FSharp.Compiler.ComponentTests/EmittedIL/StaticOptimizations/StaticOptimizations.fs attribute x4
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/BaseType.fs attribute
@@ -374,15 +419,21 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/Extensions02.fs member-
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/Structure.fs attribute
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/UnitsOfMeasure03.fs type_defn x2
 tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunctions.fs attribute x78
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Tuples/Tuples.fs attribute x9
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Tuples/Tuples.fs attribute x21
 tests/FSharp.Compiler.ComponentTests/EmittedIL/operators/Operators.fs attribute
 tests/FSharp.Compiler.ComponentTests/FSharpChecker/TransparentCompiler.fs attribute x9
-tests/FSharp.Compiler.ComponentTests/FSharpChecker/TransparentCompiler.fs let_decl x8
+tests/FSharp.Compiler.ComponentTests/FSharpChecker/TransparentCompiler.fs let_decl x16
 tests/FSharp.Compiler.ComponentTests/InteractiveSession/Misc.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/Language/ComputationExpressionTests.fs attribute x4
 tests/FSharp.Compiler.ComponentTests/Language/Nullness/NullableReferenceTypesTests.fs attribute x4
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncAsyncLocal.fs let_decl
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerable.fs member-of-augmentation x18
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableTests.fs let_decl
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncSequenceBuilder.fs member-of-augmentation x7
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeTaskBuilder.fs member-of-augmentation x9
 tests/FSharp.Compiler.ComponentTests/Language/SequenceExpressions/SequenceExpressionTests.fs attribute x3
 tests/FSharp.Compiler.ComponentTests/Miscellaneous/MigratedCoreTests.fs attribute x4
+tests/FSharp.Compiler.ComponentTests/Miscellaneous/XmlDoc.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/Signatures/SigGenerationRoundTripTests.fs attribute x2
 tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/members_basics.fs attribute x4
 tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/members_basics.fs member-of-augmentation x64
@@ -422,16 +473,26 @@ tests/FSharp.Compiler.Private.Scripting.UnitTests/DependencyManagerInteractiveTe
 tests/FSharp.Compiler.Service.Tests/BuildGraphTests.fs attribute
 tests/FSharp.Compiler.Service.Tests/BuildGraphTests.fs let_decl x2
 tests/FSharp.Compiler.Service.Tests/BuildGraphTests.fs type_defn x2
-tests/FSharp.Compiler.Service.Tests/Checker.fs member-of-augmentation x28
+tests/FSharp.Compiler.Service.Tests/Checker.fs let_decl x3
+tests/FSharp.Compiler.Service.Tests/Checker.fs member-of-augmentation x38
 tests/FSharp.Compiler.Service.Tests/Common.fs let_decl x2
-tests/FSharp.Compiler.Service.Tests/Common.fs member-of-augmentation x14
-tests/FSharp.Compiler.Service.Tests/CompletionTests.fs let_decl x4
-tests/FSharp.Compiler.Service.Tests/EditorTests.fs let_decl
+tests/FSharp.Compiler.Service.Tests/Common.fs member-of-augmentation x8
+tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.Classes.fs attribute x2
+tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.Generics.fs attribute x2
+tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.Members.fs attribute x2
+tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.Mutability.fs attribute x2
+tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.ObjectInitializers.fs attribute x6
+tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.PatternMatching.fs let_decl
+tests/FSharp.Compiler.Service.Tests/CompletionTests.fs let_decl x9
+tests/FSharp.Compiler.Service.Tests/EditorServiceAsserts.fs let_decl x2
+tests/FSharp.Compiler.Service.Tests/ErrorList/ErrorListTests.fs attribute x2
 tests/FSharp.Compiler.Service.Tests/ExprTests.fs attribute x2
 tests/FSharp.Compiler.Service.Tests/FileSystemTests.fs attribute x2
-tests/FSharp.Compiler.Service.Tests/ModuleReaderCancellationTests.fs let_decl
+tests/FSharp.Compiler.Service.Tests/ModuleReaderCancellationTests.fs let_decl x2
+tests/FSharp.Compiler.Service.Tests/ModuleReaderNamespaceTests.fs let_decl x15
 tests/FSharp.Compiler.Service.Tests/MultiProjectAnalysisTests.fs attribute x2
 tests/FSharp.Compiler.Service.Tests/OverloadCacheTests.fs attribute x4
+tests/FSharp.Compiler.Service.Tests/ParameterInfo/ParameterInfoTests.ByrefSpans.fs attribute x2
 tests/FSharp.Compiler.Service.Tests/PerfTests.fs attribute x2
 tests/FSharp.Compiler.Service.Tests/ProjectAnalysisTests.fs attribute x4
 tests/FSharp.Compiler.Service.Tests/Symbols.fs let_decl x2
@@ -439,25 +500,31 @@ tests/FSharp.Compiler.Service.Tests/SynExprTests.fs attribute x2
 tests/FSharp.Compiler.Service.Tests/SynExprTests.fs member-of-augmentation
 tests/FSharp.Compiler.Service.Tests/SynPatTests.fs attribute x2
 tests/FSharp.Compiler.Service.Tests/SyntaxTreeTests.fs attribute x2
+tests/FSharp.Compiler.Service.Tests/Tooltip/TooltipTests.Types.fs let_decl
+tests/FSharp.Compiler.Service.Tests/TypeChecker/Obsolete.fs let_decl x3
 tests/FSharp.Compiler.Service.Tests/XmlDocTests.fs let_decl x16
+tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/ArrayModule.fs attribute x2
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/AsyncModule.fs attribute x2
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/AsyncType.fs attribute x4
+tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/AsyncType.fs attribute x7
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/Cancellation.fs attribute x2
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/MailboxProcessorType.fs attribute x2
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/Tasks.fs attribute x2
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/TasksDynamic.fs attribute x4
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/TasksDynamic.fs member-of-augmentation x36
+tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Core/PrintTests.fs attribute x2
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Core/PrintfTests.fs attribute x2
 tests/FSharp.Core.UnitTests/FSharp.Core/NativeInterop.fs attribute x11
+tests/FSharp.Core.UnitTests/FSharp.Core/OperatorsModule1.fs attribute x4
 tests/FSharp.Core.UnitTests/FSharp.Core/PrimTypes.fs attribute x16
 tests/FSharp.Test.Utilities/CompilerAssert.fs let_decl
 tests/FSharp.Test.Utilities/CompilerAssert.fs member-of-type
 tests/FSharp.Test.Utilities/DirectoryAttribute.fs attribute
 tests/FSharp.Test.Utilities/FileInlineDataAttribute.fs attribute
+tests/FSharp.Test.Utilities/FnGuard.fs type_defn x2
 tests/FSharp.Test.Utilities/ProjectGeneration.fs let_decl
 tests/FSharp.Test.Utilities/ProjectGeneration.fs member-of-augmentation x143
-tests/FSharp.Test.Utilities/Utilities.fs member-of-augmentation x14
-tests/FSharp.Test.Utilities/XunitSetup.fs attribute x5
+tests/FSharp.Test.Utilities/Utilities.fs member-of-augmentation x8
+tests/FSharp.Test.Utilities/XunitSetup.fs attribute x6
 tests/benchmarks/CompiledCodeBenchmarks/MicroPerf/ComputedCollections/Arrays/IntegralRanges.fs attribute x88
 tests/benchmarks/CompiledCodeBenchmarks/MicroPerf/Conditions.fs attribute x3
 tests/benchmarks/FCSBenchmarks/BenchmarkComparison/Program.fs attribute
@@ -468,6 +535,7 @@ tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/ComputationExpressionBe
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/DecentlySizedStandAloneFileBenchmark.fs attribute
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/FileCascadeBenchmarks.fs attribute x3
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/GraphTypeCheckingBenchmarks.fs attribute
+tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/NamespaceImportBenchmarks.fs attribute x2
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/SomethingToCompile.fs let_decl x2
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/SomethingToCompile.fs member-of-augmentation x35
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/SomethingToCompileSmaller.fs let_decl x2
@@ -513,7 +581,10 @@ tests/fsharp/typecheck/sigs/pos12.fs member-of-augmentation x7
 tests/fsharp/typecheck/sigs/pos16.fs let_decl x3
 tests/fsharp/typecheck/sigs/pos35.fs member-of-augmentation x2
 tests/fsharp/typecheck/sigs/pos38.fs member-of-augmentation x4
+tests/projects/CompilerCompat/CompilerCompatLib/Library.fs attribute
+tests/projects/CompilerCompat/CompilerCompatLib/Library.fs member-of-augmentation
 tests/scripts/array-perf/array-perf.fs attribute
+tests/service/data/SyntaxTree/Attribute/ReturnTargetedAttributeGroupingIsPreserved.fs attribute
 tests/service/data/SyntaxTree/Expression/DotLambda_ArgumentExpressionInInnerAppExpression.fs let_decl
 tests/service/data/SyntaxTree/Expression/DotLambda_FunctionWithUnderscoreDotLambda.fs let_decl
 tests/service/data/SyntaxTree/Expression/DotLambda_NestedPropertiesAfterUnderscore.fs let_decl
@@ -539,6 +610,7 @@ vsintegration/src/FSharp.Editor/Build/SetGlobalPropertiesForSdkProjects.fs type_
 vsintegration/src/FSharp.Editor/Classification/ClassificationDefinitions.fs attribute x38
 vsintegration/src/FSharp.Editor/Classification/ClassificationService.fs attribute
 vsintegration/src/FSharp.Editor/CodeFixes/AddInstanceMemberParameter.fs attribute x2
+vsintegration/src/FSharp.Editor/CodeFixes/AddMissingAttributeToSignature.fs attribute x2
 vsintegration/src/FSharp.Editor/CodeFixes/AddMissingEqualsToTypeDefinition.fs attribute x2
 vsintegration/src/FSharp.Editor/CodeFixes/AddMissingFunKeyword.fs attribute x2
 vsintegration/src/FSharp.Editor/CodeFixes/AddMissingRecToMutuallyRecFunctions.fs attribute x2
@@ -565,6 +637,7 @@ vsintegration/src/FSharp.Editor/CodeFixes/MakeOuterBindingRecursive.fs attribute
 vsintegration/src/FSharp.Editor/CodeFixes/MissingReference.fs attribute x2
 vsintegration/src/FSharp.Editor/CodeFixes/PrefixUnusedValue.fs attribute x2
 vsintegration/src/FSharp.Editor/CodeFixes/ProposeUppercaseLabel.fs attribute x2
+vsintegration/src/FSharp.Editor/CodeFixes/RemoveExtraAttributeFromImplementation.fs attribute x2
 vsintegration/src/FSharp.Editor/CodeFixes/RemoveReturnOrYield.fs attribute x2
 vsintegration/src/FSharp.Editor/CodeFixes/RemoveSuperfluousCaptureForUnionCaseWithNoData.fs attribute x2
 vsintegration/src/FSharp.Editor/CodeFixes/RemoveUnnecessaryParentheses.fs attribute x2
@@ -583,7 +656,7 @@ vsintegration/src/FSharp.Editor/Commands/HelpContextService.fs attribute x2
 vsintegration/src/FSharp.Editor/Commands/XmlDocCommandService.fs attribute x3
 vsintegration/src/FSharp.Editor/Common/CancellableTasks.fs member-of-augmentation x165
 vsintegration/src/FSharp.Editor/Common/CodeAnalysisExtensions.fs member-of-augmentation x90
-vsintegration/src/FSharp.Editor/Common/Extensions.fs member-of-augmentation x137
+vsintegration/src/FSharp.Editor/Common/Extensions.fs member-of-augmentation x126
 vsintegration/src/FSharp.Editor/Common/FSharpCodeAnalysisExtensions.fs member-of-augmentation x7
 vsintegration/src/FSharp.Editor/Common/FSharpCodeAnalysisExtensions.fs member-of-object-expression x56
 vsintegration/src/FSharp.Editor/Common/Vs.fs member-of-augmentation x5
@@ -640,7 +713,6 @@ vsintegration/src/FSharp.Editor/TaskList/TaskListService.fs attribute
 vsintegration/src/FSharp.LanguageService/BackgroundRequests.fs type_defn x13
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs type_defn x3
 vsintegration/src/FSharp.LanguageService/IProjectSite.fs attribute
-vsintegration/src/FSharp.LanguageService/LanguageServiceConstants.fs member-of-augmentation x14
 vsintegration/src/FSharp.LanguageService/Vs.fs member-of-augmentation x6
 vsintegration/src/FSharp.ProjectSystem.FSharp/Project.fs attribute x19
 vsintegration/src/FSharp.ProjectSystem.FSharp/Project.fs member-of-type x6
@@ -670,7 +742,6 @@ vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorR
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.General.fs type_defn
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.GotoDefinition.fs type_defn
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.NavigationBar.fs type_defn
-vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ParameterInfo.fs type_defn
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.QuickInfo.fs type_defn
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.Script.fs type_defn
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.TimeStamp.fs type_defn

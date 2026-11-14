@@ -5,8 +5,9 @@
 > feature table, #15), PR 2 (diagnostic classes), PR 3 (faithful gates, #21),
 > PR 4 (the union behind `unstable-union`, #13, #670), PR 5 (astgen owns every
 > node), PR 6 (a deep facade per language version, `Parse::view`) and PR 7
-> (the freeze: `v4_6` … `v10` published) have landed, and so has PR 8's first
-> step (retiring deleted features, D12). Earlier stages that
+> (the freeze: `v4_6` … `v10` published) have landed, and so have PR 8's first
+> two steps (retiring deleted features, D12; the corpus pin and the table).
+> Earlier stages that
 > still stand: `LanguageVersion` as a parse input (#592/#597/#606) and the
 > LSP's `<LangVersion>` wiring (#613). The goal:
 > before the next F# compiler upgrade (a new language version), every earlier
@@ -101,7 +102,7 @@ features of their own (D4); only their `to_union` escape needs this one.
 ### D3. `LanguageVersion` is a first-class parse input (the index)
 
 Modelled on FCS's `LanguageFeatures.fs`: a closed enum `V4_6 … V11_0, Preview`
-with `DEFAULT = V10_0` (FCS's `defaultVersion`; `latest` and `latestmajor`
+with `DEFAULT = V11_0` (FCS's `defaultVersion`; `latest` and `latestmajor`
 resolve to it) and `Preview` above every numbered version (FCS's `9999`).
 `ParseOptions::lang` selects it and `Parse::lang` records it.
 
@@ -607,8 +608,11 @@ row is live or `Unmodelled` today: `INTERP_STRING_EXPR` (`StringInterpolation`,
 `INDEX_FROM_END_EXPR` (`FromEndSlicing`, preview) went live in PR 3, so each
 facade leaves out the kinds introduced after its version (PR 6).
 
-**What each parse-relevant feature does** (PR 3; the `Unmodelled` rows are all
-`checker-only`):
+**What each parse-relevant feature does** (PR 3). The `Unmodelled` rows are
+`checker-only`, apart from two that bring syntax borzoi does not parse yet,
+`unparsed syntax`: `RecordSpreads` (11.0, record spreads) and
+`ExtensionConstraintSolutions` (preview, tuple-type extensions). FCS gates
+both in the checker only; PR 8 step 4 gives each a kind and a parse-time gate.
 
 | Feature | Version | FCS | borzoi | Class |
 |---|---|---|---|---|
@@ -723,6 +727,14 @@ diagnostic for its feature" rather than "under a `Legality` one".
   `LanguageFeature::RETIRED` and `retired_in()`, `language_features`'
   retirement rules against the support floor read from `IsVersionSupported`,
   and the retirement twin of the synthetic-feature test.
+- **PR 8, step 2 — the corpus pin and the table**: `fsharp-src` at
+  dotnet/fsharp v15.2.101 (`142fe4e6`, SDK 11.0.100's compiler); the 41 cases
+  it deletes retired at `fsharp@c3c01c99…`, its 17 new cases added (two
+  `unparsed syntax`, the rest `checker-only`), `MethodOverloadsCache` at 11.0,
+  and `LanguageVersion::DEFAULT` 11.0, its `defaultVersion`. The corpus's
+  projects ask for SDK 11, so the devshell builds a second dotnet root with
+  it (`BORZOI_DOTNET_ROOT_SDK11`), never the default, which only
+  `fsproj_msbuild_corpus_diff` uses.
 
 ## PR sequence
 
@@ -747,13 +759,15 @@ diagnostic for its feature" rather than "under a `Legality` one".
    facade differs by exactly that variant). *Landed.*
 8. **The compiler upgrade** to SDK 11.0.100's compiler (dotnet/fsharp
    v15.2.101, FCS 43.13.101) — the proof, in steps:
-   0. SDK 11 in the devshell, off by default.
+   0. SDK 11 in the devshell, off by default: a second dotnet root,
+      `BORZOI_DOTNET_ROOT_SDK11`, for the tests that evaluate the corpus's
+      projects. *Landed* with step 2.
    1. Retirement (D12): the `retired` column, its `language_features` rules,
       and the retirement twin of the synthetic-feature test. Nothing is
       retired yet. *Landed.*
    2. The corpus pin and the table: 41 rows retired, 17 added,
-      `LanguageVersion::DEFAULT` 11.0, and the LSP's default following the
-      project's SDK.
+      `LanguageVersion::DEFAULT` 11.0. *Landed.* The LSP's default following
+      the project's SDK is a PR of its own.
    3. The FCS oracle bump, with the legacy oracle split out (D12), the
       projection rework, the ungated lexer and parser changes, and the
       recovery ports.
@@ -768,9 +782,9 @@ Everything in PR 8 above. Beyond them:
 
 - **Stale issues.** #14 (facades below 8.0) and #12 (`Parse::view`) are done
   by PR 6, and #17 (preview) is decided (D11).
-- **The upstream `_.` check is gone.** dotnet/fsharp#20222 deletes
-  `SingleUnderscorePattern`, one of the 41 cases step 2 retires. Its row keeps
-  its gate (D12), so a `member _.M` file stays version-dependent below 4.7.
+- **The upstream `_.` check is gone.** dotnet/fsharp#20222 deleted
+  `SingleUnderscorePattern`, one of the 41 retired cases. Its row keeps its
+  gate (D12), so a `member _.M` file stays version-dependent below 4.7.
 - **`display_name` is FSComp.txt's text as FCS returns it**: the quoted text
   after `String.Format` with no arguments, which is what FCS's resource
   generator applies (so `builder {{ }}` reads `builder { }`). For the gated
@@ -778,12 +792,17 @@ Everything in PR 8 above. Beyond them:
   checker-only row it is checked only against that reading of FSComp.txt
   until the row is gated.
 - **The oracle's FCS is older than the table's.** `tools/fcs-dump` references
-  `FSharp.Compiler.Service` 43.12.204, which reports nothing for `#elif`
-  below 11.0; the table transcribes the `fsharp-src` compiler, which reports
-  FS3350. No differential holds the `#elif` gate to FCS until the package
-  moves. It also starts an indented `#nowarn`'s directive range at the start
-  of the line, where the table's compiler starts it at the `#`, which we
-  follow (`an_indented_directive_range_starts_at_its_hash`).
+  `FSharp.Compiler.Service` 43.12.204 (SDK 10's compiler) until step 3; the
+  table and the corpus are SDK 11.0.100's. So the corpus differentials grade
+  the new corpus against the old parser, and both reject the files that use
+  new syntax (record spreads); and the oracle's default language version is
+  10.0, not `LanguageVersion::DEFAULT`, so a differential that parses at the
+  default passes that version to the oracle. 43.12.204 also reports nothing
+  for `#elif` below 11.0, where the table's compiler reports FS3350, so no
+  differential holds the `#elif` gate to FCS until the package moves. It also
+  starts an indented `#nowarn`'s directive range at the start of the line,
+  where the table's compiler starts it at the `#`, which we follow
+  (`an_indented_directive_range_starts_at_its_hash`).
 
 ## Open questions
 

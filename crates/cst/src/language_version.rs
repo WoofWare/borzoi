@@ -4,10 +4,9 @@
 //! (`../fsharp/src/Compiler/Facilities/LanguageFeatures.fs`): the same set of
 //! recognised `<LangVersion>` strings and the same alias resolution. In
 //! particular FCS sets `latestVersion = latestMajorVersion = defaultVersion =
-//! 10.0`, so `default`, `latest`, and `latestmajor` all resolve to 10.0 today;
-//! 11.0 is reachable only by writing `11.0`/`11` explicitly (it is gated on a
-//! preview SDK), and `preview` is a sentinel above every numbered version
-//! (FCS's `previewVersion = 9999`). See [`docs/ast-versioning-plan.md`] D3.
+//! 11.0`, so `default`, `latest`, and `latestmajor` all resolve to 11.0 today,
+//! and `preview` is a sentinel above every numbered version (FCS's
+//! `previewVersion = 9999`). See [`docs/ast-versioning-plan.md`] D3.
 //!
 //! Beyond faithful `<LangVersion>` parsing, the type answers each FCS
 //! `SupportsFeature` question the lexer, lex-filter and parser ask:
@@ -38,11 +37,10 @@ pub enum LanguageVersion {
     V8_0,
     /// F# 9.0.
     V9_0,
-    /// F# 10.0 — FCS's `defaultVersion`, and what `default`/`latest`/
-    /// `latestmajor` resolve to.
+    /// F# 10.0.
     V10_0,
-    /// F# 11.0 — in FCS's set of valid versions, but *not* the default/latest;
-    /// reachable only by an explicit `11.0`/`11` pin (gated on a preview SDK).
+    /// F# 11.0 — FCS's `defaultVersion`, and what `default`/`latest`/
+    /// `latestmajor` resolve to.
     V11_0,
     /// `<LangVersion>preview</LangVersion>` — every preview feature on. FCS's
     /// `previewVersion = 9999`, ordered above all numbered versions.
@@ -50,10 +48,10 @@ pub enum LanguageVersion {
 }
 
 impl LanguageVersion {
-    /// The version an unspecified project uses — FCS's `defaultVersion` (10.0),
+    /// The version an unspecified project uses — FCS's `defaultVersion` (11.0),
     /// which `default`/`latest`/`latestmajor` all resolve to, and what the LSP
     /// parses a project at when it sets no `<LangVersion>`.
-    pub const DEFAULT: LanguageVersion = LanguageVersion::V10_0;
+    pub const DEFAULT: LanguageVersion = LanguageVersion::V11_0;
 
     /// The bottom of the ladder — the least surface this parser models.
     pub const MIN: LanguageVersion = LanguageVersion::V4_6;
@@ -134,7 +132,7 @@ impl LanguageVersion {
         // `ToUpperInvariant` without locale surprises.
         Some(match text.to_ascii_uppercase().as_str() {
             "PREVIEW" => LanguageVersion::Preview,
-            // FCS: latestVersion = latestMajorVersion = defaultVersion = 10.0.
+            // FCS: latestVersion = latestMajorVersion = defaultVersion = 11.0.
             "DEFAULT" | "LATEST" | "LATESTMAJOR" => LanguageVersion::DEFAULT,
             "4.6" => LanguageVersion::V4_6,
             "4.7" => LanguageVersion::V4_7,
@@ -228,9 +226,9 @@ mod tests {
     fn fcs_string_mapping() {
         let cases: &[(&str, Option<LanguageVersion>)] = &[
             ("preview", Some(Preview)),
-            ("default", Some(V10_0)),
-            ("latest", Some(V10_0)),
-            ("latestmajor", Some(V10_0)),
+            ("default", Some(V11_0)),
+            ("latest", Some(V11_0)),
+            ("latestmajor", Some(V11_0)),
             ("4.6", Some(V4_6)),
             ("4.7", Some(V4_7)),
             ("5.0", Some(V5_0)),
@@ -280,15 +278,15 @@ mod tests {
         }
         assert_eq!(
             LanguageVersion::from_lang_version_text("LATESTMAJOR"),
-            Some(V10_0)
+            Some(V11_0)
         );
     }
 
-    /// `default`/`latest`/`latestmajor` are all `defaultVersion` (10.0) in FCS,
+    /// `default`/`latest`/`latestmajor` are all `defaultVersion` (11.0) in FCS,
     /// and that is our [`LanguageVersion::DEFAULT`] / supported surface.
     #[test]
     fn aliases_resolve_to_default() {
-        assert_eq!(LanguageVersion::DEFAULT, V10_0);
+        assert_eq!(LanguageVersion::DEFAULT, V11_0);
         for alias in ["default", "latest", "latestmajor"] {
             assert_eq!(
                 LanguageVersion::from_lang_version_text(alias),
@@ -309,16 +307,16 @@ mod tests {
         assert_eq!(all, sorted, "variants are declared in ascending order");
 
         assert!(V4_6 < V11_0);
-        assert!(LanguageVersion::DEFAULT < V11_0);
+        assert!(LanguageVersion::DEFAULT < Preview);
         assert!(V11_0 < Preview);
         assert!(*all.iter().max().unwrap() == Preview);
     }
 
     /// `#elif` is gated on F# 11.0 (FCS's `PreprocessorElif`): 11.0 and
-    /// `Preview` support it; 10.0 (our `DEFAULT`) and everything below do not.
+    /// `Preview` support it; 10.0 and everything below do not.
     #[test]
     fn preprocessor_elif_gated_at_11() {
-        assert!(!LanguageVersion::DEFAULT.supports(LanguageFeature::PreprocessorElif));
+        assert!(LanguageVersion::DEFAULT.supports(LanguageFeature::PreprocessorElif));
         assert!(!V10_0.supports(LanguageFeature::PreprocessorElif));
         assert!(V11_0.supports(LanguageFeature::PreprocessorElif));
         assert!(Preview.supports(LanguageFeature::PreprocessorElif));
