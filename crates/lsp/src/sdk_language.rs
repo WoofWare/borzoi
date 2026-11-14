@@ -279,8 +279,14 @@ pub fn project_compiler(
                     .iter()
                     .any(|variable| name.eq_ignore_ascii_case(variable)))
     });
-    let set_globally = globals.keys().any(|name| is_selector(name));
-    if set_in_environment || set_globally || parsed.hidden_content.is_some() {
+    let set_globally = globals
+        .keys()
+        .any(|name| is_selector(name) || name.to_ascii_lowercase().ends_with(TARGET_GRAPH_SUFFIX));
+    if set_in_environment
+        || set_globally
+        || parsed.hidden_content.is_some()
+        || !parsed.sdk_files_imported_from_outside.is_empty()
+    {
         return None;
     }
     let chooses = |defined: &borzoi_msbuild::ForeignDefinitions| {
@@ -522,7 +528,7 @@ impl LangVersionDoubt {
 /// The properties `CoreCompile` hands the compiler its language version
 /// through: `$(LangVersion)`, and `$(OtherFlags)` (as `$(FscOtherFlags)`),
 /// appended after it, where a `--langversion` or a response file overrides it.
-const LANG_VERSION_CARRIERS: [&str; 3] = ["LangVersion", "OtherFlags", "FscOtherFlags"];
+pub const LANG_VERSION_CARRIERS: [&str; 3] = ["LangVersion", "OtherFlags", "FscOtherFlags"];
 
 /// Why the evaluated `$(LangVersion)` may not be the version the compiler is
 /// handed, or `None` when it is. The compiler takes what `CoreCompile` reads at
@@ -530,7 +536,8 @@ const LANG_VERSION_CARRIERS: [&str; 3] = ["LangVersion", "OtherFlags", "FscOther
 /// that may write one of [`LANG_VERSION_CARRIERS`] ([`ForeignDefinitions`]),
 /// content the walk did not enter (which may hold such a target), and
 /// `$(OtherFlags)` that may name a version (`langversion`, or an `@` response
-/// file) leave it unestablished. The SDK writes `LangVersion` only at
+/// file), and a value with surrounding whitespace (which the task passes on as
+/// it stands) leave it unestablished. The SDK writes `LangVersion` only at
 /// evaluation.
 ///
 /// [`ForeignDefinitions`]: borzoi_msbuild::ForeignDefinitions
@@ -549,12 +556,25 @@ pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedC
             "a target that may write `{carrier}` before `CoreCompile` reads it"
         )));
     }
-    let other_flags = parsed
-        .properties
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("OtherFlags"))
-        .map(|(_, value)| value.to_ascii_lowercase())
-        .unwrap_or_default();
+    let property = |wanted: &str| {
+        parsed
+            .properties
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+            .map(|(_, value)| value.as_str())
+    };
+    // `ParsedProject::lang_version` is trimmed, but the task hands the
+    // compiler the value as it stands.
+    if property("LangVersion").is_some_and(|value| value.trim() != value) {
+        return Some(UntrustedCause::Unentered(
+            "a `$(LangVersion)` with surrounding whitespace, which the compiler is handed as \
+             it stands"
+                .to_string(),
+        ));
+    }
+    let other_flags = property("OtherFlags")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if other_flags.contains("langversion") || other_flags.contains('@') {
         return Some(UntrustedCause::Unentered(
             "`$(OtherFlags)`, which may name a language version after `$(LangVersion)`".to_string(),
@@ -985,6 +1005,18 @@ mod tests {
         let mut parsed = on_sdk("10.0.401");
         parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
         assert!(doubted(&parsed), "content unseen");
+        for value in [" 7.0", "8.0 ", "\t11"] {
+            let mut parsed = on_sdk("10.0.401");
+            parsed
+                .properties
+                .insert("LangVersion".to_string(), value.to_string());
+            assert!(doubted(&parsed), "{value:?}");
+        }
+        let mut parsed = on_sdk("10.0.401");
+        parsed
+            .properties
+            .insert("LangVersion".to_string(), "8.0".to_string());
+        assert!(!doubted(&parsed));
     }
 
     /// A workload manifest is the install's own build code: its targets stand,
@@ -1017,5 +1049,21 @@ mod tests {
                 .insert("/d/sdk-manifests/x/WorkloadManifest.targets".into());
             assert_eq!(compiler_of(&parsed, &[]), expected, "{name}");
         }
+    }
+
+    /// A target graph reshaped by a global, and the SDK's own files imported by
+    /// a project, decline.
+    #[test]
+    fn a_global_graph_or_an_sdk_file_imported_by_the_project_declines() {
+        let globals = HashMap::from([("BuildDependsOn".to_string(), "Clean".to_string())]);
+        assert_eq!(
+            project_compiler(&on_sdk("10.0.401"), &HashMap::new(), &globals),
+            None
+        );
+        let mut parsed = on_sdk("10.0.401");
+        parsed
+            .sdk_files_imported_from_outside
+            .insert("/d/sdk/10.0.401/Microsoft.CSharp.targets".into());
+        assert_eq!(compiler_of(&parsed, &[]), None);
     }
 }

@@ -887,6 +887,7 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
         r#"<Target Name="Build"><Exec Command="dotnet /opt/fsc.dll" /></Target>"#,
         r#"<Target Name="Note" AfterTargets="Build"><Message Text="built" /></Target>"#,
         r#"<PropertyGroup><BuildDependsOn>Mine</BuildDependsOn></PropertyGroup>"#,
+        r#"<Import Project="$(MSBuildToolsPath)/Microsoft.CSharp.targets" />"#,
         r#"<PropertyGroup><Selector>DotnetFscCompilerPath</Selector></PropertyGroup><Target Name="Pick" BeforeTargets="CoreCompile"><CreateProperty Value="x"><Output TaskParameter="Value" PropertyName="$(Selector)" /></CreateProperty></Target>"#,
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -923,6 +924,13 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
             .insert(variable.to_string(), "/opt/elsewhere".to_string());
         assert_eq!(named(&fsproj, &env), None, "{variable} in the environment");
     }
+    let globals = HashMap::from([("BuildDependsOn".to_string(), "Clean".to_string())]);
+    let mut workspace = Workspace::with_env_and_extra_build_properties(plain.clone(), globals);
+    assert_eq!(
+        workspace.compiler_sdk_for_project(&fsproj),
+        None,
+        "a target graph reshaped by a global"
+    );
 }
 
 /// A target outside the SDK that may write `$(LangVersion)` before

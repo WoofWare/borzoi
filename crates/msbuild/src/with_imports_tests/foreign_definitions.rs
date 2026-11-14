@@ -240,3 +240,39 @@ fn a_user_import_named_like_a_workload_manifest_is_foreign() {
     assert_eq!(names(&result.foreign_definitions.targets), ["mine"]);
     assert!(result.workload_definitions.targets.is_empty());
 }
+
+/// A file of the SDK that a project imports itself is recorded; the SDK's
+/// own `Sdk.props`/`Sdk.targets`, reached through the `Sdk` attribute, and the
+/// files the SDK imports are not.
+#[test]
+fn an_sdk_file_the_project_imports_itself_is_recorded() {
+    let tmp = TempDir::new().unwrap();
+    let resolver = canonical_sdk(
+        tmp.path(),
+        r#"<Project><Import Project="$(MSBuildThisFileDirectory)../../../Inner.props" /></Project>"#,
+        "<Project/>",
+        &[
+            ("Inner.props", "<Project/>"),
+            ("Other.targets", "<Project/>"),
+        ],
+    );
+    let plain = write_at(tmp.path(), "Plain.fsproj", r#"<Project Sdk="MySdk" />"#);
+    let result = parse_file_with_sdk_env(&plain, &resolver, HashMap::new(), HashMap::new());
+    assert!(
+        result.sdk_files_imported_from_outside.is_empty(),
+        "{:?}",
+        result.sdk_files_imported_from_outside
+    );
+    let importing = write_at(
+        tmp.path(),
+        "Importing.fsproj",
+        r#"<Project Sdk="MySdk"><Import Project="dotnet/sdk/10.0.100/Other.targets" /></Project>"#,
+    );
+    let result = parse_file_with_sdk_env(&importing, &resolver, HashMap::new(), HashMap::new());
+    let names: Vec<_> = result
+        .sdk_files_imported_from_outside
+        .iter()
+        .map(|p| p.file_name().unwrap().to_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Other.targets"]);
+}

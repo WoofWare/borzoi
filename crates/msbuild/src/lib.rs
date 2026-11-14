@@ -598,6 +598,11 @@ pub struct ParsedProject {
     /// .NET install (under its `sdk-manifests`) outside the SDK's version
     /// directory, reached as SDK content, which every SDK project imports.
     pub workload_definitions: ForeignDefinitions,
+    /// Files inside the entry SDK's version directory that a file outside it
+    /// imported directly, other than an SDK's `Sdk.props`/`Sdk.targets`: the
+    /// SDK's own content in an arrangement it did not choose (a project
+    /// importing `$(MSBuildToolsPath)/Microsoft.CSharp.targets`, say).
+    pub sdk_files_imported_from_outside: BTreeSet<PathBuf>,
     /// Why the walk did not see all of the build's content (an import it could
     /// not follow, or one whose gate it could not decide), or `None` when it
     /// entered everything the build imports. Content it did not see may define

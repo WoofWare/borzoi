@@ -55,7 +55,7 @@
 //! become visible to substitutions further down the project file.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -1686,6 +1686,8 @@ struct State<'r> {
     foreign_definitions: crate::ForeignDefinitions,
     /// Surfaced on [`ParsedProject::workload_definitions`].
     workload_definitions: crate::ForeignDefinitions,
+    /// Surfaced on [`ParsedProject::sdk_files_imported_from_outside`].
+    sdk_files_imported_from_outside: BTreeSet<PathBuf>,
     /// `true` while the walk is inside a context whose uncertainty would
     /// affect the **Compile item set**: a source-set-changing
     /// `<Compile>`/`<CompileBefore>`/`<CompileAfter>` element, or an
@@ -2254,6 +2256,7 @@ impl<'r> State<'r> {
             entry_sdk_version_dir: None,
             foreign_definitions: crate::ForeignDefinitions::default(),
             workload_definitions: crate::ForeignDefinitions::default(),
+            sdk_files_imported_from_outside: BTreeSet::new(),
             compile_context: false,
             in_sdk_subtree: false,
             sdk_tolerance_roots: Vec::new(),
@@ -2840,6 +2843,7 @@ impl<'r> State<'r> {
             entry_sdk_version_dir: _,
             foreign_definitions,
             workload_definitions,
+            sdk_files_imported_from_outside,
             locally_overridable,
             compile_context: _,
             in_sdk_subtree: _,
@@ -3005,6 +3009,7 @@ impl<'r> State<'r> {
             untrusted_properties,
             foreign_definitions,
             workload_definitions,
+            sdk_files_imported_from_outside,
             hidden_content,
             diagnostics,
             is_partial,
@@ -6699,6 +6704,21 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
         && path
             .components()
             .any(|c| c.as_os_str().eq_ignore_ascii_case("sdk-manifests"));
+    // A file of the SDK entered straight from a file outside it, other than an
+    // SDK's own `Sdk.props`/`Sdk.targets` (which the `Sdk` attribute and an
+    // `<Import Sdk=…>` reach): the SDK's own content, in an arrangement the SDK
+    // did not choose.
+    let sdk_entry_point = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        n.eq_ignore_ascii_case("Sdk.props") || n.eq_ignore_ascii_case("Sdk.targets")
+    }) && path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|n| n.eq_ignore_ascii_case("Sdk"));
+    if in_entry_sdk && !saved_in_sdk_subtree && !sdk_entry_point {
+        state
+            .sdk_files_imported_from_outside
+            .insert(path.to_path_buf());
+    }
     if workload_manifest && !in_entry_sdk {
         state
             .workload_definitions
