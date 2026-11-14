@@ -9,6 +9,13 @@ access-before-grounding node 12-20 `x.Length`	ours - fcs 'a
 access-before-grounding node 12-29 `x.Length, monos x`	ours - fcs 'a * System.Int32
 access-before-grounding node 22-29 `monos x`	ours System.Int32 fcs System.Int32
 access-before-grounding node 28-29 `x`	ours - fcs System.String
+annotation-relates-before-the-body binder 4-6 `c4`	ours - fcs System.String -> System.String
+annotation-relates-before-the-body binder 7-8 `p`	ours - fcs System.String
+annotation-relates-before-the-body census	[]
+annotation-relates-before-the-body fcs	errors FS0001
+annotation-relates-before-the-body node 20-33 `both p (gi p)`	ours - fcs System.String
+annotation-relates-before-the-body node 25-26 `p`	ours - fcs System.String
+annotation-relates-before-the-body node 28-32 `gi p`	ours - fcs System.String
 argument-check-before-a-complete-suffix binder 4-6 `r7`	ours Microsoft.FSharp.Core.Unit -> (System.Int32 * System.String) * Microsoft.FSharp.Core.FSharpOption<'a> fcs Microsoft.FSharp.Core.Unit -> (System.Int32 * System.String) * Microsoft.FSharp.Core.FSharpOption<'a>
 argument-check-before-a-complete-suffix binder 7-9 `()`	ours - fcs Microsoft.FSharp.Core.Unit
 argument-check-before-a-complete-suffix census	[]
@@ -25,6 +32,19 @@ argument-check-before-an-unmodelled-suffix node 13-19 `idf uu`	ours - fcs System
 argument-check-before-an-unmodelled-suffix node 13-43 `idf uu, Unchecked.defaultof<_>`	ours - fcs (System.Int32 * System.String) * 'a
 argument-check-before-an-unmodelled-suffix node 17-19 `uu`	ours - fcs System.Int32 * System.String
 argument-check-before-an-unmodelled-suffix node 21-40 `Unchecked.defaultof`	ours - fcs 'a
+branch-relates-before-its-arguments binder 4-6 `c1`	ours - fcs System.Boolean -> System.String -> System.String * System.String
+branch-relates-before-its-arguments binder 7-8 `b`	ours - fcs System.Boolean
+branch-relates-before-its-arguments binder 9-10 `p`	ours - fcs System.String
+branch-relates-before-its-arguments census	[]
+branch-relates-before-its-arguments fcs	errors FS0001
+branch-relates-before-its-arguments node 14-51 `(if b then "s" else both p (gi p)), p`	ours - fcs System.String * System.String
+branch-relates-before-its-arguments node 15-47 `if b then "s" else both p (gi p)`	ours System.String fcs System.String
+branch-relates-before-its-arguments node 18-19 `b`	ours - fcs System.Boolean
+branch-relates-before-its-arguments node 25-28 `"s"`	ours System.String fcs System.String
+branch-relates-before-its-arguments node 34-47 `both p (gi p)`	ours - fcs System.String
+branch-relates-before-its-arguments node 39-40 `p`	ours - fcs System.String
+branch-relates-before-its-arguments node 42-46 `gi p`	ours - fcs System.String
+branch-relates-before-its-arguments node 50-51 `p`	ours - fcs System.String
 condition-before-a-check binder 4-7 `r10`	ours System.Boolean -> System.Int32 * System.Boolean fcs System.Boolean -> System.Int32 * System.Boolean
 condition-before-a-check binder 8-9 `x`	ours System.Boolean fcs System.Boolean
 condition-before-a-check census	[]
@@ -60,6 +80,18 @@ lambda-access node 16-33 `fun s -> s.Length`	ours - fcs System.String -> System.
 lambda-access node 25-26 `s`	ours - fcs System.String
 lambda-access node 25-33 `s.Length`	ours - fcs System.Int32
 lambda-access node 9-34 `apply (fun s -> s.Length)`	ours System.Int32 fcs System.Int32
+parameter-loosened-once-known binder 4-6 `c6`	ours - fcs (System.Object -> System.Int32) -> 'a -> ('b -> System.Int32) * System.Int32 * 'a
+parameter-loosened-once-known binder 7-8 `x`	ours - fcs System.Object -> System.Int32
+parameter-loosened-once-known binder 9-10 `y`	ours - fcs 'a
+parameter-loosened-once-known census	[]
+parameter-loosened-once-known fcs	clean
+parameter-loosened-once-known node 14-24 `applyObj x`	ours - fcs 'a -> System.Int32
+parameter-loosened-once-known node 14-32 `applyObj x, x y, y`	ours - fcs ('a -> System.Int32) * System.Int32 * 'b
+parameter-loosened-once-known node 23-24 `x`	ours - fcs System.Object -> System.Int32
+parameter-loosened-once-known node 26-27 `x`	ours - fcs 'a -> System.Int32
+parameter-loosened-once-known node 26-29 `x y`	ours - fcs System.Int32
+parameter-loosened-once-known node 28-29 `y`	ours - fcs 'a
+parameter-loosened-once-known node 31-32 `y`	ours - fcs 'a
 singleton-into-obj-list binder 4-6 `r1`	ours System.String -> System.Int32 fcs System.String -> System.Int32
 singleton-into-obj-list binder 8-9 `y`	ours System.String fcs System.String
 singleton-into-obj-list census	[]
@@ -84,3 +116,17 @@ singleton-into-string-list fcs	clean
 singleton-into-string-list node 21-37 `gs (singleton y)`	ours System.Int32 fcs System.Int32
 singleton-into-string-list node 25-36 `singleton y`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.String>
 singleton-into-string-list node 35-36 `y`	ours - fcs System.String
+unique-overload-relates-before-its-arguments binder 19-20 `p`	ours - fcs System.String
+unique-overload-relates-before-its-arguments binder 4-6 `c2`	ours - fcs System.String -> System.String -> System.String * System.String
+unique-overload-relates-before-its-arguments binder 8-9 `s`	ours System.String fcs System.String
+unique-overload-relates-before-its-arguments census	[]
+unique-overload-relates-before-its-arguments fcs	errors FS0001
+unique-overload-relates-before-its-arguments node 24-52 `both p (s.Insert(gi p, "z"))`	ours - fcs System.String
+unique-overload-relates-before-its-arguments node 24-55 `both p (s.Insert(gi p, "z")), p`	ours - fcs System.String * System.String
+unique-overload-relates-before-its-arguments node 29-30 `p`	ours - fcs System.String
+unique-overload-relates-before-its-arguments node 32-33 `s`	ours - fcs System.String
+unique-overload-relates-before-its-arguments node 32-51 `s.Insert(gi p, "z")`	ours - fcs System.String
+unique-overload-relates-before-its-arguments node 41-45 `gi p`	ours - fcs System.Int32
+unique-overload-relates-before-its-arguments node 44-45 `p`	ours - fcs System.Int32
+unique-overload-relates-before-its-arguments node 47-50 `"z"`	ours - fcs System.String
+unique-overload-relates-before-its-arguments node 54-55 `p`	ours - fcs System.String

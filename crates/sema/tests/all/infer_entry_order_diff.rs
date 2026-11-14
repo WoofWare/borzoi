@@ -8,50 +8,67 @@
 //! checked: in `g (singleton y)` with `g : obj list -> int` and `y : string`,
 //! `singleton`'s element type becomes `obj` and `y` coerces to it, where
 //! walking `singleton y` first would fix it to `string` and then fail against
-//! `obj list`. A tuple argument against a tuple domain, and a lambda against
-//! a function domain, likewise see the domain before their parts are checked.
-//! Stage L2 of #662 decides each argument check at that point, under the
-//! binding's faithful prefix (the flag that says inference still knows FCS's
-//! table): nothing after an argument, modelled or not, can change what was
-//! decided there.
+//! `obj list`. A tuple argument against a tuple domain, a lambda against a
+//! function domain, an `if` or `match` branch against the expected type, a
+//! body against its return annotation, and a method's argument against the
+//! parameter of the one overload its arity leaves (`UnifyUniqueOverloading`)
+//! likewise see the expected type before their parts are checked. Stage L2 of
+//! #662 decides each argument check at that point, under the binding's
+//! faithful prefix (the flag that says inference still knows FCS's table), and
+//! treats an expected type it does not decide against as unknown from that
+//! point on.
 //!
 //! # The programs
 //!
-//! Each case is one function of a generated file:
+//! Most cases are one function of a generated file of the form
 //!
 //! ```text
-//! let cK (y: string) (n: int) p = (idf 3, SINK (ARG), idf "w", p)
+//! let cK (y: string) (n: int) (b: bool) x p = (idf 3, SINK (ARG), EXTRA…, idf "w", p)
 //! ```
 //!
 //! `SINK` takes one of a handful of domains (`obj list`, `string list`,
 //! `int`, `obj`, `int * string`, `string -> int`, `obj option`), and `ARG` is
 //! generated against that domain from generic combinators (`idf`,
-//! `singleton`, `both : 'a -> 'a -> 'a`, `fst`, `Some`, `app`, the pipe), tuples
-//! and leaves (`y`, `n`, `p`, literals, `box`). With a probability drawn per
-//! file, a leaf is replaced by one of the wrong type (an ill-typed argument),
-//! and a subexpression is put under a lambda (`app (fun z -> A) B`), which
-//! inference does not model. `idf 3` and `idf "w"` are **witnesses**: each is
-//! typed only by its own argument check, so whether it is committed shows
-//! whether the checks around it fired. `p` is open until the argument fixes
-//! it, so its node and the function's binder show what the argument's checks
-//! did to it.
+//! `singleton`, `both : 'a -> 'a -> 'a`, `fst`, `Some`, `app`, the pipe),
+//! tuples, `if` and `match` over the domain, method calls whose arguments hold
+//! checks of their own (`y.Insert(ARG, "z")`), and leaves (`y`, `n`, `p`,
+//! literals, `box`). The `EXTRA` elements, when there are any, are method
+//! calls with checks in their arguments — one against a tuple-typed parameter
+//! (`xs.Add((I, S))`), one against `obj` (`(box 1).Equals((I, S))`) — and a
+//! parameter fixed to `obj -> int` and then applied (`applyObj x, x (A)`;
+//! the head takes `x` only then).
+//! `p` may be used several times, so the first relation FCS applies to it is
+//! the one that fixes it. With a probability drawn per file, a leaf is
+//! replaced by one of the wrong type (an ill-typed argument), and a
+//! subexpression is put under a lambda (`app (fun z -> A) B`), which inference
+//! does not model. `idf 3` and `idf "w"` are **witnesses**: each is typed only
+//! by its own argument check, so whether it is committed shows whether the
+//! checks around it fired. `p` is open until something fixes it, so its node
+//! and the function's binder show what the checks did to it.
+//!
+//! The other cases are a body under a return annotation,
+//! `let cK (y: string) (n: int) (b: bool) p : T = ARG`, with `ARG` generated
+//! against `T` (`let c4 p : string = both p (gi p)`).
 //!
 //! # The properties
 //!
 //! - **Certain implies exact**, everywhere: every expression and binder type
 //!   we commit, FCS has, the same, on clean and ill-typed cases alike.
 //! - **Must commit**, per point:
-//!   - the witness *before* the sink, whatever follows it: the argument
-//!     after it cannot change what FCS decided at it, so the prefix is still
-//!     faithful there;
+//!   - the witness *before* the sink, whatever follows it: what comes after it
+//!     cannot change what FCS decided at it, so the prefix is still faithful
+//!     there;
 //!   - the witness after the sink, `p`'s node, and the binders, in a case FCS
-//!     accepts with no lambda in it: every check in it is one inference
-//!     models, decided where FCS decides it.
+//!     accepts built only from the plain constructs — no lambda, no ill-typed
+//!     leaf, no second use of `p`, no branch, method call, applied parameter
+//!     or return annotation: every check in it is one inference models,
+//!     decided where FCS decides it. The richer constructs are graded by
+//!     certain-implies-exact alone, since L2 may soundly decline inside them.
 //!
 //!   Each only where FCS's type is ground.
 //!
-//! The generator's regime — its depth, and how often it injects a lambda or an
-//! ill-typed leaf — is drawn per file, and the sweep asserts it reached every
+//! The generator's regime — its depth, and how often it injects each
+//! construct — is drawn per file, and the sweep asserts it reached every
 //! construct and both verdicts in quantity.
 
 use std::collections::BTreeMap;
@@ -69,6 +86,7 @@ const HEADER: &str = "module EntryOrder\n\
                       let singleton x = List.singleton x\n\
                       let both (x: 'a) (y: 'a) = x\n\
                       let app (f: 'a -> 'b) (x: 'a) = f x\n\
+                      let applyObj (k: obj -> int) = k\n\
                       let monos (t: string) = 2\n\
                       let mono (b: bool) = 1\n\
                       let g (xs: obj list) = 0\n\
@@ -77,7 +95,8 @@ const HEADER: &str = "module EntryOrder\n\
                       let go (o: obj) = 0\n\
                       let gt (t: int * string) = 0\n\
                       let gf (k: string -> int) = 0\n\
-                      let gpo (o: obj option) = 0\n";
+                      let gpo (o: obj option) = 0\n\
+                      let xs = ResizeArray<int * string>()\n";
 
 /// The types the generator builds an argument against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +112,21 @@ enum Want {
     StrToInt,
 }
 
+impl Want {
+    /// The type as F# spells it in an annotation.
+    fn spelled(&self) -> String {
+        match self {
+            Want::Int => "int".into(),
+            Want::Str => "string".into(),
+            Want::Obj => "obj".into(),
+            Want::List(t) => format!("{} list", t.spelled()),
+            Want::Opt(t) => format!("{} option", t.spelled()),
+            Want::Pair => "(int * string)".into(),
+            Want::StrToInt => "(string -> int)".into(),
+        }
+    }
+}
+
 /// Each sink, and its domain.
 fn sinks() -> Vec<(&'static str, Want)> {
     vec![
@@ -106,8 +140,8 @@ fn sinks() -> Vec<(&'static str, Want)> {
     ]
 }
 
-/// What a generated argument contains, for the distribution the sweep
-/// asserts and for the must-commit rule.
+/// What a generated case contains, for the distribution the sweep asserts
+/// and for the must-commit rule.
 #[derive(Debug, Default, Clone, Copy)]
 struct Features {
     lambda: bool,
@@ -119,6 +153,30 @@ struct Features {
     infix: bool,
     tuple: bool,
     open_param: bool,
+    /// `p` used more than once.
+    multi_p: bool,
+    /// An `if` or `match` over the expected type.
+    branch: bool,
+    /// A method call whose argument holds a check.
+    method_arg: bool,
+    /// A parameter fixed to `obj -> int`, then applied.
+    applied_fn: bool,
+    /// The body is under a return annotation.
+    annotated: bool,
+}
+
+impl Features {
+    /// Whether the case uses only the plain constructs, so that its points
+    /// after the sink are must-commit where FCS accepts it.
+    fn plain(&self) -> bool {
+        !(self.lambda
+            || self.ill_typed
+            || self.multi_p
+            || self.branch
+            || self.method_arg
+            || self.applied_fn
+            || self.annotated)
+    }
 }
 
 /// The generator's regime for one file.
@@ -127,28 +185,66 @@ struct Regime {
     depth: usize,
     lambda_pct: usize,
     ill_pct: usize,
+    /// The chance that a leaf may be a further use of `p`.
+    multi_p_pct: usize,
+    branch_pct: usize,
+    method_pct: usize,
+    /// The chance of each of up to two extra elements.
+    extra_pct: usize,
+    annotated_pct: usize,
 }
 
 struct ArgGen<'r> {
     rng: &'r mut Rng,
     regime: Regime,
     features: Features,
-    /// Whether `p` has been used: once per argument, so that FCS fixes it by
-    /// one relation.
-    used_p: bool,
+    /// How many times the case has used `p`.
+    p_uses: usize,
 }
 
 impl ArgGen<'_> {
     /// An expression FCS checks against `want`: well-typed unless an
-    /// ill-typed leaf is injected. `under_obj_element` says the position is
-    /// an `obj` element of a combinator's instantiated result, where a leaf of
-    /// another type coerces only because the domain reached it first.
+    /// ill-typed leaf is injected or `p` is used at two types. `under_obj_element`
+    /// says the position is an `obj` element of a combinator's instantiated
+    /// result, where a leaf of another type coerces only because the domain
+    /// reached it first.
     fn expr(&mut self, want: &Want, depth: usize, under_obj_element: bool) -> String {
         if depth > 0 && self.rng.chance(self.regime.lambda_pct) {
             self.features.lambda = true;
             let body = self.expr(want, depth - 1, false);
             let x = self.leaf(&Want::Int, false);
             return format!("app (fun z -> {body}) ({x})");
+        }
+        if depth > 0 && self.rng.chance(self.regime.branch_pct) {
+            self.features.branch = true;
+            let a = self.expr(want, depth - 1, under_obj_element);
+            let c = self.expr(want, depth - 1, under_obj_element);
+            return if self.rng.chance(50) {
+                format!("(if b then {a} else {c})")
+            } else {
+                format!("(match n with 0 -> {a} | _ -> {c})")
+            };
+        }
+        if depth > 0 && self.rng.chance(self.regime.method_pct) {
+            match want {
+                Want::Str => {
+                    self.features.method_arg = true;
+                    return if self.rng.chance(50) {
+                        let i = self.expr(&Want::Int, depth - 1, false);
+                        format!("y.Insert({i}, \"z\")")
+                    } else {
+                        let s = self.expr(&Want::Str, depth - 1, false);
+                        format!("y.Insert(0, {s})")
+                    };
+                }
+                Want::Obj => {
+                    self.features.method_arg = true;
+                    let i = self.expr(&Want::Int, depth - 1, false);
+                    let s = self.expr(&Want::Str, depth - 1, false);
+                    return format!("(box 1).Equals(({i}, {s}))");
+                }
+                _ => {}
+            }
         }
         if depth == 0 || self.rng.chance(25) {
             return self.leaf(want, under_obj_element);
@@ -201,9 +297,11 @@ impl ArgGen<'_> {
     }
 
     fn leaf(&mut self, want: &Want, under_obj_element: bool) -> String {
-        if !self.used_p && self.rng.chance(20) {
-            self.used_p = true;
+        let p_allowed = self.p_uses == 0 || self.rng.chance(self.regime.multi_p_pct);
+        if p_allowed && self.rng.chance(20) {
+            self.p_uses += 1;
             self.features.open_param = true;
+            self.features.multi_p |= self.p_uses > 1;
             return "p".into();
         }
         let ill = self.rng.chance(self.regime.ill_pct);
@@ -251,6 +349,37 @@ impl ArgGen<'_> {
             (Want::StrToInt, true) => "mono".into(),
         }
     }
+
+    /// An element after the sink: a method call whose argument holds checks,
+    /// or a parameter fixed to `obj -> int` and then applied.
+    fn extra(&mut self, depth: usize) -> String {
+        match self.rng.below(4) {
+            0 => {
+                self.features.method_arg = true;
+                let i = self.expr(&Want::Int, depth, false);
+                format!("y.Insert({i}, \"z\")")
+            }
+            1 => {
+                self.features.method_arg = true;
+                self.features.tuple = true;
+                let i = self.expr(&Want::Int, depth, false);
+                let s = self.expr(&Want::Str, depth, false);
+                format!("xs.Add(({i}, {s}))")
+            }
+            2 => {
+                self.features.method_arg = true;
+                self.features.tuple = true;
+                let i = self.expr(&Want::Int, depth, false);
+                let s = self.expr(&Want::Str, depth, false);
+                format!("(box 1).Equals(({i}, {s}))")
+            }
+            _ => {
+                self.features.applied_fn = true;
+                let a = self.expr(&Want::Obj, depth, false);
+                format!("applyObj x, x ({a})")
+            }
+        }
+    }
 }
 
 /// One generated case.
@@ -261,10 +390,11 @@ struct Case {
     text: String,
     features: Features,
     /// The ranges of its points, relative to `start`: the witness before the
-    /// sink, the witness after it, and the `p` node at the end.
-    before: (usize, usize),
-    after: (usize, usize),
-    p_node: (usize, usize),
+    /// sink, the witness after it, and the `p` node at the end. A case under a
+    /// return annotation has none of them.
+    before: Option<(usize, usize)>,
+    after: Option<(usize, usize)>,
+    p_node: Option<(usize, usize)>,
     /// The function's name and its parameter `p`, relative to `start`.
     name: (usize, usize),
     p_binder: (usize, usize),
@@ -276,6 +406,11 @@ fn regime_for(seed: u64) -> Regime {
         depth: [1, 2, 3][rng.below(3)],
         lambda_pct: [0, 10, 30][rng.below(3)],
         ill_pct: [0, 8, 25][rng.below(3)],
+        multi_p_pct: [0, 40, 80][rng.below(3)],
+        branch_pct: [0, 10, 25][rng.below(3)],
+        method_pct: [0, 10, 25][rng.below(3)],
+        extra_pct: [0, 25, 50][rng.below(3)],
+        annotated_pct: [0, 15, 30][rng.below(3)],
     }
 }
 
@@ -290,33 +425,68 @@ fn file_for(seed: u64) -> (String, Vec<Case>) {
     let sinks = sinks();
     for k in 0..CASES_PER_FILE {
         let (sink, domain) = &sinks[rng.below(sinks.len())];
+        let annotated = rng.chance(regime.annotated_pct);
+        let extras = if annotated {
+            0
+        } else {
+            usize::from(rng.chance(regime.extra_pct)) + usize::from(rng.chance(regime.extra_pct))
+        };
         let mut g = ArgGen {
             rng: &mut rng,
             regime,
             features: Features::default(),
-            used_p: false,
+            p_uses: 0,
         };
-        let arg = g.expr(domain, regime.depth, false);
-        let features = g.features;
-        let head = format!("let c{k:03} (y: string) (n: int) p = (");
+        // The body first, then the head: `x` is a parameter only where an
+        // element applies it, since FCS generalises an unused one and the
+        // function's type is then not ground.
+        let mut body = String::new();
+        let (before, after, p_node);
+        if annotated {
+            g.features.annotated = true;
+            // `both p (ARG)` half the time, so that `p` is related to the
+            // annotation before the argument is checked (`c4`).
+            let expr = if g.rng.chance(50) {
+                g.p_uses += 1;
+                g.features.open_param = true;
+                let a = g.expr(domain, regime.depth, false);
+                format!("both p ({a})")
+            } else {
+                g.expr(domain, regime.depth, false)
+            };
+            body.push_str(&format!(" : {} = {expr}", domain.spelled()));
+            before = None;
+            after = None;
+            p_node = None;
+        } else {
+            let arg = g.expr(domain, regime.depth, false);
+            let extra: Vec<String> = (0..extras).map(|_| g.extra(regime.depth)).collect();
+            body.push_str(" = (");
+            let before_at = body.len();
+            body.push_str("idf 3");
+            before = Some((before_at, body.len()));
+            body.push_str(&format!(", {sink} ({arg}), "));
+            for e in &extra {
+                body.push_str(e);
+                body.push_str(", ");
+            }
+            let after_at = body.len();
+            body.push_str("idf \"w\"");
+            after = Some((after_at, body.len()));
+            body.push_str(", ");
+            let p_at = body.len();
+            body.push('p');
+            p_node = Some((p_at, body.len()));
+            body.push(')');
+        }
+        let x = if g.features.applied_fn { " x" } else { "" };
+        let head = format!("let c{k:03} (y: string) (n: int) (b: bool){x} p");
         let name = (4, 8);
-        let p_binder = {
-            let at = head.find(" p =").expect("the head binds p") + 1;
-            (at, at + 1)
-        };
-        let before_at = head.len();
-        let mut text = head;
-        text.push_str("idf 3");
-        let before = (before_at, text.len());
-        text.push_str(&format!(", {sink} ({arg}), "));
-        let after_at = text.len();
-        text.push_str("idf \"w\"");
-        let after = (after_at, text.len());
-        text.push_str(", ");
-        let p_at = text.len();
-        text.push('p');
-        let p_node = (p_at, text.len());
-        text.push(')');
+        let p_binder = (head.len() - 1, head.len());
+        let shift = |r: Option<(usize, usize)>| r.map(|(s, e)| (s + head.len(), e + head.len()));
+        let (before, after, p_node) = (shift(before), shift(after), shift(p_node));
+        let text = head + &body;
+        let features = g.features;
         let start = src.len();
         src.push_str(&text);
         src.push('\n');
@@ -350,7 +520,7 @@ struct Tally {
 
 #[test]
 fn argument_checks_are_decided_at_the_arguments_entry() {
-    let files = env_usize_or("BORZOI_ENTRY_ORDER_FILES", 16);
+    let files = env_usize_or("BORZOI_ENTRY_ORDER_FILES", 24);
     let env = full_bcl_env();
     let mut tally = Tally::default();
     let mut unsound: Vec<String> = Vec::new();
@@ -441,10 +611,16 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
                 ("infix", f.infix),
                 ("tuple", f.tuple),
                 ("open-param", f.open_param),
+                ("multi-use p", f.multi_p),
+                ("branch", f.branch),
+                ("method argument", f.method_arg),
+                ("applied parameter", f.applied_fn),
+                ("annotated", f.annotated),
                 (
                     "clean-coerced-inside",
-                    clean && f.coerced_inside && !f.lambda,
+                    clean && f.coerced_inside && f.plain(),
                 ),
+                ("clean-plain", clean && f.plain()),
             ] {
                 if on {
                     *tally.with.entry(name).or_default() += 1;
@@ -471,14 +647,22 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
                     ));
                 }
             };
-            grade("witness before", abs(case.before), "node");
-            // After the sink, only where nothing in the case is unmodelled or
-            // rejected: an injected ill-typed leaf may be one FCS converts
+            if let Some(before) = case.before {
+                grade("witness before", abs(before), "node");
+            }
+            // After the sink, only where the case is built from the plain
+            // constructs: an injected ill-typed leaf may be one FCS converts
             // (an `obj` element takes `[true]`), but it may be unmodelled
-            // too, which ends the faithful prefix.
-            if clean && !f.lambda && !f.ill_typed {
-                grade("witness after", abs(case.after), "node");
-                grade("p node", abs(case.p_node), "node");
+            // too, which ends the faithful prefix; and inside a branch, a
+            // method argument or under a second use of `p`, L2 may soundly
+            // decline.
+            if clean && f.plain() {
+                if let Some(after) = case.after {
+                    grade("witness after", abs(after), "node");
+                }
+                if let Some(p_node) = case.p_node {
+                    grade("p node", abs(p_node), "node");
+                }
                 grade("function binder", abs(case.name), "binder");
                 grade("p binder", abs(case.p_binder), "binder");
             }
@@ -503,14 +687,11 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
         })
         .collect();
     assert!(
-        unsound.is_empty(),
-        "{} commits FCS does not have:\n{}",
+        unsound.is_empty() && missing.is_empty(),
+        "{} commits FCS does not have:\n{}\n\ncommits FCS makes where the prefix is faithful, \
+         missed:\n{}",
         unsound.len(),
-        unsound.join("\n")
-    );
-    assert!(
-        missing.is_empty(),
-        "commits FCS makes where the prefix is faithful, missed:\n{}",
+        unsound.join("\n"),
         missing_report.join("\n")
     );
     assert!(
@@ -528,7 +709,13 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
         "infix",
         "tuple",
         "open-param",
+        "multi-use p",
+        "branch",
+        "method argument",
+        "applied parameter",
+        "annotated",
         "clean-coerced-inside",
+        "clean-plain",
     ] {
         let n = tally.with.get(name).copied().unwrap_or(0);
         assert!(n >= min, "only {n} cases with {name}: {tally:?}");
@@ -562,9 +749,21 @@ fn generated_cases_parse_and_place_their_points() {
         assert!(parsed.errors.is_empty(), "{:?}\n{src}", parsed.errors);
         for case in &cases {
             let at = |(s, e): (usize, usize)| &case.text[s..e];
-            assert_eq!(at(case.before), "idf 3", "{}", case.text);
-            assert_eq!(at(case.after), "idf \"w\"", "{}", case.text);
-            assert_eq!(at(case.p_node), "p", "{}", case.text);
+            if let Some(before) = case.before {
+                assert_eq!(at(before), "idf 3", "{}", case.text);
+            }
+            if let Some(after) = case.after {
+                assert_eq!(at(after), "idf \"w\"", "{}", case.text);
+            }
+            if let Some(p_node) = case.p_node {
+                assert_eq!(at(p_node), "p", "{}", case.text);
+            }
+            assert_eq!(
+                case.before.is_none(),
+                case.features.annotated,
+                "{}",
+                case.text
+            );
             assert!(at(case.name).starts_with('c'), "{}", case.text);
             assert_eq!(at(case.p_binder), "p", "{}", case.text);
             assert_eq!(&src[case.start..case.start + case.text.len()], case.text);

@@ -43,6 +43,8 @@ const HEADER: &str = "module Pins\n\
                       let apply (k: string -> int) = k \"x\"\n\
                       let monos (t: string) = 2\n\
                       let gi (i: int) = 0\n\
+                      let both (x: 'a) (y: 'a) = x\n\
+                      let applyObj (k: obj -> int) = k\n\
                       let uu = fst ((7, \"u\"), 1)\n";
 
 /// Each case: its name, its `let`, and what entry and exit order each make of
@@ -111,6 +113,33 @@ const CASES: &[(&str, &str, &str)] = &[
          check and keeps `x : bool`. A check decided at its argument must see the \
          condition's equality, which inference applies to the parameter's private slot \
          and not to the variable its uses read",
+    ),
+    (
+        "branch-relates-before-its-arguments",
+        "let c1 b p = ((if b then \"s\" else both p (gi p)), p)",
+        "FCS relates the else-branch's result to `string` before checking its \
+         arguments, so `both`'s `'a`, and `p` with it, are `string` when `gi p` is \
+         checked, which FCS rejects. A relation dropped at the branch's exit leaves \
+         `p` open there, and `gi p` would fix it to `int`",
+    ),
+    (
+        "unique-overload-relates-before-its-arguments",
+        "let c2 (s: string) p = (both p (s.Insert(gi p, \"z\")), p)",
+        "`Insert` has one overload of two arguments, whose return FCS relates to the \
+         call's expected type, `both`'s `'a`, before the arguments are checked \
+         (`UnifyUniqueOverloading`): `p` is `string` when `gi p` is checked",
+    ),
+    (
+        "annotation-relates-before-the-body",
+        "let c4 p : string = both p (gi p)",
+        "the return annotation is the body's expected type before the body is \
+         checked, so `p` is `string` at `gi p`",
+    ),
+    (
+        "parameter-loosened-once-known",
+        "let c6 x y = (applyObj x, x y, y)",
+        "once `applyObj x` fixes `x : obj -> int`, FCS loosens `x` at its next use, \
+         so `x y` leaves `y` generic rather than fixing it to `obj`",
     ),
 ];
 

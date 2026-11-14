@@ -197,6 +197,8 @@ struct Base {
     params: String,
     items: Vec<String>,
     tail: Tail,
+    /// Whether it takes the multi-use parameter `q`.
+    multi: bool,
 }
 
 /// Every function name in a file has this many characters, so moving between
@@ -309,7 +311,12 @@ impl Base {
 /// One base program. `modelled_pct` is the chance its items use only
 /// constructs inference models, so that `P` is often complete: an incomplete
 /// `P` fires no argument check, and has nothing for a hole to take away.
-fn gen_base(rng: &mut Rng, modelled_pct: usize, plain_pct: usize) -> Base {
+///
+/// `multi_pct` is the chance it takes an unannotated parameter `q` that the
+/// generator uses wherever it wants a value of one type drawn per base, so
+/// `q` is used several times and the first relation FCS applies to it in its
+/// checking order is the one that fixes it.
+fn gen_base(rng: &mut Rng, modelled_pct: usize, plain_pct: usize, multi_pct: usize) -> Base {
     let modelled_only = rng.chance(modelled_pct);
     // Plain items: ground value locals and `unit` statements only. The
     // generator's other locals (a generic `g = idf`, a pattern over an open
@@ -317,8 +324,24 @@ fn gen_base(rng: &mut Rng, modelled_pct: usize, plain_pct: usize) -> Base {
     // incomplete, and an incomplete base has nothing for a hole to take away.
     let plain = modelled_only && rng.chance(plain_pct);
     let with_open = !plain && rng.chance(50);
-    let (_, params) = params(rng, with_open, false);
+    let (_, mut params) = params(rng, with_open, false);
     let mut env = header_vars();
+    let multi = rng.chance(multi_pct);
+    if multi {
+        // Not a string: the generator reads `.Length` off string values, and
+        // an access on `q` before anything fixed it is FS0072.
+        let types: Vec<T> = TYPES.into_iter().filter(|&t| t != T::Str).collect();
+        params.push_str(" q");
+        // Entered several times, so the generator picks it over the header's
+        // values of its type often enough to use it more than once.
+        let t = types[rng.below(types.len())];
+        for _ in 0..8 {
+            env.push(Var {
+                name: "q".into(),
+                kind: Kind::Mono(t),
+            });
+        }
+    }
     env.extend([
         Var {
             name: "s".into(),
@@ -409,6 +432,7 @@ fn gen_base(rng: &mut Rng, modelled_pct: usize, plain_pct: usize) -> Base {
         params,
         items,
         tail,
+        multi,
     }
 }
 
@@ -696,9 +720,20 @@ fn bases_for(seed: u64) -> Vec<Base> {
     let mut rng = Rng(seed ^ 0x5eed_c0de_cafe);
     let modelled_pct = [50, 75, 90][rng.below(3)];
     let plain_pct = [30, 60, 90][rng.below(3)];
+    let multi_pct = [30, 60, 90][rng.below(3)];
     (0..BASES_PER_FILE)
-        .map(|_| gen_base(&mut rng, modelled_pct, plain_pct))
+        .map(|_| gen_base(&mut rng, modelled_pct, plain_pct, multi_pct))
         .collect()
+}
+
+/// How many times `text` uses the identifier `name`.
+fn ident_uses(text: &str, name: &str) -> usize {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '\'';
+    text.match_indices(name)
+        .filter(|&(at, _)| {
+            !text[..at].ends_with(is_ident) && !text[at + name.len()..].starts_with(is_ident)
+        })
+        .count()
 }
 
 /// The non-vacuity tally every property keeps: each kind of cut reached, each
@@ -709,6 +744,12 @@ struct Tally {
     cuts: BTreeMap<&'static str, usize>,
     complete_bases: usize,
     bases: usize,
+    /// Bases whose body uses the multi-use parameter `q` at least twice.
+    multi_use_bases: usize,
+    /// Bases taking `q` that the FCS-graded form checked, and of those, how
+    /// many FCS rejected (see [`fcs_graded`]).
+    multi_bases_graded: usize,
+    multi_bases_rejected: usize,
     /// How many incomplete bases have each census reason.
     base_reasons: BTreeMap<String, usize>,
     /// Prefix commits a property compared.
@@ -731,6 +772,8 @@ impl Tally {
                 {
                     self.bases += 1;
                     self.complete_bases += usize::from(complete);
+                    self.multi_use_bases +=
+                        usize::from(ident_uses(&fun.text[fun.body..], "q") >= 2);
                     let reasons: std::collections::BTreeSet<String> = inferred.census[i]
                         .iter()
                         .map(|r| format!("{r:?}"))
@@ -788,6 +831,13 @@ impl Tally {
             self.complete_bases >= min && self.bases - self.complete_bases >= min,
             "the bases should be both complete and incomplete in quantity: {self:?}"
         );
+        // A fifth of the floor: `q` has one type per base, and most of what
+        // the generator builds is at another. `infer_entry_order_diff` is
+        // where repeated uses are exercised in quantity.
+        assert!(
+            self.multi_use_bases >= min / 5,
+            "too few bases use the multi-use parameter twice: {self:?}"
+        );
     }
 }
 
@@ -816,8 +866,13 @@ fn fcs_graded(files: usize, with_holes: bool) -> (Vec<Violation>, Tally, usize) 
             continue;
         };
         // The bases and their copies are well-typed: an error on one of their
-        // lines means the generator is wrong.
+        // lines means the generator is wrong. Except where a base takes the
+        // multi-use parameter `q`: the generator uses it as a value of its
+        // type, but the first relation FCS applies to it fixes it, and a
+        // statement fixes an open one to `unit`. Such a base is left out of
+        // the prefix comparison, and the sweep asserts most are kept.
         let line_of = |offset: usize| program.src[..offset].matches('\n').count() as u32 + 1;
+        let mut rejected_bases = Vec::new();
         for fun in program.funs.iter().filter(|f| f.suffix == Suffix::Rest) {
             let (l0, l1) = (line_of(fun.start), line_of(fun.start + fun.text.len() - 1));
             let errors: Vec<_> = dumps
@@ -825,6 +880,18 @@ fn fcs_graded(files: usize, with_holes: bool) -> (Vec<Violation>, Tally, usize) 
                 .iter()
                 .filter(|e| (l0..=l1).contains(&e.line))
                 .collect();
+            if program.bases[fun.base].multi {
+                if program.base_fun(fun.base).start == fun.start {
+                    tally.multi_bases_graded += 1;
+                }
+                if !errors.is_empty() {
+                    if !rejected_bases.contains(&fun.base) {
+                        rejected_bases.push(fun.base);
+                        tally.multi_bases_rejected += 1;
+                    }
+                    continue;
+                }
+            }
             assert!(
                 errors.is_empty(),
                 "the generator produced a function FCS rejects: {errors:?}\n{}",
@@ -866,6 +933,9 @@ fn fcs_graded(files: usize, with_holes: bool) -> (Vec<Violation>, Tally, usize) 
             }
         }
         for (b, _) in program.bases.iter().enumerate() {
+            if rejected_bases.contains(&b) {
+                continue;
+            }
             let base = program.base_fun(b);
             let targets: Vec<&Fun> = program
                 .funs
@@ -940,6 +1010,10 @@ fn fcs_graded_prefix_commits_survive_a_hole() {
     assert!(
         uncheckable * 4 <= fcs_files(),
         "FCS could not check {uncheckable} files"
+    );
+    assert!(
+        tally.multi_bases_rejected * 4 <= tally.multi_bases_graded,
+        "FCS rejected too many bases taking the multi-use parameter: {tally:?}"
     );
     assert!(
         violations.is_empty(),
