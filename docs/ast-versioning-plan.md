@@ -280,10 +280,12 @@ Checks:
    plus exactly that variant, and preview's its own plus the variant and the
    accessor. It is the compiler upgrade in miniature, run on every change.
 5. Its twin for a compiler that deletes a feature (astgen's
-   `a_retired_feature_leaves_every_facade_byte_identical`): in memory,
-   `WhileBang`, the row whose `Kind` separates `v7` from `v8`, is retired
-   (D12), and then every row at once. Every facade output, published or not,
-   regenerates byte-identically and nothing fails.
+   `a_retired_feature_leaves_every_facade_byte_identical`). In memory, the
+   table with every retirement cleared is the baseline. Against it, three
+   tables generate every facade output, published or not, byte-identically
+   and without failing: the table as checked in, the table with `WhileBang`
+   retired (D12), the row whose `Kind` separates `v7` from `v8`, and the table
+   with every row retired.
 
 The only re-baseline route is raising `FREEZE_EPOCH`, allowed until the first
 external release: a lock or fixture stamped with an older epoch is derived and

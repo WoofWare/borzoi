@@ -283,9 +283,30 @@ fn new_row(case: &str, version: &str, display: &str, sites: &[(String, usize)]) 
         "<fcs_stage>\t<fcs_effect>\t<borzoi>\t<engaged>".to_string()
     };
     format!(
-        "{case}\t{version}\t{middle}\t{}\t{display}\t",
+        "{case}\t{version}\t-\t{middle}\t{}\t{display}\t",
         sites_cell(sites)
     )
+}
+
+/// A suggested row has the table's columns: a checker-only one parses as it
+/// stands, and one with placeholders parses once they are filled in.
+#[test]
+fn a_suggested_row_parses() {
+    let header = borzoi_astgen::features::HEADER.join("\t");
+    let sites = [("pars.fsy".to_string(), 2)];
+    let filled = new_row("Parsed", "9.0", "parsed", &sites)
+        .replace("<fcs_stage>", "parse")
+        .replace("<fcs_effect>", "Diagnose")
+        .replace("<borzoi>", "Positional(p)")
+        .replace("<engaged>", "live");
+    let rows = parse_table(&format!(
+        "{header}\n{}\n{filled}",
+        new_row("Checked", "11.0", "checked", &[]),
+    ));
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| !r.is_retired()));
+    assert_eq!(rows[0].stages, [Stage::Check]);
+    assert_eq!(rows[1].sites, sites);
 }
 
 /// `LanguageFeature.X` uses per feature and file in the parse pipeline,
