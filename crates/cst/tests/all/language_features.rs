@@ -11,9 +11,13 @@
 //! - every `LanguageFeature` case FCS declares has exactly one row, with the
 //!   version FCS's `features` map gives it and the name its FS3350 message
 //!   uses, and FCS's version ladder is [`LanguageVersion`]'s;
-//! - each row's `fcs_sites` equals a census of `LanguageFeature.X` in the
-//!   files of FCS's parse pipeline, so a new parse-time check of an old feature
-//!   shows up as well as a new feature;
+//! - a row whose case FCS no longer declares is retired, never deleted, and
+//!   only if FCS refuses every version below its `introduced`, so the
+//!   retirement is invisible at every version FCS still supports
+//!   (`docs/ast-versioning-plan.md`, D12);
+//! - each non-retired row's `fcs_sites` equals a census of `LanguageFeature.X`
+//!   in the files of FCS's parse pipeline, so a new parse-time check of an old
+//!   feature shows up as well as a new feature;
 //! - the live rows are exactly what the parser consults.
 //!
 //! Each failure says what to change in the table. Reading the source is cheap,
@@ -22,7 +26,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use borzoi_astgen::features::{FeatureRow, Modelling, Stage, feature_table, sites_cell};
+use borzoi_astgen::features::{
+    FeatureRow, Modelling, Stage, feature_table, parse_table, sites_cell, version_decimal,
+};
 use borzoi_cst::language_version::LanguageVersion;
 
 use crate::common::corpus_root;
@@ -89,6 +95,9 @@ struct FcsFeatures {
     ladder: Vec<String>,
     /// `defaultVersion`, spelt likewise.
     default: String,
+    /// The lowest version `IsVersionSupported` accepts, spelt likewise: FCS
+    /// refuses every version below it (FS3880).
+    floor: String,
 }
 
 /// The table's spelling of an FCS decimal: `4.6m` → `4.6`, `9999m` →
@@ -164,6 +173,7 @@ fn read_fcs_features(src: &Path) -> FcsFeatures {
         .get("defaultVersion")
         .expect("LanguageFeatures.fs defines defaultVersion")
         .clone();
+    let floor = support_floor(&text, &constants);
 
     let get_feature_string = section(
         &text,
@@ -187,7 +197,31 @@ fn read_fcs_features(src: &Path) -> FcsFeatures {
         resources,
         ladder,
         default,
+        floor,
     }
+}
+
+/// The version `IsVersionSupported` compares against: its body is one
+/// `langVersion >= languageVersionNN` (or'd with the environment override
+/// that `SKIP_VERSION_SUPPORTED_CHECK` reads), and `constants` spells the
+/// name.
+fn support_floor(text: &str, constants: &BTreeMap<String, String>) -> String {
+    let body = section(text, "static member IsVersionSupported", "///").join(" ");
+    let floors: Vec<&str> = body
+        .split(">=")
+        .skip(1)
+        .map(|rest| ident(rest.trim_start()))
+        .collect();
+    let [floor] = floors[..] else {
+        panic!(
+            "IsVersionSupported compares against {floors:?}, not one version; the test's \
+             reader needs updating:\n{body}"
+        )
+    };
+    constants
+        .get(floor)
+        .unwrap_or_else(|| panic!("IsVersionSupported's floor {floor} is no version constant"))
+        .clone()
 }
 
 /// `FSComp.txt`'s text for a resource, as FCS returns it. Lines are
@@ -328,8 +362,92 @@ fn report(what: &str, failures: Vec<String>) {
     );
 }
 
-/// Every FCS feature has one row, with FCS's version and FS3350 name, and the
-/// table has no row FCS lacks.
+/// How the rows break the retirement rules (`docs/ast-versioning-plan.md`,
+/// D12), given the compiler's `cases` and its support floor: a retired row's
+/// case must be gone from the compiler, and its `introduced` at or below the
+/// floor, so that the retirement shows at no version the compiler accepts; a
+/// row the compiler lacks must be retired.
+fn retirement_failures(rows: &[FeatureRow], cases: &[String], floor: &str) -> Vec<String> {
+    let floor_decimal = version_decimal(floor);
+    let mut failures = Vec::new();
+    for row in rows {
+        let name = &row.name;
+        let introduced = &row.introduced;
+        let above_floor = row.introduced_decimal() > floor_decimal;
+        let undecided = format!(
+            "D12 covers only features introduced at or below the support floor: FCS refuses \
+             every version below {floor}, so there the retired gates are invisible to it. \
+             {name} came in at {introduced}, so FCS still accepts versions where its \
+             retirement would show, and keeping its gates there would disagree with FCS. \
+             That needs a decision, not a table edit."
+        );
+        match (&row.retired, cases.contains(name)) {
+            (None, true) => {}
+            (Some(at), true) => failures.push(format!(
+                "{name}: retired (`{at}`), but FCS still declares it. Set `retired` back to \
+                 `-`. The other checks then hold the row to the compiler again."
+            )),
+            (Some(at), false) if above_floor => failures.push(format!(
+                "{name}: retired (`{at}`) at {introduced}, above FCS's support floor {floor}. \
+                 {undecided}"
+            )),
+            (Some(_), false) => {}
+            (None, false) if above_floor => failures.push(format!(
+                "{name}: FCS no longer declares this feature. {undecided}"
+            )),
+            (None, false) => failures.push(format!(
+                "{name}: FCS no longer declares this feature. Retire the row; never delete \
+                 it. Set its `retired` cell to `fsharp@<commit>`, where <commit> is the full \
+                 `fsharp-src` revision the table was last held to: the `rev` of `fsharp-src` \
+                 in the base branch's flake.lock. Leave every other cell as it is. The \
+                 variant, its gates and its kind intervals stay. See \
+                 docs/ast-versioning-plan.md, \"When the compiler deletes a feature\"."
+            )),
+        }
+    }
+    failures
+}
+
+#[test]
+fn retirement_failures_follow_d12() {
+    let commit = "c3c01c991d17643700d343cee5c5a1e20c06ce03";
+    let rows = parse_table(&format!(
+        "{}\n\
+         Kept\t8.0\t-\tcheck\t-\tUnmodelled(r)\t-\t-\tkept\t\n\
+         Gone\t7.0\t-\tcheck\t-\tUnmodelled(r)\t-\t-\tgone\t\n\
+         GoneLate\t9.0\t-\tcheck\t-\tUnmodelled(r)\t-\t-\tgone late\t\n\
+         Retired\t8.0\tfsharp@{commit}\tparse\tDiagnose\tKind(A)\tlive\tpars.fsy=1\tretired\t\n\
+         RetiredLate\t9.0\tfsharp@{commit}\tcheck\t-\tUnmodelled(r)\t-\t-\tretired late\t\n\
+         Back\t5.0\tfsharp@{commit}\tcheck\t-\tUnmodelled(r)\t-\t-\tback\t",
+        borzoi_astgen::features::HEADER.join("\t"),
+    ));
+    let cases = ["Kept".to_string(), "Back".to_string()];
+    let failures = retirement_failures(&rows, &cases, "8.0");
+    let of = |name: &str| -> Vec<&String> {
+        failures
+            .iter()
+            .filter(|f| f.starts_with(&format!("{name}:")))
+            .collect()
+    };
+    for quiet in ["Kept", "Retired"] {
+        assert!(of(quiet).is_empty(), "{quiet}: {failures:#?}");
+    }
+    let says = |name: &str, needle: &str| {
+        let found = of(name);
+        assert!(
+            found.len() == 1 && found[0].contains(needle),
+            "{name} should say {needle:?}: {failures:#?}"
+        );
+    };
+    says("Gone", "Set its `retired` cell to `fsharp@<commit>`");
+    says("GoneLate", "needs a decision");
+    says("RetiredLate", "above FCS's support floor 8.0");
+    says("Back", "Set `retired` back to `-`");
+    assert_eq!(failures.len(), 4, "{failures:#?}");
+}
+
+/// Every FCS feature has one row, with FCS's version and FS3350 name, and
+/// every row FCS lacks is retired (`retirement_failures`).
 #[test]
 fn every_fcs_feature_has_a_row_with_its_version() {
     let src = compiler_src();
@@ -392,15 +510,14 @@ fn every_fcs_feature_has_a_row_with_its_version() {
             }
         }
     }
-    for row in &rows {
-        if !fcs.cases.contains(&row.name) {
-            failures.push(format!(
-                "{}: FCS no longer declares this feature; remove its row (and whatever gate \
-                 or interval it drove).",
-                row.name,
-            ));
-        }
-    }
+    assert!(
+        fcs.ladder.contains(&fcs.floor),
+        "IsVersionSupported's floor {} is not on FCS's ladder {:?}; the test's reader needs \
+         updating",
+        fcs.floor,
+        fcs.ladder,
+    );
+    failures.extend(retirement_failures(&rows, &fcs.cases, &fcs.floor));
     report("its features", failures);
 
     let ours: Vec<String> = LanguageVersion::NUMBERED
@@ -422,14 +539,17 @@ fn every_fcs_feature_has_a_row_with_its_version() {
 }
 
 /// Each row's `fcs_sites` is a census of the parse pipeline, and a row the
-/// pipeline never consults is a `check` row.
+/// pipeline never consults is a `check` row. A retired row keeps the cells it
+/// was last transcribed with, so only the current rows are held to the
+/// census; the compiler lacking a retired case is
+/// `every_fcs_feature_has_a_row_with_its_version`'s check.
 #[test]
 fn fcs_sites_match_a_census_of_the_parse_pipeline() {
     let src = compiler_src();
     let census = census(&src);
     let rows = feature_table();
     let mut failures = Vec::new();
-    for row in &rows {
+    for row in rows.iter().filter(|r| !r.is_retired()) {
         let found = census.get(&row.name).map_or(&[][..], Vec::as_slice);
         if row.sites != found {
             failures.push(format!(

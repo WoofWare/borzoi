@@ -347,6 +347,22 @@ impl LanguageFeature {
         LanguageFeature::FromEndSlicing,
     ];
 
+    /// The retired features, each with the `fsharp@<commit>` it was last
+    /// transcribed from: a later compiler deleted the case, and borzoi keeps
+    /// its variant, its version and its gates (`docs/ast-versioning-plan.md`,
+    /// D12).
+    pub const RETIRED: [(LanguageFeature, &str); 0] = [];
+
+    /// The `fsharp@<commit>` this feature was last transcribed from, if a
+    /// later compiler deleted it ([`Self::RETIRED`]); `None` while the
+    /// pinned compiler declares it.
+    pub fn retired_in(self) -> Option<&'static str> {
+        Self::RETIRED
+            .iter()
+            .find(|(f, _)| *f == self)
+            .map(|(_, at)| *at)
+    }
+
     /// The first version with the feature (FCS's `features` map).
     pub fn introduced(self) -> LanguageVersion {
         match self {

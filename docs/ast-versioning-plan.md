@@ -5,7 +5,8 @@
 > feature table, #15), PR 2 (diagnostic classes), PR 3 (faithful gates, #21),
 > PR 4 (the union behind `unstable-union`, #13, #670), PR 5 (astgen owns every
 > node), PR 6 (a deep facade per language version, `Parse::view`) and PR 7
-> (the freeze: `v4_6` … `v10` published) have landed. Earlier stages that
+> (the freeze: `v4_6` … `v10` published) have landed, and so has PR 8's first
+> step (retiring deleted features, D12). Earlier stages that
 > still stand: `LanguageVersion` as a parse input (#592/#597/#606) and the
 > LSP's `<LangVersion>` wiring (#613). The goal:
 > before the next F# compiler upgrade (a new language version), every earlier
@@ -278,6 +279,11 @@ Checks:
    head may opt into the accessor; the new facade's surface is the one before
    plus exactly that variant, and preview's its own plus the variant and the
    accessor. It is the compiler upgrade in miniature, run on every change.
+5. Its twin for a compiler that deletes a feature (astgen's
+   `a_retired_feature_leaves_every_facade_byte_identical`): in memory,
+   `WhileBang`, the row whose `Kind` separates `v7` from `v8`, is retired
+   (D12), and then every row at once. Every facade output, published or not,
+   regenerates byte-identically and nothing fails.
 
 The only re-baseline route is raising `FREEZE_EPOCH`, allowed until the first
 external release: a lock or fixture stamped with an older epoch is derived and
@@ -330,7 +336,26 @@ divergence, it lists each line under what can be done with it:
 `FREEZE_EPOCH` and regenerate: every published lock and fixture is rewritten
 from today's derivation, the fixture of a facade that is no longer distinct is
 removed, and `ACCEPTED_DIVERGENCES` should then be empty. The CI check passes
-the change because the constant rose.
+the change because the constant rose. A compiler deleting a feature is never a
+reason to re-baseline (D12).
+
+### When the compiler deletes a feature
+
+When the `fsharp-src` pin moves, `language_features` reports each row whose
+case the new compiler no longer declares (D12).
+
+1. Set the row's `retired` cell to `fsharp@<commit>`. `<commit>` is the full
+   revision the table was last held to: the `fsharp-src` `rev` in the base
+   branch's `flake.lock`. Leave every other cell as it is, then run
+   `cargo run -p borzoi-astgen --example generate`. The only generated file
+   that moves is `features.rs`, which gains the row in `RETIRED`.
+2. Leave the gates, the lex-filter branches and the kind intervals alone.
+   No lock, fixture or `ACCEPTED_DIVERGENCES` entry moves.
+3. If the test says the row's `introduced` is above the compiler's support
+   floor, stop. The compiler accepts versions where the retired behaviour
+   would show, so the feature needs its own decision.
+4. A row once retired that the compiler declares again goes back to `-`. The
+   other checks then hold it to the compiler again.
 
 ### D7. The substrate is the floor: incomplete, never wrong
 
@@ -468,18 +493,69 @@ Two checks hold this:
 - **#16** (compile-time type-tag views) stays deferred; `view::<V>()` over a
   sealed `Facade` trait is the baseline.
 
+### D12. A feature the compiler deletes is retired, never removed
+
+FCS deletes a `LanguageFeature` case once the feature is on at every version
+it supports. Its commits are titled "Remove always-on … flag". An older
+compiler that accepts the older versions still behaves the old way at them,
+and a frozen facade's interval came from the case's `introduced`. So the
+case's row stays in the table, marked **retired**:
+
+- The `retired` column is `-`, or `fsharp@<commit>`: the full dotnet/fsharp
+  revision the table last transcribed the row from. A full hash names one
+  compiler. A package version alone does not, because the
+  `FSharp.Compiler.Service` package the oracle references and the
+  `fsharp-src` revision the table transcribes are separate builds.
+- Every other cell stays as that revision had it. The `LanguageFeature`
+  variant, its `introduced()`, its gates and its kind intervals are unchanged,
+  so retirement changes no tree, no diagnostic and no facade.
+  `LanguageFeature::retired_in()` and `LanguageFeature::RETIRED` expose the
+  column.
+- A row leaves the table only when borzoi drops every language version below
+  its `introduced`. That is a separate decision, never a step of an upgrade.
+- `language_features` holds a retired row to two rules. The pinned compiler
+  must lack the case. The row's `introduced` must be at or below the
+  compiler's support floor, which the test reads from the source: the version
+  `IsVersionSupported` compares against (8.0 since dotnet/fsharp#19143). FCS
+  refuses every version below the floor (FS3880), so the retirement shows at
+  no version the current compiler accepts. This decision does not cover a
+  feature deleted while its `introduced` is still above the floor. The test
+  says so, and such a feature needs its own decision.
+- Facades stay byte-identical, with no `ACCEPTED_DIVERGENCES` entry and no
+  `FREEZE_EPOCH` raise. Check 5 of D6 holds that.
+
+The runbook is [When the compiler deletes a feature](#when-the-compiler-deletes-a-feature).
+
+**Two oracles.** Every borzoi oracle sets `SKIP_VERSION_SUPPORTED_CHECK`. A
+compiler that deleted a case behaves below the floor as if the feature were
+always on, so a retired gate needs an oracle from before the deletion. The
+plan lands with the FCS bump (PR 8, step 3). The current FCS grades every
+version at or above the floor. A frozen `tools/fcs-dump-legacy` on FCS
+43.12.204 grades the retired gates below the floor, and is never edited. It
+runs on fixtures and grids only, not on corpus sweeps. `from_fcs` is keyed by
+oracle for the few AST shapes that changed between the two.
+
+**Unclaimed residue.** The F# 11 compiler also changes some lexing with no
+feature gate at any version: `=$"` splits into `=` and the string, `...` is a
+token, and a `#:` line is whitespace. borzoi follows that lexing at every
+version from the FCS bump on. Below the floor, borzoi's parse is then the
+legacy compiler's gates over the current compiler's ungated lexing, which no
+compiler ever was. borzoi makes no claim about that combination, and no
+oracle grades it.
+
 ## The feature table
 
 [`crates/cst/language-features.tsv`](../crates/cst/language-features.tsv) has
 one row per FCS `LanguageFeature`, *including* the ones only the type checker
 reads (`Unmodelled(checker-only)`), so that a compiler bump's new features all
-show up as missing rows. Its columns (the file's header comment is the
-reference):
+show up as missing rows. A case a later compiler deleted keeps its row, marked
+retired (D12). Its columns (the file's header comment is the reference):
 
 | Column | Meaning |
 |---|---|
 | `feature` | FCS's case name, and the `LanguageFeature` variant name. |
 | `introduced` | FCS's `features` map version (`4.7` … `11.0`, `preview`). It alone decides facade membership. |
+| `retired` | `-`, or `fsharp@<commit>` once the compiler has deleted the case: the full revision the row was last transcribed from (D12). Every other cell keeps that revision's value. |
 | `fcs_stage` | Where FCS's parse pipeline consults it (`lex`, `lexfilter`, `parse`, `post-parse`, `+`-joined), or `check` when only the checker or a later phase does. |
 | `fcs_effect` | What FCS does below `introduced`: `Diagnose` (CLFAR; the tree FCS builds is ours), `Reshape` (hard error with recovery, a relabelled token, a different token stream), `Severity` (a diagnostic appears or changes severity); `-` for `check`. |
 | `borzoi` | `Kind(K)` (a node kind the feature introduced), `Positional(detector)`, `Shape`, `Trivia`, or `Unmodelled(reason)`; `+`-joined, except `Unmodelled`. |
@@ -494,8 +570,8 @@ astgen's staleness test `tests/up_to_date.rs`):
 - `crates/cst/src/syntax/generated/features.rs`: the `LanguageFeature` enum
   (re-exported from `borzoi_cst::language_version`), `introduced()`,
   `display_name()`, `fcs_stages()`, `fcs_effects()`, `POSITIONAL_GATES` (the
-  tree-walk gates' fast path), `kind_feature` (the live `Kind` rows), and
-  `DEFERRED_KIND_FEATURES`;
+  tree-walk gates' fast path), `kind_feature` (the live `Kind` rows),
+  `DEFERRED_KIND_FEATURES`, and `RETIRED` with `retired_in()`;
 - the facades' kind intervals (astgen reads the live `Kind` rows directly).
 
 Every version question the parser asks is `lang.supports(LanguageFeature::X)`;
@@ -505,8 +581,10 @@ there are no per-feature predicates.
 pinned compiler source (`BORZOI_CORPUS`) and run in the normal suite:
 
 1. every FCS feature has exactly one row, with FCS's version and display name,
-   and FCS's version ladder and default are `LanguageVersion`'s;
-2. each row's `fcs_sites` equals a census of `LanguageFeature.X` (outside `//`
+   and FCS's version ladder and default are `LanguageVersion`'s; every row
+   FCS lacks is retired, and a retired row is one FCS lacks, introduced at
+   or below the support floor `IsVersionSupported` reads (D12);
+2. each non-retired row's `fcs_sites` equals a census of `LanguageFeature.X` (outside `//`
    comments) over the parse pipeline — `lex.fsl`, `pppars.fsy`, `pars.fsy`,
    all of `SyntaxTree/`, `Facilities/prim-lexing.fs{,i}` and
    `Driver/ParseAndCheckInputs.fs` — and a row the pipeline never mentions is a
@@ -518,7 +596,7 @@ pinned compiler source (`BORZOI_CORPUS`) and run in the normal suite:
 
 Each failure prints the cell to write. A compiler bump therefore lands as a
 list of table edits: new rows (a ready-to-paste line for each), moved versions,
-and new or moved parse-time sites to classify.
+new or moved parse-time sites to classify, and deleted cases to retire.
 
 **Deferred rows.** A row recorded `engaged = deferred(reason)` drives neither
 a gate nor a facade interval (`DEFERRED_KIND_FEATURES` lists its kinds). Every
@@ -639,6 +717,10 @@ diagnostic for its feature" rather than "under a `Legality` one".
   `tools/ci/facade-lock-check.sh` in CI; the synthetic-feature test; node and
   dispatch-enum re-casts taken to be fallible, so a facade's code is a
   function of its own lock.
+- **PR 8, step 1 — retirement** (D12): the table's `retired` column,
+  `LanguageFeature::RETIRED` and `retired_in()`, `language_features`'
+  retirement rules against the support floor read from `IsVersionSupported`,
+  and the retirement twin of the synthetic-feature test.
 
 ## PR sequence
 
@@ -661,8 +743,22 @@ diagnostic for its feature" rather than "under a `Legality` one".
    and a permanent synthetic-feature test (a fake feature and kind at "12.0",
    in memory: every published facade regenerates byte-identically, and the new
    facade differs by exactly that variant). *Landed.*
-8. **The compiler upgrade** — the proof; `v11` is published after it
-   ([Publishing a facade](#publishing-a-facade)).
+8. **The compiler upgrade** to SDK 11.0.100's compiler (dotnet/fsharp
+   v15.2.101, FCS 43.13.101) — the proof, in steps:
+   0. SDK 11 in the devshell, off by default.
+   1. Retirement (D12): the `retired` column, its `language_features` rules,
+      and the retirement twin of the synthetic-feature test. Nothing is
+      retired yet. *Landed.*
+   2. The corpus pin and the table: 41 rows retired, 17 added,
+      `LanguageVersion::DEFAULT` 11.0, and the LSP's default following the
+      project's SDK.
+   3. The FCS oracle bump, with the legacy oracle split out (D12), the
+      projection rework, the ungated lexer and parser changes, and the
+      recovery ports.
+   4. New syntax: record spreads and tuple-type extensions, each a kind and a
+      gate.
+   5. `v11` published ([Publishing a facade](#publishing-a-facade)).
+   6. SDK 11 the devshell default, at GA.
 
 ## Still to do
 
@@ -670,11 +766,9 @@ Everything in PR 8 above. Beyond them:
 
 - **Stale issues.** #14 (facades below 8.0) and #12 (`Parse::view`) are done
   by PR 6, and #17 (preview) is decided (D11).
-- **The upstream `_.` check is gone.** dotnet/fsharp#20222 removes
-  `SingleUnderscorePattern`'s parse error; once the table transcribes a
-  compiler with it, the row's `fcs_sites` empties, `language_features` says to
-  make it a `check` row, and every `member _.M` file stops being
-  version-dependent.
+- **The upstream `_.` check is gone.** dotnet/fsharp#20222 deletes
+  `SingleUnderscorePattern`, one of the 41 cases step 2 retires. Its row keeps
+  its gate (D12), so a `member _.M` file stays version-dependent below 4.7.
 - **`display_name` is FSComp.txt's text as FCS returns it**: the quoted text
   after `String.Format` with no arguments, which is what FCS's resource
   generator applies (so `builder {{ }}` reads `builder { }`). For the gated

@@ -11,8 +11,10 @@
 //!
 //! `borzoi-cst`'s `language_features` test holds the table to the compiler
 //! source: every FCS feature has a row with FCS's version and display name, and
-//! the `fcs_sites` column equals a census of the parse pipeline. It reads the
-//! rows through [`feature_table`], so the table has one parser.
+//! the `fcs_sites` column equals a census of the parse pipeline. A row whose
+//! case a later compiler deleted is *retired* ([`FeatureRow::retired`]): the
+//! source must lack it, and every other cell stays as last transcribed. It
+//! reads the rows through [`feature_table`], so the table has one parser.
 
 /// The table, as checked in. `include_str!` makes a table edit rebuild this
 /// crate, so the staleness test always sees the current table.
@@ -26,9 +28,10 @@ pub const OUTPUT_PATH: &str = "crates/cst/src/syntax/generated/features.rs";
 
 /// The header row, which every table must open with (after its comments).
 /// `notes`, the last column, may be omitted from a row.
-pub const HEADER: [&str; 9] = [
+pub const HEADER: [&str; 10] = [
     "feature",
     "introduced",
+    "retired",
     "fcs_stage",
     "fcs_effect",
     "borzoi",
@@ -150,6 +153,11 @@ pub struct FeatureRow {
     pub name: String,
     /// The version text: `"4.7"` … `"11.0"`, or `"preview"`.
     pub introduced: String,
+    /// `Some("fsharp@<commit>")` once the compiler has deleted the case: the
+    /// dotnet/fsharp revision the row was last transcribed from. Retirement
+    /// changes nothing else: the variant, gates and kind intervals stay, and
+    /// every other cell is that revision's.
+    pub retired: Option<String>,
     pub stages: Vec<Stage>,
     /// Empty for a `check` row.
     pub effects: Vec<Effect>,
@@ -170,9 +178,15 @@ impl FeatureRow {
         })
     }
 
-    /// Whether the row's gates and intervals are in force.
+    /// Whether the row's gates and intervals are in force. Retirement does not
+    /// enter into it.
     pub fn is_live(&self) -> bool {
         self.engaged == Engaged::Live
+    }
+
+    /// Whether the compiler has deleted the case ([`FeatureRow::retired`]).
+    pub fn is_retired(&self) -> bool {
+        self.retired.is_some()
     }
 
     /// Whether borzoi gates the feature where it occurs: a live row with a
@@ -297,6 +311,32 @@ fn parse_sites(cell: &str) -> Result<Vec<(String, usize)>, String> {
     Ok(out)
 }
 
+/// The `retired` cell's prefix: what follows is a dotnet/fsharp commit.
+pub const RETIRED_PREFIX: &str = "fsharp@";
+
+/// A `retired` cell: `-`, or [`RETIRED_PREFIX`] and a full 40-digit
+/// lowercase commit hash, which names one compiler however many tags or
+/// packages share its version number.
+fn parse_retired(cell: &str) -> Result<Option<String>, String> {
+    if cell == "-" {
+        return Ok(None);
+    }
+    let commit = cell.strip_prefix(RETIRED_PREFIX).ok_or_else(|| {
+        format!("retired {cell:?}: expected `-` or `{RETIRED_PREFIX}<40-digit commit>`")
+    })?;
+    if commit.len() != 40
+        || !commit
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    {
+        return Err(format!(
+            "retired {cell:?}: the commit must be a full 40-digit lowercase dotnet/fsharp \
+             hash, so it names one compiler"
+        ));
+    }
+    Ok(Some(cell.to_string()))
+}
+
 fn parse_row(cells: &[&str]) -> Result<FeatureRow, String> {
     if cells.len() != HEADER.len() && cells.len() != HEADER.len() - 1 {
         return Err(format!(
@@ -314,7 +354,8 @@ fn parse_row(cells: &[&str]) -> Result<FeatureRow, String> {
     if !VERSIONS.iter().any(|(t, _, _)| *t == introduced) {
         return Err(format!("unknown introduced version {introduced:?}"));
     }
-    let stages = split_top_level(cells[2], '+')
+    let retired = parse_retired(cells[2])?;
+    let stages = split_top_level(cells[3], '+')
         .into_iter()
         .map(Stage::parse)
         .collect::<Result<Vec<_>, _>>()?;
@@ -326,10 +367,10 @@ fn parse_row(cells: &[&str]) -> Result<FeatureRow, String> {
                 .to_string(),
         );
     }
-    let effects = if cells[3] == "-" {
+    let effects = if cells[4] == "-" {
         Vec::new()
     } else {
-        split_top_level(cells[3], '+')
+        split_top_level(cells[4], '+')
             .into_iter()
             .map(Effect::parse)
             .collect::<Result<Vec<_>, _>>()?
@@ -337,9 +378,9 @@ fn parse_row(cells: &[&str]) -> Result<FeatureRow, String> {
     if check_only != effects.is_empty() {
         return Err("fcs_effect is `-` exactly when fcs_stage is `check`".to_string());
     }
-    let borzoi = parse_modelling(cells[4])?;
+    let borzoi = parse_modelling(cells[5])?;
     let unmodelled = matches!(borzoi[..], [Modelling::Unmodelled(_)]);
-    let engaged = match cells[5] {
+    let engaged = match cells[6] {
         "live" => Engaged::Live,
         "-" => Engaged::NotModelled,
         other => match call(other, "deferred") {
@@ -354,8 +395,8 @@ fn parse_row(cells: &[&str]) -> Result<FeatureRow, String> {
     if unmodelled != (engaged == Engaged::NotModelled) {
         return Err("engaged is `-` exactly when borzoi is Unmodelled(…)".to_string());
     }
-    let sites = parse_sites(cells[6])?;
-    let display_name = cells[7];
+    let sites = parse_sites(cells[7])?;
+    let display_name = cells[8];
     if display_name.is_empty() {
         return Err("display_name is empty".to_string());
     }
@@ -369,13 +410,14 @@ fn parse_row(cells: &[&str]) -> Result<FeatureRow, String> {
     Ok(FeatureRow {
         name: name.to_string(),
         introduced: introduced.to_string(),
+        retired,
         stages,
         effects,
         borzoi,
         engaged,
         sites,
         display_name: display_name.to_string(),
-        notes: cells.get(8).copied().unwrap_or("").to_string(),
+        notes: cells.get(9).copied().unwrap_or("").to_string(),
     })
 }
 
@@ -484,10 +526,16 @@ pub fn generate_features(rows: &[FeatureRow]) -> String {
          pub enum LanguageFeature {\n",
     );
     for row in rows {
+        let retired = row.retired.as_ref().map_or(String::new(), |r| {
+            format!(
+                "///\n/// Retired: the compiler no longer declares it; last transcribed \
+                 from `{r}`.\n"
+            )
+        });
         out.push_str(&format!(
             // A double-backtick code span: the names hold single backticks, `<`,
             // `[` and URLs, none of which markdown may interpret.
-            "/// F# {}: `` {} `` (its FS3350 name).\n{},\n",
+            "/// F# {}: `` {} `` (its FS3350 name).\n{retired}{},\n",
             row.introduced, row.display_name, row.name
         ));
     }
@@ -521,6 +569,30 @@ pub fn generate_features(rows: &[FeatureRow]) -> String {
         positional.len(),
         list(positional.clone()),
     ));
+    let retired: Vec<String> = rows
+        .iter()
+        .filter_map(|r| {
+            let at = r.retired.as_ref()?;
+            Some(format!("(LanguageFeature::{}, {at:?})", r.name))
+        })
+        .collect();
+    out.push_str(&format!(
+        "/// The retired features, each with the `fsharp@<commit>` it was last\n\
+         /// transcribed from: a later compiler deleted the case, and borzoi keeps\n\
+         /// its variant, its version and its gates (`docs/ast-versioning-plan.md`,\n\
+         /// D12).\n\
+         pub const RETIRED: [(LanguageFeature, &str); {}] = [{}];\n\n",
+        retired.len(),
+        retired.join(", "),
+    ));
+    out.push_str(
+        "/// The `fsharp@<commit>` this feature was last transcribed from, if a\n\
+         /// later compiler deleted it ([`Self::RETIRED`]); `None` while the\n\
+         /// pinned compiler declares it.\n\
+         pub fn retired_in(self) -> Option<&'static str> {\n\
+         Self::RETIRED.iter().find(|(f, _)| *f == self).map(|(_, at)| *at)\n\
+         }\n\n",
+    );
 
     out.push_str(
         "/// The first version with the feature (FCS's `features` map).\n\
@@ -650,7 +722,7 @@ mod tests {
     #[test]
     fn a_row_may_omit_notes() {
         let rows = parse_table(&table(
-            "WhileBang\t8.0\tparse\tDiagnose\tKind(WHILE_BANG_EXPR)\tlive\tpars.fsy=1\t'while!' expression",
+            "WhileBang\t8.0\t-\tparse\tDiagnose\tKind(WHILE_BANG_EXPR)\tlive\tpars.fsy=1\t'while!' expression",
         ));
         assert_eq!(rows[0].notes, "");
         assert_eq!(rows[0].sites, [("pars.fsy".to_string(), 1)]);
@@ -659,7 +731,7 @@ mod tests {
     #[test]
     fn a_reason_may_contain_the_separator() {
         let rows = parse_table(&table(
-            "X\t8.0\tparse\tDiagnose\tUnmodelled(a + b (c))\t-\t-\tx\t",
+            "X\t8.0\t-\tparse\tDiagnose\tUnmodelled(a + b (c))\t-\t-\tx\t",
         ));
         assert_eq!(
             rows[0].borzoi,
@@ -671,7 +743,7 @@ mod tests {
     #[should_panic(expected = "engaged is `-` exactly when")]
     fn a_modelled_row_must_say_whether_it_is_live() {
         parse_table(&table(
-            "X\t8.0\tparse\tDiagnose\tKind(WHILE_BANG_EXPR)\t-\t-\tx\t",
+            "X\t8.0\t-\tparse\tDiagnose\tKind(WHILE_BANG_EXPR)\t-\t-\tx\t",
         ));
     }
 
@@ -679,32 +751,78 @@ mod tests {
     #[should_panic(expected = "must stand alone")]
     fn unmodelled_stands_alone() {
         parse_table(&table(
-            "X\t8.0\tparse\tDiagnose\tShape+Unmodelled(r)\t-\t-\tx\t",
+            "X\t8.0\t-\tparse\tDiagnose\tShape+Unmodelled(r)\t-\t-\tx\t",
         ));
     }
 
     #[test]
     #[should_panic(expected = "fcs_effect is `-` exactly when")]
     fn a_check_row_has_no_effect() {
-        parse_table(&table("X\t8.0\tcheck\tDiagnose\tUnmodelled(r)\t-\t-\tx\t"));
+        parse_table(&table(
+            "X\t8.0\t-\tcheck\tDiagnose\tUnmodelled(r)\t-\t-\tx\t",
+        ));
     }
 
     #[test]
     #[should_panic(expected = "claimed by both")]
     fn a_kind_belongs_to_one_feature() {
         parse_table(&table(
-            "X\t8.0\tparse\tDiagnose\tKind(K)\tlive\t-\tx\t\n\
-             Y\t9.0\tparse\tDiagnose\tKind(K)\tlive\t-\ty\t",
+            "X\t8.0\t-\tparse\tDiagnose\tKind(K)\tlive\t-\tx\t\n\
+             Y\t9.0\t-\tparse\tDiagnose\tKind(K)\tlive\t-\ty\t",
         ));
     }
 
     #[test]
     fn deferred_kinds_have_no_interval() {
         let rows = parse_table(&table(
-            "X\t8.0\tparse\tDiagnose\tKind(A)\tlive\t-\tx\t\n\
-             Y\t5.0\tcheck\t-\tKind(B)\tdeferred(later)\t-\ty\t",
+            "X\t8.0\t-\tparse\tDiagnose\tKind(A)\tlive\t-\tx\t\n\
+             Y\t5.0\t-\tcheck\t-\tKind(B)\tdeferred(later)\t-\ty\t",
         ));
         assert_eq!(live_kind_introduced(&rows, "A"), Some(8.0));
         assert_eq!(live_kind_introduced(&rows, "B"), None);
+    }
+
+    const COMMIT: &str = "c3c01c991d17643700d343cee5c5a1e20c06ce03";
+
+    /// A retired row keeps its interval: retirement is orthogonal to `engaged`.
+    #[test]
+    fn a_retired_kind_keeps_its_interval() {
+        let rows = parse_table(&table(&format!(
+            "X\t8.0\tfsharp@{COMMIT}\tparse\tDiagnose\tKind(A)\tlive\tpars.fsy=1\tx\t"
+        )));
+        assert_eq!(rows[0].retired, Some(format!("fsharp@{COMMIT}")));
+        assert!(rows[0].is_retired() && rows[0].is_live());
+        assert_eq!(live_kind_introduced(&rows, "A"), Some(8.0));
+        let generated = generate_features(&rows);
+        // Compared without whitespace, so rustfmt's line breaks do not matter.
+        let squeeze = |s: &str| s.split_whitespace().collect::<String>();
+        let squeezed = squeeze(&generated);
+        for needle in [
+            "RETIRED: [(LanguageFeature, &str); 1] = [(LanguageFeature::X, \"fsharp@".to_string(),
+            format!(
+                "Retired: the compiler no longer declares it; last transcribed from `fsharp@{COMMIT}`."
+            ),
+            "SyntaxKind::A => Some(LanguageFeature::X)".to_string(),
+        ] {
+            assert!(
+                squeezed.contains(&squeeze(&needle)),
+                "no {needle:?} in\n{generated}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retired_cell_names_one_commit() {
+        for bad in [
+            "43.12.204@c3c01c99".to_string(),
+            "fsharp@c3c01c99".to_string(),
+            format!("fsharp@{}", COMMIT.to_uppercase()),
+            COMMIT.to_string(),
+            String::new(),
+        ] {
+            let e = parse_retired(&bad).unwrap_err();
+            assert!(e.contains("retired"), "{bad:?}: {e}");
+        }
+        assert_eq!(parse_retired("-"), Ok(None));
     }
 }
