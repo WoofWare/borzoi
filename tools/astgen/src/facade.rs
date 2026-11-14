@@ -2223,6 +2223,7 @@ mod tests {
         fake_rows.push(FeatureRow {
             name: "SyntheticFeature".to_string(),
             introduced: "12.0".to_string(),
+            retired: None,
             stages: vec![Stage::Parse],
             effects: vec![Effect::Diagnose],
             borzoi: vec![Modelling::Kind("SYNTHETIC_EXPR".to_string())],
@@ -2334,6 +2335,65 @@ mod tests {
             .collect();
         assert!(!frozen_heads.is_empty());
         assert_eq!(offered, frozen_heads);
+    }
+
+    /// The synthetic-feature test's twin for a compiler that *deletes* a
+    /// feature: retiring rows (`docs/ast-versioning-plan.md`, D12) leaves
+    /// every facade output byte-identical, published or not. Against the
+    /// table with every retirement cleared, it checks the table as checked
+    /// in, `WhileBang` (whose `Kind` separates `v7` from `v8`) retired, and
+    /// every row retired at once.
+    #[test]
+    fn a_retired_feature_leaves_every_facade_byte_identical() {
+        let checked_in = features::feature_table();
+        let union = union();
+        let versions = versions();
+        let generate = |rows: &[FeatureRow]| {
+            outputs_with(rows, &union, &versions, CURRENT_FREEZE, &checked_in_lock)
+                .unwrap_or_else(|e| panic!("{e}"))
+        };
+        let mut unretired = checked_in.clone();
+        unretired.iter_mut().for_each(|r| r.retired = None);
+        let real = generate(&unretired);
+        let retire = |row: &mut FeatureRow| {
+            row.retired = Some(format!(
+                "{}c3c01c991d17643700d343cee5c5a1e20c06ce03",
+                features::RETIRED_PREFIX
+            ));
+        };
+
+        let mut one = unretired.clone();
+        let while_bang = one.iter_mut().find(|r| r.name == "WhileBang").unwrap();
+        assert!(while_bang.is_live() && while_bang.kinds().eq(["WHILE_BANG_EXPR"]));
+        retire(while_bang);
+        let mut all = unretired.clone();
+        all.iter_mut().for_each(retire);
+
+        assert!(!PUBLISHED.is_empty());
+        for module in PUBLISHED {
+            let v = versions.iter().find(|v| v.module() == *module).unwrap();
+            assert!(real.contains_key(&v.code_path()), "{module}");
+        }
+        for (what, retired_rows) in [
+            ("the checked-in retirements", &checked_in),
+            ("WhileBang", &one),
+            ("every row", &all),
+        ] {
+            let fake = generate(retired_rows);
+            assert_eq!(
+                real.keys().collect::<Vec<_>>(),
+                fake.keys().collect::<Vec<_>>(),
+                "retiring {what} changed which files are generated"
+            );
+            for (path, text) in &real {
+                assert!(fake[path] == *text, "{path} moved with {what}");
+            }
+        }
+        assert_ne!(
+            features::generate_features(&unretired),
+            features::generate_features(&one),
+            "the feature module records a retirement"
+        );
     }
 
     /// The lock of `module`'s distinct facade in `generation`.
