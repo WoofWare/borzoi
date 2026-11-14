@@ -839,6 +839,9 @@ pub struct ForeignDefinitions {
     pub targets: BTreeMap<String, BTreeSet<PathBuf>>,
     /// `<UsingTask TaskName="…">` registrations, possibly namespace-qualified.
     pub tasks: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// `<Project DefaultTargets="…">` and `<Project InitialTargets="…">`, by
+    /// attribute (lowercased): which targets a build runs.
+    pub target_selections: BTreeMap<String, BTreeSet<PathBuf>>,
 }
 
 /// Whether a recorded name may stand for a name other than its spelling: one
@@ -862,10 +865,11 @@ impl ForeignDefinitions {
             .any(|key| matches(key) || computed_name(key))
     }
 
-    /// Whether a document outside the SDK defines any target or registers any
-    /// task: code the build runs, which may do anything.
+    /// Whether a document outside the SDK defines any target, registers any
+    /// task, or selects the targets a build runs: code the build runs, or the
+    /// choice of it, which may do anything.
     pub fn defines_build_code(&self) -> bool {
-        !self.targets.is_empty() || !self.tasks.is_empty()
+        !self.targets.is_empty() || !self.tasks.is_empty() || !self.target_selections.is_empty()
     }
 
     /// Whether a document outside the SDK may write property `name` at build
@@ -935,6 +939,17 @@ impl ForeignDefinitions {
                 .find(|a| a.name().eq_ignore_ascii_case(name))
                 .map(|a| a.value())
         };
+        if tag.eq_ignore_ascii_case("Project") {
+            for selection in ["DefaultTargets", "InitialTargets"] {
+                if attribute(selection).is_some_and(|v| !v.trim().is_empty()) {
+                    self.target_selections
+                        .entry(selection.to_ascii_lowercase())
+                        .or_default()
+                        .insert(file.to_path_buf());
+                }
+            }
+            return;
+        }
         let in_property_group = node
             .parent_element()
             .is_some_and(|p| p.tag_name().name().eq_ignore_ascii_case("PropertyGroup"));

@@ -924,6 +924,19 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
             .insert(variable.to_string(), "/opt/elsewhere".to_string());
         assert_eq!(named(&fsproj, &env), None, "{variable} in the environment");
     }
+    let dir = tempfile::tempdir().unwrap();
+    let redirected = pinned_project(dir.path(), &compiler.sdk, None, STRADDLING);
+    let text = host_fs::read_to_string(&redirected).unwrap().replace(
+        r#"<Project Sdk="Microsoft.NET.Sdk">"#,
+        r#"<Project Sdk="Microsoft.NET.Sdk" DefaultTargets="Clean">"#,
+    );
+    assert!(text.contains("DefaultTargets"));
+    std::fs::write(&redirected, text).unwrap();
+    assert_eq!(
+        named(&redirected, &plain),
+        None,
+        "a redirected default target"
+    );
     let globals = HashMap::from([("BuildDependsOn".to_string(), "Clean".to_string())]);
     let mut workspace = Workspace::with_env_and_extra_build_properties(plain.clone(), globals);
     assert_eq!(

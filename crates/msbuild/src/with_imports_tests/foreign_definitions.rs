@@ -276,3 +276,16 @@ fn an_sdk_file_the_project_imports_itself_is_recorded() {
         .collect();
     assert_eq!(names, ["Other.targets"]);
 }
+
+/// A project's choice of the targets a build runs is recorded.
+#[test]
+fn a_target_selection_is_recorded() {
+    let doc = roxmltree::Document::parse(
+        r#"<Project Sdk="Microsoft.NET.Sdk" DefaultTargets="Clean" InitialTargets=" "><PropertyGroup /></Project>"#,
+    )
+    .unwrap();
+    let mut foreign = ForeignDefinitions::default();
+    foreign.record_document(doc.root_element(), Path::new("/w/App.fsproj"));
+    assert_eq!(names(&foreign.target_selections), ["defaulttargets"]);
+    assert!(foreign.defines_build_code());
+}

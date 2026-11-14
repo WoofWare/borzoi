@@ -296,6 +296,7 @@ pub fn project_compiler(
             || defined.defines_property_where(|name| name.ends_with(TARGET_GRAPH_SUFFIX))
             || defined.defines_target(COMPILE_TARGET)
             || defined.defines_task(COMPILE_TASK)
+            || !defined.target_selections.is_empty()
     };
     // A workload manifest is the install's own build code, held to what it
     // touches; anything else outside the SDK may not run build code at all.
@@ -570,6 +571,13 @@ pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedC
             "a `$(LangVersion)` with surrounding whitespace, which the compiler is handed as \
              it stands"
                 .to_string(),
+        ));
+    }
+    // `--langversion:?` asks the compiler to list its versions, and it checks
+    // nothing.
+    if property("LangVersion").is_some_and(|value| value == "?") {
+        return Some(UntrustedCause::Unentered(
+            "`$(LangVersion)` `?`, the compiler's version query".to_string(),
         ));
     }
     let other_flags = property("OtherFlags")
@@ -1005,7 +1013,7 @@ mod tests {
         let mut parsed = on_sdk("10.0.401");
         parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
         assert!(doubted(&parsed), "content unseen");
-        for value in [" 7.0", "8.0 ", "\t11"] {
+        for value in [" 7.0", "8.0 ", "\t11", "?"] {
             let mut parsed = on_sdk("10.0.401");
             parsed
                 .properties
@@ -1035,12 +1043,14 @@ mod tests {
             ("properties", "builddependson", None),
             ("targets", "corecompile", None),
             ("tasks", "my.fsc", None),
+            ("selections", "initialtargets", None),
         ] {
             let mut parsed = on_sdk("10.0.401");
             let workload = &mut parsed.workload_definitions;
             let table = match table {
                 "targets" => &mut workload.targets,
                 "tasks" => &mut workload.tasks,
+                "selections" => &mut workload.target_selections,
                 _ => &mut workload.properties,
             };
             table
@@ -1064,6 +1074,19 @@ mod tests {
         parsed
             .sdk_files_imported_from_outside
             .insert("/d/sdk/10.0.401/Microsoft.CSharp.targets".into());
+        assert_eq!(compiler_of(&parsed, &[]), None);
+    }
+
+    /// A project that selects its own targets may not run the compiler.
+    #[test]
+    fn a_target_selection_outside_the_sdk_declines() {
+        let mut parsed = on_sdk("10.0.401");
+        parsed
+            .foreign_definitions
+            .target_selections
+            .entry("defaulttargets".to_string())
+            .or_default()
+            .insert("/w/App.fsproj".into());
         assert_eq!(compiler_of(&parsed, &[]), None);
     }
 }
