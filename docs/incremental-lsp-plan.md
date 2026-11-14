@@ -4459,24 +4459,27 @@ parse, so a store dropped after each evaluation (which reports none) passed
 them; they now check after every evaluation that each file it read is kept
 with the digest its read records.
 
-**Measured** against `main` at #726's merge (e853ad8bf), minimum of five
-runs (three for the keystroke), instructions per round:
+**Measured** against `main` at #757's merge (25c630ac1), minimum of five
+runs, instructions per round:
 
 | measurement | project | before | after |
 |---|---|---:|---:|
-| `lsp.evaluate` (`eval_counts`) | WoofWare.Incremental | 323.8 M | 206.4 M |
-| `msbuild.evaluate`, no store to reuse | WoofWare.Incremental | 289.8 M | 229.3 M |
-| `own-comment` round | WoofWare.Incremental | 505.0 M | 379.6 M |
-| `own-comment` round | WoofWare.PawPrint.Domain | 516.9 M | 393.8 M |
-| of which `didChangeWatchedFiles` | WoofWare.Incremental | 330.0 M | 208.2 M |
-| `blocked-edit`: the edit waited | WoofWare.Incremental | 393.8 M | 240.6 M |
-| `blocked-edit`: the edit waited | WoofWare.PawPrint.Domain | 362.4 M | 246.8 M |
-| keystroke round (no evaluation) | WoofWare.Incremental | 37.6 M | 37.4 M |
-| `own-save` round (no evaluation) | WoofWare.Incremental | 56.4 M | 55.9 M |
+| `lsp.evaluate` (`eval_counts`) | WoofWare.Incremental | 300.1 M | 187.6 M |
+| `lsp.evaluate` (`eval_counts`) | WoofWare.PawPrint.Domain | 299.7 M | 179.2 M |
+| `msbuild.evaluate`, no store to reuse | WoofWare.Incremental | 291.0 M | 217.9 M |
+| `own-comment` round | WoofWare.Incremental | 352.9 M | 228.7 M |
+| `own-comment` round | WoofWare.PawPrint.Domain | 352.1 M | 229.7 M |
+| of which `didChangeWatchedFiles` | WoofWare.Incremental | 304.3 M | 182.9 M |
+| `blocked-edit`: the edit waited | WoofWare.Incremental | 309.5 M | 202.6 M |
+| `blocked-edit`: the edit waited | WoofWare.PawPrint.Domain | 324.1 M | 198.1 M |
 
-The evaluation asks 114 opens, 175 `stat`s, 34 listings and 153
-canonicalisations where it asked 115, 264, 57 and 253, for the same 476
-distinct reads.
+Against #726's merge (e853ad8bf), where nothing else moved, the rounds that
+run no evaluation did not move either: a keystroke 37.6 M before and 37.4 M
+after (three runs), an `own-save` 56.4 M and 55.9 M.
+
+On WoofWare.Incremental the evaluation asks 114 opens, 175 `stat`s, 34
+listings and 153 canonicalisations where it asked 115, 264, 57 and 253, for
+the same 476 distinct reads.
 
 **Open gaps.**
 
