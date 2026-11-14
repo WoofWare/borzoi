@@ -6542,8 +6542,8 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
             return;
         }
     };
-    let source = match observed::read_to_string(state.observer, &canon) {
-        Ok(s) => s,
+    let parsed = match observed::read_document(state.observer, &canon) {
+        Ok(parsed) => parsed,
         Err(e) => {
             let reason = if e.kind() == std::io::ErrorKind::NotFound {
                 ImportFailReason::NotFound
@@ -6562,8 +6562,8 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
             return;
         }
     };
-    let doc = match roxmltree::Document::parse(&source) {
-        Ok(d) => d,
+    let parsed = match parsed {
+        Ok(parsed) => parsed,
         Err(e) => {
             state.push(
                 DiagnosticKind::ImportFailed {
@@ -6577,6 +6577,7 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
             return;
         }
     };
+    let doc = parsed.document();
     // Rebind `MSBuildThisFile{,Directory}` using the *pre-canonical*
     // path for the same reason nested `<Import>` resolution does
     // below: when MSBuild reaches a file through a symlink, it
@@ -6589,11 +6590,12 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     // Deferred `<ItemGroup>`s recorded while inside this file must know
     // which document to replay against — same pre-canonical-path identity
     // as the `MSBuildThisFile` frame above. `retained: None` until the
-    // first deferral in this frame forces the source to be kept.
+    // first deferral in this frame forces the document to be kept.
     let saved_current_file = std::mem::replace(
         &mut state.current_file,
         CurrentFile::Imported {
             path: path.to_path_buf(),
+            document: std::sync::Arc::clone(&parsed),
             retained: None,
         },
     );

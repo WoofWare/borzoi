@@ -110,7 +110,8 @@ fn toolset_predefined_names_are_exactly_the_ones_msbuild_predefines() {
 /// beside the unseeded cases below.
 #[test]
 fn visual_studio_version_on_a_real_sdk_project_is_exact_or_declined() {
-    use borzoi_msbuild::{parse_fsproj_with_imports, resolve_sdk, workloads};
+    use crate::common::parse_fsproj_with_imports;
+    use borzoi_msbuild::{resolve_sdk, workloads};
     use std::collections::HashMap;
 
     let tmp = TempDir::new().unwrap();
@@ -237,7 +238,7 @@ fn predefined_names_without_an_sdk_are_exact_or_declined() {
             theirs.is_some_and(|v| !v.is_empty() && v != "empty" && v != "/FALLBACK"),
             "{label}: MSBuild reads {theirs:?}, so the name is not predefined here"
         );
-        let ours = borzoi_msbuild::parse_fsproj_with_imports(
+        let ours = common::parse_fsproj_with_imports(
             &body,
             &path,
             &std::collections::HashMap::new(),
