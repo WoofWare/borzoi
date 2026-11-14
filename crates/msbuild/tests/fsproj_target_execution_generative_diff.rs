@@ -702,3 +702,135 @@ fn quoted_expressions_read_as_msbuild_reads_them() {
         check(&mut oracle, xml, &mut Tally::default());
     }
 }
+
+/// Identities an item list `J` may hold for batching: extensions of either
+/// case, none, a trailing dot, a dotfile, a dot in a directory, two dots; a
+/// `.` spelt escaped, which decodes to `a.x` but which MSBuild derives no
+/// extension from, nor buckets with `a.x`; and identities substitution cannot
+/// spell (an escaped `;`, a space, an escaped letter).
+const BATCH_IDENTITIES: [&str; 15] = [
+    "a.x", "b.y", "c.x", "C.X", "d/e.x", "noext", "dot.", ".rc", "m.n.x", "p.Y", "d.x/f", "a%2Ex",
+    "q%3Bx", "s%20p.x", "%61.x",
+];
+/// Conditions an element batched over `J` may carry: each identity modifier,
+/// case-folded comparisons and names, two references in one string, and
+/// shapes the executor declines (unqualified, an unmodelled modifier,
+/// unquoted, another type).
+const BATCH_CONDITIONS: [&str; 12] = [
+    "'%(J.Extension)' != '.y'",
+    "'%(J.Extension)' == '.X'",
+    "'%(J.Filename)' != 'c'",
+    "'%(J.Identity)' != 'a.x'",
+    "'%(J.Extension)' != '.metaproj' AND '%(J.Extension)' != ''",
+    "'%(J.Extension)%(J.Filename)' != '.xa'",
+    "'%(j.extension)' == '.x' or '%(J.Filename)' == 'noext'",
+    "'%(J.Extension)' != '' and '$(A)' == 'x'",
+    "'%(Extension)' != '.y'",
+    "'%(J.FullPath)' != ''",
+    "%(J.Extension) != ''",
+    "'%(K.Extension)' == ''",
+];
+
+fn batching_project(rng: &mut SplitMix64) -> String {
+    let mut out = String::from("<Project>\n  <PropertyGroup><A>x</A></PropertyGroup>\n");
+    if rng.below(4) == 0 {
+        out.push_str("  <ItemDefinitionGroup><I><M>d</M></I></ItemDefinitionGroup>\n");
+    }
+    let mut identities: Vec<&str> = (0..1 + rng.below(5))
+        .map(|_| {
+            if rng.below(6) == 0 {
+                *rng.pick(&BATCH_IDENTITIES)
+            } else {
+                *rng.pick(&BATCH_IDENTITIES[..11])
+            }
+        })
+        .collect();
+    // Now and then the escaped `.`, beside whatever else the list holds.
+    if rng.below(6) == 0 {
+        let at = rng.below(identities.len() + 1);
+        identities.insert(at, "a%2Ex");
+    }
+    let metadata = if rng.below(3) == 0 { " N=\"n\"" } else { "" };
+    out.push_str(&format!(
+        "  <ItemGroup><J Include=\"{}\"{metadata} /></ItemGroup>\n",
+        identities.join(";")
+    ));
+    if rng.below(8) == 0 {
+        out.push_str("  <ItemGroup><I Include=\"pre\" /></ItemGroup>\n");
+    }
+    out.push_str("  <Target Name=\"T0\">\n    <ItemGroup>\n");
+    for _ in 0..1 + usize::from(rng.below(6) == 0) {
+        let condition = if rng.below(5) == 0 {
+            *rng.pick(&BATCH_CONDITIONS)
+        } else {
+            *rng.pick(&BATCH_CONDITIONS[..8])
+        };
+        let include = match rng.below(12) {
+            0 => "@(J);z",
+            1 => "@(K)",
+            _ => "@(J)",
+        };
+        let own = if rng.below(4) == 0 { " M=\"own\"" } else { "" };
+        // A metadata child, which MSBuild decides per bucket: plain, reading
+        // the bucket's list, or reading metadata (which batches even where
+        // its condition skips it).
+        let child = match rng.below(16) {
+            0 => "<M>plain</M>",
+            1 => "<M Condition=\"'@(J)' == 'a.x'\">one</M>",
+            2 => "<M Condition=\"false\">%(J.Filename)</M>",
+            3 => "<M>%(J.Extension)</M>",
+            _ => "",
+        };
+        if child.is_empty() {
+            out.push_str(&format!(
+                "      <I Include=\"{include}\" Condition=\"{condition}\"{own} />\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "      <I Include=\"{include}\" Condition=\"{condition}\"{own}>{child}</I>\n"
+            ));
+        }
+    }
+    out.push_str("    </ItemGroup>\n  </Target>\n</Project>\n");
+    out
+}
+
+fn batching_sweep(seed: u64, cases: usize) -> Tally {
+    let mut rng = SplitMix64(seed);
+    let mut oracle = Oracle::spawn();
+    let mut tally = Tally::default();
+    for _ in 0..cases {
+        check(&mut oracle, &batching_project(&mut rng), &mut tally);
+    }
+    tally
+}
+
+/// An item element whose condition reads `%(J.…)` batches over `J`: its
+/// buckets, in first-appearance order, each decided with their own values,
+/// copy their items. Every committed run must be MSBuild's. Over half the
+/// draws are shapes the executor declines by design (unmodelled references,
+/// other includes, a second element of `I`, identities substitution cannot
+/// spell or whose spelling is not the identity, metadata reading the list),
+/// so the floor, which catches a collapse to declining everything, is three
+/// tenths (76 of 200 at this seed).
+#[test]
+fn batched_item_groups_match_msbuild() {
+    let tally = batching_sweep(0xba7c_4ed1, 200);
+    eprintln!(
+        "batching: {} cases, {} committed, {} rejected, {} failed",
+        tally.cases, tally.committed, tally.rejected, tally.failed
+    );
+    assert!(
+        tally.committed * 10 > tally.cases * 3,
+        "only {} of {} batched runs committed",
+        tally.committed,
+        tally.cases
+    );
+}
+
+#[test]
+#[ignore = "a fresh-seed soak; BORZOI_MSBUILD_SOAK_SEED / BORZOI_MSBUILD_SOAK_CASES"]
+fn batching_soak() {
+    let (seed, cases) = common::soak_parameters("fsproj_target_execution_batching", 3000);
+    batching_sweep(seed, cases);
+}
