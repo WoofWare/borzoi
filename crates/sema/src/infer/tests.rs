@@ -288,16 +288,15 @@ fn ill_typed_condition_keeps_the_parameter_annotation() {
 }
 
 #[test]
-fn annotated_param_beats_a_conflicting_arg_check_wake() {
+fn annotated_param_beats_a_conflicting_argument_check() {
     // The 3.3c hazard shape, now with the annotation *modelled* (R2-b):
     // `let h (y: string) = (y, fi y)` with in-file `fi : int -> int64`
     // (itself R2-b-annotated). FCS keeps `y : string` (the annotation is
     // exact on the binder; the application is the error site) and
     // `h : string -> string * int64` (the result is fixed by `fi`'s own
     // shape regardless of the bad argument). Ours agrees: the annotation
-    // grounds `y` before the wake, so the wake's `Eq(y, int)` fails and
-    // rolls back; its poison hits only the already-ground result, so `h`
-    // still emits — and crucially no `int` reaches `y`'s synth-mode tuple
+    // grounds `y` before the argument check, so its `Eq(y, int)` fails
+    // between ground types and binds nothing, so `h` still emits — and crucially no `int` reaches `y`'s synth-mode tuple
     // use (`7L` is the only Int64; nothing emits Int32).
     let src = "module M\nlet fi (n: int) = 7L\nlet h (y: string) = (y, fi y)\n";
     let types = def_types(src);
@@ -316,7 +315,7 @@ fn annotated_param_beats_a_conflicting_arg_check_wake() {
     );
     assert!(
         !exprs.contains(&"System.Int32".to_string()),
-        "no wake-derived int may reach y's use: {exprs:?}"
+        "no check-derived int may reach y's use: {exprs:?}"
     );
 }
 
@@ -326,9 +325,8 @@ fn annotated_param_beats_a_conflicting_arg_check_wake() {
 
 #[test]
 fn return_annotation_grounds_parameter_through_body() {
-    // `let h x : int = x`: the sealed `int` annotation discharges the
-    // body↔annotation relation as a genuine equality (the ArgCheck wake's
-    // own no-subsumption judgment), grounding `x` through its body use.
+    // `let h x : int = x`: the body is checked against the annotation, a
+    // decision at the body's leaf, grounding `x` through its body use.
     let types = def_types("module M\nlet h x : int = x\n");
     assert_eq!(
         types.get("h").map(String::as_str),
@@ -394,8 +392,8 @@ fn non_table_return_annotation_keeps_the_skip() {
 #[test]
 fn ill_typed_body_keeps_the_return_annotation() {
     // `let f x : int = "s"` errors at the body; FCS keeps `f : 'a -> int`.
-    // The failed discharge rolls back whole and poisons only its own
-    // (ground) endpoints, so the unused parameter still quantifies.
+    // The failed decision between ground types binds nothing, so the unused
+    // parameter still quantifies.
     let types = def_types("module M\nlet f x : int = \"s\"\n");
     assert_eq!(
         types.get("f").map(String::as_str),
@@ -746,15 +744,15 @@ fn value_binding_id_alias_stays_silent() {
 }
 
 #[test]
-fn wake_must_not_ground_an_earlier_open_binder() {
+fn decision_must_not_ground_an_earlier_open_binder() {
     // `let g = id` leaves `g` carrying id's *instantiation* variables,
     // created in g's own (earlier) binding. A later application `g 1` must
-    // NOT discharge its ArgCheck against that environment variable: FCS
+    // NOT decide its argument check against that environment variable: FCS
     // keeps `g : 'a -> 'a` (fcs-dump probe, 2026-07-08 — F# generalises
     // `let g = id`, contra the FS0030 shorthand in the sibling test's
-    // comment), so grounding `g` to `int -> int` through the wake and
-    // publishing it — as happened before the env guard — is a wrong type,
-    // not a missed one. The wake's mark gate blocks it; `g`, the `id` use
+    // comment), so grounding `g` to `int -> int` through the check and
+    // publishing it is a wrong type, not a missed one. The decision's mark
+    // gate (`Gen::touches_opaque`) declines it; `g`, the `id` use
     // node, and (in the unannotated shape) `n` all stay silent.
     for src in [
         "module M\nlet id x = x\nlet g = id\nlet n = g 1\n",
@@ -774,10 +772,10 @@ fn wake_must_not_ground_an_earlier_open_binder() {
 }
 
 #[test]
-fn wake_must_not_ground_an_earlier_open_argument() {
+fn decision_must_not_ground_an_earlier_open_argument() {
     // The argument-side twin: `let a = h 0` leaves `a` open (unmodelled
     // application). `let n = fb a` (in-file `fb : bool -> int`) must not
-    // ground `a := bool` through the wake — `a`'s type is fixed by its own
+    // ground `a := bool` through the check — `a`'s type is fixed by its own
     // (unmodelled) binding, and FCS resolves it there, not here.
     let src = "module M\nlet fb b = if b then 1 else 2\nlet a = h 0\nlet n = fb a\n";
     let types = def_types(src);
@@ -937,39 +935,32 @@ fn partial_application_grounds_a_function_result() {
 }
 
 #[test]
-fn polymorphic_application_wakes_and_grounds_result() {
-    // Closed by 3.3c: `let id x = x` (`'a -> 'a`), `let n = id 42` ⇒ `n : int`.
+fn polymorphic_application_grounds_result() {
+    // `let id x = x` (`'a -> 'a`), `let n = id 42` ⇒ `n : int`.
     // `id` instantiates to `'b -> 'b`, so `Eq(id_use, Fun(d, r))` gives
-    // `d = r = 'b`. The literal argument `42 : int` is suspended as
-    // `ArgCheck { arg: int, dom: d }`; on this walk-complete value binding the
-    // wake fires (`d` is a scheme instantiation var of ours — a no-subsumption
-    // domain), discharging `Eq(int, d)`, so `d = r = int` and `n : int`,
-    // matching FCS. (Flipped from the 3.2c-3 `polymorphic_application_defers`.)
+    // `d = r = 'b`. The literal argument `42 : int` is checked against `d`,
+    // a decision at the literal, so `d = r = int` and `n : int`, matching
+    // FCS.
     let types = def_types("module M\nlet id x = x\nlet n = id 42\n");
     assert_eq!(types.get("id").map(String::as_str), Some("'a -> 'a"));
     assert_eq!(
         types.get("n").map(String::as_str),
         Some("System.Int32"),
-        "the suspended arg wake grounds the polymorphic application result"
+        "the argument check grounds the polymorphic application result"
     );
 }
 
 #[test]
-fn applied_polymorphic_argument_wakes_and_generalises() {
-    // `let g y = id y` (with `id : 'a -> 'a`): the argument `y` is suspended as
-    // an `ArgCheck { arg: y, dom: d }` against `id`'s domain `d`. On this
-    // *walk-complete* binding the wake fires — `d` resolves to a scheme
-    // **instantiation variable** of ours (an unbound root in
-    // `scheme_inst_vars`, so a no-subsumption domain) — discharging `Eq(y, d)`.
-    // `y = d = r = 'a`, so `g` generalises to `'a -> 'a`, matching FCS. This is
-    // the headline 3.3c payoff (flipped from the 3.2c-3
-    // `applied_polymorphic_argument_defers_via_poison` deferral).
+fn applied_polymorphic_argument_generalises() {
+    // `let g y = id y` (with `id : 'a -> 'a`): the argument `y` is checked
+    // against `id`'s domain `d`, a decision at the use of `y`: `Eq(y, d)`.
+    // `y = d = r = 'a`, so `g` generalises to `'a -> 'a`, matching FCS.
     let types = def_types("module M\nlet id x = x\nlet g y = id y\n");
     assert_eq!(types.get("id").map(String::as_str), Some("'a -> 'a"));
     assert_eq!(
         types.get("g").map(String::as_str),
         Some("'a -> 'a"),
-        "the suspended arg↔param wake grounds the parameter, so the function generalises"
+        "the argument check grounds the parameter, so the function generalises"
     );
 }
 
@@ -1056,25 +1047,23 @@ fn failed_shape_application_result_never_generalises() {
     );
 }
 
-// ===== Stage 3.3c — the application wake rule (suspended arg↔param) =====
+// ===== Application argument checks, decided at the argument ======
 
 #[test]
-fn chained_application_wakes_through_the_chain() {
-    // `let c x = id (id x)` ⇒ `'a -> 'a`: the inner `id x` wakes (`x`'s var =
-    // `id`'s domain, a scheme instantiation var), grounding the inner result to
-    // that same class; the outer `id (…)` wakes likewise, so the whole chain is
-    // one quantifiable class → `'a -> 'a`, matching FCS.
+fn chained_application_checks_through_the_chain() {
+    // `let c x = id (id x)` ⇒ `'a -> 'a`: the inner `id x` is checked against
+    // the outer `id`'s domain and `x` against the inner's, so the whole chain
+    // is one quantifiable class → `'a -> 'a`, matching FCS.
     let types = def_types("module M\nlet id x = x\nlet c x = id (id x)\n");
     assert_eq!(types.get("c").map(String::as_str), Some("'a -> 'a"));
 }
 
 #[test]
-fn in_file_monomorphic_function_wakes() {
+fn in_file_monomorphic_function_checks_its_argument() {
     // `let fb b = if b then 1 else 2` is `bool -> int` (condition-grounded);
-    // `let h y = fb y`: the arg `y` is suspended against `fb`'s domain `d`,
-    // which the shape `Eq` grounds to the sealed primitive `bool` (a
-    // no-subsumption domain). The complete binding's wake discharges
-    // `Eq(y, bool)`, so `h : bool -> int`, matching FCS.
+    // `let h y = fb y`: the arg `y` is checked against `fb`'s domain, which
+    // the shape `Eq` grounds to `bool`: the decision `Eq(y, bool)` makes
+    // `h : bool -> int`, matching FCS.
     let types = def_types("module M\nlet fb b = if b then 1 else 2\nlet h y = fb y\n");
     assert_eq!(
         types.get("h").map(String::as_str),
@@ -1083,11 +1072,11 @@ fn in_file_monomorphic_function_wakes() {
 }
 
 #[test]
-fn ground_value_argument_wakes() {
+fn ground_value_argument_checks() {
     // `let b = true` (`b : bool`), `let fb b2 = if b2 then 1 else 2`
     // (`bool -> int`), `let n = fb b`: the argument is the ground value `b`, and
-    // the domain grounds to the sealed `bool`. The wake discharges `Eq(b, bool)`
-    // (a no-op — both are already `bool`); `n : int` from the result. FCS agrees.
+    // the domain grounds to `bool`. The decision `Eq(b, bool)` is a no-op —
+    // both are already `bool`; `n : int` from the result. FCS agrees.
     let types =
         def_types("module M\nlet b = true\nlet fb b2 = if b2 then 1 else 2\nlet n = fb b\n");
     assert_eq!(types.get("n").map(String::as_str), Some("System.Int32"));
@@ -1095,8 +1084,8 @@ fn ground_value_argument_wakes() {
 
 #[test]
 fn instantiated_scheme_argument_flows_into_a_tuple() {
-    // `let k y = (id y, y)` ⇒ `'a -> 'a * 'a`: `id y` wakes (`y = id`'s domain,
-    // a scheme instantiation var), so `y`, the inner result, and the outer
+    // `let k y = (id y, y)` ⇒ `'a -> 'a * 'a`: `y` is checked against `id`'s
+    // domain, so `y`, the inner result, and the outer
     // element all collapse into one quantifiable class; the tuple's second `y`
     // element shares it. FCS: `'a -> 'a * 'a`.
     let types = def_types("module M\nlet id x = x\nlet k y = (id y, y)\n");
@@ -1111,7 +1100,7 @@ fn annotated_param_hazard_emits_nothing_wrong() {
     // parameter marked the binding incomplete and everything deferred; since
     // R2-b the annotation is *modelled*, and the guard's substance is
     // unchanged: `y` is grounded to `string` by its annotation **before**
-    // the wake, so the wake's `Eq(string, int)` fails and rolls back — `y`
+    // the argument check, so its `Eq(string, int)` fails and binds nothing — `y`
     // is never retyped to `int` through the annotation-vs-application
     // conflict, and its synth-mode tuple use reads off `string` (FCS
     // agrees). `h` still emits (`string -> string * int` — the result is
@@ -1134,7 +1123,7 @@ fn annotated_param_hazard_emits_nothing_wrong() {
     );
     assert_eq!(types.get("x").map(String::as_str), Some("System.Int32"));
     // The precise leak check: the tuple's `y` element must read off the
-    // annotation's `string`, not the wake's `int`. (An `Int32` render does
+    // annotation's `string`, not the check's `int`. (An `Int32` render does
     // legitimately appear elsewhere — `f`'s body use of `x` — so the
     // assertion is range-keyed, not a blanket render scan.)
     let parsed = parse(src);
@@ -1159,64 +1148,56 @@ fn annotated_param_hazard_emits_nothing_wrong() {
 }
 
 #[test]
-fn ill_typed_literal_against_sealed_domain_fails_discharge_silently() {
+fn ill_typed_literal_against_sealed_domain_fails_silently() {
     // `let fb b = if b then 1 else 2` (`bool -> int`), `let m = fb 1`: the
-    // argument `1 : int` is suspended against the domain, which grounds to the
-    // sealed `bool`. The complete binding's wake attempts `Eq(int, bool)`, which
-    // **fails** to unify — `unify_atomic` rolls it back, leaving no trace — so
-    // the ArgCheck is undischarged and its `arg`/`dom` are poisoned. The result
+    // argument `1 : int` is checked against the domain, which grounds to the
+    // sealed `bool`. The decision `Eq(int, bool)` **fails** between ground
+    // types, binding nothing, as in FCS. The result
     // `r` is still grounded to `int` by `Eq(fb, Fun(bool, int))`, so `m : int`
     // (FCS agrees); nothing wrong is published for the argument.
     let types = def_types("module M\nlet fb b = if b then 1 else 2\nlet m = fb 1\n");
     assert_eq!(
         types.get("m").map(String::as_str),
         Some("System.Int32"),
-        "the result is grounded by the function shape, independent of the failed arg discharge"
+        "the result is grounded by the function shape, independent of the failed argument check"
     );
 }
 
 #[test]
-fn incomplete_binding_blocks_an_otherwise_wakeable_application() {
+fn incomplete_binding_blocks_an_otherwise_checked_application() {
     // `let g y = (id y, (y : int))`: the `(y : int)` ascription elsewhere in the
-    // body marks the binding **incomplete**. So even though `id y` is otherwise
-    // wakeable (`y = id`'s scheme-inst domain), the completeness gate forbids the
-    // wake, and the binding defers. FCS grounds `g : int -> int * int` through
-    // the ascription (a constraint we drop); we stay silent (D5). This pins that
-    // the gate protects annotations/ascriptions.
+    // body marks the binding **incomplete**: the faithful prefix ends there,
+    // and the binding defers. FCS grounds `g : int -> int * int` through the
+    // ascription (a constraint we drop); we stay silent (D5). This pins that
+    // the prefix protects annotations/ascriptions.
     let types = def_types("module M\nlet id x = x\nlet g y = (id y, (y : int))\n");
     assert_eq!(
         types.get("g"),
         None,
-        "an ascription-incomplete binding must not discharge its arg wake"
+        "an ascription-incomplete binding must not publish"
     );
 }
 
 #[test]
-fn undischarged_argcheck_poison_blocks_generalisation() {
-    // The generalisation-interaction guard: an application whose domain is NOT a
-    // no-subsumption type leaves its `ArgCheck` undischarged, and the deferred
-    // poison on `arg`/`dom`/`r` must block quantifying them. `let fo (o: obj) =
-    // 1` is `obj -> int`; `let g y = fo y`: `obj` admits subsumption (excluded
-    // from the no-subsumption set), so the wake never fires. FCS keeps
+fn obj_parameter_application_does_not_ground_the_argument() {
+    // The generalisation-interaction guard: `let fo (o: obj) = 1` is
+    // `obj -> int`; `let g y = fo y`: `obj` admits subsumption, so the
+    // argument is not equated with it. FCS keeps
     // `g : 'a -> int` (it does *not* ground `y := obj`); we defer rather than
-    // emit a wrong `obj -> int`. (`fo`'s annotated param also independently
-    // defers the callee, so this is belt-and-braces — but it pins the poison
-    // path.)
+    // emit a wrong `obj -> int`.
     let types = def_types("module M\nlet fo (o: obj) = 1\nlet g y = fo y\n");
     assert_eq!(
         types.get("g"),
         None,
-        "an undischarged arg wake (non-no-subsumption domain) must defer the function"
+        "an argument against an `obj` parameter must not ground it"
     );
 }
 
 proptest::proptest! {
     /// For every literal kind `literal_ty` covers, `let id x = x` +
-    /// `let n = id <lit>` grounds `n` to that literal's type: the polymorphic
-    /// application wakes (the domain is `id`'s scheme instantiation var), and the
-    /// discharged `Eq(arg, dom)` grounds the result. Covers every suffix so the
-    /// no-subsumption sealed-primitive set (which mirrors `literal_ty`) is
-    /// exercised end-to-end.
+    /// `let n = id <lit>` grounds `n` to that literal's type: the argument
+    /// check `Eq(arg, dom)`, decided at the literal, grounds the result. Covers
+    /// every suffix, so every literal kind is exercised end-to-end.
     #[test]
     fn identity_application_grounds_result_to_literal_type(idx in 0usize..16) {
         // (literal source, the primitive `literal_ty` assigns it).
@@ -1251,10 +1232,9 @@ proptest::proptest! {
 
 #[test]
 fn sealed_primitive_set_matches_literal_ty() {
-    // The no-subsumption sealed-primitive set (`is_sealed_primitive`) must be
-    // exactly the scalar `TyKind::Named`s `literal_ty` produces — the same
-    // primitives a literal has, each sealed, so a `<lit>` argument may discharge
-    // against a domain grounded to that primitive. This pins the two lists in
+    // The sealed-primitive set (`is_sealed_primitive`) must be exactly the
+    // scalar `TyKind::Named`s `literal_ty` produces — the same primitives a
+    // literal has, each sealed. This pins the two lists in
     // lock-step (a byte-string literal is a `TyKind::Array`, so it is *not* a named
     // sealed primitive — correctly excluded).
     use borzoi_cst::syntax::{ConstExpr, Expr};

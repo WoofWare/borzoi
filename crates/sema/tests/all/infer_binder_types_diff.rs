@@ -315,9 +315,9 @@ fn ill_typed_body_keeps_return_annotation() {
     assert_binder_sound(retarget);
 }
 
-/// A tuple of sealed primitives is a no-subsumption return too — the same
-/// domain judgment as the ArgCheck wake, not a second sealedness rule:
-/// `let p x : int * bool = (1, true)` ⇒ `'a -> int * bool`, matching FCS.
+/// A tuple of sealed primitives is a return annotation the body is checked
+/// against too: `let p x : int * bool = (1, true)` ⇒ `'a -> int * bool`,
+/// matching FCS.
 #[test]
 fn sealed_tuple_return_annotation_matches_fcs() {
     let source = "module M\nlet p x : int * bool = (1, true)\n";
