@@ -38,9 +38,16 @@
 //! the SDK* ([`project_compiler`]): a compiler selector written, or set in the
 //! environment or as a global; any target, task or target selection of a
 //! project's own; a reshaped target graph; an SDK file the project imports
-//! itself; content the walk could not see. Each of those declines, and the
-//! value the compiler is handed is likewise doubted wherever something visible
-//! may change it after evaluation ([`lang_version_untrusted_cause`]).
+//! itself; content the walk could not see. Each of those declines, and a
+//! refusal is withheld wherever something visible may change the value the
+//! compiler is handed after evaluation ([`lang_version_untrusted_cause`]).
+//! The files themselves parse at the evaluated version unless the evaluated
+//! values show it may be another ([`lang_version_value_doubt`]): a target that
+//! rewrites the version at build time withholds the refusal but does not move
+//! the parse, as before this module. Packages commonly ship targets that write
+//! properties under computed names (Nerdbank.GitVersioning's
+//! `PropertyName="%(…)"`), and doubting every such project's version would
+//! cost its fold for a write that never names it.
 //!
 //! What stays **unmodelled**, by the same assumption the rest of the LSP makes:
 //!
@@ -533,8 +540,8 @@ impl LangVersionSelection {
 /// (`SyntaxRecovery::of_guessed_version`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LangVersionDoubt {
-    /// The value the compiler is handed is not established
-    /// ([`lang_version_untrusted_cause`]).
+    /// The evaluated values show the version may be another
+    /// ([`lang_version_value_doubt`]).
     Provenance(UntrustedCause),
     /// The project's compiler refuses its `<LangVersion>`, so the build checks
     /// at no version.
@@ -542,11 +549,11 @@ pub enum LangVersionDoubt {
 }
 
 impl LangVersionDoubt {
-    /// The doubt over `parsed`'s language version, if any. Untrusted
-    /// provenance comes first: a refusal read from an untrusted value is
-    /// itself a guess.
+    /// The doubt over `parsed`'s language version, if any. The value's own
+    /// doubt comes first: a refusal read from a doubted value is itself a
+    /// guess.
     pub fn of(parsed: &ParsedProject, selection: &LangVersionSelection) -> Option<Self> {
-        if let Some(cause) = lang_version_untrusted_cause(parsed) {
+        if let Some(cause) = lang_version_value_doubt(parsed) {
             return Some(LangVersionDoubt::Provenance(cause));
         }
         selection.refusal.clone().map(LangVersionDoubt::Refused)
@@ -558,31 +565,20 @@ impl LangVersionDoubt {
 /// appended after it, where a `--langversion` or a response file overrides it.
 pub const LANG_VERSION_CARRIERS: [&str; 3] = ["LangVersion", "OtherFlags", "FscOtherFlags"];
 
-/// Why the evaluated `$(LangVersion)` may not be the version the compiler is
-/// handed, or `None` when it is. The compiler takes what `CoreCompile` reads at
-/// build time, so besides an untrusted evaluation, a target outside the SDK
-/// that may write one of [`LANG_VERSION_CARRIERS`] ([`ForeignDefinitions`]),
-/// content the walk did not enter (which may hold such a target), and
-/// `$(OtherFlags)` that may name a version (`langversion`, or an `@` response
-/// file), and a value with surrounding whitespace (which the task passes on as
-/// it stands) leave it unestablished. The SDK writes `LangVersion` only at
-/// evaluation.
+/// Why the version the compiler checks at may not be the one the evaluated
+/// `$(LangVersion)` names, as far as the evaluated values themselves show: its
+/// provenance is untrusted, it carries surrounding whitespace (the task hands
+/// it on as it stands), it is `?` (the compiler's version query), or
+/// `$(OtherFlags)` may name another (`langversion`, or an `@` response file).
+/// These doubt the version the files parse at ([`LangVersionDoubt`]).
 ///
-/// [`ForeignDefinitions`]: borzoi_msbuild::ForeignDefinitions
-pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedCause> {
-    for carrier in ["LangVersion", "OtherFlags"] {
-        if let Some(cause) = parsed.property_untrusted_cause(carrier) {
-            return Some(cause.clone());
-        }
-    }
-    if let Some(carrier) = LANG_VERSION_CARRIERS.iter().find(|carrier| {
-        [&parsed.foreign_definitions, &parsed.workload_definitions]
-            .iter()
-            .any(|defined| defined.writes_property_at_build_time(carrier))
-    }) {
-        return Some(UntrustedCause::Unentered(format!(
-            "a target that may write `{carrier}` before `CoreCompile` reads it"
-        )));
+/// What could change the value after evaluation (a target, or content the walk
+/// did not enter) does not: the files parse at the evaluated version under the
+/// boundary the module docs state. It does withhold a refusal
+/// ([`lang_version_untrusted_cause`]).
+pub fn lang_version_value_doubt(parsed: &ParsedProject) -> Option<UntrustedCause> {
+    if let Some(cause) = parsed.property_untrusted_cause("LangVersion") {
+        return Some(cause.clone());
     }
     // The effective values, globals and the environment included.
     // `ParsedProject::lang_version` is trimmed, but the task hands the
@@ -611,6 +607,35 @@ pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedC
         return Some(UntrustedCause::Unentered(
             "`$(OtherFlags)`, which may name a language version after `$(LangVersion)`".to_string(),
         ));
+    }
+    None
+}
+
+/// Why the evaluated `$(LangVersion)` may not be the version the compiler is
+/// handed, or `None` when it is established well enough to claim the build
+/// fails on it. Besides [`lang_version_value_doubt`]: an untrusted
+/// `$(OtherFlags)`, a target outside the SDK (or in a workload manifest) that
+/// may write one of [`LANG_VERSION_CARRIERS`] before `CoreCompile` reads it
+/// ([`ForeignDefinitions`], whose computed names match every query), and
+/// content the walk did not enter. The SDK writes `LangVersion` only at
+/// evaluation.
+///
+/// [`ForeignDefinitions`]: borzoi_msbuild::ForeignDefinitions
+pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedCause> {
+    if let Some(cause) = lang_version_value_doubt(parsed) {
+        return Some(cause);
+    }
+    if let Some(cause) = parsed.property_untrusted_cause("OtherFlags") {
+        return Some(cause.clone());
+    }
+    if let Some(carrier) = LANG_VERSION_CARRIERS.iter().find(|carrier| {
+        [&parsed.foreign_definitions, &parsed.workload_definitions]
+            .iter()
+            .any(|defined| defined.writes_property_at_build_time(carrier))
+    }) {
+        return Some(UntrustedCause::Unentered(format!(
+            "a target that may write `{carrier}` before `CoreCompile` reads it"
+        )));
     }
     parsed.hidden_content.clone()
 }
@@ -1023,6 +1048,11 @@ mod tests {
                 .or_default()
                 .insert("/w/Directory.Build.targets".into());
             assert!(doubted(&parsed), "{carrier} written by a target");
+            assert_eq!(
+                lang_version_value_doubt(&parsed),
+                None,
+                "{carrier}: the files still parse at the evaluated version"
+            );
         }
         let mut parsed = on_sdk("10.0.401");
         parsed
@@ -1035,6 +1065,11 @@ mod tests {
         let mut parsed = on_sdk("10.0.401");
         parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
         assert!(doubted(&parsed), "content unseen");
+        assert_eq!(
+            lang_version_value_doubt(&parsed),
+            None,
+            "the files still parse at it"
+        );
         for value in [" 7.0", "8.0 ", "\t11", "?"] {
             let mut parsed = on_sdk("10.0.401");
             parsed.lang_version_untrimmed = Some(value.to_string());

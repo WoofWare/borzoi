@@ -948,7 +948,8 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
 
 /// A target outside the SDK that may write `$(LangVersion)` before
 /// `CoreCompile` reads it leaves the value the compiler is handed
-/// unestablished: no refusal is reported, and the version is doubted.
+/// unestablished: no refusal is reported. The files still parse at the
+/// evaluated version (the boundary in `sdk_language`'s module docs).
 #[test]
 fn a_build_time_langversion_write_reports_no_refusal() {
     let compiler = graded_compilers()
@@ -983,8 +984,9 @@ fn a_build_time_langversion_write_reports_no_refusal() {
     let docs = borzoi::vfs::Vfs::new();
     assert!(
         sema.parses_for_project(&fsproj, &mut workspace, &docs)
-            .is_none(),
-        "the straddling file is refused under a doubted version"
+            .is_some(),
+        "the files parse at the evaluated version: a build-time rewrite is unmodelled for the \
+         parse, and only withholds the refusal"
     );
 }
 
