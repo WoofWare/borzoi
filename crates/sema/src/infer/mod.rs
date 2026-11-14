@@ -461,6 +461,7 @@ use std::cell::RefCell;
 use borzoi_assembly::{
     EntityKind, EqualityComparison, FSharpConstraints, Member, MemberMeasures, Primitive, TypeRef,
 };
+use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{
     AppExpr, AstNode, AttributeList, Binding, ConstExpr, DotGetExpr, Expr, IfThenElseExpr,
     ImplFile, LetDecl, LetOrUseExpr, LongIdentExpr, LongIdentPat, MatchExpr, MemberDefn,
@@ -468,7 +469,6 @@ use borzoi_cst::syntax::{
     RecordRepr, SequentialExpr, SyntaxKind, SyntaxNode, SyntaxToken, TupleSegment, Type, TypeDefn,
     TypeDefnRepr, UnionRepr, VarType,
 };
-use borzoi_cst::syntax::{TextRange, TextSize};
 
 use crate::assembly_env::{AssemblyEnv, EntityHandle};
 use crate::def::{DefId, DefKind};

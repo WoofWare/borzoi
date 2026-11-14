@@ -484,11 +484,7 @@ impl<'t> InferTable<'t> {
         self.table.probe_value(v).oldest < mark
     }
 
-    /// Whether `a` and `b` share an equivalence class (are unioned). Used by the
-    /// Stage-3.3c arg-wake bookkeeping: a fired `ArgCheck` counts as discharged
-    /// only if its `arg`/`dom` actually became unioned (the `Eq` held rather than
-    /// rolled back), and the scheme-instantiation provenance check membership is
-    /// root-aware via this.
+    /// Whether `a` and `b` share an equivalence class (are unioned).
     pub(crate) fn unioned(&mut self, a: TyVid, b: TyVid) -> bool {
         self.table.unioned(a, b)
     }

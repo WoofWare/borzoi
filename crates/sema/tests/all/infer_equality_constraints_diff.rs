@@ -291,8 +291,7 @@ fn grid_file(func: &Function, sort: &Sort) -> (String, Vec<GridRow>) {
     );
     // An operand whose type only a relation inference drops fixes (a branch
     // joining the open `p` to `a`), directly and piped: the constraint is
-    // met only once that relation is applied, which happens in
-    // `Gen::verified`'s probe and nowhere else. Graded for soundness alone.
+    // met only once that relation is applied. Graded for soundness alone.
     let joined = "(if true then p else a)";
     push(
         &mut src,

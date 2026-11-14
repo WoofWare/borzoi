@@ -42,7 +42,7 @@ pub(super) struct FileFacts<'a> {
     /// The project's unions and records inference knows of, by path, each
     /// with its arities: this file's ([`Self::project_cases`],
     /// [`Self::project_records`]) and those earlier files published. F#
-    /// seals both, so no type coerces into one ([`Gen::no_subsumption_ty`]).
+    /// seals both, so no type coerces into one ([`Gen::is_sealed_here`]).
     pub(super) sealed_project_types: HashMap<TyPath, HashSet<usize>>,
     /// The defining ranges of the in-file binders a use of which F# may reject
     /// for their attributes ([`Self::rejected_use_defs`]).

@@ -31,54 +31,15 @@ pub(super) enum Constraint {
         result: TyVid,
         use_range: TextRange,
         kind: MemberAccessKind,
-        /// Where FCS has checked everything the lookup reads besides the
-        /// receiver: a method call's arguments, which it checks before it
-        /// resolves the overload; for a data member, the access itself.
-        args_by: TextSize,
     },
-    /// A **suspended application argument↔parameter check** (Stage 3.3c): at a
-    /// modelled application `f x`, the argument variable `arg` and the function's
-    /// domain variable `dom` are related by F#'s subsumption, which this stage
-    /// drops. Rather than eagerly poison both (the 3.2c-3 rule), the relation is
-    /// suspended: the [`Gen::solve`] fixpoint wakes it iff the enclosing binding is
-    /// walk-complete **and** `dom` resolves to a **no-subsumption** type
-    /// ([`Gen::no_subsumption_domain`]) — a sealed BCL primitive, a tuple of such,
-    /// or an unbound scheme-instantiation root — at which point it discharges as a
-    /// genuine `Eq(arg, dom)` (via [`Solver::unify_checked`]). An `ArgCheck` that never wakes,
-    /// fails the gate, or whose `Eq` itself fails (ill-typed code) or breaks a
-    /// constraint is
-    /// **undischarged**: [`Gen::solve`] then poisons `arg`, `dom`, and the
-    /// application result `r` (deferred poison), so nothing bogus generalises. `r`
-    /// is carried only to drive that deferred poison; the discharge reads only
-    /// `arg`/`dom`.
-    // No walk generates one: argument checks are decided where FCS decides
-    // them ([`Gen::decide`]). The solve still reads the variant.
-    #[allow(dead_code)]
-    ArgCheck(ArgCheck),
-}
-
-/// A pending application argument↔parameter check inside [`Gen::solve`] (Stage
-/// 3.3c): the argument variable `arg`, the function domain `dom`, and the
-/// application result `r` (carried only for the deferred poison). The suspended
-/// form of [`Constraint::ArgCheck`], threaded through the solver's fixpoint.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ArgCheck {
-    pub(super) arg: TyVid,
-    pub(super) dom: TyVid,
-    pub(super) r: TyVid,
-    /// The argument's source span. FCS, which checks in source order, applies
-    /// the relation while it checks the argument, so by its end at the latest.
-    pub(super) span: TextRange,
 }
 
 /// The inference variables and what relates them: the unification table and
-/// its snapshots, the suspended constraints, and the provenance of the
-/// variables an instantiation made. Of what one file's walk accumulates, the
-/// only state a later answer is computed from besides [`BinderEnv`].
+/// its snapshots, the suspended member accesses, and the per-variable
+/// constraints. Of what one file's walk accumulates, the only state a later
+/// answer is computed from besides [`BinderEnv`].
 ///
-/// It knows types and variables only: no binder, node or emission. What a
-/// speculative solve ([`Gen::solve`]) must undo outside the table is
-/// [`Emissions`]' to log.
+/// It knows types and variables only: no binder, node or emission.
 pub(super) struct Solver<'a> {
     /// The session's type table ([`TyTable::session`]): every term the walk
     /// builds is an id into it. What the file publishes is copied into the
@@ -89,40 +50,21 @@ pub(super) struct Solver<'a> {
     /// The unification table. Every equality the walk generates is already
     /// in it ([`Gen::eq`]).
     pub(super) table: InferTable<'a>,
-    /// The suspended constraints still pending, except the argument checks a
-    /// settle parked ([`Self::settled_args`]).
+    /// The suspended constraints still pending.
     pub(super) constraints: Vec<Constraint>,
-    /// The argument checks a mid-walk [`Gen::settle`] parked, in the order
-    /// it met them: they stand ahead of every argument check in
-    /// [`Self::constraints`], and only [`Gen::solve`] fires one. Kept apart
-    /// so a settle does not read them again: a binding of `n` statements
-    /// settles `n` times.
-    pub(super) settled_args: Vec<ArgCheck>,
-    /// The **scheme-instantiation provenance set** (Stage 3.3c): every fresh
-    /// inference variable [`Self::instantiate`] created from a [`TyKind::Param`]. An
-    /// application's suspended [`Constraint::ArgCheck`] discharges only when its
-    /// domain resolves to a **no-subsumption** type — a sealed BCL primitive, a
-    /// tuple of such, or *an unbound root in this set*. Membership is why
-    /// `let g y = id y` may safely ground `y ↔ id`'s domain: that domain is an
-    /// instantiation of one of *our own* schemes, whose quantified typar admits no
-    /// coercion (our generaliser only quantifies unconstrained vars). Never
-    /// cleared: an entry is a permanent fact about a variable's origin. Membership
-    /// is checked against union-find **roots** ([`Self::is_scheme_inst_root`]), so
-    /// a var unioned with an instantiation var still counts.
-    scheme_inst_vars: HashSet<TyVid>,
     /// The **per-variable constraints**: each instantiation variable whose
     /// type parameter carries `equality` or `comparison`, with which
     /// ([`Self::constrain`]), in the order they were made. FCS holds such a
     /// constraint on the type variable and checks it whenever a unification
     /// solves the variable; [`Self::unify_checked`] is that check, for the
-    /// unifications that go through it (an argument check's discharge). The
+    /// unifications that go through it (every decision, and every equality
+    /// under a faithful prefix). The
     /// verdict reads the variable's resolution and the env
     /// ([`satisfies`]), nothing else, so it follows the variable through
     /// unions and through structure: `'T` unioned with `'a`, or bound to
     /// `'a * int`, is checked again when `'a` is bound.
     ///
-    /// Never cleared, like [`Self::scheme_inst_vars`]: an entry is a fact
-    /// about its variable. A check reads a window of them
+    /// Never cleared: an entry is a fact about its variable. A check reads a window of them
     /// ([`ConstraintMark`]).
     constrained: Vec<(TyVid, EqualityComparison)>,
     /// How many equalities [`Gen::eq`] refused to apply because they would
@@ -162,8 +104,6 @@ impl<'a> Solver<'a> {
             tys,
             table: InferTable::new(tys),
             constraints: Vec::new(),
-            settled_args: Vec::new(),
-            scheme_inst_vars: HashSet::default(),
             constrained: Vec::new(),
             refused_equalities: 0,
         }
@@ -192,28 +132,6 @@ impl<'a> Solver<'a> {
     ) -> Verdict {
         let constrained = &self.constrained[since.0..];
         constraint_verdict_of(&mut self.table, env, self.tys, constrained)
-    }
-
-    /// [`Self::constraint_verdict`] in the table with every one of
-    /// `relations` unified too, in order, a relation that fails to unify
-    /// skipped; the table is left as it was.
-    pub(super) fn probed_constraint_verdict(
-        &mut self,
-        env: &AssemblyEnv,
-        since: ConstraintMark,
-        relations: &[(TyVid, TyVid)],
-    ) -> Verdict {
-        let constrained = &self.constrained[since.0..];
-        let tys = self.tys;
-        let mut verdict = Verdict::Holds;
-        let _ = self.table.probe(|t| -> Result<(), ()> {
-            for (a, b) in relations {
-                let _ = t.unify(tys.var(*a), tys.var(*b));
-            }
-            verdict = constraint_verdict_of(t, env, tys, constrained);
-            Err(())
-        });
-        verdict
     }
 
     /// Unify `a` and `b` as FCS unifies a variable that carries a
@@ -369,11 +287,6 @@ impl<'a> Solver<'a> {
         match from.kind(ty) {
             TyKind::Param(i) => {
                 let v = *fresh.entry(*i).or_insert_with(|| self.table.fresh());
-                // Record the provenance: this fresh var is an instantiation of a
-                // quantified typar of one of our schemes (Stage 3.3c). Such a typar
-                // admits no coercion, so it is a **no-subsumption** domain against
-                // which a suspended `ArgCheck` may safely discharge.
-                self.scheme_inst_vars.insert(v);
                 tys.var(v)
             }
             TyKind::Var(v) => tys.var(*v),
@@ -399,33 +312,6 @@ impl<'a> Solver<'a> {
                 tys.fun(arg, ret)
             }
         }
-    }
-
-    /// Whether the (resolved, unbound) variable `v` is — or is unioned with — a
-    /// scheme-instantiation variable ([`Self::scheme_inst_vars`]), checked against
-    /// union-find **roots** so a var unioned with an instantiation var still
-    /// counts (Stage 3.3c). The set is small (one entry per instantiated typar per
-    /// use), so the linear scan is cheap at per-binding scale.
-    pub(super) fn is_scheme_inst_root(&mut self, v: TyVid) -> bool {
-        self.scheme_inst_vars
-            .iter()
-            .any(|&iv| self.table.unioned(iv, v))
-    }
-
-    /// Whether `ac`'s domain resolves to a **function type** it may discharge
-    /// against, as FCS relates them: an argument is checked against its
-    /// parameter's type by an equality first and a coercion only if that
-    /// fails, and a function type admits no coercion but equality (F# function
-    /// types are invariant), so `Eq(arg, dom)` is FCS's own relation — given
-    /// that the argument's type is the one FCS has, which a loosened use of a
-    /// value makes sure of ([`Gen::value_use`]). Where the equality fixes a
-    /// variable FCS bounds by a subtype constraint, [`Gen::verified`] undoes
-    /// it.
-    pub(super) fn function_domain(&mut self, ac: ArgCheck) -> bool {
-        matches!(
-            self.tys.kind(self.table.resolve(self.tys.var(ac.dom))),
-            TyKind::Fun { .. }
-        )
     }
 
     /// The open variables of `a` and `b`, as roots of their classes.
@@ -457,10 +343,9 @@ impl<'a> Gen<'a> {
     /// ground types that is what FCS does too. Where either side holds an
     /// open variable FCS's unification is not atomic — it may have bound part
     /// of the variable before it met the conflict — so after a failure the
-    /// table may hold less than FCS's. A binding with a failure fires no
-    /// argument check ([`Gen::verified`]) and keeps no declared type variable
-    /// ([`Gen::rigid_under_every_relation`]), and a match clause whose pattern
-    /// failed declines.
+    /// table may hold less than FCS's. A binding with a failure keeps no
+    /// declared type variable ([`Gen::rigid_stays_rigid`]), and a match clause
+    /// whose pattern failed declines.
     pub(super) fn eq(&mut self, scope: &mut Scope, a: Ty, b: Ty) {
         if !scope.complete {
             if self.solver.table.unify_atomic(a, b).is_err() {

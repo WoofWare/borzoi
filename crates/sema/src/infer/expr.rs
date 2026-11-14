@@ -820,8 +820,8 @@ impl<'a> Gen<'a> {
     }
 
     /// Whether `v`'s type mentions an open variable an earlier binding owns —
-    /// the variables [`Self::arg_check_binds_only_current_vars`] refuses to
-    /// let an argument check ground.
+    /// the variables [`Self::touches_opaque`] refuses to let a decision
+    /// ground.
     pub(super) fn mentions_inherited_open(&mut self, scope: &Scope, v: TyVid) -> bool {
         let mut roots = HashSet::default();
         collect_var_roots(

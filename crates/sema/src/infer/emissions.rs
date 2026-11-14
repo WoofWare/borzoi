@@ -25,18 +25,6 @@ pub(super) struct Guard {
     confirmed: bool,
 }
 
-/// What a speculative solve ([`super::Gen::solve`]) recorded here, so that
-/// it can be undone ([`Emissions::undo`]). The table's half of the undo
-/// is the [`super::Solver`]'s snapshot, which the solve holds: the
-/// speculation spans the solver and the emissions.
-#[derive(Debug, Default)]
-pub(super) struct TrialLog {
-    /// Each member resolution recorded, with the one it replaced.
-    resolutions: Vec<(TextRange, Option<Resolution>)>,
-    /// Each guard confirmed.
-    guards: Vec<GuardId>,
-}
-
 /// The length of both emission lists, the nodes and the local binders, for
 /// a barrier to [discard back to](Emissions::discard_since).
 #[derive(Debug, Clone, Copy)]
@@ -50,10 +38,6 @@ pub(super) struct EmissionMark {
 /// mark, and opens and confirms guards — and nothing it decides reads it:
 /// no method here answers a question about what was emitted.
 /// [`Self::into_emitted`] gives `finish` what stands.
-///
-/// The one write that is not an append is the speculative solve's undo
-/// ([`Self::undo`]), which restores the member resolutions and guards a
-/// solve that was not kept recorded.
 pub(super) struct Emissions {
     /// `(range, var)` per expression whose type to emit; `range` is the read-off
     /// key (and the same range the resolver keyed the occurrence under).
@@ -94,8 +78,6 @@ pub(super) struct Emissions {
     /// single-candidate discharge; read out in [`super::Gen::finish`] into
     /// [`InferredFile::member_resolutions`](super::InferredFile::member_resolutions).
     member_resolutions: HashMap<TextRange, Resolution>,
-    /// The undo log of the speculative solve in progress ([`super::Gen::solve`]).
-    trial: Option<TrialLog>,
     /// How many expression levels the walk has open on its recursion now
     /// ([`super::Gen::infer_expr_inner`], [`super::Gen::infer_callee`]), and the most there
     /// have been ([`InferredFile::deepest_expression_walk`](super::InferredFile::deepest_expression_walk)).
@@ -132,7 +114,6 @@ impl Emissions {
             guard_stack: Vec::new(),
             guard_on_member: HashMap::default(),
             member_resolutions: HashMap::default(),
-            trial: None,
             expr_depth: 0,
             deepest_expr_depth: 0,
         }
@@ -222,9 +203,6 @@ impl Emissions {
             && !self.guards[g].confirmed
         {
             self.guards[g].confirmed = true;
-            if let Some(log) = &mut self.trial {
-                log.guards.push(g);
-            }
         }
     }
 
@@ -243,38 +221,7 @@ impl Emissions {
 
     /// Record that the member-name token at `use_range` resolves to `res`.
     pub(super) fn member_resolution(&mut self, use_range: TextRange, res: Resolution) {
-        let previous = self.member_resolutions.insert(use_range, res);
-        if let Some(log) = &mut self.trial {
-            log.resolutions.push((use_range, previous));
-        }
-    }
-
-    /// Start logging what is recorded here, for a speculative solve.
-    pub(super) fn begin_trial(&mut self) {
-        self.trial = Some(TrialLog::default());
-    }
-
-    /// Stop logging, and return what was logged since
-    /// [`Self::begin_trial`].
-    pub(super) fn end_trial(&mut self) -> TrialLog {
-        self.trial.take().unwrap_or_default()
-    }
-
-    /// Undo what a speculative solve recorded ([`TrialLog`]), latest first.
-    pub(super) fn undo(&mut self, log: TrialLog) {
-        for (range, previous) in log.resolutions.into_iter().rev() {
-            match previous {
-                Some(res) => {
-                    self.member_resolutions.insert(range, res);
-                }
-                None => {
-                    self.member_resolutions.remove(&range);
-                }
-            }
-        }
-        for g in log.guards {
-            self.guards[g].confirmed = false;
-        }
+        self.member_resolutions.insert(use_range, res);
     }
 
     /// Count one more expression level open on the walk's recursion

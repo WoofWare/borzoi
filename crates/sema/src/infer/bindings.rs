@@ -68,7 +68,7 @@ impl<'a> Gen<'a> {
     /// and a use in a later binding would then allocate it *after* that
     /// binding's mark, where it passes for the later binding's own variable:
     /// the guards that stop a binding grounding an earlier binder's open
-    /// variable ([`Self::arg_check_binds_only_current_vars`],
+    /// variable ([`Self::touches_opaque`],
     /// [`Self::mentions_inherited_open`]) key on allocation age, and would let
     /// `mono u` retype a `let rec u` as `mono`'s domain. Parameters are not
     /// binders of the declaration and are left to their function.
@@ -351,17 +351,13 @@ impl<'a> Gen<'a> {
     /// *return slot* — even on an ill-typed body, FCS's `f` carries the
     /// annotated return (`let f x : int = "s"` is `'a -> int`) — but the
     /// body↔annotation relation is **subsumption** (`let f x : obj = "hi"` is
-    /// legal), so the body is walked in *check* mode against the annotation
-    /// and the dropped top-level relation is suspended as a
-    /// [`Constraint::ArgCheck`], exactly the application argument's rule: it
-    /// discharges as a genuine equality only on a walk-complete binding whose
-    /// annotation resolves to a **no-subsumption** type (sealed primitives and
-    /// tuples of such — R6's `let h x : int = x` grounds `x` through it), and
-    /// an undischarged check poisons its endpoints so nothing bogus
-    /// generalises. The function type curries the parameter slots over the
-    /// annotation variable, so a ground parameter side emits the annotated
-    /// return even when the body relation stays dropped
-    /// (`let f (b: bool) : obj = b` ⇒ `bool -> obj`).
+    /// legal), so the body is checked against the annotation as an
+    /// application's argument is against its domain ([`Self::infer_arg`]):
+    /// the relation is decided where FCS takes it inside the body (R6's
+    /// `let h x : int = x` grounds `x` through it). The function type curries
+    /// the parameter slots over the annotation variable, so a ground
+    /// parameter side emits the annotated return even when the body relation
+    /// is declined (`let f (b: bool) : obj = b` ⇒ `bool -> obj`).
     ///
     /// An annotation outside the gate keeps the pre-R2-c whole-binding skip:
     /// nothing is walked and nothing is constrained.
@@ -561,8 +557,8 @@ impl<'a> Gen<'a> {
     /// slot and the binder variable with genuine `Eq`s. Grounding the binder
     /// eagerly (unlike the bare-named decoupling) is what keeps a conflicting
     /// later constraint sound: the annotation's `Eq` lands first in generation
-    /// order, so a contradicting condition / `ArgCheck` wake fails and rolls
-    /// back instead of retyping the parameter. The binding stays *complete* —
+    /// order, so a contradicting condition or decision fails and rolls back
+    /// instead of retyping the parameter. The binding stays *complete* —
     /// that is the point of the stage — because the annotation is now a
     /// modelled constraint, not a dropped one.
     ///
@@ -599,8 +595,9 @@ impl<'a> Gen<'a> {
     /// Open the implicitly scoped type variables of a module-level function
     /// binding's head — its parameters' annotations and its return annotation
     /// `ret` — returning them for the head's annotations to read
-    /// ([`AnnotationCx::Head`]), and keeping them as [`Scope::head_typars`] for
-    /// the binding's solve. `None` where nothing opens.
+    /// ([`AnnotationCx::Head`]), and keeping the declared ones as
+    /// [`Scope::rigid_typars`] for the binding's solve. `None` where nothing
+    /// opens.
     ///
     /// FCS creates a type variable no `<…>` declares at its first mention
     /// (`TcTypeOrMeasureParameter`, rigidity `WarnIfNotRigid`), and every
@@ -688,7 +685,6 @@ impl<'a> Gen<'a> {
                 .or_insert_with(|| self.solver.table.fresh());
         }
         scope.rigid_typars = declared.iter().map(|n| typars[n]).collect();
-        scope.head_typars = typars.clone();
         Some(typars)
     }
 

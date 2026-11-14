@@ -15,12 +15,11 @@ pub(super) struct Scope {
     /// The vid mark taken at the binding's start — the boundary between this
     /// binding's own variables and *environment* variables inherited from
     /// earlier bindings. Generalisation refuses to quantify an inherited-open
-    /// variable ([`Gen::generalise`]), and the [`Constraint::ArgCheck`] wake
-    /// applies the same discipline: a discharge may bind only open variables
-    /// created in this binding ([`Gen::arg_check_binds_only_current_vars`]),
-    /// never retro-ground an earlier binder's still-open variable (whose type
-    /// FCS fixed at *its* binding, e.g. `let g = id` staying `'a -> 'a` under
-    /// a later `g 1`).
+    /// variable ([`Gen::generalise`]), and a decision applies the same
+    /// discipline: it may bind only open variables created in this binding
+    /// ([`Gen::touches_opaque`]), never retro-ground an earlier binder's
+    /// still-open variable (whose type FCS fixed at *its* binding, e.g.
+    /// `let g = id` staying `'a -> 'a` under a later `g 1`).
     pub(super) mark: u32,
     /// [`Emissions::mark`] at the binding's start.
     pub(super) emissions: EmissionMark,
@@ -67,20 +66,13 @@ pub(super) struct Scope {
     /// [`Solver::constraint_mark`] at the binding's start: the binding's
     /// per-variable constraints are those recorded since
     /// ([`Gen::constrained_scheme_use`]), and its checks read those alone —
-    /// an argument check's discharge ([`Solver::unify_checked`]) and the
-    /// check once the binding is solved ([`Gen::check_constraints`]).
+    /// a decision or equality ([`Solver::unify_checked`]) and the check once
+    /// the binding is solved ([`Gen::check_constraints`]).
     pub(super) constraints: ConstraintMark,
-    /// The binding's **implicitly scoped type variables**: each name a `'a` in
-    /// its head's annotations spells, to the one inference variable every
-    /// mention of it denotes ([`Gen::open_head_typars`]). Empty where the head
-    /// declares its variables explicitly or mentions a `^a`. The head's
-    /// annotations read their own copy ([`AnnotationCx::Head`]); this one is
-    /// the binding's solve's ([`Gen::is_head_typar_root`]).
-    pub(super) head_typars: HashMap<String, TyVid>,
-    /// The binding's parameters whose annotation mentions one of
-    /// [`Scope::head_typars`].
+    /// The binding's parameters whose annotation mentions one of the head's
+    /// implicitly scoped type variables ([`Gen::open_head_typars`]).
     pub(super) typar_params: HashSet<DefId>,
-    /// Of [`Scope::head_typars`], the variables the head declares
+    /// Of the head's type variables ([`Gen::open_head_typars`]), those it declares
     /// (`let f<'a> …`), in declaration order: rigid, so each must end the
     /// binding a distinct unbound variable ([`Gen::rigid_typars_hold`]).
     pub(super) rigid_typars: Vec<TyVid>,
@@ -91,11 +83,6 @@ pub(super) struct Scope {
     /// equality FCS tries first, breaks a declared variable's rigidity or
     /// fails outright ([`Gen::solve`]): FCS then rejects the declaration.
     pub(super) rigid_rejected: bool,
-    /// Every check-mode relation the walk dropped, as the checked expression's
-    /// variable and its expected one ([`Gen::infer_expr`]). FCS applies each
-    /// one, as an equality whenever that is consistent with what it knows —
-    /// which is what [`Gen::verified`] tests them for.
-    pub(super) dropped: Vec<(TyVid, TyVid, TextRange)>,
     /// How many equalities failed to unify. A failed one is a relation FCS
     /// rejects, in an order the solver does not keep.
     pub(super) eq_failures: usize,
@@ -103,23 +90,6 @@ pub(super) struct Scope {
     /// than `obj` ([`Gen::loosened`]). In FCS each is a subtype of that type, a
     /// constraint inference does not model.
     pub(super) bounded_flex: Vec<TyVid>,
-    /// The variables of the value uses whose loosening could not be decided at
-    /// the use, because the value's type was not yet known there
-    /// ([`Gen::value_use`]).
-    pub(super) undecided_uses: Vec<TyVid>,
-    /// The variables FCS constrains through a relation inference does not
-    /// model, so that what FCS makes of them is unknown here
-    /// ([`Gen::arg_check_binds_only_current_vars`], [`Gen::verified`]): each
-    /// binder this binding refers to that is not its own — an earlier binder,
-    /// whose type FCS fixed at its own binding — and each argument of a method
-    /// call, which FCS relates to a parameter type it reads off the method it
-    /// resolves; and each member access's result, until its wake binds it to
-    /// the member's type.
-    ///
-    /// A method argument's entry carries the argument's span: a relation
-    /// inside the argument is one FCS checks before it relates the argument to
-    /// the parameter, so it may bind the argument's variables.
-    pub(super) opaque: Vec<(TyVid, Option<TextRange>)>,
 }
 
 /// Whether a closed [`Scope`]'s census entry is recorded
@@ -198,16 +168,12 @@ impl<'a> Gen<'a> {
             params: Vec::new(),
             binding_params: Vec::new(),
             match_locals: HashSet::default(),
-            head_typars: HashMap::default(),
             typar_params: HashSet::default(),
             rigid_typars: Vec::new(),
             declares_typars: false,
             rigid_rejected: false,
-            dropped: Vec::new(),
             eq_failures: 0,
             bounded_flex: Vec::new(),
-            undecided_uses: Vec::new(),
-            opaque: Vec::new(),
         }
     }
 
