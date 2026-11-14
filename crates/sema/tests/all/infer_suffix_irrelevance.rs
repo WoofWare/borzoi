@@ -30,12 +30,18 @@
 //! statement boundary), before the application's last argument (a later
 //! sibling argument), or before a tuple element after the first. Cutting `P`
 //! there and replacing everything after the cut with a **hole** gives `P'`,
-//! byte-identical to `P` up to the cut. The holes, neither of which mentions a
-//! name the prefix binds, so neither can constrain it:
+//! byte-identical to `P` up to the cut. The holes, none of which mentions a
+//! name the prefix binds, so none can constrain it, are one per event that
+//! does or does not end a binding's faithful prefix (#662's D6):
 //!
 //! - `(Unchecked.defaultof<_>)`, which FCS gives a fresh type variable and
-//!   inference does not model, so the binding becomes incomplete;
-//! - `(mono "s")`, ill-typed between two ground types.
+//!   inference does not model: an unmodelled construct;
+//! - `(mono "s")`, ill-typed between two ground types, which does not end the
+//!   prefix;
+//! - `((fst (None, 0)).Value)`, a member access inference cannot decide at
+//!   the access (its receiver is generic);
+//! - `(hk 0)`, an `int` applied as a function: a unification that fails with
+//!   an open variable on one side.
 //!
 //! Every variant of a base is a top-level function of the same file, its name
 //! as long as the base's, so a range in the prefix is the base's range moved
@@ -46,30 +52,29 @@
 //! - [`fcs_graded_prefix_commits_survive_a_hole`]: every expression or binder
 //!   type we commit in `P`'s prefix whose FCS type on `P'` is ground, we also
 //!   commit on `P'`, the same. In words: a commit FCS can make from the prefix
-//!   alone must not depend, for us, on the suffix.
-//! - [`prefix_commits_agree_across_holes`] (no oracle): `P'` under the two holes
+//!   alone must not depend, for us, on the suffix. And everything we commit in
+//!   `P'`, after the cut included, FCS has, the same.
+//! - [`prefix_commits_agree_across_holes`] (no oracle): `P'` under every hole
 //!   commits the same in the prefix — expression and binder types, member
 //!   resolutions, `(expr).Member` receiver types.
 //! - [`prefix_accesses_agree_across_suffixes`] (no oracle): the member
 //!   resolutions and receiver types inside the prefix are the same under the
-//!   original suffix and both holes. FCS decides an access at the access.
+//!   original suffix and every hole. FCS decides an access at the access.
 //!   (Expression types are not compared against the original suffix: it may
 //!   ground a variable the prefix left open, and FCS's typed tree then shows
 //!   the prefix node at the later, final type.)
 //!
-//! The FCS-graded form fails today, and is `#[ignore]`d until #662's stage L2
-//! makes it hold. Its smallest counterexample: `let f () = (idf uu, None)`
+//! #662's stage L2 makes these hold, and they gate it. Before it, the smallest
+//! counterexample to the FCS-graded form is `let f () = (idf uu, None)`: it
 //! commits `idf uu : int * string`, an argument check that fires only in a
 //! complete binding, and `(idf uu, Unchecked.defaultof<_>)` is incomplete
 //! (`Unmodelled(TYPE_APP_EXPR)`), so the check never fires and the commit FCS
-//! still makes is lost. The ill-typed hole loses it too, which is why the
-//! comparison across holes holds today. Both oracle-free forms hold, and gate
-//! as ordinary tests.
+//! still makes is lost.
 //!
-//! Each asserts that its hole does what it is there for: the
-//! `Unchecked.defaultof` hole must mark the binding incomplete, or the
-//! property stops testing what an incomplete suffix does to the prefix once
-//! that hole is modelled.
+//! Each asserts that its holes do what they are there for: a hole that ends
+//! the prefix ([`Suffix::ends_the_prefix`]) must mark the binding incomplete,
+//! or the property stops testing what that event does to the prefix once the
+//! hole is modelled, or once the event stops being recorded.
 //!
 //! [`the_harness_compares_like_with_like`] is the control: a renamed copy of
 //! `P` in place of `P'` must pass every property with the whole body as the
@@ -94,13 +99,19 @@ use crate::infer_local_let_diff::{
 /// The generated files' header: `infer_local_let_diff`'s, plus the
 /// two-argument functions the application tail applies.
 fn header() -> String {
-    format!("{HEADER}let two (x: int) (y: string) = x\nlet pick x y = x\n")
+    format!("{HEADER}let two (x: int) (y: string) = x\nlet pick x y = x\nlet hk = 5\n")
 }
 
-/// The ill-typed hole.
+/// The ill-typed hole: a failure between two ground types.
 const ILL_TYPED: &str = "(mono \"s\")";
 /// The hole FCS gives a fresh type variable.
 const DEFAULT_OF: &str = "(Unchecked.defaultof<_>)";
+/// The hole whose member access inference cannot decide at the access: its
+/// receiver, `'a option`, is generic, which no wake resolves.
+const DECLINED_ACCESS: &str = "((fst (None, 0)).Value)";
+/// The hole whose equality fails with an open variable on one side: `hk` is
+/// an `int`, applied as a function `'d -> 'r`.
+const OPEN_FAILURE: &str = "(hk 0)";
 
 /// What replaces the text after a cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -109,14 +120,37 @@ enum Suffix {
     Rest,
     DefaultOf,
     IllTyped,
+    DeclinedAccess,
+    OpenFailure,
 }
 
 impl Suffix {
+    /// Every hole.
+    const HOLES: [Suffix; 4] = [
+        Suffix::DefaultOf,
+        Suffix::IllTyped,
+        Suffix::DeclinedAccess,
+        Suffix::OpenFailure,
+    ];
+
     fn hole(self) -> &'static str {
         match self {
             Suffix::Rest => unreachable!("the original suffix is not a hole"),
             Suffix::DefaultOf => DEFAULT_OF,
             Suffix::IllTyped => ILL_TYPED,
+            Suffix::DeclinedAccess => DECLINED_ACCESS,
+            Suffix::OpenFailure => OPEN_FAILURE,
+        }
+    }
+
+    /// Whether the hole ends the binding's faithful prefix, so that its census
+    /// entry must say why: an unmodelled construct, an access still undecided
+    /// after the settle at it, a failed unification with an open variable. A
+    /// failure between two ground types does not end it.
+    fn ends_the_prefix(self) -> bool {
+        match self {
+            Suffix::Rest | Suffix::IllTyped => false,
+            Suffix::DefaultOf | Suffix::DeclinedAccess | Suffix::OpenFailure => true,
         }
     }
 }
@@ -409,7 +443,7 @@ impl Program {
             let mut variants = vec![(Cut::End, Suffix::Rest), (Cut::End, Suffix::Rest)];
             if with_holes {
                 for cut in base.cuts() {
-                    for suffix in [Suffix::DefaultOf, Suffix::IllTyped] {
+                    for suffix in Suffix::HOLES {
                         variants.push((cut, suffix));
                     }
                 }
@@ -668,8 +702,8 @@ fn bases_for(seed: u64) -> Vec<Base> {
 }
 
 /// The non-vacuity tally every property keeps: each kind of cut reached, each
-/// base complete or not, and each `Unchecked.defaultof` hole marking its
-/// binding incomplete.
+/// base complete or not, and each hole that ends the prefix
+/// ([`Suffix::ends_the_prefix`]) marking its binding incomplete.
 #[derive(Debug, Default)]
 struct Tally {
     cuts: BTreeMap<&'static str, usize>,
@@ -679,8 +713,9 @@ struct Tally {
     base_reasons: BTreeMap<String, usize>,
     /// Prefix commits a property compared.
     compared: BTreeMap<&'static str, usize>,
-    /// `Unchecked.defaultof` variants whose census entry is empty.
-    complete_default_holes: Vec<String>,
+    /// How many variants of a hole that ends the prefix have an empty census
+    /// entry, by hole, with the first two.
+    complete_prefix_ending_holes: BTreeMap<Suffix, (usize, Vec<String>)>,
     /// Ill-typed variants whose census entry is empty.
     complete_ill_typed_holes: usize,
     ill_typed_holes: usize,
@@ -708,29 +743,42 @@ impl Tally {
                     }
                 }
                 Suffix::Rest => {}
-                Suffix::DefaultOf => {
-                    *self.cuts.entry(fun.cut.kind()).or_default() += 1;
-                    if complete {
-                        self.complete_default_holes.push(fun.text.clone());
-                    }
-                }
                 Suffix::IllTyped => {
                     self.ill_typed_holes += 1;
                     self.complete_ill_typed_holes += usize::from(complete);
+                }
+                hole => {
+                    debug_assert!(hole.ends_the_prefix());
+                    if hole == Suffix::DefaultOf {
+                        *self.cuts.entry(fun.cut.kind()).or_default() += 1;
+                    }
+                    if complete {
+                        let (n, first) = self.complete_prefix_ending_holes.entry(hole).or_default();
+                        *n += 1;
+                        if first.len() < 2 {
+                            first.push(fun.text.clone());
+                        }
+                    }
                 }
             }
         }
     }
 
-    /// The hole must mark the binding incomplete, and the sweep must reach
-    /// every kind of cut and both complete and incomplete bases.
+    /// A hole that ends the prefix must mark the binding incomplete, and the
+    /// sweep must reach every kind of cut and both complete and incomplete
+    /// bases.
     fn assert_live(&self, min: usize) {
+        let vacuous: Vec<String> = self
+            .complete_prefix_ending_holes
+            .iter()
+            .map(|(hole, (n, first))| format!("{hole:?} ({n} variants), e.g.:\n{}", first.concat()))
+            .collect();
         assert!(
-            self.complete_default_holes.is_empty(),
-            "an `Unchecked.defaultof` hole left its binding complete, so the property no \
-             longer tests what an incomplete suffix does to the prefix; pick a hole \
-             inference does not model:\n{}",
-            self.complete_default_holes.join("\n")
+            vacuous.is_empty(),
+            "a hole that ends the faithful prefix left its binding complete, so the property \
+             no longer tests what that event does to the prefix; either the event is no \
+             longer recorded in the census, or the hole no longer produces it:\n{}",
+            vacuous.join("\n")
         );
         for kind in ["statement", "argument", "tuple-element"] {
             let n = self.cuts.get(kind).copied().unwrap_or(0);
@@ -782,6 +830,40 @@ fn fcs_graded(files: usize, with_holes: bool) -> (Vec<Violation>, Tally, usize) 
                 "the generator produced a function FCS rejects: {errors:?}\n{}",
                 fun.text
             );
+        }
+        // Certain implies exact, anywhere in any variant, the text after the
+        // cut included: what a hole does to the binding may lose commits, but
+        // must not make one FCS does not have.
+        for fun in &program.funs {
+            let whole = inferred.all.region(fun, 0, fun.text.len());
+            for (category, ours, fcs) in [
+                ("unsound type", &whole.types, &dumps.types),
+                ("unsound binder", &whole.binders, &dumps.binders),
+            ] {
+                for (&(s, e), ty) in ours {
+                    let at = (fun.start + s, fun.start + e);
+                    if dumps.is_ungraded(at) {
+                        continue;
+                    }
+                    *tally.compared.entry("certain").or_default() += 1;
+                    let theirs = fcs.get(&at);
+                    if theirs != Some(ty) {
+                        let base = program.base_fun(fun.base);
+                        violations.push(Violation {
+                            category,
+                            cut: fun.cut,
+                            left: fun.suffix,
+                            right: fun.suffix,
+                            base_text: base.text.clone(),
+                            variant_text: fun.text.clone(),
+                            range: (s, e),
+                            slice: fun.text[s..e].to_string(),
+                            left_commit: Some(ty.clone()),
+                            right_commit: theirs.cloned(),
+                        });
+                    }
+                }
+            }
         }
         for (b, _) in program.bases.iter().enumerate() {
             let base = program.base_fun(b);
@@ -838,16 +920,20 @@ fn fcs_files() -> usize {
 }
 
 /// A commit FCS can determine from the prefix alone does not depend, for us,
-/// on the suffix.
+/// on the suffix; and nothing we commit anywhere in a variant, after the cut
+/// included, disagrees with FCS.
 ///
-/// Fails on main: either hole switches off the argument checks of the whole
-/// binding, prefix included (the `Unchecked.defaultof` hole by marking it
-/// incomplete), and so the prefix commits that a complete binding's checks
-/// ground disappear (see the module docs for the smallest case). Stage L2 of
-/// the plan for #662 (argument checks decided at the argument, gated on a
-/// prefix-completeness flag) turns it into a gate.
+/// Stage L2 of the plan for #662 decides each argument check at the
+/// argument's entry, gated on the binding's faithful prefix so far, so a hole
+/// after the cut can no longer switch off a check before it. On the base of
+/// that stage it fails both ways the stage fixes: every hole switches off the
+/// argument checks of the whole binding, prefix included (the
+/// `Unchecked.defaultof` hole by marking it incomplete, the others by failing
+/// a unification), so the prefix commits a complete binding's checks ground
+/// disappear (see the module docs for the smallest case); and the declined
+/// access and the open failure are recorded nowhere in the census, so their
+/// holes are vacuous by [`Tally::assert_live`].
 #[test]
-#[ignore = "fails on main; becomes a gate at #662's stage L2"]
 fn fcs_graded_prefix_commits_survive_a_hole() {
     let (mut violations, tally, uncheckable) = fcs_graded(fcs_files(), true);
     eprintln!("suffix irrelevance (FCS-graded): {tally:?}, uncheckable files: {uncheckable}");
@@ -855,15 +941,16 @@ fn fcs_graded_prefix_commits_survive_a_hole() {
         uncheckable * 4 <= fcs_files(),
         "FCS could not check {uncheckable} files"
     );
-    tally.assert_live(10);
-    assert!(
-        tally.compared.values().sum::<usize>() >= 200,
-        "too few prefix commits had a ground FCS type to be evidence: {tally:?}"
-    );
     assert!(
         violations.is_empty(),
         "{}",
         report("FCS-graded", &mut violations)
+    );
+    tally.assert_live(10);
+    let prefix = |k| tally.compared.get(k).copied().unwrap_or(0);
+    assert!(
+        prefix("type") + prefix("binder") >= 200,
+        "too few prefix commits had a ground FCS type to be evidence: {tally:?}"
     );
 }
 
@@ -905,23 +992,28 @@ fn oracle_free(files: usize, with_holes: bool) -> (Vec<Violation>, Vec<Violation
                 by_cut.entry(f.cut).or_default().push(f);
             }
             for (_, variants) in by_cut {
-                let [default_of, ill_typed] = variants[..] else {
-                    panic!("two holes per cut")
-                };
+                assert_eq!(
+                    variants.iter().map(|f| f.suffix).collect::<Vec<_>>(),
+                    Suffix::HOLES,
+                    "every hole once per cut, in order"
+                );
+                let default_of = variants[0];
                 let (lo, hi) = (base.body, default_of.cut_at);
                 let d = inferred.all.region(default_of, lo, hi);
-                let i = inferred.all.region(ill_typed, lo, hi);
                 let p = inferred.all.region(base, lo, hi);
-                for (cat, l, r) in [
-                    ("type", &d.types, &i.types),
-                    ("binder", &d.binders, &i.binders),
-                    ("member", &d.members, &i.members),
-                    ("receiver", &d.receivers, &i.receivers),
-                ] {
-                    *tally.compared.entry(cat).or_default() += l.len().max(r.len());
-                    compare_table(cat, l, r, default_of, ill_typed, base, &mut holes);
+                for other in &variants[1..] {
+                    let o = inferred.all.region(other, lo, hi);
+                    for (cat, l, r) in [
+                        ("type", &d.types, &o.types),
+                        ("binder", &d.binders, &o.binders),
+                        ("member", &d.members, &o.members),
+                        ("receiver", &d.receivers, &o.receivers),
+                    ] {
+                        *tally.compared.entry(cat).or_default() += l.len().max(r.len());
+                        compare_table(cat, l, r, default_of, other, base, &mut holes);
+                    }
                 }
-                for hole in [default_of, ill_typed] {
+                for &hole in &variants {
                     let h = inferred.all.region(hole, lo, hi);
                     for (cat, l, r) in [
                         ("member", &p.members, &h.members),
@@ -942,23 +1034,23 @@ fn oracle_free_files() -> usize {
     env_usize_or("BORZOI_SUFFIX_FILES", 40) * 5
 }
 
-/// The two holes, neither of which constrains the prefix, leave the same
-/// commits in it: expression and binder types, member resolutions and
-/// receiver types.
+/// The holes, none of which constrains the prefix, leave the same commits in
+/// it: expression and binder types, member resolutions and receiver types.
 ///
-/// It holds today because both holes switch off the prefix's argument checks
-/// alike; #662's stage L2, which decides each check at its argument, must
-/// keep it, now because neither does.
+/// #662's stage L2 decides each check at its argument's entry, so no hole
+/// after the cut reaches a check before it. On its base this fails where the
+/// declined-access hole leaves the binding complete, so its prefix's checks
+/// fire, where every other hole switches them off.
 #[test]
 fn prefix_commits_agree_across_holes() {
     let (mut holes, _, tally) = oracle_free(oracle_free_files(), true);
     eprintln!("suffix irrelevance across holes: {tally:?}");
+    assert!(holes.is_empty(), "{}", report("across holes", &mut holes));
     tally.assert_live(50);
     assert!(
         tally.compared.get("type").copied().unwrap_or(0) >= 500,
         "too few prefix types compared to be evidence: {tally:?}"
     );
-    assert!(holes.is_empty(), "{}", report("across holes", &mut holes));
 }
 
 /// The member resolutions and receiver types inside the prefix are the same
@@ -973,12 +1065,12 @@ fn prefix_commits_agree_across_holes() {
 fn prefix_accesses_agree_across_suffixes() {
     let (_, mut accesses, tally) = oracle_free(oracle_free_files(), true);
     eprintln!("suffix irrelevance of accesses: {tally:?}");
+    assert!(accesses.is_empty(), "{}", report("accesses", &mut accesses));
     tally.assert_live(50);
     assert!(
         tally.compared.get("access").copied().unwrap_or(0) >= 100,
         "too few prefix accesses compared to be evidence: {tally:?}"
     );
-    assert!(accesses.is_empty(), "{}", report("accesses", &mut accesses));
 }
 
 /// The control: with a renamed copy of each base in place of a cut variant,

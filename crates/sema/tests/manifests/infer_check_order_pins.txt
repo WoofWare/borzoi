@@ -25,6 +25,19 @@ argument-check-before-an-unmodelled-suffix node 13-19 `idf uu`	ours - fcs System
 argument-check-before-an-unmodelled-suffix node 13-43 `idf uu, Unchecked.defaultof<_>`	ours - fcs (System.Int32 * System.String) * 'a
 argument-check-before-an-unmodelled-suffix node 17-19 `uu`	ours - fcs System.Int32 * System.String
 argument-check-before-an-unmodelled-suffix node 21-40 `Unchecked.defaultof`	ours - fcs 'a
+condition-before-a-check binder 4-7 `r10`	ours System.Boolean -> System.Int32 * System.Boolean fcs System.Boolean -> System.Int32 * System.Boolean
+condition-before-a-check binder 8-9 `x`	ours System.Boolean fcs System.Boolean
+condition-before-a-check census	[]
+condition-before-a-check fcs	errors FS0001
+condition-before-a-check node 12-43 `if x then (gi x, x) else (0, x)`	ours System.Int32 * System.Boolean fcs System.Int32 * System.Boolean
+condition-before-a-check node 15-16 `x`	ours - fcs System.Boolean
+condition-before-a-check node 23-27 `gi x`	ours System.Int32 fcs System.Int32
+condition-before-a-check node 23-30 `gi x, x`	ours System.Int32 * System.Boolean fcs System.Int32 * System.Boolean
+condition-before-a-check node 26-27 `x`	ours - fcs System.Int32
+condition-before-a-check node 29-30 `x`	ours System.Boolean fcs System.Boolean
+condition-before-a-check node 38-39 `0`	ours - fcs System.Int32
+condition-before-a-check node 38-42 `0, x`	ours - fcs System.Int32 * System.Boolean
+condition-before-a-check node 41-42 `x`	ours - fcs System.Boolean
 id-wrapped-access binder 4-6 `r5`	ours System.String -> System.Int32 fcs System.String -> System.Int32
 id-wrapped-access binder 8-9 `x`	ours System.String fcs System.String
 id-wrapped-access census	[]
@@ -54,6 +67,16 @@ singleton-into-obj-list fcs	clean
 singleton-into-obj-list node 21-36 `g (singleton y)`	ours System.Int32 fcs System.Int32
 singleton-into-obj-list node 24-35 `singleton y`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.Object>
 singleton-into-obj-list node 34-35 `y`	ours - fcs System.Object
+singleton-into-obj-list-beside-a-check binder 4-6 `r9`	ours - fcs System.String -> System.Int32 * System.Int32
+singleton-into-obj-list-beside-a-check binder 8-9 `y`	ours System.String fcs System.String
+singleton-into-obj-list-beside-a-check census	[]
+singleton-into-obj-list-beside-a-check fcs	clean
+singleton-into-obj-list-beside-a-check node 22-37 `g (singleton y)`	ours System.Int32 fcs System.Int32
+singleton-into-obj-list-beside-a-check node 22-44 `g (singleton y), idf 3`	ours - fcs System.Int32 * System.Int32
+singleton-into-obj-list-beside-a-check node 25-36 `singleton y`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.Object>
+singleton-into-obj-list-beside-a-check node 35-36 `y`	ours - fcs System.Object
+singleton-into-obj-list-beside-a-check node 39-44 `idf 3`	ours - fcs System.Int32
+singleton-into-obj-list-beside-a-check node 43-44 `3`	ours - fcs System.Int32
 singleton-into-string-list binder 4-6 `r2`	ours System.String -> System.Int32 fcs System.String -> System.Int32
 singleton-into-string-list binder 8-9 `y`	ours System.String fcs System.String
 singleton-into-string-list census	[]

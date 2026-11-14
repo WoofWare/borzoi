@@ -31,14 +31,18 @@ use borzoi_sema::{PrecedingTypes, ProjectItems, SyntaxRecovery, infer_file, reso
 use crate::common::corpus_manifest::{check_manifest, regenerate};
 use crate::common::{GradedDumps, full_bcl_env, invoke_fcs_dump, temp_fs_file};
 
-/// The shared header: the functions the cases apply.
+/// The shared header: the functions the cases apply. `singleton` is
+/// `List.singleton`'s application rather than `[x]`, a list expression
+/// inference does not model, which would leave it untyped and every case
+/// applying it silent whatever the order.
 const HEADER: &str = "module Pins\n\
                       let idf x = x\n\
-                      let singleton x = [x]\n\
+                      let singleton x = List.singleton x\n\
                       let g (xs: obj list) = 0\n\
                       let gs (xs: string list) = 0\n\
                       let apply (k: string -> int) = k \"x\"\n\
                       let monos (t: string) = 2\n\
+                      let gi (i: int) = 0\n\
                       let uu = fst ((7, \"u\"), 1)\n";
 
 /// Each case: its name, its `let`, and what entry and exit order each make of
@@ -51,6 +55,13 @@ const CASES: &[(&str, &str, &str)] = &[
          before `y` is checked, and `y` coerces to it; FCS accepts. exit: walking \
          `singleton y` first fixes its element type to `string`, and `string list` is \
          not `obj list`",
+    ),
+    (
+        "singleton-into-obj-list-beside-a-check",
+        "let r9 (y: string) = (g (singleton y), idf 3)",
+        "entry: as `r1`, and `idf 3`'s check is decided at its own argument. exit: the \
+         failed check of `singleton y` against `obj list` is one FCS never made, and \
+         it takes every check of the binding with it, `idf 3`'s included",
     ),
     (
         "singleton-into-string-list",
@@ -92,6 +103,14 @@ const CASES: &[(&str, &str, &str)] = &[
         "let r8 () = (idf uu, Unchecked.defaultof<_>)",
         "as above, with a suffix inference does not model: today the binding is \
          incomplete and the check never fires; FCS's type for `idf uu` is the same",
+    ),
+    (
+        "condition-before-a-check",
+        "let r10 x = if x then (gi x, x) else (0, x)",
+        "the condition fixes `x` to `bool` before `gi x` is checked, so FCS rejects the \
+         check and keeps `x : bool`. A check decided at its argument must see the \
+         condition's equality, which inference applies to the parameter's private slot \
+         and not to the variable its uses read",
     ),
 ];
 
