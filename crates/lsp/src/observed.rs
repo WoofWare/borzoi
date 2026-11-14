@@ -209,6 +209,10 @@ fn stamp_of(meta: &std::fs::Metadata) -> Stamp {
 #[allow(clippy::disallowed_methods)]
 impl Disk for HostDisk {
     fn stat(&self, path: &Path) -> std::io::Result<Stamp> {
+        #[cfg(test)]
+        if let Some(stamp) = host_fs::held_stamp(path) {
+            return Ok(stamp);
+        }
         std::fs::metadata(path).map(|meta| stamp_of(&meta))
     }
 
@@ -421,6 +425,66 @@ pub(crate) mod host_fs {
         }
         fn host_is_dir(&self) -> bool {
             self.is_dir()
+        }
+    }
+
+    std::thread_local! {
+        /// The directories [`hold_ancestors_still`] holds on this thread,
+        /// with the stamps they keep.
+        static HELD: std::cell::RefCell<Vec<(PathBuf, crate::vfs::Stamp)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The stamp [`super::HostDisk`]'s `stat` answers for `path` on this
+    /// thread, when a [`HeldStill`] holds it.
+    pub(super) fn held_stamp(path: &Path) -> Option<crate::vfs::Stamp> {
+        HELD.with_borrow(|held| {
+            held.iter()
+                .find(|(dir, _)| dir == path)
+                .map(|(_, stamp)| *stamp)
+        })
+    }
+
+    /// Hold every directory above `root` still on the calling thread while
+    /// the guard lives: a [`super::HostDisk`] `stat` of one, spelt as
+    /// `root`'s ancestor, answers the stamp it has now.
+    ///
+    /// A witness names every directory its read's path is resolved through
+    /// ([`crate::read_checks`]), so the reads of a tree in a temporary
+    /// directory are witnessed by the temporary directory's ancestors too.
+    /// Concurrent tests, and other processes, make and remove entries
+    /// there, which moves those directories' stamps and makes every witness
+    /// ask its read again, as it must. A test that counts what confirming
+    /// its tree costs holds them still, so that the count depends only on
+    /// what the test does to its own tree. Only these stamps are held: every
+    /// query is still answered by the disk.
+    pub fn hold_ancestors_still(root: &Path) -> HeldStill {
+        let held: Vec<(PathBuf, crate::vfs::Stamp)> = root
+            .ancestors()
+            .skip(1)
+            .map(|dir| {
+                let stamp = super::stamp_of(&std::fs::metadata(dir).unwrap());
+                (dir.to_path_buf(), stamp)
+            })
+            .collect();
+        HeldStill {
+            before: HELD.replace(held),
+            _thread: std::marker::PhantomData,
+        }
+    }
+
+    /// Holds directories still on the thread that made it
+    /// ([`hold_ancestors_still`]) until it is dropped.
+    #[must_use]
+    pub struct HeldStill {
+        before: Vec<(PathBuf, crate::vfs::Stamp)>,
+        /// Not `Send`: what it holds is the making thread's.
+        _thread: std::marker::PhantomData<*const ()>,
+    }
+
+    impl Drop for HeldStill {
+        fn drop(&mut self) {
+            HELD.set(std::mem::take(&mut self.before));
         }
     }
 }

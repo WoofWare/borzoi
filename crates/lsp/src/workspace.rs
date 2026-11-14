@@ -7859,51 +7859,46 @@ mod tests {
         /// walking each one's path. The project file is rewritten in place,
         /// so no directory's stamp moves.
         ///
-        /// The evaluation's absence probes reach the temporary directory's
-        /// ancestors, where concurrent tests make and remove directories,
-        /// and a witness that sees one moved asks again, as it must; so the
-        /// scenario is run until a run sees nothing else move. Without the
-        /// dropped evaluation's witnesses no run can.
+        /// Every witness names the directories its read's path is resolved
+        /// through, the temporary directory's ancestors among them, where
+        /// concurrent tests make and remove entries; so the test holds those
+        /// still ([`crate::observed::host_fs::hold_ancestors_still`]), and
+        /// the counts depend only on what it does to its own tree.
         #[test]
         fn a_project_evaluated_again_starts_with_the_dropped_ones_witnesses() {
-            let attempt = || {
-                let tmp = TempDir::new().unwrap();
-                let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
-                let (project, env) = world(&root, false);
-                let file = root.join("repo/App/A.fs");
-                let mut ws = Workspace::with_env(env);
-                let mut at = 0;
-                let mut generation = |ws: &mut Workspace| {
-                    // Old enough that no stamp is racy, so witnesses are used.
-                    ws.begin_generation(Nanos(i128::MAX / 2 + at));
-                    at += 1;
-                    assert!(ws.symbols_for(&file).contains("COMMON"));
-                    ws.end_generation().evaluations
-                };
-                assert_eq!(generation(&mut ws).evaluated, 1);
-                // The first confirmation takes the witnesses; the second is
-                // what confirming an unchanged evaluation costs.
-                generation(&mut ws);
-                let steady = generation(&mut ws);
-                assert_eq!(steady.evaluated, 0, "{steady:?}");
-                assert!(steady.validation.stats > 0, "{steady:?}");
-
-                let text = crate::observed::host_fs::read_to_string(&project).unwrap();
-                fs::write(
-                    &project,
-                    text.replace("<ItemGroup>", "<!-- c --><ItemGroup>"),
-                )
-                .unwrap();
-                assert_eq!(generation(&mut ws).evaluated, 1);
-                (generation(&mut ws), steady)
+            let tmp = TempDir::new().unwrap();
+            let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+            let _still = crate::observed::host_fs::hold_ancestors_still(&root);
+            let (project, env) = world(&root, false);
+            let file = root.join("repo/App/A.fs");
+            let mut ws = Workspace::with_env(env);
+            let mut at = 0;
+            let mut generation = |ws: &mut Workspace| {
+                // Old enough that no stamp is racy, so witnesses are used.
+                ws.begin_generation(Nanos(i128::MAX / 2 + at));
+                at += 1;
+                assert!(ws.symbols_for(&file).contains("COMMON"));
+                ws.end_generation().evaluations
             };
-            let mut runs = Vec::new();
-            while runs.len() < 5 && !runs.last().is_some_and(|(first, steady)| first == steady) {
-                runs.push(attempt());
-            }
-            assert!(
-                runs.iter().any(|(first, steady)| first == steady),
-                "the new evaluation's first confirmation, against a steady one: {runs:?}"
+            assert_eq!(generation(&mut ws).evaluated, 1);
+            // The first confirmation takes the witnesses; the second is what
+            // confirming an unchanged evaluation costs.
+            generation(&mut ws);
+            let steady = generation(&mut ws);
+            assert_eq!(steady.evaluated, 0, "{steady:?}");
+            assert!(steady.validation.stats > 0, "{steady:?}");
+
+            let text = crate::observed::host_fs::read_to_string(&project).unwrap();
+            fs::write(
+                &project,
+                text.replace("<ItemGroup>", "<!-- c --><ItemGroup>"),
+            )
+            .unwrap();
+            assert_eq!(generation(&mut ws).evaluated, 1);
+            assert_eq!(
+                generation(&mut ws),
+                steady,
+                "the new evaluation's first confirmation, against a steady one"
             );
         }
 
