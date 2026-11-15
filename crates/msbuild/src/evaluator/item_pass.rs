@@ -1672,6 +1672,16 @@ fn read_compile_order_metadata_write(
             );
             return None;
         }
+        // As the scans above: the text alone decides, and only to decline.
+        if path_fixup::worlds(expansion.value.ignoring_trust().as_escaped()).is_some() {
+            state.push(
+                DiagnosticKind::UnsupportedItemOperation {
+                    operation: format!("CompileOrder {escaped}, which MSBuild may respell"),
+                },
+                span,
+            );
+            return None;
+        }
         Some(value)
     }
 
@@ -1679,6 +1689,15 @@ fn read_compile_order_metadata_write(
         .attributes()
         .rfind(|attr| attr.name().eq_ignore_ascii_case("CompileOrder"))
     {
+        Some(attr) if !attribute_is_plain(node, &attr) => {
+            state.push(
+                DiagnosticKind::UnsupportedItemOperation {
+                    operation: "CompileOrder with an unmodellable attribute".to_string(),
+                },
+                node.range(),
+            );
+            return None;
+        }
         Some(attr) => Some(expand_compile_order_value(
             attr.value(),
             node.range(),
@@ -3064,6 +3083,24 @@ fn read_item_metadata(node: Node<'_, '_>, name: &str, state: &mut State<'_>) -> 
         if expansion.had_issue() {
             return MetadataValue::Clear;
         }
+        // MSBuild holds the value whole, where this capture trims it in the
+        // escaped domain: raw padding is a value apart from the trimmed one.
+        // And MSBuild's Unix path fixup may rewrite a backslash-bearing value,
+        // or not, by a probe of its working directory (#642). The test reads
+        // the text alone and only declines, so the value's trust, which the
+        // capture carries through `note_package_uncertain_from_sdk_property_taint`
+        // above, has no say in it.
+        let full = expansion.value.ignoring_trust().as_escaped();
+        if full.trim() != full || path_fixup::worlds(full).is_some() {
+            state.note_package_uncertain(
+                PackageReferenceUncertaintyCauseKind::UnreadableMetadata {
+                    name: name.to_string(),
+                    value: full.to_string(),
+                },
+                range,
+            );
+            return MetadataValue::Clear;
+        }
         let (escaped, v) = scalar_use(expansion.value.ignoring_trust());
         if escaped.is_empty() {
             return MetadataValue::Clear;
@@ -3095,7 +3132,20 @@ fn read_item_metadata(node: Node<'_, '_>, name: &str, state: &mut State<'_>) -> 
         .attributes()
         .rfind(|attr| attr.name().eq_ignore_ascii_case(name))
         .map_or(MetadataValue::Inherit, |attr| {
-            expand_trimmed(attr.value(), name, node.range(), state)
+            if attribute_is_plain(node, &attr) {
+                expand_trimmed(attr.value(), name, node.range(), state)
+            } else {
+                // XML's attribute-value normalisation or entity decoding
+                // touched the value, which MSBuild reads its own way.
+                state.note_package_uncertain(
+                    PackageReferenceUncertaintyCauseKind::UnreadableMetadata {
+                        name: name.to_string(),
+                        value: attr.value().to_string(),
+                    },
+                    node.range(),
+                );
+                MetadataValue::Clear
+            }
         });
     for child in node
         .children()
@@ -3284,8 +3334,18 @@ fn resolve_dependency_identity_sources(
             }
             let items = state.evaluated_items.get(&key).cloned().unwrap_or_default();
             for item in items {
+                note_identity_outside_package_id_shape(&item.identity, node, state);
                 let metadata = PackageMetadata::from_item(&item);
                 let mut metadata_uncertainties = item.metadata_uncertainties.clone();
+                // A package metadatum whose trimmed reading is not MSBuild's
+                // value is uncertain for the copy, though the item table reads
+                // it exactly.
+                metadata_uncertainties.extend(
+                    item.metadata
+                        .iter()
+                        .filter(|(_, value)| value.is_none())
+                        .map(|(name, _)| HelperMetadataUncertainty::new(name, "")),
+                );
                 metadata_uncertainties.extend(helper_item_definition_default_uncertainties(
                     &key, &item, state,
                 ));
@@ -3340,6 +3400,7 @@ fn resolve_dependency_identity_sources(
         // package `Foo.Bar`, which is also what an `Update`/`Remove` naming it
         // either way must compare against.
         let identity = fragment_identity(entry);
+        note_identity_outside_package_id_shape(&identity, node, state);
         resolved.push(DependencyIdentitySource {
             #[cfg(any(test, feature = "test-support"))]
             row: EvaluatedItem::bare(&identity, Some(entry)),
@@ -3351,6 +3412,25 @@ fn resolve_dependency_identity_sources(
         });
     }
     resolved
+}
+
+/// Mark the dependency set uncertain for an identity outside a package id's
+/// shape ([`is_package_id_shape`]): MSBuild may read it apart from its text
+/// (its Unix path fixup may rewrite `\tmp\foo` to `/tmp/foo`), and no NuGet
+/// package or framework is named so (#642).
+fn note_identity_outside_package_id_shape(
+    identity: &str,
+    node: Node<'_, '_>,
+    state: &mut State<'_>,
+) {
+    if !is_package_id_shape(identity) {
+        state.note_package_uncertain(
+            PackageReferenceUncertaintyCauseKind::UnevaluableIdentity {
+                value: identity.to_string(),
+            },
+            node.range(),
+        );
+    }
 }
 
 pub(super) fn helper_item_definition_default_uncertainties(
@@ -3381,8 +3461,9 @@ fn helper_item_has_package_metadata_name(item: &EvaluatedItem, name: &str) -> bo
 
 #[derive(Debug, Clone, Default)]
 struct GenericItemMetadata {
-    /// Package metadata names, trimmed; see [`EvaluatedItem`]'s `metadata`.
-    values: HashMap<String, String>,
+    /// Package metadata names, trimmed or `None` where that is not MSBuild's
+    /// value; see [`EvaluatedItem`]'s `metadata`.
+    values: HashMap<String, Option<String>>,
     /// Every name, exact; see [`EvaluatedItem`]'s `exact_metadata`.
     exact: HashMap<String, Option<String>>,
     uncertainties: Vec<HelperMetadataUncertainty>,
@@ -3464,7 +3545,7 @@ impl EvaluatedItem {
 
 #[derive(Default)]
 struct GenericItemMetadataBuilder {
-    values: HashMap<String, String>,
+    values: HashMap<String, Option<String>>,
     exact: HashMap<String, Option<String>>,
     uncertainties: HashMap<String, HelperMetadataUncertainty>,
 }
@@ -3552,13 +3633,12 @@ fn read_generic_metadata_child(
     let (gate, condition_tainted) = evaluate_item_condition_silent_with_sdk_taint(child, state);
     match gate {
         CondGate::Run => {
-            // An unmodellable body (CDATA / entity-encoded whitespace —
-            // see `collect_element_text`) drops the metadatum and marks it
-            // uncertain, exactly like an expansion we couldn't evaluate.
-            // A body holding more than text and comments (an element, a
-            // processing instruction) is one MSBuild takes as its inner XML: the
-            // dependency capture reads its text as it always has, and the exact
-            // table holds no value for it.
+            // An unmodellable body (CDATA, entity-encoded whitespace, an
+            // element or processing instruction, a carriage return — see
+            // `collect_element_text`) drops the metadatum and marks it
+            // uncertain, exactly like an expansion we couldn't evaluate. A
+            // body whose text entity decoding touched is read by both, and the
+            // exact table holds no value for it.
             let body_exact = body_is_plain(child);
             match collect_element_text(child) {
                 Some(raw) => set_generic_metadata_value(
@@ -3624,8 +3704,16 @@ fn set_generic_metadata_value(
         )
     };
     let exact = (body_exact && !rewritable).then_some(exact);
+    // The dependency capture reads a copied item's package metadata from
+    // `values`, trimmed. Where that is not MSBuild's value (padding, a value
+    // its path fixup may rewrite, a body or attribute the XML layer reads
+    // apart), it holds `None`, which a copy's capture reads as uncertain
+    // (#642).
     if package {
-        metadata.values.insert(key.clone(), normalised);
+        let readable = exact.as_deref() == Some(normalised.as_str());
+        metadata
+            .values
+            .insert(key.clone(), readable.then_some(normalised));
     }
     metadata.exact.insert(key.clone(), exact);
     if metadata_tainted {
@@ -4483,7 +4571,10 @@ fn resolve_string_metadata(
         .rfind(|a| a.name().eq_ignore_ascii_case(name))
     {
         let expansion = state.expand(attr.value(), node.range());
-        resolved = if expansion.had_issue()
+        // XML's attribute-value normalisation or entity decoding touched the
+        // value, which MSBuild reads its own way.
+        resolved = if !attribute_is_plain(node, &attr)
+            || expansion.had_issue()
             || expansion.unpinned_root.is_some()
             || state.raw_uses_sdk_package_taint(attr.value())
         {
@@ -4604,6 +4695,11 @@ fn finalize_metadata_value(
             },
             span,
         );
+        return None;
+    }
+    // MSBuild's Unix path fixup may rewrite a backslash-bearing value, or not,
+    // by a probe of its working directory.
+    if path_fixup::worlds(escaped).is_some() {
         return None;
     }
     Some(value.unescape())

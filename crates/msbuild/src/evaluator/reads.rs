@@ -265,7 +265,10 @@ impl State<'_> {
     /// `kind` (`PackageVersion` or `GlobalPackageReference`) as MSBuild holds
     /// it: every cause is about another dependency list
     /// ([`State::package_cause_owners`]), or is `marker`, which an item of
-    /// `kind` records merely by existing. A cause with no owner (an item group,
+    /// `kind` records merely by existing, or is about the capture's reading of
+    /// a metadatum, which the list reads its own way
+    /// ([`PackageReferenceUncertaintyCauseKind::UnreadableMetadata`]). A cause
+    /// with no owner (an item group,
     /// an import, an item definition), or any other cause about this list,
     /// declines. The caller checks for an `Update` or `Remove` of the type.
     fn central_list_certain(
@@ -279,7 +282,13 @@ impl State<'_> {
             .all(
                 |(index, cause)| match self.package_cause_owners.get(&index) {
                     Some(owner) if *owner != kind => true,
-                    Some(_) => cause.kind == *marker,
+                    Some(_) => {
+                        cause.kind == *marker
+                            || matches!(
+                                cause.kind,
+                                PackageReferenceUncertaintyCauseKind::UnreadableMetadata { .. }
+                            )
+                    }
                     None => false,
                 },
             )

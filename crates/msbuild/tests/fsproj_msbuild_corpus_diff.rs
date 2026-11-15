@@ -1236,6 +1236,9 @@ fn render_package_reference_uncertainty_cause(cause: &PackageReferenceUncertaint
         PackageReferenceUncertaintyCauseKind::UnevaluableMetadata { name, value } => {
             format!("metadata {name}={value:?} could not be evaluated")
         }
+        PackageReferenceUncertaintyCauseKind::UnreadableMetadata { name, value } => {
+            format!("metadata {name}={value:?} may read differently in MSBuild")
+        }
         PackageReferenceUncertaintyCauseKind::VersionlessPackageReference { id } => {
             format!("<PackageReference Include={id:?}> has no local version")
         }
