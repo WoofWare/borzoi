@@ -140,7 +140,7 @@ fn hidden_content_may_define_an_unbound_path_so_an_unreached_point_declines() {
 /// for the import points: the walk's doubt about them is a doubt about whether
 /// the default file is imported, and there is none. (A file the hidden content
 /// names is hidden content like any other, which withdraws the Compile set
-/// on its own account, #821.)
+/// and the reference list on its own account, #821, #848.)
 #[test]
 fn an_import_the_walk_cannot_decide_charges_nothing_without_a_directory_build_file() {
     let tmp = tempfile::tempdir().unwrap();
@@ -170,7 +170,7 @@ fn an_import_the_walk_cannot_decide_charges_nothing_without_a_directory_build_fi
         "the hidden import withdraws the Compile set, the points nothing: {:?}",
         parsed.compile_item_uncertainties
     );
-    assert!(!parsed.project_references_uncertain);
+    assert!(parsed.project_references_uncertain);
     assert!(!parsed.define_constants_uncertain);
 }
 

@@ -694,7 +694,7 @@ fn walk_doc_body(root: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
                 },
                 child.range(),
             );
-            state.mark_structural_skip_respecting_sdk_reference_tolerance(
+            state.mark_structural_skip(
                 StructuralCompileItemUncertainty::ProjectSdkUnsupported { sdk },
                 child.range(),
             );
@@ -1137,8 +1137,9 @@ struct State<'r> {
     /// (unsupported, or relying on an undefined property) might have
     /// contributed `<Compile>` items or gating properties, and one followed
     /// may be one the real build skips, so any diagnostic [`Self::push`]ed here
-    /// flips [`Self::items_uncertain`]. An SDK file's import is no exception:
-    /// the file it names may be a user's, or import one (#821).
+    /// flips [`Self::items_uncertain`] and [`Self::project_references_uncertain`].
+    /// An SDK file's import is no exception: the file it names may be a
+    /// user's, or import one (#821, #848).
     import_gate_context: bool,
     /// Package-reference analogue of [`Self::import_gate_context`]: SDK imports
     /// are a normal source of implicit package/framework references, so an
@@ -1944,12 +1945,18 @@ impl<'r> State<'r> {
             "the item pass must consume every deferred ItemGroup before \
              the walk produces its result"
         );
-        // Content the walk could not see may hold or import anything, so no
-        // Compile order is certain after it (#819, #821): every site that
-        // latches opacity withdraws the Compile set, in an SDK file as anywhere.
+        // Content the walk could not see may hold or import anything, so
+        // neither the Compile order (#819, #821) nor the reference list (#848)
+        // is certain after it: every site that latches opacity withdraws both,
+        // in an SDK file as anywhere.
         debug_assert!(
             self.walk_opaque.is_none() || self.items_uncertain,
             "the walk hid content ({:?}) but kept its Compile set certain",
+            self.walk_opaque
+        );
+        debug_assert!(
+            self.walk_opaque.is_none() || self.project_references_uncertain,
+            "the walk hid content ({:?}) but kept its reference list certain",
             self.walk_opaque
         );
         // The output-name verdict and the property reads need `&self`, so
@@ -2266,8 +2273,8 @@ impl<'r> State<'r> {
 
     /// Mark the package/framework-reference set untrustworthy because a
     /// structural construct that can carry dependency items was skipped, and
-    /// latch opacity. Only [`Self::mark_hidden_items`] calls it, so the
-    /// Compile set is withdrawn with it.
+    /// latch opacity. Only [`Self::mark_structural_skip`] calls it, so the
+    /// Compile set and the reference list are withdrawn with it.
     fn mark_package_structural_skip(
         &mut self,
         kind: StructuralPackageReferenceUncertainty,
@@ -2286,49 +2293,30 @@ impl<'r> State<'r> {
         );
     }
 
-    /// Mark a structural skip, keeping the SDK's `<ProjectReference>`
-    /// carve-out: inside an SDK file the skip withdraws the Compile and
-    /// dependency sets ([`Self::mark_hidden_items`]) but not the reference
-    /// list (#848); elsewhere it withdraws all three ([`Self::mark_structural_skip`]).
-    fn mark_structural_skip_respecting_sdk_reference_tolerance(
-        &mut self,
-        kind: StructuralCompileItemUncertainty,
-        span: Range<usize>,
-    ) {
-        if self.in_sdk_subtree {
-            self.mark_hidden_items(kind, span);
-        } else {
-            self.mark_structural_skip(kind, span);
-        }
-    }
-
     /// Mark every captured item set untrustworthy because a structural
     /// construct that can carry them was skipped — a dropped/unfollowable
-    /// `<Import>` or SDK, or a malformed `<Choose>`. Such a construct can
-    /// hold `<Compile>`, `<ProjectReference>` and
-    /// `<PackageReference>`/`<FrameworkReference>` items alike. (Build-time-only
-    /// containers like `<Target>` never call this — they contribute to no
-    /// *static* set, matching MSBuild's static item evaluation.)
+    /// `<Import>` or SDK, or a malformed `<Choose>` — wherever it is. Such a
+    /// construct can hold `<Compile>`, `<ProjectReference>` and
+    /// `<PackageReference>`/`<FrameworkReference>` items alike, import a user
+    /// file that does, or import a file a later import names again (which
+    /// MSBuild then skips as a duplicate, #819). So no item set is certain once
+    /// the walk has passed it, in an SDK file as anywhere (#821, #848): that
+    /// the construct sits in an SDK file says nothing of what it reaches.
+    /// (Build-time-only containers like `<Target>` never call this — they
+    /// contribute to no *static* set, matching MSBuild's static item
+    /// evaluation.)
     fn mark_structural_skip(&mut self, kind: StructuralCompileItemUncertainty, span: Range<usize>) {
-        // A skipped import / unresolved SDK can carry `<ProjectReference>`
-        // mutations as easily as Compile items; the un-descended `<Choose>` is
-        // the exception. The rule is
-        // [`StructuralCompileItemUncertainty::hides_project_references`] rather
-        // than a local `matches!`, because a consumer explaining the dropped
-        // reference list must borrow exactly the subset that caused it.
+        // The un-descended `<Choose>` is not content the walk failed to
+        // enter: its branches are scanned for reference operations instead
+        // ([`item_pass::UndecidedChooseItems`]), and a malformed one, which
+        // MSBuild refuses to load, withdraws the list at its own site. The
+        // rule is [`StructuralCompileItemUncertainty::hides_project_references`]
+        // rather than a local `matches!`, because a consumer explaining the
+        // dropped reference list must borrow exactly the subset that caused
+        // it.
         if kind.hides_project_references() {
             self.project_references_uncertain = true;
         }
-        self.mark_hidden_items(kind, span);
-    }
-
-    /// Withdraw the Compile and dependency sets for a construct the walk did
-    /// not enter, wherever it is. Content the walk did not see may hold a
-    /// Compile item, import a user file that does, or import a file a later
-    /// import names again (which MSBuild then skips as a duplicate, #819), so
-    /// no Compile order is certain once the walk has passed it, SDK file or
-    /// not (#821).
-    fn mark_hidden_items(&mut self, kind: StructuralCompileItemUncertainty, span: Range<usize>) {
         self.items_uncertain = true;
         self.mark_package_structural_skip(
             package_structural_uncertainty_from_compile(&kind),
@@ -2366,7 +2354,7 @@ impl<'r> State<'r> {
         // So does one raised while deciding an import's gate, and a kind that
         // means a file's worth of content did not enter the walk (a failed
         // import / unresolved SDK — see [`is_structural_compile_risk`]), in an
-        // SDK file as anywhere ([`State::mark_hidden_items`] says why).
+        // SDK file as anywhere ([`State::mark_structural_skip`] says why).
         // Everything else (an undefined property or skipped `<Target>` in an
         // SDK file) leaves the Compile set intact, even though it still flips
         // `is_partial`.
@@ -2406,13 +2394,13 @@ impl<'r> State<'r> {
         if package_uncertain {
             self.package_references_uncertain = true;
         }
-        // The reference-list analogue of the structural Compile rule: a
-        // failed or unfollowable import in a user-authored file may carry
-        // `<ProjectReference>` mutations we never saw, so the captured list
-        // may claim references the real build strips. SDK-gated, unlike the
-        // Compile rule: SDK sub-imports don't declare user project references
-        // at evaluation time (a hidden one may import a user file that does, #848).
-        if !self.in_sdk_subtree && is_structural_compile_risk(&kind) {
+        // The reference-list analogue of the Compile rule's import half: a
+        // failed or unfollowable import, or one whose gate we could not
+        // decide, may carry `<ProjectReference>` mutations we never saw, so the
+        // captured list may claim references the real build strips. In an SDK
+        // file as anywhere: the file such an import names may be a user's, or
+        // import one (#848).
+        if self.import_gate_context || is_structural_compile_risk(&kind) {
             self.project_references_uncertain = true;
         }
         let origin = self.current_origin();
@@ -3376,10 +3364,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
             // untrusted decision here hides (or phantom-includes) whatever
             // the group's imports carry, `<ProjectReference>` mutations
             // included.
-            if !state.in_sdk_subtree
-                && (matches!(gate, CondGate::Unsupported)
-                    || state.condition_reads_untrusted_value(node))
-            {
+            if state.condition_reads_untrusted_value(node) {
                 state.project_references_uncertain = true;
             }
             // Same rule as `follow_explicit_import`: an undecided group
@@ -3507,18 +3492,16 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             },
             node.range(),
         );
-        state.mark_structural_skip_respecting_sdk_reference_tolerance(
+        state.mark_structural_skip(
             StructuralCompileItemUncertainty::UnsupportedChoose,
             node.range(),
         );
         // A malformed Choose fails MSBuild's whole evaluation at load time —
-        // there is no build for the captured reference list to describe. The
-        // UnsupportedChoose carve-out in `mark_structural_skip` defers to the
-        // undecided-branch mutation scan, which never runs on this path, so
-        // set the flag structurally (same provenance gate as Compile).
-        if !state.in_sdk_subtree {
-            state.project_references_uncertain = true;
-        }
+        // there is no build for the captured reference list to describe,
+        // whichever file holds it. The UnsupportedChoose carve-out in
+        // `mark_structural_skip` defers to the undecided-branch mutation scan,
+        // which never runs on this path, so set the flag here.
+        state.project_references_uncertain = true;
         return;
     }
     let whens: Vec<Node<'_, '_>> = node
@@ -4714,7 +4697,7 @@ pub(crate) fn changewave_env_value(
 ///
 /// The predicate itself is [`DiagnosticKind::hides_unseen_content`], public
 /// because consumers reason about the same class: it is why the walk goes
-/// opaque, why `project_references_uncertain` is raised outside the SDK tree,
+/// opaque, why `items_uncertain` and `project_references_uncertain` are raised,
 /// and (in the LSP) which of an uncertain project's causes also explain a
 /// dropped `<ProjectReference>` edge set. One definition, so those cannot
 /// disagree about what counts.
@@ -4996,14 +4979,14 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
     state.note_package_uncertain_if_condition_uses_sdk_taint(node);
     state.import_gate_context = prev_gate;
     state.package_import_gate_context = prev_pkg_gate;
-    // A user-authored import decided by an untrusted read may go the other
-    // way in a real build: a skipped file could mutate the reference list,
-    // and a followed file's references may not actually be brought in —
-    // either way `project_references` can't be trusted. A gate outside our
-    // grammar (Unsupported) is untrusted by construction.
-    if !state.in_sdk_subtree
-        && (matches!(gate, CondGate::Unsupported) || state.condition_reads_untrusted_value(node))
-    {
+    // An import decided by an untrusted read may go the other way in a real
+    // build, in an SDK file as anywhere: a skipped file could mutate the
+    // reference list, and a followed file's references may not actually be
+    // brought in — either way `project_references` can't be trusted. (A
+    // gate we could not decide at all, or one outside our grammar, raised a
+    // diagnostic in the gate context, which withdraws the list on its own
+    // account.)
+    if state.condition_reads_untrusted_value(node) {
         state.project_references_uncertain = true;
     }
     // An import gate we could not decide exactly (its evaluation raised
@@ -5068,7 +5051,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             // default-item machinery; in a user-authored file that leaves the
             // Compile set incomplete. Inside the SDK tree Compile uncertainty is
             // tolerated, but dependency items could still be hidden.
-            state.mark_structural_skip_respecting_sdk_reference_tolerance(
+            state.mark_structural_skip(
                 StructuralCompileItemUncertainty::ExplicitSdkUnsupported {
                     sdk: sdk_name.to_string(),
                 },
@@ -5106,7 +5089,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             // reasoning as the plain `<Import>` path). Inside the SDK tree
             // Compile uncertainty is tolerated, but dependency items could
             // still be hidden.
-            state.mark_structural_skip_respecting_sdk_reference_tolerance(
+            state.mark_structural_skip(
                 StructuralCompileItemUncertainty::SdkImportProjectUnresolved {
                     sdk: sdk_name.to_string(),
                     project: project_attr_raw.to_string(),
@@ -5133,7 +5116,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
                 },
                 node.range(),
             );
-            state.mark_structural_skip_respecting_sdk_reference_tolerance(
+            state.mark_structural_skip(
                 StructuralCompileItemUncertainty::SdkImportProjectUnresolved {
                     sdk: sdk_name.to_string(),
                     project: project_attr_raw.to_string(),
@@ -5174,7 +5157,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
                 },
                 node.range(),
             );
-            state.mark_structural_skip_respecting_sdk_reference_tolerance(
+            state.mark_structural_skip(
                 StructuralCompileItemUncertainty::SdkImportProjectUnresolved {
                     sdk: sdk_name.to_string(),
                     project: project_attr_raw.to_string(),
@@ -5225,7 +5208,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
                     },
                     node.range(),
                 );
-                state.mark_structural_skip_respecting_sdk_reference_tolerance(
+                state.mark_structural_skip(
                     StructuralCompileItemUncertainty::SdkImportProjectUnresolved {
                         sdk: sdk_name.to_string(),
                         project: project_attr_raw.to_string(),
@@ -5316,7 +5299,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // items, so the Compile set is no longer trustworthy. Inside the SDK
         // tree Compile uncertainty is tolerated, but the dropped import can
         // still hide dependency items.
-        state.mark_structural_skip_respecting_sdk_reference_tolerance(
+        state.mark_structural_skip(
             StructuralCompileItemUncertainty::ImportProjectUnresolved {
                 project: raw_path.to_string(),
             },
@@ -5362,7 +5345,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             },
             node.range(),
         );
-        state.mark_structural_skip_respecting_sdk_reference_tolerance(
+        state.mark_structural_skip(
             StructuralCompileItemUncertainty::ImportProjectUnresolved {
                 project: raw_path.to_string(),
             },
@@ -5442,7 +5425,7 @@ fn follow_wildcard_import(
             },
             span.clone(),
         );
-        state.mark_structural_skip_respecting_sdk_reference_tolerance(
+        state.mark_structural_skip(
             StructuralCompileItemUncertainty::ImportProjectUnresolved {
                 project: normalised.to_string(),
             },
@@ -5476,7 +5459,7 @@ fn follow_wildcard_import(
                 },
                 span.clone(),
             );
-            state.mark_structural_skip_respecting_sdk_reference_tolerance(
+            state.mark_structural_skip(
                 StructuralCompileItemUncertainty::ImportProjectUnresolved {
                     project: normalised.to_string(),
                 },
@@ -5718,7 +5701,7 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
             },
             span.clone(),
         );
-        state.mark_structural_skip_respecting_sdk_reference_tolerance(
+        state.mark_structural_skip(
             StructuralCompileItemUncertainty::ImportProjectUnresolved {
                 project: path.display().to_string(),
             },

@@ -44,12 +44,15 @@
 //! Every file appends its marker to `Trace`, so the final value is a log of
 //! which files ran and in what order, and defines the target `T`, so MSBuild's
 //! target table names the last file that ran; a user's file also contributes a
-//! Compile item. All three are graded with the oracle's `evaluated` op,
-//! certain-implies-exact: a property the walk commits (a trusted value, or a
-//! trusted "unset") must be MSBuild's, a target read the probe calls exact must
-//! name the element MSBuild keeps, and a Compile set the walk calls certain
-//! (`items_uncertain` false, what the LSP folds) must be MSBuild's, file for
-//! file and in order.
+//! Compile item. Every file also declares a `<ProjectReference>` of its own,
+//! and a user's file other than the project removes the project's, so content
+//! that runs after the body changes the list. All four are graded with the
+//! oracle's `evaluated` op, certain-implies-exact: a property the walk commits
+//! (a trusted value, or a trusted "unset") must be MSBuild's, a target read the
+//! probe calls exact must name the element MSBuild keeps, and a Compile set the
+//! walk calls certain (`items_uncertain` false, what the LSP folds) and a
+//! reference list it calls certain (`project_references_uncertain` false, the
+//! LSP's project graph) must be MSBuild's, file for file and in order.
 //!
 //! A project MSBuild rejects is graded too: any value the walk commits for it
 //! is a divergence.
@@ -757,22 +760,34 @@ fn render_undecided(case: &Case, site: UndecidedSite) -> String {
 // ---------------------------------------------------------------------------
 
 /// A file's marker: appended to `Trace`, and the target `T` and `T_<marker>`.
-/// A user's file also contributes the Compile item `<marker>.fs`, so the
-/// Compile set logs which of the user's files ran. An SDK's files contribute
-/// none: a Compile item an SDK import the walk cannot decide may carry is the
-/// standing SDK Compile-tolerance trade (`ParsedProject::items_uncertain`),
-/// not the import graph this harness grades.
+/// Every file declares the reference `refs/<marker>.fsproj`, so the reference
+/// list logs which files ran. A user's file also contributes the Compile item
+/// `<marker>.fs`, so the Compile set logs which of the user's files ran, and,
+/// unless it is the project, removes the project's reference
+/// ([`BODY_REFERENCE`]). So a user's file that runs after the body strips it,
+/// which no SDK file here does: the project's reference survives exactly when
+/// no such file runs (#848). An SDK's files contribute no Compile item, so
+/// that the Compile set logs the user's files alone.
 fn tracer(marker: &str) -> String {
-    let compile = if SDK_MARKERS.contains(&marker) {
+    let user = if SDK_MARKERS.contains(&marker) {
         String::new()
     } else {
-        format!("  <ItemGroup>\n    <Compile Include=\"{marker}.fs\" />\n  </ItemGroup>\n")
+        let remove = if marker == "body" {
+            String::new()
+        } else {
+            format!("    <ProjectReference Remove=\"{BODY_REFERENCE}\" />\n")
+        };
+        format!("    <Compile Include=\"{marker}.fs\" />\n{remove}")
     };
     format!(
-        "  <PropertyGroup>\n    <Trace>$(Trace);{marker}</Trace>\n  </PropertyGroup>\n{compile}  \
-         <Target Name=\"T\" />\n  <Target Name=\"T_{marker}\" />\n"
+        "  <PropertyGroup>\n    <Trace>$(Trace);{marker}</Trace>\n  </PropertyGroup>\n  \
+         <ItemGroup>\n    <ProjectReference Include=\"refs/{marker}.fsproj\" />\n{user}  \
+         </ItemGroup>\n  <Target Name=\"T\" />\n  <Target Name=\"T_{marker}\" />\n"
     )
 }
+
+/// The project's own reference, which every other user's file removes.
+const BODY_REFERENCE: &str = "refs/body.fsproj";
 
 /// The markers of the SDK's own files.
 const SDK_MARKERS: [&str; 6] = ["sdkp", "common", "sdkt", "sdkt2", "behindp", "behindt"];
@@ -1194,8 +1209,8 @@ enum Family {
     /// withdraws the whole evaluation, but a literal write after it is
     /// committed for an evaluation MSBuild refuses, and a point in content the
     /// walk cannot see makes MSBuild refuse an evaluation the walk accepts
-    /// (#820). Covers property findings, and Compile findings on a project
-    /// MSBuild rejects.
+    /// (#820). Covers property findings, and Compile and reference findings on
+    /// a project MSBuild rejects.
     UndecidedImportOfMissingFile,
 }
 
@@ -1237,7 +1252,7 @@ impl Family {
             Family::UndecidedImportHidesWrites => finding.kind == FindingKind::Property,
             Family::UndecidedImportOfMissingFile => {
                 finding.kind == FindingKind::Property
-                    || (finding.kind == FindingKind::Compile
+                    || (matches!(finding.kind, FindingKind::Compile | FindingKind::References)
                         && finding.theirs == "a rejected project")
             }
         }
@@ -1384,6 +1399,7 @@ enum FindingKind {
     Property,
     Target,
     Compile,
+    References,
 }
 
 /// What one case came to.
@@ -1399,6 +1415,12 @@ struct Outcome {
     /// The walk called the Compile set certain (and MSBuild accepted the
     /// project).
     certain_compile: bool,
+    /// The walk called the reference list certain (and MSBuild accepted the
+    /// project).
+    certain_references: bool,
+    /// Of those, whether MSBuild's list holds the project's own reference: no
+    /// file that runs after the body stripped it.
+    body_reference_kept: bool,
     /// Whether MSBuild imported `Directory.Build.props` and `.targets`, read
     /// off the markers they write.
     msbuild_imported: Option<(bool, bool)>,
@@ -1508,10 +1530,13 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         &probe,
     )
     .expect("well-formed XML parses");
-    let theirs =
-        shared
-            .oracle
-            .try_evaluated(&project_path, &[], &PROPERTIES, &["Compile"], &TARGETS);
+    let theirs = shared.oracle.try_evaluated(
+        &project_path,
+        &[],
+        &PROPERTIES,
+        &["Compile", "ProjectReference"],
+        &TARGETS,
+    );
 
     let mut outcome = Outcome::default();
     let mut describe = format!("{case:#?}\n--- p.proj\n{}", rendered.project);
@@ -1528,6 +1553,14 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 ours: "a certain item set".to_owned(),
                 theirs: "a rejected project".to_owned(),
                 kind: FindingKind::Compile,
+            });
+        }
+        if !parsed.project_references_uncertain {
+            outcome.findings.push(Finding {
+                what: "ProjectReference".to_owned(),
+                ours: "a certain reference list".to_owned(),
+                theirs: "a rejected project".to_owned(),
+                kind: FindingKind::References,
             });
         }
         for name in PROPERTIES {
@@ -1604,6 +1637,33 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 ours: format!("{ours:?}"),
                 theirs: format!("{theirs:?}"),
                 kind: FindingKind::Compile,
+            });
+        }
+    }
+    // So must a reference list the walk calls certain: the LSP's project graph
+    // reads it as the edges MSBuild builds. Identities are relative to the
+    // project's directory, as the Compile items' are.
+    if !parsed.project_references_uncertain {
+        outcome.certain_references = true;
+        let project_dir = project_path.parent().expect("a project has a directory");
+        let ours: Vec<PathBuf> = parsed
+            .project_references
+            .iter()
+            .map(|item| item.include.clone())
+            .collect();
+        let theirs: Vec<PathBuf> = theirs["items"]["ProjectReference"]
+            .as_array()
+            .expect("the ProjectReference items")
+            .iter()
+            .map(|item| project_dir.join(item["identity"].as_str().expect("an identity")))
+            .collect();
+        outcome.body_reference_kept = theirs.contains(&project_dir.join(BODY_REFERENCE));
+        if ours != theirs {
+            outcome.findings.push(Finding {
+                what: "ProjectReference".to_owned(),
+                ours: format!("{ours:?}"),
+                theirs: format!("{theirs:?}"),
+                kind: FindingKind::References,
             });
         }
     }
@@ -1746,6 +1806,9 @@ struct Report {
     exact_targets: usize,
     /// Cases whose Compile set the walk called certain, each graded.
     certain_compile: usize,
+    /// Cases whose reference list the walk called certain, each graded, by
+    /// whether MSBuild kept the project's own reference.
+    certain_references: BTreeMap<bool, usize>,
     /// Cases in no known family, which the sweep grades in full.
     outside_families: usize,
     /// Of those, how often MSBuild imported `(Directory.Build.props,
@@ -1802,6 +1865,12 @@ fn sweep(seed: u64, cases: usize) -> Report {
         report.committed_properties += outcome.committed_properties;
         report.exact_targets += outcome.exact_targets;
         report.certain_compile += usize::from(outcome.certain_compile);
+        if outcome.certain_references {
+            *report
+                .certain_references
+                .entry(outcome.body_reference_kept)
+                .or_default() += 1;
+        }
         if families.is_empty() {
             report.outside_families += 1;
             if let Some(imported) = outcome.msbuild_imported {
@@ -1835,14 +1904,15 @@ fn sweep(seed: u64, cases: usize) -> Report {
 fn assert_clean(report: &Report) {
     eprintln!(
         "sdk import graph: {} cases, {} rejected, {} committed property reads, \
-         {} exact target reads, {} certain Compile sets; {} cases outside every family, MSBuild's \
-         (props, targets) imports among them: {:?}; known-family cases with \
-         findings: {:?}",
+         {} exact target reads, {} certain Compile sets, certain reference lists by whether \
+         MSBuild kept the project's own: {:?}; {} cases outside every family, MSBuild's \
+         (props, targets) imports among them: {:?}; known-family cases with findings: {:?}",
         report.cases,
         report.rejected,
         report.committed_properties,
         report.exact_targets,
         report.certain_compile,
+        report.certain_references,
         report.outside_families,
         report.outside_imports,
         report.explained
@@ -1900,6 +1970,18 @@ fn the_import_graph_is_exact_or_declined() {
                 if imported { "imported" } else { "skipped" }
             );
         }
+    }
+    // The reference axis grades lists both ways: ones MSBuild strips the
+    // project's reference from (a user's file ran after the body) and ones it
+    // keeps it in, so a walk that declined every list, or every list a file
+    // after the body touches, would fail here.
+    for kept in [true, false] {
+        let n = report.certain_references.get(&kept).copied().unwrap_or(0);
+        assert!(
+            n >= 30,
+            "only {n} certain reference lists in which MSBuild {} the project's own",
+            if kept { "kept" } else { "stripped" }
+        );
     }
     // MSBuild rejects only the dangling-symlink imports and the SDK-qualified
     // rooted ones (each a known family): a case it rejects grades little, so a
@@ -2073,22 +2155,22 @@ fn a_point_after_a_hidden_import_of_its_file_commits_no_order() {
     );
 }
 
-/// Grade `case`'s Compile set alone: MSBuild accepts the project, and the
-/// walk publishes MSBuild's Compile set or none. What the hidden import
-/// writes is [`Family::UndecidedImportHidesWrites`]'s (#791).
-fn assert_compile_exact_or_declined(case: &Case) {
+/// Grade `case`'s item lists alone: MSBuild accepts the project, and the walk
+/// publishes MSBuild's Compile set and reference list, or declines each. What
+/// the hidden import writes is [`Family::UndecidedImportHidesWrites`]'s (#791).
+fn assert_items_exact_or_declined(case: &Case) {
     let mut shared = Shared::new();
     let (outcome, describe) = evaluate(&mut shared, case);
     assert!(
         !outcome.rejected,
         "MSBuild rejected the project:\n{describe}"
     );
-    let compile: Vec<&Finding> = outcome
+    let items: Vec<&Finding> = outcome
         .findings
         .iter()
-        .filter(|f| f.kind == FindingKind::Compile)
+        .filter(|f| matches!(f.kind, FindingKind::Compile | FindingKind::References))
         .collect();
-    assert!(compile.is_empty(), "{compile:#?}\n{describe}");
+    assert!(items.is_empty(), "{items:#?}\n{describe}");
 }
 
 /// #819: with no import point and no `Directory.Build.*` file, nothing
@@ -2098,7 +2180,7 @@ fn assert_compile_exact_or_declined(case: &Case) {
 /// own import at the body would give.
 #[test]
 fn a_plain_import_after_a_hidden_import_of_its_file_commits_no_order() {
-    assert_compile_exact_or_declined(&Case {
+    assert_items_exact_or_declined(&Case {
         props_point: PropsPoint::Absent,
         targets_point: TargetsPoint::Absent,
         props: Props::default(),
@@ -2118,13 +2200,35 @@ fn a_plain_import_after_a_hidden_import_of_its_file_commits_no_order() {
     });
 }
 
+/// #848: with no `Directory.Build.*` file the point withdraws nothing, and
+/// `child` (with `grandchild`), which strips the project's reference, is
+/// imported only by an import in `Sdk.targets` the walk cannot decide, after
+/// the body. MSBuild's list lacks the project's reference, which the walk must
+/// not publish as certain.
+#[test]
+fn a_hidden_sdk_import_of_a_user_file_after_the_body_commits_no_reference_list() {
+    for site in [RepeatSite::HiddenBeforePoint, RepeatSite::HiddenViaSdkFile] {
+        assert_items_exact_or_declined(&Case {
+            props: Props::default(),
+            targets_point: TargetsPoint::Absent,
+            targets_present: false,
+            repeat_which: Which::Targets,
+            repeats: vec![Repeat {
+                target: RepeatTarget::Child,
+                site,
+            }],
+            ..Case::usual()
+        });
+    }
+}
+
 /// #821: with no `Directory.Build.*` file the point withdraws nothing, and
 /// `child` (with `grandchild`), whose Compile items MSBuild compiles, is
 /// imported only by an import in `Sdk.props` the walk cannot decide.
 #[test]
 fn a_hidden_sdk_import_of_a_user_file_commits_no_compile_set() {
     for site in [RepeatSite::HiddenBeforePoint, RepeatSite::HiddenViaSdkFile] {
-        assert_compile_exact_or_declined(&Case {
+        assert_items_exact_or_declined(&Case {
             props: Props::default(),
             targets_present: false,
             repeat_which: Which::Props,

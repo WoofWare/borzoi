@@ -185,10 +185,13 @@ fn build_and_msbuild_reference_names(fsproj: &Path) -> BTreeSet<String> {
 /// server's own request path with C# project references opted into, so this
 /// measures what the LSP serves a host that trusts the workspace.
 fn our_reference_names(fsproj: &Path) -> BTreeSet<String> {
+    // The process's MSBuild property environment, as the server builds it:
+    // without its `MSBuildUserExtensionsPath` the SDK's import chain is
+    // opaque, and no reference list is certain.
     let mut workspace = match std::env::var_os("DOTNET_ROOT").map(PathBuf::from) {
         Some(root) => Workspace::with_env(SdkDiscoveryEnv {
             dotnet_root: Some(root),
-            ..SdkDiscoveryEnv::default()
+            ..SdkDiscoveryEnv::from_process_env()
         }),
         None => Workspace::with_env(SdkDiscoveryEnv::from_process_env()),
     };

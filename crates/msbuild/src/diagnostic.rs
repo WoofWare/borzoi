@@ -220,8 +220,8 @@ impl DiagnosticKind {
     /// consequences hang off it and must agree on membership: the evaluator
     /// goes opaque for later undefined-property reads, raises
     /// [`crate::ParsedProject::items_uncertain`] and
-    /// [`crate::ParsedProject::project_references_uncertain`] outside the SDK
-    /// tree, and the LSP borrows exactly these causes to explain a dropped
+    /// [`crate::ParsedProject::project_references_uncertain`] wherever the
+    /// file was named, and the LSP borrows exactly these causes to explain a dropped
     /// `<ProjectReference>` edge set (whose own axis records none). Hence one
     /// public definition rather than a `matches!` per consumer — a new variant
     /// added to the class is then added everywhere at once.
