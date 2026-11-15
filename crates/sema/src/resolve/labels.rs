@@ -13,14 +13,12 @@
 //! nothing, it resolves the label to the table's head
 //! (`ResolveExprDotLongIdent`).
 //!
-//! The walk models the additions the file itself makes: each record
-//! declaration enters its labels into the container it is declared in, and
-//! an `[<AutoOpen>]` module's close copies its container's entries into the
-//! enclosing one. A scope sees its own container's entries and its
-//! enclosing containers', innermost first, so a nested module's records
-//! shadow the outer ones and leave with it. A label whose latest entry in
-//! scope is such a record commits; everything else the table may hold
-//! declines:
+//! The walk models the additions the file's own record declarations make:
+//! each enters its labels into the container it is declared in. A scope
+//! sees its own container's entries and its enclosing containers',
+//! innermost first, so a nested module's records shadow the outer ones and
+//! leave with it. A label whose latest entry in scope is such a record
+//! commits; everything else the table may hold declines:
 //!
 //! - an `open` after the entry, which may add the label from anywhere
 //!   ([`OpenScope::latest_open_pos`](super::open_scope::OpenScope::latest_open_pos));
@@ -33,17 +31,19 @@
 //! - a `rec` module or namespace, where FCS adds every record of the block
 //!   ahead of the walk;
 //! - an entry that may or may not be there: a record whose
-//!   `[<RequireQualifiedAccess>]` is uncertain, a label it declares twice, an
-//!   `[<AutoOpen>]` close that is uncertain or of a `rec` module;
+//!   `[<RequireQualifiedAccess>]` is uncertain, or a label it declares twice;
+//! - an entry an `[<AutoOpen>]` module's close (or a possible one) adds to
+//!   the enclosing container. FCS adds the module's accessible records there,
+//!   its own ahead of its `[<AutoOpen>]` submodules', but which records are
+//!   accessible from the enclosing scope (a `private` record, a record in a
+//!   `private` submodule) and whether an attribute is FSharp.Core's
+//!   `AutoOpen` are each a question of its own; so every entry of the module
+//!   is copied as one that declines, which shadows what it outranks and
+//!   commits nothing;
 //! - a use inside a type's member bodies, where FCS puts the enclosing
 //!   record's own labels ahead of the table;
 //! - recovered syntax anywhere before the use, which the published accessor
 //!   checks: the walk reads nothing of the recovery reading.
-//!
-//! An `[<AutoOpen>]` module's close adds only the records accessible from
-//! the enclosing scope: a `private` record stays behind. A record whose
-//! representation is `private` goes along, and FCS resolves its labels there
-//! too (and then reports the field inaccessible).
 //!
 //! FCS consults the table only once its member lookup on the receiver has
 //! found nothing. A type variable's type hierarchy is `obj`, so a label named
@@ -58,7 +58,6 @@ use borzoi_cst::syntax::{
 };
 
 use super::contributors::RequireQualifiedAccess;
-use super::decls::header_is_private;
 use super::model::{FieldLabel, FieldLabelEntry};
 use super::state::Resolver;
 use crate::def::{DefId, id_text};
@@ -86,12 +85,6 @@ struct LabelEntry {
     pos: u32,
     /// Whether FCS certainly adds the label here.
     certain: bool,
-    /// Whether an `[<AutoOpen>]` module's close copied the entry here,
-    /// rather than a declaration in this container adding it.
-    copied: bool,
-    /// Whether the record's type is `private`: no `[<AutoOpen>]` close
-    /// carries it out of its module.
-    private_type: bool,
 }
 
 /// The file's additions to FCS's record-label table, by the container each
@@ -137,7 +130,6 @@ impl Resolver<'_> {
             .filter_map(|f| f.ident())
             .map(|tok| (id_text(&tok).to_string(), tok.text_range()))
             .collect();
-        let private_type = header_is_private(defn.syntax());
         let container = self.lexical.container_path.id();
         for (name, field) in &fields {
             let twice = fields.iter().filter(|(n, _)| n == name).count() > 1;
@@ -152,20 +144,14 @@ impl Resolver<'_> {
                     },
                     pos: group_pos,
                     certain: certain && !twice,
-                    copied: false,
-                    private_type,
                 },
             );
         }
     }
 
-    /// Before the walk leaves `nm`, whose body's container is `inner`: copy
-    /// its entries into the enclosing container, `outer`, if it may be
-    /// `[<AutoOpen>]`, as FCS adds its contents there when it closes. FCS
-    /// adds a module's own types first and its `[<AutoOpen>]` submodules'
-    /// contents after, whatever their order in the source, so the entries
-    /// the module declared are copied ahead of those its submodules' closes
-    /// copied into it.
+    /// Before the walk leaves `nm`, whose body's container is `inner`: if it
+    /// may be `[<AutoOpen>]`, copy its entries into the enclosing container,
+    /// `outer`, as entries that decline (see the [module docs](self)).
     pub(super) fn auto_open_record_labels(
         &mut self,
         nm: &NestedModuleDecl,
@@ -175,26 +161,16 @@ impl Resolver<'_> {
         if !self.may_auto_open(nm.attributes()) {
             return;
         }
-        let certain = self.certainly_auto_open(nm.attributes())
-            && !nm.is_rec()
-            && !self.scope.recursive_module_active;
         let pos = u32::from(nm.syntax().text_range().end());
-        let entries = self
+        let copies: Vec<LabelEntry> = self
             .labels
             .by_container
             .get(&inner)
             .into_iter()
             .flatten()
-            .filter(|e| !e.private_type);
-        let (own, submodules): (Vec<&LabelEntry>, Vec<&LabelEntry>) =
-            entries.partition(|e| !e.copied);
-        let copies: Vec<LabelEntry> = own
-            .into_iter()
-            .chain(submodules)
             .map(|e| LabelEntry {
                 pos,
-                certain: e.certain && certain,
-                copied: true,
+                certain: false,
                 ..e.clone()
             })
             .collect();

@@ -341,15 +341,6 @@ impl Resolver<'_> {
                 && !self.attribute_spellings_trusted(spellings.iter().map(String::as_str)))
     }
 
-    /// Whether attribute lists certainly mark their target `[<AutoOpen>]`:
-    /// one is spelled so, and written names are trusted.
-    pub(super) fn certainly_auto_open(&self, attrs: impl Iterator<Item = AttributeList>) -> bool {
-        let attrs: Vec<AttributeList> = attrs.collect();
-        let spellings = attribute_spellings(attrs.iter().cloned());
-        attrs_auto_open(attrs.into_iter())
-            && self.attribute_spellings_trusted(spellings.iter().map(String::as_str))
-    }
-
     /// Whether attribute lists *may* mark their target `[<AutoOpen>]`.
     pub(super) fn may_auto_open(&self, attrs: impl Iterator<Item = AttributeList>) -> bool {
         self.may_carry_core_attribute(attrs, "AutoOpen")

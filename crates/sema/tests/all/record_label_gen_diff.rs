@@ -41,10 +41,11 @@
 //! 2. **Certain implies exact.** Where the resolver answers, FCS must report
 //!    that very field.
 //! 3. **Must commit.** Where the model's winner is a record the resolver
-//!    models — declared in the file in the probe's scope, directly or through
-//!    an `[<AutoOpen>]` module, with no `open` after it in scope, outside a
-//!    `rec` module, in a file whose opens and extensions leave the label's
-//!    name provably unextended — the resolver must answer.
+//!    models — declared in the file in the probe's scope (not brought by an
+//!    `[<AutoOpen>]` module's close, which the resolver declines), with no
+//!    `open` after it in scope, outside a `rec` module, in a file whose opens
+//!    and extensions leave the label's name provably unextended — the
+//!    resolver must answer.
 //!
 //! The probes run in four files of one project: the earlier file holding the
 //! opened modules and namespace fragments, then a file with none of the
@@ -300,8 +301,9 @@ fn gen_record(rng: &mut Rng, names: &mut Names, attributes: bool) -> RecordSpec 
 /// No chain follows `ToString`: a label after a method value is one on a
 /// function type, which FCS reads off its table too, and which the model
 /// leaves alone.
-fn gen_probe(rng: &mut Rng, dot_get: bool) -> Item {
+fn gen_probe(rng: &mut Rng) -> Item {
     let label = rng.label();
+    let dot_get = rng.chance(1, 4);
     Item::Probe {
         label,
         dot_get,
@@ -332,10 +334,7 @@ fn gen_items(
             // An attribute in a `rec` module is one the resolver does not
             // pin, which shuts the extension gate on the whole file.
             0..=4 => gen_records(rng, names, !in_rec || kind == FileKind::Opens),
-            5..=8 => {
-                let dot_get = rng.chance(1, 4);
-                gen_probe(rng, dot_get)
-            }
+            5..=8 => gen_probe(rng),
             9..=10 if depth < 2 && !in_rec => {
                 let rec = kind != FileKind::Ext && rng.chance(1, 3);
                 let auto_open = rng.chance(1, 2);
@@ -346,7 +345,7 @@ fn gen_items(
                 if rec {
                     // A `rec` module's records are in scope from its start: a
                     // probe ahead of them is where that shows.
-                    body.insert(0, gen_probe(rng, false));
+                    body.insert(0, gen_probe(rng));
                     body.push(gen_records(rng, names, kind == FileKind::Opens));
                 }
                 let opens_ok =
@@ -385,7 +384,7 @@ fn gen_items(
                 };
                 Item::NonRecord(nr, rng.label())
             }
-            _ => gen_probe(rng, false),
+            _ => gen_probe(rng),
         };
         items.push(item);
     }
@@ -422,6 +421,10 @@ struct Event {
     /// An `[<AutoOpen>]` module's close brought it here.
     copied: bool,
     access: Access,
+    /// The outermost frame (by index in the stack) the record is accessible
+    /// in: its own module's, for a `private` record; a `private` module's
+    /// parent's, for a record in one.
+    floor: usize,
 }
 
 #[derive(Default)]
@@ -433,6 +436,17 @@ struct Frame {
     opens: Vec<usize>,
     extensions: Vec<&'static str>,
     rec: bool,
+    /// The outermost frame a record declared here is accessible in, whatever
+    /// its own modifier: the parent of the innermost enclosing `private`
+    /// module.
+    floor: usize,
+    /// Every label a record declared here carries, accessible or not, and
+    /// every label an `[<AutoOpen>]` close copied here: what the resolver's
+    /// own copies, which decline, carry.
+    declared: Vec<&'static str>,
+    /// The labels the resolver's `[<AutoOpen>]` copies put here, by
+    /// position: each shadows, declining, whatever it outranks.
+    copied: Vec<(&'static str, usize)>,
 }
 
 /// What the model says FCS reports at a probe.
@@ -468,13 +482,15 @@ struct Probe {
 
 /// A record's non-`[<RequireQualifiedAccess>]` labels, as the events an
 /// addition of it brings. An addition from outside the record's module
-/// (`foreign`) leaves a `private` record out.
+/// (`foreign`) leaves a `private` record out. A declaration in frame `at`
+/// whose own floor is `floor` ([`Frame::floor`]) sets each event's.
 fn record_events(
     file: usize,
     specs: &[RecordSpec],
     origin: Origin,
     pos: usize,
     foreign: bool,
+    (at, floor): (usize, usize),
 ) -> Vec<Event> {
     specs
         .iter()
@@ -494,6 +510,11 @@ fn record_events(
                 and_second: i == 1,
                 copied: false,
                 access: r.access,
+                floor: if r.access == Access::PrivateType {
+                    at
+                } else {
+                    floor
+                },
             })
         })
         .collect()
@@ -510,6 +531,7 @@ fn core_event(origin: Origin, pos: usize) -> Event {
         and_second: false,
         copied: false,
         access: Access::Public,
+        floor: 0,
     }
 }
 
@@ -663,16 +685,6 @@ impl Emitter {
         first: &Prediction,
         label: &'static str,
     ) -> Option<(Prediction, bool)> {
-        let Prediction::Field(f) = first else {
-            return Some((Prediction::Nothing, false));
-        };
-        // A `rec` module's record ahead of its declaration: its field types
-        // are not settled yet, and the chain is left unpredicted.
-        let ty = if *f == core_contents() {
-            FieldTy::Param
-        } else {
-            self.field_types.get(f).cloned()?
-        };
         // On a known type an intrinsic field wins, then an extension of
         // `obj` in scope, which every type has.
         let extended = || {
@@ -681,6 +693,20 @@ impl Emitter {
             } else {
                 Prediction::Nothing
             }
+        };
+        let f = match first {
+            Prediction::Field(f) => f,
+            // A first label that is not a field is an extension property
+            // (chains never follow `ToString`), of type `int`.
+            Prediction::NotAField => return Some((extended(), false)),
+            Prediction::Nothing => return Some((Prediction::Nothing, false)),
+        };
+        // A `rec` module's record ahead of its declaration: its field types
+        // are not settled yet, and the chain is left unpredicted.
+        let ty = if *f == core_contents() {
+            FieldTy::Param
+        } else {
+            self.field_types.get(f).cloned()?
         };
         Some(match ty {
             FieldTy::Prim => (extended(), false),
@@ -765,14 +791,20 @@ impl Emitter {
             match item {
                 Item::Records(specs) => {
                     let pos = self.emit_records(indent, specs);
+                    let index = stack.len() - 1;
                     let frame = stack.last_mut().unwrap();
                     for r in specs.iter().filter(|r| r.rqa) {
                         for &l in &r.labels {
                             frame.skipped.push((l, pos));
                         }
                     }
+                    for r in specs.iter().filter(|r| !r.rqa) {
+                        frame.declared.extend(r.labels.iter().copied());
+                    }
                     if !frame.rec {
-                        let events = record_events(self.file, specs, Origin::InFile, pos, false);
+                        let at = (index, frame.floor);
+                        let events =
+                            record_events(self.file, specs, Origin::InFile, pos, false, at);
                         frame.events.extend(events);
                     }
                     self.settle_members(stack);
@@ -794,8 +826,15 @@ impl Emitter {
                     let rec_kw = if *rec { "rec " } else { "" };
                     let private_kw = if *private { "private " } else { "" };
                     self.line(indent, &format!("module {private_kw}{rec_kw}{name} ="));
+                    let index = stack.len();
+                    let parent_floor = stack.last().map_or(0, |f| f.floor);
                     let mut frame = Frame {
                         rec: *rec,
+                        floor: if *private {
+                            parent_floor.max(index - 1)
+                        } else {
+                            parent_floor
+                        },
                         ..Frame::default()
                     };
                     if *rec {
@@ -807,6 +846,7 @@ impl Emitter {
                                     Origin::RecUpfront,
                                     start,
                                     false,
+                                    (index, frame.floor),
                                 ));
                             }
                         }
@@ -841,7 +881,7 @@ impl Emitter {
                                 matches!(
                                     e.origin,
                                     Origin::InFile | Origin::Copied | Origin::RecUpfront
-                                ) && e.access != Access::PrivateType
+                                ) && e.floor < index
                             })
                             .partition(|e| !e.copied);
                         parent
@@ -859,6 +899,10 @@ impl Emitter {
                         parent
                             .skipped
                             .extend(inner.skipped.into_iter().map(|(l, _)| (l, end)));
+                        parent
+                            .copied
+                            .extend(inner.declared.iter().map(|&l| (l, end)));
+                        parent.declared.extend(inner.declared);
                     }
                 }
                 Item::Open(target) => {
@@ -866,7 +910,14 @@ impl Emitter {
                     let (path, events) = match target {
                         OpenTarget::Lib => (
                             format!("L{}.M", lib.scenario),
-                            record_events(0, &lib.module_records, Origin::Opened, pos, true),
+                            record_events(
+                                0,
+                                &lib.module_records,
+                                Origin::Opened,
+                                pos,
+                                true,
+                                (0, 0),
+                            ),
                         ),
                         OpenTarget::Core => (
                             "Microsoft.FSharp.Core".to_string(),
@@ -886,7 +937,7 @@ impl Emitter {
                             // namespace by its full name inside it (FS0039).
                             (
                                 m.clone(),
-                                record_events(self.file, &specs, Origin::Opened, pos, true),
+                                record_events(self.file, &specs, Origin::Opened, pos, true, (0, 0)),
                             )
                         }
                     };
@@ -990,7 +1041,11 @@ impl Emitter {
                         Some((at, second, p, unknown))
                     });
                     let must_commit = winner.as_ref().is_some_and(|w| {
-                        matches!(w.origin, Origin::InFile | Origin::Copied)
+                        w.origin == Origin::InFile
+                            && !stack
+                                .iter()
+                                .flat_map(|f| f.copied.iter())
+                                .any(|&(l, at)| l == label && at > w.pos)
                             && !stack.iter().any(|f| f.rec)
                             && !stack
                                 .iter()
@@ -1114,7 +1169,7 @@ fn build_project(seed: u64, blocks_per_file: usize) -> Project {
             let l = &libs[k * blocks_per_file + b];
             let mut siblings = Vec::new();
             let mut items = gen_items(&mut rng, &mut names, kind, 0, false, &mut siblings);
-            items.push(gen_probe(&mut rng, false));
+            items.push(gen_probe(&mut rng));
             e.line(0, &format!("namespace P{}", l.scenario));
             e.module_records.clear();
             e.abbreviable.clear();
@@ -1124,7 +1179,14 @@ fn build_project(seed: u64, blocks_per_file: usize) -> Project {
             let mut events = vec![core_event(Origin::Assembly, 0)];
             // A namespace-level `private` record is the namespace's, in every
             // file of it.
-            events.extend(record_events(0, &l.fragment, Origin::Implicit, 0, false));
+            events.extend(record_events(
+                0,
+                &l.fragment,
+                Origin::Implicit,
+                0,
+                false,
+                (0, 0),
+            ));
             let mut stack = vec![Frame {
                 events,
                 ..Frame::default()
@@ -1409,44 +1471,44 @@ fn run(seed: u64, blocks_per_file: usize) -> Tally {
 
 /// Floors on everything the generator mixes, so a change that stops a
 /// dimension from being exercised fails rather than passes vacuously. Each
-/// is about half what a sweep of 100 blocks per file produces or less,
-/// scaled to `blocks`.
+/// is about 60% of the least that nine sweeps of 100 blocks per file
+/// produced (the default seed and eight deep ones), scaled to `blocks`.
 fn assert_floors(t: &Tally, blocks: usize) {
     eprintln!("record-label sweep: {t:?}");
     let [in_file, copied, rec, opened, implicit, assembly] = t.by_origin;
     for (what, n, floor) in [
-        ("probes FCS resolves to a field", t.fcs_fields, 350),
-        ("must-commit probes", t.must_commit, 70),
-        ("probes FCS resolves and we decline", t.declined_fields, 250),
-        ("probes no label answers (FS0072)", t.nothing, 200),
-        ("probes a member answers", t.not_a_field, 40),
-        ("winners declared in the file", in_file, 230),
-        ("winners an AutoOpen module brought", copied, 18),
-        ("winners in a rec module", rec, 40),
-        ("winners an open brought", opened, 25),
-        ("winners from an earlier file's fragment", implicit, 60),
-        ("winners from FSharp.Core", assembly, 30),
-        ("generic winners", t.generic_winners, 90),
-        ("winners second in an and pair", t.and_second_winners, 100),
-        ("scans past a skipped declaration", t.passed_skipped, 30),
+        ("probes FCS resolves to a field", t.fcs_fields, 450),
+        ("must-commit probes", t.must_commit, 40),
+        ("probes FCS resolves and we decline", t.declined_fields, 400),
+        ("probes no label answers (FS0072)", t.nothing, 150),
+        ("probes a member answers", t.not_a_field, 60),
+        ("winners declared in the file", in_file, 170),
+        ("winners an AutoOpen module brought", copied, 10),
+        ("winners in a rec module", rec, 45),
+        ("winners an open brought", opened, 30),
+        ("winners from an earlier file's fragment", implicit, 45),
+        ("winners from FSharp.Core", assembly, 45),
+        ("generic winners", t.generic_winners, 130),
+        ("winners second in an and pair", t.and_second_winners, 85),
+        ("scans past a skipped declaration", t.passed_skipped, 20),
         (
             "commits through a parenthesised receiver",
             t.dot_get_commits,
-            7,
+            8,
         ),
         (
             "chains read through a known record",
             t.chain_known_fields,
-            20,
+            11,
         ),
         (
             "chains read through the table again",
             t.chain_table_fields,
-            15,
+            12,
         ),
-        ("member probes on their own record", t.member_own_fields, 15),
-        ("member probes through the table", t.member_table_fields, 5),
-        ("winners not plain public", t.restricted_winners, 60),
+        ("member probes on their own record", t.member_own_fields, 25),
+        ("member probes through the table", t.member_table_fields, 18),
+        ("winners not plain public", t.restricted_winners, 120),
     ] {
         let floor = floor * blocks / 100;
         assert!(n >= floor, "only {n} {what} (floor {floor}): {t:?}");
@@ -1460,7 +1522,7 @@ fn record_labels_agree_with_fcs() {
 }
 
 /// A larger sweep over fresh seeds: `BORZOI_RECORD_LABEL_SEEDS` seeds (default
-/// 8) of `BORZOI_RECORD_LABEL_BLOCKS` blocks per file (default 100).
+/// 8, from `BORZOI_RECORD_LABEL_FIRST_SEED`, default 0) of `BORZOI_RECORD_LABEL_BLOCKS` blocks per file (default 100).
 #[test]
 #[ignore = "deep sweep; minutes of FCS time"]
 fn deep_record_labels_agree_with_fcs() {
@@ -1472,7 +1534,11 @@ fn deep_record_labels_agree_with_fcs() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(100);
-    for seed in 0..seeds {
+    let first: u64 = std::env::var("BORZOI_RECORD_LABEL_FIRST_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    for seed in first..first + seeds {
         let t = run(0xDEE9_0000 + seed, blocks);
         assert_floors(&t, blocks);
     }
