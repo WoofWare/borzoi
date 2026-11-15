@@ -224,10 +224,16 @@ Who needs what:
   full walks of the whole prefix, as today. A session whose first request is
   a hover pays what it pays today. D6 is what changes that.
 
-The incremental fold's cutoff moves to surfaces: an edit whose surface is
-unchanged leaves every later file's entering state unchanged, so no later
-file is re-walked. Today that holds only when the re-walked file's exports
-and contributions compare equal after a full walk.
+The incremental fold keeps its cutoff on what `advance` threads forward
+(`ResolvedFile::same_export_contribution` today), not on the whole surface.
+The surface also carries positions, a `Def`'s range and an export
+declaration's position, which `item_def` and definition locations read but
+no later file's entering state does. A comment prepended to a file moves
+them, and today's suffix reuse survives that
+(`body_edit_preserves_full_suffix_reuse`). Exact surface equality is D3's
+oracle, not the cutoff. What changes is where the edited file's comparison
+comes from: a surface walk of it, not a full walk, when no request wants its
+body.
 
 The replay starts from the beginning each time. If a later measurement shows
 the replay in the counts, the fold keeps entering states at checkpoints. That
@@ -366,7 +372,8 @@ its failure is trusted.
 
 `resolve_target(files, i, env)` returns the surfaces of `0..i` and the full
 walk of `i`. `ProjectSurfaces::entering(j)` replays the state entering `j`.
-The incremental fold's cutoff moves to surface equality.
+The incremental fold keeps its cutoff on the threaded contribution, and
+takes an edited earlier file's contribution from its surface walk.
 
 **Oracle**:
 
@@ -379,8 +386,9 @@ The incremental fold's cutoff moves to surface equality.
   unpaired headerless implementations, and a headerless file renamed between
   two folds.
 - The incremental fold's `incremental ≡ batch` differential holds with
-  surfaces. A body edit that leaves the surface unchanged re-walks no later
-  file.
+  surfaces, and `body_edit_preserves_full_suffix_reuse` still passes: an edit
+  that moves positions but not the threaded contribution re-walks no later
+  file, and `item_def` reports the moved positions.
 
 ### Stage 5: resolution requests use the target fold
 
