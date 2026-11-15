@@ -1266,16 +1266,21 @@ and so is every field of a recovered declaration; a `private`
 representation's fields are read only inside the record's enclosing module
 or namespace, and never published.
 
-**Only through a known receiver.** A data-member access wakes on a
-`Ty::Project` receiver as one on an assembly type does: the record and the
-field are instantiated together, the record related to the receiver and the
-field to the access's result, with the same late-discharge check. FCS looks
-a field up by the receiver's type when it knows that type at the access;
-when it does not, it resolves the label through the record-label
-environment and fixes the receiver to that record, so a receiver inference
-learns only later names that record too, or FCS rejects the program. A
-method-call access (`r.Fn 1`) and any member that is not a field still
-decline as `ProjectTypeMember`.
+**Through the receiver, or through the label.** A data-member access wakes
+on a `Ty::Project` receiver as one on an assembly type does: the record and
+the field are instantiated together, the record related to the receiver and
+the field to the access's result, with the same late-discharge check. FCS
+looks a field up by the receiver's type when it knows that type at the
+access; when it does not (a type variable, on which its member lookup finds
+nothing but `obj`'s members and extensions), it resolves the label through
+its record-label table, the latest declaration of the label winning, and
+fixes the receiver to that record, freshly instantiated. The resolver models
+the table as far as the file's own records decide it
+(`ResolvedFile::field_label_on_unknown_receiver`, `resolve/labels.rs`;
+graded by `record_label_gen_diff`), and inference binds an unknown receiver
+to the record it names as a decision, under the faithful prefix and the
+taint check like any other (#707). A method-call access (`r.Fn 1`) and any
+member that is not a field still decline as `ProjectTypeMember`.
 
 Graded by `infer_project_record_diff`: about 20 record declarations (plain,
 generic, two parameters, nested, recursive, mutually recursive, mutable,

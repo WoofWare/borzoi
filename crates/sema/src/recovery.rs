@@ -208,6 +208,16 @@ impl SyntaxRecovery {
             .is_some_and(|dot| node.text_range().end() <= dot.text_range().start())
     }
 
+    /// Whether the file parsed with no recovery anywhere before `offset`:
+    /// [`Self::clean_through`] for a reading that ends at an offset rather
+    /// than with a node.
+    pub fn clean_before(&self, offset: TextSize) -> bool {
+        match self {
+            SyntaxRecovery::Unretained => false,
+            SyntaxRecovery::Reported(spans) => spans.iter().all(|span| span.start() >= offset),
+        }
+    }
+
     /// Whether the declaration enclosing `node` parsed with no recovery — the
     /// question a consumer must answer *yes* to before committing anything it
     /// read out of that declaration's syntax.

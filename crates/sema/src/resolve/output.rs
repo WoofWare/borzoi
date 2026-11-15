@@ -9,8 +9,8 @@ use borzoi_cst::syntax::TextRange;
 
 use super::contributors::{FileContributions, OpenContributions};
 use super::model::{
-    DeclaredType, DeclineSite, ExportDecl, ExportedItem, ExportedItems, OpenTrace, Resolution,
-    ResolutionTrace, ResolvedFile,
+    DeclaredType, DeclineSite, ExportDecl, ExportedItem, ExportedItems, FieldLabelEntry, OpenTrace,
+    Resolution, ResolutionTrace, ResolvedFile,
 };
 use super::prescan::Prescan;
 use super::state::ActivePatternShape;
@@ -61,6 +61,8 @@ pub(super) struct Output {
     /// name's range — built by `Resolver::resolve_attribute_lists` and carried
     /// into [`ResolvedFile::attribute_resolutions`](super::model::ResolvedFile).
     pub(super) attribute_resolutions: HashMap<TextRange, Resolution>,
+    /// See [`ResolvedFile::field_label_on_unknown_receiver`](super::model::ResolvedFile::field_label_on_unknown_receiver).
+    pub(super) field_labels: HashMap<TextRange, FieldLabelEntry>,
     /// The type definitions the walk placed, in walk order, for
     /// [`ResolvedFile::placed_types`](super::model::ResolvedFile). Only a
     /// definition with a real path — not under an anonymous (headerless)
@@ -139,6 +141,7 @@ impl Output {
             namespace_paths,
             open_extension_namespaces,
             attribute_resolutions,
+            field_labels,
             placed_types,
             augmentation_instance_names,
             augmentation_static_names,
@@ -162,6 +165,7 @@ impl Output {
             opaque_binders,
             opaque_regions,
             attribute_resolutions,
+            field_labels,
             placed_types,
             unplaced_types,
             unplaced_type_places: HashMap::default(),

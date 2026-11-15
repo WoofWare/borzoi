@@ -3729,6 +3729,27 @@ pub enum OpaqueRegion {
     Range(TextRange),
 }
 
+/// A field of an in-file record that FCS's record-label table names for a
+/// label on a receiver of unknown type
+/// ([`ResolvedFile::field_label_on_unknown_receiver`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldLabel {
+    /// The record's `type` binder.
+    pub record: DefId,
+    /// The record's number of type parameters.
+    pub arity: usize,
+    /// The range of the field's name in the record's declaration.
+    pub field: TextRange,
+}
+
+/// A [`FieldLabel`] with the label it answers, which the extension gate
+/// reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FieldLabelEntry {
+    pub(super) name: String,
+    pub(super) label: FieldLabel,
+}
+
 /// The result of resolving a single file: the definition arena, a map from each
 /// name-use range to its [`Resolution`], and the items the file exports.
 ///
@@ -3778,6 +3799,10 @@ pub struct ResolvedFile {
     /// [`Resolution::Deferred`] makes no claim; an attribute neither candidate
     /// matches is *absent* (FCS errors and sinks nothing there).
     pub(super) attribute_resolutions: HashMap<TextRange, Resolution>,
+    /// What FCS's record-label table answers at each member-access label the
+    /// walk could answer for, keyed by the label token's range
+    /// ([`Self::field_label_on_unknown_receiver`]).
+    pub(super) field_labels: HashMap<TextRange, FieldLabelEntry>,
     /// The file's syntactic whole-file type-simple-name pre-scan (see
     /// [`Resolver::own_type_simple_names`](super::state::Resolver)), carried
     /// into [`ProjectItems::project_type_simple_names`] by the Compile-order
@@ -4088,6 +4113,7 @@ impl ResolvedFile {
             // The walk resolves nothing in a signature file.
             opaque_regions: vec![OpaqueRegion::WholeFile],
             attribute_resolutions: HashMap::default(),
+            field_labels: HashMap::default(),
             own_type_simple_names: HashSet::default(),
             placed_types: Vec::new(),
             // Filled by the fold from the signature's own declarations.
@@ -4306,6 +4332,45 @@ impl ResolvedFile {
     /// anywhere wants [`Self::committed_resolution_at`].
     pub fn attribute_resolution_at(&self, range: TextRange) -> Option<Resolution> {
         self.attribute_resolutions.get(&range).copied()
+    }
+
+    /// The record field FCS resolves the label written at `label` to **when
+    /// the receiver's type is not known at the access**: a type variable, so
+    /// FCS's member lookup on it finds nothing and it looks the label up in
+    /// its record-label table, the latest declaration of the label winning
+    /// (`ResolveExprDotLongIdent`, NameResolution.fs). `None` declines: the
+    /// table's winner is not one the walk can name, something FCS consults
+    /// before the table — an extension member of the label's name — may be in
+    /// scope, or the file's recovery reading does not show it parsed cleanly
+    /// up to the label (a recovered declaration's labels are FCS's to keep or
+    /// drop).
+    ///
+    /// The answer is conditional: on a receiver whose type FCS knows, FCS
+    /// looks the label up in that type instead, and this says nothing. Only
+    /// a caller that knows the receiver is still a variable at the access may
+    /// read it, as inference does.
+    pub fn field_label_on_unknown_receiver(
+        &self,
+        label: TextRange,
+        env: &AssemblyEnv,
+    ) -> Option<FieldLabel> {
+        let entry = self.field_labels.get(&label)?;
+        (self.recovery.clean_before(label.end())
+            && crate::infer::ExtensionScope::of(self, env).absent(env, &entry.name, false))
+        .then_some(entry.label)
+    }
+
+    /// [`Self::field_label_on_unknown_receiver`] against an extension scope
+    /// the caller has already built for this file.
+    pub(crate) fn field_label_under(
+        &self,
+        label: TextRange,
+        env: &AssemblyEnv,
+        extensions: &crate::infer::ExtensionScope,
+    ) -> Option<FieldLabel> {
+        let entry = self.field_labels.get(&label)?;
+        (self.recovery.clean_before(label.end()) && extensions.absent(env, &entry.name, false))
+            .then_some(entry.label)
     }
 
     /// The full written-attribute-range→[`Resolution`] map (EX-3 §2(d)).

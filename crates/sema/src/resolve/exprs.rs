@@ -72,6 +72,12 @@ impl<'a> Resolver<'a> {
                 {
                     let segments: Vec<SyntaxToken> = li.idents().collect();
                     self.resolve_long_ident(&segments);
+                    // A label after the head, on a receiver whose type the
+                    // walk does not know (the head may be no value at all;
+                    // the answer is read only where it is one).
+                    if let [_, labels @ ..] = segments.as_slice() {
+                        self.record_field_labels(labels);
+                    }
                 }
             }
             Expr::Paren(e) => {
@@ -95,6 +101,14 @@ impl<'a> Resolver<'a> {
                 // treatment as record field labels).
                 if let Some(inner) = e.expr() {
                     self.resolve_expr(&inner);
+                }
+                // What FCS's record-label table answers for each label, should
+                // the receiver's type be unknown there.
+                if let Some(li) = e.long_ident()
+                    && li.active_pat_names().next().is_none()
+                {
+                    let segments: Vec<SyntaxToken> = li.idents().collect();
+                    self.record_field_labels(&segments);
                 }
             }
             Expr::Dynamic(e) => {
