@@ -37,10 +37,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use borzoi_msbuild::observed::host_fs;
-use borzoi_msbuild::{ItemMetadataValue, ParsedProject, parse_fsproj, parse_fsproj_with_imports};
+use borzoi_msbuild::{ItemMetadataValue, ParsedProject, parse_fsproj};
 use common::{
     CONTROLLED_PROPERTY_NAMES, SplitMix64, gen_bool_expr, gen_expand_value, gen_grammar_value,
-    soak_parameters,
+    parse_fsproj_with_imports, soak_parameters,
 };
 
 /// A condition MSBuild evaluates to `true` and the walker cannot evaluate.
@@ -188,7 +188,7 @@ fn gen_doc(rng: &mut SplitMix64, names: &[&'static str]) -> Doc {
         .map(|_| {
             let readers = if rng.below(4) == 0 { names } else { &pool[..] };
             Write {
-                name: *rng.pick(&pool),
+                name: rng.pick(&pool),
                 group_condition: maybe(rng, 15, |rng| gen_condition(rng, readers)),
                 condition: maybe(rng, 30, |rng| gen_condition(rng, readers)),
                 body: gen_body(rng, readers),
@@ -298,6 +298,9 @@ fn render(doc: &Doc, target: usize, variant: &Variant) -> String {
 
 /// What a project publishes as certain, fact by fact: `None` where it
 /// declines.
+type Facts = BTreeMap<Fact, Option<Vec<String>>>;
+
+/// One fact a project may publish as certain.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Fact {
     Property(String),
@@ -307,7 +310,7 @@ enum Fact {
     TargetName,
 }
 
-fn facts(project: &ParsedProject, names: &[&'static str]) -> BTreeMap<Fact, Option<Vec<String>>> {
+fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
     let mut out = BTreeMap::new();
     // `FromDirBuild` is written by the `Directory.Build.targets` fixture only.
     for name in names.iter().chain(&["FromDirBuild"]) {
@@ -390,7 +393,8 @@ fn fact_kind(fact: &Fact) -> &'static str {
 struct Census {
     cases: usize,
     /// Per fact kind: cases whose worlds commit the fact differently, so the
-    /// undecided document must decline it.
+    /// undecided document must decline it — the wrapped write's own property
+    /// excluded, so this counts dependence on it rather than the input.
     owed: BTreeMap<&'static str, usize>,
     /// Per fact kind: of those, how many the undecided document declined.
     paid: BTreeMap<&'static str, usize>,
@@ -431,18 +435,23 @@ impl Census {
 fn check(
     census: &mut Census,
     doc_text: &str,
-    undecided: &BTreeMap<Fact, Option<Vec<String>>>,
-    worlds: &[(String, BTreeMap<Fact, Option<Vec<String>>>)],
+    undecided: &Facts,
+    worlds: &[(String, Facts)],
     absent_but_written: &[&str],
+    wrapped: &str,
     label: &str,
 ) {
     census.cases += 1;
     for (fact, claim) in undecided {
+        // The floor counts only the derived complement: the wrapped write's
+        // own name moves by construction, so counting it would floor the
+        // swept input rather than the dependence on it.
+        let derived = !matches!(fact, Fact::Property(name) if name.eq_ignore_ascii_case(wrapped));
         let values: Vec<&Option<Vec<String>>> = worlds.iter().map(|(_, w)| &w[fact]).collect();
         let world_committed: Vec<&Vec<String>> = values.iter().filter_map(|v| v.as_ref()).collect();
         let owed = world_committed.len() == values.len()
             && world_committed.windows(2).any(|w| w[0] != w[1]);
-        if owed {
+        if owed && derived {
             *census.owed.entry(fact_kind(fact)).or_default() += 1;
             if claim.is_none() {
                 *census.paid.entry(fact_kind(fact)).or_default() += 1;
@@ -535,7 +544,7 @@ fn sweep(
         let doc = gen_doc(&mut rng, names);
         let target = rng.below(doc.writes.len());
         for wrap in WRAPS {
-            let world_facts: Vec<(String, BTreeMap<Fact, Option<Vec<String>>>)> = worlds_for(wrap)
+            let world_facts: Vec<(String, Facts)> = worlds_for(wrap)
                 .into_iter()
                 .map(|variant| {
                     let text = render(&doc, target, &variant);
@@ -562,6 +571,7 @@ fn sweep(
                 &undecided,
                 &world_facts,
                 &absent_but_written,
+                doc.writes[target].name,
                 &format!("{label} {wrap:?}"),
             );
         }
@@ -657,7 +667,7 @@ fn an_undecided_write_claims_no_more_than_its_worlds_agree_on() {
     assert_sound(
         &census,
         &[
-            ("property", 850),
+            ("property", 65),
             ("Compile items", 70),
             ("DefineConstants", 60),
             ("target name", 100),
@@ -681,7 +691,7 @@ fn an_undecided_directory_build_gate_write_claims_no_more_than_its_worlds_agree_
     assert_sound(
         &census,
         &[
-            ("property", 450),
+            ("property", 110),
             ("Compile items", 75),
             ("DefineConstants", 25),
         ],
