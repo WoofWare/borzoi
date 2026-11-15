@@ -36,6 +36,48 @@
 //!   walk's doubt is about a file only content it could not see would name,
 //!   which is that content's doubt like any other, and nothing is charged.
 //!
+//! **What a doubted walk may leave behind.** A fallback walk follows the file
+//! as an ordinary import, but MSBuild may not make that import, so nothing it
+//! does may stand as certain. Every field of the walk state it can change, and
+//! why each is safe:
+//!
+//! - `imports_seen`, `imports_seen_fuzzy`: never changed. A fallback walk
+//!   registers its imports in [`Bookkeeping::doubted_imports`] instead, by the
+//!   walk's number, so the certain set holds certain imports only. A later
+//!   import of a file only a fallback walk made is a duplicate within that walk
+//!   or one inside it, is walked with an enclosing fallback walk, and otherwise
+//!   is walked again, doubted ([`doubted_duplicate`]): MSBuild made the import
+//!   there or earlier, and which is unknown.
+//! - `lookup`, `written`: the values written stay, and every name written (or
+//!   whose write was skipped or refused) is unpinned when the walk returns.
+//!   Opacity and staleness the walk latches only add doubt.
+//! - `deferred_item_groups`, `retained_imported_files`: the file's items are
+//!   replayed in the item pass, and every facet they reach is withdrawn:
+//!   Compile and packages always, `<ProjectReference>` when the file declares
+//!   or defines one.
+//! - `protected`, `depth`, `import_site_span`, `current_file`,
+//!   `in_sdk_subtree`, `enclosing_condition_stale`: restored per frame.
+//! - `diagnostics`, `diagnostic_roots`, the `*_uncertain` flags and their
+//!   causes, `walk_opaque`, `target_framework_read_exempted`: only add doubt.
+//! - `walked_files`, `walked_directory_packages_props_import`: read only by the
+//!   central-package discharge, which can only clear the package uncertainty
+//!   the walk's withdrawal has already set.
+//! - `foreign_definitions`, `workload_definitions`,
+//!   `sdk_files_imported_from_outside`, `locally_overridable`:
+//!   over-approximations by construction, recorded whatever decides a file's
+//!   import.
+//! - `default_targets_decided` and `MSBuildProjectDefaultTargets`: a root a
+//!   fallback walk reaches settles the property unset, and an `MSBuild`-prefixed
+//!   name read unset is never exact.
+//! - `sdk_tolerance_roots`, [`Bookkeeping::nested_sdk_roots`] and the toolset
+//!   seed: the roots classify files by path, and only that SDK's own files sit
+//!   under them; the seed is the toolset's, which MSBuild holds either way.
+//! - `target_definitions`, `initial_targets_named`, `using_task_names`: a
+//!   target read is exact only when no fallback walk contributed.
+//! - The item and package tables (`compile_*`, `project_references`,
+//!   `package_*`, …): filled only by the item pass. `resolved_sdk_root`,
+//!   `entry_sdk_version_dir`, `hoisted_sdk_imports`: the entry project's only.
+//!
 //! A point never reached by a walk that decided everything is never reached
 //! by MSBuild either, and imports nothing. Under opacity, the walk has
 //! accounted for the SDK's import of a file only at a point that names the
@@ -149,9 +191,13 @@ pub(super) struct Bookkeeping {
     /// walk follows its imports and conditions as an ordinary import, so that
     /// doubting the file loses nothing it would do.
     doubted_writes: Vec<String>,
-    /// The import keys ([`import_dedup_key`]) a fallback walk registered, each
-    /// with the walk's number.
+    /// The imports a fallback walk made, by their key ([`import_dedup_key`]),
+    /// each with the walk's number: a fallback walk registers its imports here
+    /// and never in [`State::imports_seen`], which holds certain imports only.
     doubted_imports: std::collections::HashMap<String, usize>,
+    /// The near-duplicate keys (`import_dedup_fuzzy_key`) of the same imports,
+    /// each with the keys of the imports it is the near-duplicate key of.
+    doubted_fuzzy: std::collections::HashMap<String, Vec<String>>,
     /// The numbers of the fallback walks the walk is inside, innermost last,
     /// and how many have run.
     doubted_walk: Vec<usize>,
@@ -175,41 +221,75 @@ impl Bookkeeping {
         }
     }
 
-    /// Record the import of the file `key` names, if the walk is inside a
-    /// fallback walk.
-    pub(super) fn note_import(&mut self, key: &str) {
-        if let Some(&walk) = self.doubted_walk.last() {
-            self.doubted_imports.insert(key.to_owned(), walk);
+    /// Register an import: in [`State::imports_seen`] when it is certain, and
+    /// in [`Self::doubted_imports`] when a fallback walk makes it.
+    pub(super) fn register_import(
+        &mut self,
+        key: String,
+        fuzzy: String,
+        imports_seen: &mut std::collections::HashSet<String>,
+        imports_seen_fuzzy: &mut std::collections::HashSet<String>,
+    ) {
+        match self.doubted_walk.last() {
+            Some(&walk) => {
+                let keys = self.doubted_fuzzy.entry(fuzzy).or_default();
+                if !keys.contains(&key) {
+                    keys.push(key.clone());
+                }
+                self.doubted_imports.insert(key, walk);
+            }
+            None => {
+                imports_seen.insert(key);
+                imports_seen_fuzzy.insert(fuzzy);
+            }
         }
+    }
+
+    /// Whether an import with key `key` and near-duplicate key `fuzzy` is a
+    /// near-duplicate of an import a fallback walk made: one with the same
+    /// near-duplicate key and another key. An import with the same key is
+    /// [`doubted_duplicate`]'s to settle.
+    pub(super) fn doubted_near_duplicate(&self, key: &str, fuzzy: &str) -> bool {
+        self.doubted_fuzzy
+            .get(fuzzy)
+            .is_some_and(|keys| keys.iter().any(|other| other != key))
     }
 }
 
-/// An import of `path`, which the walk has already imported: a duplicate
-/// MSBuild skips, unless only a fallback walk imported it, which MSBuild may
-/// not have made. Then the walk imports it again, doubted, since MSBuild has
-/// imported it here or before, and the walk cannot tell which. Within the
-/// fallback walk that imported it, or one inside it, it is a duplicate like
-/// any other (a cycle); within another (one walking a file again, whose
-/// import of it is this one), it is not.
-pub(super) fn reimport_if_doubted(path: &Path, key: &str, state: &mut State<'_>) {
+/// What [`doubted_duplicate`] leaves its caller to do with an import.
+pub(super) enum Doubted {
+    /// No fallback walk made it, or this one may make it again: walk it.
+    Walk,
+    /// Settled here: a duplicate within the fallback walk that made it, or
+    /// walked again, doubted.
+    Settled,
+}
+
+/// An import of `path` the walk has not certainly made. When a fallback walk
+/// made it (one MSBuild may not have made), it is a duplicate only within that
+/// walk or one inside it (a cycle). Inside another fallback walk the import is
+/// walked as any other, doubted with it. Outside every one, MSBuild has made
+/// it here or before, and the walk cannot tell which, so it walks it again,
+/// doubted.
+pub(super) fn doubted_duplicate(path: &Path, key: &str, state: &mut State<'_>) -> Doubted {
     let bookkeeping = &state.directory_build;
-    match bookkeeping.doubted_imports.get(key) {
-        Some(walk) if !bookkeeping.doubted_walk.contains(walk) => {}
-        _ => return,
+    let Some(walk) = bookkeeping.doubted_imports.get(key) else {
+        return Doubted::Walk;
+    };
+    if bookkeeping.doubted_walk.contains(walk) {
+        return Doubted::Settled;
     }
-    if contributes_nothing(path, state) {
-        return;
+    if !bookkeeping.doubted_walk.is_empty() {
+        return Doubted::Walk;
     }
-    state.directory_build.doubted_imports.remove(key);
-    state.imports_seen.remove(key);
-    state
-        .imports_seen_fuzzy
-        .remove(&super::import_dedup_fuzzy_key(path));
-    let root = UnpinnedRoot::UnsupportedCondition(format!(
-        "the import of {}, which a doubted Directory.Build.* file may already have made",
-        path.display()
-    ));
-    walk_doubted_as(root, &path.display().to_string(), path, state);
+    if !contributes_nothing(path, state) {
+        let root = UnpinnedRoot::UnsupportedCondition(format!(
+            "the import of {}, which a doubted Directory.Build.* file may already have made",
+            path.display()
+        ));
+        walk_doubted_as(root, &path.display().to_string(), path, state);
+    }
+    Doubted::Settled
 }
 
 /// Record the root of an SDK an imported file's own `Sdk` attribute names.

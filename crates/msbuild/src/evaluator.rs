@@ -5712,9 +5712,13 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     // `is_partial` for evaluations MSBuild completes exactly.
     let dedup_key = import_dedup_key(path);
     if state.imports_seen.contains(&dedup_key) {
-        // A file only a `Directory.Build.*` fallback imported is one MSBuild
-        // may not have imported, so this import may not be a duplicate.
-        directory_build::reimport_if_doubted(path, &dedup_key, state);
+        return;
+    }
+    // An import a `Directory.Build.*` fallback walk made is one MSBuild may
+    // not have made, so this one may not be a duplicate.
+    if let directory_build::Doubted::Settled =
+        directory_build::doubted_duplicate(path, &dedup_key, state)
+    {
         return;
     }
     // A near-duplicate under the wider Unicode fold: the pair differs in
@@ -5725,7 +5729,11 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     // structural skip records that a file's worth of content may be
     // missing (which also latches `walk_opaque` for C.2b).
     let fuzzy_key = import_dedup_fuzzy_key(path);
-    if state.imports_seen_fuzzy.contains(&fuzzy_key) {
+    if state.imports_seen_fuzzy.contains(&fuzzy_key)
+        || state
+            .directory_build
+            .doubted_near_duplicate(&dedup_key, &fuzzy_key)
+    {
         state.push(
             DiagnosticKind::UnsupportedConstruct {
                 element: format!(
@@ -5836,9 +5844,12 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
             retained: None,
         },
     );
-    state.directory_build.note_import(&dedup_key);
-    state.imports_seen.insert(dedup_key);
-    state.imports_seen_fuzzy.insert(fuzzy_key);
+    state.directory_build.register_import(
+        dedup_key,
+        fuzzy_key,
+        &mut state.imports_seen,
+        &mut state.imports_seen_fuzzy,
+    );
     state.walked_files.insert(canon.clone());
     state.depth += 1;
     // Judge SDK-provenance by this file's *own* canonical path, independent of
