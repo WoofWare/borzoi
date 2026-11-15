@@ -1,5 +1,5 @@
 //! `Directory.Build.props` and `.targets` arrive where an SDK imports them
-//! (#677): the walk follows the SDK's own import, and splices a file itself
+//! (#677): the walk follows the SDK's own import, and walks a file itself
 //! only as a fallback whose products are uncertain.
 //!
 //! The fallback runs for a file whose import point the walk did not decide:

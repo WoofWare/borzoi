@@ -1585,7 +1585,7 @@ are recorded only as unsupported constructs.
 **Design: one evaluation, a second output.** Neither a separate evaluator
 nor a hand-written model of the cone:
 - **Not a separate evaluator.** The hard part of `borzoi-msbuild` is the
-  import walk: explicit imports, the `Directory.Build.*` splices, the toolset,
+  import walk: explicit imports, the `Directory.Build.*` import points, the toolset,
   sticky globals and `TreatAsLocalProperty`. A second evaluation would
   duplicate it, and only one copy would sit under
   `fsproj_property_table_diff` and `fsproj_global_perturbation_diff`.
@@ -1913,14 +1913,8 @@ MSBuild keeps the last and drops the rest. The executor (A₁.3c) reads a
 target's XML from that file and range. The answer is exact only when:
 - the walk is not opaque, so no file it did not reach can define the name
   later;
-- every `Directory.Build.*` file the walk spliced in itself stands for an
-  import an SDK chain really makes. The props splice must have first run at
-  `Microsoft.Common.props`'s import point, whose condition, decided before
-  the splice ran, is exactly true and names the file spliced. Every other
-  props import point the chain reaches, each of which the walk suppresses,
-  must decide exactly false: MSBuild imports nothing there. The targets
-  splice is a fallback the walk makes only when no chain reached its import
-  point first, which MSBuild never makes, so it always declines;
+- no `Directory.Build.*` file was walked by the fallback for an import point
+  the walk could not decide (#677): MSBuild may not make that import;
 - the name, and every name defined, is plain: printable ASCII, no `%`, no
   whitespace. MSBuild compares names unescaped, untrimmed and
   `OrdinalIgnoreCase`, which on plain names is ASCII case folding.
@@ -2105,13 +2099,10 @@ escaped value, so `%2541` reads back as `A`. The first that lists a target
 settles it. Blanks or separators alone leave it open to a later root. On SDK
 projects it is `Build`, from `Microsoft.Common.targets`. It is left unset
 and inexact, settling the offer, by a root whose expansion the walk cannot
-vouch for, by a root in a `Directory.Build.*` file the walk spliced in
-itself, by any root outside an SDK's files once such a splice has run
-(whatever it wrote may not exist in MSBuild's build, #676), or by opacity
-while the offer is open. Beyond that it is exactly as faithful as the walk's
-import graph, like every other property: an SDK that never imports
-`Directory.Build.props` while the walk splices it in can feed it a value
-MSBuild never holds, as it can feed any property (#677).
+vouch for, by a root in a file the `Directory.Build.*` fallback walks
+doubted (which MSBuild may never import), or by opacity while the offer is
+open. Beyond that it is exactly as faithful as the walk's import graph, like
+every other property.
 `fsproj_default_targets_generative_diff` holds it to MSBuild over entry and
 imported roots, literal, padded, escaped, list, empty and property-expanded
 values, blanks and separators, a `Directory.Build.props` beside an SDK-less

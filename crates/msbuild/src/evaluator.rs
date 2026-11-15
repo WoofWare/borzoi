@@ -47,12 +47,11 @@
 //! [`super::parse_fsproj_with_imports`]. It follows explicit `<Import>`
 //! (substituting `$(...)` in the path, resolving relative to the
 //! importing file, recursing depth-limited, with duplicate imports —
-//! cycles included — skipped exactly as MSBuild skips them) and
-//! also splices in the nearest `Directory.Build.props` /
-//! `Directory.Build.targets` discovered by
-//! [`super::detect_implicit_imports`]. Walked-imported files share the
-//! same [`State`] as the project body, so properties they define
-//! become visible to substitutions further down the project file.
+//! cycles included — skipped exactly as MSBuild skips them), the SDK's
+//! own `Directory.Build.props` / `Directory.Build.targets` imports among
+//! them. Walked-imported files share the same [`State`] as the project
+//! body, so properties they define become visible to substitutions
+//! further down the project file.
 
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -184,9 +183,9 @@ pub fn walk(
 ///
 /// `Directory.Build.props` and `.targets` arrive the same way: through the
 /// SDK's own imports in `Microsoft.Common.props` and `.targets`, so a project
-/// no SDK reaches gets neither. Where the walk did not decide such an import
-/// point, it splices the file itself as a fallback whose products are
-/// uncertain ([`directory_build`]).
+/// no SDK reaches gets neither. Where the walk cannot decide such an import
+/// point, the whole evaluation is uncertain from there, and the file is
+/// walked doubted ([`directory_build`]).
 ///
 /// When the resolver does not know the SDK the walker emits
 /// [`DiagnosticKind::SdkNotFound`]; when `sdk_resolver` is `None`, the SDK
@@ -900,7 +899,8 @@ struct State<'r> {
     /// cannot be rewritten by MSBuild's `Microsoft.Common.props`
     /// default-fill assignments, so an *empty* sticky global stays
     /// empty rather than defaulting to "true" / the discovered path.
-    /// Consulted by the target executor ([`executor`]).
+    /// Consulted only by the target executor ([`executor`]).
+    #[cfg(any(test, feature = "test-support"))]
     sticky_globals: HashSet<String>,
     /// What the caller's environment said about `MSBuildExtensionsPath`, held
     /// aside rather than promoted: whether that value survives is the one
@@ -1620,6 +1620,7 @@ impl<'r> State<'r> {
             }
             Some(_) => {}
         }
+        #[cfg(any(test, feature = "test-support"))]
         let mut sticky_globals: HashSet<String> = HashSet::new();
         for (k, v) in extra_properties {
             // A caller global is *not* already-evaluated text: MSBuild unescapes
@@ -1631,9 +1632,10 @@ impl<'r> State<'r> {
             if !local_overrides.contains(&lower) {
                 protected.insert(lower.clone());
                 // A non-treated-as-local global is read-only for the
-                // whole walk: record it so the import gates can tell an
+                // whole walk: record it so the target executor can tell an
                 // empty global (sticky) from an unset/body-written empty
                 // (default-fillable).
+                #[cfg(any(test, feature = "test-support"))]
                 sticky_globals.insert(lower);
             }
         }
@@ -1646,6 +1648,7 @@ impl<'r> State<'r> {
             protected,
             locally_overridable: local_overrides.clone(),
             reserved,
+            #[cfg(any(test, feature = "test-support"))]
             sticky_globals,
             env_extensions_path,
             written: HashMap::new(),
@@ -2094,7 +2097,8 @@ impl<'r> State<'r> {
             lookup,
             protected: _,
             reserved: _,
-            sticky_globals: _,
+            #[cfg(any(test, feature = "test-support"))]
+                sticky_globals: _,
             env_extensions_path: _,
             written,
             compile_first,
@@ -2374,6 +2378,7 @@ impl<'r> State<'r> {
     /// through and the sticky-global short-circuit must stand down. This
     /// keeps the answer in lockstep with the `TreatAsLocalProperty` model
     /// `walk_external_file` already implements via `protected`.
+    #[cfg(any(test, feature = "test-support"))]
     fn is_sticky_global(&self, name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
         self.sticky_globals.contains(&lower) && self.protected.contains(&lower)
@@ -2792,7 +2797,8 @@ impl<'r> State<'r> {
                 }
                 // Content the walk could not see may define either name;
                 // trusting the absence after it is the trade-off every
-                // reader but the splice and the Compile items makes (#792).
+                // reader but the import points and the Compile items makes
+                // (#792).
                 PropertyRead::Value(_) | PropertyRead::Unset | PropertyRead::UnsetInexact(_) => {}
             }
             // The entry's trust is the question just asked.
@@ -2823,8 +2829,8 @@ impl<'r> State<'r> {
     /// reads as undefined here, but the real build holds the value it
     /// computed, so a condition that rests on one leans on a value that may
     /// differ too (#780). A refused name a later clean write bound holds a
-    /// value computed exactly (the mark outlives the overwrite for the splice
-    /// alone; [`Trust::refused`]).
+    /// value computed exactly (the mark outlives the overwrite for the import
+    /// points alone; [`Trust::refused`]).
     fn condition_reads_untrusted_value(&self, node: Node<'_, '_>) -> bool {
         attribute(node, "Condition").as_deref().is_some_and(|cond| {
             if self.condition_trust(cond, None).reference_is_untrusted() {
@@ -4051,8 +4057,8 @@ fn walk_property_child_inner(
                 // we computed from ordinary text and the two sides agree.
                 // Recording it in the refused channel as well would outlive
                 // that discharge (see [`RefusedOutcome::Keep`] at the
-                // clean-write site) and decline a splice MSBuild decides the
-                // same way — the mark there answers a different question, about
+                // clean-write site) and decline an import point MSBuild decides
+                // the same way — the mark there answers a different question, about
                 // values that may rest on content the walk hid.
                 refused: RefusedOutcome::Keep,
                 stale: StaleOutcome::Keep,
@@ -5691,11 +5697,9 @@ fn keyword_boundary(source: &str, start: usize, len: usize) -> bool {
 /// A root the walk cannot vouch for settles the offer with the property
 /// unset, so reads of it stay inexact. That is one whose expansion reads an
 /// undecided or unpinned value, one reached after the walk passed content it
-/// could not see (which may have set it first), and one in a
-/// `Directory.Build.*` file the walk spliced in itself, which MSBuild
-/// imports only when an SDK chain reaches the point that file stands for.
-/// So is any root outside an SDK's files once such a splice has run, since
-/// the properties it wrote may not exist in MSBuild's build (#676).
+/// could not see (which may have set it first), and one in a file the
+/// `Directory.Build.*` fallback walks doubted, which MSBuild may never
+/// import.
 fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
     if state.default_targets_decided {
         return;

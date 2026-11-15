@@ -1,6 +1,6 @@
 //! Tests for [`super::parse_fsproj_with_imports`] — the
-//! filesystem-touching variant that follows explicit `<Import>` and
-//! splices in the nearest `Directory.Build.props` / `.targets`.
+//! filesystem-touching variant that follows explicit `<Import>`, the SDK's
+//! `Directory.Build.props` / `.targets` import points among them.
 //!
 //! Each test builds a fresh [`tempfile::TempDir`], writes a small
 //! cluster of fsproj/props files into it, and asserts on the merged

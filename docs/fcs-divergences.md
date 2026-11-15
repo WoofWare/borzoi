@@ -373,18 +373,6 @@ recovering ~36 members per framework. It was never a feature gap. (`#711`)
 - **Well-known properties: path-derivable subset only** — SDK-dependent paths
   (`MSBuildBinPath`, `MSBuildExtensionsPath`, `MSBuildThisFile*`, …) are absent.
   (`4aa7871`)
-- **In-body explicit SDK imports not repositioned** — an explicit
-  `<Import Sdk="X" Project="Sdk.props|targets"/>` that promotion declines (because
-  it's conditional or not the first/last element child) runs at its literal
-  in-body position; the `Directory.Build.props` repositioning keys only on nested
-  *root* `<Project Sdk=…>`, not in-body SDK imports, so MSBuild's order differs.
-  (`6d87b41`, `bfbb307`)
-- **Nested-SDK `Directory.Build.props` bootstrap fallback** — when the `<Import>`
-  reaching a nested SDK is itself conditioned on a property that *only*
-  `Directory.Build.props` sets, the walker falls back to the historical
-  before-body splice (MSBuild would drop `Directory.Build.props` in this circular
-  case); the resulting compile order diverges, but avoids emitting no
-  `Directory.Build.props` at all. (`bfbb307`)
 - **Glob expansion remains resolver-optional** — the core MSBuild crate stays
   filesystem-free and callers that pass no glob resolver still get
   `UnsupportedGlob` / `UnsupportedItemOperation`. The LSP and `.fsproj`

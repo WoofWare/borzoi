@@ -51,10 +51,10 @@ This is a Cargo workspace with nine members:
   table astgen generates from the locks.
 - `crates/msbuild/` — `borzoi-msbuild`. MSBuild `.fsproj` parser /
   evaluator: extracts the Compile order, expands `$(…)` substitution, evaluates
-  the condition subset, detects/follows `Directory.Build.props|targets`,
-  and — when an SDK resolves to the canonical dotnet layout — walks the
-  real `Microsoft.Common.props` → `NuGet.props` chain, including the
-  `Directory.Packages.props` central-package import.
+  the condition subset, follows the SDK's `Directory.Build.props|targets`
+  import points, and — when an SDK resolves to the canonical dotnet
+  layout — walks the real `Microsoft.Common.props` → `NuGet.props` chain,
+  including the `Directory.Packages.props` central-package import.
   Self-contained: depends only on `roxmltree` and `self_cell` (which holds a
   parsed document beside its text, so the crate forbids `unsafe`). Intended to
   be reusable outside this repo. Every file-system query an evaluation makes

@@ -212,7 +212,8 @@ pub(crate) fn body_target_framework(parsed: &ParsedProject) -> Option<String> {
 /// its value still holds a `$(...)` we did not expand. An unset singular the
 /// evaluator keeps inexact for its consumers is the multi-TFM shape, and one
 /// unset only because content went unseen is the trade-off every reader but
-/// the splice and the Compile items makes: neither is untrusted here.
+/// the `Directory.Build.*` import points and the Compile items makes: neither
+/// is untrusted here.
 ///
 /// Deliberately the singular only: an outer-gated PLURAL (the arcade idiom,
 /// `<TargetFrameworks Condition="'$(TargetFramework)' == ''">`) is unpinned by

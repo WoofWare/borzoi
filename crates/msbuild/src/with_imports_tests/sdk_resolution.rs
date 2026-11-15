@@ -277,12 +277,11 @@ fn project_sdk_with_failing_resolver_emits_sdk_not_found() {
 
 #[test]
 fn project_sdk_resolved_still_walks_directory_build_props() {
-    // The real `Microsoft.NET.Sdk` chain pulls `Directory.Build.props`
-    // itself from inside `Microsoft.Common.props`. The walker owns that
-    // implicit import point directly rather than depending on the deeper SDK
-    // chain to rediscover the file, so it must keep its splice live alongside
-    // the SDK. We witness that: define a property in `Directory.Build.props`,
-    // reference it from the body, and check no `UndefinedProperty` fires.
+    // The real `Microsoft.NET.Sdk` chain imports `Directory.Build.props`
+    // from inside `Microsoft.Common.props`, and so does a resolved SDK whose
+    // `Sdk.props` holds that import point. We witness it: define a property in
+    // `Directory.Build.props`, reference it from the body, and check no
+    // `UndefinedProperty` fires.
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
@@ -328,7 +327,7 @@ fn project_sdk_resolved_still_walks_directory_build_props() {
 }
 
 #[test]
-fn sdk_directory_build_props_rediscovery_import_is_suppressed() {
+fn the_sdks_props_import_point_imports_the_file_once() {
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
@@ -371,7 +370,7 @@ fn sdk_directory_build_props_rediscovery_import_is_suppressed() {
     assert_eq!(
         paths_of(&result.items),
         vec![dir.join("FromProps.fs")],
-        "Directory.Build.props should be walked by the explicit splice only; diagnostics: {:?}",
+        "Directory.Build.props should be walked once, at the SDK's import point; diagnostics: {:?}",
         result.diagnostics,
     );
 }
@@ -380,18 +379,13 @@ fn sdk_directory_build_props_rediscovery_import_is_suppressed() {
 /// decision**, even when it has no discovery machinery behind it: the path
 /// property is never set, `Exists('')` is false, and nothing is imported.
 ///
-/// The walker used to splice the file itself and suppress this import to avoid
-/// double-walking. It no longer owns that point — it walks `Sdk.targets` first
-/// so `Microsoft.Common.targets` can place the import where MSBuild places it —
-/// so the suppression is gone and this SDK's own (empty) import stands.
-///
-/// The expectation was checked against the real evaluator rather than derived
-/// from the new design: an SDK-less document explicitly importing a file with
+/// The expectation was checked against the real evaluator: an SDK-less
+/// document explicitly importing a file with
 /// exactly this `<Import Project="$(DirectoryBuildTargetsPath)"
 /// Condition="Exists(…)"/>` and no discovery evaluates to no import at all on
 /// SDK 10.0.109, with a `Directory.Build.targets` sitting next to it.
 #[test]
-fn sdk_directory_build_targets_rediscovery_import_owns_the_decision() {
+fn sdk_directory_build_targets_import_point_owns_the_decision() {
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
@@ -535,7 +529,7 @@ fn sdk_custom_directory_build_props_path_import_is_not_suppressed() {
 }
 
 #[test]
-fn sdk_directory_build_props_rediscovery_ignores_path_retargeted_by_sdk_props() {
+fn the_sdks_props_import_point_imports_the_path_the_sdk_retargeted() {
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
@@ -587,7 +581,7 @@ fn sdk_directory_build_props_rediscovery_ignores_path_retargeted_by_sdk_props() 
     assert_eq!(
         paths_of(&result.items),
         vec![dir.join("FromRetargetedProps.fs")],
-        "SDK rediscovery should not pre-import a DirectoryBuildPropsPath retargeted before the explicit props splice; diagnostics: {:?}",
+        "the SDK's import point imports the path the SDK retargeted, not the discovered file; diagnostics: {:?}",
         result.diagnostics,
     );
 }
@@ -644,7 +638,7 @@ fn sdk_directory_build_targets_import_point_owns_a_retargeted_path_too() {
     assert_eq!(
         paths_of(&result.items),
         Vec::<std::path::PathBuf>::new(),
-        "same shape with the path retargeted by the spliced props file: the \
+        "same shape with the path retargeted by a file nothing imports: the \
          chain still owns its import point, and nothing computed a path for it \
          to import; diagnostics: {:?}",
         result.diagnostics,

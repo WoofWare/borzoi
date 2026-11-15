@@ -209,7 +209,7 @@ fn central_versions_flow_through_canonical_sdk_chain() {
 }
 
 #[test]
-fn missing_directory_build_props_leaves_no_rediscovery_noise() {
+fn missing_directory_build_props_leaves_no_import_point_noise() {
     // The overwhelmingly common shape: no Directory.Build.props anywhere.
     // Microsoft.Common.props' discovery group then leaves
     // `DirectoryBuildPropsPath` unset and its `<Import

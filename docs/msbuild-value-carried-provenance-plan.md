@@ -43,7 +43,18 @@
 > right answer; #792 is set aside by the metamorphic gate with its count
 > pinned. #781 (a file spliced on an undecided gate publishing trusted values)
 > and #811 (the fallback splice reading an unbound gate or path that hidden
-> content may have defined) are fixed by #677's import points.
+> content may have defined) are fixed by #677's import points. The import-graph
+> harness carries three more as known families: #819 (a certain import after
+> opacity that MSBuild skips as a duplicate), #820 (an undecided import of a
+> missing file, which MSBuild rejects) and #821 (an undecided SDK import of a
+> user file, hidden by the SDK Compile tolerance).
+>
+> **#677 replaced the `Directory.Build.*` splice with the SDK's own import
+> points** (see "#677: the import points, as landed"). Sections written before
+> it describe the splice and its functions (`gate_value_is_exact`,
+> `note_directory_build_splice_decision`, `fire_entry_directory_build_props_splice`,
+> the pre-`Sdk.targets` snapshot), which no longer exist; they are kept as the
+> record of the measurements made then.
 
 ## The rule
 
