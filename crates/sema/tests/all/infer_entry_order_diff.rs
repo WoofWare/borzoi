@@ -108,7 +108,10 @@ use std::collections::BTreeMap;
 
 use borzoi_cst::parser::parse;
 use borzoi_cst::syntax::{AstNode, Expr, ImplFile, Pat, SyntaxKind, SyntaxNode, TextRange};
-use borzoi_sema::{PrecedingTypes, ProjectItems, SyntaxRecovery, infer_file, resolve_file};
+use borzoi_sema::{
+    Incomplete, PrecedingTypes, ProjectFile, ProjectItems, SourceFile, SyntaxRecovery, infer_file,
+    infer_project, qualified_names, resolve_file, resolve_project_files,
+};
 
 use crate::common::{GradedDumps, env_usize_or, full_bcl_env, temp_fs_file, try_invoke_fcs_dump};
 use crate::infer_local_let_diff::Rng;
@@ -1867,6 +1870,12 @@ fn every_arm_in_every_context_is_certain_implies_exact() {
 /// receiver recorded at the span's **last** dot means one recorded at the
 /// failing lookup: that is what the claim checks, with no false alarm when
 /// the failing lookup is an earlier dot whose receiver is not recorded.
+///
+/// It covers accesses whose member is written, as every one in the
+/// alphabet's clean files is. Under a missing member FCS reports nothing
+/// (`DiscardAfterMissingQualificationAfterDot`), so a recovered access's
+/// receiver is held by [`deleting_a_member_keeps_the_receiver_and_isolates_the_declaration`]
+/// and `infer_receiver_at`, not by FCS.
 #[derive(Debug, Default)]
 struct ReceiverClaim {
     /// How many receiver types the graded files record.
@@ -2020,5 +2029,252 @@ fn the_alphabet_names_every_arm_inference_models() {
         arms.0, named,
         "the alphabet's arms and `Gen::infer_construct`'s differ: add a form for each arm \
          inference models ([`Arm`]), and none for one it does not"
+    );
+}
+
+fn span(r: TextRange) -> (usize, usize) {
+    (u32::from(r.start()) as usize, u32::from(r.end()) as usize)
+}
+
+/// What one file's inference publishes, keyed so two files that share a
+/// prefix compare there: by range, a binder by its defining range, a module
+/// value by its path.
+#[derive(Debug, PartialEq, Eq)]
+struct Published {
+    types: BTreeMap<(usize, usize), String>,
+    binders: BTreeMap<(usize, usize), String>,
+    members: BTreeMap<(usize, usize), String>,
+    receivers: BTreeMap<(usize, usize), String>,
+    incompleteness: Vec<Vec<Incomplete>>,
+    module_values: BTreeMap<Vec<String>, String>,
+}
+
+/// Infer `src`, which may not parse cleanly, as a one-file project (the
+/// fold module values are published through), returning what it publishes
+/// and its tree.
+fn publish(src: &str) -> (Published, ImplFile, SyntaxRecovery) {
+    let env = full_bcl_env();
+    let parsed = parse(src);
+    let recovery = SyntaxRecovery::of(&parsed);
+    let tree = ImplFile::cast(parsed.root.clone()).expect("impl file");
+    let file = SourceFile::Impl(tree.clone());
+    let qnof = qualified_names(
+        std::slice::from_ref(&file),
+        &[std::path::PathBuf::from("/probe/Probe.fs")],
+    )
+    .pop()
+    .expect("one name per file");
+    let files = vec![ProjectFile::new(file, qnof, recovery.clone())];
+    let resolved = resolve_project_files(&files, env);
+    let project = infer_project(&files, &resolved, env);
+    let inferred = project.file(0).expect("an implementation file");
+    let resolved_file = resolved.file(0);
+    let published = Published {
+        types: inferred
+            .types()
+            .iter()
+            .map(|(r, t)| (span(*r), t.render(env)))
+            .collect(),
+        binders: inferred
+            .def_types()
+            .iter()
+            .map(|(d, t)| (span(resolved_file.def(*d).range), t.render(env)))
+            .collect(),
+        members: inferred
+            .member_resolutions()
+            .iter()
+            .map(|(r, res)| (span(*r), format!("{res:?}")))
+            .collect(),
+        receivers: inferred
+            .receiver_types()
+            .map(|(dot, t)| (span(dot), t.render(env)))
+            .collect(),
+        incompleteness: inferred.incompleteness().to_vec(),
+        module_values: resolved_file
+            .exports()
+            .iter()
+            .map(|item| {
+                let path = item
+                    .qualified_path(env)
+                    .unwrap_or_else(|| vec![item.name(env).to_string()]);
+                let value = match project.item_type(item.id()) {
+                    Ok(ty) => ty.render(env),
+                    Err(gap) => format!("declined {gap:?}"),
+                };
+                (path, value)
+            })
+            .collect(),
+    };
+    (published, tree, recovery)
+}
+
+/// Every member access's dot in `tree` with a written member after it: the
+/// dot's range and the end of the path it is in, so deleting from the dot's
+/// end to the path's end leaves the access's member unwritten.
+fn written_member_dots(tree: &ImplFile) -> Vec<(TextRange, usize)> {
+    tree.syntax()
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::LONG_IDENT)
+        .filter(|path| {
+            path.parent().is_some_and(|access| {
+                matches!(
+                    access.kind(),
+                    SyntaxKind::LONG_IDENT_EXPR | SyntaxKind::DOT_GET_EXPR
+                )
+            })
+        })
+        .flat_map(|path| {
+            let end = u32::from(path.text_range().end()) as usize;
+            path.children_with_tokens()
+                .filter_map(|el| el.into_token())
+                .filter(|t| t.kind() == SyntaxKind::DOT_TOK)
+                .filter(|dot| {
+                    dot.next_token()
+                        .is_some_and(|t| t.kind() == SyntaxKind::IDENT_TOK)
+                })
+                .map(move |dot| (dot.text_range(), end))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The tally of [`deleting_a_member_keeps_the_receiver_and_isolates_the_declaration`].
+#[derive(Debug, Default)]
+struct DeletionTally {
+    accesses: usize,
+    /// Deletions whose damaged file's first recovery is not the dot (`s.(1)`
+    /// is an indexer, `s..B` another recovery): not this property's input.
+    not_first_recovery: usize,
+    graded: usize,
+    /// Graded deletions whose dot has a receiver type in the damaged file,
+    /// and in the clean one.
+    some: usize,
+    clean_some: usize,
+    violations: Vec<String>,
+}
+
+/// Member deletion, oracle-free and metamorphic, over the alphabet's files
+/// (every modelled form in every context, so every access shape): delete
+/// the member written after a dot of a clean generated file (`s.Length` becomes `s.`), so that
+/// the dot is the damaged file's first recovery, and the damaged file must
+///
+/// - (a) record at that dot nothing, or what the clean file records there:
+///   everything before the dot parsed alike, and the receiver's type at the
+///   access depends on nothing after it;
+/// - (b) publish exactly what the file truncated at the damaged
+///   declaration's start publishes — expression, binder and receiver types
+///   before it, member resolutions, the census and module values — plus
+///   only receiver types inside the damaged declaration up to the dot, each
+///   what the clean file records there: the damaged declaration is walked
+///   for those receivers alone, and nothing after it is walked;
+/// - (c) record a receiver at the dot often enough to be evidence.
+///
+/// FCS cannot grade these files: it reports nothing under a missing
+/// qualification (`DiscardAfterMissingQualificationAfterDot`), so this and
+/// `infer_receiver_at`'s cases are what hold the recovered declaration's
+/// walk.
+#[test]
+fn deleting_a_member_keeps_the_receiver_and_isolates_the_declaration() {
+    let rounds = env_usize_or("BORZOI_DELETION_ROUNDS", 2);
+    let mut tally = DeletionTally::default();
+    let sources = (0..rounds)
+        .flat_map(|round| alphabet_files(&alphabet(), round))
+        .map(|(src, _)| src);
+    for src in sources {
+        let (clean, tree, _) = publish(&src);
+        for (dot, path_end) in written_member_dots(&tree) {
+            tally.accesses += 1;
+            let at = u32::from(dot.end()) as usize;
+            let damaged_src = format!("{}{}", &src[..at], &src[path_end..]);
+            let (damaged, damaged_tree, recovery) = publish(&damaged_src);
+            let first = recovery.first_is_trailing_dot(damaged_tree.syntax());
+            if first.as_ref().map(|t| t.text_range()) != Some(dot) {
+                tally.not_first_recovery += 1;
+                continue;
+            }
+            let decl_start = first
+                .and_then(|t| t.parent())
+                .and_then(|n| n.ancestors().find(|a| a.kind() == SyntaxKind::LET_DECL))
+                .map(|d| u32::from(d.text_range().start()) as usize)
+                .expect("a generated access sits in a `let`");
+            tally.graded += 1;
+            let mut fail = |what: String| {
+                tally.violations.push(format!(
+                    "{what}\n--- damaged at {} ---\n{damaged_src}",
+                    span(dot).0
+                ))
+            };
+            // (a)
+            if clean.receivers.contains_key(&span(dot)) {
+                tally.clean_some += 1;
+            }
+            let at_dot = damaged.receivers.get(&span(dot));
+            if let Some(ty) = at_dot {
+                tally.some += 1;
+                if clean.receivers.get(&span(dot)) != Some(ty) {
+                    fail(format!(
+                        "(a) receiver {ty} at the dot, clean {:?}",
+                        clean.receivers.get(&span(dot))
+                    ));
+                }
+            }
+            // (b)
+            let (truncated, _, _) = publish(&src[..decl_start]);
+            let (before, inside): (BTreeMap<_, _>, BTreeMap<_, _>) = damaged
+                .receivers
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .partition(|((s, _), _)| *s < decl_start);
+            for ((s, e), ty) in &inside {
+                if *s > span(dot).0 || clean.receivers.get(&(*s, *e)) != Some(ty) {
+                    fail(format!(
+                        "(b) receiver {ty} at {s}..{e} in the damaged declaration, clean {:?}",
+                        clean.receivers.get(&(*s, *e))
+                    ));
+                }
+            }
+            // The damaged declaration's binders, and every later one's, are
+            // values the truncated file does not declare: each declines.
+            let (module_values, later): (BTreeMap<_, _>, BTreeMap<_, _>) = damaged
+                .module_values
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .partition(|(path, _)| truncated.module_values.contains_key(path));
+            for (path, value) in &later {
+                if !value.starts_with("declined") {
+                    fail(format!(
+                        "(b) {path:?}, declared from the damaged declaration on, is {value}"
+                    ));
+                }
+            }
+            let damaged_rest = Published {
+                receivers: before,
+                module_values,
+                ..damaged
+            };
+            if damaged_rest != truncated {
+                fail(format!(
+                    "(b) not the truncated file's:\n damaged   {damaged_rest:?}\n truncated {truncated:?}"
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "member deletion: {} accesses, {} graded, {} not the first recovery, {} with a receiver \
+         ({} in the clean file)",
+        tally.accesses, tally.graded, tally.not_first_recovery, tally.some, tally.clean_some
+    );
+    assert!(
+        tally.violations.is_empty(),
+        "{} violations; the first:\n{}",
+        tally.violations.len(),
+        tally.violations.first().map_or("", String::as_str)
+    );
+    // (c): most of the alphabet's accesses are on a receiver FCS does not
+    // know either (`p.Length`) or on a module (`List.empty`), so the floor
+    // is on the count, and on recovering most of what the clean file has.
+    assert!(
+        tally.some >= 50 && tally.some * 10 >= tally.clean_some * 9,
+        "too few deletions record a receiver to be evidence: {tally:?}"
     );
 }

@@ -351,10 +351,13 @@ fn is_member_access_callee(e: &Expr) -> bool {
     match e {
         // A single segment — an operator or active-pattern name in
         // parentheses, `(+)` or `(|P|_|)` — names a value, and so does a path
-        // through an active-pattern segment: neither is a member access.
-        Expr::LongIdent(li) => li
-            .long_ident()
-            .is_some_and(|l| l.active_pat_names().next().is_none() && l.idents().nth(1).is_some()),
+        // through an active-pattern segment: neither is a member access. A
+        // single segment with a dot after it (`y.(0, p)`, recovered with its
+        // member unwritten) is one.
+        Expr::LongIdent(li) => li.long_ident().is_some_and(|l| {
+            l.active_pat_names().next().is_none()
+                && (l.idents().nth(1).is_some() || has_trailing_dot(&l))
+        }),
         Expr::DotGet(_) => true,
         Expr::Paren(p) => p
             .inner()

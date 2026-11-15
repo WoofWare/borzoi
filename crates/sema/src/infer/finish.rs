@@ -24,6 +24,18 @@ pub(super) struct Walked {
 /// [`SyntaxRecovery::first_is_trailing_dot`](crate::SyntaxRecovery::first_is_trailing_dot)):
 /// walked by [`Gen::finish`] once everything else is read off, for the
 /// receiver types up to that dot alone.
+///
+/// Keeping the receivers up to the dot is sound only while no receiver
+/// there takes its type from context after the dot. Today none does: a
+/// lambda's parameter, a record field's value and a computation
+/// expression's body are not typed from their context. Once they are, it
+/// fails, since FCS picks a lambda's overload or a record's type from what
+/// follows: with `M(f: string -> int)` and `M(f: int -> int, n: int)`,
+/// `C.M((fun s -> s.), 1)` gives `s : int` and `C.M(fun s -> s.)` gives
+/// `s : string`, and `{ F = (fun s -> s.); G = 1 }` picks a different
+/// record from `{ F = (fun s -> s.) }`. Typing those from context inside
+/// a damaged declaration needs a recovered-input family graded against
+/// FCS's completion sink first (#706).
 pub(super) struct Damaged {
     pub(super) decl: LetDecl,
     /// The recovered dot. Everything before it parsed as it would with a
@@ -257,7 +269,8 @@ impl<'a> Gen<'a> {
     /// Walk `damaged` for its receiver types up to its recovered dot, adding
     /// them to `receiver_types`. The walk writes to emissions of its own, of
     /// which only those receivers are read. A walk that passes the type
-    /// budget adds none.
+    /// budget adds none. The cut at the dot assumes no receiver before it is
+    /// typed from context after it ([`Damaged`]).
     fn damaged_receivers(
         &mut self,
         damaged: &Damaged,

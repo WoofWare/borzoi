@@ -9,7 +9,13 @@
 //! These pin the shapes; [`super::infer_suffix_irrelevance`] holds the
 //! record to not depending on what follows the access, and
 //! [`super::infer_entry_order_diff`]'s alphabet holds it to FCS reporting no
-//! FS0072 (a lookup on a receiver it does not know) at a recorded access.
+//! FS0072 (a lookup on a receiver it does not know) at a recorded access —
+//! for accesses whose member is written only. Under a missing member FCS
+//! reports nothing (`DiscardAfterMissingQualificationAfterDot`), so the
+//! receivers of a recovered declaration are held by the cases here and by
+//! the alphabet's member-deletion property
+//! (`deleting_a_member_keeps_the_receiver_and_isolates_the_declaration`),
+//! not by FCS.
 
 use std::collections::BTreeMap;
 
@@ -131,6 +137,14 @@ fn a_forward_reference_to_a_later_member_has_none() {
     assert_eq!(receiver_at(src, "this.Q."), None);
     let src = "module M\ntype C() =\n    member this.P = this.Q.\n    member this.Q = \"hi\"\n";
     assert_eq!(receiver_at(src, "this.Q."), None);
+}
+
+#[test]
+fn a_trailing_dot_in_function_position_has_its_receiver() {
+    // `s.Insert(0, "z")` with its member deleted: the recovered `s.` is the
+    // callee of an application.
+    let src = "module M\nlet f (s: string) = ignore (s.(0, \"z\"))\n";
+    assert_eq!(receiver_at(src, "s.").as_deref(), Some(STRING));
 }
 
 #[test]

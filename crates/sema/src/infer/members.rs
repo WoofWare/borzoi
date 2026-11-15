@@ -437,8 +437,10 @@ impl<'a> Gen<'a> {
     /// - **`PAREN_EXPR`**: transparent — peel and recurse.
     ///
     /// An active-pattern name segment (`Foo.(|Bar|_|)`) is not a plain member token,
-    /// so a path carrying one declines, as does a path whose last member is not
-    /// written (a recovered trailing dot).
+    /// so a path carrying one declines. So does a path whose last member is not
+    /// written (a recovered trailing dot, `y.(0, p)`), which names no method:
+    /// it is walked as the access it is, for its receivers
+    /// ([`Self::infer_long_ident_member`], [`Self::infer_dot_get`]).
     fn method_callee(
         &mut self,
         scope: &mut Scope,
@@ -447,7 +449,11 @@ impl<'a> Gen<'a> {
         match callee {
             Expr::LongIdent(li) => {
                 let long_ident = li.long_ident()?;
-                if long_ident.active_pat_names().next().is_some() || has_trailing_dot(&long_ident) {
+                if has_trailing_dot(&long_ident) {
+                    let _ = self.infer_expr(scope, callee, Expected::Synth).var();
+                    return None;
+                }
+                if long_ident.active_pat_names().next().is_some() {
                     return None;
                 }
                 let idents: Vec<SyntaxToken> = long_ident.idents().collect();
@@ -464,7 +470,11 @@ impl<'a> Gen<'a> {
             Expr::DotGet(dg) => {
                 let recv_expr = dg.expr()?;
                 let long_ident = dg.long_ident()?;
-                if long_ident.active_pat_names().next().is_some() || has_trailing_dot(&long_ident) {
+                if has_trailing_dot(&long_ident) {
+                    let _ = self.infer_expr(scope, callee, Expected::Synth).var();
+                    return None;
+                }
+                if long_ident.active_pat_names().next().is_some() {
                     return None;
                 }
                 let segments: Vec<SyntaxToken> = long_ident.idents().collect();
