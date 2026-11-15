@@ -485,6 +485,12 @@ checks it and what we do about it. These remain divergent:
   nothing at all where it rejects an enclosing application first (a value
   that is not a function applied to `[^1]` or `[|^1|]`, as `xs[^1]` is below
   6.0, draws FS3217 at the application).
+- **`type struct (A) with …` draws `ExtensionConstraintSolutions`' gate below
+  preview.** FCS reads that recovery's head as `A` alone and its check finds
+  no tuple to gate, so it reports nothing; we keep the head a
+  `TUPLE_TYPE_EXTENSION_HEAD`, which the facades below preview leave out, and
+  report FS3350 over it so the node lies under a diagnostic naming its
+  feature.
 - **An interpolated string below F# 5.0 is typed as at 5.0.** FCS's check of
   `StringInterpolation` abandons the string (`checkLanguageFeatureError`), so
   it types it, and what binds it, as `obj`; inference over our tree types it

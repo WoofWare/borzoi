@@ -242,6 +242,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/S
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/E_ExtendVirtualMethods01.fs@423 token	outside-damage 2/2/3 beyond-fcs:2
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/E_InvalidForwardRef01.fs@415 token	outside-damage 1/1/2 beyond-fcs:6
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/ExtendViaOverloading02.fs@305 token	exact 9/9/9
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension01.fs@497 token	outside-damage 6/6/7 beyond-fcs:2
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeKindInference/infer_interface001e.fs@480 token	outside-damage 1/1/2 beyond-fcs:1
 tests/FSharp.Compiler.ComponentTests/Conformance/OverloadResolutionPriority/OverloadResolutionPriorityTests.fs@1612 token	outside-damage 24/24/25
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/E_DynamicTest03.fs@118 token	exact 3/3/4

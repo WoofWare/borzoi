@@ -17,6 +17,10 @@ Absent / Qualified / beside | fcs - (erroring) | ours decline
 Absent / Qualified / nested | fcs - (erroring) | ours decline
 Absent / Spaced / beside | fcs - (erroring) | ours decline
 Absent / Spaced / nested | fcs - (erroring) | ours decline
+Absent / StructTupleHead / beside | fcs value (erroring) | ours decline
+Absent / StructTupleHead / nested | fcs value (erroring) | ours decline
+Absent / TupleHead / beside | fcs value (erroring) | ours decline
+Absent / TupleHead / nested | fcs value (erroring) | ours decline
 GenericLocal / Backticked / beside | fcs case (clean) | ours decline
 GenericLocal / Backticked / nested | fcs value (clean) | ours decline
 GenericLocal / Mangled(0) / beside | fcs - (erroring) | ours decline
@@ -33,6 +37,10 @@ GenericLocal / Qualified / beside | fcs - (erroring) | ours decline
 GenericLocal / Qualified / nested | fcs - (erroring) | ours decline
 GenericLocal / Spaced / beside | fcs - (erroring) | ours decline
 GenericLocal / Spaced / nested | fcs - (erroring) | ours decline
+GenericLocal / StructTupleHead / beside | fcs value (erroring) | ours decline
+GenericLocal / StructTupleHead / nested | fcs value (erroring) | ours decline
+GenericLocal / TupleHead / beside | fcs value (erroring) | ours decline
+GenericLocal / TupleHead / nested | fcs value (erroring) | ours decline
 ModuleOnly / Backticked / beside | fcs - (erroring) | ours decline
 ModuleOnly / Backticked / nested | fcs - (erroring) | ours decline
 ModuleOnly / Mangled(0) / beside | fcs - (erroring) | ours decline
@@ -49,6 +57,10 @@ ModuleOnly / Qualified / beside | fcs - (erroring) | ours decline
 ModuleOnly / Qualified / nested | fcs - (erroring) | ours decline
 ModuleOnly / Spaced / beside | fcs - (erroring) | ours decline
 ModuleOnly / Spaced / nested | fcs - (erroring) | ours decline
+ModuleOnly / StructTupleHead / beside | fcs value (erroring) | ours decline
+ModuleOnly / StructTupleHead / nested | fcs value (erroring) | ours decline
+ModuleOnly / TupleHead / beside | fcs value (erroring) | ours decline
+ModuleOnly / TupleHead / nested | fcs value (erroring) | ours decline
 NonGenericLocal / Backticked / beside | fcs value (clean) | ours commit value
 NonGenericLocal / Backticked / nested | fcs value (clean) | ours decline
 NonGenericLocal / Mangled(0) / beside | fcs value (clean) | ours decline
@@ -65,6 +77,10 @@ NonGenericLocal / Qualified / beside | fcs - (erroring) | ours decline
 NonGenericLocal / Qualified / nested | fcs - (erroring) | ours decline
 NonGenericLocal / Spaced / beside | fcs - (erroring) | ours decline
 NonGenericLocal / Spaced / nested | fcs - (erroring) | ours decline
+NonGenericLocal / StructTupleHead / beside | fcs value (erroring) | ours decline
+NonGenericLocal / StructTupleHead / nested | fcs value (erroring) | ours decline
+NonGenericLocal / TupleHead / beside | fcs value (erroring) | ours decline
+NonGenericLocal / TupleHead / nested | fcs value (erroring) | ours decline
 Opened / Backticked / beside | fcs value (clean) | ours decline
 Opened / Backticked / nested | fcs value (clean) | ours decline
 Opened / Mangled(0) / beside | fcs value (clean) | ours decline
@@ -81,6 +97,10 @@ Opened / Qualified / beside | fcs value (clean) | ours decline
 Opened / Qualified / nested | fcs value (clean) | ours decline
 Opened / Spaced / beside | fcs - (erroring) | ours decline
 Opened / Spaced / nested | fcs - (erroring) | ours decline
+Opened / StructTupleHead / beside | fcs value (erroring) | ours decline
+Opened / StructTupleHead / nested | fcs value (erroring) | ours decline
+Opened / TupleHead / beside | fcs value (erroring) | ours decline
+Opened / TupleHead / nested | fcs value (erroring) | ours decline
 Record / Backticked / beside | fcs value (clean) | ours commit value
 Record / Backticked / nested | fcs value (clean) | ours decline
 Record / Mangled(0) / beside | fcs value (clean) | ours decline
@@ -97,6 +117,10 @@ Record / Qualified / beside | fcs - (erroring) | ours decline
 Record / Qualified / nested | fcs - (erroring) | ours decline
 Record / Spaced / beside | fcs - (erroring) | ours decline
 Record / Spaced / nested | fcs - (erroring) | ours decline
+Record / StructTupleHead / beside | fcs value (erroring) | ours decline
+Record / StructTupleHead / nested | fcs value (erroring) | ours decline
+Record / TupleHead / beside | fcs value (erroring) | ours decline
+Record / TupleHead / nested | fcs value (erroring) | ours decline
 Union / Backticked / beside | fcs case (clean) | ours commit case
 Union / Backticked / nested | fcs value (clean) | ours decline
 Union / Mangled(0) / beside | fcs case (clean) | ours decline
@@ -113,3 +137,7 @@ Union / Qualified / beside | fcs - (erroring) | ours decline
 Union / Qualified / nested | fcs - (erroring) | ours decline
 Union / Spaced / beside | fcs - (erroring) | ours decline
 Union / Spaced / nested | fcs - (erroring) | ours decline
+Union / StructTupleHead / beside | fcs value (erroring) | ours decline
+Union / StructTupleHead / nested | fcs value (erroring) | ours decline
+Union / TupleHead / beside | fcs value (erroring) | ours decline
+Union / TupleHead / nested | fcs value (erroring) | ours decline

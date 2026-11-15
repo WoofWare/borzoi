@@ -159,6 +159,7 @@ crate::syntax::facade_support::facade_node!(TryExpr: TRY_EXPR);
 crate::syntax::facade_support::facade_node!(TupleExpr: TUPLE_EXPR);
 crate::syntax::facade_support::facade_node!(TuplePat: TUPLE_PAT);
 crate::syntax::facade_support::facade_node!(TupleType: TUPLE_TYPE);
+crate::syntax::facade_support::facade_node!(TupleTypeExtensionHead: TUPLE_TYPE_EXTENSION_HEAD);
 crate::syntax::facade_support::facade_node!(TyparConstraint: TYPAR_CONSTRAINT);
 crate::syntax::facade_support::facade_node!(TyparConstraints: TYPAR_CONSTRAINTS);
 crate::syntax::facade_support::facade_node!(TyparDecl: TYPAR_DECL);
@@ -2439,6 +2440,12 @@ impl TupleSegment {
     }
 }
 
+impl TupleTypeExtensionHead {
+    pub(crate) fn from_union(node: u::TupleTypeExtensionHead) -> Option<Self> {
+        Self::can_cast(node.syntax().kind()).then_some(Self(node))
+    }
+}
+
 impl TyparConstraint {
     pub(crate) fn from_union(node: u::TyparConstraint) -> Option<Self> {
         Self::can_cast(node.syntax().kind()).then_some(Self(node))
@@ -4236,6 +4243,15 @@ impl TupleType {
     }
 }
 
+impl TupleTypeExtensionHead {
+    pub fn is_struct(&self) -> bool {
+        self.0.is_struct()
+    }
+    pub fn ty(&self) -> Option<Type> {
+        self.0.ty().and_then(Type::from_union)
+    }
+}
+
 impl TyparConstraint {
     pub fn kind(&self) -> Option<TyparConstraintKind> {
         self.0.kind().map(TyparConstraintKind::from_union)
@@ -4340,6 +4356,11 @@ impl TypeDefn {
     }
     pub fn repr(&self) -> Option<TypeDefnRepr> {
         self.0.repr().and_then(TypeDefnRepr::from_union)
+    }
+    pub fn tuple_type_head(&self) -> Option<TupleTypeExtensionHead> {
+        self.0
+            .tuple_type_head()
+            .and_then(TupleTypeExtensionHead::from_union)
     }
     pub fn typar_decls(&self) -> Option<TyparDecls> {
         self.0.typar_decls().and_then(TyparDecls::from_union)

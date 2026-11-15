@@ -470,14 +470,20 @@ fn sig_feature_gates_match_fcs_at_every_version() {
 /// FS0236 and `ScopedNowarn`'s FS3350 are reported, at the start of its line,
 /// where the table's compiler starts it at the `#`; it reports nothing for an
 /// `#elif` below 11.0, where the table's compiler reports FS3350; and it
-/// predates record spreads, lexing `...` as an operator. Record spreads
-/// (`RecordSpreads`, 11.0) are gated in FCS's type checker, so FCS's parse
-/// reports nothing at any version: the fixture is a control, holding the tree
+/// predates record spreads, lexing `...` as an operator, and tuple type
+/// extensions. Record spreads (`RecordSpreads`, 11.0) and tuple type
+/// extensions (`ExtensionConstraintSolutions`, preview) are gated in FCS's
+/// type checker, so FCS's parse reports nothing at any version: each fixture
+/// is a control, holding the tree
 /// to be the same at every version (sema's `infer_legality_pin_diff` holds the
 /// gate to FCS's check).
 const IMPL_FROM_FLOOR: &[(&str, Expect)] = &[
     (
         "module M\ntype T = { A: int }\ntype R = { ...T; B: int }\nlet f (t: T) = { ...t; B = 1 }, {| ...t |}\n",
+        Control,
+    ),
+    (
+        "module M\ntype ('a * 'b) with\n    member x.F = 1\ntype struct (int * int) with\n    member x.G = 2\n",
         Control,
     ),
     (

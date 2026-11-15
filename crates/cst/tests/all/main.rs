@@ -103,6 +103,7 @@ mod parser_diff_tabs;
 mod parser_diff_then;
 mod parser_diff_trait_call;
 mod parser_diff_try;
+mod parser_diff_tuple_type_extensions;
 mod parser_diff_typar_expr;
 mod parser_diff_typar_intersection;
 mod parser_diff_type_app_expr;

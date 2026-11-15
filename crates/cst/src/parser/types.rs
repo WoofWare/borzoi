@@ -178,7 +178,7 @@ impl<'src> Parser<'src> {
     /// element after it into the *currently open* `TUPLE_TYPE` node, returning
     /// the number of separators consumed (so the struct form can enforce its
     /// ≥2-element rule). The caller has already parsed the head element.
-    fn sweep_tuple_type_separators(&mut self, top: bool) -> usize {
+    pub(super) fn sweep_tuple_type_separators(&mut self, top: bool) -> usize {
         let mut separators = 0usize;
         while let Some(sep_kind) = self.next_non_trivia_raw_at_pos().and_then(|t| match t {
             Token::Op("*") => Some(SyntaxKind::STAR_TOK),

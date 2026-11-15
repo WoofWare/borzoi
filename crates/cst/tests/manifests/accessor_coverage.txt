@@ -312,6 +312,8 @@ TuplePat::elements
 TuplePat::is_struct
 TupleType::is_struct
 TupleType::segments
+TupleTypeExtensionHead::is_struct
+TupleTypeExtensionHead::ty
 TyparConstraint::kind
 TyparConstraint::member_sig
 TyparConstraint::self_constraint
@@ -337,6 +339,7 @@ TypeDefn::implicit_ctor
 TypeDefn::long_id
 TypeDefn::members
 TypeDefn::repr
+TypeDefn::tuple_type_head
 TypeDefn::typar_decls
 TypeDefnsDecl::defns
 TypeTestExpr::expr

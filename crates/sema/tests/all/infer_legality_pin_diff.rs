@@ -92,6 +92,10 @@ const FIXTURES: &[(LanguageFeature, &str)] = &[
         LanguageFeature::RecordSpreads,
         "module M\ntype T = { A: int }\ntype R = { ...T; B: int }\nlet v : int =\n    let t = { A = 1 }\n    let r = { ...t; B = 2 }\n    1\n",
     ),
+    (
+        LanguageFeature::ExtensionConstraintSolutions,
+        "module M\ntype ('a * 'b) with\n    member x.F = 1\nlet v : int = 1\n",
+    ),
 ];
 
 /// `Legality` features FCS consults while parsing that the parser does not
@@ -386,8 +390,9 @@ fn check_time_gates_report_what_fcs_checks_report() {
     // the gate reports FS3534 so that the node lies under a diagnostic naming
     // its feature (`docs/fcs-divergences.md`); such a fixture is graded where
     // FCS reaches it.
-    // Record spreads are graded from the current oracle's support floor: below
-    // it the legacy oracle checks, which predates them.
+    // Record spreads and tuple type extensions are graded from the current
+    // oracle's support floor: below it the legacy oracle checks, which predates
+    // them.
     const CHECKED: &[(&str, LanguageVersion)] = &[
         (
             "module M\nlet a = $\"x{1}y\"\nlet b = $\"\"\"z\"\"\"\nlet c = $@\"w{2}\"\nlet d = <@ $\"q{3}\" @>\nlet e = $\"{1}\".Length\n",
@@ -403,6 +408,10 @@ fn check_time_gates_report_what_fcs_checks_report() {
         ),
         (
             "module M\ntype T = { A: int; B: string }\ntype R = { ...T; C: int }\ntype S<'a> = { X: 'a; ...R }\nlet t = { A = 1; B = \"b\" }\nlet r = { ...t; C = 2 }\nlet s = { X = 0; ...r }\nlet a = {| ...r; D = 3 |}\nlet b = struct {| ...t |}\nlet c = {| ...a; ...t; E = 4 |}\n",
+            LanguageVersion::V10_0,
+        ),
+        (
+            "module M\ntype ('a * 'b) with\n    member x.F = 1\ntype struct (int * string) with\n    member x.N = 1\ntype private struct (int * int) with\n    member x.P = 2\ntype internal ('a * 'b * 'c) with\n    static member Z = 3\ntype private struct ('d *) with\n    static member W = 4\ntype ('e & #seq<int> * 'f / 'g) with\n    static member V = 5\n",
             LanguageVersion::V10_0,
         ),
     ];

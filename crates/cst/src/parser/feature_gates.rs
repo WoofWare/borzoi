@@ -276,6 +276,39 @@ fn kind_gate_span(node: &SyntaxNode) -> Option<Range<usize>> {
             .filter_map(SyntaxElement::into_token)
             .find(|t| t.kind() == SyntaxKind::WHILE_BANG_TOK)
             .map(|t| token_span(&t)),
+        // FCS checks a tuple type extension's tuple, `(`…`)`, or for the
+        // struct form `pars.fsy`'s `rhs2 1 7`: from the head's `opt_access`, a
+        // type-header access modifier before the `struct` where there is one.
+        // Its trailing-`*` recovery, `struct (A *)`, is `rhs2 2 6`, from the
+        // `struct`.
+        SyntaxKind::TUPLE_TYPE_EXTENSION_HEAD => {
+            let head = significant_range(node)?;
+            let trailing_star = node
+                .children()
+                .find(|n| n.kind() == SyntaxKind::TUPLE_TYPE)
+                .and_then(|tuple| {
+                    tuple
+                        .descendants_with_tokens()
+                        .filter_map(SyntaxElement::into_token)
+                        .filter(is_significant)
+                        .last()
+                })
+                .is_some_and(|t| t.kind() == SyntaxKind::STAR_TOK);
+            let access = node
+                .children_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .find(is_significant)
+                .filter(|t| t.kind() == SyntaxKind::STRUCT_TOK && !trailing_star)
+                .and_then(|_| {
+                    std::iter::successors(node.prev_sibling_or_token(), |el| {
+                        el.prev_sibling_or_token()
+                    })
+                    .filter_map(SyntaxElement::into_token)
+                    .find(is_significant)
+                })
+                .filter(|t| t.kind() == SyntaxKind::ACCESS_TOK);
+            Some(access.map_or(head.start, |t| token_span(&t).start)..head.end)
+        }
         SyntaxKind::WITH_NULL_TYPE => {
             let range = node.text_range();
             Some(usize::from(range.start())..usize::from(range.end()))

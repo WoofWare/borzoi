@@ -266,6 +266,7 @@ fn fcs_sig_type_defn(v: &Value) -> NormalisedTypeDefn {
     let typar_form = fcs_typar_form(&component_info[1]);
     let constraints = fcs_type_defn_constraints(&component_info[1], &component_info[2]);
     let long_id = fcs_component_info_long_id(&component_info[3]);
+    let head_type = fcs_component_info_head_type(&component_info[3]);
     // `SynComponentInfo.accessibility` (field 6) — the type header's own access.
     let access = fcs_access(&component_info[6]);
     let repr = fcs_sig_type_repr(&f[1]);
@@ -285,6 +286,7 @@ fn fcs_sig_type_defn(v: &Value) -> NormalisedTypeDefn {
         attributes,
         access,
         long_id,
+        head_type,
         typars,
         typar_form,
         constraints,
@@ -515,14 +517,15 @@ fn fcs_ident_list_texts(idents: &Value) -> Vec<String> {
 /// (field 3, a `SynType option`). A named head is
 /// `Some(SynType.LongIdent(SynLongIdent(path, …)))`, whose path is spelt like a
 /// module header's (`fcs_ident_list_texts`); `None` is a head FCS recovered
-/// without a name. A tuple-type head (`type (int * int) with …`, the
-/// `ExtensionConstraintSolutions` syntax) is not modelled.
+/// without a name, and so is a tuple type extension's head (`type (int * int)
+/// with …`, the `ExtensionConstraintSolutions` syntax), which
+/// [`fcs_component_info_head_type`] reads.
 fn fcs_component_info_long_id(syn_type: &Value) -> Vec<String> {
     fcs_ident_list_texts(fcs_component_info_idents(syn_type))
 }
 
 /// The `Ident list` of [`fcs_component_info_long_id`]'s head, as a JSON array
-/// (`[]` for `None`).
+/// (`[]` for `None` or a head that is not a name).
 pub(in crate::common) fn fcs_component_info_idents(syn_type: &Value) -> &Value {
     static EMPTY: Value = Value::Array(Vec::new());
     let Some(ty) = fcs_opt(syn_type) else {
@@ -530,8 +533,17 @@ pub(in crate::common) fn fcs_component_info_idents(syn_type: &Value) -> &Value {
     };
     match case_name(ty) {
         "LongIdent" => &fields(&fields(ty)[0])[0],
-        other => panic!("a SynComponentInfo head of SynType.{other} is not modelled"),
+        _ => &EMPTY,
     }
+}
+
+/// `SynComponentInfo.synType` when it is a type rather than a name: a tuple
+/// type extension's head (`SynType.Paren(Tuple …)`, a struct `Tuple`, or a
+/// recovered element alone).
+fn fcs_component_info_head_type(syn_type: &Value) -> Option<NormalisedType> {
+    fcs_opt(syn_type)
+        .filter(|ty| case_name(ty) != "LongIdent")
+        .map(fcs_type)
 }
 
 /// Extract the segment texts of a `SynLongIdent` (the DU case `SynLongIdent
@@ -840,6 +852,7 @@ fn fcs_type_defn(v: &Value) -> NormalisedTypeDefn {
     let typar_form = fcs_typar_form(&component_info[1]);
     let constraints = fcs_type_defn_constraints(&component_info[1], &component_info[2]);
     let long_id = fcs_component_info_long_id(&component_info[3]);
+    let head_type = fcs_component_info_head_type(&component_info[3]);
     // `SynComponentInfo.accessibility` (field 6) — `type internal Foo`.
     let access = fcs_access(&component_info[6]);
     let repr = fcs_type_repr(&f[1]);
@@ -869,6 +882,7 @@ fn fcs_type_defn(v: &Value) -> NormalisedTypeDefn {
         attributes,
         access,
         long_id,
+        head_type,
         typars,
         typar_form,
         constraints,

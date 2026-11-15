@@ -933,6 +933,17 @@ pub enum SyntaxKind {
     /// `and` leading keyword arrive in later phase-9 slices.
     TYPE_DEFN,
 
+    /// A tuple type extension's head, the type a `type (int * int) with …` or
+    /// `type struct (int * int) with …` extends (`pars.fsy`'s
+    /// `tyconNameAndTyparDecls`, F# preview's `ExtensionConstraintSolutions`):
+    /// FCS's `SynComponentInfo.synType` when it is not a `LongIdent`. Shape
+    /// `TUPLE_TYPE_EXTENSION_HEAD > [STRUCT_TOK?, LPAREN_TOK, <type>, RPAREN_TOK]`,
+    /// standing in a [`SyntaxKind::TYPE_DEFN`] for its `LONG_IDENT`. The type is a
+    /// [`SyntaxKind::TUPLE_TYPE`] (a trailing `*` with no element after it is
+    /// FCS's recovery, with a `SynType.FromParseError` there), or, for FCS's
+    /// `struct (T)` recovery, `T` alone.
+    TUPLE_TYPE_EXTENSION_HEAD,
+
     /// `SynTypeDefnSimpleRepr.TypeAbbrev` — a type abbreviation's right-hand
     /// side (`type T = <typ>`, `SyntaxTree.fsi:1404`, `pars.fsy:2455`). Wraps
     /// the single `SynType` child (FCS's `rhsType`, parsed by the phase-7

@@ -88,6 +88,25 @@ impl AstNode for TypeDefn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TupleTypeExtensionHead(pub(crate) SyntaxNode);
+
+impl AstNode for TupleTypeExtensionHead {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(kind, SyntaxKind::TUPLE_TYPE_EXTENSION_HEAD)
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TyparDecls(pub(crate) SyntaxNode);
 
 impl AstNode for TyparDecls {

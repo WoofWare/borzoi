@@ -70,17 +70,12 @@ tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/C
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/MemberDeclarations/E_PropertyInvalidGetter01.fs	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/Misc/E_NoNestedTypes.fs	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/Misc/E_ZeroArity.fs	errors
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension01.fs	errors
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs	errors
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension03.fs	errors
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension04.fs	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/E_ActivePatterns01.fs	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Record/E_SyntaxError01.fs	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/E_SyntaxError01.fs	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/SimpleConstant/E_NoRangeConst01.fs	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/TypeConstraint/E_typeconstraint01.fs	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/PseudoCustomAttributes/AssemblyCopyright_001.fs	non-utf8
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/MiniFSharpPlusExtensionSRTP.fs	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase02.fsx	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase03.fsx	errors
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase04.fsx	errors
@@ -714,10 +709,7 @@ tests/service/data/SyntaxTree/Type/Record 05.fs	errors
 tests/service/data/SyntaxTree/Type/Same Line Declarations 01.fs	errors
 tests/service/data/SyntaxTree/Type/SynTypeTupleWithStructRecovery.fs	errors
 tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 01.fs	errors
-tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 02.fs	errors
-tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 03.fs	errors
 tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 04.fs	errors
-tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 05.fs	errors
 tests/service/data/SyntaxTree/Type/Type 01.fs	errors
 tests/service/data/SyntaxTree/Type/Type 03.fs	errors
 tests/service/data/SyntaxTree/Type/Type 04.fs	errors

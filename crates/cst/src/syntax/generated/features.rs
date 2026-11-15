@@ -462,7 +462,7 @@ impl LanguageFeature {
     /// The features the parser gates where they occur: the live rows with a
     /// `Kind` or `Positional` item. A parse at a version supporting all of
     /// them draws no such gate.
-    pub const POSITIONAL_GATES: [LanguageFeature; 16] = [
+    pub const POSITIONAL_GATES: [LanguageFeature; 17] = [
         LanguageFeature::SingleUnderscorePattern,
         LanguageFeature::WildCardInForLoop,
         LanguageFeature::RelaxWhitespace,
@@ -479,6 +479,7 @@ impl LanguageFeature {
         LanguageFeature::ErrorOnInvalidDeclsInTypeDefinitions,
         LanguageFeature::FromEndSlicing,
         LanguageFeature::RecordSpreads,
+        LanguageFeature::ExtensionConstraintSolutions,
     ];
 
     /// The retired features, each with the `fsharp@<commit>` it was last
@@ -1299,6 +1300,9 @@ pub fn kind_feature(kind: SyntaxKind) -> Option<LanguageFeature> {
         SyntaxKind::INDEX_FROM_END_EXPR => Some(LanguageFeature::FromEndSlicing),
         SyntaxKind::RECORD_SPREAD => Some(LanguageFeature::RecordSpreads),
         SyntaxKind::RECORD_SPREAD_DECL => Some(LanguageFeature::RecordSpreads),
+        SyntaxKind::TUPLE_TYPE_EXTENSION_HEAD => {
+            Some(LanguageFeature::ExtensionConstraintSolutions)
+        }
         _ => None,
     }
 }

@@ -147,6 +147,10 @@ const FIXTURES: &[(LanguageFeature, &str)] = &[
         LanguageFeature::RecordSpreads,
         "module M\ntype T = { A: int }\ntype R = { ...T; B: int }\nlet f (t: T) = { ...t; B = 1 }\nlet g (t: T) = {| ...t; C = 2 |}\n",
     ),
+    (
+        LanguageFeature::ExtensionConstraintSolutions,
+        "module M\ntype ('a * 'b) with\n    member x.F = 1\ntype struct (int * string) with\n    member x.G = 2\n",
+    ),
 ];
 
 const LADDER: [LanguageVersion; 10] = [
