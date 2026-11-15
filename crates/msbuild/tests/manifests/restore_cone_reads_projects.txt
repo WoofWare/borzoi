@@ -1,73 +1,73 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 BORZOI_PROJECT_LIST=… nix develop -c cargo test -p borzoi-msbuild --test restore_cone_census pinned_projects -- --ignored
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedNuGetAuditSuppressions	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedPackageDownloads	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedPackageReferences	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedPackageVersions	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedPrunePackageReference	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DotnetCliToolReference	MSBuild 0; ours none, not exact
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item FilteredRestoreGraphProjectInputItems	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item FilteredRestoreGraphProjectInputItemsWithoutDuplicates	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item FrameworkReference	MSBuild 0; ours 0, identities agree, tainted
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item ImplicitPackageReferenceVersion	MSBuild 9; ours 9, identities agree, not exact
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item NuGetAuditSuppress	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PackageDownload	MSBuild 0; ours none, tainted; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PackageReference	MSBuild 2; ours 2, identities agree, tainted; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PackageReferenceToUpdate	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PackageVersion	MSBuild 0; ours 0, identities agree, tainted; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item ProjectReference	MSBuild 0; ours 0, identities agree, not exact
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PrunePackageReference	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item RestoreGraphProjectInputItems	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item TargetingPack	MSBuild 0; ours none, not exact
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _AllRuntimeIdentifiers	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _CurrentRestoreProjectPathItems	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _DecomposedTargetFramework	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _FilteredRestoreGraphProjectInputItemsTmp	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _FrameworkReferenceForRestore	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _GenerateRestoreGraphProjectEntryInput	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _GenerateRestoreProjectPathWalkOutputs	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _GetAllRuntimeIdentifiersTargetFrameworks	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _PackageReferenceToAdd	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _PackageReferenceToRemove	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _ReferenceToObsoleteDotNetCliTool	MSBuild 0; ours none, not exact
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreGraphEntry	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreGraphEntryFiltered	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreProjectPathItems	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreProjectPathItemsOutputs	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreProjectPathItemsWithoutDupes	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreSettingsPerFramework	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreTargetFrameworkItems	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreTargetFrameworksOutputFiltered	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _TargetFramework	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _TargetFrameworkToSilenceIsTrimmableUnsupportedWarning	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _ValidProjectsForRestore	MSBuild 0; ours none, not exact; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property AllowMissingPrunePackageData	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedNuGetAuditSuppressions	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedPackageDownloads	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedPackageReferences	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedPackageVersions	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DeduplicatedPrunePackageReference	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item DotnetCliToolReference	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item FilteredRestoreGraphProjectInputItems	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item FilteredRestoreGraphProjectInputItemsWithoutDuplicates	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item FrameworkReference	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item ImplicitPackageReferenceVersion	MSBuild 9; ours 9, identities agree, metadata agrees on 3 names
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item NuGetAuditSuppress	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PackageDownload	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PackageReference	MSBuild 2; ours 2, identities agree, metadata agrees on 4 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PackageReferenceToUpdate	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PackageVersion	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item ProjectReference	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item PrunePackageReference	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item RestoreGraphProjectInputItems	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item TargetingPack	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _AllRuntimeIdentifiers	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _CurrentRestoreProjectPathItems	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _DecomposedTargetFramework	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _FilteredRestoreGraphProjectInputItemsTmp	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _FrameworkReferenceForRestore	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _GenerateRestoreGraphProjectEntryInput	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _GenerateRestoreProjectPathWalkOutputs	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _GetAllRuntimeIdentifiersTargetFrameworks	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _PackageReferenceToAdd	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _PackageReferenceToRemove	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _ReferenceToObsoleteDotNetCliTool	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreGraphEntry	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreGraphEntryFiltered	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreProjectPathItems	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreProjectPathItemsOutputs	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreProjectPathItemsWithoutDupes	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreSettingsPerFramework	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreTargetFrameworkItems	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _RestoreTargetFrameworksOutputFiltered	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _TargetFramework	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _TargetFrameworkToSilenceEnableSingleFileAnalyzerUnsupportedWarning	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _TargetFrameworkToSilenceIsAotCompatibleUnsupportedWarning	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _TargetFrameworkToSilenceIsTrimmableUnsupportedWarning	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads item _ValidProjectsForRestore	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property AllowMissingPrunePackageData	unset agrees; the cone writes it
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property AssemblyName	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property AssetTargetFallback	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CLRSupport	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CentralPackageFloatingVersionsEnabled	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CentralPackageTransitivePinningEnabled	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CentralPackageVersionOverrideEnabled	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectCentralPackageVersionsContinueOnError	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectNuGetAuditSuppressionsContinueOnError	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectPackageDownloadsContinueOnError	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectPackageReferencesContinueOnError	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectPrunePackageReferencesContinueOnError	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property ContinueOnError	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property DisableCheckingDuplicateNuGetItems	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property DisableWarnForInvalidRestoreProjects	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property AssetTargetFallback	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CLRSupport	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CentralPackageFloatingVersionsEnabled	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CentralPackageTransitivePinningEnabled	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CentralPackageVersionOverrideEnabled	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectCentralPackageVersionsContinueOnError	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectNuGetAuditSuppressionsContinueOnError	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectPackageDownloadsContinueOnError	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectPackageReferencesContinueOnError	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property CollectPrunePackageReferencesContinueOnError	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property ContinueOnError	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property DisableCheckingDuplicateNuGetItems	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property DisableWarnForInvalidRestoreProjects	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property DotnetCliToolTargetFramework	value agrees; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property EnableAotAnalyzer	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property EnableComHosting	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property EnableSingleFileAnalyzer	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property EnableTrimAnalyzer	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property EnableAotAnalyzer	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property EnableComHosting	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property EnableSingleFileAnalyzer	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property EnableTrimAnalyzer	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property HideWarningsAndErrors	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property ImplicitPackageReferenceInformationLink	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property IsAotCompatible	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property IsTrimmable	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property ImplicitPackageReferenceInformationLink	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property IsAotCompatible	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property Language	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildProjectDirectory	value agrees
@@ -78,115 +78,115 @@
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NETCoreSdkVersion	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NETStandardMaximumVersion	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NETStandardMaximumVersion	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NetCoreRoot	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NetCoreTargetingPackRoot	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NoWarn	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NoWarn	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NuGetAudit	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NuGetAuditLevel	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NuGetAuditMode	untrusted (read $(NuGetExeSkipSdkAnalysisLevelCheck) undefined, hidden by read $(TargetFramework) undefined); set in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NuGetAuditMode	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NuGetLockFilePath	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property OutputType	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PackageId	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PackageReferenceCompatibleProjectStyle	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PackageTargetFallback	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PackageVersion	unset, inexact (opacity: read $(TargetFramework) undefined); set in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PackageReferenceCompatibleProjectStyle	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PackageTargetFallback	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PackageVersion	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PrunePackageDataRoot	value agrees; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PrunePackageTargetingPackRoots	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PublishAot	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PublishTrimmed	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreAdditionalProjectFallbackFolders	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreAdditionalProjectFallbackFoldersExcludes	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PrunePackageTargetingPackRoots	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PublishAot	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property PublishTrimmed	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreAdditionalProjectFallbackFolders	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreAdditionalProjectFallbackFoldersExcludes	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreAdditionalProjectSources	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreBuildInParallel	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreConfigFile	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreConfigFile	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreContinueOnError	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreDoNotWriteDependencyGraphSpec	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreDotnetCliToolReferences	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreEnablePackagePruning	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreFallbackFolders	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreDoNotWriteDependencyGraphSpec	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreDotnetCliToolReferences	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreEnablePackagePruning	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreFallbackFolders	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreGraphOutputPath	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreGraphProjectInput	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreLegacyPackagesDirectory	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreLockedMode	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreOutputAbsolutePath	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreGraphProjectInput	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreLegacyPackagesDirectory	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreLockedMode	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreOutputAbsolutePath	unset agrees; the cone writes it
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreOutputPath	value agrees; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestorePackagePruningDefault	untrusted (read $(NuGetExeSkipSdkAnalysisLevelCheck) undefined, hidden by read $(TargetFramework) undefined); set in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestorePackagePruningDefault	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestorePackagesPath	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestorePackagesWithLockFile	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreProjectFilterMode	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreProjectFilterMode	unset agrees; the cone writes it
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreProjectStyle	value agrees; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreProjects	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreProjects	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreRecursive	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreRepositoryPath	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreRepositoryPathOverride	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreRootConfigDirectory	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreSolutionDirectory	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreRepositoryPath	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreRepositoryPathOverride	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreRootConfigDirectory	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreSolutionDirectory	unset agrees; the cone writes it
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreSources	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreUseLegacyDependencyResolver	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreUseLegacyDependencyResolver	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RestoreUseSkipNonexistentTargets	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RuntimeIdentifier	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RuntimeIdentifier	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RuntimeIdentifierGraphPath	untrusted (an SDK package input); set in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RuntimeIdentifiers	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RuntimeSupports	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RuntimeIdentifiers	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property RuntimeSupports	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property SdkAnalysisLevel	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property SelfContained	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property SolutionDir	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property SuppressObsoleteDotNetCliToolWarning	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFramework	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFrameworkIdentifier	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFrameworkMoniker	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFrameworkProfile	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFrameworkVersion	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property SelfContained	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property SolutionDir	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property SuppressObsoleteDotNetCliToolWarning	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFramework	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFrameworkIdentifier	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFrameworkMoniker	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFrameworkProfile	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFrameworkVersion	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetFrameworks	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetLatestRuntimePatch	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetPlatformIdentifier	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetPlatformMinVersion	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetPlatformMoniker	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetPlatformVersion	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetLatestRuntimePatch	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetPlatformIdentifier	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetPlatformMinVersion	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetPlatformMoniker	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TargetPlatformVersion	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property TreatWarningsAsErrors	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property UsingMicrosoftNETSdk	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property ValidateRuntimeIdentifierCompatibility	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property Version	untrusted (read $(VersionSuffix) undefined, hidden by read $(TargetFramework) undefined); set in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property Version	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property WarningsAsErrors	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property WarningsNotAsErrors	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property WindowsTargetPlatformMinVersion	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _CentralPackageVersionsEnabled	untrusted (read $(ManagePackageVersionsCentrally) undefined, hidden by read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _DisableNuGetRestoreTargetFrameworksOverride	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _EnablePackageReferencesInVCProjects	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _FirstTargetFrameworkToSupportAot	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _FirstTargetFrameworkToSupportSingleFile	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _FirstTargetFrameworkToSupportTrimming	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _GenerateRestoreGraphProjectEntryInputProperties	untrusted (read $(SolutionDir) undefined, hidden by read $(TargetFramework) undefined); set in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _HasPackageReferenceItems	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _MinNonEolTargetFrameworkForAot	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _MinNonEolTargetFrameworkForSingleFile	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _MinNonEolTargetFrameworkForTrimming	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _MinimumNonEolSupportedNetCoreTargetFramework	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputConfigFilePaths	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputFallbackFolders	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputPackagesPath	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputRepositoryPath	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputSources	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RequiresILLinkPack	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreCrossTargeting	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreFallbackFoldersOverride	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreGraphAbsoluteProjectPaths	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestorePackagesPathOverride	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreProjectFramework	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreProjectName	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreProjectVersion	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreRepositoryPathOverride	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreSkipContentFileWrite	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreSourcesOverride	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _SilenceEnableSingleFileAnalyzerUnsupportedWarning	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _SilenceIsAotCompatibleUnsupportedWarning	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _SilenceIsTrimmableUnsupportedWarning	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _TargetFrameworkOverride	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _TargetFrameworkToBeUsed	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild; the cone writes it
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _TargetFrameworkVersionWithoutV	unset, inexact (opacity: read $(TargetFramework) undefined); unset in MSBuild
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj retains its targets	0 as MSBuild ran them, 42 not exact
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj runs GenerateRestoreGraphFile	declines: target AfterSdkPublish is not known exactly
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property WarningsNotAsErrors	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property WindowsTargetPlatformMinVersion	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _CentralPackageVersionsEnabled	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _DisableNuGetRestoreTargetFrameworksOverride	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _EnablePackageReferencesInVCProjects	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _FirstTargetFrameworkToSupportAot	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _FirstTargetFrameworkToSupportSingleFile	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _FirstTargetFrameworkToSupportTrimming	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _GenerateRestoreGraphProjectEntryInputProperties	value agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _HasPackageReferenceItems	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _MinNonEolTargetFrameworkForAot	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _MinNonEolTargetFrameworkForSingleFile	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _MinNonEolTargetFrameworkForTrimming	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _MinimumNonEolSupportedNetCoreTargetFramework	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputConfigFilePaths	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputFallbackFolders	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputPackagesPath	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputRepositoryPath	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _OutputSources	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RequiresILLinkPack	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreCrossTargeting	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreFallbackFoldersOverride	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreGraphAbsoluteProjectPaths	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestorePackagesPathOverride	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreProjectFramework	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreProjectName	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreProjectVersion	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreRepositoryPathOverride	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreSkipContentFileWrite	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _RestoreSourcesOverride	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _SilenceEnableSingleFileAnalyzerUnsupportedWarning	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _SilenceIsAotCompatibleUnsupportedWarning	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _SilenceIsTrimmableUnsupportedWarning	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _TargetFrameworkOverride	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _TargetFrameworkToBeUsed	unset agrees; the cone writes it
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property _TargetFrameworkVersionWithoutV	unset agrees
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj retains its targets	42 as MSBuild ran them, 0 not exact
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj runs GenerateRestoreGraphFile	declines: target _FilterRestoreGraphProjectInputItems runs MSBuild
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads item DeduplicatedNuGetAuditSuppressions	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads item DeduplicatedPackageDownloads	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads item DeduplicatedPackageReferences	MSBuild 0; ours 0, identities agree, metadata agrees on 0 names; the cone writes it
