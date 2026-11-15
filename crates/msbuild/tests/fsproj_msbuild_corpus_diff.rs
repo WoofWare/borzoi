@@ -761,7 +761,7 @@ fn compare_lang_version(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> Face
     }
     // The value is published beside its trust: an untrusted `LangVersion` is a
     // decline, which makes no claim.
-    if parsed.property_provenance_untrusted("LangVersion") {
+    if !parsed.property("LangVersion").is_exact() {
         return FacetReport::skipped("lang_version", format!("untrusted; ours={ours:?}"))
             .classed("decline(LangVersion untrusted)".to_string());
     }

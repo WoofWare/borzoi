@@ -494,9 +494,12 @@ fn web_sdk_before_common_targets_is_imported() {
         "the Web SDK chain declined an import: {declined_imports:#?}"
     );
     assert!(
-        !parsed.property_provenance_untrusted("EventSourceSupport"),
+        !parsed
+            .property("EventSourceSupport")
+            .untrusted_cause()
+            .is_some(),
         "EventSourceSupport untrusted: {:?}",
-        parsed.property_untrusted_cause("EventSourceSupport")
+        parsed.property("EventSourceSupport").untrusted_cause()
     );
     let ours = parsed
         .properties

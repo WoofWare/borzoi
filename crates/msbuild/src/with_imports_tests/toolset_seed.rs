@@ -37,7 +37,7 @@ fn canonical_sdk(
 /// `Seen`, the body's copy of `$(VisualStudioVersion)`, when committed.
 fn committed_seen(result: &ParsedProject) -> Option<&str> {
     let value = result.properties.get("Seen")?;
-    (!result.property_provenance_untrusted("Seen")).then_some(value.as_str())
+    (!result.property("Seen").untrusted_cause().is_some()).then_some(value.as_str())
 }
 
 const COPY: &str = "<PropertyGroup><Seen>$(VisualStudioVersion)</Seen></PropertyGroup>";

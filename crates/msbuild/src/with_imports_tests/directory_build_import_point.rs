@@ -31,7 +31,7 @@ fn contributing(marker: &str) -> String {
 const EMPTY: &str = "<Project>\n  <!-- empty to prevent directory crawling -->\n</Project>\n";
 
 fn untrusted(project: &ParsedProject, name: &str) -> bool {
-    project.property_provenance_untrusted(name)
+    !project.property(name).is_exact()
 }
 
 fn property<'p>(project: &'p ParsedProject, name: &str) -> Option<&'p str> {

@@ -42,6 +42,7 @@ pub use diagnostic::{
     PackageReferenceUncertaintyCauseKind, StructuralCompileItemUncertainty,
     StructuralPackageReferenceUncertainty,
 };
+pub use evaluator::property_reads::{InexactUnset, PropertyRead, PropertyReads};
 pub use glob::{GlobDecline, SpecFragment, Unmodelled};
 pub use imports::detect_implicit_imports;
 /// Escape text that entered from *outside* MSBuild's escaped-value domain — a
@@ -515,6 +516,11 @@ pub struct ParsedProject {
     /// `extra_properties` are deliberately *excluded* from this map so
     /// callers can distinguish project-side state from inputs they
     /// already know about. Both are still consulted during substitution.
+    ///
+    /// **Trust-blind:** it holds the walk's values whether or not they are
+    /// the real build's, and a name missing from it may be one the project
+    /// wrote and the walk could not compute. A consumer that decides
+    /// anything on a property reads [`Self::property`] instead.
     pub properties: HashMap<String, String>,
     /// F# preprocessor symbols from the evaluated `$(DefineConstants)`,
     /// parsed as a `;`-separated list with whitespace trimmed and empty
@@ -582,20 +588,13 @@ pub struct ParsedProject {
     /// Sourced from the merged `lookup` (same as [`Self::lang_version`]), so a
     /// caller-supplied global participates.
     pub target_name: ItemMetadataValue,
-    /// Properties whose end-of-evaluation value provenance is
-    /// **untrusted**, keyed by lowercased name: the stored value (or a gate
-    /// whose outcome it depended on) leaned on an *unpinned* property or an
-    /// SDK-package-tainted read, so the real build may hold a different value
-    /// even though the captured one expanded cleanly. Consumers reading an evaluated
-    /// property with reference semantics (e.g. `TargetFramework` deciding
-    /// which output directory to fold) must check
-    /// [`Self::property_provenance_untrusted`] and decline rather than
-    /// trust the captured spelling. Undefined-but-never-written properties
-    /// are absent (the environment model resolves them exactly).
-    ///
-    /// The value is the cause in force when the property's value was computed
-    /// ([`Self::property_untrusted_cause`]).
-    pub untrusted_properties: HashMap<String, UntrustedCause>,
+    /// What a read of each property name sees at the end of the evaluation,
+    /// and whether it is the real build's answer: a trusted value, a name
+    /// undefined in the real build too, a name the real build may define (a
+    /// refused write, the environment, the toolset, content the walk could
+    /// not see), or a value the walk holds and may have wrong. Globals and
+    /// reserved names included. Read it through [`Self::property`].
+    pub property_reads: PropertyReads,
     /// What the documents the walk entered from outside the entry .NET SDK
     /// define, read off their text whatever the conditions around it say.
     /// Workload manifests are not among them.
@@ -989,19 +988,11 @@ impl ForeignDefinitions {
 }
 
 impl ParsedProject {
-    /// Whether `name`'s end-of-evaluation value provenance is untrusted —
-    /// see [`Self::untrusted_properties`]. Case-insensitive (MSBuild
-    /// property names compare OrdinalIgnoreCase). `false` for a property
-    /// that was never written: under the environment model those are
-    /// genuinely unset, so reading them as absent/empty is exact.
-    pub fn property_provenance_untrusted(&self, name: &str) -> bool {
-        self.property_untrusted_cause(name).is_some()
-    }
-
-    /// Why `name`'s value provenance is untrusted, `None` exactly when
-    /// [`Self::property_provenance_untrusted`] is false. Case-insensitive.
-    pub fn property_untrusted_cause(&self, name: &str) -> Option<&UntrustedCause> {
-        self.untrusted_properties.get(&name.to_ascii_lowercase())
+    /// What a read of `name` sees at the end of the evaluation
+    /// ([`Self::property_reads`]). Case-insensitive (MSBuild property names
+    /// compare OrdinalIgnoreCase).
+    pub fn property(&self, name: &str) -> PropertyRead {
+        self.property_reads.read(name)
     }
 }
 

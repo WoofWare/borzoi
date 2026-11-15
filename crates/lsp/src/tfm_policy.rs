@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use borzoi_msbuild::{ParsedProject, target_frameworks};
+use borzoi_msbuild::{InexactUnset, ParsedProject, PropertyRead, target_frameworks};
 
 /// The served-TFM decision for one project, as computed from its first
 /// (unseeded, or caller-seeded) evaluation.
@@ -197,7 +197,9 @@ pub(crate) fn reseed_outcome(pass2: &ParsedProject) -> ReseedOutcome {
 /// Distinct from [`target_frameworks`], which folds the plural in: this is
 /// specifically "did the body pin a single TFM", MSBuild's inner-build signal.
 pub(crate) fn body_target_framework(parsed: &ParsedProject) -> Option<String> {
-    lookup_property_ci(&parsed.properties, "TargetFramework")
+    parsed
+        .property("TargetFramework")
+        .value()
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(String::from)
@@ -205,8 +207,12 @@ pub(crate) fn body_target_framework(parsed: &ParsedProject) -> Option<String> {
 
 /// Whether the project's `TargetFramework` is too weakly established to seed a
 /// second evaluation with, or to publish as a node's known TFM: its write sits
-/// behind a gate the evaluator could not pin, or its value still holds a
-/// `$(...)` we did not expand.
+/// behind a gate the evaluator could not pin, the real build holds a value the
+/// evaluator does not (a write it could not compute, or the environment's), or
+/// its value still holds a `$(...)` we did not expand. An unset singular the
+/// evaluator keeps inexact for its consumers is the multi-TFM shape, and one
+/// unset only because content went unseen is the trade-off every reader but
+/// the splice and the Compile items makes: neither is untrusted here.
 ///
 /// Deliberately the singular only: an outer-gated PLURAL (the arcade idiom,
 /// `<TargetFrameworks Condition="'$(TargetFramework)' == ''">`) is unpinned by
@@ -216,10 +222,15 @@ pub(crate) fn body_target_framework(parsed: &ParsedProject) -> Option<String> {
 /// body singular, by contrast, is consumed as an authoritative
 /// `NodeTfm::Known`.
 pub(crate) fn tfm_untrusted(parsed: &ParsedProject) -> bool {
-    parsed.property_provenance_untrusted("TargetFramework")
-        || body_target_framework(parsed)
-            .as_deref()
-            .is_some_and(|v| v.contains("$("))
+    match parsed.property("TargetFramework") {
+        PropertyRead::Untrusted(_)
+        | PropertyRead::UnsetInexact(InexactUnset::Refused | InexactUnset::Environment) => true,
+        PropertyRead::Value(value) => value.contains("$("),
+        PropertyRead::Unset
+        | PropertyRead::UnsetInexact(
+            InexactUnset::Toolset | InexactUnset::Opaque(_) | InexactUnset::ConsumerCarveOut,
+        ) => false,
+    }
 }
 
 /// Whether the caller's extra build properties pin a **non-empty**

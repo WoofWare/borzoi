@@ -157,7 +157,7 @@ fn visual_studio_version_on_a_real_sdk_project_is_exact_or_declined() {
     let ours_value = ours.properties.get(&name);
     assert!(
         ours_value.is_none()
-            || ours.property_provenance_untrusted(&name)
+            || ours.property(&name).untrusted_cause().is_some()
             || ours_value == theirs.get(&name),
         "certain-implies-exact violated: we committed {ours_value:?}, MSBuild reads {:?}",
         theirs.get(&name)
@@ -248,7 +248,7 @@ fn predefined_names_without_an_sdk_are_exact_or_declined() {
         )
         .expect("well-formed XML parses");
         let ours_value = ours.properties.get(&probe);
-        let committed = ours_value.is_some() && !ours.property_provenance_untrusted(&probe);
+        let committed = ours_value.is_some() && !ours.property(&probe).untrusted_cause().is_some();
         if committed && ours_value != theirs {
             violations.push(format!(
                 "{label}: we committed {ours_value:?}, MSBuild reads {theirs:?}"

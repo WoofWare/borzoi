@@ -184,7 +184,7 @@ fn evaluate(
         None,
     )
     .expect("well-formed XML parses");
-    let ours = if parsed.property_provenance_untrusted("R") {
+    let ours = if parsed.property("R").untrusted_cause().is_some() {
         None
     } else {
         parsed.properties.get("R").cloned()

@@ -331,7 +331,7 @@ fn evaluate(
     )
     .expect("well-formed XML parses");
 
-    let ours = if parsed.property_provenance_untrusted("Trace") {
+    let ours = if parsed.property("Trace").untrusted_cause().is_some() {
         None
     } else {
         parsed.properties.get("Trace").cloned()
@@ -395,7 +395,7 @@ fn evaluate_gate(oracle: &mut Oracle, dir: &Path, value: &str) -> (Option<String
     )
     .expect("well-formed XML parses");
 
-    let ours = if parsed.property_provenance_untrusted("Trace") {
+    let ours = if parsed.property("Trace").untrusted_cause().is_some() {
         None
     } else {
         parsed.properties.get("Trace").cloned()

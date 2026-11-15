@@ -1166,9 +1166,9 @@ fn an_undecided_choose_holding_only_items_leaves_later_undefined_reads_exact() {
         ));
         assert_eq!(p.properties.get("P").map(String::as_str), Some("set"));
         assert!(
-            !p.property_provenance_untrusted("P"),
+            !p.property("P").untrusted_cause().is_some(),
             "{branch}: {:?}",
-            p.property_untrusted_cause("P")
+            p.property("P").untrusted_cause()
         );
     }
 }
@@ -1184,7 +1184,7 @@ fn an_undecided_choose_still_unpins_a_name_its_branch_writes() {
             r#"<PropertyGroup><P Condition="'$(Q)' == ''">set</P></PropertyGroup>"#,
         ));
         assert!(
-            p.property_provenance_untrusted("P"),
+            p.property("P").untrusted_cause().is_some(),
             "{items:?}: P is gated on a name the undecided branch may write"
         );
     }
@@ -5436,10 +5436,10 @@ fn untrusted_property_provenance_is_queryable() {
   </PropertyGroup>
 </Project>"#;
     let p = parse(src);
-    assert!(p.property_provenance_untrusted("marked"));
-    assert!(p.property_provenance_untrusted("MARKED"));
-    assert!(!p.property_provenance_untrusted("Clean"));
-    assert!(!p.property_provenance_untrusted("NeverWritten"));
+    assert!(p.property("marked").untrusted_cause().is_some());
+    assert!(p.property("MARKED").untrusted_cause().is_some());
+    assert!(!p.property("Clean").untrusted_cause().is_some());
+    assert!(!p.property("NeverWritten").untrusted_cause().is_some());
 }
 
 /// A member access must not launder its receiver's provenance. The reference
@@ -5461,11 +5461,11 @@ fn a_member_access_does_not_launder_an_untrusted_receiver() {
         );
         let p = parse(&src);
         assert!(
-            p.property_provenance_untrusted("Marked"),
+            p.property("Marked").untrusted_cause().is_some(),
             "{member}: the receiver must be untrusted for this case to test anything"
         );
         assert!(
-            p.property_provenance_untrusted("Derived"),
+            p.property("Derived").untrusted_cause().is_some(),
             "{member}: a value derived from an untrusted property through a member \
              access must not read as trusted"
         );
@@ -5519,7 +5519,7 @@ fn exact_undefined_child_gate_is_not_unpinned_by_an_unpinned_group() {
 </Project>"#;
     let p = parse(src);
     assert!(
-        !p.property_provenance_untrusted("marked"),
+        !p.property("marked").untrusted_cause().is_some(),
         "a child gated on a provably-false exact-undefined read cannot write, \
          so the unpinnable group must not taint it"
     );
@@ -10368,10 +10368,10 @@ fn a_gate_decided_by_trusted_operands_does_not_taint_its_writes() {
             let src = format!("<Project>\n  {prelude}\n  {body}\n</Project>");
             let p = parse(&src);
             assert!(
-                p.property_provenance_untrusted("Tf"),
+                p.property("Tf").untrusted_cause().is_some(),
                 "{tag}/{shape}: Tf must be untrusted for the row to test anything"
             );
-            let untrusted = p.property_provenance_untrusted("L");
+            let untrusted = p.property("L").untrusted_cause().is_some();
             if untrusted != expected_untrusted {
                 failures.push(format!(
                     "{tag}/{shape}: L untrusted = {untrusted}, expected {expected_untrusted} \
@@ -10400,11 +10400,11 @@ fn a_child_gate_decided_false_by_trusted_operands_is_not_marked_by_its_group() {
 </Project>"#;
     let p = parse(src);
     assert!(
-        !p.property_provenance_untrusted("L"),
+        !p.property("L").untrusted_cause().is_some(),
         "L's own gate is false whatever Tf holds, so it cannot write"
     );
     assert!(
-        p.property_provenance_untrusted("M"),
+        p.property("M").untrusted_cause().is_some(),
         "M's own gate depends on Tf, so the unsupported group gate must mark it"
     );
 }
@@ -10434,20 +10434,20 @@ fn an_untrusted_property_reports_the_root_of_its_chain() {
     let item_gate = crate::UntrustedCause::Unmodelled("'@(NoSuchItem)' == ''".to_string());
     for name in ["Tf", "Gated", "Derived", "GATED"] {
         assert_eq!(
-            p.property_untrusted_cause(name),
+            p.property(name).untrusted_cause(),
             Some(&item_gate),
             "{name} rests on Tf's unmodelled gate"
         );
     }
     assert_eq!(
-        p.property_untrusted_cause("FromUndefined"),
+        p.property("FromUndefined").untrusted_cause(),
         Some(&crate::UntrustedCause::UndefinedProperty {
             name: "TargetFramework".to_string(),
             hidden_by: None,
         })
     );
-    assert_eq!(p.property_untrusted_cause("On"), None);
-    assert_eq!(p.property_untrusted_cause("NeverWritten"), None);
+    assert_eq!(p.property("On").untrusted_cause(), None);
+    assert_eq!(p.property("NeverWritten").untrusted_cause(), None);
 }
 
 /// An operand the concrete evaluation short-circuits past is still an operand
@@ -10478,7 +10478,7 @@ fn a_short_circuited_inexact_undefined_operand_is_unknown() {
         "MSBuild includes A.fs; an empty Compile set must not be certain"
     );
     assert!(
-        p.property_provenance_untrusted("L"),
+        p.property("L").untrusted_cause().is_some(),
         "MSBuild writes L; its absence must not be certain"
     );
 }
@@ -10501,13 +10501,13 @@ fn an_untrusted_cause_is_the_one_in_force_at_the_read() {
 </Project>"#;
     let p = parse(src);
     assert_eq!(
-        p.property_untrusted_cause("L"),
+        p.property("L").untrusted_cause(),
         Some(&crate::UntrustedCause::Unmodelled(
             "'@(GateA)' == ''".to_string()
         ))
     );
     assert_eq!(
-        p.property_untrusted_cause("M"),
+        p.property("M").untrusted_cause(),
         Some(&crate::UntrustedCause::Unmodelled(
             "'@(GateB)' == ''".to_string()
         ))
@@ -10616,7 +10616,7 @@ mod gate_trust_props {
             } else {
                 UNCERTAIN
             };
-            if p.property_provenance_untrusted("L") {
+            if p.property("L").untrusted_cause().is_some() {
                 return Ok(());
             }
             if UNCERTAIN.iter().any(|u| gate.contains(&format!("$({u})"))) {
@@ -10687,7 +10687,7 @@ fn an_unset_read_after_an_undecided_import_names_what_hid_it() {
 </Project>"#;
     let p = parse(src);
     assert_eq!(
-        p.property_untrusted_cause("L"),
+        p.property("L").untrusted_cause(),
         Some(&crate::UntrustedCause::UndefinedProperty {
             name: "Unset".to_string(),
             hidden_by: Some(Box::new(crate::UntrustedCause::Unmodelled(
@@ -10713,7 +10713,7 @@ fn a_gate_cause_keeps_the_root_its_read_carried() {
 </Project>"#;
     let p = parse(src);
     assert_eq!(
-        p.property_untrusted_cause("L"),
+        p.property("L").untrusted_cause(),
         Some(&crate::UntrustedCause::UndefinedProperty {
             name: "TargetFramework".to_string(),
             hidden_by: None,
@@ -10798,12 +10798,12 @@ mod cause_history_props {
             changed.insert(at, inserted);
             let before = parse(&project(&body));
             let after = parse(&project(&changed));
-            if before.property_untrusted_cause("L").is_some() {
+            if before.property("L").untrusted_cause().is_some() {
                 APPLICABLE_WITH_CAUSE.fetch_add(1, Ordering::Relaxed);
             }
             prop_assert_eq!(
-                before.property_untrusted_cause("L"),
-                after.property_untrusted_cause("L"),
+                before.property("L").untrusted_cause().cloned(),
+                after.property("L").untrusted_cause().cloned(),
                 "body {:?}, inserted at {}: {:?}",
                 body,
                 at,
@@ -10864,7 +10864,7 @@ fn after_an_undecided_import_no_value_settles_an_untrusted_operand() {
 </Project>"#
         );
         assert!(
-            parse(&src).property_provenance_untrusted("L"),
+            parse(&src).property("L").untrusted_cause().is_some(),
             "{tag}: $({read}) must not settle the untrusted Tf after the hidden import"
         );
     }

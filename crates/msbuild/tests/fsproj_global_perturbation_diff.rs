@@ -388,7 +388,7 @@ fn evaluate_both(
             None => {
                 ours.absent.insert((*name).to_string());
             }
-            Some(_) if parsed.property_provenance_untrusted(name) => {
+            Some(_) if parsed.property(name).untrusted_cause().is_some() => {
                 ours.untrusted.insert((*name).to_string());
             }
             Some(value) => {

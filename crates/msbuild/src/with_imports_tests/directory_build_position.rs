@@ -120,7 +120,7 @@ fn an_sdk_that_never_imports_the_file_imports_none_of_it() {
         Some("body"),
         "no file of the chain imports it"
     );
-    assert!(!result.property_provenance_untrusted("Trace"));
+    assert!(result.property("Trace").is_exact());
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn an_sdkless_project_imports_no_targets_file() {
         result.properties.get("Trace").map(String::as_str),
         Some("body")
     );
-    assert!(!result.property_provenance_untrusted("Trace"));
+    assert!(result.property("Trace").is_exact());
 }
 
 #[test]
