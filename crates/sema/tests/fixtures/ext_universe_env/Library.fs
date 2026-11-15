@@ -121,3 +121,18 @@ namespace ExtUniverse.Recv
 /// which a project's `[<CLIEvent>]` extension member `Changed` competes with.
 type Receiver() =
     member _.add_Changed(o: obj) = true
+
+namespace ExtUniverse.Acc
+
+/// A type with a plain method named like a property getter, which a C#-style
+/// extension *getter* competes with.
+type Receiver() =
+    member _.get_Z(o: obj) = true
+
+/// A C#-style extension container whose extension is a static property's
+/// getter: the reader projects `Z` as a property, and FCS calls its `get_Z`
+/// as an extension method of `Receiver` (`(r: Receiver).get_Z(1)`).
+[<System.Runtime.CompilerServices.Extension>]
+type AccExts =
+    static member Z
+        with [<System.Runtime.CompilerServices.Extension>] get (r: Receiver, i: int) = 0L
