@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>WorkloadOracle</RootNamespace>
+    <AssemblyName>workload-oracle</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <!-- No package references: the workload resolver is not published as a
+       package, so Program.fs loads it, and everything it depends on, from the
+       .NET SDK directory named on its command line and reaches it through
+       reflection. -->
+
+</Project>
