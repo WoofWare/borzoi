@@ -219,9 +219,10 @@ struct EvaluatedProject {
     /// "first-declared default" — `chosen_tfm` alone cannot.
     body_target_framework: Option<String>,
     /// Whether the body-singular TFM's provenance is **untrusted**: the
-    /// first pass's `TargetFramework` is unpinned or SDK-tainted
-    /// ([`ParsedProject::property_provenance_untrusted`]), or the body
-    /// value still holds unexpanded `$(...)`. The real build may then
+    /// first pass's `TargetFramework` is unpinned or SDK-tainted, or its
+    /// write was one the evaluator could not compute
+    /// ([`tfm_policy::tfm_untrusted`]), or the body value still holds
+    /// unexpanded `$(...)`. The real build may then
     /// select a different TFM, so [`resolve_node_uncached`] must not report
     /// the node as [`NodeTfm::Known`] under it (the env fold would locate
     /// that TFM's output on trust) nor trust its evaluated output name
@@ -5423,6 +5424,44 @@ mod tests {
             b_node.output_name, None,
             "the output name from an untrusted-TFM evaluation must decline"
         );
+    }
+
+    /// A body `TargetFramework` whose write the evaluator refused (a value it
+    /// cannot compute) is a TFM the real build holds and we do not know, not
+    /// a project that pinned none (#780): the node's TFM is unknown, so it
+    /// must not fall through to the declared-TFM classification.
+    #[test]
+    fn refused_body_target_framework_is_not_read_as_unset() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("A/A.fsproj");
+        let b = tmp.path().join("B/B.fsproj");
+        write_file(&a, &fsproj_with_refs(&["../B/B.fsproj"]));
+        write_file(
+            &b,
+            r#"<Project>
+              <PropertyGroup>
+                <TargetFramework>$(Configuration.Substring(0,1))</TargetFramework>
+              </PropertyGroup>
+            </Project>"#,
+        );
+
+        let ws = Workspace::default();
+        let graph = ws.project_graph_with_producer_tfms(
+            &a,
+            &BTreeMap::new(),
+            &borzoi_msbuild::observed::Observer::new(),
+        );
+        let b_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.path == lexically_normalize(&b))
+            .expect("B is in the graph");
+        assert_eq!(
+            b_node.tfm,
+            NodeTfm::Unresolved,
+            "MSBuild computes `TargetFramework`; a refused write is not an undeclared one"
+        );
+        assert_eq!(b_node.output_name, None);
     }
 
     /// MSBuild global-property names compare OrdinalIgnoreCase, and the

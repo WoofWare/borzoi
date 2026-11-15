@@ -89,12 +89,14 @@ use super::{
 pub(crate) mod executor;
 mod item_pass;
 mod item_spec;
+pub(crate) mod property_reads;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod reads;
 use item_pass::{
     CapturedPackageReference, CurrentFile, DeferredGroupKind, DeferredItemGroup,
     RetainedImportedFile, item_key, replay_deferred_item_groups,
 };
+use property_reads::{InexactUnset, PropertyRead};
 #[cfg(any(test, feature = "test-support"))]
 use reads::{EvaluationReads, ReadProbe};
 
@@ -826,7 +828,21 @@ fn walk_once<'r>(
         #[cfg(any(test, feature = "test-support"))]
         reads: probe.map(|probe| state.read_probe(probe)),
     };
-    (state.into_project(), observations)
+    let project = state.into_project();
+    // The published reads answer every name as the probe's read of it does:
+    // the table enumerates only some names, and the rest must fall to the
+    // rule it states for them.
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(reads) = &observations.reads {
+        for (name, read) in &reads.properties {
+            assert_eq!(
+                project.property(name),
+                *read,
+                "the published read of `{name}` differs from the walk's"
+            );
+        }
+    }
+    (project, observations)
 }
 
 /// Examine the project root's `Sdk` attribute and decide whether the
@@ -2760,19 +2776,10 @@ impl<'r> State<'r> {
             "the item pass must consume every deferred ItemGroup before \
              the walk produces its result"
         );
-        // The output-name verdict and the untrusted-provenance set need
-        // `&self`, so compute them before the destructure below consumes it.
+        // The output-name verdict and the property reads need `&self`, so
+        // compute them before the destructure below consumes it.
         let target_name = self.target_name_verdict();
-        // A refused write alone does not put a name here: this set describes
-        // values a consumer holds and may have wrong, and a refusal means we
-        // hold no value at all — see [`Trust::reference_is_untrusted`] (and
-        // #780, where that reading is shown to be wrong for this set's
-        // consumers).
-        let untrusted_properties: HashMap<String, crate::UntrustedCause> = self
-            .lookup
-            .uncertain()
-            .filter_map(|(name, trust)| Some((name.to_string(), trust.untrusted_cause()?)))
-            .collect();
+        let property_reads = self.property_reads();
         let hidden_content = self
             .walk_opaque
             .as_ref()
@@ -2969,8 +2976,8 @@ impl<'r> State<'r> {
         let properties = written
             .into_values()
             .filter_map(|project_name| {
-                // Published beside `untrusted_properties`, which carries
-                // each name's trust to the consumer.
+                // Trust-blind by contract: `property_reads` carries each
+                // name's trust to a consumer that decides on it.
                 lookup
                     .get_unescaped_ignoring_trust(&project_name)
                     .map(|v| (project_name, v))
@@ -3008,8 +3015,8 @@ impl<'r> State<'r> {
             .unwrap_or_default();
         // `<LangVersion>` from the same merged map. Trim and drop empties so an
         // unset (or whitespace-only) value reads as `None` rather than `Some("")`.
-        // Published beside `untrusted_properties`; the LSP reads the
-        // `LangVersion` entry there into its fold's cache key, beside the
+        // Published beside `property_reads`; the LSP reads the
+        // `LangVersion` read there into its fold's cache key, beside the
         // consequence-side `shape_depends_on_language_version`.
         let lang_version_untrimmed = lookup
             .get_unescaped_ignoring_trust("LangVersion")
@@ -3038,7 +3045,7 @@ impl<'r> State<'r> {
             lang_version_untrimmed,
             other_flags,
             target_name,
-            untrusted_properties,
+            property_reads,
             foreign_definitions,
             workload_definitions,
             sdk_files_imported_from_outside,
@@ -3472,21 +3479,15 @@ impl<'r> State<'r> {
         self.trust_for_raw(raw).unpinned().cloned()
     }
 
-    /// Whether `name`'s end-of-evaluation value provenance is untrusted —
-    /// unpinned (some write to it sat behind a gate we couldn't evaluate,
-    /// or its value leaned on one) or SDK-package-tainted. The basis of
-    /// [`ParsedProject::untrusted_properties`].
-    fn property_provenance_untrusted(&self, name: &str) -> bool {
-        self.trust_of(name).reference_is_untrusted()
-    }
-
     /// The [`ParsedProject::target_name`] verdict: the output file's base
     /// name is `$(TargetName)`, defaulting to `$(AssemblyName)` (the common
     /// targets' `<TargetName Condition="'$(TargetName)' == ''">` write —
     /// probed, dotnet 10.0.301: an explicit `TargetName` beats
     /// `AssemblyName` in the output filename). Each candidate in turn:
-    /// untrusted provenance or residual `$(...)` decides `Unknown` (a
-    /// consumer locating an output DLL by a wrong name fabricates);
+    /// untrusted provenance, a value the real build holds and the walk does
+    /// not (a refused write, or an environment name it could not promote),
+    /// or residual `$(...)` decides `Unknown` (a consumer locating an output
+    /// DLL by a wrong name fabricates);
     /// whitespace-only is `Unknown` too (MSBuild preserves padding in the
     /// filename — probed, ` Padded .dll` — but the default gate compares
     /// `== ''` exactly, so a whitespace-only spelling names the output
@@ -3496,8 +3497,15 @@ impl<'r> State<'r> {
     /// (`$(MSBuildProjectName)`, the project-file stem) applies.
     fn target_name_verdict(&self) -> ItemMetadataValue {
         for name in ["TargetName", "AssemblyName"] {
-            if self.property_provenance_untrusted(name) {
-                return ItemMetadataValue::Unknown;
+            match self.read_property(name) {
+                PropertyRead::Untrusted(_)
+                | PropertyRead::UnsetInexact(InexactUnset::Refused | InexactUnset::Environment) => {
+                    return ItemMetadataValue::Unknown;
+                }
+                // Content the walk could not see may define either name;
+                // trusting the absence after it is the trade-off every
+                // reader but the splice and the Compile items makes (#792).
+                PropertyRead::Value(_) | PropertyRead::Unset | PropertyRead::UnsetInexact(_) => {}
             }
             // The entry's trust is the question just asked.
             match self.lookup.get_ignoring_trust(name) {
@@ -3522,10 +3530,15 @@ impl<'r> State<'r> {
     /// pinned `'$(NoSuchProp)' == 'on'` reference-mutation cases make.
     ///
     /// "Leans on" is about the *outcome*: see [`Self::condition_trust`].
+    ///
+    /// A name whose write the walk refused reads as undefined here, but the
+    /// real build holds the value it computed, so a condition that rests on
+    /// one leans on a value that may differ too (#780).
     fn condition_reads_untrusted_value(&self, node: Node<'_, '_>) -> bool {
-        attribute(node, "Condition")
-            .as_deref()
-            .is_some_and(|cond| self.condition_trust(cond, None).reference_is_untrusted())
+        attribute(node, "Condition").as_deref().is_some_and(|cond| {
+            let trust = self.condition_trust(cond, None);
+            trust.reference_is_untrusted() || trust.refused()
+        })
     }
 
     /// The trust a condition's *decision* carries: certain when the values the
@@ -5611,8 +5624,8 @@ fn property_child_could_write(child: Node<'_, '_>, state: &State<'_>) -> bool {
     // exact — the same exemption `evaluate_condition_with_exemptions`
     // applies at the read sites. Without it a child gated on a provably-false
     // `'$(NoSuch)' != ''` reads as maybe-writing and needlessly unpins the
-    // property, which downstream (e.g. `property_provenance_untrusted`) then
-    // refuses on.
+    // property, which downstream (e.g. an untrusted
+    // `ParsedProject::property` read) then refuses on.
     eval.undefined_properties
         .retain(|name| !state.undefined_read_is_exact(name));
     let exists_dir = state.entry_project_dir.clone();

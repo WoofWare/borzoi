@@ -13,8 +13,8 @@
 //! something the walker cannot decide, giving `D′`. The real build then sees
 //! one of a small set of *worlds* — `D` with `c` taken, `D` with `c` not taken,
 //! or `D` with `c`'s value replaced — and the walker cannot tell which. So for
-//! every fact `D′` publishes as certain (a property not in
-//! `untrusted_properties`, the Compile items while `items_uncertain` is clear,
+//! every fact `D′` publishes as certain (a property read as a value or as
+//! unset, the Compile items while `items_uncertain` is clear,
 //! `define_constants` while `define_constants_uncertain` is clear, the
 //! `ProjectReference` list while `project_references_uncertain` is clear, a
 //! known `target_name`), **every world must publish the same fact, certain,
@@ -38,7 +38,8 @@ use std::path::{Path, PathBuf};
 
 use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::{
-    ItemMetadataValue, ParsedProject, SdkPaths, SdkResolution, SdkResolveError, parse_fsproj,
+    InexactUnset, ItemMetadataValue, ParsedProject, PropertyRead, SdkPaths, SdkResolution,
+    SdkResolveError, parse_fsproj,
 };
 use common::{
     CONTROLLED_PROPERTY_NAMES, SplitMix64, gen_bool_expr, gen_expand_value, gen_grammar_value,
@@ -319,15 +320,14 @@ fn facts(project: &ParsedProject, names: &[&'static str]) -> Facts {
     let mut out = BTreeMap::new();
     // `FromDirBuild` is written by the `Directory.Build.targets` fixture only.
     for name in names.iter().chain(&["FromDirBuild"]) {
-        let certain = !project.property_provenance_untrusted(name);
-        let value = project
-            .properties
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.clone());
+        let claim = match project.property(name) {
+            PropertyRead::Value(value) => Some(Some(value)),
+            PropertyRead::Unset => Some(None),
+            PropertyRead::UnsetInexact(_) | PropertyRead::Untrusted(_) => None,
+        };
         out.insert(
             Fact::Property(name.to_string()),
-            certain.then(|| vec![format!("{value:?}")]),
+            claim.map(|value| vec![format!("{value:?}")]),
         );
     }
     let paths = |items: &[borzoi_msbuild::ResolvedItem]| {
@@ -407,8 +407,6 @@ struct Census {
     violation_count: usize,
     /// Per fact kind: the violations found.
     violated: BTreeMap<&'static str, usize>,
-    /// Cases set aside as the known refused-write defect (see [`check`]).
-    refused_absent: usize,
     /// Cases set aside as the known splice-value defect (see [`check`]).
     spliced_values: usize,
     /// Cases set aside as a stale value read outside the splice (see
@@ -423,10 +421,9 @@ struct Census {
 impl Census {
     fn print(&self, label: &str) {
         println!(
-            "{label}: {} cases, {} refused-write absences, {} splice values, {} stale reads and \
-             {} unbound splice inputs set aside, {} commits a world declined",
+            "{label}: {} cases, {} splice values, {} stale reads and {} unbound splice inputs \
+             set aside, {} commits a world declined",
             self.cases,
-            self.refused_absent,
             self.spliced_values,
             self.stale_reads,
             self.unbound_splice_inputs,
@@ -468,7 +465,6 @@ fn check(
     doc_text: &str,
     undecided: &Facts,
     worlds: &[(String, Facts)],
-    absent_but_written: &[&str],
     undecided_construct: Undecided<'_>,
     label: &str,
 ) {
@@ -492,25 +488,6 @@ fn check(
             }
         }
         let Some(claim) = claim else { continue };
-        // A refused write leaves its name out of both `properties` and
-        // `untrusted_properties`, so the walker publishes "never written" for
-        // a name the real build holds a value for, and `target_name` falls
-        // through a refused `TargetName` or `AssemblyName` as though it were
-        // unset. That is a defect, tracked as #780; it is counted
-        // rather than reported here so the gate stays a gate for everything
-        // else, and so the count says when the fix lands.
-        let absent = |name: &str| {
-            absent_but_written
-                .iter()
-                .any(|n| n.eq_ignore_ascii_case(name))
-        };
-        let rests_on_a_refused_absence = match fact {
-            Fact::Property(name) => absent(name),
-            Fact::TargetName => absent("TargetName") || absent("AssemblyName"),
-            // An item gate reads a refused name as never written too.
-            Fact::ProjectReferences => !absent_but_written.is_empty(),
-            _ => false,
-        };
         let disagreeing = worlds
             .iter()
             .find(|(_, facts)| {
@@ -524,10 +501,6 @@ fn check(
             if world_committed.len() < values.len() {
                 census.world_declined += 1;
             }
-            continue;
-        }
-        if rests_on_a_refused_absence {
-            census.refused_absent += 1;
             continue;
         }
         // A `Directory.Build.*` splice decided on an untrusted gate withdraws
@@ -623,23 +596,11 @@ fn sweep(
             let text = render(&doc, target, &Variant::Undecided(wrap));
             let project = evaluate(&text);
             let undecided = facts(&project, names);
-            let absent_but_written: Vec<&str> = doc
-                .writes
-                .iter()
-                .map(|w| w.name)
-                .filter(|name| {
-                    !project
-                        .properties
-                        .keys()
-                        .any(|k| k.eq_ignore_ascii_case(name))
-                })
-                .collect();
             check(
                 &mut census,
                 &text,
                 &undecided,
                 &world_facts,
-                &absent_but_written,
                 Undecided::Write(doc.writes[target].name),
                 &format!("{label} {wrap:?}"),
             );
@@ -949,18 +910,6 @@ fn sweep_opacity(seed: u64, cases: usize, names: &[&'static str]) -> Census {
         let files = render_opacity(&doc, &Variant::Undecided(Wrap::ElementCondition));
         let project = fixture.evaluate(&files);
         let undecided = facts(&project, names);
-        let absent_but_written: Vec<&str> = doc
-            .body
-            .writes
-            .iter()
-            .map(|w| w.name)
-            .filter(|name| {
-                !project
-                    .properties
-                    .keys()
-                    .any(|k| k.eq_ignore_ascii_case(name))
-            })
-            .collect();
         let written_outside_the_hidden_file = |name: &str| {
             doc.before
                 .iter()
@@ -980,7 +929,6 @@ fn sweep_opacity(seed: u64, cases: usize, names: &[&'static str]) -> Census {
             &text,
             &undecided,
             &world_facts,
-            &absent_but_written,
             Undecided::Import {
                 defines_an_unbound_splice_input,
             },
@@ -1008,15 +956,14 @@ fn assert_sound(census: &Census, floors: &[(&str, usize)]) {
     }
 }
 
-/// The set-aside counts, pinned for the fixed seeds: a fix for #780 or #781
-/// moves them, and must update them here (and drop the set-aside once it
-/// reaches zero), so the gate cannot quietly keep exempting a class that no
-/// longer exists — or one that grew.
-fn assert_set_asides(census: &Census, refused_absent: usize, spliced_values: usize) {
+/// The #781 set-aside count, pinned for the fixed seeds: a fix moves it, and
+/// must update it here (and drop the set-aside once it reaches zero), so the
+/// gate cannot quietly keep exempting a class that no longer exists — or one
+/// that grew.
+fn assert_set_asides(census: &Census, spliced_values: usize) {
     assert_eq!(
-        (census.refused_absent, census.spliced_values),
-        (refused_absent, spliced_values),
-        "the (#780 refused-absence, #781 splice-value) set-aside counts moved"
+        census.spliced_values, spliced_values,
+        "the #781 splice-value set-aside count moved"
     );
 }
 
@@ -1038,7 +985,7 @@ fn an_undecided_write_claims_no_more_than_its_worlds_agree_on() {
             ("target name", 100),
         ],
     );
-    assert_set_asides(&census, 532, 0);
+    assert_set_asides(&census, 0);
 }
 
 #[test]
@@ -1061,7 +1008,7 @@ fn an_undecided_directory_build_gate_write_claims_no_more_than_its_worlds_agree_
             ("DefineConstants", 25),
         ],
     );
-    assert_set_asides(&census, 240, 163);
+    assert_set_asides(&census, 212);
 }
 
 /// The opacity tier: a property written in the SDK before content the walk
@@ -1071,10 +1018,10 @@ fn a_value_written_before_hidden_content_claims_no_more_than_its_worlds_agree_on
     let census = sweep_opacity(0x0bac_17e5, 800, &written_names(true));
     census.print("with an undecided SDK import");
     assert_sound(&census, &[("Compile items", 30)]);
-    assert_set_asides(&census, 23, 249);
+    assert_set_asides(&census, 213);
     assert_eq!(
         (census.stale_reads, census.unbound_splice_inputs),
-        (1165, 9),
+        (909, 9),
         "the (#792 stale value read outside the splice and the Compile items, #811 splice \
          input hidden content defined) set-aside counts moved"
     );
@@ -1105,17 +1052,17 @@ fn soak_undecided_writes_claim_no_more_than_their_worlds() {
 // The defects the gate found, each pinned as the answer it should give, and
 // ignored with its issue until fixed.
 
-/// #780: a refused write is published as never written.
+/// #780: a refused write is not published as never written.
 #[test]
-#[ignore = "#780: a refused property write reads as never written"]
 fn a_refused_write_is_not_published_as_never_written() {
     let project = pure_evaluate(
         r#"<Project>
   <PropertyGroup><TargetName>$(Configuration.Substring(0,1))</TargetName></PropertyGroup>
 </Project>"#,
     );
-    assert!(
-        project.property_provenance_untrusted("TargetName"),
+    assert_eq!(
+        project.property("TargetName"),
+        PropertyRead::UnsetInexact(InexactUnset::Refused),
         "MSBuild computes `TargetName`; an absent, trusted name says the project never wrote it"
     );
     assert_eq!(project.target_name, ItemMetadataValue::Unknown);
@@ -1124,7 +1071,6 @@ fn a_refused_write_is_not_published_as_never_written() {
 /// #780: an item gate reads a refused name as never written, capturing a
 /// phantom `ProjectReference`.
 #[test]
-#[ignore = "#780: a refused property write reads as never written"]
 fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
     let project = pure_evaluate(
         r#"<Project>
@@ -1157,7 +1103,7 @@ fn a_file_spliced_on_an_undecided_gate_publishes_no_trusted_value() {
         "P2″ already withdraws the item facets"
     );
     assert!(
-        project.property_provenance_untrusted("FromDirBuild"),
+        project.property("FromDirBuild").untrusted_cause().is_some(),
         "MSBuild writes the gate `false` and never imports the file"
     );
 }

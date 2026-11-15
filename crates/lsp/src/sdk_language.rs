@@ -68,7 +68,7 @@
 use std::collections::HashMap;
 
 use borzoi_cst::language_version::LanguageVersion;
-use borzoi_msbuild::{ParsedProject, SdkVersion, UntrustedCause};
+use borzoi_msbuild::{InexactUnset, ParsedProject, PropertyRead, SdkVersion, UntrustedCause};
 
 /// One SDK's F# compiler, as far as `<LangVersion>` goes. See the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,22 +340,11 @@ pub fn project_compiler(
     }
     let sdk = entry_sdk_version(parsed.resolved_sdk_root.as_deref()?)?;
     SdkLanguageFacts::for_sdk(&sdk)?;
-    let written = |name: &str| {
-        parsed
-            .properties
-            .iter()
-            .find(|(written, _)| written.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    };
-    let trusted = |name: &str| {
-        if parsed.property_provenance_untrusted(name) {
-            None
-        } else {
-            written(name)
-        }
-    };
+    // A value the walk trusts, or `None`: unset, untrusted, or one the real
+    // build may hold and the walk does not (a refused write among them).
+    let trusted = |name: &str| parsed.property(name).value().map(str::to_string);
     let names_own = |name: &str, file: &str| {
-        trusted(name).and_then(|value| sdk_version_of_sdk_file(value, &["FSharp", file]))
+        trusted(name).and_then(|value| sdk_version_of_sdk_file(&value, &["FSharp", file]))
             == Some(sdk.clone())
     };
     let bundled = trusted("UseBundledFSharpTargets")
@@ -366,8 +355,10 @@ pub fn project_compiler(
     {
         return None;
     }
-    // Only the SDK's props can have written it, and they name their own.
-    if written("DotnetFscCompilerPath").is_some() && !names_own("DotnetFscCompilerPath", "fsc.dll")
+    // Only the SDK's props can have written it, and they name their own. A
+    // name the walk cannot vouch is unset may have been written by anything.
+    if parsed.property("DotnetFscCompilerPath") != PropertyRead::Unset
+        && !names_own("DotnetFscCompilerPath", "fsc.dll")
     {
         return None;
     }
@@ -577,8 +568,8 @@ pub const LANG_VERSION_CARRIERS: [&str; 3] = ["LangVersion", "OtherFlags", "FscO
 /// boundary the module docs state. It does withhold a refusal
 /// ([`lang_version_untrusted_cause`]).
 pub fn lang_version_value_doubt(parsed: &ParsedProject) -> Option<UntrustedCause> {
-    if let Some(cause) = parsed.property_untrusted_cause("LangVersion") {
-        return Some(cause.clone());
+    if let Some(cause) = evaluated_value_doubt(parsed, "LangVersion") {
+        return Some(cause);
     }
     // The effective values, globals and the environment included.
     // `ParsedProject::lang_version` is trimmed, but the task hands the
@@ -611,6 +602,26 @@ pub fn lang_version_value_doubt(parsed: &ParsedProject) -> Option<UntrustedCause
     None
 }
 
+/// Why the evaluation's read of `name` may not be the value the build
+/// evaluates: a value the walk holds and may have wrong, or a name the real
+/// build defines and the walk does not (a refused write, or the environment).
+/// A name undefined only because the walk did not enter some content is not
+/// doubted here: that content is [`ParsedProject::hidden_content`], which
+/// [`lang_version_untrusted_cause`] reads on its own account.
+fn evaluated_value_doubt(parsed: &ParsedProject, name: &str) -> Option<UntrustedCause> {
+    match parsed.property(name) {
+        PropertyRead::Untrusted(cause) => Some(cause),
+        PropertyRead::UnsetInexact(why @ (InexactUnset::Refused | InexactUnset::Environment)) => {
+            Some(why.cause(name))
+        }
+        PropertyRead::Value(_)
+        | PropertyRead::Unset
+        | PropertyRead::UnsetInexact(
+            InexactUnset::Toolset | InexactUnset::Opaque(_) | InexactUnset::ConsumerCarveOut,
+        ) => None,
+    }
+}
+
 /// Why the evaluated `$(LangVersion)` may not be the version the compiler is
 /// handed, or `None` when it is established well enough to claim the build
 /// fails on it. Besides [`lang_version_value_doubt`]: an untrusted
@@ -625,8 +636,8 @@ pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedC
     if let Some(cause) = lang_version_value_doubt(parsed) {
         return Some(cause);
     }
-    if let Some(cause) = parsed.property_untrusted_cause("OtherFlags") {
-        return Some(cause.clone());
+    if let Some(cause) = evaluated_value_doubt(parsed, "OtherFlags") {
+        return Some(cause);
     }
     if let Some(carrier) = LANG_VERSION_CARRIERS.iter().find(|carrier| {
         [&parsed.foreign_definitions, &parsed.workload_definitions]
@@ -748,7 +759,10 @@ mod tests {
                 format!(r"{root}\FSharp\Microsoft.FSharp.NetSdk.targets"),
             ),
         ] {
-            parsed.properties.insert(name.to_string(), value);
+            parsed
+                .property_reads
+                .named
+                .insert(name.to_ascii_lowercase(), PropertyRead::Value(value));
         }
         assert_eq!(parsed.foreign_definitions, Default::default());
         parsed
@@ -879,13 +893,16 @@ mod tests {
         parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
         assert_eq!(compiler_of(&parsed, &[]), None, "content unseen");
 
-        let with = |name: &str, value: &str| {
+        let with_read = |name: &str, read: PropertyRead| {
             let mut parsed = on_sdk("10.0.401");
             parsed
-                .properties
-                .insert(name.to_string(), value.to_string());
+                .property_reads
+                .named
+                .insert(name.to_ascii_lowercase(), read);
             parsed
         };
+        let with =
+            |name: &str, value: &str| with_read(name, PropertyRead::Value(value.to_string()));
         let props = "FSharpPropsShim";
         for (name, value, expected) in [
             (
@@ -918,14 +935,25 @@ mod tests {
             );
         }
         let mut parsed = on_sdk("10.0.401");
-        parsed.properties.remove("FSharpTargetsShim");
+        parsed.property_reads.named.remove("fsharptargetsshim");
         assert_eq!(compiler_of(&parsed, &[]), None, "no targets shim");
-        let mut parsed = on_sdk("10.0.401");
-        parsed.untrusted_properties.insert(
-            "fsharppropsshim".to_string(),
-            UntrustedCause::Unentered("a gate".to_string()),
+        let untrusted = PropertyRead::Untrusted(UntrustedCause::Unentered("a gate".to_string()));
+        assert_eq!(
+            compiler_of(&with_read("FSharpPropsShim", untrusted), &[]),
+            None,
+            "untrusted props shim"
         );
-        assert_eq!(compiler_of(&parsed, &[]), None, "untrusted props shim");
+        let refused = PropertyRead::UnsetInexact(InexactUnset::Refused);
+        assert_eq!(
+            compiler_of(&with_read("FSharpPropsShim", refused.clone()), &[]),
+            None,
+            "refused props shim"
+        );
+        assert_eq!(
+            compiler_of(&with_read("DotnetFscCompilerPath", refused), &[]),
+            None,
+            "a compiler path the project writes and the walk cannot compute"
+        );
         let mut parsed = on_sdk("10.0.401");
         parsed.resolved_sdk_root = Some("/opt/my-sdk".into());
         assert_eq!(compiler_of(&parsed, &[]), None, "not the canonical layout");

@@ -132,8 +132,7 @@ impl UnpinnedRoot {
 }
 
 /// Why a property's evaluated value may not be the real build's: the cause in
-/// force when the value was computed. See
-/// [`crate::ParsedProject::property_untrusted_cause`].
+/// force when the value was computed. See [`crate::PropertyRead`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UntrustedCause {
     /// The chain read `$(name)` while it was undefined, and a real build may
@@ -152,6 +151,9 @@ pub enum UntrustedCause {
     /// Content the walk could not enter (an import, an SDK, a construct),
     /// described.
     Unentered(String),
+    /// The project writes `name` with a value the walk could not compute, so
+    /// the real build holds a value where the walk holds none.
+    Refused { name: String },
 }
 
 impl UntrustedCause {

@@ -5,7 +5,7 @@
 //! The fold gate for cross-file resolution is an *intersection*:
 //! `Parse::shape_depends_on_language_version` (a file whose token stream
 //! straddles the F# 8 strict-indentation boundary) AND
-//! `ParsedProject::property_provenance_untrusted("LangVersion")` (we can't pin
+//! `ParsedProject::property("LangVersion")` being untrusted (we can't pin
 //! which version the real build uses). Either alone folds; only both together
 //! refuse. These tests pin every corner of that intersection against a *real*
 //! SDK:
@@ -251,12 +251,12 @@ fn ordinary_sdk_projects_have_trusted_langversion_provenance() {
             .project(&fsproj)
             .unwrap_or_else(|| panic!("{tag}: the project must evaluate"));
         let value = parsed.lang_version.as_deref();
-        let untrusted = parsed.property_provenance_untrusted("LangVersion");
+        let untrusted = parsed.property("LangVersion").untrusted_cause().is_some();
         if value != expected_value || untrusted != expected_untrusted {
             failures.push(format!(
                 "{tag}: LangVersion {value:?} (untrusted: {untrusted}, because {:?}), \
                  expected {expected_value:?} (untrusted: {expected_untrusted})",
-                parsed.property_untrusted_cause("LangVersion")
+                parsed.property("LangVersion").untrusted_cause()
             ));
         }
         std::fs::remove_dir_all(&root).ok();

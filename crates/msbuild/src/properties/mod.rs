@@ -327,12 +327,9 @@ impl PropertyMap {
         }
     }
 
-    /// Every name whose trust is not certain, lowercase, with that trust.
-    pub(crate) fn uncertain(&self) -> impl Iterator<Item = (&str, &Trust)> {
-        self.inner
-            .iter()
-            .filter(|(_, entry)| !entry.trust.is_certain())
-            .map(|(lower, entry)| (lower.as_str(), &entry.trust))
+    /// Every name the table holds an entry for, bound or not, lowercase.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.inner.keys().map(String::as_str)
     }
 
     /// Canonical keys of the bound names (the casing the value was first

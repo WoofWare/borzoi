@@ -43,7 +43,7 @@ fn top_level_sdk_element_degrades_instead_of_reading_sdk_names_as_undefined() {
         result.diagnostics
     );
     assert!(
-        result.property_provenance_untrusted("R"),
+        result.property("R").untrusted_cause().is_some(),
         "a read of an SDK-defined name must not be committed as exact"
     );
 
@@ -61,7 +61,7 @@ fn top_level_sdk_element_degrades_instead_of_reading_sdk_names_as_undefined() {
     );
     let result = parse_file(&trailing);
     assert!(
-        result.is_partial && result.property_provenance_untrusted("R"),
+        result.is_partial && result.property("R").untrusted_cause().is_some(),
         "the element form is position-independent, so a trailing <Sdk> \
          must still degrade the earlier read: {:?}",
         result.diagnostics

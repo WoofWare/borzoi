@@ -966,7 +966,7 @@ fn a_build_time_langversion_write_reports_no_refusal() {
     let (_, env, _) = environments().remove(0);
     let mut workspace = Workspace::with_env(env.clone());
     let parsed = workspace.project(&fsproj).unwrap();
-    assert!(!parsed.property_provenance_untrusted("LangVersion"));
+    assert!(!parsed.property("LangVersion").untrusted_cause().is_some());
     assert!(borzoi::sdk_language::lang_version_untrusted_cause(parsed).is_some());
     let diags = borzoi::fsproj_diagnostics::diagnostics_for(
         &text,
@@ -1153,7 +1153,7 @@ fn an_untrusted_langversion_reports_no_refusal() {
     let (_, env, _) = environments().remove(0);
     let mut workspace = Workspace::with_env(env.clone());
     let parsed = workspace.project(&fsproj).unwrap();
-    assert!(parsed.property_provenance_untrusted("LangVersion"));
+    assert!(parsed.property("LangVersion").untrusted_cause().is_some());
     assert_eq!(parsed.lang_version.as_deref(), Some("7.0"));
     assert!(
         workspace.lang_version_selection(&fsproj).refusal.is_some(),
