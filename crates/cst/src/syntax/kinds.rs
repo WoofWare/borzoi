@@ -207,6 +207,15 @@ pub enum SyntaxKind {
     /// so no dedicated token is needed for the from-end slice.)
     DOT_DOT_TOK,
 
+    /// `...` (FCS's `DOT_DOT_DOT`), lexed at every version. It heads a record
+    /// spread ([`SyntaxKind::RECORD_SPREAD`], [`SyntaxKind::RECORD_SPREAD_DECL`]).
+    /// Before the copy source of a `{ … with` record, and in front of an
+    /// expression anywhere else, FCS reports it and drops it, and so do we:
+    /// there it is a direct token of the `RECORD_EXPR` or `ANON_RECD_EXPR`, or
+    /// the head of an `ERROR` node that stands for FCS's
+    /// `ArbitraryAfterError`.
+    DOT_DOT_DOT_TOK,
+
     /// `,` punctuator separating tuple elements (`1, 2, 3`).
     COMMA_TOK,
 
@@ -999,7 +1008,8 @@ pub enum SyntaxKind {
     /// `SynTypeDefnSimpleRepr.Record` — a record type's right-hand side
     /// (`type T = { F : T1; mutable G : T2 }`, `SyntaxTree.fsi:1382`,
     /// `pars.fsy:2479`/`braceFieldDeclList`, phase 9.4). Shape
-    /// `[LBRACE_TOK, RECORD_FIELD_DECL (SEMI_TOK | <BlockSep ERROR>)* …, RBRACE_TOK]`.
+    /// `[LBRACE_TOK, RECORD_FIELD_DECL (SEMI_TOK | <BlockSep ERROR>)* …, RBRACE_TOK]`,
+    /// where a [`SyntaxKind::RECORD_SPREAD_DECL`] may stand for any field.
     /// The `{` is a real `LBrace`; the `}` is LexFilter-swallowed and recovered
     /// from the raw stream (like the CE `}` in 10.2). Record-level accessibility
     /// is elided.
@@ -1011,6 +1021,14 @@ pub enum SyntaxKind {
     /// `isStatic` (always `false` for a record field) / accessibility / xmlDoc
     /// are elided.
     RECORD_FIELD_DECL,
+
+    /// `SynFieldOrSpread.Spread(SynTypeSpread(spreadRange, ty, range))`: a
+    /// record type's spread `...T`, which copies `T`'s fields into the record
+    /// (`pars.fsy`'s `recdFieldDecl`, F# 11's `RecordSpreads`). Shape
+    /// `RECORD_SPREAD_DECL > [DOT_DOT_DOT_TOK, <typ>?]`, a sibling of the
+    /// [`SyntaxKind::RECORD_FIELD_DECL`]s of a [`SyntaxKind::RECORD_REPR`]. A
+    /// bare `...` has no type (FCS's `SynType.FromParseError`).
+    RECORD_SPREAD_DECL,
 
     /// `SynTypeDefnSimpleRepr.Union` — a discriminated-union right-hand side
     /// (`type T = A | B of int`, `SyntaxTree.fsi:1376`, `pars.fsy:2461`/
@@ -2272,12 +2290,15 @@ pub enum SyntaxKind {
     /// `equalsRange`/`blockSeparator`/range trivia is elided by the normaliser.
     ///
     /// Shape: `RECORD_EXPR > [LBRACE_TOK, (<copy-src-expr> WITH_TOK)?,
-    /// RECORD_FIELD (sep RECORD_FIELD)*, RBRACE_TOK]` with trivia interleaved
+    /// binding (sep binding)*, RBRACE_TOK]`, each binding a `RECORD_FIELD` or a
+    /// [`SyntaxKind::RECORD_SPREAD`], with trivia interleaved
     /// (`sep` = `SEMI_TOK` / a zero-width `ERROR` for `Virtual::BlockSep`); the
     /// `}` is swallowed and recovered like a computation expression's, and a
     /// copy-update's trailing `Virtual::End` is consumed as a zero-width
     /// `ERROR`. The optional leading copy source is the sole direct `Expr`
-    /// child of `RECORD_EXPR` (field values are nested inside `RECORD_FIELD`).
+    /// child of `RECORD_EXPR` (field values and spread sources are nested in
+    /// their bindings); FS3903's `{ ...src with … }` leaves its `...` as a
+    /// [`SyntaxKind::DOT_DOT_DOT_TOK`] before it.
     RECORD_EXPR,
 
     /// `SynExpr.AnonRecd` — an anonymous-record *expression* `{| F = e; … |}`
@@ -2288,7 +2309,7 @@ pub enum SyntaxKind {
     /// the same `recdExprCore` (`pars.fsy:5917`).
     ///
     /// Shape: `ANON_RECD_EXPR > [LBRACE_BAR_TOK, (<copy-src-expr> WITH_TOK)?,
-    /// RECORD_FIELD (sep RECORD_FIELD)*, BAR_RBRACE_TOK]` with trivia
+    /// binding (sep binding)*, BAR_RBRACE_TOK]` (as `RECORD_EXPR`'s) with trivia
     /// interleaved (`sep` = `SEMI_TOK` / a zero-width `ERROR` for
     /// `Virtual::BlockSep`). Unlike `RECORD_EXPR`'s `}`, the `|}`
     /// ([`SyntaxKind::BAR_RBRACE_TOK`]) is a *real* filtered token (not
@@ -2326,6 +2347,16 @@ pub enum SyntaxKind {
     /// is FCS's `RecordFieldName` (`SynLongIdent * bool`); the trailing-dot bool
     /// and the equals/separator ranges are elided.
     RECORD_FIELD,
+
+    /// `SynExprSpread(spreadRange, expr, range)`: a record or anonymous-record
+    /// expression's spread `...e`, which copies `e`'s fields
+    /// (`SynExprRecordFieldOrSpread.Spread`, `pars.fsy`'s `recdBinding`, F#
+    /// 11's `RecordSpreads`). Shape `RECORD_SPREAD > [DOT_DOT_DOT_TOK,
+    /// <expr>?]`, a sibling of the [`SyntaxKind::RECORD_FIELD`]s of a
+    /// [`SyntaxKind::RECORD_EXPR`] or [`SyntaxKind::ANON_RECD_EXPR`]; the
+    /// expression is FCS's `declExprBlock`. A bare `...` has none (FCS's
+    /// `ArbitraryAfterError`).
+    RECORD_SPREAD,
 
     /// `SynExpr.YieldOrReturn(flags, expr, range, trivia)` — a `yield e`
     /// or `return e` (`SyntaxTree.fsi:899`, grammar `pars.fsy:4488`).

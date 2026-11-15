@@ -31251,17 +31251,23 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/SeqExpressionTailCalls/SeqExpress
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SeqExpressionTailCalls/SeqExpressionTailCalls02.fs:6:16-6:17	x Parameter def agree-none
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SeqExpressionTailCalls/SeqExpressionTailCalls02.fs:6:9-6:15	rwalk2 Value { is_function: true } def agree-none
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs	compared fcs-clean
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs:1:5-1:7	r1 Value { is_function: false } def declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs:3:5-3:7	r2 Value { is_function: false } def declined ParseErrors fcs-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs:1:5-1:7	r1 Value { is_function: false } def agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs:3:5-3:7	r2 Value { is_function: false } def agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs:3:51-3:53	r1 Value { is_function: false } use agree-none
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs	compared fcs-clean
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:2:6-2:8	R1 Type def declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:4:5-4:7	r1 Value { is_function: false } def declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:5:5-5:8	r1' Value { is_function: false } def declined ParseErrors fcs-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:2:6-2:8	R1 Type def agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:4:5-4:7	r1 Value { is_function: false } def agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:5:23-5:25	r1 Value { is_function: false } use agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:5:5-5:8	r1' Value { is_function: false } def agree-none
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs	compared fcs-clean
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:2:6-2:8	R1 Type def declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:4:6-4:8	R2 Type def declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:6:6-6:8	R3 Type def declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:8:6-8:8	R4 Type def declined ParseErrors fcs-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:2:6-2:8	R1 Type def agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:4:6-4:8	R2 Type def agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:6:16-6:18	R1 Type use agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:6:23-6:25	R2 Type use agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:6:6-6:8	R3 Type def agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:8:16-8:18	R2 Type use agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:8:23-8:25	R1 Type use agree-none
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:8:6-8:8	R4 Type def agree-none
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch04.fs	compared fcs-clean
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch04.fs:4:12-4:18	funcC2 Value { is_function: true } def agree-none
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch04.fs:4:20-4:21	n Parameter def agree-none

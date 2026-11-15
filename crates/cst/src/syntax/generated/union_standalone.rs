@@ -183,6 +183,25 @@ impl AstNode for RecordFieldDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordSpreadDecl(pub(crate) SyntaxNode);
+
+impl AstNode for RecordSpreadDecl {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(kind, SyntaxKind::RECORD_SPREAD_DECL)
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnionCase(pub(crate) SyntaxNode);
 
 impl AstNode for UnionCase {
@@ -492,6 +511,25 @@ pub struct RecordField(pub(crate) SyntaxNode);
 impl AstNode for RecordField {
     fn can_cast(kind: SyntaxKind) -> bool {
         matches!(kind, SyntaxKind::RECORD_FIELD)
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(node.kind()) {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordSpread(pub(crate) SyntaxNode);
+
+impl AstNode for RecordSpread {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(kind, SyntaxKind::RECORD_SPREAD)
     }
     fn cast(node: SyntaxNode) -> Option<Self> {
         if Self::can_cast(node.kind()) {

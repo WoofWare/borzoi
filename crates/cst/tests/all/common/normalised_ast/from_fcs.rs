@@ -1201,13 +1201,13 @@ fn fcs_simple_repr(simple: &Value) -> NormalisedTypeRepr {
         "Record" => {
             // `Record(accessibility, recordFieldsAndSpreads: SynFieldOrSpread
             // list, range)` — field 0 is the repr-level access
-            // (`type R = private { … }`), field 1 the field list.
+            // (`type R = private { … }`), field 1 the fields and spreads.
             let rf = fields(simple);
             let recd_fields = rf[1]
                 .as_array()
                 .expect("SynTypeDefnSimpleRepr.Record field 1 must be array")
                 .iter()
-                .map(|item| fcs_field(fcs_record_decl_field(item)))
+                .map(fcs_record_decl_item)
                 .collect();
             NormalisedTypeRepr::Record {
                 access: fcs_access(&rf[0]),
@@ -1684,31 +1684,47 @@ fn fcs_syn_ident_name(syn_ident: &Value) -> String {
         .to_string()
 }
 
+/// The `SynField` of one item of a record type's field list
+/// (`SynFieldOrSpread.Field(field)`), or `None` for a type spread
+/// (`SynFieldOrSpread.Spread`, `{ ...T; … }`).
+pub(in crate::common) fn fcs_record_decl_field(item: &Value) -> Option<&Value> {
+    match case_name(item) {
+        "Field" => Some(&fields(item)[0]),
+        "Spread" => None,
+        other => panic!("unexpected SynFieldOrSpread case {other:?}"),
+    }
+}
+
+/// One item of a record type's field list: `SynFieldOrSpread.Field(field)`,
+/// or `.Spread(SynTypeSpread(spreadRange, ty, range))`.
+fn fcs_record_decl_item(item: &Value) -> NormalisedRecordDeclItem {
+    match fcs_record_decl_field(item) {
+        Some(field) => NormalisedRecordDeclItem::Field(fcs_field(field)),
+        None => NormalisedRecordDeclItem::Spread(fcs_type(&fields(&fields(item)[0])[1])),
+    }
+}
+
+/// The spread of a `SynExprSpread(spreadRange, expr, range)`: its expression.
+fn fcs_spread_item(spread: &Value) -> NormalisedRecordItem {
+    NormalisedRecordItem::Spread(Box::new(fcs_expr(&fields(spread)[1])))
+}
+
+/// One binding of a record expression:
+/// `SynExprRecordFieldOrSpread.Field(field, blockSeparator)` or
+/// `.Spread(spread, blockSeparator)`.
+fn fcs_record_expr_item(item: &Value) -> NormalisedRecordItem {
+    match case_name(item) {
+        "Field" => NormalisedRecordItem::Field(fcs_record_field(&fields(item)[0])),
+        "Spread" => fcs_spread_item(&fields(item)[0]),
+        other => panic!("unexpected SynExprRecordFieldOrSpread case {other:?}"),
+    }
+}
+
 /// Project one `SynField(attributes, isStatic, idOpt, fieldType, isMutable,
 /// xmlDoc, accessibility, range, trivia)`. Field 1 is `isStatic` (significant
 /// only for a `val` field, 9.9b — always `false` for record/union fields),
 /// field 2 `idOpt` (`Ident option`), field 3 the `fieldType`, field 4
 /// `isMutable`.
-/// The `SynField` of one item of a record type's field list
-/// (`SynFieldOrSpread.Field(field)`). A type spread (`{ ...T; … }`, the
-/// `RecordSpreads` syntax) is not modelled.
-pub(in crate::common) fn fcs_record_decl_field(item: &Value) -> &Value {
-    match case_name(item) {
-        "Field" => &fields(item)[0],
-        other => panic!("a record type's SynFieldOrSpread.{other} is not modelled"),
-    }
-}
-
-/// The `SynExprRecordField` of one item of a record expression's field list
-/// (`SynExprRecordFieldOrSpread.Field(field, blockSeparator)`). A spread
-/// (`{ ...r; … }`) is not modelled.
-fn fcs_record_expr_field(item: &Value) -> &Value {
-    match case_name(item) {
-        "Field" => &fields(item)[0],
-        other => panic!("a record expression's SynExprRecordFieldOrSpread.{other} is not modelled"),
-    }
-}
-
 fn fcs_field(v: &Value) -> NormalisedField {
     let f = fields(v);
     let is_static = f[1]
@@ -3010,7 +3026,7 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
                 .as_array()
                 .expect("SynExpr.Record recordFields must be a JSON array")
                 .iter()
-                .map(|item| fcs_record_field(fcs_record_expr_field(item)))
+                .map(fcs_record_expr_item)
                 .collect();
             NormalisedExpr::Record {
                 inherit_info,
@@ -3026,7 +3042,7 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
             // `SynExprAnonRecordFieldOrSpread` list, whose `Field` case wraps a
             // `SynExprAnonRecordField(fieldName: SynLongIdent, equalsRange,
             // expr, range)`. The field value is mandatory (no Option). A spread
-            // (`{| ...r |}`) is not modelled.
+            // `{| ...r |}` is `.Spread(SynExprSpread, blockSeparator)`.
             let f = fields(v);
             let is_struct = f[0]
                 .as_bool()
@@ -3049,18 +3065,16 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
                 .as_array()
                 .expect("SynExpr.AnonRecd recordFields must be a JSON array")
                 .iter()
-                .map(|item| {
-                    let field = match case_name(item) {
-                        "Field" => fields(&fields(item)[0]),
-                        other => panic!(
-                            "an anonymous record's SynExprAnonRecordFieldOrSpread.{other} is \
-                             not modelled"
-                        ),
-                    };
-                    NormalisedRecordField {
-                        name: fcs_syn_long_ident_segments(&field[0]),
-                        value: Some(Box::new(fcs_expr(&field[2]))),
+                .map(|item| match case_name(item) {
+                    "Field" => {
+                        let field = fields(&fields(item)[0]);
+                        NormalisedRecordItem::Field(NormalisedRecordField {
+                            name: fcs_syn_long_ident_segments(&field[0]),
+                            value: Some(Box::new(fcs_expr(&field[2]))),
+                        })
                     }
+                    "Spread" => fcs_spread_item(&fields(item)[0]),
+                    other => panic!("unexpected SynExprAnonRecordFieldOrSpread case {other:?}"),
                 })
                 .collect();
             NormalisedExpr::AnonRecd {

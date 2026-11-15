@@ -490,12 +490,13 @@ pub enum NormalisedTypeRepr {
     /// elided, so this variant carries no payload.
     None,
     Abbrev(NormalisedType),
-    /// `SynTypeDefnSimpleRepr.Record(accessibility, recordFields, range)` (phase
-    /// 9.4). `access` is the repr-level modifier `type R = private { … }`
-    /// (FCS field 0); `fields` the record fields. See [`NormalisedAccess`].
+    /// `SynTypeDefnSimpleRepr.Record(accessibility, recordFieldsAndSpreads,
+    /// range)` (phase 9.4). `access` is the repr-level modifier `type R =
+    /// private { … }` (FCS field 0); `fields` the record's fields and spreads in
+    /// source order. See [`NormalisedAccess`].
     Record {
         access: Option<NormalisedAccess>,
-        fields: Vec<NormalisedField>,
+        fields: Vec<NormalisedRecordDeclItem>,
     },
     /// `SynTypeDefnSimpleRepr.Union(accessibility, unionCases, range)` (phase
     /// 9.5). `access` is the repr-level modifier `type U = private | A`
@@ -776,6 +777,15 @@ pub struct NormalisedField {
     /// `SynField.isStatic` — `true` only for a `static val` field (phase 9.9b);
     /// always `false` for a record (9.4) or union-case (9.5) field.
     pub is_static: bool,
+}
+
+/// One `SynFieldOrSpread` of a [`NormalisedTypeRepr::Record`]: a field, or a
+/// spread `...T` (F# 11's `RecordSpreads`), whose `SynTypeSpread` keeps only
+/// its type (a bare `...` is FCS's `SynType.FromParseError`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NormalisedRecordDeclItem {
+    Field(NormalisedField),
+    Spread(NormalisedType),
 }
 
 /// `SynOpenDeclTarget` — `open Foo.Bar` (`ModuleOrNamespace`, a dotted path)
@@ -1518,7 +1528,7 @@ pub enum NormalisedExpr {
     Record {
         inherit_info: Option<(NormalisedType, Box<NormalisedExpr>)>,
         copy: Option<Box<NormalisedExpr>>,
-        fields: Vec<NormalisedRecordField>,
+        fields: Vec<NormalisedRecordItem>,
     },
     /// `SynExpr.AnonRecd(isStruct, copyInfo, recordFields, range, trivia)`
     /// (`SyntaxTree.fsi:620`) — an anonymous-record expression `{| F = e; … |}`.
@@ -1531,7 +1541,7 @@ pub enum NormalisedExpr {
     AnonRecd {
         is_struct: bool,
         copy: Option<Box<NormalisedExpr>>,
-        fields: Vec<NormalisedRecordField>,
+        fields: Vec<NormalisedRecordItem>,
     },
     /// `SynExpr.ArrayOrList(isArray, exprs: SynExpr list, range)`
     /// (`SyntaxTree.fsi:628`) — an *empty* list `[]` (`is_array=false`) or
@@ -1803,6 +1813,18 @@ pub struct NormalisedMatchClause {
 pub struct NormalisedRecordField {
     pub name: Vec<String>,
     pub value: Option<Box<NormalisedExpr>>,
+}
+
+/// One binding of a [`NormalisedExpr::Record`] or [`NormalisedExpr::AnonRecd`]:
+/// FCS's `SynExprRecordFieldOrSpread` (`SynExprAnonRecordFieldOrSpread`), a
+/// field, or a spread `...e` (F# 11's `RecordSpreads`), whose
+/// `SynExprSpread` keeps only its expression (a bare `...` is FCS's
+/// `ArbitraryAfterError`, [`NormalisedExpr::Error`]). The block separators are
+/// elided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NormalisedRecordItem {
+    Field(NormalisedRecordField),
+    Spread(Box<NormalisedExpr>),
 }
 
 /// One member of an interpolated string body: FCS's

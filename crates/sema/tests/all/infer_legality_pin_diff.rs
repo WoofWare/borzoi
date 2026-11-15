@@ -88,6 +88,10 @@ const FIXTURES: &[(LanguageFeature, &str)] = &[
         LanguageFeature::FromEndSlicing,
         "module M\nlet v : int =\n    let xs = [| 1; 2 |]\n    xs.[^1]\n",
     ),
+    (
+        LanguageFeature::RecordSpreads,
+        "module M\ntype T = { A: int }\ntype R = { ...T; B: int }\nlet v : int =\n    let t = { A = 1 }\n    let r = { ...t; B = 2 }\n    1\n",
+    ),
 ];
 
 /// `Legality` features FCS consults while parsing that the parser does not
@@ -382,6 +386,8 @@ fn check_time_gates_report_what_fcs_checks_report() {
     // the gate reports FS3534 so that the node lies under a diagnostic naming
     // its feature (`docs/fcs-divergences.md`); such a fixture is graded where
     // FCS reaches it.
+    // Record spreads are graded from the current oracle's support floor: below
+    // it the legacy oracle checks, which predates them.
     const CHECKED: &[(&str, LanguageVersion)] = &[
         (
             "module M\nlet a = $\"x{1}y\"\nlet b = $\"\"\"z\"\"\"\nlet c = $@\"w{2}\"\nlet d = <@ $\"q{3}\" @>\nlet e = $\"{1}\".Length\n",
@@ -394,6 +400,10 @@ fn check_time_gates_report_what_fcs_checks_report() {
         (
             "module M\nlet xs = [| 1; 2; 3 |]\nlet b = xs[^1]\nlet c = xs[..^1]\nlet d = xs[0..^1]\n",
             LanguageVersion::V6_0,
+        ),
+        (
+            "module M\ntype T = { A: int; B: string }\ntype R = { ...T; C: int }\ntype S<'a> = { X: 'a; ...R }\nlet t = { A = 1; B = \"b\" }\nlet r = { ...t; C = 2 }\nlet s = { X = 0; ...r }\nlet a = {| ...r; D = 3 |}\nlet b = struct {| ...t |}\nlet c = {| ...a; ...t; E = 4 |}\n",
+            LanguageVersion::V10_0,
         ),
     ];
     const VERSIONS: [LanguageVersion; 7] = [

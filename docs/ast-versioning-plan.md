@@ -6,7 +6,8 @@
 > PR 4 (the union behind `unstable-union`, #13, #670), PR 5 (astgen owns every
 > node), PR 6 (a deep facade per language version, `Parse::view`) and PR 7
 > (the freeze: `v4_6` … `v10` published) have landed, and so have PR 8's first
-> two steps (retiring deleted features, D12; the corpus pin and the table).
+> two steps (retiring deleted features, D12; the corpus pin and the table),
+> its oracle bump (step 3a) and record spreads (step 4a).
 > Earlier stages that
 > still stand: `LanguageVersion` as a parse input (#592/#597/#606) and the
 > LSP's `<LangVersion>` wiring (#613). The goal:
@@ -623,10 +624,10 @@ row is live or `Unmodelled` today: `INTERP_STRING_EXPR` (`StringInterpolation`,
 facade leaves out the kinds introduced after its version (PR 6).
 
 **What each parse-relevant feature does** (PR 3). The `Unmodelled` rows are
-`checker-only`, apart from two that bring syntax borzoi does not parse yet,
-`unparsed syntax`: `RecordSpreads` (11.0, record spreads) and
-`ExtensionConstraintSolutions` (preview, tuple-type extensions). FCS gates
-both in the checker only; PR 8 step 4 gives each a kind and a parse-time gate.
+`checker-only`, apart from one that brings syntax borzoi does not parse yet,
+`unparsed syntax`: `ExtensionConstraintSolutions` (preview, tuple-type
+extensions). FCS gates it in the checker only; PR 8 step 4b gives it a kind
+and a parse-time gate, as step 4a gave `RecordSpreads` (11.0).
 
 | Feature | Version | FCS | borzoi | Class |
 |---|---|---|---|---|
@@ -638,6 +639,7 @@ both in the checker only; PR 8 step 4 gives each a kind and a parse-time gate.
 | `ParsedHashDirectiveArgumentNonQuotes` | 9.0 | FS3350 at an unquoted `#nowarn` argument, FS0203 at an `FS`-prefixed one, severity of FS0203 | the same | `Recovery` |
 | `BetterAnonymousRecordParsing` | 10.0 | FS3350 as the lex-filter splits `>|}` / `@>|}`, at its lexbuf lexeme | the same (a model of the lexbuf lexeme) | `Legality` |
 | `ScopedNowarn` | 10.0 | FS3350 at a top-level `#warnon`, FS0236 in a nested module, severity of FS0203 | the same | `Recovery` |
+| `RecordSpreads` | 11.0 | FS3350 at each spread `...e` / `...T`, in the checker | the same, while parsing | `Legality` |
 | `FromEndSlicing` | preview | FS3303 at a `^` index argument, in the checker (elsewhere FS3534 at every version) | the same, while parsing, and FS3534 elsewhere | `Legality` |
 
 ## The central invariant (and how it is enforced)
@@ -771,6 +773,15 @@ diagnostic for its feature" rather than "under a `Legality` one".
   every request below the floor (D12), the FCS projection read in the new
   AST shapes, and the ungated lexing and lex-filtering (`...`, `#:`, `=$"`,
   the `|}` and closing-`>` continuators, the reworded FS0058).
+- **PR 8, step 4a — record spreads**: `RECORD_SPREAD` (`{ ...e; F = x }`,
+  `{| ...e |}`) and `RECORD_SPREAD_DECL` (`type R = { ...T; F: int }`), the
+  `RecordSpreads` row live with a parse-phase `Legality` gate held to FCS's
+  check, and FCS's error forms (a spread with no source, before `with`, and
+  `...e` anywhere else as an `ERROR` node standing for its
+  `ArbitraryAfterError`). The union reads a record's spreads as
+  `spreads()`, each with its index among the bindings: an ordered item enum
+  over `RecordField` would be a new enum in every frozen facade, which
+  astgen blocks as it does a new variant.
 
 ## PR sequence
 
@@ -807,8 +818,8 @@ diagnostic for its feature" rather than "under a `Legality` one".
    3. The FCS oracle bump, with the legacy oracle split out (D12), the
       projection rework and the ungated lexer and parser changes. *Landed*
       (3a). The recovery ports follow (3b).
-   4. New syntax: record spreads and tuple-type extensions, each a kind and a
-      gate.
+   4. New syntax, each a kind and a gate: record spreads (4a, *landed*) and
+      tuple-type extensions (4b).
    5. `v11` published ([Publishing a facade](#publishing-a-facade)).
    6. SDK 11 the devshell default, at GA.
 
@@ -827,10 +838,10 @@ Everything in PR 8 above. Beyond them:
   features that is the FS3350 text the differentials check; for a
   checker-only row it is checked only against that reading of FSComp.txt
   until the row is gated.
-- **The new syntax FCS accepts and we do not parse yet** (step 4): record
-  spreads and tuple-type extension heads. The corpus files that use them are
+- **The new syntax FCS accepts and we do not parse yet** (step 4b):
+  tuple-type extension heads. The corpus files that use them are
   `fcs-normaliser-unmodelled` in `parser_corpus_diff` (FCS accepts them, and
-  the FCS projection does not model a spread or a tuple-type head), and
+  the FCS projection does not model a tuple-type head), and
   `diff_tuple_type_extension_head_is_unparsed` pins the head.
 
 ## Open questions

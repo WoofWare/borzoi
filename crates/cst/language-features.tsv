@@ -138,7 +138,7 @@ ImprovedImpliedArgumentNamesPartTwo	11.0	-	check	-	Unmodelled(checker-only)	-	-	
 ErrorOnMissingSignatureAttribute	11.0	-	check	-	Unmodelled(checker-only)	-	-	error (rather than warning) when an enforced compiler-semantic attribute is present in the .fs but missing from the .fsi	
 DirectDelegateConstruction	11.0	-	check	-	Unmodelled(checker-only)	-	-	construct delegates that point directly at the target method, avoiding an intermediate closure	
 AccessProtectedBaseFieldFromClosure	11.0	-	check	-	Unmodelled(checker-only)	-	-	Access a protected base-class field from a closure inside a member	
-RecordSpreads	11.0	-	check	-	Unmodelled(unparsed syntax)	-	-	record type and expression spreads	New syntax at every version: `{ ...r; X = 1 }`, `{| ...r |}` and `type R = { ...T; F: int }`, behind the new `...` token. FCS reports FS3350 from the checker (Checking/Spreads.fs, CheckDeclarations.fs, CheckExpressions.fs). borzoi does not parse it yet; PR 8 step 4 of docs/ast-versioning-plan.md adds its kinds and a parse-time gate.
+RecordSpreads	11.0	-	check	-	Kind(RECORD_SPREAD)+Kind(RECORD_SPREAD_DECL)	live	-	record type and expression spreads	New syntax at every version: `{ ...r; X = 1 }`, `{| ...r |}` and `type R = { ...T; F: int }`, behind the `...` token. FCS checks it only in the type checker (Checking/Spreads.fs, CheckDeclarations.fs), at each spread; borzoi reports the same FS3350 while parsing.
 TypeArgumentDependencyOrdering	11.0	-	check	-	Unmodelled(checker-only)	-	-	ordering explicit type arguments by their constraint dependencies	
 OptimizeClosureIfNotInlined	11.0	-	check	-	Unmodelled(checker-only)	-	-	optimize a curried closure argument when its inlining fails	
 RuntimeAsync	preview	-	check	-	Unmodelled(checker-only)	-	-	runtime async	

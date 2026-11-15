@@ -14,11 +14,11 @@ use borzoi_cst::syntax::{
     MatchLambdaExpr, Measure, MeasureLitExpr, MeasureLitPat, MeasurePowerType, MemberDefn,
     MemberLeading, MemberSig, MemberSigLeading, ModuleDecl, ModuleOrNamespace,
     ModuleOrNamespaceKind, NamedPat, NewExpr, ObjExpr, OpenDecl, ParenExpr, ParenPat, Pat,
-    RationalConst, RecordField, RecordFieldDecl, SigDecl, SigFile, StaticOptCondition,
-    StaticOptimizationExpr, SyntaxKind, SyntaxToken, TraitCallExpr, TupleExpr, TuplePat,
-    TupleSegment, TupleType, TyparConstraint, TyparConstraintKind, TyparDecl, TyparDeclsForm, Type,
-    TypeAppExpr, TypeDefn, TypeDefnRepr, TypeTestExpr, TypedExpr, TypedPat, UnionCase,
-    UnionCaseField, UpcastExpr, ValField, VarType,
+    RationalConst, RecordField, RecordFieldDecl, RecordSpread, SigDecl, SigFile,
+    StaticOptCondition, StaticOptimizationExpr, SyntaxKind, SyntaxToken, TraitCallExpr, TupleExpr,
+    TuplePat, TupleSegment, TupleType, TyparConstraint, TyparConstraintKind, TyparDecl,
+    TyparDeclsForm, Type, TypeAppExpr, TypeDefn, TypeDefnRepr, TypeTestExpr, TypedExpr, TypedPat,
+    UnionCase, UnionCaseField, UpcastExpr, ValField, VarType,
 };
 
 use super::decode::*;
@@ -1129,7 +1129,16 @@ fn normalise_type_repr(r: &TypeDefnRepr) -> NormalisedTypeRepr {
         )),
         TypeDefnRepr::Record(rec) => NormalisedTypeRepr::Record {
             access: cst_access(rec.syntax()),
-            fields: rec.fields().map(|f| normalise_field(&f)).collect(),
+            fields: interleave(rec.fields(), rec.spreads())
+                .into_iter()
+                .map(|item| match item {
+                    RecordBinding::Field(f) => NormalisedRecordDeclItem::Field(normalise_field(&f)),
+                    RecordBinding::Spread(s) => NormalisedRecordDeclItem::Spread(
+                        s.ty()
+                            .map_or(NormalisedType::FromParseError, |t| normalise_type(&t)),
+                    ),
+                })
+                .collect(),
         },
         TypeDefnRepr::Union(u) => NormalisedTypeRepr::Union {
             access: u.access().map(|t| cst_access_from_token(&t)),
@@ -2155,6 +2164,56 @@ fn normalise_long_ident_pat(p: &LongIdentPat, counter: &mut u32) -> NormalisedPa
 /// boundary and [`normalise_fun`] for how it's consumed). It threads
 /// through every sub-expression in source order so nested and sibling
 /// lambdas claim numbers in FCS's parse-reduction order.
+/// Whether `node` is the `ERROR` node our parser leaves for a `...e` outside a
+/// record's bindings (`Parser::parse_misplaced_spread`), which FCS reports
+/// (FS3902) and drops for an `ArbitraryAfterError`.
+fn is_misplaced_spread(node: &borzoi_cst::syntax::SyntaxNode) -> bool {
+    node.kind() == SyntaxKind::ERROR
+        && node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|t| !t.kind().is_trivia())
+            .is_some_and(|t| t.kind() == SyntaxKind::DOT_DOT_DOT_TOK)
+}
+
+/// Whether one of `node`'s children is a misplaced spread
+/// ([`is_misplaced_spread`]): an expression slot FCS fills with an
+/// `ArbitraryAfterError` that no accessor reads.
+fn holds_misplaced_spread(node: &borzoi_cst::syntax::SyntaxNode) -> bool {
+    node.children().any(|c| is_misplaced_spread(&c))
+}
+
+/// `node`'s `Expr` children in source order (a tuple's elements, a sequence's
+/// statements), each misplaced spread among them standing for FCS's
+/// `ArbitraryAfterError`.
+fn exprs_with_misplaced_spreads(
+    node: &borzoi_cst::syntax::SyntaxNode,
+    counter: &mut u32,
+) -> Vec<NormalisedExpr> {
+    node.children()
+        .filter_map(|c| match Expr::cast(c.clone()) {
+            Some(e) => Some(normalise_expr(&e, counter)),
+            None => is_misplaced_spread(&c).then_some(NormalisedExpr::Error),
+        })
+        .collect()
+}
+
+/// The expression in a slot of `parent`, or FCS's `ArbitraryAfterError` where
+/// a misplaced spread fills it ([`is_misplaced_spread`]); `missing` is the
+/// panic message for a well-formed slot with neither.
+fn expr_or_misplaced_spread(
+    e: Option<Expr>,
+    parent: &borzoi_cst::syntax::SyntaxNode,
+    counter: &mut u32,
+    missing: &str,
+) -> NormalisedExpr {
+    match e {
+        Some(e) => normalise_expr(&e, counter),
+        None if holds_misplaced_spread(parent) => NormalisedExpr::Error,
+        None => panic!("{missing}"),
+    }
+}
+
 fn normalise_expr(e: &Expr, counter: &mut u32) -> NormalisedExpr {
     match e {
         Expr::Const(c) => NormalisedExpr::Const(normalise_const(c)),
@@ -2247,11 +2306,13 @@ fn normalise_expr(e: &Expr, counter: &mut u32) -> NormalisedExpr {
         Expr::Cons(c) => normalise_cons(c, counter),
         Expr::JoinIn(j) => normalise_join_in(j, counter),
         Expr::IfThenElse(i) => normalise_if_then_else(i, counter),
-        Expr::Sequential(s) => NormalisedExpr::Sequential(
+        Expr::Sequential(s) => NormalisedExpr::Sequential(if holds_misplaced_spread(s.syntax()) {
+            exprs_with_misplaced_spreads(s.syntax(), counter)
+        } else {
             s.statements()
                 .map(|e| normalise_expr(&e, counter))
-                .collect(),
-        ),
+                .collect()
+        }),
         Expr::InterpString(s) => normalise_interp_string(s, counter),
         Expr::Fun(f) => normalise_fun(f, counter),
         // Inline IL `(# … #)` (`SynExpr.LibraryOnlyILAssembly`) is not modelled
@@ -2299,7 +2360,7 @@ fn normalise_expr(e: &Expr, counter: &mut u32) -> NormalisedExpr {
             let copy = r
                 .copy_source()
                 .map(|src| Box::new(normalise_expr(&src, counter)));
-            let fields = normalise_record_fields(r.fields(), counter);
+            let fields = normalise_record_fields(r.fields(), r.spreads(), counter);
             NormalisedExpr::Record {
                 inherit_info,
                 copy,
@@ -2313,7 +2374,7 @@ fn normalise_expr(e: &Expr, counter: &mut u32) -> NormalisedExpr {
             let copy = r
                 .copy_source()
                 .map(|src| Box::new(normalise_expr(&src, counter)));
-            let fields = normalise_record_fields(r.fields(), counter);
+            let fields = normalise_record_fields(r.fields(), r.spreads(), counter);
             NormalisedExpr::AnonRecd {
                 is_struct: r.is_struct(),
                 copy,
@@ -2329,6 +2390,10 @@ fn normalise_expr(e: &Expr, counter: &mut u32) -> NormalisedExpr {
                 Some(inner) => NormalisedExpr::ArrayOrListComputed {
                     is_array: a.is_array(),
                     inner: Box::new(normalise_expr(&inner, counter)),
+                },
+                None if holds_misplaced_spread(a.syntax()) => NormalisedExpr::ArrayOrListComputed {
+                    is_array: a.is_array(),
+                    inner: Box::new(NormalisedExpr::Error),
                 },
                 None => NormalisedExpr::ArrayOrList {
                     is_array: a.is_array(),
@@ -2954,12 +3019,15 @@ fn normalise_if_then_else(i: &IfThenElseExpr, counter: &mut u32) -> NormalisedEx
 /// node always carries one `Expr` child and one `Type` child — both must
 /// be present on a well-formed tree.
 fn normalise_typed(t: &TypedExpr, counter: &mut u32) -> NormalisedExpr {
-    let expr = t
-        .expr()
-        .expect("TYPED_EXPR must contain an inner expression child");
+    let expr = expr_or_misplaced_spread(
+        t.expr(),
+        t.syntax(),
+        counter,
+        "TYPED_EXPR must contain an inner expression child",
+    );
     let ty = t.ty();
     NormalisedExpr::Typed {
-        expr: Box::new(normalise_expr(&expr, counter)),
+        expr: Box::new(expr),
         ty: type_slot(ty),
     }
 }
@@ -3462,7 +3530,7 @@ fn normalise_type_app(t: &TypeAppExpr, counter: &mut u32) -> NormalisedExpr {
 /// rather than carrying a separate flag.
 fn normalise_app(a: &AppExpr, counter: &mut u32) -> NormalisedExpr {
     let func = a.func().expect("APP_EXPR must have a func child");
-    let arg = a.arg().expect("APP_EXPR must have an arg child");
+    let arg = a.arg();
     // Struct fields evaluate in source order, so `func` consumes the shared
     // lambda counter before `arg` — matching FCS's left-to-right reduction.
     NormalisedExpr::App {
@@ -3470,7 +3538,12 @@ fn normalise_app(a: &AppExpr, counter: &mut u32) -> NormalisedExpr {
         is_infix: a.is_infix(),
         bracket_indexer: a.is_bracket_indexer(),
         func: Box::new(normalise_expr(&func, counter)),
-        arg: Box::new(normalise_expr(&arg, counter)),
+        arg: Box::new(expr_or_misplaced_spread(
+            arg,
+            a.syntax(),
+            counter,
+            "APP_EXPR must have an arg child",
+        )),
     }
 }
 
@@ -3645,26 +3718,60 @@ fn normalise_assign(a: &AssignExpr, counter: &mut u32) -> NormalisedExpr {
     }
 }
 
-/// Project a `RECORD_FIELD` list (shared by `SynExpr.Record` and
-/// `SynExpr.AnonRecd`): each field's `SynLongIdent` name segments (backticks
-/// stripped) and value expression, in source order so the shared `_argN`
-/// lambda counter advances left-to-right.
+/// A record's field or spread, back in source order ([`interleave`]).
+enum RecordBinding<F, S> {
+    Field(F),
+    Spread(S),
+}
+
+/// A record's `fields` and its `spreads`, each spread with its index among
+/// the two (`RecordExpr::spreads`, `RecordRepr::spreads`), interleaved back
+/// into source order.
+fn interleave<F, S>(
+    mut fields: impl Iterator<Item = F>,
+    spreads: impl Iterator<Item = (usize, S)>,
+) -> Vec<RecordBinding<F, S>> {
+    let mut out = Vec::new();
+    for (index, spread) in spreads {
+        while out.len() < index {
+            let Some(field) = fields.next() else { break };
+            out.push(RecordBinding::Field(field));
+        }
+        out.push(RecordBinding::Spread(spread));
+    }
+    out.extend(fields.map(RecordBinding::Field));
+    out
+}
+
+/// Project the bindings of a `SynExpr.Record` or `SynExpr.AnonRecd`: each
+/// field's `SynLongIdent` name segments (backticks stripped) and value
+/// expression, and each spread's expression (a bare `...`'s is FCS's
+/// `ArbitraryAfterError`), in source order so the shared `_argN` lambda
+/// counter advances left-to-right.
 fn normalise_record_fields(
     fields: impl Iterator<Item = RecordField>,
+    spreads: impl Iterator<Item = (usize, RecordSpread)>,
     counter: &mut u32,
-) -> Vec<NormalisedRecordField> {
-    fields
-        .map(|f| {
-            let name = f
-                .field_name()
-                .map(|li| {
-                    li.idents()
-                        .map(|tok| strip_backticks(tok.text()).to_string())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let value = f.value().map(|v| Box::new(normalise_expr(&v, counter)));
-            NormalisedRecordField { name, value }
+) -> Vec<NormalisedRecordItem> {
+    interleave(fields, spreads)
+        .into_iter()
+        .map(|item| match item {
+            RecordBinding::Spread(s) => NormalisedRecordItem::Spread(Box::new(
+                s.expr()
+                    .map_or(NormalisedExpr::Error, |e| normalise_expr(&e, counter)),
+            )),
+            RecordBinding::Field(f) => {
+                let name = f
+                    .field_name()
+                    .map(|li| {
+                        li.idents()
+                            .map(|tok| strip_backticks(tok.text()).to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let value = f.value().map(|v| Box::new(normalise_expr(&v, counter)));
+                NormalisedRecordItem::Field(NormalisedRecordField { name, value })
+            }
         })
         .collect()
 }
@@ -3703,12 +3810,16 @@ fn normalise_dot_indexed_get(d: &DotIndexedGetExpr, counter: &mut u32) -> Normal
     let object = d
         .object()
         .expect("DOT_INDEXED_GET_EXPR must contain an object expr");
-    let index = d
-        .index()
-        .expect("DOT_INDEXED_GET_EXPR must contain an index expr");
+    let object = Box::new(normalise_expr(&object, counter));
+    let index = expr_or_misplaced_spread(
+        d.index(),
+        d.syntax(),
+        counter,
+        "DOT_INDEXED_GET_EXPR must contain an index expr",
+    );
     NormalisedExpr::DotIndexedGet {
-        object: Box::new(normalise_expr(&object, counter)),
-        index: Box::new(normalise_expr(&index, counter)),
+        object,
+        index: Box::new(index),
     }
 }
 
@@ -3746,7 +3857,11 @@ fn normalise_index_range(r: &IndexRangeExpr, counter: &mut u32) -> NormalisedExp
 fn normalise_tuple(t: &TupleExpr, counter: &mut u32) -> NormalisedExpr {
     NormalisedExpr::Tuple {
         is_struct: t.is_struct(),
-        elements: t.elements().map(|e| normalise_expr(&e, counter)).collect(),
+        elements: if holds_misplaced_spread(t.syntax()) {
+            exprs_with_misplaced_spreads(t.syntax(), counter)
+        } else {
+            t.elements().map(|e| normalise_expr(&e, counter)).collect()
+        },
     }
 }
 
@@ -3779,6 +3894,9 @@ fn normalise_paren(p: &ParenExpr, counter: &mut u32) -> NormalisedExpr {
             }
         }
         (None, false) => NormalisedExpr::Error,
+        (None, true) if holds_misplaced_spread(p.syntax()) => {
+            NormalisedExpr::Paren(Box::new(NormalisedExpr::Error))
+        }
         (None, true) => panic!("PAREN_EXPR must contain an inner expression child"),
     }
 }

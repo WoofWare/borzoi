@@ -1416,6 +1416,9 @@ impl<'src> Parser<'src> {
             // [`Parser::parse_range_expr`] handles the open-lower form, and
             // the indexer tail / seq-block body gates admit `arr.[..3]`.
             Some((Ok(FilteredToken::Raw(Token::DotDot)), _)) => true,
+            // `...e` outside a record's bindings — FCS's `DOT_DOT_DOT declExpr`,
+            // FS3902 over an `ArbitraryAfterError` ([`Parser::parse_misplaced_spread`]).
+            Some((Ok(FilteredToken::Raw(Token::DotDotDot)), _)) => true,
             // `*` — the whole-dimension wildcard (FCS's nullary `STAR` declExpr,
             // `IndexRange(None, None)`). A `declExpr`-level starter, like a
             // leading `..`: it admits `arr.[*]` / `[*]` / `(1, *)` through the

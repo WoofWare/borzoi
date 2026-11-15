@@ -11,7 +11,7 @@
 //! The grid crosses record declarations (plain, generic, nested, mutable,
 //! struct, a function-typed field, two records sharing a field name, a
 //! measured field, an obsolete field, a private representation, members, a
-//! class with a property) with where the record is declared (the using
+//! spread, which reads nothing, a class with a property) with where the record is declared (the using
 //! file, the using file with no header, an earlier file reached by an
 //! `open`, by module-qualified paths, behind a signature) and with how the
 //! receiver is typed (an annotated
@@ -188,6 +188,20 @@ const RECORDS: &[Record] = &[
         "type IR =\n    { N: int }\n    interface System.IComparable with\n        member this.CompareTo _ = 0\n",
         "IR",
         &[(".N", true)],
+    ),
+    r(
+        "spread",
+        // A spread copies fields inference does not read, so it reads none.
+        "type Sp0 = { A: int; B: string }\ntype Sp = { ...Sp0; C: bool }\n",
+        "Sp",
+        &[(".A", false), (".B", false), (".C", false)],
+    ),
+    r(
+        "spreadShadows",
+        // The spread after `K` replaces it: `K` is `Sh0`'s `int`.
+        "type Sh0 = { K: int }\ntype Sh = { K: string; L: bool; ...Sh0 }\n",
+        "Sh",
+        &[(".K", false), (".L", false)],
     ),
     r(
         "classProperty",

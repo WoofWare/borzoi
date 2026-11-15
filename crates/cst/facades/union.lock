@@ -130,6 +130,8 @@ node	RecordFieldDecl	RECORD_FIELD_DECL
 node	RecordPat	RECORD_PAT
 node	RecordPatField	RECORD_PAT_FIELD
 node	RecordRepr	RECORD_REPR
+node	RecordSpread	RECORD_SPREAD
+node	RecordSpreadDecl	RECORD_SPREAD_DECL
 node	SequentialExpr	SEQUENTIAL_EXPR
 node	SigFile	SIG_FILE
 node	SignatureParameterType	SIGNATURE_PARAMETER_TYPE
@@ -423,6 +425,7 @@ accessor	AndsPat	operands	iter enum Pat
 accessor	AnonRecdExpr	copy_source	option enum Expr
 accessor	AnonRecdExpr	fields	iter node RecordField
 accessor	AnonRecdExpr	is_struct	bool
+accessor	AnonRecdExpr	spreads	iter (usize, node RecordSpread)
 accessor	AnonRecdType	fields	iter node AnonRecdTypeField
 accessor	AnonRecdType	is_struct	bool
 accessor	AnonRecdTypeField	ident	option token
@@ -692,6 +695,7 @@ accessor	RationalConstRational	numerator	option token
 accessor	RecordExpr	copy_source	option enum Expr
 accessor	RecordExpr	fields	iter node RecordField
 accessor	RecordExpr	inherit	option node InheritMember
+accessor	RecordExpr	spreads	iter (usize, node RecordSpread)
 accessor	RecordField	field_name	option node LongIdent
 accessor	RecordField	value	option enum Expr
 accessor	RecordFieldDecl	attributes	iter node AttributeList
@@ -702,6 +706,9 @@ accessor	RecordPat	fields	iter node RecordPatField
 accessor	RecordPatField	name	option node LongIdent
 accessor	RecordPatField	pat	option enum Pat
 accessor	RecordRepr	fields	iter node RecordFieldDecl
+accessor	RecordRepr	spreads	iter (usize, node RecordSpreadDecl)
+accessor	RecordSpread	expr	option enum Expr
+accessor	RecordSpreadDecl	ty	option enum Type
 accessor	SequentialExpr	statements	iter enum Expr
 accessor	SigFile	modules	iter node ModuleOrNamespace
 accessor	SignatureParameterType	attributes	iter node AttributeList

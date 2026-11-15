@@ -151,6 +151,8 @@ pub const UNION_NODES: &[UnionNode] = &[
     union_node!(RecordPat),
     union_node!(RecordPatField),
     union_node!(RecordRepr),
+    union_node!(RecordSpread),
+    union_node!(RecordSpreadDecl),
     union_node!(SequentialExpr),
     union_node!(SigFile),
     union_node!(SignatureParameterType),
@@ -7188,6 +7190,8 @@ pub const FACADES: &[FacadeCase] = &[
             cast_case!(v11, RecordPat),
             cast_case!(v11, RecordPatField),
             cast_case!(v11, RecordRepr),
+            cast_case!(v11, RecordSpread),
+            cast_case!(v11, RecordSpreadDecl),
             cast_case!(v11, SequentialExpr),
             cast_case!(v11, SigFile),
             cast_case!(v11, SignatureParameterType),
@@ -7301,6 +7305,14 @@ pub const FACADES: &[FacadeCase] = &[
                 "iter node RecordField"
             ),
             accessor_case!(v11, AnonRecdExpr, is_struct, is_struct, one, "bool"),
+            accessor_case!(
+                v11,
+                AnonRecdExpr,
+                spreads,
+                spreads,
+                iter,
+                "iter (usize, node RecordSpread)"
+            ),
             accessor_case!(
                 v11,
                 AnonRecdType,
@@ -8362,6 +8374,14 @@ pub const FACADES: &[FacadeCase] = &[
             ),
             accessor_case!(
                 v11,
+                RecordExpr,
+                spreads,
+                spreads,
+                iter,
+                "iter (usize, node RecordSpread)"
+            ),
+            accessor_case!(
+                v11,
                 RecordField,
                 field_name,
                 field_name,
@@ -8405,6 +8425,16 @@ pub const FACADES: &[FacadeCase] = &[
                 iter,
                 "iter node RecordFieldDecl"
             ),
+            accessor_case!(
+                v11,
+                RecordRepr,
+                spreads,
+                spreads,
+                iter,
+                "iter (usize, node RecordSpreadDecl)"
+            ),
+            accessor_case!(v11, RecordSpread, expr, expr, one, "option enum Expr"),
+            accessor_case!(v11, RecordSpreadDecl, ty, ty, one, "option enum Type"),
             accessor_case!(
                 v11,
                 SequentialExpr,
@@ -8963,6 +8993,8 @@ pub const FACADES: &[FacadeCase] = &[
             cast_case!(preview, RecordPat),
             cast_case!(preview, RecordPatField),
             cast_case!(preview, RecordRepr),
+            cast_case!(preview, RecordSpread),
+            cast_case!(preview, RecordSpreadDecl),
             cast_case!(preview, SequentialExpr),
             cast_case!(preview, SigFile),
             cast_case!(preview, SignatureParameterType),
@@ -9076,6 +9108,14 @@ pub const FACADES: &[FacadeCase] = &[
                 "iter node RecordField"
             ),
             accessor_case!(preview, AnonRecdExpr, is_struct, is_struct, one, "bool"),
+            accessor_case!(
+                preview,
+                AnonRecdExpr,
+                spreads,
+                spreads,
+                iter,
+                "iter (usize, node RecordSpread)"
+            ),
             accessor_case!(
                 preview,
                 AnonRecdType,
@@ -10362,6 +10402,14 @@ pub const FACADES: &[FacadeCase] = &[
             ),
             accessor_case!(
                 preview,
+                RecordExpr,
+                spreads,
+                spreads,
+                iter,
+                "iter (usize, node RecordSpread)"
+            ),
+            accessor_case!(
+                preview,
                 RecordField,
                 field_name,
                 field_name,
@@ -10412,6 +10460,16 @@ pub const FACADES: &[FacadeCase] = &[
                 iter,
                 "iter node RecordFieldDecl"
             ),
+            accessor_case!(
+                preview,
+                RecordRepr,
+                spreads,
+                spreads,
+                iter,
+                "iter (usize, node RecordSpreadDecl)"
+            ),
+            accessor_case!(preview, RecordSpread, expr, expr, one, "option enum Expr"),
+            accessor_case!(preview, RecordSpreadDecl, ty, ty, one, "option enum Type"),
             accessor_case!(
                 preview,
                 SequentialExpr,

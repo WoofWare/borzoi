@@ -1005,6 +1005,10 @@ pub const STANDALONE_NODES: &[Node] = &[
         kinds: &[],
     },
     Node {
+        name: "RecordSpreadDecl",
+        kinds: &[],
+    },
+    Node {
         name: "UnionCase",
         kinds: &[],
     },
@@ -1072,6 +1076,10 @@ pub const STANDALONE_NODES: &[Node] = &[
     },
     Node {
         name: "RecordField",
+        kinds: &[],
+    },
+    Node {
+        name: "RecordSpread",
         kinds: &[],
     },
     Node {

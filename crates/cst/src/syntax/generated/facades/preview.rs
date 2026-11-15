@@ -142,6 +142,8 @@ crate::syntax::facade_support::facade_node!(RecordFieldDecl: RECORD_FIELD_DECL);
 crate::syntax::facade_support::facade_node!(RecordPat: RECORD_PAT);
 crate::syntax::facade_support::facade_node!(RecordPatField: RECORD_PAT_FIELD);
 crate::syntax::facade_support::facade_node!(RecordRepr: RECORD_REPR);
+crate::syntax::facade_support::facade_node!(RecordSpread: RECORD_SPREAD);
+crate::syntax::facade_support::facade_node!(RecordSpreadDecl: RECORD_SPREAD_DECL);
 crate::syntax::facade_support::facade_node!(SequentialExpr: SEQUENTIAL_EXPR);
 crate::syntax::facade_support::facade_node!(SigFile: SIG_FILE);
 crate::syntax::facade_support::facade_node!(SignatureParameterType: SIGNATURE_PARAMETER_TYPE);
@@ -2349,6 +2351,18 @@ impl RecordPatField {
     }
 }
 
+impl RecordSpread {
+    pub(crate) fn from_union(node: u::RecordSpread) -> Option<Self> {
+        Self::can_cast(node.syntax().kind()).then_some(Self(node))
+    }
+}
+
+impl RecordSpreadDecl {
+    pub(crate) fn from_union(node: u::RecordSpreadDecl) -> Option<Self> {
+        Self::can_cast(node.syntax().kind()).then_some(Self(node))
+    }
+}
+
 impl SequentialExpr {
     pub(crate) fn from_union(node: u::SequentialExpr) -> Option<Self> {
         Self::can_cast(node.syntax().kind()).then_some(Self(node))
@@ -2843,6 +2857,11 @@ impl AnonRecdExpr {
     }
     pub fn is_struct(&self) -> bool {
         self.0.is_struct()
+    }
+    pub fn spreads(&self) -> impl Iterator<Item = (usize, RecordSpread)> + '_ {
+        self.0
+            .spreads()
+            .filter_map(|(x0, x1)| Some((x0, RecordSpread::from_union(x1)?)))
     }
 }
 
@@ -4007,6 +4026,11 @@ impl RecordExpr {
     pub fn inherit(&self) -> Option<InheritMember> {
         self.0.inherit().and_then(InheritMember::from_union)
     }
+    pub fn spreads(&self) -> impl Iterator<Item = (usize, RecordSpread)> + '_ {
+        self.0
+            .spreads()
+            .filter_map(|(x0, x1)| Some((x0, RecordSpread::from_union(x1)?)))
+    }
 }
 
 impl RecordField {
@@ -4051,6 +4075,23 @@ impl RecordPatField {
 impl RecordRepr {
     pub fn fields(&self) -> impl Iterator<Item = RecordFieldDecl> + '_ {
         self.0.fields().filter_map(RecordFieldDecl::from_union)
+    }
+    pub fn spreads(&self) -> impl Iterator<Item = (usize, RecordSpreadDecl)> + '_ {
+        self.0
+            .spreads()
+            .filter_map(|(x0, x1)| Some((x0, RecordSpreadDecl::from_union(x1)?)))
+    }
+}
+
+impl RecordSpread {
+    pub fn expr(&self) -> Option<Expr> {
+        self.0.expr().and_then(Expr::from_union)
+    }
+}
+
+impl RecordSpreadDecl {
+    pub fn ty(&self) -> Option<Type> {
+        self.0.ty().and_then(Type::from_union)
     }
 }
 
