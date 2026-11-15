@@ -79,6 +79,12 @@ pub(super) struct Windows {
     /// [`resolve_rhss`](Resolver::resolve_rhss) and
     /// [`resolve_local_let_rhss`](Resolver::resolve_local_let_rhss).
     ap_body_case_names: HashSet<String>,
+    /// `true` while resolving an expression ([`resolve_expr`](Resolver::resolve_expr)):
+    /// a binder interned meanwhile is a local def
+    /// ([`DefSpace::Local`](crate::DefSpace::Local)), and every other a
+    /// declaration def. Opened by the outermost `resolve_expr` alone, so a
+    /// nested expression costs the walk's recursion no frame.
+    expression: bool,
 }
 
 impl Windows {
@@ -98,6 +104,11 @@ impl Windows {
     /// resolved ([`Self::ap_body_case_names`]).
     pub(super) fn is_ap_body_case(&self, name: &str) -> bool {
         self.ap_body_case_names.contains(name)
+    }
+
+    /// Whether an expression is being resolved ([`Self::expression`]).
+    pub(super) fn in_expression(&self) -> bool {
+        self.expression
     }
 
     /// Assert, in debug builds, that every window is closed: what the walk
@@ -153,6 +164,11 @@ impl Resolver<'_> {
         body: impl FnOnce(&mut Self) -> R,
     ) -> R {
         self.with_window(|w| &mut w.pending_items, pending, body)
+    }
+
+    /// Run `body` with the expression window ([`Windows::expression`]) open.
+    pub(super) fn with_expression<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.with_window(|w| &mut w.expression, true, body)
     }
 
     /// Run `body`, a recognizer's RHS, with each of `case_entries`' names

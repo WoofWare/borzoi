@@ -224,7 +224,7 @@ impl<'a> Resolver<'a> {
 
     /// The name an export of `def` publishes: the definition's own name.
     pub(super) fn export_name(&self, def: DefId) -> ExportName {
-        ExportName::new(self.out.defs[def.index()].name())
+        ExportName::new(self.out.defs[def].name())
     }
 
     pub(super) fn export_case(
@@ -236,7 +236,7 @@ impl<'a> Resolver<'a> {
         kind: CaseKind,
     ) -> Option<ItemId> {
         let decl_path = self.decl_path(&[name]);
-        let pos = self.out.defs[def.index()].range.start();
+        let pos = self.out.defs[def].range.start();
         if self.lexical.anonymous_root {
             // No cross-file `ExportedItem`, but the case is still recorded (with
             // `item: None`) so its container derives into `modules_with_hidden_values`
@@ -367,7 +367,7 @@ impl<'a> Resolver<'a> {
         // The export-decl-list twin: a case `Item` decl (no value path). Its
         // type-qualified path is threaded by `export_type_qualified_case` below,
         // which sets it on this just-pushed decl.
-        let pos = self.out.defs[def.index()].range.start();
+        let pos = self.out.defs[def].range.start();
         self.push_export_decl(
             self.decl_path(&[name]),
             pos,
@@ -2039,7 +2039,7 @@ impl Resolver<'_> {
             return;
         };
         let names_a_type = match self.out.resolutions.get(&case.text_range()) {
-            Some(Resolution::Local(id)) => self.out.defs[id.index()].kind == DefKind::Type,
+            Some(Resolution::Local(id)) => self.out.defs[*id].kind == DefKind::Type,
             Some(Resolution::Entity(_)) => true,
             _ => false,
         };

@@ -2596,9 +2596,7 @@ impl<'a> Resolver<'a> {
                 );
                 entry.maybe_constant_pattern = item.attributed;
                 let block = match item.def {
-                    super::model::ExportDef::Own(id) => {
-                        block_of(self.out.defs[id.index()].range.start())
-                    }
+                    super::model::ExportDef::Own(id) => block_of(self.out.defs[id].range.start()),
                     // A signature-paired binder lives in the `.fsi`'s arena;
                     // the walk of an implementation file exports none.
                     super::model::ExportDef::Sig { .. } => 0,
@@ -3701,7 +3699,7 @@ impl<'a> Resolver<'a> {
             | Resolution::Unresolved => return Some(false),
         };
         Some(matches!(
-            self.out.defs[def.index()].kind,
+            self.out.defs[def].kind,
             DefKind::UnionCase | DefKind::ExceptionCase | DefKind::ActivePattern
         ))
     }
@@ -3844,7 +3842,7 @@ impl<'a> Resolver<'a> {
             if !value_takes_qualifier {
                 let type_pos = Self::reached_type_slot_pos(
                     reach,
-                    u32::from(self.out.defs[type_id.index()].range.start()),
+                    u32::from(self.out.defs[type_id].range.start()),
                 );
                 if let Some(cause) = self.reached_type_contested(head, reach, type_pos) {
                     self.defer_with_cause(
@@ -3885,10 +3883,8 @@ impl<'a> Resolver<'a> {
             let head_is_value = self.head_case_classification(head) == Some(false);
             // Where the type entered the slot: its declaration, or the
             // block's start for an earlier block's.
-            let type_pos = Self::reached_type_slot_pos(
-                reach,
-                u32::from(self.out.defs[type_id.index()].range.start()),
-            );
+            let type_pos =
+                Self::reached_type_slot_pos(reach, u32::from(self.out.defs[type_id].range.start()));
             // Whether the type takes the qualifier: `None` when a value
             // does, the cause when the contest is not decidable.
             let takes = if head_is_value {
@@ -4789,10 +4785,8 @@ impl<'a> Resolver<'a> {
         let Some((type_id, case_res, reach)) = self.type_case_path(type_seg, case_seg) else {
             return false;
         };
-        let type_pos = Self::reached_type_slot_pos(
-            reach,
-            u32::from(self.out.defs[type_id.index()].range.start()),
-        );
+        let type_pos =
+            Self::reached_type_slot_pos(reach, u32::from(self.out.defs[type_id].range.start()));
         if let Some(cause) = self.reached_type_contested(&id_text(type_seg), reach, type_pos) {
             self.defer_with_cause(
                 type_seg.text_range(),
@@ -6490,10 +6484,10 @@ impl<'a> Resolver<'a> {
     /// earlier part of this file.
     fn value_resolution_def_range(&self, res: Resolution) -> Option<TextRange> {
         match res {
-            Resolution::Local(id) => Some(self.out.defs[id.index()].range),
+            Resolution::Local(id) => Some(self.out.defs[id].range),
             Resolution::Item(id) => {
                 let local = id.index().checked_sub(self.item_base as usize)?;
-                Some(self.out.defs[self.out.items.get(local)?.def()?.index()].range)
+                Some(self.out.defs[self.out.items.get(local)?.def()?].range)
             }
             // `lookup` only ever yields in-file `Local` / `Item` value-frame
             // entries; other kinds have no in-file value range to compare.
@@ -6518,7 +6512,7 @@ impl<'a> Resolver<'a> {
             }
             _ => return None,
         };
-        Some(self.out.defs[def_id.index()].kind)
+        Some(self.out.defs[def_id].kind)
     }
 
     /// For a qualified `Type.Case` path, the `(type_def, case_resolution)` when
@@ -6651,7 +6645,7 @@ impl<'a> Resolver<'a> {
 
     /// [`Self::in_file_type_reach`] for the in-file type `id`.
     pub(super) fn in_file_type_reach_of(&self, k: usize, id: DefId) -> TypeReach {
-        self.in_file_type_reach(k, u32::from(self.out.defs[id.index()].range.start()))
+        self.in_file_type_reach(k, u32::from(self.out.defs[id].range.start()))
     }
 
     /// Where an in-file type declared at `pos` and reached as `reach` entered
@@ -7023,7 +7017,7 @@ impl<'a> Resolver<'a> {
                     .and_then(|m| m.get(head))
                     .map(|&id| {
                         self.same_file_fold_order(
-                            self.out.defs[id.index()].range.start().into(),
+                            self.out.defs[id].range.start().into(),
                             FoldTier::Types,
                         )
                     });
@@ -7227,7 +7221,7 @@ impl<'a> Resolver<'a> {
         match id.index().checked_sub(self.item_base as usize) {
             Some(local) => {
                 let item = self.out.items.get(local)?;
-                let pos = u32::from(self.out.defs[item.def()?.index()].range.start());
+                let pos = u32::from(self.out.defs[item.def()?].range.start());
                 let path = item.qualified.as_ref()?;
                 let names = self.assemblies.names();
                 let prefix_key = PathKey::of(names, prefix);
@@ -7634,7 +7628,7 @@ impl<'a> Resolver<'a> {
                     return (None, true);
                 }
                 if let Resolution::Local(id) = entry.resolution
-                    && self.out.defs[id.index()].kind == DefKind::ActivePattern
+                    && self.out.defs[id].kind == DefKind::ActivePattern
                 {
                     continue; // pattern-only: not a value in expression position
                 }

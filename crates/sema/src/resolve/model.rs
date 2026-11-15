@@ -18,7 +18,7 @@ use borzoi_cst::syntax::{TextRange, TextSize};
 use crate::assembly_env::{
     AssemblyEnv, CustomOperationNames, EntityHandle, MemberIndex, UnionCaseIndex,
 };
-use crate::def::{Def, DefId, SemanticClass};
+use crate::def::{Def, DefArena, DefId, SemanticClass};
 use crate::diagnostics::SemaDiagnostic;
 
 use super::contributors::{Contribution, FileContributions};
@@ -3763,7 +3763,7 @@ pub(super) struct FieldLabelEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFile {
     /// All binders introduced in the file, indexed by [`DefId`].
-    pub(super) defs: Vec<Def>,
+    pub(super) defs: DefArena,
     /// Every resolved occurrence (uses *and* the binders' own self-references),
     /// keyed by the occurrence's source range.
     pub(super) resolutions: HashMap<TextRange, Resolution>,
@@ -4106,7 +4106,7 @@ impl ResolvedFile {
     pub(super) fn signature_slot(
         item_base: u32,
         screen: Arc<SigScreen>,
-        defs: Vec<Def>,
+        defs: DefArena,
         sig_exports: Vec<SigExport>,
     ) -> ResolvedFile {
         ResolvedFile {
@@ -4496,7 +4496,7 @@ impl ResolvedFile {
             Some(Resolution::Entity(h)) => env.is_abbreviation(*h) || is_target(*h),
             Some(Resolution::Local(id)) => self
                 .own_abbrev_type_simple_names
-                .contains(env.names().text(self.defs[id.index()].name())),
+                .contains(env.names().text(self.defs[*id].name())),
             // No other variant is ever recorded for an attribute; if one
             // appears, defer rather than trust it.
             Some(_) => true,
@@ -4526,7 +4526,7 @@ impl ResolvedFile {
 
     /// The binder a [`DefId`] names.
     pub fn def(&self, id: DefId) -> &Def {
-        &self.defs[id.index()]
+        &self.defs[id]
     }
 
     /// Whether the walk declines every use spelled `name`, wherever it is: the
@@ -4564,7 +4564,8 @@ impl ResolvedFile {
         })
     }
 
-    /// Every binder the walk interned, in interning order.
+    /// Every binder the walk interned: the declarations, then the locals, each
+    /// in interning order.
     pub fn defs(&self) -> impl Iterator<Item = &Def> + '_ {
         self.defs.iter()
     }
@@ -4821,7 +4822,7 @@ impl ResolvedProject {
                 .iter()
                 .map(|file| {
                     let mut file = ResolvedFile::clone(file);
-                    for def in &mut file.defs {
+                    for def in file.defs.iter_mut() {
                         *def = def.rekey(from, to);
                     }
                     for decl in &mut file.export_decls {
@@ -4879,7 +4880,7 @@ impl ResolvedProject {
                 let idx = file as usize;
                 let rf = self.files.get(idx)?;
                 let def = rf.placed_types.get(index as usize)?.def;
-                return Some((idx, rf.defs.get(def.index())?));
+                return Some((idx, rf.defs.get(def)?));
             }
             _ => return None,
         };
@@ -4892,10 +4893,8 @@ impl ResolvedProject {
             f.exports.items.get(local).map(|item| (idx, item))
         })?;
         match item.def {
-            ExportDef::Own(def) => Some((idx, self.files[idx].defs.get(def.index())?)),
-            ExportDef::Sig { file, def } => {
-                Some((file, self.files.get(file)?.defs.get(def.index())?))
-            }
+            ExportDef::Own(def) => Some((idx, self.files[idx].defs.get(def)?)),
+            ExportDef::Sig { file, def } => Some((file, self.files.get(file)?.defs.get(def)?)),
         }
     }
 
