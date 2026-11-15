@@ -37,7 +37,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use borzoi_msbuild::observed::host_fs;
-use borzoi_msbuild::{ItemMetadataValue, ParsedProject, parse_fsproj};
+use borzoi_msbuild::{
+    ItemMetadataValue, ParsedProject, SdkPaths, SdkResolution, SdkResolveError, parse_fsproj,
+};
 use common::{
     CONTROLLED_PROPERTY_NAMES, SplitMix64, gen_bool_expr, gen_expand_value, gen_grammar_value,
     parse_fsproj_with_imports, soak_parameters,
@@ -400,6 +402,8 @@ struct Census {
     paid: BTreeMap<&'static str, usize>,
     violations: Vec<String>,
     violation_count: usize,
+    /// Per fact kind: the violations found.
+    violated: BTreeMap<&'static str, usize>,
     /// Cases set aside as the known refused-write defect (see [`check`]).
     refused_absent: usize,
     /// Cases set aside as the known splice-value defect (see [`check`]).
@@ -417,8 +421,9 @@ impl Census {
         );
         for (kind, owed) in &self.owed {
             println!(
-                "  {kind}: {owed} owed declines, {} paid",
-                self.paid.get(kind).copied().unwrap_or(0)
+                "  {kind}: {owed} owed declines, {} paid, {} violations",
+                self.paid.get(kind).copied().unwrap_or(0),
+                self.violated.get(kind).copied().unwrap_or(0)
             );
         }
     }
@@ -510,7 +515,8 @@ fn check(
             continue;
         }
         census.violation_count += 1;
-        if census.violations.len() < 8 {
+        *census.violated.entry(fact_kind(fact)).or_default() += 1;
+        if census.violated[fact_kind(fact)] <= 2 {
             let why = match disagreeing {
                 Some((world, published)) => format!("the world `{world}` publishes {published:?}"),
                 None => "no world publishes it certain".to_string(),
@@ -625,6 +631,193 @@ impl DirectoryBuildFixture {
     }
 }
 
+/// The SDK the opacity tier's documents name.
+const OPACITY_SDK: &str = "OpacitySdk";
+
+/// A document under an SDK whose `Sdk.props` writes some properties and then
+/// imports a file behind a gate the walker cannot decide — content the walk
+/// cannot see, which may redefine what was written before it. The body reads
+/// those properties, including into the `Directory.Build.targets` gate and
+/// path, after the opacity.
+///
+/// This is the shape of #614, generated rather than witnessed: a value bound
+/// before hidden content and read after it may be stale.
+struct OpacityDoc {
+    /// Written in `Sdk.props` before the undecided import.
+    before: Vec<Write>,
+    /// Written by the hidden file, when it is imported.
+    hidden: Vec<Write>,
+    body: Doc,
+}
+
+fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
+    const LITERALS: &[&str] = &["", "a", "true", "false", "net8.0", "Debug", "1.2.3"];
+    let literal_write = |rng: &mut SplitMix64, name: &'static str| Write {
+        name,
+        group_condition: None,
+        condition: None,
+        body: (*rng.pick(LITERALS)).to_string(),
+    };
+    let body = gen_doc(rng, names);
+    let before: Vec<Write> = (0..1 + rng.below(4))
+        .map(|_| {
+            let name = *rng.pick(names);
+            literal_write(rng, name)
+        })
+        .collect();
+    let hidden = (0..1 + rng.below(3))
+        .map(|_| {
+            // Mostly a redefinition of something written before the import:
+            // that is the stale value the shape needs.
+            let name = if rng.below(4) == 0 {
+                *rng.pick(names)
+            } else {
+                rng.pick(&before).name
+            };
+            literal_write(rng, name)
+        })
+        .collect();
+    OpacityDoc {
+        before,
+        hidden,
+        body,
+    }
+}
+
+fn render_writes(writes: &[Write]) -> String {
+    let mut out = String::from("  <PropertyGroup>\n");
+    for write in writes {
+        out.push_str(&format!(
+            "    <{name}>{body}</{name}>\n",
+            name = write.name,
+            body = xml_escape(&write.body)
+        ));
+    }
+    out.push_str("  </PropertyGroup>\n");
+    out
+}
+
+/// The three files of one opacity case under `variant` (`Taken`, `Omitted`,
+/// or `Undecided`, whose wrap is ignored): `Sdk.props`, the hidden file, and
+/// the project body.
+fn render_opacity(doc: &OpacityDoc, variant: &Variant) -> (String, String, String) {
+    let import = match variant {
+        Variant::Omitted => String::new(),
+        Variant::Undecided(_) => format!(
+            "  <Import Project=\"Hidden.props\" Condition=\"{}\" />\n",
+            xml_escape(UNDECIDABLE)
+        ),
+        _ => "  <Import Project=\"Hidden.props\" />\n".to_string(),
+    };
+    let sdk_props = format!(
+        "<Project>\n{}{import}</Project>\n",
+        render_writes(&doc.before)
+    );
+    let hidden = format!("<Project>\n{}</Project>\n", render_writes(&doc.hidden));
+    let body = render(&doc.body, usize::MAX, &Variant::Taken).replacen(
+        "<Project>",
+        &format!("<Project Sdk=\"{OPACITY_SDK}\">"),
+        1,
+    );
+    (sdk_props, hidden, body)
+}
+
+/// [`DirectoryBuildFixture`] with an SDK beside it whose files each case
+/// writes.
+struct OpacityFixture {
+    inner: DirectoryBuildFixture,
+    sdk: PathBuf,
+}
+
+impl OpacityFixture {
+    fn new() -> Self {
+        let inner = DirectoryBuildFixture::new();
+        let sdk = inner
+            .project
+            .parent()
+            .unwrap()
+            .join("sdks")
+            .join(OPACITY_SDK);
+        std::fs::create_dir_all(&sdk).unwrap();
+        std::fs::write(sdk.join("Sdk.targets"), "<Project />").unwrap();
+        Self { inner, sdk }
+    }
+
+    fn evaluate(&self, (sdk_props, hidden, body): &(String, String, String)) -> ParsedProject {
+        std::fs::write(self.sdk.join("Sdk.props"), sdk_props).unwrap();
+        std::fs::write(self.sdk.join("Hidden.props"), hidden).unwrap();
+        let sdk = self.sdk.clone();
+        let resolver = move |name: &str, _: &borzoi_msbuild::observed::Observer| {
+            if name.eq_ignore_ascii_case(OPACITY_SDK) {
+                Ok(SdkResolution::Single(SdkPaths {
+                    root: sdk.clone(),
+                    props: sdk.join("Sdk.props"),
+                    targets: sdk.join("Sdk.targets"),
+                }))
+            } else {
+                Err(SdkResolveError::NotFound)
+            }
+        };
+        parse_fsproj_with_imports(
+            body,
+            &self.inner.project,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some(&resolver),
+            None,
+        )
+        .expect("generated documents are well-formed")
+    }
+}
+
+fn sweep_opacity(seed: u64, cases: usize, names: &[&'static str]) -> Census {
+    let fixture = OpacityFixture::new();
+    let mut rng = SplitMix64(seed);
+    let mut census = Census::default();
+    for _ in 0..cases {
+        let doc = gen_opacity_doc(&mut rng, names);
+        let world_facts: Vec<(String, Facts)> = [Variant::Taken, Variant::Omitted]
+            .into_iter()
+            .map(|variant| {
+                let files = render_opacity(&doc, &variant);
+                (
+                    format!("{variant:?}"),
+                    facts(&fixture.evaluate(&files), names),
+                )
+            })
+            .collect();
+        let files = render_opacity(&doc, &Variant::Undecided(Wrap::ElementCondition));
+        let project = fixture.evaluate(&files);
+        let undecided = facts(&project, names);
+        let absent_but_written: Vec<&str> = doc
+            .body
+            .writes
+            .iter()
+            .map(|w| w.name)
+            .filter(|name| {
+                !project
+                    .properties
+                    .keys()
+                    .any(|k| k.eq_ignore_ascii_case(name))
+            })
+            .collect();
+        let text = format!(
+            "--- Sdk.props ---\n{}--- Hidden.props ---\n{}--- body ---\n{}",
+            files.0, files.1, files.2
+        );
+        check(
+            &mut census,
+            &text,
+            &undecided,
+            &world_facts,
+            &absent_but_written,
+            "",
+            "opacity",
+        );
+    }
+    census
+}
+
 fn assert_sound(census: &Census, floors: &[(&str, usize)]) {
     assert!(
         census.violation_count == 0,
@@ -697,6 +890,15 @@ fn an_undecided_directory_build_gate_write_claims_no_more_than_its_worlds_agree_
         ],
     );
     assert_set_asides(&census, 240, 163);
+}
+
+/// The opacity tier: a property written in the SDK before content the walk
+/// cannot see, read by the body after it.
+#[test]
+fn a_value_written_before_hidden_content_claims_no_more_than_its_worlds_agree_on() {
+    let census = sweep_opacity(0x0bac_17e5, 300, &written_names(true));
+    census.print("with an undecided SDK import");
+    assert_sound(&census, &[]);
 }
 
 /// The fresh-seed twin of the two sweeps above. Seed 1 at 4 000 cases finds

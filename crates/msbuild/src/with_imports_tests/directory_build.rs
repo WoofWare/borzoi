@@ -1489,17 +1489,15 @@ fn an_overwrite_under_sdk_opacity_does_not_discharge_a_refusal() {
     );
 }
 
-/// The known wrong commit of #614, pinned: the SDK's own `Sdk.props` gates an
-/// import on a condition outside the modelled grammar, which MSBuild finds
-/// true, so `Hidden.props` redefines `ThatProperty`, the entry body copies it
-/// into the `Directory.Build.targets` gate, and MSBuild takes the file. We
-/// skip the import, keep the stale `false`, skip the file, and commit the
-/// Compile set as certain. No refused write is involved (unlike the test
-/// above): `gate_value_is_exact` tolerates SDK-subtree opacity by design.
-/// A sound fix wants per-value staleness under opacity (P3 of
-/// `docs/msbuild-value-carried-provenance-plan.md`); un-ignore this then.
+/// #614: the SDK's own `Sdk.props` gates an import on a condition outside the
+/// modelled grammar, which MSBuild finds true, so `Hidden.props` redefines
+/// `ThatProperty`, the entry body copies it into the
+/// `Directory.Build.targets` gate, and MSBuild takes the file. We skip the
+/// import, so the `false` we hold for `ThatProperty` may be stale: written
+/// before content the walk could not see. The gate copied from it carries that
+/// staleness, and `gate_value_is_exact` declines on it. No refused write is
+/// involved (unlike the test above).
 #[test]
-#[ignore = "#614: a gate read from a property an opaque SDK import redefined commits"]
 fn a_gate_read_from_a_property_an_opaque_sdk_import_redefined_declines() {
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) = write_synthetic_sdk(
