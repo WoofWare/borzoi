@@ -27,20 +27,31 @@ uses.
 
 ### What a later file reads from an earlier one
 
-The fold threads one state from file to file. `thread_forward` advances it
-past a file, and reads exactly:
+The fold threads one state from file to file. The step that advances it past
+a file reads, as far as reading the code finds:
 
-- through `ProjectItems::extend_with`: `exports`, `contributions`,
-  `placed_types`, `unplaced_types`, `own_module_simple_names`,
-  `own_type_simple_names`, `sig_screen` and
+- through `ProjectItems::extend_with` and what it calls: `exports`,
+  `export_decls` (through `FileExportIndices::derive`), `contributions`,
+  `placed_types`, `unplaced_types`, `unplaced_type_places`,
+  `own_module_simple_names`, `own_type_simple_names`, `sig_screen` and
   `declares_core_attribute_alias`;
-- directly: `augmentation_instance_names` and `augmentation_static_names`;
-- through `wholesale_extension_contribution`:
-  `attributes_may_declare_extension` and `augmentation_names_unknowable`.
+- in `thread_forward`: `augmentation_instance_names` and
+  `augmentation_static_names`, and through `wholesale_extension_contribution`,
+  `attributes_may_declare_extension` and `augmentation_names_unknowable`;
+- in the fold loop around it: a paired signature's `sig_exports` and screen
+  (`append_signature_exports`), and, for an unpaired headerless
+  implementation, a shadow of its implicit module, derived from its
+  qualified name and pairing (`note_implicit_module_shadow`).
+
+A request on a later file also reads earlier files directly. Definition and
+semantic tokens follow a cross-file resolution to its `Def` in the declaring
+file's arena (`ResolvedProject::item_def`).
 
 None of these is the resolution of a use inside a binding body. They are
 read off declarations: binders in binding heads, type and module definitions,
-attributes, and opens. About 72% of the project's bytes sit inside the bodies
+attributes, opens, and the file's name. The list above was built by reading
+code, and a first draft of it missed four entries. So D1 makes the compiler
+derive it rather than trusting the list. About 72% of the project's bytes sit inside the bodies
 of top-level and member bindings (measured over the 225 files the fold
 resolved at fe24b49d, counting the bytes after each outermost `BINDING`'s
 `=`).
@@ -86,13 +97,20 @@ Skipping bodies changes nothing the request answers:
   produces (`PartialEq`), at horizon 2 through the cold fold and at horizon
   240 through the incremental fold. That also covers every `preceding_*`
   field the target carries.
-- **Every earlier file's threaded fields are equal, except for `DefId`.**
-  Raw, `exports` differ in 190 files and `placed_types` in 56. With each
-  export's `def` masked, `exports` differ in none. `placed_types` agree under
-  the existing `DeclaredType::same_for_later_files`. A `DefId` is an index
-  into the file's arena in walk order (`Resolver::intern`), and a skipped body
-  allocates none of its local binders' defs, so every later declaration's
-  index moves.
+- **Every earlier file's threaded fields that the spike compared are equal,
+  except for `DefId`.** It compared the fields of the first draft's list:
+  everything above but `export_decls`, `unplaced_type_places` and
+  `sig_exports`. The project has five signature files, so signature
+  materialisation ran, but its `sig_exports` were not compared. It has no
+  headerless implementation, so the implicit-module shadow never ran. Raw,
+  `exports` differ in 190 files and
+  `placed_types` in 56. With each export's `def` masked, `exports` differ in
+  none. `placed_types` agree under the existing
+  `DeclaredType::same_for_later_files`. A `DefId` is an index into the file's
+  arena in walk order (`Resolver::intern`), and a skipped body allocates none
+  of its local binders' defs, so every later declaration's index moves. The
+  target's equality does not cover `item_def` either, since a resolution
+  names an earlier item by its `ItemId`, not its `Def`.
 
 ### What the skip leaves
 
@@ -139,12 +157,19 @@ parsing, which this plan leaves alone too.
 
 ### D1. A file's surface is a type
 
-`FileSurface` holds exactly the fields listed under "What a later file reads
-from an earlier one". `thread_forward` and `ProjectItems::extend_with` take
-`&FileSurface`, and `ResolvedFile` holds one. The compiler then enforces what
-is today a measured fact: nothing downstream of a file reads anything its
-surface does not carry. A new threaded field has to be added to the surface,
-and the surface's oracle (D3) then covers it.
+`FileSurface` is what later files may read of an earlier one. The per-file
+transition (D4's `advance`) takes `&FileSurface`, and so does every
+cross-file read a request makes, `ResolvedProject::item_def` included. The
+surface therefore carries the file's declaration defs (D2), its qualified
+name and its pairing, besides the fields under "What a later file reads from
+an earlier one".
+
+Its contents are not taken from that list. They are whatever makes the
+transition and the cross-file reads compile once they are handed only a
+`FileSurface`. The compiler then enforces what is today a fact found by
+reading: nothing downstream of a file reads anything its surface does not
+carry. A new threaded field has to be added to the surface, and the
+surface's oracle (D3) then covers it.
 
 ### D2. Declaration ids do not depend on bodies
 
@@ -176,7 +201,12 @@ one project. Stage 3 holds it over the corpora.
 ### D4. The fold folds surfaces, and a request resolves its own file
 
 The fold over files `0..i` computes surfaces for `0..i-1` and a full walk for
-`i`. The state entering any file `j` is `thread_forward` replayed over the
+`i`. The per-file transition becomes one function, `advance(state, surface)`,
+shared by the cold fold, the incremental fold and the replay. It covers
+everything the two folds do today after a file's walk: `thread_forward`,
+signature materialisation, and the implicit-module shadow. Two copies of the
+transition could disagree, and the replay would inherit whatever a copy
+missed. The state entering any file `j` is `advance` replayed over the
 surfaces before it. That is the fold's bookkeeping alone: the `semanticTokens
 L` row's 7.04 G exceeds the per-file `resolve_file` sum, target included, by
 under 0.3 G, and that difference also holds the request's own lookups, so it
@@ -222,16 +252,37 @@ Stage 2 kept its uncached scan.
 
 ### D6 (gated). Inference reads what the target uses
 
-A full walk of the target names exactly the earlier items it references. The
-files the target's inference needs are the files that declare those items,
-closed over the same relation for each of their bodies. The unit is a whole
-file, since that is `infer_project`'s unit today. Inference within a file
-stays as it is, so whether a value's type is fixed by a later binding in the
-same file, or by its recursive group, is not this design's concern.
+A file's inference reads `PrecedingTypes`, and not all of it per item:
+
+- **Per item**: an earlier value's published type (`items`), a type by its
+  place (`types`), a case by its id (`cases`), a record by its path
+  (`records`). These the closure below can serve.
+- **Whole prefix**: `constructor_name_count` counts every constructor-like
+  declaration of a name in every earlier file, and `sealed_types` iterates
+  every earlier case and record. An earlier file the target never references
+  still moves these. An earlier `let Red = 0` makes a later `type Color = Red
+  | Blue` followed by `let r = Red` withhold `r`'s type
+  (`FileFacts::uncontested_case_name`), and leaving that file out infers
+  `r : Color`.
+
+The whole-prefix reads are about declarations: a name that is declared, and
+a union or record that exists. If each of them can be computed from
+declarations alone, they move into the surface and come from every earlier
+file, while inferred value types come only from the files in the closure.
+Any whole-prefix read that turns out to need inference rules this design
+out, or widens the closure to every file that contributes to it.
+
+The closure: a full walk of the target names exactly the earlier items it
+references. The files whose inference it needs are the files that declare
+those items, closed over the same relation for each of their bodies. The
+unit is a whole file, since that is `infer_project`'s unit today. Inference
+within a file stays as it is, so whether a value's type is fixed by a later
+binding in the same file, or by its recursive group, is not this design's
+concern.
 
 Whether this pays depends on how large the closure is for real files. If a
 typical file's closure is most of its prefix, it does not pay. Stage 7
-measures that before anything is built.
+audits the reads and measures the closure before anything is built.
 
 ## Implementation plan
 
@@ -258,18 +309,7 @@ prints them when the feature is on. Instruction counts need macOS, as
 WoofWare.PawPrint2 at 91e869b4, within the noise of the rows that read no
 files.
 
-### Stage 1: the surface type
-
-**Dependencies**: none. **Implements**: D1.
-
-`FileSurface`, built in `finish`. `thread_forward` and `extend_with` take it,
-and both folds pass `rf.surface()`.
-
-**Oracle**: it compiles with no field of `ResolvedFile` other than the surface
-reachable from `thread_forward`. Every gate is unchanged, and every manifest
-moves zero lines.
-
-### Stage 2: two id spaces
+### Stage 1: two id spaces
 
 **Dependencies**: none. **Implements**: D2.
 
@@ -284,9 +324,23 @@ over the corpora. A body edit that adds a local binder leaves every export's
 `DefId` unchanged: a property over generated files, which fails before this
 stage and passes after it.
 
+### Stage 2: the surface type and the shared transition
+
+**Dependencies**: Stage 1, so that the surface can carry the declaration
+defs alone. **Implements**: D1, and D4's `advance`.
+
+`FileSurface`, built in `finish`. The cold and incremental folds' per-file
+steps become one `advance(state, &FileSurface)`. `ResolvedProject::item_def`
+and the other cross-file reads take the surface. What the surface holds is
+whatever makes these compile.
+
+**Oracle**: it compiles with no field of `ResolvedFile` outside the surface
+reachable from `advance` or from a cross-file read. Every gate is unchanged,
+and every manifest moves zero lines.
+
 ### Stage 3: the surface walk, unconsumed
 
-**Dependencies**: Stages 1 and 2. **Implements**: D3.
+**Dependencies**: Stage 2. **Implements**: D3.
 
 `surface_file(file, preceding, env) -> FileSurface`: the walk with
 `walk_bodies` off. Nothing consumes it yet.
@@ -297,7 +351,10 @@ stage and passes after it.
 - every file of every project in the whole-project gate, each against its
   real entering state;
 - the generated files of `binder_site_grid` and of the contributor-name
-  oracle's generator.
+  oracle's generator;
+- generated projects with signature-paired implementations and unpaired
+  headerless implementations, whose surfaces carry what signature
+  materialisation and the implicit-module shadow read.
 
 A planted body dependence must fail it: a walk that records an export from
 inside a body, for example. The mutation is checked to have applied before
@@ -311,11 +368,19 @@ its failure is trusted.
 walk of `i`. `ProjectSurfaces::entering(j)` replays the state entering `j`.
 The incremental fold's cutoff moves to surface equality.
 
-**Oracle**: for every horizon `i` of every project in the whole-project gate,
-and of generated projects, `resolve_target`'s full walk of `i` equals today's
-`resolve_project_files_prefix(files, i + 1, env).file(i)`. The incremental
-fold's `incremental ≡ batch` differential holds with surfaces. A body edit
-that leaves the surface unchanged re-walks no later file.
+**Oracle**:
+
+- For every horizon `i` of every project in the whole-project gate, and of
+  generated projects, `resolve_target`'s full walk of `i` equals today's
+  `resolve_project_files_prefix(files, i + 1, env).file(i)`.
+- For every `j`, `ProjectSurfaces::entering(j)` equals the state the cold fold
+  enters `j` with, and `item_def` answers every earlier item as the full fold
+  does. The generated projects include signature-paired implementations,
+  unpaired headerless implementations, and a headerless file renamed between
+  two folds.
+- The incremental fold's `incremental ≡ batch` differential holds with
+  surfaces. A body edit that leaves the surface unchanged re-walks no later
+  file.
 
 ### Stage 5: resolution requests use the target fold
 
@@ -364,15 +429,22 @@ quadratic in the project.
 
 **Dependencies**: Stage 5. **Implements**: D6.
 
-7a measures, for every file of every whole-project gate project, the share
-of its prefix in its demand closure, and prints the distribution. 7b is built
-only if the median share is small enough that a hover-first session's cold
-cost falls by more than the bookkeeping adds. 7a states that threshold before
-measuring.
+7a first audits every read `infer_file` makes of `PrecedingTypes`. It
+classifies each as per item or whole prefix, and for each whole-prefix read
+says whether declarations alone determine it. That classification is held by
+a property: inference whose whole-prefix facts come from every earlier
+file's surface, and whose per-item facts come from every earlier file's
+inference, equals today's. The `let Red = 0` case under D6 is one of its
+fixtures. 7a then measures, for every file of every whole-project gate
+project, the share of its prefix in its demand closure, and prints the
+distribution. 7a states its threshold before measuring. 7b is built only if
+the audit leaves D6 standing and the median share is small enough that a
+hover-first session's cold cost falls by more than the bookkeeping adds.
 
 **Oracle (7b)**: for every file, the hover and completion answers from the
 closure's inference equal those from the whole prefix's inference, over the
-whole-project gate.
+whole-project gate and over generated projects that collide constructor
+names across files the target does not reference.
 
 ### Expected end state
 
