@@ -1493,7 +1493,7 @@ impl Context {
             Context::Operand => "-({H})",
             Context::ConvertOperand => "int ({H})",
             Context::Statement => "(({H}); 0)",
-            Context::Scrutinee => "(match ({H}) with 1 -> 1 | _ -> 2)",
+            Context::Scrutinee => "(match ({H}) with _ when b -> 1 | _ -> 2)",
             Context::Receiver => "({H}).Length",
             Context::CaseField => "WA ({H})",
             Context::Annotated => "({H})",
@@ -1582,18 +1582,16 @@ fn alphabet_case(k: usize, cell: Cell, seed: u64) -> AlphabetCase {
     }
 }
 
-/// Every alphabet case, `per_cell` per cell, in files of
+/// A case for each of `cells`, drawn for `round`, in files of
 /// [`CASES_PER_FILE`].
-fn alphabet_files(per_cell: usize) -> Vec<(String, Vec<(usize, AlphabetCase)>)> {
-    let cases: Vec<AlphabetCase> = (0..per_cell)
-        .flat_map(|round| {
-            alphabet()
-                .into_iter()
-                .enumerate()
-                .map(move |(i, cell)| (round, i, cell))
-        })
+fn alphabet_files(cells: &[Cell], round: usize) -> Vec<(String, Vec<(usize, AlphabetCase)>)> {
+    let cases: Vec<AlphabetCase> = cells
+        .iter()
         .enumerate()
-        .map(|(k, (round, i, cell))| alphabet_case(k, cell, (round * 7919 + i) as u64))
+        .map(|(k, &cell)| {
+            let i = alphabet().iter().position(|&c| c == cell).expect("a cell");
+            alphabet_case(k, cell, (round * 7919 + i) as u64)
+        })
         .collect();
     let mut files = Vec::new();
     let mut cases = cases.into_iter().peekable();
@@ -1620,11 +1618,82 @@ fn expr_at(root: &SyntaxNode, at: (usize, usize)) -> Option<Expr> {
     })
 }
 
+/// How many rounds a cell may take to draw a case FCS grades: a form is
+/// drawn from a few spellings ([`Arm::production`]), not every one of which
+/// FCS's dump grades in every context (`-("s")` is a declaration it does not
+/// convert), so a cell left ungraded is drawn again.
+const ALPHABET_ROUNDS: usize = 40;
+
+/// The cells FCS's dump grades no case of, however the form is drawn, each
+/// with why, for both prefix states. An operator's or a conversion's operand
+/// of a type the operator has no implementation for (`-()`, `int (1, 1)`,
+/// `-(Some 1)`) leaves the operator's static constraint unsolved, and FCS's
+/// dump converts no declaration that holds one; nor one where such an
+/// operator's result is equated with `unit` or passed to a method. The
+/// sweep asserts each is still ungraded, so an entry that FCS starts to grade
+/// fails until it is removed.
+const FCS_UNGRADED: &[(Arm, Context, &str)] = &[
+    (Arm::Unit, Context::Operand, "`-()`: no `~-` on unit"),
+    (
+        Arm::Tuple,
+        Context::Operand,
+        "`-(t, 1)`: no `~-` on a tuple",
+    ),
+    (Arm::ElselessIf, Context::Operand, "`-(if b then t)`: unit"),
+    (Arm::While, Context::Operand, "`-(while …)`: unit"),
+    (
+        Arm::MethodCall,
+        Context::Operand,
+        "`-(y.Insert(…))`: string",
+    ),
+    (Arm::CaseApply, Context::Operand, "`-(Some t)`: an option"),
+    (
+        Arm::ModuleValue,
+        Context::Operand,
+        "`-(List.empty)`: a list",
+    ),
+    (
+        Arm::Unit,
+        Context::ConvertOperand,
+        "`int ()`: no conversion from unit",
+    ),
+    (Arm::Tuple, Context::ConvertOperand, "`int (t, 1)`: a tuple"),
+    (
+        Arm::ElselessIf,
+        Context::ConvertOperand,
+        "`int (if b then t)`: unit",
+    ),
+    (Arm::While, Context::ConvertOperand, "`int (while …)`: unit"),
+    (
+        Arm::ModuleValue,
+        Context::ConvertOperand,
+        "`int List.empty`: a list",
+    ),
+    (
+        Arm::Operator,
+        Context::UnitPattern,
+        "`let () = -(t)`: `~-` at unit",
+    ),
+    (
+        Arm::Operator,
+        Context::MethodArg,
+        "`y.Insert(0, -(t))`: `~-` at an unknown type",
+    ),
+];
+
+/// Whether FCS's dump grades no case of `cell` ([`FCS_UNGRADED`]).
+fn fcs_ungraded(cell: Cell) -> bool {
+    FCS_UNGRADED
+        .iter()
+        .any(|&(arm, context, _)| arm == cell.arm && context == cell.context)
+}
+
 /// Every modelled form, in every context that hands it an expected type,
 /// with the prefix faithful and with it lost before the form, graded
 /// against FCS: what inference commits anywhere in the file, FCS has, the
-/// same. And each case's form is the arm its cell names, so the alphabet is
-/// what the cells say it is.
+/// same. A cell counts as graded only where FCS's dump grades its form's
+/// range, and is drawn again until it is. And each case's form is the arm
+/// its cell names, so the alphabet is what the cells say it is.
 #[test]
 fn every_arm_in_every_context_is_certain_implies_exact() {
     let per_cell = env_usize_or("BORZOI_ALPHABET_PER_CELL", 1);
@@ -1632,83 +1701,121 @@ fn every_arm_in_every_context_is_certain_implies_exact() {
     let mut graded: BTreeMap<Cell, usize> = BTreeMap::new();
     let mut misplaced = Vec::new();
     let mut unsound = Vec::new();
-    let (mut certain, mut uncheckable, mut files) = (0, 0, 0);
-    for (src, cases) in alphabet_files(per_cell) {
-        files += 1;
-        let parsed = parse(&src);
-        assert!(parsed.errors.is_empty(), "{:?}\n{src}", parsed.errors);
-        let root = parsed.root.clone();
-        for (start, case) in &cases {
-            let at = (start + case.hole.0, start + case.hole.1);
-            let found = expr_at(&root, at).as_ref().and_then(arm_of);
-            if found != Some(case.cell.arm) {
-                misplaced.push(format!("{:?} reads as {found:?}: {}", case.cell, case.text));
-            }
+    let (mut certain, mut files) = (0, 0);
+    let mut uncheckable: Vec<String> = Vec::new();
+    let pending = |graded: &BTreeMap<Cell, usize>| -> Vec<Cell> {
+        alphabet()
+            .into_iter()
+            .filter(|&c| !fcs_ungraded(c))
+            .flat_map(|c| {
+                let have = graded.get(&c).copied().unwrap_or(0);
+                std::iter::repeat_n(c, per_cell.saturating_sub(have))
+            })
+            .collect()
+    };
+    let mut rounds = 0;
+    while rounds < ALPHABET_ROUNDS && !pending(&graded).is_empty() {
+        // The cells FCS grades nothing of are drawn too, so that one it starts
+        // to grade is seen, in files of their own: FCS may fail to check a file
+        // that holds one at all, which would take the other cells with it.
+        let mut batch = alphabet_files(&pending(&graded), rounds);
+        if rounds < 4 {
+            let exempt: Vec<Cell> = alphabet()
+                .into_iter()
+                .filter(|&c| fcs_ungraded(c))
+                .collect();
+            batch.extend(alphabet_files(&exempt, rounds));
         }
-        let recovery = SyntaxRecovery::of(&parsed);
-        let file = ImplFile::cast(parsed.root).expect("impl file");
-        let resolved = resolve_file(&file, &ProjectItems::default(), env, &recovery);
-        let inferred = infer_file(&file, &resolved, env, &PrecedingTypes::default());
-        let path = temp_fs_file("infer_alphabet", &src);
-        let jsons = try_invoke_fcs_dump("types", &path)
-            .and_then(|t| try_invoke_fcs_dump("binder-types", &path).map(|b| (t, b)));
-        let _ = std::fs::remove_file(&path);
-        let Ok((types_json, binders_json)) = jsons else {
-            uncheckable += 1;
-            continue;
-        };
-        let Some(dumps) = GradedDumps::read(&types_json, &binders_json, &src, Some(&file)) else {
-            uncheckable += 1;
-            continue;
-        };
-        let header_lines = HEADER.matches('\n').count() as u32;
-        assert!(
-            dumps.errors.iter().all(|e| e.line > header_lines),
-            "FCS rejects the header: {:?}",
-            dumps.errors
-        );
-        let span = |r: borzoi_cst::syntax::TextRange| {
-            (u32::from(r.start()) as usize, u32::from(r.end()) as usize)
-        };
-        let ours_types: BTreeMap<(usize, usize), String> = inferred
-            .types()
-            .iter()
-            .map(|(r, t)| (span(*r), t.render(env)))
-            .collect();
-        let ours_binders: BTreeMap<(usize, usize), String> = inferred
-            .def_types()
-            .iter()
-            .map(|(d, t)| (span(resolved.def(*d).range), t.render(env)))
-            .collect();
-        for (table, ours, theirs) in [
-            ("node", &ours_types, &dumps.types),
-            ("binder", &ours_binders, &dumps.binders),
-        ] {
-            for (&at, ty) in ours {
-                if dumps.is_ungraded(at) {
+        for (src, cases) in batch {
+            files += 1;
+            let parsed = parse(&src);
+            assert!(parsed.errors.is_empty(), "{:?}\n{src}", parsed.errors);
+            let root = parsed.root.clone();
+            for (start, case) in &cases {
+                let at = (start + case.hole.0, start + case.hole.1);
+                let found = expr_at(&root, at).as_ref().and_then(arm_of);
+                if found != Some(case.cell.arm) {
+                    misplaced.push(format!("{:?} reads as {found:?}: {}", case.cell, case.text));
+                }
+            }
+            let recovery = SyntaxRecovery::of(&parsed);
+            let file = ImplFile::cast(parsed.root).expect("impl file");
+            let resolved = resolve_file(&file, &ProjectItems::default(), env, &recovery);
+            let inferred = infer_file(&file, &resolved, env, &PrecedingTypes::default());
+            let path = temp_fs_file("infer_alphabet", &src);
+            let jsons = try_invoke_fcs_dump("types", &path)
+                .and_then(|t| try_invoke_fcs_dump("binder-types", &path).map(|b| (t, b)));
+            let _ = std::fs::remove_file(&path);
+            let dumps = match jsons {
+                Ok((types_json, binders_json)) => {
+                    GradedDumps::read(&types_json, &binders_json, &src, Some(&file))
+                        .ok_or_else(|| "a declaration FCS's dump does not place".to_string())
+                }
+                Err(e) => Err(format!("{e:?}")),
+            };
+            // A file FCS cannot check grades none of its cells, which are drawn
+            // again.
+            let dumps = match dumps {
+                Ok(dumps) => dumps,
+                Err(why) => {
+                    uncheckable.push(why);
                     continue;
                 }
-                certain += 1;
-                if theirs.get(&at) != Some(ty) {
-                    let line_start = src[..at.0].rfind('\n').map_or(0, |i| i + 1);
-                    let line_end = src[at.0..].find('\n').map_or(src.len(), |i| at.0 + i);
-                    unsound.push(format!(
-                        "{table} `{}` ours {ty}, FCS {:?}: {}",
-                        &src[at.0..at.1],
-                        theirs.get(&at),
-                        &src[line_start..line_end]
-                    ));
+            };
+            let header_lines = HEADER.matches('\n').count() as u32;
+            assert!(
+                dumps.errors.iter().all(|e| e.line > header_lines),
+                "FCS rejects the header: {:?}",
+                dumps.errors
+            );
+            let span = |r: borzoi_cst::syntax::TextRange| {
+                (u32::from(r.start()) as usize, u32::from(r.end()) as usize)
+            };
+            let ours_types: BTreeMap<(usize, usize), String> = inferred
+                .types()
+                .iter()
+                .map(|(r, t)| (span(*r), t.render(env)))
+                .collect();
+            let ours_binders: BTreeMap<(usize, usize), String> = inferred
+                .def_types()
+                .iter()
+                .map(|(d, t)| (span(resolved.def(*d).range), t.render(env)))
+                .collect();
+            for (table, ours, theirs) in [
+                ("node", &ours_types, &dumps.types),
+                ("binder", &ours_binders, &dumps.binders),
+            ] {
+                for (&at, ty) in ours {
+                    if dumps.is_ungraded(at) {
+                        continue;
+                    }
+                    certain += 1;
+                    if theirs.get(&at) != Some(ty) {
+                        let line_start = src[..at.0].rfind('\n').map_or(0, |i| i + 1);
+                        let line_end = src[at.0..].find('\n').map_or(src.len(), |i| at.0 + i);
+                        unsound.push(format!(
+                            "{table} `{}` ours {ty}, FCS {:?}: {}",
+                            &src[at.0..at.1],
+                            theirs.get(&at),
+                            &src[line_start..line_end]
+                        ));
+                    }
+                }
+            }
+            for (start, case) in &cases {
+                let at = (start + case.hole.0, start + case.hole.1);
+                if !dumps.is_ungraded(at) {
+                    *graded.entry(case.cell).or_default() += 1;
                 }
             }
         }
-        for (_, case) in &cases {
-            *graded.entry(case.cell).or_default() += 1;
-        }
+        rounds += 1;
     }
     eprintln!(
-        "alphabet sweep: {} cells, {files} files, {certain} commits graded, {uncheckable} \
-         uncheckable",
-        graded.len()
+        "alphabet sweep: {} cells graded in {rounds} rounds, {files} files, {certain} commits \
+         graded, {} uncheckable: {uncheckable:?}",
+        graded.len(),
+        uncheckable.len()
     );
     assert!(
         misplaced.is_empty(),
@@ -1722,12 +1829,21 @@ fn every_arm_in_every_context_is_certain_implies_exact() {
         unsound.len(),
         unsound.join("\n")
     );
-    assert_eq!(uncheckable, 0, "FCS could not check every alphabet file");
-    let missing: Vec<Cell> = alphabet()
-        .into_iter()
-        .filter(|c| graded.get(c).copied().unwrap_or(0) < per_cell)
-        .collect();
-    assert!(missing.is_empty(), "cells not graded: {missing:?}");
+    assert!(
+        uncheckable.len() * 10 <= files,
+        "FCS could not check {} of {files} alphabet files: {uncheckable:?}",
+        uncheckable.len()
+    );
+    let missing = pending(&graded);
+    assert!(
+        missing.is_empty(),
+        "cells FCS graded no case of in {ALPHABET_ROUNDS} rounds: {missing:?}"
+    );
+    let now_graded: Vec<&Cell> = graded.keys().filter(|&&c| fcs_ungraded(c)).collect();
+    assert!(
+        now_graded.is_empty(),
+        "FCS grades cells `FCS_UNGRADED` says it does not; remove them: {now_graded:?}"
+    );
     assert!(certain > 0, "nothing committed, so nothing graded");
 }
 
