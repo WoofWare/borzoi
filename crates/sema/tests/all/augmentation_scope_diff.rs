@@ -623,10 +623,15 @@ enum Spelling {
     /// ``` ``T`1`` ``` where the container also declares a type literally
     /// named so.
     MangledWithLiteral,
+    /// A tuple type extension's head over `T`, `(T * int)`, which augments
+    /// `System.Tuple` instead (F# preview's `ExtensionConstraintSolutions`).
+    TupleHead,
+    /// Its struct form, `struct (T * int)`, augmenting `System.ValueTuple`.
+    StructTupleHead,
 }
 
 impl Spelling {
-    const ALL: [Spelling; 8] = [
+    const ALL: [Spelling; 10] = [
         Spelling::Plain,
         Spelling::Backticked,
         Spelling::Mangled(0),
@@ -635,6 +640,8 @@ impl Spelling {
         Spelling::Spaced,
         Spelling::Qualified,
         Spelling::MangledWithLiteral,
+        Spelling::TupleHead,
+        Spelling::StructTupleHead,
     ];
 }
 
@@ -717,6 +724,8 @@ fn header_spellings_agree_with_fcs() {
                     Spelling::Spaced => "``T x``".to_string(),
                     Spelling::Qualified => format!("{qualifier}.T"),
                     Spelling::MangledWithLiteral => "``T`1``".to_string(),
+                    Spelling::TupleHead => format!("(T{typars} * int)"),
+                    Spelling::StructTupleHead => format!("struct (T{typars} * int)"),
                 };
                 let literal = if spelling == Spelling::MangledWithLiteral {
                     "type ``T`1`` =\n    | C\n"
@@ -725,6 +734,12 @@ fn header_spellings_agree_with_fcs() {
                 };
                 let indent = if nested { "    " } else { "" };
                 let host = if nested { "module N =\n" } else { "" };
+                let typars = if matches!(spelling, Spelling::TupleHead | Spelling::StructTupleHead)
+                {
+                    ""
+                } else {
+                    typars
+                };
                 let src = format!(
                     "module Prog\n\nlet A = 10\n{decl}{literal}{host}{indent}type {name}{typars} with\n{indent}    member _.M = A\n"
                 );

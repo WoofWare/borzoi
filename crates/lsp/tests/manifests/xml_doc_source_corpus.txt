@@ -29429,12 +29429,12 @@ tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/T
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/E_InvalidExtensions03.fs:10:12-10:16	this Value { is_function: false } def agree-none
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/E_InvalidExtensions03.fs:10:31-10:35	this Value { is_function: false } use agree-none
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs	compared fcs-check-errors
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:13:5-13:7	x1 Value { is_function: false } def declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:14:4-14:6	x1 Value { is_function: false } use declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:14:75-14:77	x1 Value { is_function: false } use declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:20:5-20:7	x2 Value { is_function: false } def declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:21:4-21:6	x2 Value { is_function: false } use declined ParseErrors fcs-none
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:21:47-21:49	x2 Value { is_function: false } use declined ParseErrors fcs-none
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:13:5-13:7	x1 Value { is_function: false } def agree-none
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:14:4-14:6	x1 Value { is_function: false } use agree-none
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:14:75-14:77	x1 Value { is_function: false } use agree-none
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:20:5-20:7	x2 Value { is_function: false } def agree-none
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:21:4-21:6	x2 Value { is_function: false } use agree-none
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:21:47-21:49	x2 Value { is_function: false } use agree-none
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int003.fs	compared fcs-check-errors
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int003.fs:12:17-12:20	res Value { is_function: false } def agree-none
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int003.fs:14:9-14:10	a Value { is_function: false } def agree-none

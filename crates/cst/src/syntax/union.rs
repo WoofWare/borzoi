@@ -242,6 +242,21 @@ impl AttributesDecl {
     }
 }
 
+impl TupleTypeExtensionHead {
+    /// `true` for `type struct (…) with …`, a `System.ValueTuple` extension.
+    pub fn is_struct(&self) -> bool {
+        accessor!("TupleTypeExtensionHead::is_struct");
+        token(&self.0, SyntaxKind::STRUCT_TOK).is_some()
+    }
+
+    /// The extended type: the tuple between the parentheses, or, for FCS's
+    /// `struct (T)` recovery, `T`.
+    pub fn ty(&self) -> Option<Type> {
+        accessor!("TupleTypeExtensionHead::ty");
+        child(&self.0)
+    }
+}
+
 impl TypeDefn {
     /// The type-header attribute lists — FCS's `SynComponentInfo.attributes`
     /// (phase 10.7a). Leading [`AttributeList`] children of the `TYPE_DEFN`,
@@ -258,6 +273,14 @@ impl TypeDefn {
     /// inside the repr node). `None` only on a malformed header with no name.
     pub fn long_id(&self) -> Option<LongIdent> {
         accessor!("TypeDefn::long_id");
+        child(&self.0)
+    }
+
+    /// The head of a tuple type extension (`type (int * int) with …`) — FCS's
+    /// `SynComponentInfo.synType` when it is a tuple rather than a name. A
+    /// definition has this or a [`Self::long_id`], never both.
+    pub fn tuple_type_head(&self) -> Option<TupleTypeExtensionHead> {
+        accessor!("TypeDefn::tuple_type_head");
         child(&self.0)
     }
 

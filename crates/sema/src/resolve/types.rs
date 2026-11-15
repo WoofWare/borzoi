@@ -3,7 +3,7 @@
 use borzoi_cst::syntax::{
     ActivePatName, AstNode, Binding, GetSetMember, LongIdentPat, MemberDefn, MemberLeading,
     MemberLetBindings, ObjExpr, Pat, SyntaxKind, SyntaxNode, SyntaxToken, TupleSegment, TyparDecls,
-    Type, TypeDefn, TypeDefnRepr, ValSig,
+    Type, TypeDefn, TypeDefnRepr, ValSig, VarType,
 };
 
 use super::state::Frame;
@@ -875,6 +875,22 @@ impl<'a> Resolver<'a> {
     /// types. An enum repr holds only constant cases (no type uses), and an
     /// object-model body's member signatures / inheritance are a later slice.
     pub(super) fn resolve_type_defn(&mut self, defn: &TypeDefn) {
+        // A tuple type extension's head declares a type parameter at each type
+        // variable in it (FCS's `DesugarTupleTypeExtensionCompInfo`), which the
+        // walk does not intern; the definition's members, the only code that
+        // could use one, are not walked ([`Self::member_scope_of`]).
+        if let Some(head) = defn.tuple_type_head() {
+            for var in head.syntax().descendants_of::<VarType>() {
+                let mut tokens = var.syntax().tokens_where(|k| !k.is_trivia());
+                if let Some(first) = tokens.next() {
+                    let end = tokens.last().unwrap_or_else(|| first.clone());
+                    self.out.opaque_binders.insert(TextRange::new(
+                        first.text_range().start(),
+                        end.text_range().end(),
+                    ));
+                }
+            }
+        }
         match defn.repr() {
             Some(TypeDefnRepr::Abbrev(a)) => {
                 if let Some(ty) = a.ty() {
@@ -1088,6 +1104,12 @@ impl<'a> Resolver<'a> {
     /// Which scope a type definition's members see, beyond the module scope
     /// and their own self identifier and parameters.
     pub(super) fn member_scope_of(&self, defn: &TypeDefn) -> MemberScope {
+        // A tuple type extension (`type (A * B) with …`) augments `System.Tuple`
+        // or `System.ValueTuple` over type parameters its head declares, which
+        // the walk does not model.
+        if defn.tuple_type_head().is_some() {
+            return MemberScope::Unwalked;
+        }
         let header = defn.typar_decls().map_or(0, |t| t.typars().count());
         let here = |name: &str, arity: usize| {
             self.index

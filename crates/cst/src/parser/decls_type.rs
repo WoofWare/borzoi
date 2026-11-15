@@ -244,10 +244,9 @@ impl<'src> Parser<'src> {
     ///   (`SynTyparDecls.PrefixList`, `pars.fsy`'s `prefixTyparDecls: LPAREN
     ///   typarDeclList rparen`); see [`Self::parse_typar_decls_prefix_list`].
     ///
-    /// A `(` that does not open a typar list (`type (int * int) with …`, the
-    /// tuple-extension form FCS rejects) falls through to
-    /// [`Self::parse_long_ident_path`], which records a clean "expected
-    /// identifier" error.
+    /// * **a tuple type extension's head** `type (A * B) with …` / `type struct
+    ///   (A * B) with …`: a `(` that does not open a typar list, or `struct (`
+    ///   ([`Self::parse_tuple_type_extension_head`]).
     ///
     /// Returns whether an after-keyword attribute's trailing offside `BlockSep`
     /// (FCS's `opt_OBLOCKSEP`) was drained — i.e. this is the column-0 offside
@@ -329,6 +328,20 @@ impl<'src> Parser<'src> {
             self.parse_typar_decl(true);
             self.builder.finish_node();
             self.parse_long_ident_path("type");
+            return drained_offside_attr_sep;
+        }
+
+        // A tuple type extension's head, in place of the name: a `(` with
+        // something inside it (an empty `()` is left to the name's error).
+        let tuple_head = match self.peek() {
+            Some((Ok(FilteredToken::Raw(Token::LParen)), lparen)) => !matches!(
+                self.next_non_trivia_raw_after(lparen.end),
+                Some(Token::RParen) | None
+            ),
+            _ => self.peek_starts_struct_tuple_type(),
+        };
+        if tuple_head {
+            self.parse_tuple_type_extension_head();
             return drained_offside_attr_sep;
         }
 
@@ -688,16 +701,82 @@ impl<'src> Parser<'src> {
         !self.source[span.end..].starts_with(|c: char| "!$%&*+-./<=>?@^|~:".contains(c))
     }
 
+    /// Parse a tuple type extension's head (`tyconNameAndTyparDecls`, F#
+    /// preview's `ExtensionConstraintSolutions`) into a
+    /// [`SyntaxKind::TUPLE_TYPE_EXTENSION_HEAD`]: `(A * B …)` or `struct (A * B
+    /// …)`, the tuple a [`SyntaxKind::TUPLE_TYPE`]. FCS also accepts, silently,
+    /// a trailing `*` after the first element (`(A *)`, `struct (A *)`, with a
+    /// `SynType.FromParseError` after it) and a lone element in the struct form
+    /// (`struct (A)`, whose head is `A`); the tuple's `*` then ends it, or the
+    /// element stands alone. A lone element without `struct` is an error. The
+    /// cursor is at the `(` or the `struct`.
+    /// Record `message` at the cursor (or the end of input).
+    fn head_error_at_cursor(&mut self, message: &str) {
+        let span = self
+            .peek()
+            .map(|(_, s)| s.clone())
+            .unwrap_or_else(|| self.source.len()..self.source.len());
+        self.errors.push(ParseError {
+            message: message.to_string(),
+            span,
+        });
+    }
+
+    fn parse_tuple_type_extension_head(&mut self) {
+        self.builder
+            .start_node(SyntaxKind::TUPLE_TYPE_EXTENSION_HEAD);
+        let is_struct = matches!(
+            self.peek(),
+            Some((Ok(FilteredToken::Raw(Token::Struct)), _))
+        );
+        if is_struct {
+            self.bump_into(SyntaxKind::STRUCT_TOK);
+        }
+        self.bump_into(SyntaxKind::LPAREN_TOK);
+        let star = |p: &Self| {
+            matches!(p.next_non_trivia_raw_at_pos(), Some(Token::Op("*")))
+                && p.next_tokens_unbroken(1)
+        };
+        if self.peek_starts_type_or_anon_recd() {
+            if let Some((_, next_span)) = self.peek() {
+                let start = next_span.start;
+                self.drain_raw_up_to(start);
+            }
+            let cp = self.builder.checkpoint();
+            self.parse_app_type_can_be_nullable();
+            if star(self) {
+                self.builder.start_node_at(cp, SyntaxKind::TUPLE_TYPE);
+                self.bump_into(SyntaxKind::STAR_TOK);
+                if !matches!(self.next_non_trivia_raw_at_pos(), Some(Token::RParen)) {
+                    if self.peek_starts_type_or_anon_recd() {
+                        // FCS's `tupleOrQuotTypeElements`: further `*` or `/`
+                        // separators, as in any tuple type.
+                        self.parse_app_type_can_be_nullable();
+                        self.sweep_tuple_type_separators(false);
+                    } else {
+                        self.head_error_at_cursor("expected type after tuple-type separator");
+                    }
+                }
+                self.builder.finish_node(); // TUPLE_TYPE
+            } else if !is_struct {
+                self.head_error_at_cursor("expected `*` in a tuple type extension's head");
+            }
+        } else {
+            self.head_error_at_cursor("expected a type in a tuple type extension's head");
+        }
+        self.bump_swallowed_rparen(SyntaxKind::RPAREN_TOK);
+        self.builder.finish_node(); // TUPLE_TYPE_EXTENSION_HEAD
+    }
+
     /// Whether the cursor (a type header, past any accessibility) opens a
     /// parenthesised prefix typar list: `(`, then a typar declaration's head —
     /// an optional `[< … >]` attribute run, a `'`/`^` sigil and its identifier —
     /// followed by what may follow a `typarDecl` in FCS's `typarDeclList`: a
     /// `,`, the closing `)`, or an intersection constraint's `&`.
     ///
-    /// The lookahead stops short of FCS's grammar on one point only: a `(` whose
-    /// typar is followed by anything else (`('a * 'b) with …`, a tuple-type
-    /// extension, which FCS rejects) is left to the name parser's clean error
-    /// rather than claimed as a list that then fails at the `*`.
+    /// A typar followed by anything else, or an intersection constraint
+    /// followed by a `*`, opens a tuple type extension's head (`('a * 'b) with
+    /// …`) instead.
     fn at_prefix_typar_list(&self) -> bool {
         if !matches!(
             self.peek(),
@@ -715,9 +794,40 @@ impl<'src> Parser<'src> {
                 }
             }
         }
-        matches!(sig.next(), Some(Token::Quote | Token::Op("^")))
-            && matches!(sig.next(), Some(Token::Ident(_) | Token::QuotedIdent(_)))
-            && matches!(sig.next(), Some(Token::Comma | Token::RParen | Token::Amp))
+        if !(matches!(sig.next(), Some(Token::Quote | Token::Op("^")))
+            && matches!(sig.next(), Some(Token::Ident(_) | Token::QuotedIdent(_))))
+        {
+            return false;
+        }
+        match sig.next() {
+            Some(Token::Comma | Token::RParen) => true,
+            // An intersection constraint, `('a & #I, …)`, unless a `*` follows it
+            // at the parentheses' own depth: `('a & #I * 'b)` is a tuple type
+            // extension's head.
+            Some(Token::Amp) => {
+                // Bounded by the list's own `)`: parentheses nest, and so do a
+                // flexible type's generic arguments, whose closers the lexer may
+                // fuse (`>>`).
+                let (mut parens, mut angles) = (0usize, 0usize);
+                for t in sig {
+                    match t {
+                        Token::LParen => parens += 1,
+                        Token::RParen if parens == 0 => return true,
+                        Token::RParen => parens -= 1,
+                        Token::Less(_) => angles += 1,
+                        Token::Greater(_) => angles = angles.saturating_sub(1),
+                        Token::Op(op) if !op.is_empty() && op.bytes().all(|b| b == b'>') => {
+                            angles = angles.saturating_sub(op.len());
+                        }
+                        Token::Comma if parens == 0 && angles == 0 => return true,
+                        Token::Op("*") if parens == 0 && angles == 0 => return false,
+                        _ => {}
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Parse a parenthesised prefix typar list — FCS's `prefixTyparDecls: LPAREN

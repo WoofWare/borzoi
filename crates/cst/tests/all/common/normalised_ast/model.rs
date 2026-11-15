@@ -349,6 +349,10 @@ pub struct NormalisedTypeDefn {
     /// See [`NormalisedAccess`].
     pub access: Option<NormalisedAccess>,
     pub long_id: Vec<String>,
+    /// `SynComponentInfo.synType` when it is a type rather than a name: a
+    /// tuple type extension's head (`type (int * int) with …`, F# preview's
+    /// `ExtensionConstraintSolutions`), whose [`Self::long_id`] is empty.
+    pub head_type: Option<NormalisedType>,
     /// `SynComponentInfo.typeParams` flattened to the typar list (phase 9.3).
     /// Empty for a non-generic definition; the list's source shape is
     /// [`Self::typar_form`].

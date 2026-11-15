@@ -16,9 +16,9 @@ use borzoi_cst::syntax::{
     ModuleOrNamespaceKind, NamedPat, NewExpr, ObjExpr, OpenDecl, ParenExpr, ParenPat, Pat,
     RationalConst, RecordField, RecordFieldDecl, RecordSpread, SigDecl, SigFile,
     StaticOptCondition, StaticOptimizationExpr, SyntaxKind, SyntaxToken, TraitCallExpr, TupleExpr,
-    TuplePat, TupleSegment, TupleType, TyparConstraint, TyparConstraintKind, TyparDecl,
-    TyparDeclsForm, Type, TypeAppExpr, TypeDefn, TypeDefnRepr, TypeTestExpr, TypedExpr, TypedPat,
-    UnionCase, UnionCaseField, UpcastExpr, ValField, VarType,
+    TuplePat, TupleSegment, TupleType, TupleTypeExtensionHead, TyparConstraint,
+    TyparConstraintKind, TyparDecl, TyparDeclsForm, Type, TypeAppExpr, TypeDefn, TypeDefnRepr,
+    TypeTestExpr, TypedExpr, TypedPat, UnionCase, UnionCaseField, UpcastExpr, ValField, VarType,
 };
 
 use super::decode::*;
@@ -61,9 +61,15 @@ fn cst_type_header_access(node: &borzoi_cst::syntax::SyntaxNode) -> Option<Norma
             borzoi_cst::syntax::NodeOrToken::Token(t) if t.kind() == SyntaxKind::ACCESS_TOK => {
                 return Some(cst_access_from_token(&t));
             }
-            // The name is the first `LONG_IDENT` child; a before-name access
-            // must precede it. Anything from here on is the after-name slot.
-            borzoi_cst::syntax::NodeOrToken::Node(n) if n.kind() == SyntaxKind::LONG_IDENT => {
+            // The name is the first `LONG_IDENT` child (or a tuple type
+            // extension's head); a before-name access must precede it. Anything
+            // from here on is the after-name slot.
+            borzoi_cst::syntax::NodeOrToken::Node(n)
+                if matches!(
+                    n.kind(),
+                    SyntaxKind::LONG_IDENT | SyntaxKind::TUPLE_TYPE_EXTENSION_HEAD
+                ) =>
+            {
                 return None;
             }
             _ => {}
@@ -964,16 +970,50 @@ fn normalise_type_defn(d: &TypeDefn) -> NormalisedTypeDefn {
         }
         (ic, _) => ic,
     };
+    // FCS's `struct (A)` recovery heads the definition with `A` alone, which
+    // is a name when `A` is one.
+    let (long_id, head_type) = match d.tuple_type_head().map(|h| normalise_tuple_type_head(&h)) {
+        Some(NormalisedType::LongIdent(path)) => (path, None),
+        head => (long_id, head),
+    };
     NormalisedTypeDefn {
         attributes,
         access: cst_type_header_access(d.syntax()),
         long_id,
+        head_type,
         typars,
         typar_form,
         constraints,
         repr,
         members,
         implicit_ctor,
+    }
+}
+
+/// A tuple type extension's head as FCS builds its `SynComponentInfo.synType`
+/// (`tyconNameAndTyparDecls`): `type (A * B)` is `Paren(Tuple(false, …))`,
+/// `type struct (A * B)` is `Tuple(true, …)` with no `Paren`, and the
+/// recoveries carry no `Paren` either: `(A *)` and `struct (A *)` end in a
+/// `FromParseError` element, and `struct (A)` is `A` alone.
+fn normalise_tuple_type_head(h: &TupleTypeExtensionHead) -> NormalisedType {
+    let ty = h
+        .ty()
+        .map_or(NormalisedType::FromParseError, |t| normalise_type(&t));
+    let NormalisedType::Tuple { mut path, .. } = ty else {
+        return ty;
+    };
+    let trailing_star = matches!(path.last(), Some(NormalisedTupleSegment::Star));
+    if trailing_star {
+        path.push(NormalisedTupleSegment::Type(NormalisedType::FromParseError));
+    }
+    let tuple = NormalisedType::Tuple {
+        is_struct: h.is_struct(),
+        path,
+    };
+    if h.is_struct() || trailing_star {
+        tuple
+    } else {
+        NormalisedType::Paren(Box::new(tuple))
     }
 }
 

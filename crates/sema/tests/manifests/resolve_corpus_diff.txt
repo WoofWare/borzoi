@@ -4203,7 +4203,24 @@ tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/T
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/E_InvalidExtensions03.fs:7:31 "this"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/E_InvalidExtensions03.fs:7:31 "this.Length"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/E_InvalidExtensions03.fs:7:43 "*"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs	our-parse-errors
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs	compared fcs-check-errors b1=18 assembly=10 external=4
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:10:14 "'T1"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:10:20 "'T2"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:11:33 "struct (a, f)"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:11:48 "struct (b, x)"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:11:73 "a"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:11:78 "b"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:11:81 "f"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:11:83 "x"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:17:14 "'T1"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:17:20 "'T2"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:18:30 "struct (a, _b)"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:18:48 "a"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:8:29 "int"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:8:38 "int"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:8:45 "x1"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:8:48 "+"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs:8:50 "x2"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int003.fs	compared fcs-check-errors b1=7 assembly=8 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int003.fs:11:10 "M"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeKindInference/infer_interface002.fs	compared fcs-clean b1=5 assembly=13 external=2
@@ -5575,7 +5592,9 @@ tests/service/data/SyntaxTree/Type/Module Inside Record 01.fs	our-parse-errors
 tests/service/data/SyntaxTree/Type/Open Inside Type 01.fs	our-parse-errors
 tests/service/data/SyntaxTree/Type/Record - Mutable 02.fs	our-parse-errors
 tests/service/data/SyntaxTree/Type/SynMemberDefnInterfaceContainsTheRangeOfTheWithKeyword.fs	compared fcs-check-errors b1=0 assembly=0 external=0
-tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 03.fs	our-parse-errors
+tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 03.fs	compared fcs-check-errors b1=2 assembly=0 external=1
+tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 03.fs:1:13 "'T2"	gap
+tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 03.fs:1:7 "'T1"	gap
 tests/service/data/SyntaxTree/Type/Type 11.fs	our-parse-errors
 tests/service/data/SyntaxTree/Type/Union 08.fs	compared fcs-clean b1=0 assembly=0 external=0
 tests/service/data/SyntaxTree/UnionCase/Missing name 07.fs	our-parse-errors

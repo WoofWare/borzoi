@@ -326,6 +326,9 @@ tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/T
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/ExtendViaOverloading02.fs member-of-augmentation x6
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/ExtendWithOperator01.fs member-of-augmentation x6
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/MultipleExtensions.fs member-of-augmentation
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension01.fs member-of-augmentation x7
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs member-of-augmentation x7
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension03.fs member-of-augmentation x6
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/E_typeext_int002.fs member-of-augmentation
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int001.fs member-of-augmentation
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int001.fs type_defn x10
@@ -359,6 +362,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/Extension
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/DuplicateBuiltinOperatorSymmetricOperands.fs member-of-augmentation x4
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ExtensionAccessibility.fs member-of-augmentation
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ExtensionPrecedence.fs member-of-augmentation x10
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/MiniFSharpPlusExtensionSRTP.fs member-of-augmentation x582
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/NestedTraverseSequenceSRTP.fs member-of-augmentation x30
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/OpExplicitOptionalExtension.fs member-of-augmentation x6
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ScopeCapture.fs member-of-augmentation x4

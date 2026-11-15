@@ -520,6 +520,14 @@ const FIXTURES: &[(&str, FileKind)] = &[
         FileKind::Impl,
     ),
     ("namespace N\ntype R = { ...T; X: int }\n", FileKind::Sig),
+    (
+        "type ('a * 'b) with\n    member x.F = 1\ntype struct (int * int) with\n    member x.G = 2\n",
+        FileKind::Impl,
+    ),
+    (
+        "namespace N\ntype (int * int) with\n    member F : int\n",
+        FileKind::Sig,
+    ),
 ];
 
 /// Checks every fixture at every version into `indexes`; returns the holes met.

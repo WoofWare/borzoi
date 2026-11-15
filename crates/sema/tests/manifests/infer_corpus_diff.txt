@@ -727,7 +727,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/S
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/StructTypes/ExplicitCtor.fs:20:23-20:27 expr	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/StructTypes/StructConstruction02.fs	compared
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/E_InvalidExtensions03.fs	compared
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs	our-parse-errors
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs	compared
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int003.fs	compared
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int003.fs:12:17-12:20 binder	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/intrinsic/typeext_int003.fs:12:23-12:27 expr	agree
@@ -1647,7 +1647,7 @@ tests/service/data/SyntaxTree/Type/Module Inside Record 01.fs	our-parse-errors
 tests/service/data/SyntaxTree/Type/Open Inside Type 01.fs	our-parse-errors
 tests/service/data/SyntaxTree/Type/Record - Mutable 02.fs	our-parse-errors
 tests/service/data/SyntaxTree/Type/SynMemberDefnInterfaceContainsTheRangeOfTheWithKeyword.fs	compared
-tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 03.fs	our-parse-errors
+tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 03.fs	compared
 tests/service/data/SyntaxTree/Type/Type 11.fs	our-parse-errors
 tests/service/data/SyntaxTree/Type/Union 08.fs	compared
 tests/service/data/SyntaxTree/Type/Union 08.fs:7:16-7:18 expr	agree

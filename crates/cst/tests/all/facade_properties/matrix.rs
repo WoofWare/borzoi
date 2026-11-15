@@ -168,6 +168,7 @@ pub const UNION_NODES: &[UnionNode] = &[
     union_node!(TupleExpr),
     union_node!(TuplePat),
     union_node!(TupleType),
+    union_node!(TupleTypeExtensionHead),
     union_node!(TyparConstraint),
     union_node!(TyparConstraints),
     union_node!(TyparDecl),
@@ -9010,6 +9011,7 @@ pub const FACADES: &[FacadeCase] = &[
             cast_case!(preview, TupleExpr),
             cast_case!(preview, TuplePat),
             cast_case!(preview, TupleType),
+            cast_case!(preview, TupleTypeExtensionHead),
             cast_case!(preview, TyparConstraint),
             cast_case!(preview, TyparConstraints),
             cast_case!(preview, TyparDecl),
@@ -10678,6 +10680,22 @@ pub const FACADES: &[FacadeCase] = &[
             ),
             accessor_case!(
                 preview,
+                TupleTypeExtensionHead,
+                is_struct,
+                is_struct,
+                one,
+                "bool"
+            ),
+            accessor_case!(
+                preview,
+                TupleTypeExtensionHead,
+                ty,
+                ty,
+                one,
+                "option enum Type"
+            ),
+            accessor_case!(
+                preview,
                 TyparConstraint,
                 kind,
                 kind,
@@ -10826,6 +10844,14 @@ pub const FACADES: &[FacadeCase] = &[
                 repr,
                 one,
                 "option enum TypeDefnRepr"
+            ),
+            accessor_case!(
+                preview,
+                TypeDefn,
+                tuple_type_head,
+                tuple_type_head,
+                one,
+                "option node TupleTypeExtensionHead"
             ),
             accessor_case!(
                 preview,

@@ -19,7 +19,6 @@ use crate::common::{
     assert_sig_asts_match,
 };
 use borzoi_oracle_harness::panic_silence::{catch_unwind_silent, take_silenced_panic};
-use std::io::Write;
 
 /// Two parameters.
 #[test]
@@ -163,24 +162,11 @@ fn diff_prefix_list_rejections() {
     }
 }
 
-/// A tuple-type extension head, `type ('a * 'b) with`, which FCS accepts at
-/// every version (the `ExtensionConstraintSolutions` syntax, gated in its
-/// checker) and we do not parse yet: the feature table's `Unmodelled(unparsed
-/// syntax)` row. Pinned so the row's modelling flips it.
+/// A `(` that does not open a typar list is a tuple type extension's head,
+/// `type ('a * 'b) with` (`parser_diff_tuple_type_extensions`).
 #[test]
-fn diff_tuple_type_extension_head_is_unparsed() {
-    let source = "type ('a * 'b) with\n    member _.M = 1\n";
-    let mut tmp = tempfile::NamedTempFile::with_suffix(".fs").expect("create tempfile");
-    tmp.write_all(source.as_bytes()).expect("write source");
-    let json = crate::common::fcs_ast_batch(tmp.path());
-    assert!(
-        !crate::common::fcs_parse_had_errors(&json),
-        "FCS accepts {source:?}"
-    );
-    assert!(
-        !borzoi_cst::parser::parse(source).errors.is_empty(),
-        "we parse {source:?}: model the tuple-type extension head and grade it"
-    );
+fn diff_tuple_type_extension_head_is_not_a_typar_list() {
+    assert_asts_match("type ('a * 'b) with\n    member _.M = 1\n");
 }
 
 /// Typar declarations a list element may be. Each is a whole `typarDecl`.
@@ -292,4 +278,19 @@ fn diff_prefix_typar_grid() {
         accepted > 0 && accepted < total,
         "the prefix-typar grid should both accept and reject, but accepted {accepted} of {total}",
     );
+}
+
+/// A prefix list whose intersection constraint's generic arguments close with
+/// a fused `>>` or hold a tuple: the lookahead that tells a list from a tuple
+/// type extension's head stops at the list's own `)`, so neither the tuple
+/// nor a later `*` (in the code after the header) makes it a tuple head.
+#[test]
+fn diff_prefix_list_constraint_generics() {
+    for src in [
+        "type ('a & #seq<seq<int>>) T = class end\nlet f x = if x > 0 then x * x else 0\n",
+        "type ('a & #seq<int * int>) T = class end\n",
+        "type ('a & #seq<seq<int>>, 'b) T = class end\nlet g x = x * x\n",
+    ] {
+        assert_asts_match(src);
+    }
 }

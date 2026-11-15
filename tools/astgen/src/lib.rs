@@ -985,6 +985,10 @@ pub const STANDALONE_NODES: &[Node] = &[
         kinds: &[],
     },
     Node {
+        name: "TupleTypeExtensionHead",
+        kinds: &[],
+    },
+    Node {
         name: "TyparDecls",
         kinds: &[],
     },

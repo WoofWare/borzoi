@@ -147,6 +147,7 @@ node	TryExpr	TRY_EXPR
 node	TupleExpr	TUPLE_EXPR
 node	TuplePat	TUPLE_PAT
 node	TupleType	TUPLE_TYPE
+node	TupleTypeExtensionHead	TUPLE_TYPE_EXTENSION_HEAD
 node	TyparConstraint	TYPAR_CONSTRAINT
 node	TyparConstraints	TYPAR_CONSTRAINTS
 node	TyparDecl	TYPAR_DECL
@@ -740,6 +741,8 @@ accessor	TuplePat	elements	iter enum Pat
 accessor	TuplePat	is_struct	bool
 accessor	TupleType	is_struct	bool
 accessor	TupleType	segments	vec value TupleSegment
+accessor	TupleTypeExtensionHead	is_struct	bool
+accessor	TupleTypeExtensionHead	ty	option enum Type
 accessor	TyparConstraint	kind	option value TyparConstraintKind
 accessor	TyparConstraint	member_sig	option node MemberSig
 accessor	TyparConstraint	self_constraint	option enum Type
@@ -765,6 +768,7 @@ accessor	TypeDefn	implicit_ctor	option node ImplicitCtor
 accessor	TypeDefn	long_id	option node LongIdent
 accessor	TypeDefn	members	iter enum MemberDefn
 accessor	TypeDefn	repr	option enum TypeDefnRepr
+accessor	TypeDefn	tuple_type_head	option node TupleTypeExtensionHead
 accessor	TypeDefn	typar_decls	option node TyparDecls
 accessor	TypeDefnsDecl	defns	iter node TypeDefn
 accessor	TypeTestExpr	expr	option enum Expr
