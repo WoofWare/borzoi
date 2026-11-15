@@ -481,9 +481,12 @@ pub struct ParsedProject {
     ///   (regardless of document order) and e.g. a
     ///   `ReferenceOutputAssembly=false` default empties `ReferencePath`,
     ///   while the captured items still read as full references.
-    /// - A user-authored `<Import>` we could not follow (unresolved,
-    ///   failed, or gated on an untrusted condition): the imported file may
-    ///   carry any of the above.
+    /// - Content the walk did not enter ([`Self::hidden_content`]): an
+    ///   `<Import>` it could not follow (unresolved or failed) or whose gate it
+    ///   could not decide, in an SDK file as in a user's. The file may carry
+    ///   any of the above, import a user file that does, or import a file a
+    ///   later import names again, which MSBuild then skips as a duplicate. And
+    ///   an `<Import>` whose gate an untrusted value decided, wherever it is.
     ///
     /// Deliberately out of contract: `<Target>`-time item mutation. This
     /// field describes the *evaluated* (static) item list; whether a target
@@ -614,7 +617,8 @@ pub struct ParsedProject {
     /// not follow, or one whose gate it could not decide), or `None` when it
     /// entered everything the build imports. Content it did not see may define
     /// anything, so [`Self::foreign_definitions`] is complete only when this is
-    /// `None`, and [`Self::items_uncertain`] is `true` whenever it is `Some`.
+    /// `None`, and [`Self::items_uncertain`] and
+    /// [`Self::project_references_uncertain`] are `true` whenever it is `Some`.
     pub hidden_content: Option<UntrustedCause>,
     pub diagnostics: Vec<Diagnostic>,
     /// `true` if any diagnostic was emitted — i.e. the result may diverge

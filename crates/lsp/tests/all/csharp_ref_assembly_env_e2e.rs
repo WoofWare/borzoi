@@ -49,7 +49,7 @@ fn assembly_env_includes_csharp_project_reference_types() {
     let mut workspace = match &dotnet_root {
         Some(root) => Workspace::with_env(SdkDiscoveryEnv {
             dotnet_root: Some(root.clone()),
-            ..SdkDiscoveryEnv::default()
+            ..SdkDiscoveryEnv::from_process_env()
         }),
         None => Workspace::with_env(SdkDiscoveryEnv::from_process_env()),
     };
@@ -125,7 +125,7 @@ fn a_cs_edit_and_its_event_rebuild_only_the_env_with_a_csharp_edge() {
     if let Some(root) = std::env::var_os("DOTNET_ROOT").map(PathBuf::from) {
         state.workspace = Workspace::with_env(SdkDiscoveryEnv {
             dotnet_root: Some(root),
-            ..SdkDiscoveryEnv::default()
+            ..SdkDiscoveryEnv::from_process_env()
         });
     }
     state.semantic.set_csharp_project_references_enabled(true);
