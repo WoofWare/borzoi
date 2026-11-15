@@ -1071,6 +1071,7 @@ impl<'s, 'r> Engine<'s, 'r> {
         match condition::evaluate(&raw, &self.lookup).outcome {
             condition::Outcome::True => Ok(true),
             condition::Outcome::False => Ok(false),
+            condition::Outcome::Illegal => decline(format!("MSBuild rejects the condition {raw}")),
             condition::Outcome::Unsupported => {
                 decline(format!("the condition {raw} is not modelled"))
             }

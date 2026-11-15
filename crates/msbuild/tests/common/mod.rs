@@ -838,11 +838,13 @@ fn globals_object(
 
 /// Which branch of the certain-implies-exact contract a case exercised — used
 /// by the sweeps to assert coverage (that the corpus reaches both committed
-/// booleans and isn't silently degrading to all-`Unsupported`).
+/// booleans and the committed rejection, and isn't silently degrading to
+/// all-`Unsupported`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     True,
     False,
+    Illegal,
     Unsupported,
 }
 
@@ -851,6 +853,8 @@ pub enum Verdict {
 /// - We commit to `True`/`False` ⟹ MSBuild agrees with that *exact* boolean
 ///   (never the opposite, never "illegal"). A violation is a soundness bug:
 ///   we'd be gating an item on a truth value the real build disagrees with.
+/// - We say `Illegal` ⟹ MSBuild rejects the condition. A violation would
+///   have a consumer decline a project MSBuild evaluates.
 /// - We return `Unsupported` ⟹ no claim. MSBuild may say true, false, or
 ///   reject it; our fail-safe deliberately over-approximates the unmodelled.
 ///
@@ -866,6 +870,15 @@ pub fn check_certain_implies_exact(
     }
     match evaluate(condition, &map).outcome {
         Outcome::Unsupported => Verdict::Unsupported,
+        Outcome::Illegal => {
+            if let Some(theirs) = oracle.eval(condition, props) {
+                panic!(
+                    "certain-implies-exact violated: we say Illegal for condition \
+                     {condition:?} with props {props:?}, but MSBuild says {theirs}"
+                );
+            }
+            Verdict::Illegal
+        }
         ours @ (Outcome::True | Outcome::False) => {
             let ours_bool = ours == Outcome::True;
             match oracle.eval(condition, props) {

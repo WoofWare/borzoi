@@ -35,6 +35,113 @@ fn props(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// (condition, props, the outcome branch we must land in)
+type Case = (&'static str, Vec<(String, String)>, Verdict);
+
+/// Corners of [`Verdict::Illegal`]: what MSBuild rejects, where it does not
+/// look, and the near misses it evaluates, which we must not call illegal.
+fn illegal_corners() -> Vec<Case> {
+    vec![
+        // Syntax: MSBuild parses the whole condition before evaluating any of
+        // it, so a syntax error rejects it whatever the values, and behind a
+        // deciding `And`/`Or` operand too.
+        ("tr ue", props(&[]), Verdict::Illegal),
+        ("$(A) == ", props(&[("A", "a")]), Verdict::Illegal),
+        ("(true", props(&[]), Verdict::Illegal),
+        ("true)", props(&[]), Verdict::Illegal),
+        ("()", props(&[]), Verdict::Illegal),
+        ("'abc", props(&[]), Verdict::Illegal),
+        ("'a' == 'b", props(&[]), Verdict::Illegal),
+        ("false And (tr ue)", props(&[]), Verdict::Illegal),
+        ("true Or 'abc", props(&[]), Verdict::Illegal),
+        ("false And $(A) ==", props(&[]), Verdict::Illegal),
+        ("false and 'x' = 'x'", props(&[]), Verdict::Illegal),
+        ("true == true == true", props(&[]), Verdict::Illegal),
+        ("a.b == 'a.b'", props(&[]), Verdict::Illegal),
+        ("trueand true", props(&[]), Verdict::Illegal),
+        ("'a' == 'b' 'c'", props(&[]), Verdict::Illegal),
+        ("!", props(&[]), Verdict::Illegal),
+        ("true And", props(&[]), Verdict::Illegal),
+        ("Or true", props(&[]), Verdict::Illegal),
+        ("true;", props(&[]), Verdict::Illegal),
+        ("false and #", props(&[]), Verdict::Illegal),
+        ("false and $", props(&[]), Verdict::Illegal),
+        ("false and $x", props(&[]), Verdict::Illegal),
+        ("false and @", props(&[]), Verdict::Illegal),
+        ("false and %", props(&[]), Verdict::Illegal),
+        ("true,true", props(&[]), Verdict::Illegal),
+        ("false and $(A.B('x)", props(&[]), Verdict::Illegal),
+        // The scan stops at the parse error, before the item list, whose
+        // legality would depend on where the condition sits.
+        ("tr ue @(I)", props(&[]), Verdict::Illegal),
+        // An item list or metadata reference is legal on an item and illegal
+        // on a property, so no claim either way.
+        ("'@(I)' == ''", props(&[]), Verdict::Unsupported),
+        ("false and '%(I.M)' == ''", props(&[]), Verdict::Unsupported),
+        // Syntax MSBuild accepts and we do not model: evaluated, so no claim.
+        ("(true) == true", props(&[]), Verdict::Unsupported),
+        ("!true == false", props(&[]), Verdict::Unsupported),
+        ("false and foo('x')", props(&[]), Verdict::Unsupported),
+        ("false and f(,)", props(&[]), Verdict::Unsupported),
+        // A relational comparison on an operand that is neither a number nor
+        // a version (MSB4086), on the evaluated path only.
+        ("1 < abc", props(&[]), Verdict::Illegal),
+        ("abc < 1", props(&[]), Verdict::Illegal),
+        ("1.2.3 < abc", props(&[]), Verdict::Illegal),
+        ("true And 1 < abc", props(&[]), Verdict::Illegal),
+        ("false And 1 < abc", props(&[]), Verdict::False),
+        ("true Or 1 < abc", props(&[]), Verdict::True),
+        ("'' < 1", props(&[]), Verdict::Illegal),
+        ("$(Foo) < 1", props(&[]), Verdict::Illegal),
+        ("$(Foo) < 1", props(&[("Foo", "Debug")]), Verdict::Illegal),
+        ("' 1' < 2", props(&[]), Verdict::Illegal),
+        ("'1.-1' < 2", props(&[]), Verdict::Illegal),
+        ("'1.2.3.4.5' < 2", props(&[]), Verdict::Illegal),
+        ("'1.2.2147483648' > 2", props(&[]), Verdict::Illegal),
+        ("1 < 0xg", props(&[]), Verdict::Illegal),
+        // …and the near misses .NET does read: `-0` is a version component
+        // (one we do not model, so no claim), whitespace pads one, and a
+        // dotted operand that is no version may still be a number.
+        ("'1.-0' < 2", props(&[]), Verdict::Unsupported),
+        ("' 1 . 2 ' < 2", props(&[]), Verdict::True),
+        ("'1.' < 2", props(&[]), Verdict::True),
+        // `double.TryParse` takes the NaN symbol in any case (a number every
+        // comparison is false on), a trailing NUL, and an infinity it then
+        // refuses as a number: none of these is ours to call.
+        ("nan < 1", props(&[]), Verdict::Unsupported),
+        ("'NaN' > 1", props(&[]), Verdict::Unsupported),
+        ("'1%00' < 2", props(&[]), Verdict::Unsupported),
+        ("Infinity < 1", props(&[]), Verdict::Unsupported),
+        // A scalar standing as a boolean outside the vocabulary, on the
+        // evaluated path only.
+        ("foo", props(&[]), Verdict::Illegal),
+        ("1", props(&[]), Verdict::Illegal),
+        ("'1'", props(&[]), Verdict::Illegal),
+        ("$(Foo)", props(&[]), Verdict::Illegal),
+        ("true and foo", props(&[]), Verdict::Illegal),
+        ("'x'and'y'", props(&[]), Verdict::Illegal),
+        ("foo or true", props(&[]), Verdict::Illegal),
+        ("!foo or true", props(&[]), Verdict::Illegal),
+        ("(foo) or true", props(&[]), Verdict::Illegal),
+        ("false and foo", props(&[]), Verdict::False),
+        ("true or foo", props(&[]), Verdict::True),
+        ("false and $(Foo)", props(&[]), Verdict::False),
+        ("'%74rue'", props(&[]), Verdict::True),
+        // `OrdinalIgnoreCase` folds `ſ` to `S`, which ASCII folding does not.
+        ("'yeſ'", props(&[]), Verdict::Unsupported),
+        // `HasTrailingSlash` given more than one item.
+        ("HasTrailingSlash('a;b')", props(&[]), Verdict::Illegal),
+        ("HasTrailingSlash('a/; b/')", props(&[]), Verdict::Illegal),
+        ("HasTrailingSlash('a/;%20')", props(&[]), Verdict::Illegal),
+        ("HasTrailingSlash(';;a/;;')", props(&[]), Verdict::True),
+        (
+            "false and HasTrailingSlash('a;b')",
+            props(&[]),
+            Verdict::False,
+        ),
+    ]
+}
+
 /// Hand-picked corners: each pins both our evaluator's committed outcome and
 /// (via the internal oracle round-trip) MSBuild's agreement. Every shape the
 /// `condition.rs` unit tests pin one-by-one gets a guaranteed seat here,
@@ -43,8 +150,6 @@ fn props(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 fn hand_picked_corners() {
     let mut oracle = Oracle::spawn();
 
-    // (condition, props, the outcome branch we must land in)
-    type Case = (&'static str, Vec<(String, String)>, Verdict);
     let cases: &[Case] = &[
         // Bare booleans and negation.
         ("true", props(&[]), Verdict::True),
@@ -107,11 +212,7 @@ fn hand_picked_corners() {
         ("$(Flag)", props(&[("Flag", "false")]), Verdict::False),
         // Whitespace around a *simple* reference is MSBuild-illegal (only the
         // function forms tolerate it), so we must not commit to Flag's value.
-        (
-            "$( Flag )",
-            props(&[("Flag", "true")]),
-            Verdict::Unsupported,
-        ),
+        ("$( Flag )", props(&[("Flag", "true")]), Verdict::Illegal),
         ("!$(Flag)", props(&[("Flag", "false")]), Verdict::True),
         ("on", props(&[]), Verdict::True),
         ("no", props(&[]), Verdict::False),
@@ -135,13 +236,12 @@ fn hand_picked_corners() {
             props(&[("V", "8.0.0")]),
             Verdict::True,
         ),
-        // A raw item/metadata opener anywhere in the condition text is
-        // MSBuild-illegal (its scanner lexes `@(`/`%(` before expansion), so
-        // the up-front raw-source scan refuses regardless of where it sits.
+        // MSBuild's scanner counts a reference's parentheses without regard
+        // to quotes, so a quoted `(` leaves this one unclosed.
         (
             "$(V.Contains('@('))",
             props(&[("V", "x")]),
-            Verdict::Unsupported,
+            Verdict::Illegal,
         ),
         (
             "HasTrailingSlash('@(x)/')",
@@ -160,10 +260,10 @@ fn hand_picked_corners() {
         // …including an escape reaching the operand through a property value.
         ("'$(P0)' == 'a b'", props(&[("P0", "a%20b")]), Verdict::True),
         // A `%` **outside** quotes is not an escape: MSBuild's scanner rejects it
-        // outright (MSB4090), which maps to Unsupported. Committing a boolean for
-        // a condition MSBuild refuses to evaluate would be a wrong gate.
-        ("%74rue", props(&[]), Verdict::Unsupported),
-        ("1%2E0 > 0.5", props(&[]), Verdict::Unsupported),
+        // outright (MSB4090). Committing a boolean for a condition MSBuild
+        // refuses to evaluate would be a wrong gate.
+        ("%74rue", props(&[]), Verdict::Illegal),
+        ("1%2E0 > 0.5", props(&[]), Verdict::Illegal),
         // A bare `%` with any other suffix stays literal: committed as
         // ordinary string comparison, and MSBuild must agree.
         ("'100%' == '100%'", props(&[]), Verdict::True),
@@ -212,11 +312,11 @@ fn hand_picked_corners() {
             Verdict::True,
         ),
         // Bare text *around* the reference is MSB4092 ("An unexpected token"),
-        // so this must stay a decline rather than read as `$(D)` plus a suffix.
+        // so this must not read as `$(D)` plus a suffix.
         (
             "HasTrailingSlash($(OutDir)sub/)",
             props(&[("OutDir", "obj/")]),
-            Verdict::Unsupported,
+            Verdict::Illegal,
         ),
         // The F# SDK's FSharpCoreMaximumMajorVersion gate, end-to-end.
         (
@@ -227,12 +327,12 @@ fn hand_picked_corners() {
         // MSBuild's scanner rejects an unquoted reference holding whitespace
         // but nothing outside an XML name, before `and` could short-circuit
         // past it; with punctuation beside the whitespace it is legal.
-        ("false and $(A B)", props(&[]), Verdict::Unsupported),
-        ("false and $(A\nB)", props(&[]), Verdict::Unsupported),
+        ("false and $(A B)", props(&[]), Verdict::Illegal),
+        ("false and $(A\nB)", props(&[]), Verdict::Illegal),
         (
             "false and $([System.String]::Concat($(A B)))",
             props(&[]),
-            Verdict::Unsupported,
+            Verdict::Illegal,
         ),
         (
             "$(A.Contains('x y'))",
@@ -244,16 +344,14 @@ fn hand_picked_corners() {
         ("'x\ty' == 'x\ty'", props(&[]), Verdict::True),
         // It scans parentheses without regard to quotes, so a quoted `)`
         // ends the reference early.
-        (
-            "false and $(A.Contains(')'))",
-            props(&[]),
-            Verdict::Unsupported,
-        ),
+        ("false and $(A.Contains(')'))", props(&[]), Verdict::Illegal),
     ];
+    let cases: Vec<Case> = cases.iter().cloned().chain(illegal_corners()).collect();
 
     let mut trues = 0;
     let mut falses = 0;
-    for (condition, props, expected) in cases {
+    let mut illegals = 0;
+    for (condition, props, expected) in &cases {
         let got = check_certain_implies_exact(&mut oracle, condition, props);
         assert_eq!(
             got, *expected,
@@ -262,14 +360,16 @@ fn hand_picked_corners() {
         match got {
             Verdict::True => trues += 1,
             Verdict::False => falses += 1,
+            Verdict::Illegal => illegals += 1,
             Verdict::Unsupported => {}
         }
     }
-    // Sanity: the corner list actually exercises both committed branches
-    // (guards against the whole evaluator regressing to one constant).
+    // Sanity: the corner list actually exercises every committed branch
+    // (guards against the whole evaluator regressing to one constant, or the
+    // rejection silently ceasing to fire).
     assert!(
-        trues >= 5 && falses >= 5,
-        "corners: {trues} true, {falses} false"
+        trues >= 5 && falses >= 5 && illegals >= 30,
+        "corners: {trues} true, {falses} false, {illegals} illegal"
     );
 }
 
@@ -285,6 +385,7 @@ fn fixed_seed_sweep() {
     const CASES: usize = 4000;
     let mut trues = 0usize;
     let mut falses = 0usize;
+    let mut illegal = 0usize;
     let mut unsupported = 0usize;
 
     for _ in 0..CASES {
@@ -294,17 +395,207 @@ fn fixed_seed_sweep() {
         match check_certain_implies_exact(&mut oracle, &condition, &props) {
             Verdict::True => trues += 1,
             Verdict::False => falses += 1,
+            Verdict::Illegal => illegal += 1,
             Verdict::Unsupported => unsupported += 1,
         }
     }
 
-    eprintln!("sweep: {trues} true, {falses} false, {unsupported} unsupported / {CASES}");
+    eprintln!(
+        "sweep: {trues} true, {falses} false, {illegal} illegal, {unsupported} unsupported / {CASES}"
+    );
     // Anti-vacuity floors: a healthy corpus commits to *both* booleans a few
     // hundred times each (observed ~340/~390 at this seed). Far below the
     // split, so a generator tweak won't trip them, but a collapse of the
-    // evaluator to a constant — or to all-`Unsupported` — would.
+    // evaluator to a constant — or to all-`Unsupported` — would. The
+    // relational operands include non-numbers, so it rejects too (471).
     assert!(trues >= 250, "too few committed-true cases: {trues}");
     assert!(falses >= 250, "too few committed-false cases: {falses}");
+    assert!(illegal >= 230, "too few committed-illegal cases: {illegal}");
+}
+
+/// What one run of [`illegal_leaning_sweep`] saw: our verdicts on each of
+/// [`gen_illegal_leaning`]'s families.
+#[derive(Default, Debug)]
+struct IllegalCensus {
+    /// Our verdicts by family: `[true, false, illegal, unsupported]`.
+    mutated: [usize; 4],
+    ill_typed: [usize; 4],
+    token_soup: [usize; 4],
+}
+
+impl IllegalCensus {
+    fn illegal(&self) -> usize {
+        self.mutated[2] + self.ill_typed[2] + self.token_soup[2]
+    }
+}
+
+/// One of [`gen_bool_expr`]'s conditions with a character deleted or one
+/// inserted, once or twice: mostly syntax errors, some still legal.
+fn gen_mutated(rng: &mut SplitMix64) -> String {
+    const INSERTS: &[char] = &[
+        '\'', '(', ')', '=', '!', '<', '>', ' ', '\t', '$', '@', '%', ',', ';', '#', 'a', '1', '.',
+        '-',
+    ];
+    let depth = rng.below(3) as u32;
+    let mut chars: Vec<char> = gen_bool_expr(rng, depth).chars().collect();
+    for _ in 0..1 + rng.below(2) {
+        let at = rng.below(chars.len() + 1);
+        if rng.below(2) == 0 && at < chars.len() {
+            chars.remove(at);
+        } else {
+            chars.insert(at, *rng.pick(INSERTS));
+        }
+    }
+    chars.into_iter().collect()
+}
+
+/// An operand MSBuild may not be able to type where it stands — a scalar as a
+/// boolean, a relational comparison on a non-number, `HasTrailingSlash` over
+/// a list — beside an ordinary condition on either side of `And`/`Or`, so
+/// that the condition's verdict turns on whether MSBuild evaluates it. Some
+/// are the near misses .NET does read.
+fn gen_ill_typed(rng: &mut SplitMix64) -> String {
+    const ATOMS: &[&str] = &[
+        "foo",
+        "1",
+        "'1'",
+        "''",
+        "$(P0)",
+        "$(Foo)",
+        "$(Undefined)",
+        "1 < abc",
+        "abc >= 1",
+        "'x' < $(P0)",
+        "$(Foo) > 2",
+        "$(Version) <= 6",
+        "' 1' < 2",
+        "'1.-1' < 2",
+        "'1.-0' < 2",
+        "'1.2.2147483648' > 1",
+        "nan < 1",
+        "HasTrailingSlash('a;b')",
+        "HasTrailingSlash('$(P0);x/')",
+        "HasTrailingSlash('$(P0)')",
+    ];
+    let depth = rng.below(2) as u32;
+    let expr = gen_bool_expr(rng, depth);
+    let atom = *rng.pick(ATOMS);
+    let atom = if rng.below(4) == 0 {
+        format!("!({atom})")
+    } else {
+        atom.to_string()
+    };
+    let connective = *rng.pick(&["And", "Or", "and", "or"]);
+    if rng.below(2) == 0 {
+        format!("{expr} {connective} {atom}")
+    } else {
+        format!("{atom} {connective} {expr}")
+    }
+}
+
+/// One to six of MSBuild's condition tokens, near-tokens and stray
+/// characters, in any order: mostly syntax errors, including the item-list
+/// and metadata openers whose legality depends on the context.
+fn gen_token_soup(rng: &mut SplitMix64) -> String {
+    const TOKENS: &[&str] = &[
+        "(",
+        ")",
+        "!",
+        "==",
+        "!=",
+        "<",
+        ">=",
+        "=",
+        "and",
+        "Or",
+        "'a'",
+        "'",
+        "1",
+        "1.2",
+        "0x1",
+        "$(P0)",
+        "$(P 0)",
+        "$(",
+        "$",
+        "%",
+        "@",
+        ",",
+        "f(",
+        "foo",
+        "true",
+        "false",
+        ";",
+        "@(I)",
+        "'%(M)'",
+        "HasTrailingSlash",
+        "'b/'",
+    ];
+    let mut soup = String::new();
+    for _ in 0..1 + rng.below(6) {
+        soup.push_str(rng.pick(TOKENS));
+        soup.push_str(rng.pick(&["", " ", " ", "  "]));
+    }
+    soup
+}
+
+fn illegal_leaning_sweep(seed: u64, cases: usize) -> IllegalCensus {
+    let mut oracle = Oracle::spawn();
+    let mut rng = SplitMix64(seed);
+    let mut census = IllegalCensus::default();
+    for _ in 0..cases {
+        let family = rng.below(3);
+        let condition = match family {
+            0 => gen_mutated(&mut rng),
+            1 => gen_ill_typed(&mut rng),
+            _ => gen_token_soup(&mut rng),
+        };
+        let props = gen_props(&mut rng);
+        let verdict = match check_certain_implies_exact(&mut oracle, &condition, &props) {
+            Verdict::True => 0,
+            Verdict::False => 1,
+            Verdict::Illegal => 2,
+            Verdict::Unsupported => 3,
+        };
+        let tally = match family {
+            0 => &mut census.mutated,
+            1 => &mut census.ill_typed,
+            _ => &mut census.token_soup,
+        };
+        tally[verdict] += 1;
+    }
+    census
+}
+
+/// The illegal side of the contract, at a fixed seed: conditions leaning
+/// towards MSBuild's errors, every `Illegal` verdict graded against MSBuild's
+/// rejection, every boolean against its value.
+#[test]
+fn illegal_leaning_sweep_fixed_seed() {
+    let census = illegal_leaning_sweep(0x111e_6a15_5eed, 4000);
+    eprintln!("illegal-leaning sweep: {census:?}");
+    // Liveness of each family's rejections (observed at this seed: 909
+    // mutated, 601 ill-typed, 1150 token soup), so the classification cannot
+    // silently stop firing, and of the ill-typed family's booleans (302),
+    // which are where MSBuild's laziness is graded.
+    assert!(census.mutated[2] >= 450, "{census:?}");
+    assert!(census.ill_typed[2] >= 280, "{census:?}");
+    assert!(census.token_soup[2] >= 550, "{census:?}");
+    assert!(
+        census.ill_typed[0] + census.ill_typed[1] >= 160,
+        "{census:?}"
+    );
+}
+
+/// Fresh-seed twin of [`illegal_leaning_sweep_fixed_seed`].
+#[test]
+#[ignore = "fresh-seed soak; run it when touching condition.rs"]
+fn illegal_leaning_sweep_soak() {
+    let (seed, cases) = soak_parameters("condition illegal-leaning", 50_000);
+    let census = illegal_leaning_sweep(seed, cases);
+    eprintln!(
+        "illegal-leaning soak: {census:?} ({} illegal)",
+        census.illegal()
+    );
 }
 
 /// What one run of [`case_variant_sweep`] saw.
@@ -463,6 +754,9 @@ struct WhitespaceCensus {
     /// Of those, cases with one inside a quoted string, where MSBuild reads it
     /// as itself.
     committed_inside_quote: usize,
+    /// Respelt cases we call illegal: whitespace inside a bare token splits it
+    /// (`tr ue`, `= =`, `$(P 0)`).
+    illegal_respelt: usize,
 }
 
 fn whitespace_variant_sweep(
@@ -481,9 +775,15 @@ fn whitespace_variant_sweep(
         };
         let respelt = respell_whitespace(rng, &condition);
         let verdict = check_certain_implies_exact(oracle, &respelt, &props);
-        if verdict != Verdict::Unsupported && respelt != condition {
-            census.committed_respelt += 1;
-            census.committed_inside_quote += usize::from(breaks_inside_quote(&respelt));
+        if respelt != condition {
+            match verdict {
+                Verdict::True | Verdict::False => {
+                    census.committed_respelt += 1;
+                    census.committed_inside_quote += usize::from(breaks_inside_quote(&respelt));
+                }
+                Verdict::Illegal => census.illegal_respelt += 1,
+                Verdict::Unsupported => {}
+            }
         }
     }
     census
@@ -499,7 +799,7 @@ fn whitespace_variant_sweep_fixed_seed() {
     let mut rng = SplitMix64(0x0007_ab1f_5eed);
     let census = whitespace_variant_sweep(&mut oracle, &mut rng, 3000);
     eprintln!("whitespace-variant sweep: {census:?}");
-    // Observed at this seed: 882 respelt, 273 inside a quote.
+    // Observed at this seed: 932 respelt, 307 inside a quote.
     assert!(
         census.committed_respelt >= 500,
         "only {} committed cases were respelt — the check is testing nothing",
@@ -512,6 +812,137 @@ fn whitespace_variant_sweep_fixed_seed() {
     );
 }
 
+/// Which of a document's conditions MSBuild evaluates, so an illegal one
+/// rejects the project: the facts a consumer of `Outcome::Illegal` stands on,
+/// pinned through the `project` op. A condition behind a false
+/// `<PropertyGroup>`, `<ItemDefinitionGroup>` or `<ImportGroup>`, an unchosen
+/// `<When>`, or a `<Target>` is never evaluated, syntax errors included. An
+/// item's condition is evaluated under a false `<ItemGroup>`, and its
+/// metadata's under a false item, type errors included.
+#[test]
+fn where_msbuild_evaluates_a_condition() {
+    let mut oracle = Oracle::spawn();
+    let names = ["R".to_string()];
+    for (body, rejected) in [
+        (
+            r#"<PropertyGroup><R Condition="tr ue">x</R></PropertyGroup>"#,
+            true,
+        ),
+        (
+            r#"<PropertyGroup><R Condition="1 &lt; abc">x</R></PropertyGroup>"#,
+            true,
+        ),
+        (
+            r#"<PropertyGroup><R Condition="false and 1 &lt; abc">x</R></PropertyGroup>"#,
+            false,
+        ),
+        (
+            r#"<PropertyGroup><R Condition="false and (tr ue)">x</R></PropertyGroup>"#,
+            true,
+        ),
+        (
+            r#"<PropertyGroup><R Condition="false">x</R><R Condition="tr ue">y</R></PropertyGroup>"#,
+            true,
+        ),
+        (
+            r#"<PropertyGroup Condition="tr ue"><R>x</R></PropertyGroup>"#,
+            true,
+        ),
+        (
+            r#"<PropertyGroup Condition="false"><R Condition="tr ue">x</R></PropertyGroup>"#,
+            false,
+        ),
+        (
+            r#"<PropertyGroup Condition="false"><R Condition="'abc">x</R></PropertyGroup>"#,
+            false,
+        ),
+        (
+            r#"<PropertyGroup Condition="false"><R Condition="1 &lt; abc">x</R></PropertyGroup>"#,
+            false,
+        ),
+        (
+            r#"<ItemGroup><I Include="x" Condition="tr ue"/></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup Condition="false"><I Include="x" Condition="tr ue"/></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup Condition="false"><I Include="x" Condition="1 &lt; abc"/></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup Condition="false"><I Include="x" Condition="foo"/></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup Condition="false and 1 &lt; abc"><I Include="x"/></ItemGroup>"#,
+            false,
+        ),
+        (
+            r#"<ItemGroup><I Include="x" Condition="false"><M Condition="1 &lt; abc">m</M></I></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup><I Include="x"/><I Remove="x" Condition="tr ue"/></ItemGroup>"#,
+            true,
+        ),
+        (r#"<ItemDefinitionGroup Condition="tr ue"/>"#, true),
+        (
+            r#"<ItemDefinitionGroup Condition="false"><I><M Condition="tr ue">m</M></I></ItemDefinitionGroup>"#,
+            false,
+        ),
+        (
+            r#"<ItemDefinitionGroup><I Condition="false"><M Condition="tr ue">m</M></I></ItemDefinitionGroup>"#,
+            false,
+        ),
+        (r#"<Import Project="nope.props" Condition="tr ue"/>"#, true),
+        (
+            r#"<ImportGroup Condition="false"><Import Project="nope.props" Condition="tr ue"/></ImportGroup>"#,
+            false,
+        ),
+        (
+            r#"<Choose><When Condition="tr ue"><PropertyGroup><R>x</R></PropertyGroup></When></Choose>"#,
+            true,
+        ),
+        (
+            r#"<Choose><When Condition="true"/><When Condition="tr ue"/></Choose>"#,
+            false,
+        ),
+        (
+            r#"<Choose><When Condition="false"><ItemGroup><I Include="x" Condition="tr ue"/></ItemGroup></When></Choose>"#,
+            false,
+        ),
+        (
+            r#"<Choose><When Condition="true"/><Otherwise><ItemGroup><I Include="x" Condition="tr ue"/></ItemGroup></Otherwise></Choose>"#,
+            false,
+        ),
+        (
+            r#"<UsingTask TaskName="X" AssemblyFile="y.dll" Condition="tr ue"/>"#,
+            true,
+        ),
+        (r#"<Target Name="T" Condition="tr ue"/>"#, false),
+        (
+            r#"<Target Name="T"><PropertyGroup><R Condition="tr ue">x</R></PropertyGroup></Target>"#,
+            false,
+        ),
+        // An item list is illegal in a property's condition, even behind a
+        // false `and`, and legal in an item's.
+        (
+            r#"<PropertyGroup><R Condition="false and '@(I)' == ''">x</R></PropertyGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup><I Include="x" Condition="false and '@(I)' == ''"/></ItemGroup>"#,
+            false,
+        ),
+    ] {
+        let xml = format!("<Project>{body}</Project>");
+        let theirs = oracle.project(&xml, &names, None, &[]);
+        assert_eq!(theirs.is_none(), rejected, "{xml}");
+    }
+}
 /// Fresh-seed twin of [`whitespace_variant_sweep_fixed_seed`].
 #[test]
 #[ignore = "fresh-seed soak; run it when touching condition.rs"]
@@ -703,6 +1134,11 @@ mod exists_on_disk {
             let theirs = theirs[name] == "T";
             match ours {
                 Outcome::Unsupported => census.declined += 1,
+                // MSBuild evaluated the batch, so it rejects none of them.
+                Outcome::Illegal => panic!(
+                    "certain-implies-exact violated: we say Illegal for {condition:?} with \
+                     {props:?}, but MSBuild evaluates it"
+                ),
                 Outcome::True | Outcome::False => {
                     let ours = ours == Outcome::True;
                     assert_eq!(
@@ -768,7 +1204,7 @@ mod exists_on_disk {
             let ours = match ours {
                 Outcome::True => true,
                 Outcome::False => false,
-                Outcome::Unsupported => panic!("{path}: declined"),
+                Outcome::Illegal | Outcome::Unsupported => panic!("{path}: declined"),
             };
             assert_eq!(ours, *expected, "Exists('{path}')");
         }

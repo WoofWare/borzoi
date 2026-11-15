@@ -223,13 +223,15 @@ fn condition_nesting_boundary_is_exact() {
     ] {
         let at = shape(MAX_CONDITION_NESTING);
         // Our verdict on a 2 MiB stack first, then the graded one.
-        assert_ne!(
-            ours(at.clone(), &[]),
-            Outcome::Unsupported,
+        assert!(
+            matches!(ours(at.clone(), &[]), Outcome::True | Outcome::False),
             "{name} at the bound"
         );
         let verdict = check_certain_implies_exact(&mut oracle, &at, &[]);
-        assert_ne!(verdict, Verdict::Unsupported, "{name} at the bound commits");
+        assert!(
+            matches!(verdict, Verdict::True | Verdict::False),
+            "{name} at the bound commits"
+        );
 
         let past = shape(MAX_CONDITION_NESTING + 1);
         assert_eq!(

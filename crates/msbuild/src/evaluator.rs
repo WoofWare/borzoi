@@ -4359,7 +4359,9 @@ fn evaluate_condition_with_exemptions(
     match eval.outcome {
         condition::Outcome::True => CondGate::Run,
         condition::Outcome::False => CondGate::Skip,
-        condition::Outcome::Unsupported => CondGate::Unsupported,
+        // #820's rejection flag will consume `Illegal`; until then it gates as
+        // undecided, like `Unsupported`.
+        condition::Outcome::Illegal | condition::Outcome::Unsupported => CondGate::Unsupported,
     }
 }
 

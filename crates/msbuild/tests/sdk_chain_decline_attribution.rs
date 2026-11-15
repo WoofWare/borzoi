@@ -149,7 +149,8 @@ fn expression_commits(raw: &str, map: &PropertyMap) -> bool {
 
 fn condition_commits(raw: &str, map: &PropertyMap) -> bool {
     let eval = evaluate(raw, map);
-    eval.outcome != Outcome::Unsupported && eval.undefined_properties.is_empty()
+    // A committed boolean: `Illegal` decides no gate.
+    matches!(eval.outcome, Outcome::True | Outcome::False) && eval.undefined_properties.is_empty()
 }
 
 /// Every name in `population` that some item reads and `defined` lacks, counted
