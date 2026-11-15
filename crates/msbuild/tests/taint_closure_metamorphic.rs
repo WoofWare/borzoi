@@ -520,8 +520,7 @@ fn check(
         // rule costs"), tracked as #792. So a stale read reaching any other
         // fact is counted, not failed, and the Compile items must hold.
         let a_stale_read_by_a_trusting_reader =
-            matches!(undecided_construct, Undecided::Import)
-                && !matches!(fact, Fact::CompileItems);
+            matches!(undecided_construct, Undecided::Import) && !matches!(fact, Fact::CompileItems);
         if a_stale_read_by_a_trusting_reader {
             census.stale_reads += 1;
             continue;

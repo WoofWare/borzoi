@@ -1119,6 +1119,37 @@ treat a file whose point the walk never reached as one whose identity is in
 doubt, so those cases decline, and
 `an_unbound_splice_input_hidden_content_defined_declines` passes.
 
+#### #677: the import points, as landed
+
+`evaluator::directory_build` holds the rule; its module docs are the
+specification. In short: a point is *decided* when the route of import gates
+to it, its condition and its `Project` read only certain inputs
+(`Trust::is_certain`, so `stale` counts); a decided point is an ordinary
+import. Otherwise the fallback runs, at the point or, for a file the walk
+never accounted for once it has passed hidden content, at the end of the
+property pass. With the file's identity certain it walks the file with every
+write unpinned and withdraws Compile, packages, defines, and the
+`ProjectReference` list only if the file declares references; a file with no
+element child is not walked. With the identity in doubt (a doubted path, or a
+point the walk never reached, whose path is whatever it is there) every bound
+property is unpinned, the walk latches opacity and every facet is withdrawn,
+unless no write touched the path and no `Directory.Build.*` file exists above
+the project. #781 and #811 are closed by it. Writes a stale group or
+`<Choose>` condition let run are stale too, which the import points need.
+
+The cost, measured on the pinned F# corpus (SDK 11 rc, whose prerelease host
+band the walk does not model, #810, so every project is opaque after
+`Microsoft.NET.Sdk.ImportWorkloads.props`): 2 Compile, 43 `ProjectReference`
+and 55 `LangVersion` lines move from `match` to `decline`, none to anything
+else, and the msbuild corpus differential gained a trust check on
+`lang_version`. Single-framework projects lose the F# targets under that
+opacity, so the `Directory.Build.targets` point is never reached and its
+identity is in doubt (the whole evaluation is withdrawn); multi-framework
+ones reach it through `IsCrossTargetingBuild`, which reads `TargetFramework`
+under the same opacity, so the file is doubted and what it writes declines.
+Modelling prerelease bands (#810) removes the opacity and these declines with
+it. The LSP project corpus (SDK 10) moves no line.
+
 ### The census, re-run — and what it says about P3's priority
 
 Measured 2026-08-02 against the pinned SDK **10.0.301** (the P1 member table
