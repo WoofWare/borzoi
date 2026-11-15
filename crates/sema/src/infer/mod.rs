@@ -317,7 +317,7 @@
 //! function type relates the argument's type FCS has.
 //!
 //! **Method-call typing.** A method call
-//! `recv.Method(args)` types as the method's **return** type:
+//! `recv.Method(args)` types as the chosen member's **return** type:
 //! `let h = s.GetHashCode()` ⇒ `int`, `let t = s.GetType()` ⇒ `System.Type`.
 //!
 //! - **Parse shape.** A method call is an **`App` whose callee is a member access**
@@ -325,29 +325,35 @@
 //!   its `call:instance` node at the *whole* application, typed as the return type,
 //!   with the receiver its own node. [`Gen::infer_app`] routes a member-access
 //!   callee to [`Gen::infer_method_call`].
-//! - **The worklist, by *kind*.** [`Constraint::HasMember`] carries a
-//!   [`MemberAccessKind`] (`Data` | `Method { arg_count }`); the wake dispatches the
-//!   lookup on it — [`AssemblyEnv::instance_data_member`] vs
-//!   [`AssemblyEnv::instance_method`] (a **single non-overloaded, non-generic**
-//!   public instance method) — and the rest of the wake (bridge the return type,
-//!   record the member, unify the result) is shared. Overloaded (`s.Substring(1)` —
-//!   FCS `call:instance-overloaded`), generic, static, extension, and constructor
-//!   methods defer.
-//! - **Well-formedness gate.** The return type is the call's type only when the
-//!   argument list is well-formed: the wake gates on the call's positional
-//!   `arg_count` ([`Gen::method_arg_vids`]) being `Some(param_count)` exactly. FCS does
-//!   *not* type an ill-formed call as the method return — it falls back to `obj`
-//!   (`call:function`) — so each of these defers fully (no type, no recorded
-//!   resolution): a wrong **arity** (`s.ToLowerInvariant(1)`, `s.Insert()`), a
-//!   **parenthesized unit** (`s.ToLowerInvariant(())` is one unit argument, not
-//!   zero), a **named argument** (`s.Insert(foo = 0, …)` — [`is_named_arg`], names
-//!   unvalidated here), and an extra-parenthesized tuple (`s.Insert((0, "z"))`, which
-//!   FCS elaborates as a method-value `application`, so only the one call-parenthesis
-//!   layer is peeled and it counts as a single argument). Conservative on
-//!   `[<Optional>]` / `params` / named-argument methods, never wrong.
+//! - **FCS's order.** The receiver and any data member before the method are
+//!   decided at their dots; the method group is looked up on the receiver's
+//!   type at the dot; the regime the arguments are checked under
+//!   ([`CallRegime`]) is chosen from how many candidates of the group have the
+//!   call's shape ([`call_forms`]: a `[<ParamArray>]` method is two at
+//!   exactly its declared count), before any argument is checked; then the
+//!   arguments, in source order; then the resolution. With **one** candidate
+//!   FCS relates its parameters to the arguments' types and its return to the
+//!   call's expected type first (`UnifyUniqueOverloading`), so each argument
+//!   is checked against its parameter and `s.Substring(p)` fixes `p : int`
+//!   ([`Gen::unique_call`]). With **several**, each argument is checked
+//!   against a fresh type and the call is resolved on the arguments' types,
+//!   by the OV-6 engine, only when each is ground ([`Gen::several_call`]).
+//!   Anything else — a receiver not known at the dot, no member identified, a
+//!   group an extension may join, no candidate of the call's shape, a named
+//!   argument, a lambda or other shaped argument — declines before the
+//!   arguments are walked ([`Gen::undecided_call`]): FCS reports a member it
+//!   does not find before it checks any argument.
+//! - **Well-formedness.** A call no candidate has the shape of is not typed as
+//!   any member's: FCS reports it and types it `obj` or by the error. So each
+//!   of these declines fully (no type, no recorded resolution): a wrong
+//!   **arity** (`s.ToLowerInvariant(1)`, `s.Insert()`), a **parenthesized
+//!   unit** (`s.ToLowerInvariant(())` is one unit argument, not zero), a
+//!   **named argument** (`s.Insert(foo = 0, …)` — [`is_named_arg`], names
+//!   unvalidated here), and an extra-parenthesized tuple (`s.Insert((0,
+//!   "z"))`, which FCS elaborates as a method-value `application`, so only the
+//!   one call-parenthesis layer is peeled and it counts as a single argument).
 //! - **Void returns are `unit`.** A `void`-returning method's call type is F#'s
-//!   `unit`, which [`Gen::wake_member`] unifies the result with when the return
-//!   `TypeRef` is [`Primitive::Void`] — bridging it would give the wrong
+//!   `unit` ([`Gen::readable_member_type`]) — bridging it would give the wrong
 //!   `System.Void`.
 //! - **A method call emits no node inside itself** (`gen_member_access`'s receiver,
 //!   the argument's sub-expressions). FCS lowers a rejected / ill-formed call to a
@@ -356,23 +362,14 @@
 //!   bad call to `f`'s domain), so gating a receiver on its *own* groundness is
 //!   unsound. [`Gen::infer_method_call`] therefore **discards** every emission its
 //!   receiver / argument walk produces — the receiver's *type* still flows to the
-//!   wake (its hover comes from name resolution); only its expression-*node* is
+//!   lookup (its hover comes from name resolution); only its expression-*node* is
 //!   dropped. The whole-call node (emitted by the caller) is read back only when
-//!   ground, and a rejected call's `result` stays open in synth position (and a
-//!   check-position call emits no whole-call node), so it drops naturally.
-//! - **The argument** is checked against an unknown expected type
-//!   ([`Expected::Unknown`]): FCS relates it to the parameter of the overload it
-//!   resolves, possibly before anything inside it is checked. The call's own
-//!   expected type is tainted before the arguments are walked, since FCS may
-//!   relate the method's return to it first. A **unit** `()` argument is
-//!   skipped (no parameters, and modelled — so it does not mark the binding
-//!   incomplete).
+//!   ground, and a declined call's `result` stays open, so it drops naturally.
 //! - **Chaining is free.** A method result feeding a further access
-//!   (`s.ToLowerInvariant().Length`) resolves through the same fixpoint — the inner
-//!   call grounds the receiver, then the outer member wakes.
-//! - **LSP.** The `Method` wake records the method in `member_resolutions` exactly
-//!   as `Data` does, so the hover / go-to-def path serves a called method name
-//!   too.
+//!   (`s.ToLowerInvariant().Length`) is decided before the access after it.
+//! - **LSP.** A call's member is recorded in `member_resolutions` exactly as a
+//!   data member's is ([`Gen::record_member`]), so the hover / go-to-def path
+//!   serves a called method name too.
 //!
 //! **Expression-level `let … in` and sequences.** A function body with a
 //! local `let` or a statement is walked
@@ -464,7 +461,8 @@
 use std::cell::RefCell;
 
 use borzoi_assembly::{
-    EntityKind, EqualityComparison, FSharpConstraints, Member, MemberMeasures, Primitive, TypeRef,
+    EntityKind, EqualityComparison, FSharpConstraints, Member, MemberMeasures, MethodLike,
+    ParamDefault, Primitive, TypeRef,
 };
 use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{
@@ -475,7 +473,7 @@ use borzoi_cst::syntax::{
     TypeDefnRepr, UnionRepr, VarType,
 };
 
-use crate::assembly_env::{AssemblyEnv, EntityHandle};
+use crate::assembly_env::{AssemblyEnv, EntityHandle, MemberIndex};
 use crate::def::{DefId, DefKind};
 use crate::function_ty::{
     Arith, Builtin, FunctionTyGap, ModuleFunctionScheme, UnionCaseScheme, builtin_operator,
@@ -487,7 +485,7 @@ use crate::match_reach::{ClausePat, ConstKind, Ctor, provably_reachable};
 use crate::member_ty::type_ref_to_ty;
 use crate::names::NameTable;
 use crate::node_span::NodeSpans;
-use crate::overload::arity_window;
+use crate::overload::{CallForm, call_forms};
 use crate::qnof::QualifiedNameOfFile;
 use crate::resolve::{CaseKind, ItemId, Resolution, ResolvedFile};
 use crate::ty::{MAX_TYPE_DEPTH, Ty, TyKind, TyPath, TyTable, TyVid, TypeBudgetExceeded};

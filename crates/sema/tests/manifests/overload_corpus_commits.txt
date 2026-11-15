@@ -1,19 +1,40 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all overload_corpus_diff::our_commit_agrees_with_fcs_or_we_deferred
+OvCorpus.OvArity.M("x") commit overload-set
+OvCorpus.OvArity.M("x", 3) commit overload-set
+OvCorpus.OvArity.M("x"B) commit overload-set
+OvCorpus.OvArity.M('c') commit overload-set
 OvCorpus.OvArity.M(3) commit overload-set
+OvCorpus.OvArity.M(3, "x") commit overload-set
 OvCorpus.OvArity.M(3, 3) commit overload-set
+OvCorpus.OvArity.M(3.0) commit overload-set
+OvCorpus.OvArity.M(3.0f) commit overload-set
+OvCorpus.OvArity.M(3.0m) commit overload-set
+OvCorpus.OvArity.M(3L) commit overload-set
+OvCorpus.OvArity.M(3uy) commit overload-set
+OvCorpus.OvArity.M(b) commit overload-set
+OvCorpus.OvArity.M(d) commit overload-set
+OvCorpus.OvArity.M(o) commit overload-set
+OvCorpus.OvArity.M(true) commit overload-set
+OvCorpus.OvArity.M(xs) commit overload-set
 OvCorpus.OvNullary.M() commit single-candidate
 OvCorpus.OvOptional.M("x") commit overload-set
+OvCorpus.OvOptional.M("x", 3) commit overload-set
+OvCorpus.OvOptional.M(3, "x") commit overload-set
 OvCorpus.OvOptional.M(3, 3) commit overload-set
 OvCorpus.OvOut.M("x") commit overload-set
 OvCorpus.OvParams.M("x") commit overload-set
+OvCorpus.OvParams.M("x", 3) commit overload-set
 OvCorpus.OvParams.M() commit overload-set
 OvCorpus.OvParams.M(3) commit overload-set
+OvCorpus.OvParams.M(3, "x") commit overload-set
 OvCorpus.OvParams.M(3, 3) commit overload-set
 OvCorpus.OvParams.M(3, 3, 3) commit overload-set
+OvCorpus.OvParamsOnly.M("x", 3) commit single-candidate
 OvCorpus.OvParamsOnly.M() commit single-candidate
 OvCorpus.OvParamsOnly.M(3) commit single-candidate
+OvCorpus.OvParamsOnly.M(3, "x") commit single-candidate
 OvCorpus.OvParamsOnly.M(3, 3) commit single-candidate
 OvCorpus.OvParamsOnly.M(3, 3, 3) commit single-candidate
 OvCorpus.OvSingle.M("x") commit single-candidate
@@ -191,19 +212,40 @@ OvCorpus.Ov_String_Obj.M(3.0m) commit overload-set
 OvCorpus.Ov_String_Obj.M(3L) commit overload-set
 OvCorpus.Ov_String_Obj.M(3uy) commit overload-set
 OvCorpus.Ov_String_Obj.M(true) commit overload-set
+c_OvArity.I("x") commit overload-set
+c_OvArity.I("x", 3) commit overload-set
+c_OvArity.I("x"B) commit overload-set
+c_OvArity.I('c') commit overload-set
 c_OvArity.I(3) commit overload-set
+c_OvArity.I(3, "x") commit overload-set
 c_OvArity.I(3, 3) commit overload-set
+c_OvArity.I(3.0) commit overload-set
+c_OvArity.I(3.0f) commit overload-set
+c_OvArity.I(3.0m) commit overload-set
+c_OvArity.I(3L) commit overload-set
+c_OvArity.I(3uy) commit overload-set
+c_OvArity.I(b) commit overload-set
+c_OvArity.I(d) commit overload-set
+c_OvArity.I(o) commit overload-set
+c_OvArity.I(true) commit overload-set
+c_OvArity.I(xs) commit overload-set
 c_OvNullary.I() commit single-candidate
 c_OvOptional.I("x") commit overload-set
+c_OvOptional.I("x", 3) commit overload-set
+c_OvOptional.I(3, "x") commit overload-set
 c_OvOptional.I(3, 3) commit overload-set
 c_OvOut.I("x") commit overload-set
 c_OvParams.I("x") commit overload-set
+c_OvParams.I("x", 3) commit overload-set
 c_OvParams.I() commit overload-set
 c_OvParams.I(3) commit overload-set
+c_OvParams.I(3, "x") commit overload-set
 c_OvParams.I(3, 3) commit overload-set
 c_OvParams.I(3, 3, 3) commit overload-set
+c_OvParamsOnly.I("x", 3) commit single-candidate
 c_OvParamsOnly.I() commit single-candidate
 c_OvParamsOnly.I(3) commit single-candidate
+c_OvParamsOnly.I(3, "x") commit single-candidate
 c_OvParamsOnly.I(3, 3) commit single-candidate
 c_OvParamsOnly.I(3, 3, 3) commit single-candidate
 c_OvSingle.I("x") commit single-candidate

@@ -10527,21 +10527,23 @@ Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsp
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:51:19-35 "LastIndexOf"	assembly-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:53:20-22 "(&&)"	assembly-deferral unbound-name operator
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:53:29-40 "Length"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:54:24-38 "Substring"	assembly-deferral qualified-access member_access_on_value
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:54:24-38 "Substring"	assembly-match member
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:56:35-39 "Char" handlers plain definition first	declined expected served-assembly
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:56:35-39 "Char" handlers plain definition last	declined expected served-assembly
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:56:35-39 "Char" handlers plain definition middle	declined expected served-assembly
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:56:35-47 "IsDigit"	assembly-deferral qualified-access assembly_type_member
-Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:57:17-31 "Substring"	assembly-deferral qualified-access member_access_on_value
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:57:17-31 "Substring"	assembly-match member
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:67:25-46 "LastIndexOf"	assembly-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:68:23-44 "LastIndexOf"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:74:24-43 "Substring"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:75:24-43 "Substring"	assembly-deferral qualified-access member_access_on_value
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:74:24-43 "Substring"	assembly-match member
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:75:24-43 "Substring"	assembly-match member
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:75:24-43 "Substring" handlers plain definition last	declined expected served-assembly-member
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:76:41-45 "tail" hover-type plain	local withheld-in-file-value at first,middle,last
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:83:25-46 "LastIndexOf"	assembly-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:84:23-44 "LastIndexOf"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:91:17-36 "Substring"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:91:51-70 "Substring"	assembly-deferral qualified-access member_access_on_value
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:91:17-36 "Substring"	assembly-match member
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:91:17-36 "Substring" handlers plain definition last	declined expected served-assembly-member
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:91:51-70 "Substring"	assembly-match member
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:93:17-21 "tail" hover-type plain	local withheld-in-file-value at first,middle,last
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AttributeFormatting.fs:93:9-13 "head" hover-type plain	local withheld-in-file-value at first,middle,last
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj ComparableFieldDefinitionHandle.fs	compared records=93 definitions=19
@@ -11462,7 +11464,7 @@ Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsp
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:224:13-19 "String" handlers plain definition first	declined expected served-assembly
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:224:13-19 "String" handlers plain definition last	declined expected served-assembly
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:224:13-19 "String" handlers plain definition middle	declined expected served-assembly
-Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:224:13-26 "Equals"	assembly-deferral qualified-access assembly_type_member
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:224:13-26 "Equals"	assembly-match member
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:230:54-66 "AssemblyName" handlers plain definition first	declined expected served-assembly
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:230:54-66 "AssemblyName" handlers plain definition last	declined expected served-assembly
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:230:54-66 "AssemblyName" handlers plain definition middle	declined expected served-assembly
@@ -11512,7 +11514,7 @@ Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsp
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:368:98-111 "Revision" handlers plain definition middle	declined expected served-assembly-member
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:378:15-26 "Culture"	project-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:382:25-40 "CultureName"	assembly-match member
-Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:386:13-26 "Equals"	assembly-deferral qualified-access assembly_type_member
+Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:386:13-26 "Equals"	assembly-match member
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:416:65-73 "WoofWare"	project-deferral unrecorded qualifier
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:416:65-98 "CustomAttribute"	project-deferral unrecorded project_type_path_shadow@root x2
 Smaug123/WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj FriendAssemblies.fs:416:74-82 "PawPrint"	project-deferral unrecorded qualifier
