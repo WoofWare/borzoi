@@ -1021,6 +1021,54 @@ mod tests {
         }
     }
 
+    /// The source cache's probes are asked afresh on every plan, nothing held
+    /// in memory: with no watch event, a remote entry written is served, one
+    /// deleted is fetched again, and a deleted embedded entry is written
+    /// again (`Unobserved::GoToDefinition`'s guarantee).
+    #[test]
+    fn plan_source_probes_the_cache_on_every_plan() {
+        let dir = cache_dir();
+        let remote = || DefinitionSource::Remote {
+            document: r"D:\repo\printf.fs".into(),
+            url: "https://example.com/printf.fs".into(),
+            line: 1,
+            column: 1,
+        };
+        let dest = match plan_source(remote(), dir.path()).unwrap() {
+            SourcePlan::NeedsFetch { dest, .. } => dest,
+            other => panic!("expected NeedsFetch, got {other:?}"),
+        };
+        write_if_absent(&dest, b"fetched\n").unwrap();
+        assert!(matches!(
+            plan_source(remote(), dir.path()).unwrap(),
+            SourcePlan::Ready(SourceTarget::File { .. })
+        ));
+        std::fs::remove_file(&dest).unwrap();
+        assert!(matches!(
+            plan_source(remote(), dir.path()).unwrap(),
+            SourcePlan::NeedsFetch { .. }
+        ));
+
+        let embedded = || DefinitionSource::Embedded {
+            document: r"C:\src\a\Lib.fs".into(),
+            text: "let x = 1\n".into(),
+            line: 1,
+            column: 1,
+        };
+        let SourcePlan::Ready(SourceTarget::File { path, .. }) =
+            plan_source(embedded(), dir.path()).unwrap()
+        else {
+            panic!("expected Ready(File)");
+        };
+        std::fs::remove_file(&path).unwrap();
+        plan_source(embedded(), dir.path()).unwrap();
+        assert_eq!(
+            crate::observed::host_fs::read_to_string(&path).unwrap(),
+            "let x = 1\n",
+            "a deleted embedded entry was not written again"
+        );
+    }
+
     // --- atomic cache write (no torn reads under concurrent workers) ---------
 
     #[test]

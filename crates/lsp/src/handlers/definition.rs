@@ -31,7 +31,6 @@
 //! never an LSP error envelope.
 
 use crate::inbox::{Superseded, Watch, never_superseded};
-use crate::observed::Unobserved;
 use crate::uri::UriExt as _;
 use crate::vfs::Vfs;
 use borzoi_cst::parser::FileKind;
@@ -340,10 +339,7 @@ fn assembly_member_location(
         _ => return None,
     };
     let dll = env.assembly_path(parent)?;
-    let pdb_image = semantic.pdb_image(dll, || {
-        let bytes = Unobserved::GoToDefinition.read(dll).ok()?;
-        Some(Arc::<[u8]>::from(pdb_image_for(dll, &bytes)?))
-    })?;
+    let pdb_image = cached_pdb_image(semantic, dll)?;
     let source =
         definition_source_with_range_fallback(&pdb_image, token, range.as_deref()).ok()??;
     locate_source(source)
@@ -360,9 +356,15 @@ fn assembly_member_location(
 /// `None` when there is neither an embedded PDB nor a matching sidecar (or any
 /// read/parse failure) — the IO shell around the pure
 /// [`crate::goto_source::sidecar_pdb_name`] /
-/// [`crate::goto_source::sidecar_pdb_matches`] cores. `pub` so the
+/// [`crate::goto_source::sidecar_pdb_matches`] cores. The sidecar is read
+/// through `observer`, which records its stamp, or its absence, so that a
+/// cached image can be confirmed ([`SemanticState::pdb_image`]). `pub` so the
 /// embedded-vs-sidecar selection can be exercised on a real DLL on disk.
-pub fn pdb_image_for(dll_path: &Path, dll_bytes: &[u8]) -> Option<Vec<u8>> {
+pub fn pdb_image_for(
+    dll_path: &Path,
+    dll_bytes: &[u8],
+    observer: &borzoi_msbuild::observed::Observer,
+) -> Option<Vec<u8>> {
     if let Some(image) = embedded_portable_pdb(dll_bytes).ok()? {
         return Some(image);
     }
@@ -370,8 +372,16 @@ pub fn pdb_image_for(dll_path: &Path, dll_bytes: &[u8]) -> Option<Vec<u8>> {
     // the DLL (only its file name is trusted — the recorded path is the absent
     // build machine's), and accept it only if its id matches.
     let sidecar = dll_path.parent()?.join(sidecar_pdb_name(dll_bytes)?);
-    let bytes = Unobserved::GoToDefinition.read(sidecar).ok()?;
+    let bytes = borzoi_msbuild::observed::read_stamped(observer, &sidecar).ok()?;
     sidecar_pdb_matches(dll_bytes, &bytes).then_some(bytes)
+}
+
+/// The DLL's portable-PDB image ([`pdb_image_for`]), through the semantic
+/// state's cache, which confirms what finding it read before serving it.
+fn cached_pdb_image(semantic: &mut SemanticState, dll: &Path) -> Option<Arc<[u8]>> {
+    semantic.pdb_image(dll, |bytes, observer| {
+        Some(Arc::<[u8]>::from(pdb_image_for(dll, bytes, observer)?))
+    })
 }
 
 /// *Where* a referenced-assembly **method** is defined — its document + 1-based
@@ -396,10 +406,7 @@ pub fn member_definition_document(
     };
     let mut from_pdb = || {
         let dll = env.assembly_path(parent)?;
-        let pdb_image = semantic.pdb_image(dll, || {
-            let bytes = Unobserved::GoToDefinition.read(dll).ok()?;
-            Some(Arc::<[u8]>::from(pdb_image_for(dll, &bytes)?))
-        })?;
+        let pdb_image = cached_pdb_image(semantic, dll)?;
         definition_document_in_pdb(&pdb_image, token).ok()?
     };
     // The sequence point first; a member without one (an F# module value's
@@ -426,10 +433,7 @@ pub fn entity_definition_document(
             return None;
         }
         let dll = env.assembly_path(handle)?;
-        let pdb_image = semantic.pdb_image(dll, || {
-            let bytes = Unobserved::GoToDefinition.read(dll).ok()?;
-            Some(Arc::<[u8]>::from(pdb_image_for(dll, &bytes)?))
-        })?;
+        let pdb_image = cached_pdb_image(semantic, dll)?;
         entity_definition_document_in_pdb(&pdb_image, &tokens).ok()?
     };
     // The sequence point first; an entity without one — or with no methods at
@@ -474,10 +478,7 @@ fn assembly_entity_location(
         return None; // Nothing to navigate to — no methods, no pickled range.
     }
     let dll = env.assembly_path(handle)?;
-    let pdb_image = semantic.pdb_image(dll, || {
-        let bytes = Unobserved::GoToDefinition.read(dll).ok()?;
-        Some(Arc::<[u8]>::from(pdb_image_for(dll, &bytes)?))
-    })?;
+    let pdb_image = cached_pdb_image(semantic, dll)?;
     let source = entity_definition_source_with_range_fallback(&pdb_image, &tokens, range.as_ref())
         .ok()??;
     locate_source(source)
