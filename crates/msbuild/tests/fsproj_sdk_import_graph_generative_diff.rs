@@ -71,11 +71,9 @@
 //! A divergence in a case that belongs to none of [`KNOWN_DIVERGENCES`] fails
 //! the sweep. Membership is decided from the case's shape, never from the
 //! walk's answer, and a family may explain only some of a case's findings
-//! ([`Family::covers`]): one about writes an undecided import hides covers
-//! property findings, never the Compile set. Each known family also has a
-//! witness case ([`Family::witness`]) that the test asserts *still* diverges,
-//! so the change that fixes a family turns this test red until the family is
-//! deleted.
+//! ([`Family::covers`]). Each known family also has a witness case
+//! ([`Family::witness`]) that the test asserts *still* diverges, so the change
+//! that fixes a family turns this test red until the family is deleted.
 //!
 //! ## Anti-vacuity
 //!
@@ -1353,33 +1351,39 @@ fn render(case: &Case, sdk: &str) -> Rendered {
 /// MSBuild's (#677).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Family {
-    /// An import input written under a condition the walk cannot decide, or
-    /// refused: the walk takes one side of every import it decides, and a
-    /// later write of a property the skipped (or followed) file also writes
-    /// is published as trusted, with only later *undefined* reads made
-    /// inexact (#791). The same holds for a gated import whose gate the walk
-    /// cannot decide ([`GatedImport::undecided_to_the_walk`]). It holds #820's
-    /// remainder too: an import point in content the walk cannot see whose
-    /// failure ([`PointDoubt::GateOr`] over a missing file) makes MSBuild reject
-    /// an evaluation the walk cannot know is rejected. Covers property findings
-    /// only: the Compile set, the reference list and the define set must still
-    /// be uncertain.
-    UndecidedImportHidesWrites,
+    /// An import the walk does not make, or cannot know MSBuild makes, is of
+    /// a file that an import the walk does make names again: a hidden repeat,
+    /// or any content the walk cannot see
+    /// ([`Case::hides_content_from_the_walk`]) in a case that names a file
+    /// twice. MSBuild skips the later import as a duplicate when the
+    /// earlier one was made; the walk makes it, and publishes what the file
+    /// writes there as trusted (#891). Covers property findings only: the Compile set, the reference
+    /// list and the define set must still be uncertain.
+    HiddenImportMakesALaterOneADuplicate,
+    /// #820's remainder: an import point in or after content the walk cannot
+    /// see whose failure ([`PointDoubt::GateOr`] over a missing file) makes
+    /// MSBuild reject an evaluation the walk cannot know is rejected. Covers findings
+    /// against a rejected project only.
+    HiddenPointRejectsTheProject,
 }
 
-const KNOWN_DIVERGENCES: &[Family] = &[Family::UndecidedImportHidesWrites];
+const KNOWN_DIVERGENCES: &[Family] = &[
+    Family::HiddenImportMakesALaterOneADuplicate,
+    Family::HiddenPointRejectsTheProject,
+];
 
 impl Family {
     /// Whether `case` is in the family: decided from the case's shape alone,
     /// never from how the walk answered it.
     fn contains(self, case: &Case) -> bool {
         match self {
-            Family::UndecidedImportHidesWrites => {
-                case.undecided.is_some()
-                    || case.props_point == PropsPoint::BehindUndecidedImport
-                    || case.targets_point == TargetsPoint::BehindUndecidedImport
-                    || case.has_hidden_repeat()
-                    || case.gated.is_some_and(GatedImport::undecided_to_the_walk)
+            Family::HiddenImportMakesALaterOneADuplicate => {
+                case.has_hidden_repeat()
+                    || (case.hides_content_from_the_walk()
+                        && !(case.repeats.is_empty() && case.reimports.is_empty()))
+            }
+            Family::HiddenPointRejectsTheProject => {
+                case.point_doubt == PointDoubt::GateOr && case.hides_content_from_the_walk()
             }
         }
     }
@@ -1387,7 +1391,8 @@ impl Family {
     /// Whether the family explains `finding`, in a case it contains.
     fn covers(self, finding: &Finding) -> bool {
         match self {
-            Family::UndecidedImportHidesWrites => finding.kind == FindingKind::Property,
+            Family::HiddenImportMakesALaterOneADuplicate => finding.kind == FindingKind::Property,
+            Family::HiddenPointRejectsTheProject => finding.theirs == "a rejected project",
         }
     }
 
@@ -1395,13 +1400,43 @@ impl Family {
     /// asserts still diverges.
     fn witness(self) -> Case {
         match self {
-            // With no `Directory.Build.*` file, nothing withdraws the values
-            // the hidden `Behind.props` would have changed: `Trace` lacks its
-            // marker and is published as trusted.
-            Family::UndecidedImportHidesWrites => Case {
-                props_point: PropsPoint::BehindUndecidedImport,
+            // MSBuild runs `child` once, in `Sdk.props` behind the import the
+            // walk cannot decide, and skips the body's import of it; the walk
+            // makes the body's, and publishes what it leaves in `Seen`.
+            Family::HiddenImportMakesALaterOneADuplicate => Case {
+                props_point: PropsPoint::Absent,
+                targets_point: TargetsPoint::Absent,
                 props: Props::default(),
                 targets_present: false,
+                repeat_which: Which::Props,
+                repeats: vec![
+                    Repeat {
+                        target: RepeatTarget::Child,
+                        site: RepeatSite::HiddenBeforePoint,
+                    },
+                    Repeat {
+                        target: RepeatTarget::Child,
+                        site: RepeatSite::Body,
+                    },
+                ],
+                ..Case::usual()
+            },
+            // The targets point is behind an import the walk cannot decide,
+            // and imports its path whether or not the file exists. `Sdk.targets`
+            // imports the props file again after it, by a link, and the walk
+            // commits what that import writes.
+            Family::HiddenPointRejectsTheProject => Case {
+                form: Form::ExplicitImports,
+                props_point: PropsPoint::InSdkFile,
+                targets_point: TargetsPoint::BehindUndecidedImport,
+                targets_present: false,
+                point_doubt: PointDoubt::GateOr,
+                reimports: vec![Reimport {
+                    which: Which::Props,
+                    spelling: Spelling::FileLink,
+                    shape: Shape::Literal,
+                    site: Site::SdkTargets,
+                }],
                 ..Case::usual()
             },
         }
@@ -1409,6 +1444,16 @@ impl Family {
 }
 
 impl Case {
+    /// Whether the case holds an import the walk cannot decide, apart from
+    /// the import points' own doubt: content the walk cannot see.
+    fn hides_content_from_the_walk(&self) -> bool {
+        self.undecided.is_some()
+            || self.props_point == PropsPoint::BehindUndecidedImport
+            || self.targets_point == TargetsPoint::BehindUndecidedImport
+            || self.has_hidden_repeat()
+            || self.gated.is_some_and(GatedImport::undecided_to_the_walk)
+    }
+
     /// Whether content the walk cannot see imports a file the point reaches.
     fn has_hidden_repeat(&self) -> bool {
         self.repeats.iter().any(Repeat::is_hidden)
@@ -2440,8 +2485,8 @@ fn a_point_after_a_hidden_import_of_its_file_commits_no_order() {
 
 /// Grade `case`'s item lists and define set alone: MSBuild accepts the
 /// project, and the walk publishes MSBuild's Compile set, reference list and
-/// define set, or declines each. What the hidden import writes is otherwise
-/// [`Family::UndecidedImportHidesWrites`]'s (#791).
+/// define set, or declines each. The sweep grades what the hidden import
+/// writes.
 fn assert_items_exact_or_declined(case: &Case) {
     let mut shared = Shared::new();
     let (outcome, describe) = evaluate(&mut shared, case);

@@ -10478,7 +10478,7 @@ fn an_untrusted_property_reports_the_root_of_its_chain() {
   </PropertyGroup>
 </Project>"#;
     let p = parse(src);
-    let item_gate = crate::UntrustedCause::Unmodelled("'@(NoSuchItem)' == ''".to_string());
+    let item_gate = crate::UntrustedCause::Unmodelled("'@(NoSuchItem)' == ''".into());
     for name in ["Tf", "Gated", "Derived", "GATED"] {
         assert_eq!(
             p.property(name).untrusted_cause(),
@@ -10489,7 +10489,7 @@ fn an_untrusted_property_reports_the_root_of_its_chain() {
     assert_eq!(
         p.property("FromUndefined").untrusted_cause(),
         Some(&crate::UntrustedCause::UndefinedProperty {
-            name: "RoslynTargetsPath".to_string(),
+            name: "RoslynTargetsPath".into(),
             hidden_by: None,
         })
     );
@@ -10550,13 +10550,13 @@ fn an_untrusted_cause_is_the_one_in_force_at_the_read() {
     assert_eq!(
         p.property("L").untrusted_cause(),
         Some(&crate::UntrustedCause::Unmodelled(
-            "'@(GateA)' == ''".to_string()
+            "'@(GateA)' == ''".into()
         ))
     );
     assert_eq!(
         p.property("M").untrusted_cause(),
         Some(&crate::UntrustedCause::Unmodelled(
-            "'@(GateB)' == ''".to_string()
+            "'@(GateB)' == ''".into()
         ))
     );
 }
@@ -10737,9 +10737,9 @@ fn an_unset_read_after_an_undecided_import_names_what_hid_it() {
     assert_eq!(
         p.property("L").untrusted_cause(),
         Some(&crate::UntrustedCause::UndefinedProperty {
-            name: "Unset".to_string(),
+            name: "Unset".into(),
             hidden_by: Some(Box::new(crate::UntrustedCause::Unmodelled(
-                "'@(NoSuchItem)' == ''".to_string()
+                "'@(NoSuchItem)' == ''".into()
             ))),
         })
     );
@@ -10763,7 +10763,7 @@ fn a_gate_cause_keeps_the_root_its_read_carried() {
     assert_eq!(
         p.property("L").untrusted_cause(),
         Some(&crate::UntrustedCause::UndefinedProperty {
-            name: "RoslynTargetsPath".to_string(),
+            name: "RoslynTargetsPath".into(),
             hidden_by: None,
         })
     );

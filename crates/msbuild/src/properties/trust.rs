@@ -14,11 +14,12 @@
 //!   one. It is read where a name's current value decides something.
 //! * **stale** records that the value was bound before content the walk could
 //!   not see ([`OpacityCause`]), or computed from such a value, so the real
-//!   build may have rewritten it there. It is read only where a value decides a
-//!   `Directory.Build.*` import point or a Compile item; every other reader
-//!   trusts a held value under
-//!   opacity, a measured trade-off (`docs/msbuild-value-carried-provenance-plan.md`,
-//!   "#614: what each rule costs").
+//!   build may have rewritten it there. It is read where a value decides a
+//!   `Directory.Build.*` import point or a Compile item, and where the end of
+//!   the walk publishes one (a property read, the output name, the
+//!   `DefineConstants` list). A condition's decision mid-walk does not read it
+//!   (`docs/msbuild-value-carried-provenance-plan.md`, "#614: what each rule
+//!   costs").
 //!
 //! [`Trust`] holds all four at once, which is the point: the channels are
 //! updated together at a write ([`PropertyProvenance`]) and consulted together
@@ -59,13 +60,17 @@ pub(crate) enum UnpinnedRoot {
     /// reasons it has to be unpinned, so no exemption may be keyed on a
     /// root's `name`: the `DefineConstants` self-append is decided at the read
     /// itself, never on a root re-surfaced from a property that copied it.
+    ///
+    /// The name is shared, as [`Self::UnsupportedCondition`]'s text is.
     Undefined {
-        name: String,
+        name: Arc<str>,
         because: Option<Box<UndefinedBecause>>,
     },
     /// A write in the value chain was gated on a condition outside the
-    /// supported grammar, so we cannot know whether it ran.
-    UnsupportedCondition(String),
+    /// supported grammar, so we cannot know whether it ran. The text is
+    /// shared: one condition is the root of every name it leaves in doubt,
+    /// and a copy for each would cost the condition's length per name.
+    UnsupportedCondition(Arc<str>),
 }
 
 /// Why a name read while undefined might not be undefined to the real build.
@@ -88,14 +93,14 @@ pub(crate) enum OpacityCause {
     /// by the root that made it so.
     Gate(UnpinnedRoot),
     /// Content the walk could not enter, described.
-    Unentered(String),
+    Unentered(Arc<str>),
 }
 
 impl UnpinnedRoot {
     /// A root for a read of `name` while undefined.
     pub(crate) fn undefined(name: &str, because: Option<UndefinedBecause>) -> Self {
         UnpinnedRoot::Undefined {
-            name: name.to_string(),
+            name: name.into(),
             because: because.map(Box::new),
         }
     }
@@ -124,11 +129,11 @@ impl UnpinnedRoot {
 
     pub(crate) fn to_diagnostic(&self) -> DiagnosticKind {
         match self {
-            UnpinnedRoot::Undefined { name, .. } => {
-                DiagnosticKind::UndefinedProperty { name: name.clone() }
-            }
+            UnpinnedRoot::Undefined { name, .. } => DiagnosticKind::UndefinedProperty {
+                name: name.to_string(),
+            },
             UnpinnedRoot::UnsupportedCondition(condition) => DiagnosticKind::UnsupportedCondition {
-                condition: condition.clone(),
+                condition: condition.to_string(),
             },
         }
     }
@@ -140,23 +145,26 @@ impl UnpinnedRoot {
 pub enum UntrustedCause {
     /// The chain read `$(name)` while it was undefined, and a real build may
     /// define it. `hidden_by` is set when the read was uncertain only because
-    /// an earlier part of the build could not be seen into: it says why.
+    /// an earlier part of the build could not be seen into: it says why. The
+    /// name is shared, as [`Self::Unmodelled`]'s text is.
     UndefinedProperty {
-        name: String,
+        name: Arc<str>,
         hidden_by: Option<Box<UntrustedCause>>,
     },
     /// The chain rests on text outside the modelled grammar, carried verbatim:
-    /// a `Condition` on a write, or a property body (`<Name> body`).
-    Unmodelled(String),
+    /// a `Condition` on a write, or a property body (`<Name> body`). Shared
+    /// with every other cause that carries the same text: one undecidable
+    /// condition is the cause of every property it leaves in doubt.
+    Unmodelled(Arc<str>),
     /// The chain rests on a value the SDK computed from package inputs that the
     /// walk does not model.
     SdkPackageInput,
     /// Content the walk could not enter (an import, an SDK, a construct),
-    /// described.
-    Unentered(String),
+    /// described. Shared as [`Self::Unmodelled`]'s text is.
+    Unentered(Arc<str>),
     /// The project writes `name` with a value the walk could not compute, so
     /// the real build holds a value where the walk holds none.
-    Refused { name: String },
+    Refused { name: Arc<str> },
     /// MSBuild may reject the whole project, so it holds no value at all
     /// ([`crate::ParsedProject::rejection`]).
     Rejected(Box<crate::Rejection>),
@@ -351,7 +359,8 @@ impl Trust {
     /// unpinned root comes first: it names the property or condition to look
     /// at, where the package taint names only the SDK.
     pub(crate) fn untrusted_cause(&self) -> Option<UntrustedCause> {
-        // Staleness is not a published cause: see [`Trust::stale`].
+        // Staleness is published by the end-of-walk readers, not here: see
+        // [`Trust::stale`].
         let Trust {
             unpinned,
             sdk_package,
@@ -433,14 +442,15 @@ impl Trust {
     /// passed content it could not see, which may have rewritten it, or it was
     /// computed from such a value (the cause is the opacity's).
     ///
-    /// Consumed only where a value decides whether a `Directory.Build.*` file
-    /// joins the walk (an import point's predicate, `evaluator::directory_build`,
-    /// through [`Trust::is_certain`]). Every other reader trusts a held value under
-    /// opacity, and the projections that serve them — [`Trust::reference_is_untrusted`]
-    /// and [`Trust::untrusted_cause`] — leave this channel out on purpose: on
-    /// the real SDK chain most values are bound before some opacity, so those
-    /// readers would decline wholesale. That trade-off, and what it costs, is
-    /// measured in the plan.
+    /// Consumed where a value decides whether a `Directory.Build.*` file joins
+    /// the walk (an import point's predicate, `evaluator::directory_build`,
+    /// through [`Trust::is_certain`]), where a Compile item reads one, and
+    /// where the end of the walk publishes one (the property reads, the output
+    /// name, the `DefineConstants` list). The projections that serve the
+    /// mid-walk condition decisions, [`Trust::reference_is_untrusted`] and
+    /// [`Trust::untrusted_cause`], leave this channel out: once the walk is
+    /// opaque no decision is exact that rests on an unknown operand, and a
+    /// stale operand alone is trusted there, which the plan measures.
     pub(crate) fn stale(&self) -> Option<&StaleCause> {
         self.stale.as_ref()
     }
@@ -659,7 +669,7 @@ mod tests {
     fn unpinned_root_strategy() -> impl Strategy<Value = UnpinnedRoot> {
         prop_oneof![
             "[ab]".prop_map(|name| UnpinnedRoot::undefined(&name, None)),
-            "[ab]".prop_map(UnpinnedRoot::UnsupportedCondition),
+            "[ab]".prop_map(|text| UnpinnedRoot::UnsupportedCondition(text.into())),
         ]
     }
 
@@ -678,7 +688,7 @@ mod tests {
     }
 
     fn opacity_strategy() -> impl Strategy<Value = StaleCause> {
-        "[ab]".prop_map(|cause| Arc::new(OpacityCause::Unentered(cause)))
+        "[ab]".prop_map(|cause| Arc::new(OpacityCause::Unentered(cause.into())))
     }
 
     /// A deliberately tiny alphabet: the interesting cases are the ones where

@@ -230,7 +230,7 @@ mod properties {
                                 }
                                 CompileItemUncertaintyCauseKind::Structural(structural) => {
                                     DefineConstantsUncertaintyCauseKind::HiddenContent(
-                                        UntrustedCause::Unentered(format!("{structural:?}")),
+                                        UntrustedCause::Unentered(format!("{structural:?}").into()),
                                     )
                                 }
                                 // The define axis has no stale arm.
@@ -539,7 +539,7 @@ fn hidden_content_explains_a_define_withdrawal() {
     parsed.define_constants_uncertain = true;
     parsed.define_constants_uncertainties = vec![DefineConstantsUncertaintyCause {
         kind: DefineConstantsUncertaintyCauseKind::HiddenContent(UntrustedCause::Unmodelled(
-            "$([System.String]::IsNullOrWhiteSpace(''))".to_string(),
+            "$([System.String]::IsNullOrWhiteSpace(''))".into(),
         )),
         span: 0..1,
         origin: DiagnosticOrigin::Imported,
@@ -1024,21 +1024,21 @@ fn a_language_version_refusal_names_what_the_version_rests_on() {
     let parsed = certain_project();
     let cases: &[(UntrustedCause, &[&str])] = &[
         (
-            UntrustedCause::Unmodelled("'@(NoSuchItem)' == ''".to_string()),
+            UntrustedCause::Unmodelled("'@(NoSuchItem)' == ''".into()),
             &["`'@(NoSuchItem)' == ''`", "can't evaluate"],
         ),
         (
             UntrustedCause::UndefinedProperty {
-                name: "TargetFramework".to_string(),
+                name: "TargetFramework".into(),
                 hidden_by: None,
             },
             &["`$(TargetFramework)`", "undefined"],
         ),
         (
             UntrustedCause::UndefinedProperty {
-                name: "EnablePreviewFeatures".to_string(),
+                name: "EnablePreviewFeatures".into(),
                 hidden_by: Some(Box::new(UntrustedCause::Unmodelled(
-                    "'@(NoSuchItem)' == ''".to_string(),
+                    "'@(NoSuchItem)' == ''".into(),
                 ))),
             },
             &[
@@ -1048,7 +1048,7 @@ fn a_language_version_refusal_names_what_the_version_rests_on() {
             ],
         ),
         (
-            UntrustedCause::Unentered("ImportProjectUnresolved".to_string()),
+            UntrustedCause::Unentered("ImportProjectUnresolved".into()),
             &["couldn't read", "ImportProjectUnresolved"],
         ),
         (UntrustedCause::SdkPackageInput, &["package"]),

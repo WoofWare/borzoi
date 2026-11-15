@@ -23,7 +23,9 @@ pub enum PropertyRead {
     Unset,
     /// Undefined in the walk, but the real build may define it.
     UnsetInexact(InexactUnset),
-    /// A value the walk holds but may have wrong.
+    /// A value the walk holds but may have wrong: computed from something it
+    /// could not pin down, or held from before content it could not see, which
+    /// may have rewritten it.
     Untrusted(UntrustedCause),
 }
 
@@ -77,13 +79,11 @@ impl InexactUnset {
     /// the real build's.
     pub fn cause(&self, name: &str) -> UntrustedCause {
         let undefined = |hidden_by: Option<&UntrustedCause>| UntrustedCause::UndefinedProperty {
-            name: name.to_string(),
+            name: name.into(),
             hidden_by: hidden_by.map(|cause| Box::new(cause.clone())),
         };
         match self {
-            InexactUnset::Refused => UntrustedCause::Refused {
-                name: name.to_string(),
-            },
+            InexactUnset::Refused => UntrustedCause::Refused { name: name.into() },
             InexactUnset::Opaque(cause) => undefined(Some(cause)),
             InexactUnset::Rejected(rejection) => UntrustedCause::Rejected(rejection.clone()),
             InexactUnset::Environment | InexactUnset::Toolset | InexactUnset::ConsumerCarveOut => {
@@ -156,7 +156,12 @@ impl State<'_> {
                 .expect("an untrusted reference has a cause");
             return PropertyRead::Untrusted(cause);
         }
-        // The entry's trust is the question answered just above.
+        // A value bound before content the walk could not see, or computed
+        // from one, may have been rewritten there.
+        if let Some(stale) = trust.stale() {
+            return PropertyRead::Untrusted(UntrustedCause::of_opacity(stale));
+        }
+        // The entry's trust is the two questions answered just above.
         if let Some(value) = self.lookup.get_unescaped_ignoring_trust(name) {
             return PropertyRead::Value(value);
         }

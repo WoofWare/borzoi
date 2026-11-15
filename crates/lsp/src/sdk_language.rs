@@ -887,14 +887,14 @@ pub fn lang_version_value_doubt(parsed: &ParsedProject) -> Option<UntrustedCause
         return Some(UntrustedCause::Unentered(
             "a `$(LangVersion)` with surrounding whitespace, which the compiler is handed as \
              it stands"
-                .to_string(),
+                .into(),
         ));
     }
     // `--langversion:?` asks the compiler to list its versions, and it checks
     // nothing.
     if lang_version == Some("?") {
         return Some(UntrustedCause::Unentered(
-            "`$(LangVersion)` `?`, the compiler's version query".to_string(),
+            "`$(LangVersion)` `?`, the compiler's version query".into(),
         ));
     }
     let other_flags = parsed
@@ -906,7 +906,7 @@ pub fn lang_version_value_doubt(parsed: &ParsedProject) -> Option<UntrustedCause
     // task strips it before the compiler reads the switch.
     if other_flags.contains("langversion") || other_flags.contains(['@', '"']) {
         return Some(UntrustedCause::Unentered(
-            "`$(OtherFlags)`, which may name a language version after `$(LangVersion)`".to_string(),
+            "`$(OtherFlags)`, which may name a language version after `$(LangVersion)`".into(),
         ));
     }
     None
@@ -954,9 +954,9 @@ pub fn lang_version_untrusted_cause(parsed: &ParsedProject) -> Option<UntrustedC
             .iter()
             .any(|defined| defined.writes_property_at_build_time(carrier))
     }) {
-        return Some(UntrustedCause::Unentered(format!(
-            "a target that may write `{carrier}` before `CoreCompile` reads it"
-        )));
+        return Some(UntrustedCause::Unentered(
+            format!("a target that may write `{carrier}` before `CoreCompile` reads it").into(),
+        ));
     }
     parsed.hidden_content.clone()
 }
@@ -1201,7 +1201,7 @@ mod tests {
             );
         }
         let mut parsed = on_sdk("10.0.401");
-        parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
+        parsed.hidden_content = Some(UntrustedCause::Unentered("an import".into()));
         assert_eq!(compiler_of(&parsed, &[]), None, "content unseen");
 
         // `read` is what the evaluation publishes for `name`; a `Value` is one
@@ -1254,7 +1254,7 @@ mod tests {
         parsed.properties.remove("FSharpTargetsShim");
         parsed.property_reads.named.remove("fsharptargetsshim");
         assert_eq!(compiler_of(&parsed, &[]), None, "no targets shim");
-        let untrusted = PropertyRead::Untrusted(UntrustedCause::Unentered("a gate".to_string()));
+        let untrusted = PropertyRead::Untrusted(UntrustedCause::Unentered("a gate".into()));
         assert_eq!(
             compiler_of(&with_read("FSharpPropsShim", untrusted), &[]),
             None,
@@ -1387,8 +1387,7 @@ mod tests {
             assert_eq!(checked(&with(name, value)), expected, "{name}={value:?}");
         }
         for carrier in FEATURE_SWITCH_CARRIERS {
-            let untrusted =
-                PropertyRead::Untrusted(UntrustedCause::Unentered("a gate".to_string()));
+            let untrusted = PropertyRead::Untrusted(UntrustedCause::Unentered("a gate".into()));
             assert_eq!(
                 checked(&with_read(carrier, untrusted)),
                 LanguageVersion::MIN
@@ -1466,7 +1465,7 @@ mod tests {
                 parsed
             };
         let mut hidden = on_sdk("10.0.401");
-        hidden.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
+        hidden.hidden_content = Some(UntrustedCause::Unentered("an import".into()));
         let flags = |value: &str| {
             let mut parsed = with_read(PropertyRead::Value(value.to_string()));
             parsed.other_flags = Some(value.to_string());
@@ -1502,11 +1501,11 @@ mod tests {
             (
                 "an untrusted read",
                 with_read(PropertyRead::Untrusted(UntrustedCause::Unentered(
-                    "a gate".to_string(),
+                    "a gate".into(),
                 ))),
                 Some(FeatureSwitchRoute::Untrusted {
                     carrier: "OtherFlags",
-                    cause: UntrustedCause::Unentered("a gate".to_string()),
+                    cause: UntrustedCause::Unentered("a gate".into()),
                 }),
                 true,
             ),
@@ -1522,7 +1521,7 @@ mod tests {
             (
                 "unset behind hidden content",
                 with_read(PropertyRead::UnsetInexact(InexactUnset::Opaque(
-                    UntrustedCause::Unentered("an import".to_string()),
+                    UntrustedCause::Unentered("an import".into()),
                 ))),
                 None,
                 true,
@@ -1721,7 +1720,7 @@ mod tests {
             .insert("/w/App.fsproj".into());
         assert!(!doubted(&parsed), "an evaluation-time write is evaluated");
         let mut parsed = on_sdk("10.0.401");
-        parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
+        parsed.hidden_content = Some(UntrustedCause::Unentered("an import".into()));
         assert!(doubted(&parsed), "content unseen");
         assert_eq!(
             lang_version_value_doubt(&parsed),

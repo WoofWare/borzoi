@@ -99,7 +99,7 @@ use item_pass::{
     CapturedPackageReference, CurrentFile, DeferredGroupKind, DeferredItemGroup,
     RetainedImportedFile, item_key, replay_deferred_item_groups,
 };
-use property_reads::{InexactUnset, PropertyRead};
+use property_reads::PropertyRead;
 #[cfg(any(test, feature = "test-support"))]
 use reads::{EvaluationReads, ReadProbe};
 
@@ -2356,7 +2356,10 @@ impl<'r> State<'r> {
         // or import, a malformed Choose (which fails MSBuild's evaluation
         // outright). An undecided Choose does not come here: its branch
         // writes are enumerated per name instead.
-        self.latch_walk_opaque(OpacityCause::Unentered(format!("{kind:?}")), span.clone());
+        self.latch_walk_opaque(
+            OpacityCause::Unentered(format!("{kind:?}").into()),
+            span.clone(),
+        );
         self.record_package_reference_uncertainty(
             PackageReferenceUncertaintyCauseKind::Structural(kind),
             span,
@@ -2450,7 +2453,10 @@ impl<'r> State<'r> {
         // the walk — after it, an undefined read could be of a name that
         // hidden content defined (see [`State::walk_opaque`]).
         if is_structural_compile_risk(&kind) {
-            self.latch_walk_opaque(OpacityCause::Unentered(format!("{kind:?}")), span.clone());
+            self.latch_walk_opaque(
+                OpacityCause::Unentered(format!("{kind:?}").into()),
+                span.clone(),
+            );
         }
         let compile_uncertain =
             self.compile_context || self.import_gate_context || is_structural_compile_risk(&kind);
@@ -2728,17 +2734,26 @@ impl<'r> State<'r> {
         }
     }
 
-    /// Why an undecided import gate makes the walk opaque: the root its
-    /// evaluation just surfaced, else the gate itself.
-    fn gate_opacity_cause(&self, node: Node<'_, '_>, diagnostics_before: usize) -> OpacityCause {
-        OpacityCause::Gate(
-            self.unpinned_root_from_recent_diagnostics(diagnostics_before)
-                .unwrap_or_else(|| {
-                    UnpinnedRoot::UnsupportedCondition(
-                        attribute(node, "Condition").unwrap_or_default().to_string(),
-                    )
-                }),
-        )
+    /// Latch the walk opaque for an import gate it could not decide, and
+    /// return why the gate is undecided: the root its evaluation just
+    /// surfaced, else the gate itself.
+    fn latch_undecided_import_gate(
+        &mut self,
+        node: Node<'_, '_>,
+        diagnostics_before: usize,
+    ) -> UnpinnedRoot {
+        let root = self
+            .unpinned_root_from_recent_diagnostics(diagnostics_before)
+            .unwrap_or_else(|| {
+                UnpinnedRoot::UnsupportedCondition(
+                    attribute(node, "Condition")
+                        .unwrap_or_default()
+                        .as_ref()
+                        .into(),
+                )
+            });
+        self.latch_walk_opaque(OpacityCause::Gate(root.clone()), node.range());
+        root
     }
 
     /// The root cause behind the first unpinned property `raw` references,
@@ -2766,17 +2781,13 @@ impl<'r> State<'r> {
     fn target_name_verdict(&self) -> ItemMetadataValue {
         for name in ["TargetName", "AssemblyName"] {
             match self.read_property(name) {
-                PropertyRead::Untrusted(_)
-                | PropertyRead::UnsetInexact(
-                    InexactUnset::Refused | InexactUnset::Environment | InexactUnset::Rejected(_),
-                ) => {
+                // A value held from before content the walk could not see
+                // reads as untrusted, and that content may define a name the
+                // walk holds unset.
+                PropertyRead::Untrusted(_) | PropertyRead::UnsetInexact(_) => {
                     return ItemMetadataValue::Unknown;
                 }
-                // Content the walk could not see may define either name;
-                // trusting the absence after it is the trade-off every
-                // reader but the import points and the Compile items makes
-                // (#792).
-                PropertyRead::Value(_) | PropertyRead::Unset | PropertyRead::UnsetInexact(_) => {}
+                PropertyRead::Value(_) | PropertyRead::Unset => {}
             }
             // The entry's trust is the question just asked.
             match self.lookup.get_ignoring_trust(name) {
@@ -2872,7 +2883,7 @@ impl<'r> State<'r> {
         // [`Trust::stale`]), but it cannot be the operand that settles an
         // unknown one: that would decide a branch the base rule leaves open.
         // Telling a rewritable value from a current one is what
-        // [`Trust::stale`] records; this decision does not consume it (#792),
+        // [`Trust::stale`] records; this decision does not consume it,
         // so nothing settles an unknown operand after opacity. Measured on the
         // corpus, this keeps every decline the decision recovers.
         if self.walk_opaque.is_some() {
@@ -2912,7 +2923,7 @@ impl<'r> State<'r> {
                     self.root_for_undefined_read(name)
                 }
                 (None, DiagnosticKind::UnsupportedCondition { condition }) => {
-                    UnpinnedRoot::UnsupportedCondition(condition.clone())
+                    UnpinnedRoot::UnsupportedCondition(condition.as_str().into())
                 }
                 (None, _) => unreachable!("only the two kinds are selected above"),
             },
@@ -3113,7 +3124,7 @@ impl<'r> State<'r> {
         // A value deciding the Compile set that rests on one hidden content may
         // have rewritten ([`Trust::stale`]) leaves the set uncertain, as an
         // unpinned read would. Measured at zero cost on the crate suite, the F#
-        // corpus and the LSP project corpus (#792).
+        // corpus and the LSP project corpus.
         if self.compile_context
             && let Some(stale) = value.trust().stale()
         {
@@ -3436,7 +3447,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     .or_else(|| {
                         attribute(node, "Condition")
                             .as_deref()
-                            .map(|c| UnpinnedRoot::UnsupportedCondition(c.to_string()))
+                            .map(|c| UnpinnedRoot::UnsupportedCondition(c.into()))
                     })
             } else {
                 None
@@ -3522,10 +3533,8 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
             // gate may bring in or omit whole files of property writes.
             let gate_raised_doubt = state.diagnostics.len() != diagnostics_before_gate
                 || matches!(gate, CondGate::Unsupported);
-            if gate_raised_doubt {
-                let cause = state.gate_opacity_cause(node, diagnostics_before_gate);
-                state.latch_walk_opaque(cause, node.range());
-            }
+            let undecided = gate_raised_doubt
+                .then(|| state.latch_undecided_import_gate(node, diagnostics_before_gate));
             match gate {
                 CondGate::Run => {
                     state.import_gate_context = prev_gate;
@@ -3535,18 +3544,20 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     // nothing else we model — every Import inside still
                     // routes through `handle_import`.
                     directory_build::within_route(route_decided, state, |state| {
-                        for child in node.children().filter(Node::is_element) {
-                            if child.tag_name().name() == "Import" {
-                                handle_import(child, current_file_dir, state);
-                            } else {
-                                state.push(
-                                    DiagnosticKind::UnsupportedConstruct {
-                                        element: child.tag_name().name().to_string(),
-                                    },
-                                    child.range(),
-                                );
+                        directory_build::within_followed_import(undecided, state, |state| {
+                            for child in node.children().filter(Node::is_element) {
+                                if child.tag_name().name() == "Import" {
+                                    handle_import(child, current_file_dir, state);
+                                } else {
+                                    state.push(
+                                        DiagnosticKind::UnsupportedConstruct {
+                                            element: child.tag_name().name().to_string(),
+                                        },
+                                        child.range(),
+                                    );
+                                }
                             }
-                        }
+                        });
                     });
                 }
                 CondGate::Skip => {
@@ -3753,7 +3764,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
                 .or_else(|| {
                     attribute(*when, "Condition")
                         .as_deref()
-                        .map(|c| UnpinnedRoot::UnsupportedCondition(c.to_string()))
+                        .map(|c| UnpinnedRoot::UnsupportedCondition(c.into()))
                 });
             undecided = Some((index, unpinned_root));
             break;
@@ -4061,7 +4072,7 @@ fn walk_property_child_inner(
                     .or_else(|| {
                         attribute(node, "Condition")
                             .as_deref()
-                            .map(|c| UnpinnedRoot::UnsupportedCondition(c.to_string()))
+                            .map(|c| UnpinnedRoot::UnsupportedCondition(c.into()))
                     }) {
                     Some(root) => UnpinnedOutcome::Set(root),
                     None => UnpinnedOutcome::Keep,
@@ -4085,7 +4096,7 @@ fn walk_property_child_inner(
         CondGate::Unsupported => {
             let unpinned = match attribute(node, "Condition").as_deref() {
                 Some(condition) => {
-                    UnpinnedOutcome::Set(UnpinnedRoot::UnsupportedCondition(condition.to_string()))
+                    UnpinnedOutcome::Set(UnpinnedRoot::UnsupportedCondition(condition.into()))
                 }
                 None => UnpinnedOutcome::Keep,
             };
@@ -4125,9 +4136,9 @@ fn walk_property_child_inner(
             &name,
             PropertyProvenance {
                 taint: TaintOutcome::Set(node.range()),
-                unpinned: UnpinnedOutcome::Set(UnpinnedRoot::UnsupportedCondition(format!(
-                    "<{name}> body"
-                ))),
+                unpinned: UnpinnedOutcome::Set(UnpinnedRoot::UnsupportedCondition(
+                    format!("<{name}> body").into(),
+                )),
                 // The unpinned root above carries this refusal, and carries it
                 // with the *right lifetime*: a later clean unconditional
                 // overwrite discharges it, because the final value is then one
@@ -4267,7 +4278,7 @@ fn walk_property_child_inner(
             .or_else(|| {
                 attribute(node, "Condition")
                     .as_deref()
-                    .map(|c| UnpinnedRoot::UnsupportedCondition(c.to_string()))
+                    .map(|c| UnpinnedRoot::UnsupportedCondition(c.into()))
             })
     } else if inherited_condition_maybe_wrong {
         inherited_unpinned_root.cloned()
@@ -4501,7 +4512,7 @@ fn evaluate_condition_with_exemptions(
         let mut unpinned_unsupported = false;
         for root in &unpinned_roots {
             match root {
-                UnpinnedRoot::Undefined { name, .. } => undefined_names.push(name.clone()),
+                UnpinnedRoot::Undefined { name, .. } => undefined_names.push(name.to_string()),
                 UnpinnedRoot::UnsupportedCondition(_) => unpinned_unsupported = true,
             }
         }
@@ -5208,13 +5219,12 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
     // a whole file of property writes, whichever way we resolved it:
     // Skip may hide writes the real build performs, Run may perform
     // writes the real build skips. Either way no later undefined read
-    // can claim exactness.
+    // can claim exactness, and a write the followed file makes is one the
+    // real build may not make (#791).
     let gate_raised_doubt =
         state.diagnostics.len() != diagnostics_before_gate || matches!(gate, CondGate::Unsupported);
-    if gate_raised_doubt {
-        let cause = state.gate_opacity_cause(node, diagnostics_before_gate);
-        state.latch_walk_opaque(cause, node.range());
-    }
+    let undecided =
+        gate_raised_doubt.then(|| state.latch_undecided_import_gate(node, diagnostics_before_gate));
     match gate {
         CondGate::Run => {}
         CondGate::Skip => {
@@ -5243,7 +5253,9 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
     let saved_path_certain = std::mem::replace(&mut state.taken_import_path_certain, path_certain);
     state.reach_doubted += usize::from(!path_certain);
     directory_build::within_route(route_decided, state, |state| {
-        follow_import_after_gate(node, current_file_dir, state);
+        directory_build::within_followed_import(undecided, state, |state| {
+            follow_import_after_gate(node, current_file_dir, state);
+        });
     });
     state.reach_doubted -= usize::from(!path_certain);
     state.taken_import_path_certain = saved_path_certain;
