@@ -252,7 +252,9 @@
 //! member segment) and is inert until a wake succeeds — recorded only from a
 //! single-candidate discharge, never a guess (D5). The LSP layers this over the
 //! resolver's `Deferred(QualifiedAccess)` at a member-name range for hover /
-//! go-to-definition; dot-completion is served from the receiver's inferred type.
+//! go-to-definition; dot-completion is served from the receiver's type at the
+//! access, recorded before each dot where it is ground there
+//! ([`InferredFile::receiver_type_at`], `receivers.rs`).
 //!
 //! **Argument checks at the argument's entry.** FCS relates an expression to
 //! its expected type (`UnifyOverallType`) by an equality first, undone if it
@@ -466,7 +468,7 @@ use borzoi_assembly::{
 use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{
     AppExpr, AstNode, AttributeList, Binding, ConstExpr, DotGetExpr, Expr, IfThenElseExpr,
-    ImplFile, LetDecl, LetOrUseExpr, LongIdentExpr, LongIdentPat, MatchExpr, MemberDefn,
+    ImplFile, LetDecl, LetOrUseExpr, LongIdent, LongIdentExpr, LongIdentPat, MatchExpr, MemberDefn,
     ModuleOrNamespace, ModuleOrNamespaceKind, NamedPat, NestedModuleDecl, ParenPat, Pat,
     RecordRepr, SequentialExpr, SyntaxKind, SyntaxNode, SyntaxToken, TupleSegment, Type, TypeDefn,
     TypeDefnRepr, UnionRepr, VarType,
@@ -508,6 +510,7 @@ mod literals;
 mod members;
 mod patterns;
 mod project_types;
+mod receivers;
 mod scope;
 mod solve;
 mod solver;
@@ -523,7 +526,7 @@ mod values;
 use annotations::*;
 use binder_env::BinderEnv;
 use decide::*;
-use emissions::{EmissionMark, Emissions};
+use emissions::{EmissionMark, Emissions, Receiver};
 use extension_scope::*;
 use facts::*;
 use finish::*;
@@ -531,6 +534,7 @@ use literals::*;
 use members::*;
 use patterns::*;
 use project_types::*;
+use receivers::*;
 use scope::*;
 use solve::*;
 use solver::*;
@@ -573,9 +577,9 @@ pub struct InferredFile {
     /// Each counted binding's incompleteness reasons, in walk order; empty for
     /// a complete binding. See [`Self::incompleteness`].
     incompleteness: Vec<Vec<Incomplete>>,
-    /// Each `(expr).Member` access's **receiver** type, keyed by the whole
-    /// `DOT_GET_EXPR`'s range — recorded whether or not the access resolves.
-    /// See [`Self::dot_get_receiver_type`].
+    /// Each member access's **receiver** type at the access, keyed by the
+    /// range of the dot after the receiver — recorded whether or not the
+    /// access resolves. See [`Self::receiver_type_at`].
     receiver_types: HashMap<TextRange, Ty>,
     /// What this file publishes for each binder a module-level `let` binds:
     /// its certain type, or why it has none — read for the binders the file
@@ -747,18 +751,30 @@ impl InferredFile {
         &self.member_resolutions
     }
 
-    /// The synthesized type of a `(expr).Member` access's receiver expression,
-    /// keyed by the whole `DOT_GET_EXPR`'s range, whether or not the access
-    /// resolves.
+    /// The type of a member access's receiver **at the access**, keyed by the
+    /// range of the dot after the receiver, whether or not the access
+    /// resolves: `s` before the dot of `s.Length`, `s.Length` before the
+    /// second dot of `s.Length.CompareTo`, `"hi"` in `"hi".Le`, and `s` in a
+    /// recovered `s.` whose member is not written yet (inferred only where
+    /// that is the file's first recovery, and then nothing else of its
+    /// declaration is published).
     ///
-    /// This is dot-completion's question — what is the receiver, while the
-    /// member name is still being typed (`"hi".Le`) — and it is deliberately not
-    /// an expression node: FCS keeps no node inside the receiver of an access
-    /// it rejects, so [`Self::type_at`] withholds the receiver until the access
-    /// resolves. A receiver is never coerced, so its synthesized type is its type
-    /// either way.
-    pub fn dot_get_receiver_type(&self, dot_get: TextRange) -> Option<&Ty> {
-        self.receiver_types.get(&dot_get)
+    /// This is dot-completion's question — what does FCS know of the receiver
+    /// where it looks the member up — and it is answered from what was known
+    /// there, never from what a later use makes of the receiver: FCS reports
+    /// FS0072 on a receiver it does not know at the access (`(x.Le, g x)`),
+    /// so `None` there, though `g x` fixes `x` afterwards. It is deliberately
+    /// not an expression node: FCS keeps no node inside the receiver of an
+    /// access it rejects, so [`Self::type_at`] withholds the receiver until
+    /// the access resolves. A receiver is never coerced, so its synthesized
+    /// type is its type either way.
+    pub fn receiver_type_at(&self, dot: TextRange) -> Option<&Ty> {
+        self.receiver_types.get(&dot)
+    }
+
+    /// Every `(dot range, receiver type)` pair of [`Self::receiver_type_at`].
+    pub fn receiver_types(&self) -> impl Iterator<Item = (TextRange, &Ty)> + '_ {
+        self.receiver_types.iter().map(|(&dot, ty)| (dot, ty))
     }
 
     /// Why each counted binding was incomplete, one entry per binding in walk
@@ -1101,8 +1117,8 @@ fn infer_file_in(
     }
     let facts = FileFacts::build(file, resolved, env, &tys, preceding, anonymous_module);
     let mut cx = Gen::new(&facts, &tys);
-    cx.walk(file);
-    let walked = cx.finish();
+    let damaged = cx.walk(file);
+    let walked = cx.finish(damaged);
     facts.into_inferred(walked)
 }
 

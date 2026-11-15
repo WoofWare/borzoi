@@ -18,6 +18,19 @@ pub(super) struct Walked {
     pub(super) refused_equalities: usize,
 }
 
+/// The declaration holding the file's first recovery, when that is a member
+/// access whose member is not written (`s.`,
+/// [`SyntaxRecovery::first_is_trailing_dot`](crate::SyntaxRecovery::first_is_trailing_dot)):
+/// walked by [`Gen::finish`] once everything else is read off, for the
+/// receiver types up to that dot alone.
+pub(super) struct Damaged {
+    pub(super) decl: LetDecl,
+    /// The recovered dot. Everything before it parsed as it would with a
+    /// member after it; a receiver after it is past what the parse can be
+    /// shown to share with FCS's.
+    pub(super) dot: TextRange,
+}
+
 impl<'a> Gen<'a> {
     /// Read each recorded expression's and binder's type back from its (now
     /// solved) variable, emitting only fully-[`ground`](TyTable::is_ground) types — an
@@ -28,35 +41,41 @@ impl<'a> Gen<'a> {
     /// here ([`Resolution::sealed_under_incomplete_projection`]); an
     /// assembly-derived *type* is sealed at its door instead, so by here it has
     /// simply never been unified in — see the seal's comment below.
-    pub(super) fn finish(self) -> Walked {
-        let Gen {
-            facts,
-            mut solver,
-            binders,
-            out,
-        } = self;
+    ///
+    /// A `damaged` declaration is walked only after everything the file
+    /// publishes is read off, into emissions of its own, and only its receiver
+    /// types up to its recovered dot are kept: nothing it binds, emits or
+    /// counts can reach what was read before it.
+    pub(super) fn finish(mut self, damaged: Option<Damaged>) -> Walked {
         // Every constraint belongs to a binding, and each binding's solve
         // ([`Self::solve`]) leaves none behind: nothing is left for a solve
         // outside one.
         debug_assert!(
-            solver.constraints.is_empty(),
+            self.solver.constraints.is_empty(),
             "a constraint outlived its binding's solve"
         );
-        let emitted = out.into_emitted();
+        let emitted = std::mem::replace(&mut self.out, Emissions::new()).into_emitted();
         // Past the budget the table's answers are not answers, so nothing is
         // read from it. The check repeats below, after the last read: the
         // read-off resolves every recorded variable, and one of those can be
         // the first walk to pass the budget.
-        if let Some(why) = solver.table.over_budget() {
+        if let Some(why) = self.solver.table.over_budget() {
             return Self::finish_over_budget(
-                facts,
-                &binders,
-                &solver,
+                self.facts,
+                &self.binders,
+                &self.solver,
                 emitted.incompleteness,
                 emitted.deepest_expr_depth,
                 why,
             );
         }
+        let Gen {
+            facts,
+            solver,
+            binders,
+            ..
+        } = &mut self;
+        let facts = *facts;
         let tys = solver.tys;
         let mut types = HashMap::default();
         for (range, var) in emitted.exprs {
@@ -151,33 +170,14 @@ impl<'a> Gen<'a> {
                 *res = res.sealed_under_incomplete_projection();
             }
         }
-        let receiver_types: HashMap<TextRange, Ty> = emitted
-            .dot_get_receivers
-            .into_iter()
-            .filter_map(|(range, var)| {
-                let ty = solver.table.resolve(tys.var(var));
-                tys.is_ground(ty).then_some((range, ty))
-            })
-            .collect();
-        // What the file publishes is the env's: each type is copied out of
-        // the session's table, which ends with the inference.
-        let mut memo = HashMap::default();
-        let types: HashMap<TextRange, Ty> = types
-            .into_iter()
-            .map(|(range, ty)| (range, facts.publish(tys, ty, &mut memo)))
-            .collect();
-        let def_types: HashMap<DefId, Ty> = def_types
-            .into_iter()
-            .map(|(def, ty)| (def, facts.publish(tys, ty, &mut memo)))
-            .collect();
-        let receiver_types: HashMap<TextRange, Ty> = receiver_types
-            .into_iter()
-            .map(|(range, ty)| (range, facts.publish(tys, ty, &mut memo)))
-            .collect();
+        let mut receiver_types = HashMap::default();
+        for receiver in emitted.receivers {
+            record_receiver(solver, &mut receiver_types, receiver);
+        }
         // What each module-level binder publishes to later files. A rejected
         // use or an `inline` binding declines whatever its type; otherwise the
         // binder's published type is exactly its hover type above.
-        let module_values = binders
+        let module_values: Vec<(DefId, ModuleValue)> = binders
             .module_binders()
             .map(|(def, binder)| {
                 let verdict = if facts.use_may_be_rejected(def) || binder.header_rejects {
@@ -197,13 +197,45 @@ impl<'a> Gen<'a> {
         if let Some(why) = solver.table.over_budget() {
             return Self::finish_over_budget(
                 facts,
-                &binders,
-                &solver,
+                binders,
+                solver,
                 emitted.incompleteness,
                 emitted.deepest_expr_depth,
                 why,
             );
         }
+        // Everything the file publishes is read; the damaged declaration's walk
+        // can add receiver types and nothing else.
+        if let Some(damaged) = damaged {
+            self.damaged_receivers(&damaged, &mut receiver_types);
+        }
+        let Gen { facts, solver, .. } = self;
+        let tys = solver.tys;
+        // What the file publishes is the env's: each type is copied out of
+        // the session's table, which ends with the inference.
+        let mut memo = HashMap::default();
+        let types: HashMap<TextRange, Ty> = types
+            .into_iter()
+            .map(|(range, ty)| (range, facts.publish(tys, ty, &mut memo)))
+            .collect();
+        let def_types: HashMap<DefId, Ty> = def_types
+            .into_iter()
+            .map(|(def, ty)| (def, facts.publish(tys, ty, &mut memo)))
+            .collect();
+        let receiver_types: HashMap<TextRange, Ty> = receiver_types
+            .into_iter()
+            .map(|(range, ty)| (range, facts.publish(tys, ty, &mut memo)))
+            .collect();
+        let module_values = module_values
+            .into_iter()
+            .map(|(def, verdict)| {
+                let verdict = match verdict {
+                    ModuleValue::Typed(ty) => ModuleValue::Typed(facts.publish(tys, ty, &mut memo)),
+                    declined => declined,
+                };
+                (def, verdict)
+            })
+            .collect();
         Walked {
             types,
             def_types,
@@ -215,6 +247,27 @@ impl<'a> Gen<'a> {
             type_budget_exceeded: None,
             type_walks: solver.table.walks(),
             refused_equalities: solver.refused_equalities,
+        }
+    }
+
+    /// Walk `damaged` for its receiver types up to its recovered dot, adding
+    /// them to `receiver_types`. The walk writes to emissions of its own, of
+    /// which only those receivers are read. A walk that passes the type
+    /// budget adds none.
+    fn damaged_receivers(
+        &mut self,
+        damaged: &Damaged,
+        receiver_types: &mut HashMap<TextRange, Ty>,
+    ) {
+        self.type_let_decl(&damaged.decl);
+        let emitted = std::mem::replace(&mut self.out, Emissions::new()).into_emitted();
+        if self.solver.table.over_budget().is_some() {
+            return;
+        }
+        for receiver in emitted.receivers {
+            if receiver.dot.start() <= damaged.dot.start() {
+                record_receiver(&mut self.solver, receiver_types, receiver);
+            }
         }
     }
 
@@ -257,4 +310,24 @@ impl<'a> Gen<'a> {
             refused_equalities: solver.refused_equalities,
         }
     }
+}
+
+/// Add `receiver` to `receiver_types`. Its type was ground at the access, so
+/// the final table has it too; the assertion is the invariant that makes a
+/// type read at the access the one FCS has there.
+fn record_receiver(
+    solver: &mut Solver<'_>,
+    receiver_types: &mut HashMap<TextRange, Ty>,
+    receiver: Receiver,
+) {
+    debug_assert_eq!(
+        solver.table.resolve(solver.tys.var(receiver.var)),
+        receiver.ty,
+        "a receiver's type at its access is its final one"
+    );
+    let previous = receiver_types.insert(receiver.dot, receiver.ty);
+    debug_assert!(
+        previous.is_none_or(|p| p == receiver.ty),
+        "one dot, one receiver type"
+    );
 }

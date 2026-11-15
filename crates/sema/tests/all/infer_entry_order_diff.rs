@@ -107,7 +107,7 @@
 use std::collections::BTreeMap;
 
 use borzoi_cst::parser::parse;
-use borzoi_cst::syntax::{AstNode, Expr, ImplFile, Pat, SyntaxNode};
+use borzoi_cst::syntax::{AstNode, Expr, ImplFile, Pat, SyntaxKind, SyntaxNode, TextRange};
 use borzoi_sema::{PrecedingTypes, ProjectItems, SyntaxRecovery, infer_file, resolve_file};
 
 use crate::common::{GradedDumps, env_usize_or, full_bcl_env, temp_fs_file, try_invoke_fcs_dump};
@@ -1703,6 +1703,7 @@ fn every_arm_in_every_context_is_certain_implies_exact() {
     let mut unsound = Vec::new();
     let (mut certain, mut files) = (0, 0);
     let mut uncheckable: Vec<String> = Vec::new();
+    let mut receivers = ReceiverClaim::default();
     let pending = |graded: &BTreeMap<Cell, usize>| -> Vec<Cell> {
         alphabet()
             .into_iter()
@@ -1744,24 +1745,29 @@ fn every_arm_in_every_context_is_certain_implies_exact() {
             let inferred = infer_file(&file, &resolved, env, &PrecedingTypes::default());
             let path = temp_fs_file("infer_alphabet", &src);
             let jsons = try_invoke_fcs_dump("types", &path)
-                .and_then(|t| try_invoke_fcs_dump("binder-types", &path).map(|b| (t, b)));
+                .and_then(|t| try_invoke_fcs_dump("binder-types", &path).map(|b| (t, b)))
+                .and_then(|(t, b)| {
+                    try_invoke_fcs_dump("check-diagnostics", &path).map(|d| (t, b, d))
+                });
             let _ = std::fs::remove_file(&path);
             let dumps = match jsons {
-                Ok((types_json, binders_json)) => {
+                Ok((types_json, binders_json, diagnostics_json)) => {
                     GradedDumps::read(&types_json, &binders_json, &src, Some(&file))
+                        .map(|dumps| (dumps, diagnostics_json))
                         .ok_or_else(|| "a declaration FCS's dump does not place".to_string())
                 }
                 Err(e) => Err(format!("{e:?}")),
             };
             // A file FCS cannot check grades none of its cells, which are drawn
             // again.
-            let dumps = match dumps {
+            let (dumps, diagnostics_json) = match dumps {
                 Ok(dumps) => dumps,
                 Err(why) => {
                     uncheckable.push(why);
                     continue;
                 }
             };
+            receivers.grade(&src, file.syntax(), &inferred, &diagnostics_json);
             let header_lines = HEADER.matches('\n').count() as u32;
             assert!(
                 dumps.errors.iter().all(|e| e.line > header_lines),
@@ -1845,6 +1851,106 @@ fn every_arm_in_every_context_is_certain_implies_exact() {
         "FCS grades cells `FCS_UNGRADED` says it does not; remove them: {now_graded:?}"
     );
     assert!(certain > 0, "nothing committed, so nothing graded");
+    receivers.assert_holds();
+}
+
+/// The FCS-graded claim on the receiver types inference records at each
+/// access ([`borzoi_sema::InferredFile::receiver_type_at`]): FCS reports no
+/// FS0072 (a lookup on an object of indeterminate type) at any access where
+/// one is recorded. Completion offers the members of a recorded receiver, so
+/// one FCS does not know at the access would offer members FCS rejects.
+///
+/// FCS's FS0072 spans the access from its receiver to the end of its member
+/// path, whichever dot of the path the failing lookup is at. Inference
+/// records a receiver at a dot only if it recorded one at every dot before it
+/// in the path (it resolves each member on the receiver before it), so a
+/// receiver recorded at the span's **last** dot means one recorded at the
+/// failing lookup: that is what the claim checks, with no false alarm when
+/// the failing lookup is an earlier dot whose receiver is not recorded.
+#[derive(Debug, Default)]
+struct ReceiverClaim {
+    /// How many receiver types the graded files record.
+    recorded: usize,
+    /// How many FS0072s the graded files hold, and how many span a dot.
+    fs0072: usize,
+    fs0072_with_a_dot: usize,
+    violations: Vec<String>,
+}
+
+impl ReceiverClaim {
+    fn grade(
+        &mut self,
+        src: &str,
+        root: &SyntaxNode,
+        inferred: &borzoi_sema::InferredFile,
+        diagnostics_json: &str,
+    ) {
+        self.recorded += inferred.receiver_types().count();
+        // FCS's lines are 1-based and its columns UTF-16 code units, which
+        // are bytes in the generated (ASCII) source.
+        assert!(src.is_ascii(), "the generated source is ASCII");
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(src.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let offset = |line: &serde_json::Value, col: &serde_json::Value| -> usize {
+            let line = line.as_u64().expect("a line") as usize;
+            line_starts[line - 1] + col.as_u64().expect("a column") as usize
+        };
+        let dots: Vec<TextRange> = root
+            .descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|t| t.kind() == SyntaxKind::DOT_TOK)
+            .map(|t| t.text_range())
+            .collect();
+        let reply: serde_json::Value =
+            serde_json::from_str(diagnostics_json).expect("check-diagnostics JSON");
+        let diagnostics = reply["Diagnostics"]
+            .as_array()
+            .expect("check-diagnostics has a Diagnostics array");
+        for d in diagnostics.iter().filter(|d| d["Code"] == 72) {
+            self.fs0072 += 1;
+            let (start, end) = (
+                offset(&d["StartLine"], &d["StartCol"]),
+                offset(&d["EndLine"], &d["EndCol"]),
+            );
+            let Some(&last) = dots
+                .iter()
+                .rev()
+                .find(|r| usize::from(r.start()) >= start && usize::from(r.end()) <= end)
+            else {
+                continue;
+            };
+            self.fs0072_with_a_dot += 1;
+            if let Some(ty) = inferred.receiver_type_at(last) {
+                let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
+                let line_end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+                self.violations.push(format!(
+                    "FS0072 at `{}`, where the receiver before its last dot is recorded as {}: {}",
+                    &src[start..end],
+                    ty.render(full_bcl_env()),
+                    &src[line_start..line_end]
+                ));
+            }
+        }
+    }
+
+    fn assert_holds(&self) {
+        eprintln!(
+            "receiver claim: {} receivers recorded, {} FS0072 ({} spanning a dot)",
+            self.recorded, self.fs0072, self.fs0072_with_a_dot
+        );
+        assert!(
+            self.violations.is_empty(),
+            "{} receivers recorded at an access FCS reports FS0072 at:\n{}",
+            self.violations.len(),
+            self.violations.join("\n")
+        );
+        assert!(self.recorded > 0, "no receiver recorded, so none graded");
+        assert!(
+            self.fs0072_with_a_dot > 0,
+            "no FS0072 at an access, so the claim was never tested"
+        );
+    }
 }
 
 /// [`Arm::ALL`] and [`Context::ALL`] hold each value once, at its index.

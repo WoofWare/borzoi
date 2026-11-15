@@ -91,8 +91,8 @@ impl<'a> Gen<'a> {
     /// [`Constraint::HasMember`] (`kind = Data`) per trailing segment (Stage 3.3a).
     /// The `segments` are the member idents after the receiver (`["Length"]` for
     /// `s.Length`; `["A", "B"]` for a multi-dot `s.A.B`). Returns the variable
-    /// standing for the **final** member's type — the type of the whole access.
-    /// `segments` is not empty: a bare receiver is not a member access.
+    /// standing for each member's type, in order: the last is the type of the
+    /// whole access, and each is the receiver of the segment after it.
     ///
     /// Each segment chains: segment *i*'s constraint watches the previous result
     /// (the receiver for the first), so a multi-dot chain wakes segment by segment
@@ -104,15 +104,16 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         recv: TyVid,
         segments: &[SyntaxToken],
-    ) -> TyVid {
-        debug_assert!(!segments.is_empty(), "a member access names a member");
+    ) -> Vec<TyVid> {
         let mut cur = recv;
+        let mut results = Vec::with_capacity(segments.len());
         for seg in segments {
             let result = self.solver.table.fresh();
             self.has_member(scope, cur, seg, result, MemberAccessKind::Data);
+            results.push(result);
             cur = result;
         }
-        cur
+        results
     }
 
     /// Type a **single-candidate instance method call** `recv.Method(args)` (Stage
@@ -172,7 +173,7 @@ impl<'a> Gen<'a> {
                 (recv, method_tok, true)
             } else {
                 let recorded = scope.reasons_recorded();
-                let Some((recv, method_tok)) = self.method_callee(scope, callee) else {
+                let Some((receivers, method_tok, path)) = self.method_callee(scope, callee) else {
                     self.out.discard_since(emit_mark);
                     return Inferred::untyped(self.decline_expected_consequence(
                         scope,
@@ -183,6 +184,11 @@ impl<'a> Gen<'a> {
                 // FCS resolves a data-member prefix of the callee
                 // (`s.Field.M(…)`) at its dot, before the arguments.
                 self.settle_access(scope);
+                let recv = *receivers.last().expect("a method call has a receiver");
+                self.record_receivers(AccessPath {
+                    path: &path,
+                    receivers,
+                });
                 // FCS looks the method up on the receiver at the dot, before its
                 // arguments: on a receiver it does not know there it reports
                 // FS0072, so nothing after is decided against it.
@@ -410,11 +416,13 @@ impl<'a> Gen<'a> {
     }
 
     /// Resolve a **method-call callee** (a member access in function position) into
-    /// its `(receiver-var-for-the-method, method-name-token)` (Stage 3.3d), or
-    /// `None` when the callee is not a modelled member access. Emits the receiver's
-    /// own node and chains any **data-member prefix** before the final method
-    /// segment (`s.Field.M(…)` = a `Data` `HasMember` on `Field`, then a `Method`
-    /// one on `M`), reusing [`Self::gen_member_access`]:
+    /// the variables of its receivers, the method-name token and the path they are
+    /// in (Stage 3.3d), or `None` when the callee is not a modelled member access.
+    /// The receivers are one per dot of the path ([`AccessPath`]): the head, then
+    /// each member of a **data-member prefix** before the final method segment
+    /// (`s.Field.M(…)` = a `Data` `HasMember` on `Field`, then a `Method` one on
+    /// `M`), so the last is the method's own receiver. Emits the receiver's own
+    /// node and chains the prefix with [`Self::gen_member_access`]:
     ///
     /// - **`LONG_IDENT_EXPR`** (`s.M`, `s.Field.M`): the head resolves to an in-file
     ///   value binder ([`Self::receiver_var`], emitting its value node); the trailing
@@ -429,12 +437,17 @@ impl<'a> Gen<'a> {
     /// - **`PAREN_EXPR`**: transparent — peel and recurse.
     ///
     /// An active-pattern name segment (`Foo.(|Bar|_|)`) is not a plain member token,
-    /// so a path carrying one declines.
-    fn method_callee(&mut self, scope: &mut Scope, callee: &Expr) -> Option<(TyVid, SyntaxToken)> {
+    /// so a path carrying one declines, as does a path whose last member is not
+    /// written (a recovered trailing dot).
+    fn method_callee(
+        &mut self,
+        scope: &mut Scope,
+        callee: &Expr,
+    ) -> Option<(Vec<TyVid>, SyntaxToken, LongIdent)> {
         match callee {
             Expr::LongIdent(li) => {
                 let long_ident = li.long_ident()?;
-                if long_ident.active_pat_names().next().is_some() {
+                if long_ident.active_pat_names().next().is_some() || has_trailing_dot(&long_ident) {
                     return None;
                 }
                 let idents: Vec<SyntaxToken> = long_ident.idents().collect();
@@ -444,13 +457,14 @@ impl<'a> Gen<'a> {
                 let head_var = self.receiver_var(scope, head)?;
                 // Emit the receiver's own value node (coercion-free — synth).
                 self.emit(head.text_range(), head_var, Expected::Synth);
-                let recv = self.chain_prefix(scope, head_var, prefix)?;
-                Some((recv, method.clone()))
+                let mut receivers = vec![head_var];
+                receivers.extend(self.gen_member_access(scope, head_var, prefix));
+                Some((receivers, method.clone(), long_ident))
             }
             Expr::DotGet(dg) => {
                 let recv_expr = dg.expr()?;
                 let long_ident = dg.long_ident()?;
-                if long_ident.active_pat_names().next().is_some() {
+                if long_ident.active_pat_names().next().is_some() || has_trailing_dot(&long_ident) {
                     return None;
                 }
                 let segments: Vec<SyntaxToken> = long_ident.idents().collect();
@@ -459,29 +473,12 @@ impl<'a> Gen<'a> {
                 // access never coerces its receiver — so synthesize it (emitting its
                 // own node).
                 let head_var = self.infer_expr(scope, &recv_expr, Expected::Synth).var()?;
-                let recv = self.chain_prefix(scope, head_var, prefix)?;
-                Some((recv, method.clone()))
+                let mut receivers = vec![head_var];
+                receivers.extend(self.gen_member_access(scope, head_var, prefix));
+                Some((receivers, method.clone(), long_ident))
             }
             Expr::Paren(p) => self.method_callee(scope, &p.inner()?),
             _ => None,
-        }
-    }
-
-    /// Chain a **data-member prefix** onto a receiver variable, returning the
-    /// receiver for the final method segment (Stage 3.3d). An empty prefix (the
-    /// common `s.M(…)` shape) passes the receiver through unchanged; a non-empty one
-    /// (`s.Field.M(…)`) generates the data-member chain via
-    /// [`Self::gen_member_access`].
-    fn chain_prefix(
-        &mut self,
-        scope: &mut Scope,
-        recv: TyVid,
-        prefix: &[SyntaxToken],
-    ) -> Option<TyVid> {
-        if prefix.is_empty() {
-            Some(recv)
-        } else {
-            Some(self.gen_member_access(scope, recv, prefix))
         }
     }
 
@@ -530,9 +527,12 @@ impl<'a> Gen<'a> {
             return Inferred::untyped(self.decline_expected(scope, Incomplete::MemberAccessShape));
         }
         let idents: Vec<SyntaxToken> = long_ident.idents().collect();
-        // Need a head *and* at least one member segment.
+        // A path whose last member is not written (`s.`, `s.A.`) is a recovered
+        // access, walked only in a damaged declaration, for its receivers.
+        let trailing = has_trailing_dot(&long_ident);
+        // Need a head *and* at least one member segment, or a dot after it.
         let (head, segments) = match idents.split_first() {
-            Some((head, segments)) if !segments.is_empty() => (head, segments),
+            Some((head, segments)) if !segments.is_empty() || trailing => (head, segments),
             _ => {
                 return Inferred::untyped(
                     self.decline_expected(scope, Incomplete::MemberAccessShape),
@@ -550,13 +550,35 @@ impl<'a> Gen<'a> {
                 Incomplete::QualifiedPath,
             ));
         };
+        if trailing {
+            // FCS looks up each written member in turn, and nothing after the
+            // last dot: what precedes each dot is still a receiver it knew or
+            // did not.
+            let mut receivers = vec![recv];
+            receivers.extend(self.gen_member_access(scope, recv, segments));
+            self.settle_access(scope);
+            self.record_receivers(AccessPath {
+                path: &long_ident,
+                receivers,
+            });
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
+        }
         // Emit the receiver's own value node (coercion-free — synth), guarded on
         // the access resolving: FCS keeps no receiver node for a rejected one.
         self.out.open_receiver_guards(segments);
         self.emit(head.text_range(), recv, Expected::Synth);
         self.out.close_guards(segments.len());
-        let result = self.gen_member_access(scope, recv, segments);
+        let results = self.gen_member_access(scope, recv, segments);
         self.settle_access(scope);
+        let (&result, before_last) = results
+            .split_last()
+            .expect("a member access names a member");
+        let mut receivers = vec![recv];
+        receivers.extend(before_last);
+        self.record_receivers(AccessPath {
+            path: &long_ident,
+            receivers,
+        });
         self.emit(self.facts.node_span(li.syntax()), result, expected);
         // FCS relates a member access to what its context expects once the
         // access is resolved (`Propagate` stops at a dot).
@@ -585,7 +607,10 @@ impl<'a> Gen<'a> {
             return Inferred::untyped(self.decline_expected(scope, Incomplete::MemberAccessShape));
         }
         let segments: Vec<SyntaxToken> = long_ident.idents().collect();
-        if segments.is_empty() {
+        // A path whose last member is not written (`(e).`) is a recovered
+        // access, walked only in a damaged declaration, for its receivers.
+        let trailing = has_trailing_dot(&long_ident);
+        if segments.is_empty() && !trailing {
             return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         }
         // The receiver is a coercion-free (synth) sub-position — a member access
@@ -599,9 +624,21 @@ impl<'a> Gen<'a> {
             // The receiver's walk recorded why it is not typed.
             return Inferred::untyped(self.decline_expected_propagated(scope));
         };
-        self.out.dot_get_receiver(dg.syntax().text_range(), recv);
-        let result = self.gen_member_access(scope, recv, &segments);
+        let results = self.gen_member_access(scope, recv, &segments);
         self.settle_access(scope);
+        let mut receivers = vec![recv];
+        receivers.extend(&results);
+        if !trailing {
+            // The last member's type is the access's, not a receiver.
+            receivers.pop();
+        }
+        self.record_receivers(AccessPath {
+            path: &long_ident,
+            receivers,
+        });
+        let Some(&result) = results.last().filter(|_| !trailing) else {
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
+        };
         self.emit(self.facts.node_span(dg.syntax()), result, expected);
         let (_, d) = self.relate(scope, result, expected);
         Inferred::typed(result, d)

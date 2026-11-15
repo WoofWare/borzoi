@@ -5,14 +5,17 @@
 //! members** — fields, non-indexer readable properties, *and* methods. A
 //! completion list is a set of genuinely-callable candidates, not a type
 //! assertion, so methods belong even though inference (Stage 3.3a) only *types*
-//! data members. The receiver type comes from inference (the receiver's
-//! inferred/binder type); its [`borzoi_sema::TyKind::Named`] head is resolved
-//! through the project's [`AssemblyEnv`] to the entity's member list.
+//! data members. The receiver type comes from inference: the receiver's type
+//! *at the access*, where FCS looks the member up
+//! ([`InferredFile::receiver_type_at`]); its [`borzoi_sema::TyKind::Named`] head
+//! is resolved through the project's [`AssemblyEnv`] to the entity's member list.
 //!
 //! **Soundness (D5: silence over noise).** A completion list requires a
-//! **ground** receiver type. An open / deferred receiver (an unannotated
-//! parameter, a receiver inference could not type) offers **nothing** — never a
-//! guess. Only *public instance* members are offered; static members (`Empty`)
+//! **ground** receiver type known at the access. An open / deferred receiver (an
+//! unannotated parameter nothing fixed before the dot, a receiver inference
+//! could not type) offers **nothing** — never a guess, and never the members of
+//! the type a later use gives it (`(x.Le, g x)` is FS0072 in FCS, #662's D4).
+//! Only *public instance* members are offered; static members (`Empty`)
 //! need a type-qualified path, not a value receiver, so they are excluded, and
 //! a `private get` / write-only property is excluded (unreadable). No base-class
 //! walk yet — exact-entity members only (as Stage 3.3a).
@@ -22,8 +25,10 @@
 //! cleanly and are fully covered: `s.Le` is a `LONG_IDENT_EXPR`
 //! (`[IDENT s, DOT, IDENT Le]`) and `"hi".Le` a `DOT_GET_EXPR` (receiver
 //! expression + member path). The *trailing-dot* `s.` also recovers as a
-//! `LONG_IDENT_EXPR` (`[IDENT s, DOT]`) whose receiver token is still present, so
-//! it is covered via the receiver binder's type. The literal trailing-dot `"hi".`
+//! `LONG_IDENT_EXPR` (`[IDENT s, DOT]`) whose receiver token is still present;
+//! inference walks the declaration holding it for the receiver types up to it
+//! when it is the file's first recovery. A later dot (`s.Length.`) has its own
+//! receiver (`s.Length`), recorded as the head's is. The literal trailing-dot `"hi".`
 //! is **scoped out**: under error recovery its `DOT_GET_EXPR` collapses — the
 //! receiver becomes a bare sibling `CONST_EXPR` and the `DOT` an orphan — so no
 //! member-access node survives to anchor the receiver (a parser-side follow-up,
@@ -32,7 +37,8 @@
 use crate::uri::UriExt as _;
 use borzoi_cst::syntax::TextSize;
 use borzoi_cst::syntax::{
-    AstNode, DotGetExpr, Expr, ImplFile, LongIdentExpr, SyntaxKind, SyntaxNode, SyntaxToken,
+    AstNode, DotGetExpr, Expr, ImplFile, LongIdentExpr, ModuleOrNamespace, NestedModuleDecl,
+    SyntaxKind, SyntaxNode, SyntaxToken,
 };
 use borzoi_sema::{
     AssemblyEnv, InferredFile, InferredProject, Resolution, ResolvedFile, Ty, TyKind,
@@ -131,7 +137,7 @@ fn member_candidates(
 
     let byte = position_to_offset(text, pos);
     // Find the receiver expression whose member is being completed at `byte`.
-    let Some(receiver) = receiver_at(impl_file, byte) else {
+    let Some(access) = receiver_at(impl_file, byte) else {
         return Ok(None);
     };
 
@@ -150,16 +156,16 @@ fn member_candidates(
 
     // A ground `TyKind::Named` receiver resolves to an entity; anything else (open,
     // an array / tuple / function head, a generic named type) offers nothing.
-    Ok(receiver_type(&receiver, file, inferred, &inferred_project)
+    Ok(receiver_type(&access, file, inferred, &inferred_project)
         .and_then(|recv_ty| members_of(&env, &recv_ty))
         .map(|names| names.into_iter().map(str::to_string).collect()))
 }
 
-/// The receiver expression of a member access at `byte` — the `recv` in
-/// `recv.<member-being-typed>`. Handles the three covered parse shapes; `None`
-/// for every other position (not a member access, an unsupported receiver, or the
-/// scoped-out literal trailing-dot). See the module docs for the shape survey.
-fn receiver_at(file: &ImplFile, byte: usize) -> Option<Receiver> {
+/// The member access being completed at `byte` — the dot after its receiver,
+/// in `recv.<member-being-typed>` — or `None` for every other position (not
+/// a member access, or the scoped-out literal trailing-dot). See the module
+/// docs for the shape survey.
+fn receiver_at(file: &ImplFile, byte: usize) -> Option<Access> {
     let byte = TextSize::try_from(byte).ok()?;
     let root = file.syntax();
     // The token just left of the cursor anchors the position: completion fires
@@ -186,7 +192,7 @@ fn receiver_at(file: &ImplFile, byte: usize) -> Option<Receiver> {
     match left.kind() {
         // Trailing dot (`s.`) or partial member (`s.Le`): the anchoring dot is
         // `left` itself, or the dot immediately preceding the member ident.
-        SyntaxKind::DOT_TOK => receiver_before_dot(&left),
+        SyntaxKind::DOT_TOK => access_at_dot(left),
         SyntaxKind::IDENT_TOK => {
             // The member ident being typed — its immediately-preceding non-trivia
             // sibling in the path must be a dot, else this is a bare name (not a
@@ -195,118 +201,141 @@ fn receiver_at(file: &ImplFile, byte: usize) -> Option<Receiver> {
             if dot.kind() != SyntaxKind::DOT_TOK {
                 return None;
             }
-            receiver_before_dot(&dot)
+            access_at_dot(dot)
         }
         _ => None,
     }
 }
 
-/// A member-access receiver, in one of the two shapes that survive parsing
-/// (after transparent parentheses are peeled — see [`receiver_of_expr`]).
-enum Receiver {
-    /// A value-binder receiver: the head ident of a `LONG_IDENT_EXPR`
-    /// (`s` in `s.Le` / `s.`) or a paren-peeled ident receiver (`(s).Le`). Its
-    /// type is read from the binder's `def_type`.
-    IdentHead(SyntaxToken),
-    /// Any other receiver *expression* of a `DOT_GET_EXPR` (`"hi"` in `"hi".Le`),
-    /// identified by the whole `DOT_GET_EXPR`'s range: its type is inference's
-    /// receiver type for that access, which is recorded whether or not the
-    /// (partly typed) member resolves.
-    DotGet(borzoi_cst::syntax::TextRange),
+/// A member access being completed: the dot after its receiver, which is
+/// what inference keys the receiver's type at the access by
+/// ([`InferredFile::receiver_type_at`]).
+struct Access {
+    dot: SyntaxToken,
+    /// The receiver's binder token, when the receiver is a plain name: the
+    /// head of a `LONG_IDENT_EXPR` before its first dot (`s` in `s.Le`), or a
+    /// `DOT_GET_EXPR`'s receiver once transparent parentheses are peeled
+    /// (`(s).Le`). Read only where nothing is recorded at the dot
+    /// ([`receiver_type`]).
+    binder: Option<SyntaxToken>,
 }
 
-/// The receiver anchored by a member-access `dot` token. The dot always lives
-/// inside a `LONG_IDENT`; that path's parent distinguishes the two shapes:
-///
-/// - parent `LONG_IDENT_EXPR` (`s.Le` / `s.`): the receiver is the path's **head
-///   ident** (`s`), a value binder.
-/// - parent `DOT_GET_EXPR` (`"hi".Le`): the receiver is the `DOT_GET_EXPR`'s inner
-///   **expression** (`"hi"`).
-///
-/// In **both** shapes `dot` must be the path's **first** dot, so the receiver is
-/// exactly the head ident / inner expression. A completion after a *later* dot
-/// (`s.A.`, `"hi".Length.`) has a multi-segment receiver (`s.A`, `"hi".Length`)
-/// whose type this handler does not chain through, so it **declines** rather than
-/// wrongly offer the head's members — the silence-over-wrong-list rule (D5).
+/// The member access anchored by a member-access `dot` token. The dot always
+/// lives inside a `LONG_IDENT`, whose parent is the access: a
+/// `LONG_IDENT_EXPR` (`s.Le`, `s.`, `s.Length.`) or a `DOT_GET_EXPR`
+/// (`"hi".Le`, `"hi".Length.To`). Any dot of the path anchors one; the
+/// receiver before a later dot (`s.Length`) is as much the access's as the
+/// head is, and inference records each.
 ///
 /// `None` if the dot is not inside either shape (or the shape is malformed).
-fn receiver_before_dot(dot: &SyntaxToken) -> Option<Receiver> {
+fn access_at_dot(dot: SyntaxToken) -> Option<Access> {
     let long_ident = dot.parent()?;
     if long_ident.kind() != SyntaxKind::LONG_IDENT {
         return None;
     }
-    // Only the *first* dot of the path anchors a head receiver; a later dot has a
-    // multi-segment receiver we cannot type here.
     let first_dot = long_ident
         .children_with_tokens()
         .filter_map(|el| el.into_token())
         .find(|t| t.kind() == SyntaxKind::DOT_TOK)?;
-    if first_dot != *dot {
-        return None;
-    }
     let path_parent = long_ident.parent()?;
-    match path_parent.kind() {
+    let binder = match path_parent.kind() {
         SyntaxKind::LONG_IDENT_EXPR => {
             let long_ident_expr = LongIdentExpr::cast(path_parent)?;
-            let head = long_ident_expr
-                .long_ident()?
-                .syntax()
-                .children_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|t| t.kind() == SyntaxKind::IDENT_TOK)?;
-            Some(Receiver::IdentHead(head))
+            (first_dot == dot)
+                .then(|| {
+                    long_ident_expr
+                        .long_ident()?
+                        .syntax()
+                        .children_with_tokens()
+                        .filter_map(|el| el.into_token())
+                        .find(|t| t.kind() == SyntaxKind::IDENT_TOK)
+                })
+                .flatten()
         }
         SyntaxKind::DOT_GET_EXPR => {
             let dot_get = DotGetExpr::cast(path_parent)?;
-            receiver_of_expr(dot_get.expr()?, dot_get.syntax().text_range())
+            if first_dot == dot {
+                binder_of_expr(dot_get.expr()?)
+            } else {
+                None
+            }
         }
-        _ => None,
-    }
+        _ => return None,
+    };
+    Some(Access { dot, binder })
 }
 
-/// Classify a `DOT_GET_EXPR` receiver *expression*, peeling transparent
-/// **parentheses** first. A peeled **ident** receiver is a value binder (typed
-/// via `def_type`, like a `LONG_IDENT_EXPR` head, so `(s).Le` completes like
-/// `s.Le`); any other expression is the access's receiver, looked up by the
-/// `DOT_GET_EXPR`'s own range `dot_get`. `None` on a malformed shape (an empty
-/// paren recovery hole, an ident with no token).
-fn receiver_of_expr(mut expr: Expr, dot_get: borzoi_cst::syntax::TextRange) -> Option<Receiver> {
+/// The binder token of a `DOT_GET_EXPR` receiver *expression* that is a plain
+/// name once transparent **parentheses** are peeled (`(s).Le`), or `None`.
+fn binder_of_expr(mut expr: Expr) -> Option<SyntaxToken> {
     loop {
         match expr {
             Expr::Paren(p) => expr = p.inner()?,
-            Expr::Ident(ident) => return Some(Receiver::IdentHead(ident.ident()?)),
-            _ => return Some(Receiver::DotGet(dot_get)),
+            Expr::Ident(ident) => return ident.ident(),
+            _ => return None,
         }
     }
 }
 
-/// The receiver's **ground** inferred type, or `None` (D5 silence): an open /
-/// deferred receiver offers no completions.
+/// The receiver's type where the member is looked up, or `None` (D5
+/// silence): never the type a later use gives the receiver (#662's D4).
 ///
-/// - An `IdentHead` receiver resolves to an in-file binder; its type is the
-///   binder's `def_type` (a value/parameter typed by inference).
-/// - A `DotGet` receiver's type is inference's receiver type for that access.
+/// - What inference recorded at the access: the receiver's type when FCS
+///   reaches the dot ([`InferredFile::receiver_type_at`]).
+/// - Where it recorded nothing — an access inference does not walk, such as
+///   one in a member body — and the receiver is a plain name, the binder's
+///   type, but only where it was published before the access's declaration
+///   group began ([`group_start`]): an earlier file's value, or an earlier
+///   declaration's binder, whose type FCS had fixed before it began checking
+///   the access's group. A binder of the same group (a `let rec` sibling, a
+///   `module rec`'s other declarations) has a published type that is its
+///   type at the group's end, which FCS may not know at the access (FS0072).
 fn receiver_type(
-    receiver: &Receiver,
+    access: &Access,
     file: &ResolvedFile,
     inferred: &InferredFile,
     project: &InferredProject,
 ) -> Option<Ty> {
-    match receiver {
-        Receiver::IdentHead(head) => {
-            let res = file.resolution_at(head.text_range())?;
-            match (file.resolved_def_id(res), res) {
-                (Some(def), _) => inferred.def_type(def).copied(),
-                // An earlier file's top-level value: the type that file
-                // published for it.
-                (None, Resolution::Item(id)) if !file.owns_item(id) => {
-                    project.item_type(id).ok().copied()
-                }
-                (None, _) => None,
-            }
-        }
-        Receiver::DotGet(range) => inferred.dot_get_receiver_type(*range).copied(),
+    if let Some(ty) = inferred.receiver_type_at(access.dot.text_range()) {
+        return Some(*ty);
     }
+    let head = access.binder.as_ref()?;
+    let res = file.resolution_at(head.text_range())?;
+    match (file.resolved_def_id(res), res) {
+        (Some(def), _) if file.def(def).range.end() <= group_start(head) => {
+            inferred.def_type(def).copied()
+        }
+        (Some(_), _) => None,
+        // An earlier file's top-level value: the type that file published.
+        (None, Resolution::Item(id)) if !file.owns_item(id) => project.item_type(id).ok().copied(),
+        (None, _) => None,
+    }
+}
+
+/// Where the declaration group holding `token` begins: the outermost
+/// recursive module or namespace around it (`module rec`, `namespace rec`,
+/// whose declarations FCS checks as one group), else the module-level
+/// declaration holding it (a `let rec … and …` or `type … and …` is one).
+fn group_start(token: &SyntaxToken) -> TextSize {
+    let mut declaration = None;
+    let mut recursive = None;
+    for node in token.parent_ancestors() {
+        let holder = node.parent().map(|p| p.kind());
+        if declaration.is_none()
+            && matches!(
+                holder,
+                Some(SyntaxKind::MODULE_OR_NAMESPACE | SyntaxKind::NESTED_MODULE_DECL)
+            )
+        {
+            declaration = Some(node.text_range().start());
+        }
+        let is_rec = ModuleOrNamespace::cast(node.clone()).is_some_and(|m| m.is_rec())
+            || NestedModuleDecl::cast(node.clone()).is_some_and(|m| m.is_rec());
+        if is_rec {
+            recursive = Some(node.text_range().start());
+        }
+    }
+    recursive.or(declaration).unwrap_or_default()
 }
 
 /// The public instance member names of a ground `TyKind::Named` receiver, resolved
