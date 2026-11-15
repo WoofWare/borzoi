@@ -2329,6 +2329,154 @@ fn substitution_applies_to_a_metadata_child_element() {
     );
 }
 
+/// Metadata spellings MSBuild reads apart from its text (#642) read as
+/// `Unknown` on a reference: an attribute MSBuild parses as XML (holding a
+/// `<`, here an encoded CDATA section), a value holding a backslash (its Unix
+/// path fixup may rewrite it), and a body holding an element (MSBuild reads the
+/// inner XML) or a carriage return (MSBuild keeps it). An attribute holding a
+/// tab or an entity reads exactly, as MSBuild reads it.
+#[test]
+fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
+    for (metadata, value) in [("all\tx", "all\tx"), ("a&amp;b", "a&b")] {
+        let src = format!(
+            "<Project><ItemGroup><ProjectReference Include=\"../Lib/Lib.fsproj\" ExcludeAssets=\"{metadata}\" /></ItemGroup></Project>"
+        );
+        assert_eq!(
+            parse(&src).project_references[0].exclude_assets,
+            ItemMetadataValue::known(value),
+            "{src:?}"
+        );
+    }
+    for metadata in [
+        "ExcludeAssets=\"&lt;![CDATA[all]]&gt;\"",
+        "ExcludeAssets=\"\\tmp\\all\"",
+        "><ExcludeAssets>a<x/>b</ExcludeAssets></ProjectReference",
+        "><ExcludeAssets>a<?p q?>b</ExcludeAssets></ProjectReference",
+        "><ExcludeAssets>a\r\nb</ExcludeAssets></ProjectReference",
+    ] {
+        // MSBuild runs its path fixup on Unix hosts alone.
+        if cfg!(windows) && metadata.contains('\\') {
+            continue;
+        }
+        let src = format!(
+            "<Project><ItemGroup><ProjectReference Include=\"../Lib/Lib.fsproj\" {metadata} /></ItemGroup></Project>"
+        )
+        .replace("></ProjectReference />", "></ProjectReference>");
+        let p = parse(&src);
+        assert_eq!(
+            paths(&p.project_references),
+            [Path::new("/repo/proj/../Lib/Lib.fsproj")],
+            "{src:?}"
+        );
+        assert_eq!(
+            p.project_references[0].exclude_assets,
+            ItemMetadataValue::Unknown,
+            "{src:?}"
+        );
+    }
+}
+
+/// Package metadata MSBuild reads apart from the capture's trimmed reading
+/// (#642) leaves the package set uncertain, whether the reference declares it
+/// or copies it from a helper item; the plain spelling beside each stays
+/// certain.
+#[test]
+fn package_metadata_msbuild_reads_its_own_way_is_uncertain() {
+    for (metadata, certain) in [
+        ("Version=\"1.0\"", true),
+        ("Version=\" 1.0 \"", false),
+        ("Version=\"\\tmp\\1.0\"", false),
+        // A trailing tab is padding; one inside, and an entity, read exactly.
+        ("Version=\"1.0\t\"", false),
+        ("Version=\"1\t0\"", true),
+        ("Version=\"1&amp;0\"", true),
+        ("Version=\"&lt;![CDATA[1.0]]&gt;\"", false),
+        ("><Version>1.0</Version></X", true),
+        ("><Version>1<x/>0</Version></X", false),
+        ("><Version>1<?p q?>0</Version></X", false),
+        ("><Version>1\r\n0</Version></X", false),
+        // A metadatum whose absence makes no other cause, unlike `Version`.
+        ("Version=\"1.0\" PrivateAssets=\"all\"", true),
+        ("Version=\"1.0\" PrivateAssets=\" all \"", false),
+        ("Version=\"1.0\" PrivateAssets=\"\\tmp\\all\"", false),
+        ("Version=\"1.0\" PrivateAssets=\"a\tll\"", true),
+        ("Version=\"1.0\" PrivateAssets=\"a&lt;ll\"", false),
+        (
+            "Version=\"1.0\"><PrivateAssets>a<x/>ll</PrivateAssets></X",
+            false,
+        ),
+        (
+            "Version=\"1.0\"><PrivateAssets>a\r\nll</PrivateAssets></X",
+            false,
+        ),
+    ] {
+        // MSBuild runs its path fixup on Unix hosts alone.
+        if cfg!(windows) && metadata.contains('\\') {
+            continue;
+        }
+        let element = |kind: &str, include: &str| {
+            format!("<{kind} Include=\"{include}\" {metadata} />")
+                .replace("></X />", &format!("></{kind}>"))
+        };
+        for src in [
+            format!(
+                "<Project><ItemGroup>{}</ItemGroup></Project>",
+                element("PackageReference", "A")
+            ),
+            format!(
+                "<Project><ItemGroup>{}<PackageReference Include=\"@(HelperPkg)\" /></ItemGroup></Project>",
+                element("HelperPkg", "A")
+            ),
+        ] {
+            let p = parse(&src);
+            assert_eq!(p.package_references.len(), 1, "{src:?}");
+            assert_eq!(!p.package_references_uncertain, certain, "{src:?}");
+        }
+    }
+}
+
+/// A copy of a helper with several package metadata the capture cannot read
+/// records its causes in one order, evaluation after evaluation: they may not
+/// turn on a hash map's iteration order.
+#[test]
+fn a_copy_records_its_unreadable_metadata_in_one_order() {
+    let src = "<Project><ItemGroup>\
+        <HelperPkg Include=\"A\" Version=\" 1.0 \" PrivateAssets=\" all \" \
+         IncludeAssets=\" x \" ExcludeAssets=\" y \" VersionOverride=\" 2 \" />\
+        <PackageReference Include=\"@(HelperPkg)\" /></ItemGroup></Project>";
+    let first = parse(src);
+    assert!(first.package_references_uncertain);
+    for _ in 0..32 {
+        assert_eq!(parse(src), first);
+    }
+}
+
+/// A `CompileOrder` MSBuild reads its own way (#642) declines the compile
+/// order: an attribute MSBuild parses as XML, a backslash, a body holding an
+/// element.
+#[test]
+fn compile_order_msbuild_reads_its_own_way_declines() {
+    for order in [
+        "CompileOrder=\"&lt;![CDATA[CompileFirst]]&gt;\" />",
+        "CompileOrder=\"\\tmp\\CompileFirst\" />",
+        "><CompileOrder>Compile<x/>First</CompileOrder></Compile>",
+    ] {
+        // MSBuild runs its path fixup on Unix hosts alone.
+        if cfg!(windows) && order.contains('\\') {
+            continue;
+        }
+        let src = format!(
+            "<Project><ItemGroup><Compile Include=\"B.fs\" /><Compile Include=\"A.fs\" {order}</ItemGroup></Project>"
+        );
+        let p = parse(&src);
+        assert!(
+            p.items_uncertain || !p.diagnostics.is_empty(),
+            "{src:?}: {:?}",
+            file_names(&p.items)
+        );
+    }
+}
+
 #[test]
 fn metadata_with_inexact_property_declines_but_keeps_the_item() {
     // The Include itself was fine; only the metadata value failed to
@@ -5038,10 +5186,11 @@ proptest::proptest! {
     fn package_references_captured_verbatim_and_in_order(
         refs in proptest::collection::vec(
             (
-                // A package-id-ish token: letters/digits/'.'/'-', non-empty,
-                // free of the ';'/'$'/whitespace that would change item count
-                // or trigger substitution.
-                "[A-Za-z][A-Za-z0-9.-]{0,12}",
+                // A package id: letters/digits/'.'/'-', non-empty, free of the
+                // ';'/'$'/whitespace that would change item count or trigger
+                // substitution, and not ending in '.', which no NuGet id does
+                // and the capture declines.
+                "[A-Za-z]([A-Za-z0-9.-]{0,11}[A-Za-z0-9-])?",
                 proptest::option::of("[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{1,2}"),
             ),
             0usize..=6,

@@ -1883,8 +1883,11 @@ struct EvaluatedItem {
     #[cfg(any(test, feature = "test-support"))]
     escaped_identity: Option<String>,
     /// NuGet's package metadata names only, each value trimmed as the
-    /// dependency capture reads it.
-    metadata: HashMap<String, String>,
+    /// dependency capture reads it; `None` where that reading is not MSBuild's
+    /// value (padded, a value MSBuild's Unix path fixup may rewrite, a body it
+    /// reads as inner XML or with its carriage returns, an attribute it parses
+    /// as XML), which a capture copying the item must treat as uncertain.
+    metadata: HashMap<String, Option<String>>,
     /// Every metadatum, exactly as MSBuild evaluates it (untrimmed), for a
     /// reader of the item table itself ([`reads`]). `None` where that value
     /// cannot be known: a body holding more than text and comments, or a value
@@ -1911,7 +1914,10 @@ struct EvaluatedItem {
 
 impl EvaluatedItem {
     fn metadata(&self, name: &str) -> Option<String> {
-        self.metadata.get(&name.to_ascii_lowercase()).cloned()
+        self.metadata
+            .get(&name.to_ascii_lowercase())
+            .cloned()
+            .flatten()
     }
 }
 
@@ -7151,6 +7157,12 @@ fn contains_metadata_reference(s: &str) -> bool {
 ///   here — `&#32;` and `&#9;` are kept (length 1) while `&#x20;` is dropped
 ///   (length 0) — so neither the source nor the decoded test predicts it, and
 ///   we decline rather than pick a side.
+/// - **An element or processing instruction in the body.** MSBuild then reads
+///   the body's inner XML (`Utilities.GetXmlNodeInnerContents`):
+///   `<P>a<?p q?>b</P>` is `a<?p q?>b`, where the text alone is `ab`.
+/// - **A carriage return in content.** MSBuild reads a project without
+///   line-end normalisation, so `a<CR><LF>b` is four characters, where
+///   roxmltree folds the CRLF to a line feed.
 fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
     let source = node.document().input_text();
     // Element-level check: a merged text node's own range would not reveal the
@@ -7161,6 +7173,9 @@ fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
     let is_xml_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
     let mut out = String::new();
     for child in node.children() {
+        if child.is_element() || child.is_pi() {
+            return None;
+        }
         if !child.is_text() {
             continue;
         }
@@ -7170,6 +7185,9 @@ fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
                 // Insignificant literal whitespace: contributes nothing.
                 continue;
             }
+            return None;
+        }
+        if source[child.range()].contains('\r') {
             return None;
         }
         out.push_str(text);

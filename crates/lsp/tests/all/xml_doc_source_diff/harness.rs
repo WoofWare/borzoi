@@ -116,9 +116,11 @@ fn oracle() -> &'static Mutex<BatchChild> {
     ORACLE.get_or_init(|| Mutex::new(fcs_dump_batch_child("xmldoc-batch")))
 }
 
-/// Type-check `paths` (Compile order) as one project under `defines`.
+/// Type-check `paths` (Compile order) as one project under `defines`, at
+/// [`LanguageVersion::DEFAULT`], the version our side parses the fixtures at.
 pub fn fcs_check(paths: &[PathBuf], defines: &[&str]) -> Vec<OracleFile> {
-    fcs_check_with(paths, defines, &[], false, None)
+    let lang = LanguageVersion::DEFAULT.to_string();
+    fcs_check_with(paths, defines, &[], false, Some(&lang))
 }
 
 /// [`fcs_check`] with a reference set: `refs` beside the SDK's own, or — when

@@ -481,6 +481,13 @@ pub enum PackageReferenceUncertaintyCauseKind {
     /// A metadata value depended on item/metadata evaluation or substitution we
     /// do not model.
     UnevaluableMetadata { name: String, value: String },
+    /// A metadatum is spelt so that MSBuild may read it apart from the
+    /// capture, which trims it: padded, holding a backslash MSBuild's Unix path
+    /// fixup may rewrite, or written as an attribute holding a `<`, which
+    /// MSBuild parses as XML. The item tables read such a value as MSBuild
+    /// does or mark it inexact themselves, so this cause says nothing about
+    /// them.
+    UnreadableMetadata { name: String, value: String },
     /// A declaring `<PackageReference Include="...">` had no local version or
     /// version override, so the effective version is determined elsewhere.
     VersionlessPackageReference { id: String },

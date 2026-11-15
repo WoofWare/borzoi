@@ -54,8 +54,8 @@ fn fcs_compiler_service_finds_nearest_props_and_targets() {
 
     // src/Compiler has its own Directory.Build.props. The targets
     // file isn't co-located there, so the walk falls through to
-    // src/Directory.Build.targets. The repo has no
-    // Directory.Packages.props in the chain.
+    // src/Directory.Build.targets. Central package management's
+    // Directory.Packages.props is the repo root's.
     assert_eq!(
         pairs,
         vec![
@@ -66,6 +66,10 @@ fn fcs_compiler_service_finds_nearest_props_and_targets() {
             (
                 ImplicitImportKind::DirectoryBuildTargets,
                 PathBuf::from("src/Directory.Build.targets")
+            ),
+            (
+                ImplicitImportKind::DirectoryPackagesProps,
+                PathBuf::from("Directory.Packages.props")
             ),
         ],
         "diagnostics: {got:#?}",
@@ -91,6 +95,10 @@ fn fcs_fsharp_core_finds_nearest_props_and_targets() {
             (
                 ImplicitImportKind::DirectoryBuildTargets,
                 PathBuf::from("src/Directory.Build.targets")
+            ),
+            (
+                ImplicitImportKind::DirectoryPackagesProps,
+                PathBuf::from("Directory.Packages.props")
             ),
         ],
         "diagnostics: {got:#?}",
@@ -119,6 +127,10 @@ fn fcs_assembly_check_falls_through_to_repo_root() {
                 ImplicitImportKind::DirectoryBuildTargets,
                 PathBuf::from("Directory.Build.targets")
             ),
+            (
+                ImplicitImportKind::DirectoryPackagesProps,
+                PathBuf::from("Directory.Packages.props")
+            ),
         ],
         "diagnostics: {got:#?}",
     );
@@ -143,6 +155,10 @@ fn fcs_fslex_falls_through_to_repo_root() {
             (
                 ImplicitImportKind::DirectoryBuildTargets,
                 PathBuf::from("Directory.Build.targets")
+            ),
+            (
+                ImplicitImportKind::DirectoryPackagesProps,
+                PathBuf::from("Directory.Packages.props")
             ),
         ],
         "diagnostics: {got:#?}",

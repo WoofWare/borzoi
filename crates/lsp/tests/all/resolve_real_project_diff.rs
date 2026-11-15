@@ -48,14 +48,13 @@
 //!   absent from both sides and its uses cannot be checked at all. That is not
 //!   silent: FCS then errors, and the oracle-error gate below fails.
 //!
-//! A non-default `<LangVersion>` *is* supported: the project's resolved
-//! `LanguageVersion` is threaded to the oracle as `--langversion:<canonical>`
+//! Any `<LangVersion>` is supported: the project's resolved `LanguageVersion`,
+//! set or defaulted, is threaded to the oracle as `--langversion:<canonical>`
 //! (see `invoke_fcs_dump_project_with_refs`), so both sides take the same
-//! version-gated syntax branches. Our side already parses each file at
-//! `lang_version_for_project`. The one residual boundary is a pin the oracle's
-//! own SDK can't honour (e.g. `11.0`, gated on a preview SDK): FCS then rejects
-//! the `--langversion` flag, which surfaces as a *loud* oracle failure rather
-//! than a silent divergence.
+//! version-gated syntax branches whatever the oracle's own default. Our side
+//! already parses each file at `lang_version_for_project`. A pin the oracle's
+//! FCS can't honour makes FCS reject the `--langversion` flag, which surfaces
+//! as a *loud* oracle failure rather than a silent divergence.
 //!
 //! The oracle reads our set *exclusively* because a differential is only
 //! evidence when both sides read the same assemblies. An oracle that also
@@ -102,7 +101,6 @@ use crate::common::{
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::SemanticState;
 use borzoi::workspace::Workspace;
-use borzoi_cst::language_version::LanguageVersion;
 use borzoi_cst::syntax::TextRange;
 use borzoi_sema::test_support::{assembly_full_name_agrees, certified_expected};
 use borzoi_sema::{AssemblyEnv, Resolution, resolve_project_files};
@@ -302,16 +300,13 @@ fn project_resolution_matches_fcs() {
 
     // The project's resolved `<LangVersion>`, threaded to the FCS oracle below so
     // both sides take the same version-gated syntax branches (our side already
-    // parsed each file at this version, via `parses_for_project`). `None` when the
-    // project uses the SDK default — FCS's own default agrees with
-    // `LanguageVersion::DEFAULT`, so no `--langversion` flag is threaded. (The
-    // analogous framework-side boundary — a non-default `<FrameworkReference>`
-    // such as AspNetCore / WindowsDesktop — remains out of scope; it is documented
-    // in the module header, as it can't be detected as cheaply.)
-    let lang_version = {
-        let v = workspace.lang_version_for_project(&project);
-        (v != LanguageVersion::DEFAULT).then(|| v.to_string())
-    };
+    // parsed each file at this version, via `parses_for_project`). It is threaded
+    // even when the project sets none, since the oracle's own default need not be
+    // ours. (The analogous framework-side boundary — a non-default
+    // `<FrameworkReference>` such as AspNetCore / WindowsDesktop — remains out of
+    // scope; it is documented in the module header, as it can't be detected as
+    // cheaply.)
+    let lang_version = Some(workspace.lang_version_for_project(&project).to_string());
 
     // The `#if` symbols our side parsed each file under (implicit `COMPILED` /
     // `EDITING` + the project's `$(DefineConstants)`). Threaded through to the FCS

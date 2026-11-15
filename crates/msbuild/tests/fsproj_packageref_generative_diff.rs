@@ -27,7 +27,11 @@
 //! fixture differentials already pin one-by-one (literal and `$(…)` items,
 //! helper `@(…)` lists, attribute/child `Version`, defined/undefined-property
 //! conditions, SDK/project property interleavings) — the value added here is
-//! the *combinations*, especially across the SDK/project boundary.
+//! the *combinations*, especially across the SDK/project boundary. The one
+//! exception is a value or identity spelt so that MSBuild reads it apart from
+//! its text (`ODD_ATTRIBUTES`, `ODD_BODIES`, `ODD_IDS`: padding, a backslash,
+//! what the XML layer touches, a body MSBuild reads as inner XML), which the
+//! capture must read as MSBuild does or decline.
 //!
 //! MSBuild is the resident oracle (`itemsMeta`), its default SDK resolver
 //! pointed at the synthetic SDK (`--sdks-path`), so a case costs milliseconds
@@ -58,18 +62,66 @@ const PROP_NAMES: [&str; 3] = ["VerA", "VerB", "PkgFlag"];
 const IDS: [&str; 3] = ["Alpha", "Beta", "Gamma"];
 const LITERALS: [&str; 3] = ["1.0", "2.0", "3.0-pre"];
 
+/// Spellings of a value as an attribute that MSBuild reads apart from the
+/// XML reader's value or from its own text, each of which the capture must
+/// read as MSBuild does or decline (#642): a backslash, which MSBuild's Unix
+/// path fixup may rewrite (`/tmp` exists wherever the oracle runs); padding,
+/// which MSBuild keeps; a tab, line break or entity, which MSBuild reads as
+/// written where XML's attribute normalisation would not; and a `<` (an
+/// encoded CDATA section), which makes MSBuild parse the value as XML.
+const ODD_ATTRIBUTES: [&str; 9] = [
+    "\\tmp\\1.0",
+    "1.0\\x",
+    "%24(foo)\\x",
+    " 1.0 ",
+    "1.0\t",
+    "1\n.0",
+    "&lt;![CDATA[1.0]]&gt;",
+    "1.0&#9;",
+    "a&amp;b",
+];
+
+/// Spellings of a value as element content, as [`ODD_ATTRIBUTES`]: what only
+/// a body can hold (an element or processing instruction, which MSBuild reads
+/// as inner XML; a CRLF, which it keeps; CDATA; comments), and the padding
+/// and backslashes an attribute can.
+const ODD_BODIES: [&str; 10] = [
+    "<n>1.0</n>",
+    "1.0<?p q?>",
+    "1.0\r\n",
+    "1\r\n.0",
+    "1\r.0",
+    "<![CDATA[1.0]]>",
+    "\n      1.0\n    ",
+    "a&amp;b&#9;c",
+    "<!-- c -->1.0",
+    "\\tmp\\1.0",
+];
+
 /// A `$(…)`-expandable value position.
 #[derive(Debug, Clone, Copy)]
 enum Value {
     Lit(usize),
     Prop(usize),
+    /// One of [`ODD_ATTRIBUTES`] in an attribute, [`ODD_BODIES`] in a body.
+    Odd(usize),
 }
 
 impl Value {
+    /// The value as an attribute's text.
     fn render(self) -> String {
         match self {
             Value::Lit(i) => LITERALS[i].to_string(),
             Value::Prop(i) => format!("$({})", PROP_NAMES[i]),
+            Value::Odd(i) => ODD_ATTRIBUTES[i % ODD_ATTRIBUTES.len()].to_string(),
+        }
+    }
+
+    /// The value as element content.
+    fn render_body(self) -> String {
+        match self {
+            Value::Odd(i) => ODD_BODIES[i % ODD_BODIES.len()].to_string(),
+            other => other.render(),
         }
     }
 }
@@ -113,6 +165,8 @@ enum Identity {
     Prop(usize),
     /// `@(HelperPkg)` — consumes whatever helper items precede it.
     Helper,
+    /// One of [`ODD_IDS`].
+    Odd(usize),
 }
 
 impl Identity {
@@ -122,9 +176,15 @@ impl Identity {
             Identity::TwoIds(a, b) => format!("{};{}", IDS[a], IDS[b]),
             Identity::Prop(i) => format!("$({})", PROP_NAMES[i]),
             Identity::Helper => "@(HelperPkg)".to_string(),
+            Identity::Odd(i) => ODD_IDS[i].to_string(),
         }
     }
 }
+
+/// Identities outside a package id's shape that MSBuild may read apart from
+/// their text (#642): a backslash its Unix path fixup may rewrite, and an
+/// escaped one.
+const ODD_IDS: [&str; 3] = ["\\tmp\\Alpha", "Alpha\\x", "%5ctmp%5cAlpha"];
 
 /// The `Version` metadatum on a `PackageReference Update`: absent, an explicit
 /// empty *clear* (`Version=""`), or a value.
@@ -159,6 +219,9 @@ enum ItemDecl {
     Helper {
         id: usize,
         version: Option<Value>,
+        /// A `PrivateAssets`, whose absence on a copy makes no cause of its
+        /// own (a copy without `Version` is versionless).
+        private_assets: Option<Value>,
         cond: Cond,
     },
     /// `<PackageReference Update="…" …>` — merges onto every prior matching
@@ -204,7 +267,7 @@ impl ItemDecl {
                         );
                     }
                     VersionSpec::Child(v) => {
-                        let v = v.render();
+                        let v = v.render_body();
                         let _ = writeln!(out, r#"    <PackageReference Include="{id}"{cond}>"#);
                         let _ = writeln!(out, "      <Version>{v}</Version>");
                         let _ = writeln!(out, "    </PackageReference>");
@@ -216,21 +279,22 @@ impl ItemDecl {
                 let cond = cond.render();
                 let _ = writeln!(out, r#"    <FrameworkReference Include="{id}"{cond} />"#);
             }
-            ItemDecl::Helper { id, version, cond } => {
+            ItemDecl::Helper {
+                id,
+                version,
+                private_assets,
+                cond,
+            } => {
                 let id = IDS[id];
                 let cond = cond.render();
-                match version {
-                    None => {
-                        let _ = writeln!(out, r#"    <HelperPkg Include="{id}"{cond} />"#);
-                    }
-                    Some(v) => {
-                        let v = v.render();
-                        let _ = writeln!(
-                            out,
-                            r#"    <HelperPkg Include="{id}" Version="{v}"{cond} />"#
-                        );
-                    }
+                let mut attrs = String::new();
+                if let Some(v) = version {
+                    let _ = write!(attrs, r#" Version="{}""#, v.render());
                 }
+                if let Some(v) = private_assets {
+                    let _ = write!(attrs, r#" PrivateAssets="{}""#, v.render());
+                }
+                let _ = writeln!(out, r#"    <HelperPkg Include="{id}"{attrs}{cond} />"#);
             }
             ItemDecl::PackageUpdate {
                 identity,
@@ -297,7 +361,7 @@ impl Group {
                         "    <{name}{cond}>{value}</{name}>",
                         name = PROP_NAMES[write.name],
                         cond = write.cond.render(),
-                        value = write.value.render(),
+                        value = write.value.render_body(),
                     );
                 }
                 let _ = writeln!(out, "  </PropertyGroup>");
@@ -353,6 +417,7 @@ fn value_strategy() -> impl Strategy<Value = Value> {
     prop_oneof![
         3 => (0..LITERALS.len()).prop_map(Value::Lit),
         2 => (0..PROP_NAMES.len()).prop_map(Value::Prop),
+        1 => (0..ODD_ATTRIBUTES.len().max(ODD_BODIES.len())).prop_map(Value::Odd),
     ]
 }
 
@@ -381,6 +446,7 @@ fn identity_strategy() -> impl Strategy<Value = Identity> {
         2 => (0..IDS.len(), 0..IDS.len()).prop_map(|(a, b)| Identity::TwoIds(a, b)),
         1 => (0..PROP_NAMES.len()).prop_map(Identity::Prop),
         2 => Just(Identity::Helper),
+        1 => (0..ODD_IDS.len()).prop_map(Identity::Odd),
     ]
 }
 
@@ -418,9 +484,15 @@ fn item_strategy() -> impl Strategy<Value = ItemDecl> {
         3 => (
             0..IDS.len(),
             proptest::option::of(value_strategy()),
+            proptest::option::weighted(0.25, value_strategy()),
             cond_strategy()
         )
-            .prop_map(|(id, version, cond)| ItemDecl::Helper { id, version, cond }),
+            .prop_map(|(id, version, private_assets, cond)| ItemDecl::Helper {
+                id,
+                version,
+                private_assets,
+                cond,
+            }),
         3 => (
             identity_strategy(),
             update_version_strategy(),
@@ -551,15 +623,25 @@ fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
         "MSBuildSDKsPath".to_string(),
         sdks.to_string_lossy().into_owned(),
     );
-    let parsed = parse_fsproj_with_imports(
-        &project_xml,
-        &proj,
-        &HashMap::new(),
-        &environment,
-        Some(&resolver),
-        None,
-    )
-    .unwrap_or_else(|e| panic!("our parse: {e}\n{project_xml}"));
+    let parse = || {
+        parse_fsproj_with_imports(
+            &project_xml,
+            &proj,
+            &HashMap::new(),
+            &environment,
+            Some(&resolver),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("our parse: {e}\n{project_xml}"))
+    };
+    let parsed = parse();
+    // An evaluation is a function of its inputs: the causes it records, and
+    // their order, may not turn on a hash map's iteration order.
+    assert_eq!(
+        parsed,
+        parse(),
+        "two evaluations of one project differ\n{project_xml}"
+    );
     (
         Laid {
             case_dir,
