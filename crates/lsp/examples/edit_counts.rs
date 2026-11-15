@@ -455,14 +455,22 @@ fn trace_fold_files() -> bool {
     *TRACE_FOLD_FILES.get_or_init(|| std::env::var_os("EDIT_COUNTS_FOLD_FILES").is_some())
 }
 
-/// The `r.` columns from the fold's counts, in [`Cost::fold`] order: the
-/// files, their bytes, the total, each phase, and what the phases leave.
-fn fold_columns(fold: &[u64; 2 + FOLD_SPANS.len()]) -> String {
-    let [files, bytes, total, phases @ ..] = fold;
+/// One sample's fold counts (the files, their bytes, and the instructions
+/// inside each of [`FOLD_SPANS`]) with what the phases leave of the total
+/// appended: [`Cost::fold`]'s order. The remainder is taken per sample, as
+/// extrema over samples taken column by column would not leave one.
+fn with_rest(counts: [u64; 2 + FOLD_SPANS.len()]) -> [u64; 3 + FOLD_SPANS.len()] {
+    let [_, _, total, phases @ ..] = &counts;
     let rest = total.saturating_sub(phases.iter().sum());
-    let mut out = format!("{files:>7} {bytes:>10} {total:>14}");
-    for phase in phases.iter().chain([&rest]) {
-        out.push_str(&format!(" {phase:>14}"));
+    std::array::from_fn(|i| counts.get(i).copied().unwrap_or(rest))
+}
+
+/// The `r.` columns, from counts in [`Cost::fold`] order.
+fn fold_columns(fold: &[u64; 3 + FOLD_SPANS.len()]) -> String {
+    let [files, bytes, rest @ ..] = fold;
+    let mut out = format!("{files:>7} {bytes:>10}");
+    for count in rest {
+        out.push_str(&format!(" {count:>14}"));
     }
     out
 }
@@ -807,7 +815,7 @@ impl tracing::Subscriber for FoldObserver {
                     {
                         file[2 + i] = total.load(Relaxed) - start.load(Relaxed);
                     }
-                    eprintln!("fold file {}", fold_columns(&file));
+                    eprintln!("fold file {}", fold_columns(&with_rest(file)));
                 }
             }
         } else if let Some(unit) = id.into_u64().checked_sub(UNIT_ID_BASE)
@@ -919,8 +927,9 @@ struct Cost {
     /// Cached envs resolved again ([`ENVS_RESOLVED_AGAIN`]).
     envs_resolved_again: u64,
     /// The fold's files resolved ([`FOLD_FILES`]), their bytes
-    /// ([`FOLD_BYTES`]), and the instructions inside each of [`FOLD_SPANS`].
-    fold: [u64; 2 + FOLD_SPANS.len()],
+    /// ([`FOLD_BYTES`]), the instructions inside each of [`FOLD_SPANS`], and
+    /// what the phases leave of the files' total ([`with_rest`]).
+    fold: [u64; 3 + FOLD_SPANS.len()],
 }
 
 impl Cost {
@@ -1010,7 +1019,7 @@ impl Reading {
             validation: std::array::from_fn(|i| later.validation[i] - self.validation[i]),
             env_builds: later.env_builds - self.env_builds,
             envs_resolved_again: later.envs_resolved_again - self.envs_resolved_again,
-            fold: std::array::from_fn(|i| later.fold[i] - self.fold[i]),
+            fold: with_rest(std::array::from_fn(|i| later.fold[i] - self.fold[i])),
         }
     }
 }
