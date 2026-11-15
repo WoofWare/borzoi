@@ -5448,10 +5448,14 @@ impl AssemblyEnv {
     /// hard-wires such a method's `IsInstance` to true (`infos.fs:574–582`), so it is
     /// reachable as `recv.M(…)` and never as `T.M(…)`.
     ///
-    /// Two shapes answer `true` for **every** name, since they hide names we cannot
+    /// Three shapes answer `true` for **every** name, since they hide names we cannot
     /// read: an [`ExtensionMembers::Unknowable`] index (the owning assembly's F#
-    /// signature data failed to decode), and any **skipped member** (undecodable, so
-    /// possibly an `[<Extension>]` of any name).
+    /// signature data failed to decode), any **skipped member** (undecodable, so
+    /// possibly an `[<Extension>]` of any name), and a type abbreviation carrying
+    /// `[<Extension>]` or `[<AutoOpen>]` (#832). FCS reads either attribute off the
+    /// abbreviation and then lists the extension members of the type it abbreviates,
+    /// which may be declared anywhere, so where the abbreviation is in scope its
+    /// target's extensions are too; the target is not chased here.
     fn entity_tree_has_extension_named(
         &self,
         handle: EntityHandle,
@@ -5465,6 +5469,11 @@ impl AssemblyEnv {
             return true;
         }
         let entity = self.entity(handle);
+        if entity.kind == EntityKind::Abbreviation
+            && (entity.is_auto_open || entity.is_extension_container)
+        {
+            return true;
+        }
         let fsharp_names = if is_static {
             &entity.static_extension_member_names
         } else {
