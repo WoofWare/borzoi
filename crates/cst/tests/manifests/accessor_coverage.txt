@@ -141,6 +141,8 @@ InferredDowncastExpr::expr
 InferredUpcastExpr::expr
 InheritMember::args
 InheritMember::base_type
+InlineIlExpr::args
+InlineIlExpr::types
 InterfaceImpl::has_with
 InterfaceImpl::interface_type
 InterfaceImpl::members

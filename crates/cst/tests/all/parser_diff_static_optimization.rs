@@ -8,8 +8,7 @@
 //! right into nested `SynExpr.LibraryOnlyStaticOptimization(constraints, branch,
 //! fallthrough, _)`. Each constraint is a `SynStaticOptimizationConstraint`:
 //! `WhenTyparTyconEqualsTycon('T, ty)` (`'T : ty`) or `WhenTyparIsStruct('T)`
-//! (the bare `'T struct`). Unlike inline IL, every field is serialisable, so the
-//! construct is fully modelled in the diff oracle.
+//! (the bare `'T struct`). Every field is modelled in the diff oracle.
 
 use crate::common::assert_asts_match;
 

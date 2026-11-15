@@ -8,11 +8,11 @@ use borzoi_cst::syntax::{
     AttributeList, AutoPropertyKind, Binding, ConsExpr, ConstExpr, ConstPat, DotGetExpr,
     DotIndexedGetExpr, DowncastExpr, DynamicExpr, EnumCase, ExceptionDefnDecl, Expr,
     ExternCTypeBase, ExternCTypeSuffix, ExternDecl, FunExpr, GetSetAccessor, HashDirectiveDecl,
-    IdentExpr, IfThenElseExpr, ImplFile, ImplicitCtor, IndexRangeExpr, InterpStringExpr,
-    InterpStringPart, JoinInExpr, LibraryOnlyFieldGetExpr, LongIdent, LongIdentAppType,
-    LongIdentExpr, LongIdentPat, LongIdentType, MatchBangExpr, MatchClause, MatchExpr,
-    MatchLambdaExpr, Measure, MeasureLitExpr, MeasureLitPat, MeasurePowerType, MemberDefn,
-    MemberLeading, MemberSig, MemberSigLeading, ModuleDecl, ModuleOrNamespace,
+    IdentExpr, IfThenElseExpr, ImplFile, ImplicitCtor, IndexRangeExpr, InlineIlExpr,
+    InterpStringExpr, InterpStringPart, JoinInExpr, LibraryOnlyFieldGetExpr, LongIdent,
+    LongIdentAppType, LongIdentExpr, LongIdentPat, LongIdentType, MatchBangExpr, MatchClause,
+    MatchExpr, MatchLambdaExpr, Measure, MeasureLitExpr, MeasureLitPat, MeasurePowerType,
+    MemberDefn, MemberLeading, MemberSig, MemberSigLeading, ModuleDecl, ModuleOrNamespace,
     ModuleOrNamespaceKind, NamedPat, NewExpr, ObjExpr, OpenDecl, ParenExpr, ParenPat, Pat,
     RationalConst, RecordExprItem, RecordField, RecordFieldDecl, RecordReprItem, SigDecl, SigFile,
     StaticOptCondition, StaticOptimizationExpr, SyntaxKind, SyntaxToken, TraitCallExpr, TupleExpr,
@@ -1196,9 +1196,8 @@ fn normalise_type_repr(r: &TypeDefnRepr) -> NormalisedTypeRepr {
         )),
         // Inline-IL type repr `( # "instr" # )`
         // (`SynTypeDefnSimpleRepr.LibraryOnlyILAssembly`) is not modelled in the
-        // diff oracle, for the same reason as the expression form
-        // (`Expr::InlineIl`): FCS boxes the parsed IL (`ilCode: obj`), which the
-        // dump cannot round-trip for an equality check. Both sides `panic!`, so
+        // diff oracle: FCS parses the type string into an IL type (`ilType:
+        // obj`) where our tree keeps the string literal. Both sides `panic!`, so
         // the corpus sweep's `catch_unwind` counts the file as unmodeled and
         // neither side reaches the equality assertion.
         TypeDefnRepr::InlineIl(_) => {
@@ -2355,14 +2354,7 @@ fn normalise_expr(e: &Expr, counter: &mut u32) -> NormalisedExpr {
         }),
         Expr::InterpString(s) => normalise_interp_string(s, counter),
         Expr::Fun(f) => normalise_fun(f, counter),
-        // Inline IL `(# … #)` (`SynExpr.LibraryOnlyILAssembly`) is not modelled
-        // in the diff oracle: FCS boxes the parsed IL instructions
-        // (`ilCode: obj`), which the dump cannot round-trip for an equality
-        // check. Treated as a closed-world gap — the corpus sweep wraps this in
-        // `catch_unwind` and counts the file as unmodeled (FCS's `from_fcs`
-        // side likewise `panic!`s on the `LibraryOnlyILAssembly` SynExpr case),
-        // so neither side reaches the equality assertion.
-        Expr::InlineIl(_) => panic!("inline IL (SynExpr.LibraryOnlyILAssembly) is not modelled"),
+        Expr::InlineIl(il) => normalise_inline_il(il, counter),
         Expr::StaticOptimization(s) => normalise_static_optimization(s, counter),
         Expr::LibraryOnlyFieldGet(g) => normalise_library_only_field_get(g, counter),
         Expr::TraitCall(t) => normalise_trait_call(t, counter),
@@ -3966,6 +3958,29 @@ fn normalise_trait_call(t: &TraitCallExpr, counter: &mut u32) -> NormalisedExpr 
         support,
         member,
         arg,
+    }
+}
+
+/// Project `SynExpr.LibraryOnlyILAssembly` — inline IL
+/// `(# "instr" type (T) arg₀ … : retTy #)`. [`InlineIlExpr::types`] yields the
+/// `type (T)` operand and the return type in source order; the node's own
+/// `:` separates them (an argument's colons sit inside its `Expr`). The
+/// arguments advance the shared `_argN` counter in source order. The
+/// instruction string is not projected (see [`NormalisedExpr::InlineIl`]).
+fn normalise_inline_il(il: &InlineIlExpr, counter: &mut u32) -> NormalisedExpr {
+    let colon = il
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|token| token.kind() == SyntaxKind::COLON_TOK)
+        .map(|token| token.text_range().start());
+    let (ret_ty, type_args): (Vec<Type>, Vec<Type>) = il
+        .types()
+        .partition(|ty| colon.is_some_and(|colon| ty.syntax().text_range().start() > colon));
+    NormalisedExpr::InlineIl {
+        type_args: type_args.iter().map(normalise_type).collect(),
+        args: il.args().map(|e| normalise_expr(&e, counter)).collect(),
+        ret_ty: ret_ty.iter().map(normalise_type).collect(),
     }
 }
 
