@@ -353,7 +353,7 @@ fn define_constants_gated_in_directory_build_props_is_uncertain() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="A.fs" />
   </ItemGroup>
@@ -368,7 +368,7 @@ fn define_constants_gated_in_directory_build_props_is_uncertain() {
   </PropertyGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(
         result.define_constants_uncertain,
         "a user-gated define on an unresolved property must be respected"
@@ -604,7 +604,7 @@ fn custom_sdk_layout_does_not_tolerate_sibling_user_files() {
     // beside the SDK dir — so for non-canonical layouts we tolerate `root` only.
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join(".sdk"); // self-contained, NOT `…/Sdks/<name>/Sdk`
-    write_at(&root, "Sdk.props", "<Project/>");
+    write_at(&root, "Sdk.props", &common_props_sdk());
     write_at(&root, "Sdk.targets", "<Project/>");
     let project_path = write_at(
         tmp.path(),
@@ -941,7 +941,7 @@ fn define_constants_uncertainty_records_its_cause() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="A.fs" />
   </ItemGroup>
@@ -956,7 +956,7 @@ fn define_constants_uncertainty_records_its_cause() {
   </PropertyGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(result.define_constants_uncertain);
     let kinds: Vec<_> = result
         .define_constants_uncertainties
@@ -990,10 +990,10 @@ fn define_uncertainty_and_its_causes_agree() {
         let project_path = write_at(
             tmp.path(),
             "Demo.fsproj",
-            r#"<Project><ItemGroup><Compile Include="A.fs" /></ItemGroup></Project>"#,
+            r#"<Project Sdk="Std"><ItemGroup><Compile Include="A.fs" /></ItemGroup></Project>"#,
         );
         write_at(tmp.path(), "Directory.Build.props", dbp);
-        let result = parse_file(&project_path);
+        let result = parse_file_std(&project_path);
         assert_eq!(
             result.define_constants_uncertain,
             !result.define_constants_uncertainties.is_empty(),

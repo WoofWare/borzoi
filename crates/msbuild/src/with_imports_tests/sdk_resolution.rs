@@ -1,6 +1,5 @@
 //! Project-level `Sdk="..."` resolution: props/targets ordering against
-//! the body and `Directory.Build.*`, and explicit `<Import Sdk=...>`
-//! item promotion.
+//! the body and `Directory.Build.*`, and explicit `<Import Sdk=...>`.
 
 use super::*;
 use proptest::prelude::*;
@@ -294,7 +293,7 @@ fn project_sdk_resolved_still_walks_directory_build_props() {
 </Project>"#,
     );
     let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "MySdk", &common_props_sdk(), "<Project/>");
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
@@ -652,12 +651,10 @@ fn sdk_directory_build_targets_import_point_owns_a_retargeted_path_too() {
 }
 
 #[test]
-fn failing_sdk_resolver_falls_back_to_directory_build_splice() {
-    // Companion: when the resolver returns None, the walker still
-    // walks Directory.Build.* — the splice has always been live, but
-    // we keep this as a regression witness for the no-SDK path. The
-    // deliberately-missing inner import is the witness: it fires
-    // exactly once if and only if Directory.Build.props was imported.
+fn failing_sdk_resolver_walks_no_directory_build_props() {
+    // An SDK that does not resolve imports nothing, so nothing imports
+    // `Directory.Build.props` either. The deliberately-missing inner import
+    // is the witness: it fails if and only if the file was walked.
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
@@ -682,9 +679,13 @@ fn failing_sdk_resolver_falls_back_to_directory_build_splice() {
         .filter(|d| matches!(&d.kind, DiagnosticKind::ImportFailed { .. }))
         .count();
     assert_eq!(
-        inner_import_failures, 1,
-        "expected the fallback Directory.Build.props to be walked exactly once, got: {:?}",
+        inner_import_failures, 0,
+        "nothing imports Directory.Build.props, got: {:?}",
         result.diagnostics,
+    );
+    assert!(
+        result.items_uncertain,
+        "the unresolved SDK leaves the Compile set uncertain"
     );
 }
 
@@ -712,11 +713,13 @@ fn sdk_props_runs_before_directory_build_props() {
     let (root, props, targets) = write_synthetic_sdk(
         tmp.path(),
         "MySdk",
-        r#"<Project>
+        &format!(
+            r#"<Project>
   <PropertyGroup>
     <SdkSeed>fromsdk</SdkSeed>
   </PropertyGroup>
-</Project>"#,
+{COMMON_PROPS_BLOCK}</Project>"#
+        ),
         "<Project/>",
     );
     let project_path = write_at(
@@ -764,11 +767,8 @@ fn explicit_only_sdk_props_runs_before_directory_build_props() {
     // `Sdk="X"` attribute and instead opens with
     // `<Import Sdk="X" Project="Sdk.props"/>`. MSBuild treats this as
     // equivalent to the root-Sdk shorthand, so the effective order is
-    // still Sdk.props → Directory.Build.props → body → ... .
-    // The body pre-scan slice (7b-v1c continued) promotes the first
-    // unconditional explicit `Sdk.props` import to root-equivalent
-    // status; without it, Directory.Build.props would run first and
-    // `$(SdkSeed)` would be empty.
+    // still Sdk.props → Directory.Build.props → body → ... : the explicit
+    // import walks in place, and its `Sdk.props` imports the file.
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
@@ -782,11 +782,13 @@ fn explicit_only_sdk_props_runs_before_directory_build_props() {
     let (root, props, targets) = write_synthetic_sdk(
         tmp.path(),
         "MySdk",
-        r#"<Project>
+        &format!(
+            r#"<Project>
   <PropertyGroup>
     <SdkSeed>fromsdk</SdkSeed>
   </PropertyGroup>
-</Project>"#,
+{COMMON_PROPS_BLOCK}</Project>"#
+        ),
         "<Project/>",
     );
     let project_path = write_at(
@@ -816,7 +818,7 @@ fn explicit_only_sdk_props_runs_before_directory_build_props() {
         paths_of(&result.items),
         vec![dir.join("fromsdk.fs"), dir.join("Body.fs")],
         "Directory.Build.props's $(SdkSeed) must resolve from Sdk.props \
-         (promoted from the body Import) — diagnostics: {:?}",
+         — diagnostics: {:?}",
         result.diagnostics,
     );
     assert!(
@@ -825,31 +827,28 @@ fn explicit_only_sdk_props_runs_before_directory_build_props() {
             .iter()
             .any(|d| matches!(d.kind, DiagnosticKind::UndefinedProperty { .. })),
         "no UndefinedProperty expected when the explicit Sdk.props import \
-         is promoted before Directory.Build.props: {:?}",
+         runs before Directory.Build.props: {:?}",
         result.diagnostics,
     );
-    // The explicit imports must not be double-walked once the same file
-    // is spliced at the top: no ImportFailed of any kind may surface.
+    // No import fails.
     assert!(
         !result
             .diagnostics
             .iter()
             .any(|d| matches!(&d.kind, DiagnosticKind::ImportFailed { .. })),
-        "explicit Sdk.props/Sdk.targets imports must be skipped during \
-         body walk once promoted to top: {:?}",
+        "explicit Sdk.props/Sdk.targets imports resolve: {:?}",
         result.diagnostics,
     );
 }
 
 #[test]
-fn promoted_explicit_sdk_items_carry_body_import_span() {
+fn explicit_sdk_items_carry_body_import_span() {
     // Public contract: items/diagnostics from an imported file
     // collapse to the importing `<Import>` element's byte range. For
     // the explicit-SDK form, the user wrote `<Import Sdk="X"
     // Project="Sdk.props"/>` as a body element — items the
-    // (promoted) Sdk.props contributes must point at *that* Import
-    // node's span, not the whole `<Project>` element. This test
-    // pins the contract for the promotion path.
+    // Sdk.props contributes must point at *that* Import node's span,
+    // not the whole `<Project>` element.
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) = write_synthetic_sdk(
         tmp.path(),
@@ -906,7 +905,7 @@ fn promoted_explicit_sdk_items_carry_body_import_span() {
     assert_eq!(
         from_props.span,
         props_import_start..props_import_end,
-        "promoted Sdk.props's items must point at the body <Import \
+        "Sdk.props's items must point at the body <Import \
          Sdk=... Project=Sdk.props/> element, not the project root",
     );
     let from_targets = result
@@ -921,320 +920,8 @@ fn promoted_explicit_sdk_items_carry_body_import_span() {
     assert_eq!(
         from_targets.span,
         targets_import_start..targets_import_end,
-        "promoted Sdk.targets's items must point at the body <Import \
+        "Sdk.targets's items must point at the body <Import \
          Sdk=... Project=Sdk.targets/> element, not the project root",
-    );
-}
-
-#[test]
-fn explicit_sdk_promotion_skipped_when_property_group_precedes_props() {
-    // MSBuild evaluates child elements in document order: a
-    // `<PropertyGroup>` written *before* `<Import Sdk="X"
-    // Project="Sdk.props"/>` would set properties that Sdk.props itself
-    // (and the SDK chain's `Sdk.props`-driven imports of
-    // Directory.Build.props) could observe. Promoting that body Import
-    // to the OUTERMOST splice position silently reorders the
-    // PropertyGroup *after* the SDK chain. The conservative behaviour
-    // is to skip promotion entirely when anything precedes Sdk.props;
-    // the body walk then handles the explicit import in its natural
-    // (post-PropertyGroup) position.
-    //
-    // Witness: a property the project sets *before* the SDK import
-    // would only be visible to the SDK chain in the promoted (wrong)
-    // ordering. We name the SDK with a value that wouldn't otherwise
-    // be referenced and check the resolver was never asked to look up
-    // anything based on the post-PropertyGroup name — promotion was
-    // skipped, so the resolver gets called only at body position.
-    let tmp = TempDir::new().unwrap();
-    let (root, props, targets) = write_synthetic_sdk(
-        tmp.path(),
-        "MySdk",
-        r#"<Project>
-  <ItemGroup>
-    <Compile Include="$(BeforeSdk).fs" />
-  </ItemGroup>
-</Project>"#,
-        "<Project/>",
-    );
-    let project_path = write_at(
-        tmp.path(),
-        "Demo.fsproj",
-        r#"<Project>
-  <PropertyGroup>
-    <BeforeSdk>set-by-project</BeforeSdk>
-  </PropertyGroup>
-  <Import Sdk="MySdk" Project="Sdk.props" />
-  <ItemGroup>
-    <Compile Include="Body.fs" />
-  </ItemGroup>
-</Project>"#,
-    );
-    let result = parse_file_with_sdk(&project_path, |name| {
-        if name == "MySdk" {
-            Ok(SdkPaths {
-                root: root.clone(),
-                props: props.clone(),
-                targets: targets.clone(),
-            })
-        } else {
-            Err(SdkResolveError::NotFound)
-        }
-    });
-    let dir = canon(tmp.path());
-    // Without promotion, Sdk.props walks at body position — after the
-    // PropertyGroup wrote BeforeSdk — so its <Compile Include=
-    // "$(BeforeSdk).fs"/> resolves to "set-by-project.fs". With
-    // (wrong) promotion, Sdk.props runs before the PropertyGroup and
-    // BeforeSdk substitutes to empty, producing ".fs" plus an
-    // UndefinedProperty diagnostic.
-    assert_eq!(
-        paths_of(&result.items),
-        vec![dir.join("set-by-project.fs"), dir.join("Body.fs")],
-        "promotion must be skipped when a PropertyGroup precedes \
-         Sdk.props; got items {:?} diagnostics {:?}",
-        result.items,
-        result.diagnostics,
-    );
-    assert!(
-        !result
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d.kind, DiagnosticKind::UndefinedProperty { .. })),
-        "no UndefinedProperty expected when promotion is correctly \
-         skipped: {:?}",
-        result.diagnostics,
-    );
-}
-
-#[test]
-fn explicit_sdk_promotion_skipped_when_property_group_follows_targets() {
-    // Symmetric case for Sdk.targets: a `<PropertyGroup>` *after* the
-    // explicit `<Import Sdk="X" Project="Sdk.targets"/>` would in
-    // MSBuild see the SDK-supplied properties (Sdk.targets has
-    // already run). Promoting Sdk.targets to the bottommost slot
-    // reorders it *after* the trailing PropertyGroup, which is the
-    // opposite of what MSBuild would do.
-    //
-    // We promote Sdk.props (it's still at the top), but Sdk.targets
-    // stays in-body. Witness: a property the trailing PropertyGroup
-    // sets must be visible to Directory.Build.targets, since both
-    // walk after the body — i.e. the trailing PropertyGroup ran
-    // before our Directory.Build.targets splice. (In MSBuild it
-    // would run between the body and the Sdk.targets the explicit
-    // import requested — both orderings differ from us, but the
-    // important thing here is to verify we did *not* promote
-    // Sdk.targets.)
-    let tmp = TempDir::new().unwrap();
-    write_at(
-        tmp.path(),
-        "Directory.Build.targets",
-        r#"<Project>
-  <ItemGroup>
-    <Compile Include="$(TrailingProp).fs" />
-  </ItemGroup>
-</Project>"#,
-    );
-    let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
-    let project_path = write_at(
-        tmp.path(),
-        "Demo.fsproj",
-        r#"<Project>
-  <Import Sdk="MySdk" Project="Sdk.props" />
-  <ItemGroup>
-    <Compile Include="Body.fs" />
-  </ItemGroup>
-  <Import Sdk="MySdk" Project="Sdk.targets" />
-  <PropertyGroup>
-    <TrailingProp>set-after-targets</TrailingProp>
-  </PropertyGroup>
-</Project>"#,
-    );
-    let result = parse_file_with_sdk(&project_path, |name| {
-        if name == "MySdk" {
-            Ok(SdkPaths {
-                root: root.clone(),
-                props: props.clone(),
-                targets: targets.clone(),
-            })
-        } else {
-            Err(SdkResolveError::NotFound)
-        }
-    });
-    let dir = canon(tmp.path());
-    // The body's Sdk.targets import must NOT have been promoted (a
-    // PropertyGroup follows it). It runs at body position, and only
-    // once — we never spliced Sdk.targets at the bottom, so there is
-    // no duplicate to skip.
-    assert!(
-        !result
-            .diagnostics
-            .iter()
-            .any(|d| matches!(&d.kind, DiagnosticKind::ImportFailed { .. })),
-        "no ImportFailed expected — targets import shouldn't be \
-         double-walked because it wasn't promoted: {:?}",
-        result.diagnostics,
-    );
-    // Body.fs comes from the body's <ItemGroup>; the trailing
-    // PropertyGroup sets TrailingProp which our Directory.Build.targets
-    // splice (post-body) sees, producing set-after-targets.fs.
-    assert_eq!(
-        paths_of(&result.items),
-        vec![dir.join("Body.fs"), dir.join("set-after-targets.fs")],
-        "items {:?} diagnostics {:?}",
-        result.items,
-        result.diagnostics,
-    );
-}
-
-#[test]
-fn explicit_sdk_promotion_skipped_when_props_is_conditional() {
-    // A `Condition` attribute on the body Import is a deliberate gate:
-    // the project might be opting into a particular SDK variant only
-    // under certain configurations. Promoting silently bypasses the
-    // condition (the splice runs the SDK chain unconditionally).
-    // Conservative behaviour: leave conditional imports to the body
-    // walk, where `evaluate_condition` handles them faithfully.
-    let tmp = TempDir::new().unwrap();
-    write_at(
-        tmp.path(),
-        "Directory.Build.props",
-        r#"<Project>
-  <PropertyGroup>
-    <Who>dbp</Who>
-  </PropertyGroup>
-  <ItemGroup>
-    <Compile Include="$(SdkSeed).fs" />
-  </ItemGroup>
-</Project>"#,
-    );
-    let (root, props, targets) = write_synthetic_sdk(
-        tmp.path(),
-        "MySdk",
-        r#"<Project>
-  <PropertyGroup>
-    <SdkSeed>fromsdk</SdkSeed>
-    <Who>sdk</Who>
-  </PropertyGroup>
-</Project>"#,
-        "<Project/>",
-    );
-    let project_path = write_at(
-        tmp.path(),
-        "Demo.fsproj",
-        r#"<Project>
-  <Import Sdk="MySdk" Project="Sdk.props" Condition="'true' == 'true'" />
-  <ItemGroup>
-    <Compile Include="Body.fs" />
-  </ItemGroup>
-</Project>"#,
-    );
-    let result = parse_file_with_sdk(&project_path, |name| {
-        if name == "MySdk" {
-            Ok(SdkPaths {
-                root: root.clone(),
-                props: props.clone(),
-                targets: targets.clone(),
-            })
-        } else {
-            Err(SdkResolveError::NotFound)
-        }
-    });
-    // Promotion skipped → the property pass runs Directory.Build.props
-    // (before-body splice) *before* the conditional Sdk.props import at its
-    // body position, so the last write to `Who` is the SDK's. Promotion
-    // would splice Sdk.props outermost-first and Directory.Build.props
-    // would win instead.
-    assert_eq!(
-        result.properties.get("Who").map(String::as_str),
-        Some("sdk"),
-        "conditional Sdk.props must NOT be promoted; diagnostics: {:?}",
-        result.diagnostics,
-    );
-    // The item pass runs after the whole property pass, so the
-    // Directory.Build.props item sees the SDK-defined `SdkSeed` even
-    // though the SDK props walk later — matching MSBuild.
-    let dir = canon(tmp.path());
-    assert_eq!(
-        paths_of(&result.items),
-        vec![dir.join("fromsdk.fs"), dir.join("Body.fs")],
-        "diagnostics: {:?}",
-        result.diagnostics,
-    );
-}
-
-#[test]
-fn explicit_sdk_promotion_skipped_when_props_wrapped_in_import_group() {
-    // The body pre-scan only looks at *direct* <Import> children of
-    // the project root. An `<ImportGroup>` wrapper — even
-    // unconditional — is not a position MSBuild's root-Sdk shorthand
-    // expands to, so we conservatively decline to promote. The body
-    // walk handles the wrapped import normally.
-    let tmp = TempDir::new().unwrap();
-    write_at(
-        tmp.path(),
-        "Directory.Build.props",
-        r#"<Project>
-  <PropertyGroup>
-    <Who>dbp</Who>
-  </PropertyGroup>
-  <ItemGroup>
-    <Compile Include="$(SdkSeed).fs" />
-  </ItemGroup>
-</Project>"#,
-    );
-    let (root, props, targets) = write_synthetic_sdk(
-        tmp.path(),
-        "MySdk",
-        r#"<Project>
-  <PropertyGroup>
-    <SdkSeed>fromsdk</SdkSeed>
-    <Who>sdk</Who>
-  </PropertyGroup>
-</Project>"#,
-        "<Project/>",
-    );
-    let project_path = write_at(
-        tmp.path(),
-        "Demo.fsproj",
-        r#"<Project>
-  <ImportGroup>
-    <Import Sdk="MySdk" Project="Sdk.props" />
-  </ImportGroup>
-  <ItemGroup>
-    <Compile Include="Body.fs" />
-  </ItemGroup>
-</Project>"#,
-    );
-    let result = parse_file_with_sdk(&project_path, |name| {
-        if name == "MySdk" {
-            Ok(SdkPaths {
-                root: root.clone(),
-                props: props.clone(),
-                targets: targets.clone(),
-            })
-        } else {
-            Err(SdkResolveError::NotFound)
-        }
-    });
-    // Same detection as the conditional-import test: promotion skipped →
-    // Directory.Build.props runs first in the property pass, so the wrapped
-    // Sdk.props import's write to `Who` lands last.
-    assert_eq!(
-        result.properties.get("Who").map(String::as_str),
-        Some("sdk"),
-        "ImportGroup-wrapped Sdk.props must NOT be promoted; \
-         diagnostics: {:?}",
-        result.diagnostics,
-    );
-    // And the item pass sees the final property table regardless of where
-    // in the property pass the SDK props ran.
-    let dir = canon(tmp.path());
-    assert_eq!(
-        paths_of(&result.items),
-        vec![dir.join("fromsdk.fs"), dir.join("Body.fs")],
-        "diagnostics: {:?}",
-        result.diagnostics,
     );
 }
 
@@ -1309,7 +996,7 @@ fn imported_file_with_sdk_root_without_resolver_emits_sdk_resolver_absent() {
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
-        "Directory.Build.props",
+        "inner.props",
         r#"<Project Sdk="Inner.Sdk">
   <PropertyGroup>
     <FromDirBuild>seen</FromDirBuild>
@@ -1320,6 +1007,7 @@ fn imported_file_with_sdk_root_without_resolver_emits_sdk_resolver_absent() {
         tmp.path(),
         "Demo.fsproj",
         r#"<Project>
+  <Import Project="inner.props" />
   <ItemGroup>
     <Compile Include="A.fs" />
   </ItemGroup>

@@ -47,10 +47,10 @@
 //! [`super::parse_fsproj_with_imports`]. It follows explicit `<Import>`
 //! (substituting `$(...)` in the path, resolving relative to the
 //! importing file, recursing depth-limited, with duplicate imports —
-//! cycles included — skipped exactly as MSBuild skips them) and
-//! also splices in the nearest `Directory.Build.props` /
-//! `Directory.Build.targets` discovered by
-//! [`super::detect_implicit_imports`]. Walked-imported files share the
+//! cycles included — skipped exactly as MSBuild skips them), and the
+//! `Sdk.props`/`Sdk.targets` a root `Sdk` attribute imports. Nothing else
+//! is imported: `Directory.Build.props` and `.targets` arrive through the
+//! SDK's own `<Import>`s. Walked-imported files share the
 //! same [`State`] as the project body, so properties they define
 //! become visible to substitutions further down the project file.
 
@@ -166,59 +166,23 @@ pub fn walk(
     project
 }
 
-/// Whether the deferred second pass in [`walk_with_imports`] could change
-/// the result, so is worth running. It cannot when the entry already has
-/// its own SDK (pass 1's before-body splice is already faithful), nor when
-/// there is no SDK resolver — then no nested `<Project Sdk=...>` can
-/// resolve, the deferred `Directory.Build.props` splice can never be
-/// consumed, and pass 2 would dangle straight back to pass 1. Both cases
-/// would discard pass 2's entire walk, so we skip it.
-fn deferred_pass_can_change_result(entry_has_sdk: bool, has_sdk_resolver: bool) -> bool {
-    !entry_has_sdk && has_sdk_resolver
-}
-
 /// With-imports walker reachable from [`super::parse_fsproj_with_imports`].
-/// Walks (in order): the implicit `Directory.Build.props` if any, then
-/// the project body, then the implicit `Directory.Build.targets` if any.
-/// All three share one [`State`] so properties written by an earlier
-/// stage are visible to substitutions in later stages — matching
-/// MSBuild's left-to-right evaluation. Explicit `<Import>` elements
-/// inside any of those bodies are followed too.
 ///
-/// When `sdk_resolver` is supplied AND the project root carries an
-/// `Sdk` attribute that the resolver maps to `Some(SdkPaths)`, the
-/// walker also splices `Sdk.props` (outermost-before-body) and
-/// `Sdk.targets` (outermost-after-body) around the Directory.Build.*
-/// pair: `Sdk.props → Directory.Build.props → body →
-/// Directory.Build.targets → Sdk.targets`. That matches MSBuild's
-/// effective ordering, where `Microsoft.Common.props` imports
-/// Directory.Build.props *after* the SDK chain has already set
-/// properties like `UsingMicrosoftNETSdk`. The Directory.Build.*
-/// splice stays live even when the SDK resolves, because MSBuild's
-/// imports of those files are produced by deeper SDK machinery; the
-/// explicit splice keeps that import point under this evaluator's direct
-/// control.
-/// When the resolver returns `None` (SDK unknown to the caller) the
-/// walker emits [`DiagnosticKind::SdkNotFound`] and the body still
-/// gets the Directory.Build.* splice. When `sdk_resolver` is `None`,
-/// the SDK attribute surfaces as [`DiagnosticKind::SdkResolverAbsent`] —
-/// same as the pure walker.
+/// The import graph is the document's own, as MSBuild's is. A root `Sdk`
+/// attribute imports the SDK's `Sdk.props` before the body and `Sdk.targets`
+/// after it; every other file arrives through an `<Import>` some file makes,
+/// under that import's own condition, at that import's position.
+/// `Directory.Build.props` and `.targets` are no exception: the walk reaches
+/// them only where a file really imports them, which for a real SDK is
+/// `Microsoft.Common.props` and `Microsoft.Common.targets`, so a project with
+/// no SDK gets neither. Every import, at every depth, goes through the one
+/// duplicate check ([`walk_external_file`]), which identifies a file as
+/// MSBuild does.
 ///
-/// **Directory.Build.props position (two-pass).** MSBuild imports
-/// `Directory.Build.props` exactly once, right after the *first*
-/// `Sdk.props` to run (that `Sdk.props` re-enters
-/// `Microsoft.Common.props`, which imports `Directory.Build.props`).
-/// When the entry project has its own SDK, the first `Sdk.props` is the
-/// entry's and the eager before-body splice already matches. The one
-/// shape that diverges is an entry project with *no* resolvable SDK but
-/// a *nested* imported file that does — MSBuild's first `Sdk.props` is
-/// then the nested one (mid-body), so `Directory.Build.props` belongs
-/// right after it. For an entry with no SDK (and an SDK resolver present,
-/// so a nested SDK *can* resolve) we therefore always run a second pass
-/// with the splice deferred to the first body-reached nested `Sdk.props`
-/// (the faithful model), keeping the eager first pass only as the
-/// fallback for the *dangle* case where no such nested `Sdk.props` runs at
-/// all (see the in-function comment).
+/// When the resolver does not know the SDK the walker emits
+/// [`DiagnosticKind::SdkNotFound`]; when `sdk_resolver` is `None`, the SDK
+/// attribute surfaces as [`DiagnosticKind::SdkResolverAbsent`], as in the
+/// pure walker. Either way the body is still walked.
 ///
 /// **`TargetFramework` reads (two-pass).** An undefined `$(TargetFramework)`
 /// read is exactly `""` under the caller's globals whenever every other C.2b
@@ -242,8 +206,6 @@ pub fn walk_with_imports<'r>(
     project_path: &Path,
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
-    implicit_props: Option<&Path>,
-    implicit_targets: Option<&Path>,
     detected_packages_props: Option<&Path>,
     sdk_resolver: Option<&'r SdkResolver<'r>>,
     glob_resolver: Option<&'r GlobResolver<'r>>,
@@ -251,13 +213,11 @@ pub fn walk_with_imports<'r>(
     #[cfg(any(test, feature = "test-support"))] probe: Option<&ReadProbe>,
 ) -> Walked {
     let walk = |target_framework_reads| {
-        walk_in_msbuild_order(
+        walk_once(
             doc,
             project_path,
             extra_properties,
             environment,
-            implicit_props,
-            implicit_targets,
             detected_packages_props,
             sdk_resolver,
             glob_resolver,
@@ -306,118 +266,10 @@ enum TargetFrameworkReads {
     CarvedOut,
 }
 
-/// [`walk_with_imports`]'s `Directory.Build.props` placement under one
-/// [`TargetFrameworkReads`] mode: the walk whose result stands, with its
-/// observations.
-#[allow(clippy::too_many_arguments)]
-fn walk_in_msbuild_order<'r>(
-    doc: &Document<'_>,
-    project_path: &Path,
-    extra_properties: &HashMap<String, String>,
-    environment: &HashMap<String, String>,
-    implicit_props: Option<&Path>,
-    implicit_targets: Option<&Path>,
-    detected_packages_props: Option<&Path>,
-    sdk_resolver: Option<&'r SdkResolver<'r>>,
-    glob_resolver: Option<&'r GlobResolver<'r>>,
-    observer: &'r Observer,
-    target_framework_reads: TargetFrameworkReads,
-    #[cfg(any(test, feature = "test-support"))] probe: Option<&ReadProbe>,
-) -> (ParsedProject, WalkObservations) {
-    // Pass 1: the eager before-body `Directory.Build.props` splice
-    // (historical behaviour). This is *only* a fallback result for the
-    // dangle case below — we deliberately read no detection signal off it
-    // except `entry_has_sdk`, which is resolved from the root `Sdk=`
-    // attribute / explicit promotion *before* any `Directory.Build.props`
-    // or body runs and so is identical in both passes. Every other pass-1
-    // observation is contaminated: pass 1 runs `Directory.Build.props` in
-    // the wrong (before-body) position, so a property it sets can flip a
-    // body `<Import>` condition and change which nested SDKs are reached
-    // — making "did a nested `Sdk.props` fire?" unreliable in pass 1.
-    let (pass1, obs1) = walk_once(
-        doc,
-        project_path,
-        extra_properties,
-        environment,
-        implicit_props,
-        implicit_targets,
-        detected_packages_props,
-        sdk_resolver,
-        glob_resolver,
-        observer,
-        false,
-        target_framework_reads,
-        #[cfg(any(test, feature = "test-support"))]
-        probe,
-    );
-    // Skip the deferred second pass whenever it could not possibly change
-    // the result — when the entry already has its own SDK (pass 1 is
-    // faithful), or when there is no SDK resolver (no nested
-    // `<Project Sdk=...>` can resolve, so the deferred splice can never be
-    // consumed and pass 2 would dangle straight back to pass 1). Otherwise
-    // we always run it: we cannot decide cheaply from pass 1 whether the
-    // faithful order reaches a nested `Sdk.props`, because pass 1's eager
-    // `Directory.Build.props` may itself suppress (or spuriously enable)
-    // the import that leads there. Only the deferred walk evaluates body
-    // import conditions in MSBuild's real order, so only it can answer.
-    if !deferred_pass_can_change_result(obs1.entry_has_sdk, sdk_resolver.is_some()) {
-        return (pass1, obs1);
-    }
-    // Pass 2: defer the `Directory.Build.props` splice to the first
-    // body-reached nested `Sdk.props`.
-    let (pass2, obs2) = walk_once(
-        doc,
-        project_path,
-        extra_properties,
-        environment,
-        implicit_props,
-        implicit_targets,
-        detected_packages_props,
-        sdk_resolver,
-        glob_resolver,
-        observer,
-        true,
-        target_framework_reads,
-        #[cfg(any(test, feature = "test-support"))]
-        probe,
-    );
-    // Pass 2 is the faithful single-pass model: it fires
-    // `Directory.Build.props` at exactly the first body-reached nested
-    // `Sdk.props`, re-evaluating the import gate/override there (just as
-    // MSBuild does, after the body and the nested `Sdk.props` have run).
-    // So body imports *before* that point don't see Directory.Build.props
-    // and imports *after* do — matching MSBuild, including when those
-    // properties flip a conditional `<Import>`. The one shape pass 2
-    // cannot model is a *dangle*: no body-reached nested `Sdk.props` ever
-    // runs (either there is none, or the import that would reach it is
-    // gated on a property only `Directory.Build.props` sets, so deferring
-    // it suppresses the nested SDK). MSBuild would then import no
-    // `Directory.Build.props` at all — but emitting nothing is a
-    // surprising regression versus the historical before-body splice, so
-    // we fall back to pass 1. We detect the dangle precisely:
-    // `pending_directory_build_props` is still `Some`, i.e. never
-    // `take()`n.
-    if obs2.directory_build_props_pending_unconsumed {
-        (pass1, obs1)
-    } else {
-        (pass2, obs2)
-    }
-}
-
 /// Observations read off [`State`] at the end of one [`walk_once`] pass,
 /// driving the two-pass decision in [`walk_with_imports`]. None are part
 /// of [`ParsedProject`].
 struct WalkObservations {
-    /// The entry project resolved an SDK of its own (root `Sdk=`
-    /// shorthand or explicit-form promotion). When true the eager
-    /// before-body splice already matches MSBuild — no second pass.
-    entry_has_sdk: bool,
-    /// Pass 2 only: the deferred `Directory.Build.props` was stashed but
-    /// never fired (no body-reached nested `Sdk.props` consumed it). The
-    /// dangle case — the orchestrator falls back to pass 1 rather than
-    /// emit a project with no `Directory.Build.props`. Always `false` on
-    /// pass 1 (nothing is ever deferred there).
-    directory_build_props_pending_unconsumed: bool,
     /// Some undefined `$(TargetFramework)` read was exact only because the
     /// walk ran under [`TargetFrameworkReads::Exact`].
     target_framework_read_exempted: bool,
@@ -453,24 +305,18 @@ fn into_resolved_items(items: Vec<OrderedResolvedItem>) -> Vec<ResolvedItem> {
     items.into_iter().map(|ordered| ordered.item).collect()
 }
 
-/// One evaluation pass. `defer_directory_build_props` controls whether
-/// the entry `Directory.Build.props` is spliced eagerly before the body
-/// (`false`) or stashed in `State::pending_directory_build_props` to be
-/// fired at the first nested `Sdk.props` (`true`). The public
-/// [`walk_with_imports`] is the two-pass orchestrator over this.
+/// One evaluation under one [`TargetFrameworkReads`] mode; the public
+/// [`walk_with_imports`] chooses the mode.
 #[allow(clippy::too_many_arguments)]
 fn walk_once<'r>(
     doc: &Document<'_>,
     project_path: &Path,
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
-    implicit_props: Option<&Path>,
-    implicit_targets: Option<&Path>,
     detected_packages_props: Option<&Path>,
     sdk_resolver: Option<&'r SdkResolver<'r>>,
     glob_resolver: Option<&'r GlobResolver<'r>>,
     observer: &'r Observer,
-    defer_directory_build_props: bool,
     target_framework_reads: TargetFrameworkReads,
     #[cfg(any(test, feature = "test-support"))] probe: Option<&ReadProbe>,
 ) -> (ParsedProject, WalkObservations) {
@@ -491,6 +337,7 @@ fn walk_once<'r>(
     state
         .foreign_definitions
         .record_document(root, project_path);
+    state.user_definitions.record_document(root, project_path);
     // Seed `imports_seen` with the entry project so an import that names
     // the entry — directly or through a chain — is skipped the way
     // MSBuild skips it (warning MSB4210, "attempting to import itself";
@@ -502,245 +349,26 @@ fn walk_once<'r>(
     state
         .walked_files
         .insert(canonicalise_or_normalise(observer, project_path));
-    state.implicit_directory_build_props_fallback = implicit_props.map(Path::to_path_buf);
     let project_dir = project_path.parent().unwrap_or_else(|| Path::new(""));
-    state.directory_build_props_splice_pending = true;
-    if let Some(Resolution { path, .. }) = resolve_directory_build_path(
-        &state,
-        "DirectoryBuildPropsPath",
-        implicit_props,
-        project_dir,
-    ) && should_import_default_true(
-        state
-            .lookup
-            .get_unescaped("ImportDirectoryBuildProps")
-            .as_deref(),
-        state.is_sticky_global("ImportDirectoryBuildProps"),
-    ) {
-        // Sdk.props can contain the standard Directory.Build.props rediscovery
-        // import before this walker reaches its explicit splice. Pre-record
-        // the import point we currently own so that standard rediscovery is
-        // still suppressed, while later SDK retargets to a different path keep
-        // flowing through normal import evaluation.
-        state.directory_build_props_splice_path = Some(canonicalise_or_normalise(observer, &path));
-    }
 
     // The entry root offers its `DefaultTargets` before its implicit SDK
     // imports, as each imported root does in [`walk_external_file`].
     latch_default_targets(root, &mut state);
 
-    // Resolve the project root's SDK shorthand (if any). The returned
-    // paths, when `Some`, are spliced as the OUTERMOST pair around the
-    // Directory.Build.* splice, matching MSBuild's effective ordering:
-    // Sdk.props → Directory.Build.props → body → Directory.Build.targets
-    // → Sdk.targets. MSBuild gets this ordering naturally because the
-    // SDK chain itself imports Directory.Build.* (from inside
-    // `Microsoft.Common.props`) *after* setting its own properties such
-    // as `UsingMicrosoftNETSdk` — so a Directory.Build.props that
-    // conditions on those names sees them defined. We keep the
-    // Directory.Build.* splice live even when the SDK resolves so that
-    // the implicit import point is handled in one controlled place instead
-    // of relying on deeper SDK files to rediscover and import the same
-    // Directory.Build.* files. Splicing Sdk.props *before*
-    // Directory.Build.props is the crucial bit: a Directory.Build.props
-    // that checks
-    // `<PropertyGroup Condition="'$(UsingMicrosoftNETSdk)' == 'true'">`
-    // would otherwise emit UndefinedProperty here even though MSBuild
-    // would have entered the group.
-    // Two ways the SDK chain can attach: the root-`Sdk` shorthand
-    // (handled by [`resolve_project_sdk`]) and MSBuild's explicit form
-    // — `<Project>` with no `Sdk` attribute but body `<Import Sdk="X"
-    // Project="Sdk.props"/>` / `Sdk.targets`. The explicit form is
-    // rarer but semantically equivalent, and the body walk would
-    // otherwise see the SDK imports *after* Directory.Build.props has
-    // already run (which itself depends on SDK-supplied properties).
-    // [`find_explicit_sdk_promotion`] hoists those body Imports to
-    // root-equivalent positions; the ranges it returns get marked in
-    // `state.hoisted_sdk_imports` so the body walk skips them on its
-    // pass (otherwise the body walk would re-reach the spliced files:
-    // harmless for `Sdk.props` — the top splice already registered it,
-    // so the duplicate-import skip fires — but `Sdk.targets` splices at
-    // the *bottom*, so a body-position walk would run it first and the
-    // splice itself would become the skipped duplicate, inverting
-    // MSBuild's order).
-    //
-    // Splice the props/targets *only when* the project asked for it.
-    // For the root-Sdk shorthand both always splice (the shorthand
-    // expands to `Sdk.props` *and* `Sdk.targets`); the import-site
-    // span attributes to the root `<Project>` element, which is
-    // where the `Sdk="X"` attribute lives. For the explicit form we
-    // honour what the user wrote: `Sdk.props` is required to trigger
-    // promotion at all; `Sdk.targets` only splices if the body has a
-    // matching `<Import Sdk=... Project="Sdk.targets"/>`. The
-    // import-site span for those splices points at the user's
-    // actual body `<Import>` element so diagnostics/items
-    // contributed by the spliced SDK file are attributed to the
-    // source location the user wrote, not the whole `<Project>`.
-    let (sdk_props_to_splice, sdk_targets_to_splice) = match resolve_project_sdk(root, &mut state) {
-        Some(sdk_paths) => {
-            // The entry project's own root `Sdk` *is* the framework SDK —
-            // record it (the one place we do).
-            state.record_sdk_root(&sdk_paths.root);
-            (
-                Some((sdk_paths.props, root.range())),
-                Some((sdk_paths.targets, root.range())),
-            )
-        }
-        None => match find_explicit_sdk_promotion(root, &state) {
-            Some(promotion) => {
-                // The entry's promoted explicit-form SDK — the same framework
-                // SDK in `<Import Sdk=... Project="Sdk.props"/>` spelling.
-                state.record_sdk_root(&promotion.sdk_paths.root);
-                state
-                    .hoisted_sdk_imports
-                    .insert(promotion.props_range.clone());
-                let targets = promotion.targets_range.map(|range| {
-                    state.hoisted_sdk_imports.insert(range.clone());
-                    (promotion.sdk_paths.targets, range)
-                });
-                (
-                    Some((promotion.sdk_paths.props, promotion.props_range)),
-                    targets,
-                )
-            }
-            None => (None, None),
-        },
-    };
-
-    if let Some((props, span)) = sdk_props_to_splice.as_ref() {
-        walk_external_file(props, span.clone(), &mut state);
+    // The root `Sdk` attribute: `Sdk.props` before the body, `Sdk.targets`
+    // after it, as MSBuild expands it. The explicit form, `<Import Sdk=…>` in
+    // the body, is an ordinary import at its own position
+    // ([`follow_explicit_import`]).
+    let sdk_paths = resolve_project_sdk(root, &mut state);
+    if let Some(paths) = sdk_paths.as_ref() {
+        // The entry project's own root `Sdk` *is* the framework SDK.
+        state.record_sdk_root(&paths.root);
+        walk_external_file(&paths.props, root.range(), &mut state);
     }
-
-    // MSBuild gates the implicit Directory.Build files on two
-    // well-known properties. `ImportDirectoryBuildProps` is checked
-    // *before* the project body, so its value must already be set
-    // when we look (the caller's `extra_properties`, or
-    // unset/empty meaning "import"). `ImportDirectoryBuildTargets`
-    // is checked *after* the body, so the project itself can write
-    // it via `<PropertyGroup>` to opt out.
-    //
-    // `Directory.Build{Props,Targets}Path` are MSBuild's escape
-    // hatch for redirecting the implicit import to a specific file.
-    // When set (case-insensitively non-empty) and the file exists,
-    // MSBuild imports that path instead of walking the tree to find
-    // the nearest `Directory.Build.*`. The override is resolved at
-    // the same point as the gate check — before-body for props,
-    // after-body for targets — so a project body can redirect the
-    // targets import but not the props one.
-    if defer_directory_build_props {
-        // Pass 2: defer the *entire* import decision — the
-        // `ImportDirectoryBuildProps` gate, the `DirectoryBuildPropsPath`
-        // override, and the resolved path — to the first body-reached
-        // nested `Sdk.props` (in `walk_external_file`), where MSBuild
-        // actually performs it (after the body and the nested `Sdk.props`
-        // have run). Stash only the fallback path that the fire site
-        // cannot otherwise reach; everything else is re-read from live
-        // state there.
-        state.pending_directory_build_props = Some(DeferredDirectoryBuildProps {
-            fallback: implicit_props.map(Path::to_path_buf),
-        });
-    } else if state.directory_build_props_splice_pending {
-        // Fallback position for SDK chains that never pass through the
-        // real `Microsoft.Common.props` Directory.Build.props import
-        // point (synthetic SDKs, or no SDK at all): fire the splice
-        // here, right after `Sdk.props` — the historical position. When
-        // the SDK walk above DID reach that import point, the splice
-        // already fired there (see `follow_explicit_import`) and the
-        // pending flag is already down.
-        fire_entry_directory_build_props_splice(&mut state);
-    }
-
-    // Only nested SDKs reached *during the body walk* count as MSBuild's
-    // "first `Sdk.props`" (and may fire the deferred splice). Nested SDKs
-    // reached while splicing the before-body `Directory.Build.props`
-    // (above) or the after-body `Directory.Build.targets` / entry
-    // `Sdk.targets` (below) sit on the wrong side of that import.
-    state.in_entry_body = true;
     walk_doc_body(root, project_dir, &mut state);
-    state.in_entry_body = false;
-
-    // `Sdk.targets` first, and `Directory.Build.targets` only if that walk did
-    // not already import it.
-    //
-    // MSBuild does not splice `Directory.Build.targets` after the body: it is
-    // imported from inside `Microsoft.Common.targets`, which the SDK's
-    // `Sdk.targets` chain reaches — and crucially *after*
-    // `Microsoft.NET.TargetFrameworkInference.targets` has computed
-    // `TargetFrameworkIdentifier` / `TargetFrameworkVersion`. Splicing it first
-    // put our copy at a position where that pair is still unset, and the walk's
-    // own duplicate-import skip then suppressed the real chain's import at the
-    // real position — so the file was walked exactly once, at the wrong time.
-    //
-    // The consequence was a wrong commit, not a decline: read from
-    // `Directory.Build.targets`, `'$(TargetFrameworkIdentifier)' ==
-    // '.NETFramework'` was *cleanly* false rather than undecidable, so the gate
-    // committed. That is how `FSharp.Profiles.props` in the pinned F# corpus
-    // published two `#if` symbols the real build never defines.
-    //
-    // Letting the chain place the import is better than moving our splice to
-    // after `Sdk.targets`: the position then comes from the real targets file
-    // rather than from a guess about where in `Sdk.targets` it sits, and it is
-    // right for every SDK-derived name at once, not just the framework pair.
-    // The explicit splice stays as the fallback for chains that never import it
-    // themselves — no SDK at all, or an SDK whose targets never reach
-    // `Microsoft.Common.targets` — which would otherwise lose the file entirely.
-    //
-    // The path and the gate are resolved **here**, before `Sdk.targets` runs, so
-    // the reorder is purely *subtractive*: every splice it performs is one the
-    // pre-reorder walker also performed, and walking `Sdk.targets` first only
-    // ever removes one (when the chain did it itself). Deciding them afterwards
-    // instead would let a value `Sdk.targets` writes *past* the real import
-    // point revive a splice MSBuild has already declined to make — an
-    // `ImportDirectoryBuildTargets` the body set to `false` and the SDK later
-    // sets back to `true` is never retried by MSBuild, because
-    // `Microsoft.Common.targets` has gone by.
-    let targets_to_import = resolve_directory_build_path(
-        &state,
-        "DirectoryBuildTargetsPath",
-        implicit_targets,
-        project_dir,
-    );
-    // Verdict on the snapshot, applied below only if the fallback splice is the
-    // decision that stands — see `directory_build_splice_is_untrusted`.
-    let snapshot_untrusted = state.directory_build_splice_is_untrusted(
-        DIRECTORY_BUILD_TARGETS_SPLICE,
-        targets_to_import.is_some(),
-    );
-    let targets_gate_open = should_import_default_true(
-        state
-            .lookup
-            .get_unescaped("ImportDirectoryBuildTargets")
-            .as_deref(),
-        state.is_sticky_global("ImportDirectoryBuildTargets"),
-    );
-    if let Some((targets, span)) = sdk_targets_to_splice.as_ref() {
-        walk_external_file(targets, span.clone(), &mut state);
+    if let Some(paths) = sdk_paths.as_ref() {
+        walk_external_file(&paths.targets, root.range(), &mut state);
     }
-    // The splice stands down entirely once the chain has reached its own import
-    // point; only a chain that never got there leaves the decision to the
-    // pre-`Sdk.targets` snapshot, which is the SDK-less and inert-SDK case the
-    // splice exists for.
-    if !state.sdk_reached_directory_build_targets_import && snapshot_untrusted {
-        // The chain never reached its own import point, so this snapshot is
-        // the decision — and it rested on a value we could not pin down.
-        // Only when a file actually resolves, though: with nothing to import,
-        // MSBuild's own `exists('')` is false whatever the gate says, so both
-        // sides skip and the claim stays exact.
-        state.note_directory_build_gate_uncertain(DIRECTORY_BUILD_TARGETS_SPLICE.1);
-    }
-    if let Some(Resolution { path, source }) = targets_to_import.as_ref()
-        && targets_gate_open
-        && !state.sdk_reached_directory_build_targets_import
-        && !state
-            .walked_files
-            .contains(&canonicalise_or_normalise(observer, path))
-    {
-        if matches!(source, ResolutionSource::Fallback) {
-            seed_directory_build_path(&mut state, "DirectoryBuildTargetsPath", path);
-        }
-        walk_directory_build_file(path, 0..0, DirectoryBuildFile::Targets, &mut state);
-    }
-
     // The property pass is complete — every import has been followed and
     // every `<PropertyGroup>` evaluated. Run the item pass against the
     // final property table.
@@ -810,8 +438,6 @@ fn walk_once<'r>(
             .get_unescaped("TargetFramework")
             .is_some_and(|value| !value.trim().is_empty());
     let observations = WalkObservations {
-        entry_has_sdk: sdk_props_to_splice.is_some(),
-        directory_build_props_pending_unconsumed: state.pending_directory_build_props.is_some(),
         target_framework_read_exempted: state.target_framework_read_exempted.get(),
         builds_its_own_target_framework,
         #[cfg(any(test, feature = "test-support"))]
@@ -820,10 +446,8 @@ fn walk_once<'r>(
     (state.into_project(), observations)
 }
 
-/// Examine the project root's `Sdk` attribute and decide whether the
-/// SDK chain will handle the import job. Four outcomes:
-///   * no attribute → returns `None`, caller takes the Directory.Build.*
-///     path silently;
+/// Examine the project root's `Sdk` attribute. Four outcomes:
+///   * no attribute → returns `None`, silently;
 ///   * attribute present, resolver supplied and returns `Ok(paths)` →
 ///     returns those paths, no diagnostic;
 ///   * attribute present but resolver missing → emits
@@ -895,121 +519,6 @@ fn resolve_project_sdk(root: Node<'_, '_>, state: &mut State<'_>) -> Option<SdkP
     }
 }
 
-/// The body pre-scan's result when a project uses MSBuild's explicit
-/// SDK form (no root `Sdk` attribute, `<Import Sdk="X" Project="Sdk.props"/>`
-/// inside the body) and we want to splice the SDK chain at root-equivalent
-/// positions. `props_range` is the byte range of the body Import node we
-/// promoted; `targets_range` is the matching `Sdk.targets` body Import
-/// if one exists (`None` if the project only declared `Sdk.props`).
-/// Both ranges are added to `state.hoisted_sdk_imports` so the body
-/// walk skips them on second encounter — without that, a body-position
-/// walk of `Sdk.targets` would register the file before the bottom
-/// splice, turning the splice into the skipped duplicate.
-struct ExplicitSdkPromotion {
-    sdk_paths: SdkPaths,
-    props_range: Range<usize>,
-    targets_range: Option<Range<usize>>,
-}
-
-/// When the project root has *no* `Sdk` attribute and its body opens
-/// with `<Import Sdk="X" Project="Sdk.props"/>` *as the very first
-/// element child*, hoist that import — and the matching trailing
-/// `Sdk.targets` — to the OUTERMOST splice positions, just like the
-/// root-Sdk shorthand. Without this, `walk_with_imports` would splice
-/// `Directory.Build.props` before the body, and the body's
-/// `Sdk.props` import would walk *after* Directory.Build.props — the
-/// reverse of MSBuild's effective ordering, causing
-/// `UndefinedProperty` diagnostics from a Directory.Build.props that
-/// conditions on SDK-supplied names.
-///
-/// Canonical-position discipline (deliberately narrow, so promotion
-/// never reorders user-visible work):
-///   * `Sdk.props` must be the **first** element child of root. Any
-///     preceding `<PropertyGroup>`, `<ItemGroup>`, etc. would in
-///     MSBuild evaluate *before* the SDK chain; promoting silently
-///     reverses that order.
-///   * `Sdk.targets` (if promoted at all) must be the **last** element
-///     child of root, and carry the same SDK name. Anything after it
-///     would in MSBuild run *after* Sdk.targets; promotion reverses
-///     that too. When something trails the import we leave it for the
-///     body walk in-place.
-///   * `<ImportGroup>` wrappers are not promotion candidates: the
-///     root-Sdk shorthand expands to bare `<Import>` elements at root
-///     position, so an `<ImportGroup>`-wrapped import is not
-///     semantically equivalent.
-///   * Conditional imports (any `Condition` attribute) are left to the
-///     body walk — promoting would silently bypass the gate.
-///   * If the SDK resolver is missing or returns `Err`, we return
-///     `None` and let the body walk emit the diagnostic naturally at
-///     its in-body position.
-///
-/// Emits no diagnostics: promotion is silent. Callers gate the splice
-/// on the returned `Some(_)` and mark `state.hoisted_sdk_imports` for
-/// the skip-on-body-walk contract.
-fn find_explicit_sdk_promotion(
-    root: Node<'_, '_>,
-    state: &State<'_>,
-) -> Option<ExplicitSdkPromotion> {
-    if root.attribute("Sdk").is_some() {
-        return None;
-    }
-    let resolver = state.sdk_resolver?;
-
-    let mut element_children = root.children().filter(Node::is_element);
-    let first = element_children.next()?;
-    let (props_node, sdk_name) = canonical_sdk_import(first, "Sdk.props")?;
-    // Promotion needs the canonical entry points; a locator-style
-    // resolution has none, so it is not a promotion candidate (the body
-    // walk handles the import naturally).
-    let sdk_paths = match resolver(sdk_name, state.observer).ok()? {
-        SdkResolution::Single(paths) => paths,
-        SdkResolution::Roots(_) => return None,
-    };
-
-    // `Sdk.targets` only promotes when it is the *last* element child
-    // of root. Re-scan to find the last element; if it's different from
-    // `props_node` and is a matching canonical `Sdk.targets`, promote
-    // it. (A project with only `Sdk.props` and no `Sdk.targets` still
-    // promotes the props import; targets stays unspliced.)
-    let last = root.children().rfind(Node::is_element)?;
-    let targets_range = if last.range() == props_node.range() {
-        // Only one element child total — `Sdk.props` itself. No
-        // `Sdk.targets` to promote.
-        None
-    } else {
-        canonical_sdk_import(last, "Sdk.targets")
-            .filter(|(_, name)| *name == sdk_name)
-            .map(|(node, _)| node.range())
-    };
-
-    Some(ExplicitSdkPromotion {
-        sdk_paths,
-        props_range: props_node.range(),
-        targets_range,
-    })
-}
-
-/// Treat `node` as a canonical `<Import Sdk="X" Project="<expected_project>"/>`:
-/// it must be an `<Import>` element with no `Condition` attribute, an
-/// `Sdk` attribute, and a `Project` attribute matching
-/// `expected_project`. Returns the node and the `Sdk` name on success.
-fn canonical_sdk_import<'a, 'input>(
-    node: Node<'a, 'input>,
-    expected_project: &str,
-) -> Option<(Node<'a, 'input>, &'a str)> {
-    if node.tag_name().name() != "Import" {
-        return None;
-    }
-    if node.attribute("Condition").is_some() {
-        return None;
-    }
-    let sdk_name = node.attribute("Sdk")?;
-    if node.attribute("Project") != Some(expected_project) {
-        return None;
-    }
-    Some((node, sdk_name))
-}
-
 /// Map a resolver-side [`SdkResolveError`] to the matching
 /// [`DiagnosticKind`]. Pulled out so the project-root and `<Import Sdk=>`
 /// handlers stay consistent.
@@ -1029,172 +538,6 @@ fn sdk_error_to_diagnostic(sdk_name: &str, err: SdkResolveError) -> DiagnosticKi
             name: sdk_name.to_string(),
             reason,
         },
-    }
-}
-
-/// How `resolve_directory_build_path` arrived at its returned path.
-/// `Override` means the caller (or project body) set `Directory.Build.*Path`
-/// explicitly — MSBuild preserves that value verbatim, so we must not
-/// rewrite it. `Fallback` means we used the precomputed nearest-ancestor
-/// file because no override was set — MSBuild's `Microsoft.Common.props`
-/// assigns the matching `*Path` property to this file before importing,
-/// so the caller seeds the lookup *if and only if* the import gate is open.
-enum ResolutionSource {
-    Override,
-    Fallback,
-}
-
-struct Resolution {
-    path: PathBuf,
-    source: ResolutionSource,
-}
-
-/// The entry `Directory.Build.props` import, deferred to fire at the
-/// first body-reached nested `Sdk.props` (pass 2 of the two-pass walk).
-/// Carries only the inputs [`walk_external_file`] cannot otherwise reach:
-/// the precomputed nearest-ancestor fallback (`walk_once`'s
-/// `implicit_props`, or `None` when there is none). The actual import
-/// decision — the `ImportDirectoryBuildProps` gate, the
-/// `DirectoryBuildPropsPath` override, and the resulting path — is
-/// re-resolved against *live* state at the fire point, because MSBuild
-/// evaluates them there (after the body and the nested `Sdk.props` run),
-/// not at the before-body position.
-struct DeferredDirectoryBuildProps {
-    fallback: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DirectoryBuildFile {
-    Props,
-    Targets,
-}
-
-/// Write `value` (the resolved file path, forward-slash normalised) to
-/// `state.lookup` under `property_name`. Used to mirror MSBuild's
-/// implicit `DirectoryBuild{Props,Targets}Path` assignment that happens
-/// inside the gated import block in `Microsoft.Common.props`. Bypasses
-/// the `protected` set on purpose: callers seed only when their own
-/// gate check already decided to import, and `DirectoryBuildPropsPath` /
-/// `DirectoryBuildTargetsPath` are not reserved names.
-fn seed_directory_build_path(state: &mut State<'_>, property_name: &str, path: &Path) {
-    let value = path.to_string_lossy().replace('\\', "/");
-    // A path *we* discovered on disk, not project XML: it enters the escaped
-    // domain through `insert_computed`, so a `%`, `;` or `(` in it is inert
-    // rather than an escape, a list separator, or an expression delimiter.
-    state.lookup.insert_computed(property_name, value);
-}
-
-/// Pick the file path to use for an implicit `Directory.Build.*`
-/// import: the explicit `Directory.Build{Props,Targets}Path` override
-/// (when set and pointing at an existing file) wins; otherwise the
-/// precomputed nearest-ancestor `fallback`. Returns `None` when the
-/// override is set but its file doesn't exist (MSBuild's
-/// `Microsoft.Common.props` gates the import on `Exists('$(...)')`,
-/// so a stale override silently skips rather than falling back to
-/// the nearest sibling — that would be a worse divergence). Relative
-/// override paths resolve against `project_dir`.
-///
-/// An *empty override supplied as a read-only global* also returns
-/// `None`: MSBuild assigns `DirectoryBuild*Path` to the discovered
-/// path only when the property is unset, and a global cannot be
-/// written through, so the value stays "" and `Exists('')` is false —
-/// the import is skipped with no fallback. An empty value that is
-/// *not* a sticky global (unset, or written by the project body —
-/// where the default-fill can take effect) keeps falling back to the
-/// discovered file.
-///
-/// Pure: this never mutates `state`. The caller is responsible for
-/// seeding `$(<override_property>)` to the resolved path when the
-/// result is [`ResolutionSource::Fallback`] *and* the import gate
-/// passes — MSBuild's assignment of `DirectoryBuild*Path` sits inside
-/// the gated import block in `Microsoft.Common.props`, so doing it
-/// here would leak a phantom path when the gate is closed.
-fn resolve_directory_build_path(
-    state: &State<'_>,
-    override_property: &str,
-    fallback: Option<&Path>,
-    project_dir: &Path,
-) -> Option<Resolution> {
-    // An override that names a file on disk: a point of use. Padding is trimmed
-    // *in the domain*, before decoding — an escaped `%20` is part of the
-    // filename, not padding (see `Escaped::trimmed_unescaped`).
-    if let Some(trimmed) = state
-        .lookup
-        .get(override_property)
-        .map(|v| v.trimmed_unescaped())
-    {
-        if !trimmed.is_empty() {
-            // MSBuild accepts both `\` and `/` on either platform; explicit
-            // `<Import>` resolution normalises to `/` before joining, and
-            // overrides must follow the same rule or `alt\Custom.targets`
-            // would probe a literal-backslash filename on Unix and silently
-            // skip the import.
-            let normalised = trimmed.replace('\\', "/");
-            let candidate = Path::new(&normalised);
-            let resolved = if candidate.is_absolute() {
-                candidate.to_path_buf()
-            } else {
-                project_dir.join(candidate)
-            };
-            return observed::exists(state.observer, &resolved).then_some(Resolution {
-                path: resolved,
-                source: ResolutionSource::Override,
-            });
-        }
-        // Empty value. A read-only global stays empty (the
-        // `Microsoft.Common.props` discovery assigns this property only
-        // when unset, and cannot write through a global), so
-        // `Exists('')` is false and the import is skipped — no
-        // fallback. A non-global empty (unset / body-written) falls
-        // through to the discovered file below.
-        if state.is_sticky_global(override_property) {
-            return None;
-        }
-    }
-    Some(Resolution {
-        path: fallback?.to_path_buf(),
-        source: ResolutionSource::Fallback,
-    })
-}
-
-/// Reproduce MSBuild's `Microsoft.Common.props` gate for
-/// `Directory.Build.*`: the property defaults to "true" when empty or
-/// unset, and the import fires when the value is MSBuild-**true**.
-///
-/// The gate is a condition — `'$(ImportDirectoryBuildProps)' == 'true'`
-/// in `Microsoft.Common.props`, and the same shape for the targets side
-/// in `Microsoft.Common.targets` — so it is an MSBuild `==`, which
-/// coerces *both* operands through [`condition::parse_msbuild_bool`]
-/// before falling back to a string compare. Deciding it with a bare
-/// `== "true"` string test therefore skips files the real build
-/// imports: probed end-to-end (dotnet 10.0.301, 2026-08-01) `yes`, `on`
-/// and `!false` all import, while `no`, `off` and `0` do not. That
-/// shortfall is invisible downstream — a skipped import loses whatever
-/// properties and items the file contributes, and nothing marks the
-/// result uncertain — so the vocabulary must come from the one place
-/// that models it rather than be re-derived here.
-///
-/// A whitespace-only value takes the default-fill arm because MSBuild
-/// compares it equal to empty (`'   ' == ''` is true, oracle-pinned
-/// 2026-08-01). Padding around a *non-empty* value is not stripped, so
-/// `" true "` is not MSBuild-true — which is exactly
-/// [`condition::parse_msbuild_bool`]'s deliberately untrimmed contract.
-///
-/// `is_sticky_global` distinguishes a read-only global from an
-/// unset/body-written value. MSBuild's default-fill
-/// (`<Prop Condition="'$(Prop)' == ''">true</Prop>`) cannot write
-/// through a global, so an *empty global* stays empty — the gate
-/// `'$(Prop)' == 'true'` is then false and the import is skipped.
-/// Only the empty case differs: a non-empty global ("true", "0", …)
-/// compares identically either way.
-fn should_import_default_true(value: Option<&str>, is_sticky_global: bool) -> bool {
-    match value {
-        // Read-only global: no default-fill, so the value is taken
-        // verbatim and only an MSBuild-true spelling opens the gate.
-        Some(s) if is_sticky_global => is_msbuild_true(s),
-        None => true,
-        Some(s) if s.trim().is_empty() => true,
-        Some(s) => is_msbuild_true(s),
     }
 }
 
@@ -1364,8 +707,6 @@ struct State<'r> {
     /// cannot be rewritten by MSBuild's `Microsoft.Common.props`
     /// default-fill assignments, so an *empty* sticky global stays
     /// empty rather than defaulting to "true" / the discovered path.
-    /// Consulted by the `Directory.Build.*` import gates
-    /// ([`should_import_default_true`], [`resolve_directory_build_path`]).
     sticky_globals: HashSet<String>,
     /// What the caller's environment said about `MSBuildExtensionsPath`, held
     /// aside rather than promoted: whether that value survives is the one
@@ -1449,11 +790,6 @@ struct State<'r> {
     /// definition) may be about any list.
     #[cfg(any(test, feature = "test-support"))]
     package_cause_owners: HashMap<usize, item_pass::PackageItemKind>,
-    /// Whether the walk has spliced in a `Directory.Build.*` file itself
-    /// ([`walk_directory_build_file`]), standing in for an import an SDK's
-    /// `Microsoft.Common.*` makes, which MSBuild makes only when an SDK chain
-    /// reaches it (#676).
-    directory_build_file_spliced: bool,
     /// Whether `MSBuildProjectDefaultTargets` is settled ([`latch_default_targets`]):
     /// set from a root's `DefaultTargets`, or left unset because a root's
     /// could not be decided.
@@ -1528,12 +864,6 @@ struct State<'r> {
     /// completes (the `Directory.Packages.props` discharge check reads
     /// it).
     walked_files: HashSet<PathBuf>,
-    /// The nearest-ancestor `Directory.Build.props` detected by the
-    /// caller, stashed so [`fire_entry_directory_build_props_splice`]
-    /// can reach it from whichever position consumes the entry splice
-    /// (the real `Microsoft.Common.props` import point, or the
-    /// after-`Sdk.props` fallback).
-    implicit_directory_build_props_fallback: Option<PathBuf>,
     /// The canonical file successfully walked through an
     /// `<Import Project="$(DirectoryPackagesPropsPath)">`-shaped import —
     /// NuGet's central-package import point (only `NuGet.props` uses that
@@ -1591,88 +921,6 @@ struct State<'r> {
     /// Where every file-system query of the walk is made and recorded
     /// ([`crate::observed`]), the resolvers' included.
     observer: &'r Observer,
-    /// Byte ranges of *entry-project* body `<Import Sdk="X"
-    /// Project="Sdk.{props,targets}"/>` nodes that the pre-scan in
-    /// [`find_explicit_sdk_promotion`] has hoisted to the root SDK
-    /// splice positions. When the entry project's body walk later
-    /// reaches one of these nodes, [`follow_explicit_import`] must
-    /// skip it — for `Sdk.props` the walk would be a harmless
-    /// duplicate skip (the top splice already registered the file),
-    /// but `Sdk.targets` splices at the *bottom*, so walking it at
-    /// body position would register it first and make the splice the
-    /// skipped duplicate. Empty unless we're in the explicit-only
-    /// promotion case.
-    ///
-    /// The ranges are byte offsets into the *entry project's* XML.
-    /// [`follow_explicit_import`] gates the skip on
-    /// `import_site_span.is_none()` (i.e. "we're inside the entry
-    /// project body, not an imported file") so an `<Import>` at the
-    /// same byte offset inside `Directory.Build.props` or `Sdk.props`
-    /// is never accidentally matched.
-    hoisted_sdk_imports: HashSet<Range<usize>>,
-    /// Canonical path of the entry project's `Directory.Build.props` import
-    /// point owned by this walker. SDK props can contain the standard
-    /// rediscovery import before the explicit splice has fired; when that
-    /// import points at this same path, following it would double-walk user
-    /// props.
-    directory_build_props_splice_path: Option<PathBuf>,
-    /// Canonical path of the entry project's `Directory.Build.targets` import
-    /// point already consumed by the explicit after-body splice. SDK targets
-    /// also contain the standard rediscovery import for this property; when it
-    /// points at this same path, following it would double-walk user targets.
-    directory_build_targets_splice_path: Option<PathBuf>,
-    /// Set while walking the explicit Directory.Build import point and its
-    /// transitive imports. If that import rewrites `DirectoryBuild*Path`, the
-    /// later SDK rediscovery line must still be suppressed: MSBuild has only
-    /// one such import point, and rewrites inside the imported file do not
-    /// create a second one.
-    active_directory_build_splice: Option<DirectoryBuildFile>,
-    /// True before the explicit Directory.Build.props import point has been
-    /// consumed or skipped. While this is true, an SDK props file's standard
-    /// rediscovery import should be suppressed if it points at the same live
-    /// path that the explicit splice is about to handle.
-    directory_build_props_splice_pending: bool,
-    directory_build_props_path_written_by_splice: bool,
-    directory_build_targets_path_written_by_splice: bool,
-    /// The SDK chain reached its own `Directory.Build.targets` import point
-    /// (`Microsoft.Common.targets`), whatever that import then decided.
-    ///
-    /// A chain that declares the import point owns the decision outright, and
-    /// the explicit splice must stand down — its answer is MSBuild's answer,
-    /// including every way of saying no: the gate turned off by a
-    /// `CustomBeforeDirectoryBuildTargets` hook, a path the discovery group
-    /// never computed because the gate was off when *it* ran, or simply no such
-    /// file on disk. None of those are retried by MSBuild, and all of them are
-    /// indistinguishable from each other at the import itself, which is why
-    /// this is one flag rather than a model of the discovery sequence.
-    ///
-    /// Probed on SDK 10.0.109: a chain declaring the import with no discovery
-    /// behind it imports nothing, rather than falling back to the file on disk.
-    sdk_reached_directory_build_targets_import: bool,
-    /// The entry project's `Directory.Build.props` import, deferred from
-    /// its usual before-body position. `Some` only on the orchestrator's
-    /// second pass (`defer_directory_build_props = true`) and only
-    /// between the before-body point and the first body-reached nested
-    /// `Sdk.props` that fires it. [`walk_external_file`] `take()`s it at
-    /// that first nested `Sdk.props` (so the import is attempted at most
-    /// once) and re-resolves the gate/override/path against live state
-    /// there. If it is still `Some` at the end of the walk the deferred
-    /// import never fired — the import leading to the nested SDK was
-    /// itself gated on a `Directory.Build.props`-set property, so deferral
-    /// suppressed the nested SDK too — and the orchestrator falls back to
-    /// the before-body splice (pass 1). Not part of [`ParsedProject`].
-    pending_directory_build_props: Option<DeferredDirectoryBuildProps>,
-    /// `true` only while walking the *entry project's own body* (not its
-    /// before/after-body `Directory.Build.*` / `Sdk.*` splices, and not
-    /// any imported file's body). Gates the nested-SDK deferral logic in
-    /// [`walk_external_file`]: only a nested `Sdk.props` reached *through
-    /// the entry body* is the "first `Sdk.props`" MSBuild would run, so
-    /// only such a one should fire the deferred `Directory.Build.props`.
-    /// A nested SDK reached while
-    /// walking an already-spliced `Directory.Build.props` or
-    /// `Directory.Build.targets` must not reposition the entry
-    /// `Directory.Build.props`. Not part of [`ParsedProject`].
-    in_entry_body: bool,
     /// The [`SdkPaths::root`] of the entry project's own (root / promoted)
     /// SDK, recorded by [`Self::record_sdk_root`]; `None` for an SDK-less
     /// entry. Surfaced on [`ParsedProject::resolved_sdk_root`] by
@@ -1684,6 +932,14 @@ struct State<'r> {
     entry_sdk_version_dir: Option<PathBuf>,
     /// Surfaced on [`ParsedProject::foreign_definitions`].
     foreign_definitions: crate::ForeignDefinitions,
+    /// Per SDK file, by [`import_dedup_key`]: whether its import closure
+    /// reaches a `Directory.Build.*` import point
+    /// ([`State::reaches_directory_build_point`]).
+    reaches_directory_build_point: HashMap<String, bool>,
+    /// The definitions of every document the walk entered that is not an
+    /// SDK's ([`Self::is_sdk_file`]), the entry project included: what user
+    /// content may write. Read by [`import_decides_user_content`].
+    user_definitions: crate::ForeignDefinitions,
     /// Surfaced on [`ParsedProject::workload_definitions`].
     workload_definitions: crate::ForeignDefinitions,
     /// Surfaced on [`ParsedProject::sdk_files_imported_from_outside`].
@@ -1806,10 +1062,6 @@ struct State<'r> {
     /// ([`reads`]); the walk itself runs no target.
     #[cfg(any(test, feature = "test-support"))]
     target_definitions: Vec<(String, reads::TargetDefinition)>,
-    /// Which `Directory.Build.*` files the walk spliced in itself, and
-    /// whether an SDK chain reached the import point each stands in for.
-    #[cfg(any(test, feature = "test-support"))]
-    directory_build_splices: reads::DirectoryBuildSplices,
     /// Whether a file the walk reached names `InitialTargets`, which MSBuild
     /// runs before any target a build asks for.
     #[cfg(any(test, feature = "test-support"))]
@@ -2219,7 +1471,6 @@ impl<'r> State<'r> {
             package_versions: Vec::new(),
             package_versions_untracked: false,
             default_targets_decided: false,
-            directory_build_file_spliced: false,
             update_batches: HashMap::new(),
             global_package_references: Vec::new(),
             framework_references: Vec::new(),
@@ -2234,7 +1485,6 @@ impl<'r> State<'r> {
             imports_seen: HashSet::new(),
             imports_seen_fuzzy: HashSet::new(),
             walked_files: HashSet::new(),
-            implicit_directory_build_props_fallback: None,
             walked_directory_packages_props_import: None,
             depth: 0,
             entry_project_dir,
@@ -2242,19 +1492,11 @@ impl<'r> State<'r> {
             sdk_resolver,
             glob_resolver,
             observer,
-            hoisted_sdk_imports: HashSet::new(),
-            directory_build_props_splice_path: None,
-            directory_build_targets_splice_path: None,
-            active_directory_build_splice: None,
-            directory_build_props_splice_pending: false,
-            directory_build_props_path_written_by_splice: false,
-            directory_build_targets_path_written_by_splice: false,
-            sdk_reached_directory_build_targets_import: false,
-            pending_directory_build_props: None,
-            in_entry_body: false,
             resolved_sdk_root: None,
             entry_sdk_version_dir: None,
             foreign_definitions: crate::ForeignDefinitions::default(),
+            user_definitions: crate::ForeignDefinitions::default(),
+            reaches_directory_build_point: HashMap::new(),
             workload_definitions: crate::ForeignDefinitions::default(),
             sdk_files_imported_from_outside: BTreeSet::new(),
             compile_context: false,
@@ -2281,8 +1523,6 @@ impl<'r> State<'r> {
             entry_project_path: project_path.to_path_buf(),
             #[cfg(any(test, feature = "test-support"))]
             target_definitions: Vec::new(),
-            #[cfg(any(test, feature = "test-support"))]
-            directory_build_splices: reads::DirectoryBuildSplices::default(),
             #[cfg(any(test, feature = "test-support"))]
             initial_targets_named: false,
             #[cfg(any(test, feature = "test-support"))]
@@ -2383,142 +1623,131 @@ impl<'r> State<'r> {
             && !is_toolset_predefined_name(&lower)
     }
 
-    /// Is the *current* value of `name` exactly what MSBuild holds at this
-    /// point in the walk? Asked at the `Directory.Build.*` splice, where the
-    /// answer decides whether a whole user-authored file joins the walk.
-    ///
-    /// Read-site, not write-site, and the distinction is load-bearing. The
-    /// analogous `define_context` / `package_context` machinery latches at the
-    /// *write*, which is equivalent for them because their values are consumed
-    /// at `into_project` — every write precedes the read. This value is
-    /// consumed **mid-walk**, so latching at the write is wrong twice over: a
-    /// later clean unconditional overwrite re-pins the value and the two sides
-    /// agree after all, and a body read that happens *before* the import sees
-    /// the same absence MSBuild sees (probed: a body `$(FromDirBuild)` reads
-    /// empty even when `Directory.Build.targets` does define it, because the
-    /// body is evaluated first). Both would be spurious declines.
-    ///
-    /// So the question is asked once, of the final value, at the moment the
-    /// splice consumes it.
-    fn gate_value_is_exact(&self, name: &str) -> bool {
-        // Deliberately the **name-keyed** channels only, and not
-        // [`Self::undefined_read_is_exact`], which folds in `walk_opaque`.
-        // Opacity is latched by ordinary SDK structure — an unfollowable
-        // sub-import, a `<Choose>` the chain gates on a property we don't
-        // model — and routing it here turned every such project's Compile set
-        // uncertain, which is exactly the wholesale decline the
-        // `msbuild-trust-audit` skill warns the generic seam causes. Six
-        // existing tests assert that SDK structural uncertainty must *not*
-        // reintroduce Compile uncertainty, and they were right to.
-        //
-        // What is left is precise: the three channels say a write *of this
-        // name* was undecided, refused, or rode SDK-tainted input. That is the
-        // question the splice actually needs answered, and it holds whether or
-        // not the name currently has a value — an undecided write that did not
-        // happen is recorded the same way as one that did.
-        self.trust_of(name).is_certain()
-    }
-
-    /// Record that a `Directory.Build.*` splice decision rested on a value we
-    /// could not pin down. Both consequences follow from the same fact, and
-    /// both directions are covered: whichever way we resolved the gate, the
-    /// governed file may have been imported where the real build skips it, or
-    /// skipped where the real build imports it.
-    /// Ask [`Self::gate_value_is_exact`] of both names a splice decision rests
-    /// on — whether to import, and which file — and record uncertainty if
-    /// either is unpinned.
-    /// Two inputs decide the import, and they fail differently:
-    ///
-    /// * an unpinned **path** is uncertain *whatever* resolved, because the
-    ///   value we resolved from may not be the one MSBuild resolved from — so
-    ///   "nothing resolved here" is no proof that nothing is imported there;
-    /// * an unpinned **gate** only matters once a file has actually resolved.
-    ///   With an exact path resolving to nothing, MSBuild's own
-    ///   `exists('$(DirectoryBuild*Path)')` is false however the gate reads, so
-    ///   both sides skip and the claim is exact.
-    ///
-    /// Getting that asymmetry wrong costs in either direction: too eager and
-    /// `items_uncertain` stops the LSP folding a project it could have
-    /// analysed, too lax and a missing Compile item is published as fact.
-    fn note_directory_build_splice_decision(
-        &mut self,
-        splice: (&str, &str),
-        a_file_resolved: bool,
-    ) {
-        if self.directory_build_splice_is_untrusted(splice, a_file_resolved) {
-            self.note_directory_build_gate_uncertain(splice.1);
+    /// Whether the file at `path`, or a file its imports name, imports a
+    /// `Directory.Build.*` file: has an `<Import>` reading one of
+    /// [`DIRECTORY_BUILD_IMPORT_INPUTS`]. Read off the files' text, each once
+    /// per evaluation; an import is followed when its path expands exactly
+    /// (`$(MSBuildThisFileDirectory)` standing for the file's own directory)
+    /// to a file that exists. One whose path does not is not followed: an SDK
+    /// import the walk cannot resolve is the standing Compile-tolerance trade.
+    fn reaches_directory_build_point(&mut self, path: &Path) -> bool {
+        let key = import_dedup_key(path);
+        if let Some(&known) = self.reaches_directory_build_point.get(&key) {
+            return known;
         }
-    }
-
-    /// [`Self::note_directory_build_splice_decision`]'s verdict without
-    /// recording it, for the one decision taken from a *snapshot*: the
-    /// pre-`Sdk.targets` read in `walk_once` serves only the fallback splice,
-    /// and is discarded when the chain reaches its own import point. Recording
-    /// it there regardless would decline a project whose SDK cleanly re-pins
-    /// the gate before that point — the verdict has to travel to where it is
-    /// used, or not at all.
-    fn directory_build_splice_is_untrusted(
-        &self,
-        (gate_name, path_name): (&str, &str),
-        a_file_resolved: bool,
-    ) -> bool {
-        !self.gate_value_is_exact(path_name)
-            || (a_file_resolved && !self.gate_value_is_exact(gate_name))
-    }
-
-    fn note_directory_build_gate_uncertain(&mut self, path_name: &str) {
-        // The governed file's property writes are now neither reliably present
-        // nor reliably absent, so no *later* undefined read can claim
-        // exactness. Same conclusion an ordinary `<Import>`'s undecided gate
-        // reaches, reached at the same point in the walk.
-        let cause = match self.trust_of(path_name).unpinned() {
-            Some(root) => OpacityCause::Gate(root.clone()),
-            None => OpacityCause::Unentered(format!(
-                "the Directory.Build import that `$({path_name})` governs"
-            )),
+        // A cycle reaches nothing more than its first visit finds.
+        self.reaches_directory_build_point
+            .insert(key.clone(), false);
+        let Ok(Ok(parsed)) = observed::read_document(self.observer, path) else {
+            return false;
         };
-        self.latch_walk_opaque(cause);
-        // Every captured item facet, not just Compile. Routed through
-        // `mark_structural_skip` rather than setting `items_uncertain` by hand:
-        // a `Directory.Build.*` file holds `<ProjectReference>` and
-        // `<PackageReference>` as readily as `<Compile>`, and a bespoke flag
-        // would have left those facets trusted — this crate's recurring "one
-        // missing entry per round" defect. That helper already means "an import
-        // that could not be resolved to a definite decision", which is exactly
-        // this.
-        //
-        // Deliberately the *non*-tolerant helper even inside the SDK subtree.
-        // The tolerance in `mark_structural_skip_respecting_sdk_compile_tolerance`
-        // is a coverage trade for SDK machinery; a wrongly-skipped
-        // `Directory.Build.props` drops hand-written sources by construction.
-        self.mark_structural_skip(
-            StructuralCompileItemUncertainty::ImportProjectUnresolved {
-                project: format!("$({path_name})"),
-            },
-            0..0,
-        );
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let doc = parsed.document();
+        let mut next = Vec::new();
+        let mut reaches = false;
+        for import in doc.descendants().filter(|n| n.has_tag_name("Import")) {
+            if [import.attribute("Project"), import.attribute("Condition")]
+                .into_iter()
+                .flatten()
+                .flat_map(properties::property_references)
+                .any(|name| {
+                    DIRECTORY_BUILD_IMPORT_INPUTS
+                        .iter()
+                        .any(|input| input.eq_ignore_ascii_case(name))
+                })
+            {
+                reaches = true;
+                break;
+            }
+            if import.attribute("Sdk").is_some() {
+                continue;
+            }
+            let Some(raw) = import.attribute("Project") else {
+                continue;
+            };
+            let dir_text = format!("{}/", dir.to_string_lossy().replace('\\', "/"));
+            let raw = raw
+                .replace("$(MSBuildThisFileDirectory)", &dir_text)
+                .replace("$(msbuildthisfiledirectory)", &dir_text);
+            let expansion = item_pass::expand_silent(&raw, self);
+            if expansion.had_issue() || expansion.unpinned_root.is_some() {
+                continue;
+            }
+            for segment in expansion.value.split_list() {
+                if segment.is_filespec_wildcard() {
+                    continue;
+                }
+                let target = normalise(&dir.join(segment.unescape().replace('\\', "/")));
+                if observed::exists(self.observer, &target) {
+                    next.push(target);
+                }
+            }
+        }
+        if !reaches {
+            reaches = next
+                .into_iter()
+                .any(|target| self.reaches_directory_build_point(&target));
+        }
+        self.reaches_directory_build_point.insert(key, reaches);
+        reaches
+    }
+
+    /// Whether `path` is one of an SDK's files: under a root of
+    /// [`Self::sdk_tolerance_roots`] by its own canonical path, or by its
+    /// directory's.
+    ///
+    /// The two arms are compared against the recorded (canonical) roots. The
+    /// first is the primary check (normal SDK files, and imports through
+    /// differently-spelt paths that agree only after canonicalisation). The
+    /// second exists for the file-level symlink-merge layout (Nix's combined
+    /// dotnet tree, but any store-of-symlinks qualifies): there the merge
+    /// tree's directories are real while its leaf files are per-file symlinks
+    /// back to the originating store, so a workload `WorkloadManifest.targets`
+    /// canonicalises into a *different* store than its own directory does.
+    /// The first arm alone then wrongly scores that SDK-internal manifest as a
+    /// user file and lets its `<ImportGroup>` conditions (e.g.
+    /// `'$(TargetPlatformIdentifier)' == 'android'`) flip `items_uncertain`,
+    /// refusing the fold for every real SDK project (`sdk_project_fold_e2e`).
+    ///
+    /// The second arm canonicalises the directory, so it is not fooled by a
+    /// path that only *lexically* sits under a root: an SDK file importing
+    /// `../user.props` (whose directory canonicalises outside every root) or a
+    /// directory symlink inside the SDK tree pointing out are both correctly
+    /// not the SDK's; only a genuine leaf-file symlink out of a real in-tree
+    /// directory is.
+    fn is_sdk_file(&self, path: &Path) -> bool {
+        let canon = canonicalise_or_normalise(self.observer, path);
+        let dir_canon = path
+            .parent()
+            .map(|dir| canonicalise_or_normalise(self.observer, dir));
+        self.sdk_tolerance_roots.iter().any(|root| {
+            canon.starts_with(root)
+                || dir_canon
+                    .as_deref()
+                    .is_some_and(|dir| dir.starts_with(root))
+        })
     }
 
     /// Record the [`SdkPaths::root`] of the entry project's own SDK.
     ///
-    /// Called **only** for the entry root's `Sdk` shorthand and its
-    /// promoted explicit form — the unambiguous framework SDK. We deliberately
+    /// Called **only** for the entry root's `Sdk` shorthand and an
+    /// `<Import Sdk=… Project="Sdk.props"/>` in the entry body, its explicit
+    /// form — the unambiguous framework SDK. We deliberately
     /// do *not* record SDKs reached anywhere else (nested imports, an imported
     /// file's own root `Sdk`, `Directory.Build.{props,targets}` helpers): which
     /// of a body's many `<Import Sdk=...>` / `Sdk.props` / `Sdk.targets` hits
     /// "establishes" the framework is subtle and order-dependent, so rather
     /// than guess we leave [`ParsedProject::resolved_sdk_root`] `None` for
     /// SDK-less entries and let the consumer fall back to its own default-root
-    /// probe. `first`-wins is therefore moot in practice (one entry SDK), but
-    /// kept so a future explicit-form change can't double-record.
+    /// probe. `first`-wins keeps the first such SDK when a body imports more
+    /// than one.
     fn record_sdk_root(&mut self, root: &Path) {
         let first = self.resolved_sdk_root.is_none();
         self.resolved_sdk_root
             .get_or_insert_with(|| root.to_path_buf());
         // Also tolerate it: this is the entry chokepoint for both the `Sdk`
-        // shorthand and the promoted explicit form (`<Import Sdk=… Project=
-        // "Sdk.props"/>` as the first body element), and the latter resolves on
-        // a path that never reaches `resolve_project_sdk`. Without this its SDK
+        // shorthand and the explicit form, and the latter resolves on a path
+        // that never reaches `resolve_project_sdk`. Without this its SDK
         // props/targets would be judged user-authored.
         let version_dir = self.note_sdk_tolerance(root);
         if first {
@@ -2804,7 +2033,6 @@ impl<'r> State<'r> {
             #[cfg(any(test, feature = "test-support"))]
                 package_cause_owners: _,
             default_targets_decided: _,
-            directory_build_file_spliced: _,
             update_batches: _,
             package_versions,
             package_versions_untracked,
@@ -2821,7 +2049,6 @@ impl<'r> State<'r> {
             imports_seen: _,
             imports_seen_fuzzy: _,
             walked_files: _,
-            implicit_directory_build_props_fallback: _,
             walked_directory_packages_props_import: _,
             depth: _,
             entry_project_dir: _,
@@ -2829,19 +2056,11 @@ impl<'r> State<'r> {
             sdk_resolver: _,
             glob_resolver: _,
             observer: _,
-            hoisted_sdk_imports: _,
-            directory_build_props_splice_path: _,
-            directory_build_targets_splice_path: _,
-            active_directory_build_splice: _,
-            directory_build_props_splice_pending: _,
-            directory_build_props_path_written_by_splice: _,
-            directory_build_targets_path_written_by_splice: _,
-            sdk_reached_directory_build_targets_import: _,
-            pending_directory_build_props: _,
-            in_entry_body: _,
             resolved_sdk_root,
             entry_sdk_version_dir: _,
             foreign_definitions,
+            user_definitions: _,
+            reaches_directory_build_point: _,
             workload_definitions,
             sdk_files_imported_from_outside,
             locally_overridable,
@@ -2870,8 +2089,6 @@ impl<'r> State<'r> {
                 entry_project_path: _,
             #[cfg(any(test, feature = "test-support"))]
                 target_definitions: _,
-            #[cfg(any(test, feature = "test-support"))]
-                directory_build_splices: _,
             #[cfg(any(test, feature = "test-support"))]
                 initial_targets_named: _,
             #[cfg(any(test, feature = "test-support"))]
@@ -3036,15 +2253,6 @@ impl<'r> State<'r> {
             read_set: ReadSet::default(),
             read_counts: ReadCounts::default(),
             resolved_sdk_root,
-        }
-    }
-
-    fn record_directory_build_path_write(&mut self, name: &str) {
-        let written_by_splice = self.active_directory_build_splice.is_some();
-        if name.eq_ignore_ascii_case("DirectoryBuildPropsPath") {
-            self.directory_build_props_path_written_by_splice = written_by_splice;
-        } else if name.eq_ignore_ascii_case("DirectoryBuildTargetsPath") {
-            self.directory_build_targets_path_written_by_splice = written_by_splice;
         }
     }
 
@@ -3551,8 +2759,9 @@ impl<'r> State<'r> {
         }
         // Once the walk has passed content it could not see, any value it holds
         // may have been rewritten there. Such a value is trusted when a
-        // condition reads nothing worse (a deliberate trade-off — see
-        // `gate_value_is_exact`), but it cannot be the operand that settles an
+        // condition reads nothing worse (a deliberate trade-off: folding
+        // opacity into every read declines every real SDK project), but it
+        // cannot be the operand that settles an
         // unknown one: that would decide a branch the base rule leaves open.
         // Telling a rewritable value from a current one needs values to carry
         // their own staleness (`docs/msbuild-value-carried-provenance-plan.md`,
@@ -4063,8 +3272,37 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
             // The group's `Condition` gates its imports; an untrusted one in a
             // user file may hide imports that carry Compile items (same as a
             // bare `<Import>` condition). Compile uncertainty is gated to
-            // non-SDK files, while package uncertainty applies in SDK files too
-            // because skipped imports may hide dependency items.
+            // non-SDK files, and to SDK groups none of whose imports decides
+            // user content ([`import_decides_user_content`]), while package
+            // uncertainty applies in SDK files too because skipped imports may
+            // hide dependency items.
+            let in_sdk_subtree = state.in_sdk_subtree;
+            let deciding: Vec<Node<'_, '_>> = if in_sdk_subtree {
+                node.children()
+                    .filter(|child| child.has_tag_name("Import"))
+                    .filter(|import| {
+                        import_decides_user_content(
+                            *import,
+                            node.attribute("Condition"),
+                            current_file_dir,
+                            state,
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // The group's own gate is checked here; each import checks its own
+            // inputs when it runs, after the imports before it.
+            if let Some(import) = deciding.first() {
+                note_untrusted_user_import_inputs(
+                    *import,
+                    node.attribute("Condition"),
+                    false,
+                    state,
+                );
+            }
+            state.in_sdk_subtree = in_sdk_subtree && deciding.is_empty();
             let prev_gate = state.import_gate_context;
             let prev_pkg_gate = state.package_import_gate_context;
             state.import_gate_context = prev_gate || !state.in_sdk_subtree;
@@ -4089,11 +3327,18 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
             {
                 let cause = state.gate_opacity_cause(node, diagnostics_before_gate);
                 state.latch_walk_opaque(cause);
+                for import in node.children().filter(|child| child.has_tag_name("Import")) {
+                    escalate_if_closure_reaches_directory_build(import, current_file_dir, state);
+                }
             }
             match gate {
                 CondGate::Run => {
                     state.import_gate_context = prev_gate;
                     state.package_import_gate_context = prev_pkg_gate;
+                    // Each import is judged on its own inputs when it runs
+                    // ([`follow_explicit_import`]): an earlier import in the
+                    // group can rewrite them.
+                    state.in_sdk_subtree = in_sdk_subtree;
                     // MSBuild lets imports nest inside an <ImportGroup
                     // Condition="..."> wrapper. The group adds gating but
                     // nothing else we model — every Import inside still
@@ -4121,6 +3366,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     state.package_import_gate_context = prev_pkg_gate;
                 }
             }
+            state.in_sdk_subtree = in_sdk_subtree;
         }
         "Choose" => handle_choose(node, current_file_dir, state),
         // Item definitions belong to MSBuild's pass 2 — after every property
@@ -4615,7 +3861,6 @@ fn walk_property_child_inner(
         );
         state.lookup.remove(&name);
         state.written.remove(&lower);
-        state.record_directory_build_path_write(&name);
         state.apply_property_provenance(
             &name,
             PropertyProvenance {
@@ -4629,7 +3874,7 @@ fn walk_property_child_inner(
                 // we computed from ordinary text and the two sides agree.
                 // Recording it in the refused channel as well would outlive
                 // that discharge (see [`RefusedOutcome::Keep`] at the
-                // clean-write site) and decline a splice MSBuild decides the
+                // clean-write site) and decline an import MSBuild decides the
                 // same way — the mark there answers a different question, about
                 // values that may rest on content the walk hid.
                 refused: RefusedOutcome::Keep,
@@ -4667,7 +3912,6 @@ fn walk_property_child_inner(
         // the tainted name doesn't appear in `properties`.
         state.lookup.remove(&name);
         state.written.remove(&lower);
-        state.record_directory_build_path_write(&name);
         let taint = TaintOutcome::after_write(
             value_taints_property || state.in_sdk_subtree,
             node.range(),
@@ -4702,7 +3946,6 @@ fn walk_property_child_inner(
         );
         state.lookup.remove(&name);
         state.written.remove(&lower);
-        state.record_directory_build_path_write(&name);
         let taint = TaintOutcome::after_write(
             value_taints_property || state.in_sdk_subtree,
             node.range(),
@@ -4729,7 +3972,6 @@ fn walk_property_child_inner(
         );
         state.lookup.remove(&name);
         state.written.remove(&lower);
-        state.record_directory_build_path_write(&name);
         let taint = TaintOutcome::after_write(
             value_taints_property || state.in_sdk_subtree,
             node.range(),
@@ -4783,9 +4025,9 @@ fn walk_property_child_inner(
         // by the same "last write wins on both sides" argument it looks like it
         // should discharge a prior refusal too. It must not, and the reason is
         // about the reader rather than the write:
-        // [`State::gate_value_is_exact`] consumes this mark *mid-walk* and
-        // deliberately tolerates SDK-subtree opacity (folding `walk_opaque`
-        // into it declines every real SDK project — measured, six tests).
+        // a later condition consumes this mark *mid-walk*, and a defined value
+        // it reads under SDK-subtree opacity is trusted (folding `walk_opaque`
+        // into every read declines every real SDK project).
         // Under opacity a cleanly-computed value can rest on a property hidden
         // content redefined, and opacity can latch either side of this write,
         // so no write-time check can establish that it did not. A discharge is
@@ -4796,7 +4038,6 @@ fn walk_property_child_inner(
     };
     state.lookup.insert_escaped(name.clone(), expansion.value);
     state.written.insert(lower.clone(), name.clone());
-    state.record_directory_build_path_write(&name);
     state.apply_property_provenance(&name, provenance);
 }
 
@@ -4848,8 +4089,7 @@ fn evaluate_property_group_condition(
 /// therefore deterministic rather than a divergence risk: under this
 /// walker's environment model (caller `extra_properties` ARE the
 /// environment; a name absent from them and never written is genuinely
-/// unset — the same model `should_import_default_true` commits to for the
-/// `Directory.Build.*` gates) an undefined self-name means the default
+/// unset) an undefined self-name means the default
 /// fires, exactly as in a real build. Only the *undefined* case is
 /// exempt: a defined-but-unpinned self-name still re-surfaces its root
 /// below, because there the stored value itself is untrustworthy.
@@ -5436,23 +4676,6 @@ fn is_cpm_flag_property_name(name: &str) -> bool {
         || name.eq_ignore_ascii_case("CentralPackageVersionOverrideEnabled")
 }
 
-/// The `(gate, path)` property pair each `Directory.Build.*` splice decides
-/// from: whether to import, and which file to import.
-///
-/// Named here rather than spelled at the splice sites so there is one list of
-/// the properties the walker reads *directly* — those reads are invisible to
-/// every mechanism that keys off a `Condition`, which is the defect this
-/// stage exists to close. The sweep in
-/// `with_imports_tests::directory_build` enumerates these and asserts each is
-/// classified by when its value is consumed, so a pair added here without that
-/// decision fails rather than going untested.
-pub(crate) const DIRECTORY_BUILD_PROPS_SPLICE: (&str, &str) =
-    ("ImportDirectoryBuildProps", "DirectoryBuildPropsPath");
-/// The targets-side counterpart of [`DIRECTORY_BUILD_PROPS_SPLICE`], consumed
-/// *after* the project body rather than before it.
-pub(crate) const DIRECTORY_BUILD_TARGETS_SPLICE: (&str, &str) =
-    ("ImportDirectoryBuildTargets", "DirectoryBuildTargetsPath");
-
 /// Whether a property-group child could write at all if its group ran.
 /// `false` only on exact knowledge: the child's own condition evaluates
 /// cleanly false — defined properties, supported grammar, no unpinned
@@ -5563,113 +4786,217 @@ fn handle_import(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
 }
 
 fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<'_>) {
-    // The pre-scan in [`find_explicit_sdk_promotion`] may have already
-    // promoted this body `<Import Sdk=X Project="Sdk.{props,targets}"/>`
-    // to a root-equivalent splice position. Re-walking it here would
-    // misplace `Sdk.targets`: its splice runs at the *bottom*, so a
-    // body-position walk would register the file first and turn the
-    // splice into the skipped duplicate. Silent skip mirrors MSBuild's
-    // effective behaviour: the SDK chain only enters once, at splice
-    // position.
-    //
-    // The skip is gated on "currently walking the entry project's
-    // body": `state.hoisted_sdk_imports` is populated with ranges
-    // into the *entry project's* XML, but `node.range()` is a byte
-    // offset into whatever XML buffer the current frame is walking.
-    // An imported file's `<Import>` that happens to share a byte
-    // offset with a hoisted entry-project import must not get
-    // silently dropped here. `import_site_span` is `None` exactly
-    // while we're inside the entry project body — see [`State`].
-    if state.import_site_span.is_none() && state.hoisted_sdk_imports.contains(&node.range()) {
+    // An SDK file's import is Compile-tolerated (an undecided gate, an
+    // unresolvable path) only while it does not decide user content
+    // ([`import_decides_user_content`]): a `Directory.Build.props` the walk
+    // wrongly skips drops hand-written sources by construction. The flag is
+    // restored when the import is done; [`walk_external_file`] judges each
+    // file it enters by that file's own path.
+    let in_sdk_subtree = state.in_sdk_subtree;
+    let decides_user_content =
+        in_sdk_subtree && import_decides_user_content(node, None, current_file_dir, state);
+    if decides_user_content {
+        note_untrusted_user_import_inputs(node, None, true, state);
+    }
+    state.in_sdk_subtree = in_sdk_subtree && !decides_user_content;
+    follow_import_judged(node, current_file_dir, state);
+    state.in_sdk_subtree = in_sdk_subtree;
+}
+
+/// An SDK import that decides user content is uncertain whenever a value its
+/// path or a condition deciding it reads is not certain ([`Trust::is_certain`]):
+/// not only an unpinned one, which the condition evaluation itself reports,
+/// but one whose write was refused or rode SDK-tainted input. A
+/// cleanly-computed value can rest on a property hidden content redefined,
+/// and the condition evaluation trusts a defined value under opacity; for a
+/// file of the user's, that trust would publish a Compile set the real build
+/// does not have.
+///
+/// `own_inputs` false checks only `group_condition`: an `<ImportGroup>`'s own
+/// gate, decided before any of its imports runs.
+fn note_untrusted_user_import_inputs(
+    node: Node<'_, '_>,
+    group_condition: Option<&str>,
+    own_inputs: bool,
+    state: &mut State<'_>,
+) {
+    let own = if own_inputs {
+        [node.attribute("Project"), node.attribute("Condition")]
+    } else {
+        [None, None]
+    };
+    let read: Vec<&str> = own
+        .into_iter()
+        .chain([group_condition])
+        .flatten()
+        .flat_map(properties::property_references)
+        .collect();
+    // A `Directory.Build.*` file's gate decides whether its path is computed
+    // at all, so an import reading either reads both.
+    let partners = DIRECTORY_BUILD_IMPORT_INPUTS.chunks(2).filter(|pair| {
+        read.iter()
+            .any(|name| pair.iter().any(|input| input.eq_ignore_ascii_case(name)))
+    });
+    let uncertain = read
+        .iter()
+        .copied()
+        .chain(partners.flatten().copied())
+        .find(|name| !state.trust_of(name).is_certain())
+        .map(str::to_owned);
+    if let Some(name) = uncertain {
+        let cause = match state.trust_of(&name).unpinned() {
+            Some(root) => OpacityCause::Gate(root.clone()),
+            None => OpacityCause::Unentered(format!(
+                "the import that `$({name})` decides, of a user's file"
+            )),
+        };
+        state.latch_walk_opaque(cause);
+        state.mark_structural_skip(
+            StructuralCompileItemUncertainty::ImportProjectUnresolved {
+                project: node.attribute("Project").unwrap_or_default().to_string(),
+            },
+            node.range(),
+        );
+    }
+}
+
+/// An undecided gate on an SDK import that is tolerated as SDK machinery: if
+/// the files it names reach a `Directory.Build.*` import point
+/// ([`State::reaches_directory_build_point`]), whether the user's file joins
+/// the build is undecided too (an SDK branch on an undecided
+/// `TargetFramework` choosing whether `Microsoft.Common.targets` is reached,
+/// say), so the Compile set is uncertain.
+fn escalate_if_closure_reaches_directory_build(
+    node: Node<'_, '_>,
+    current_file_dir: &Path,
+    state: &mut State<'_>,
+) {
+    if !state.in_sdk_subtree || node.attribute("Sdk").is_some() {
         return;
     }
-    // Reaching the chain's own `Directory.Build.targets` import point retires
-    // the explicit splice, **whatever the import decides**. The splice exists
-    // only for chains that never reach this point at all; once MSBuild's
-    // `Microsoft.Common.targets` has evaluated the import, its answer is the
-    // answer — including a clean "no", which MSBuild never revisits. Recording
-    // only a *successful* walk would let a hook that turns
-    // `ImportDirectoryBuildTargets` off from inside `Sdk.targets` (via
-    // `CustomBeforeDirectoryBuildTargets`, which runs before this point) fall
-    // through to the splice and import a file the real build skips.
-    if is_sdk_directory_build_targets_import_point(node, state) {
-        // The chain owns the import from here, so *this* is where its gate is
-        // consumed. The pre-`Sdk.targets` snapshot taken in `walk_once` is
-        // judged there for the fallback splice, but it cannot see a write the
-        // chain performs after it — and SDK diagnostics are Compile-tolerated,
-        // so such a write would otherwise move the import silently.
-        // …but only when a file actually resolves: the chain's own import is
-        // guarded by `exists('$(DirectoryBuildTargetsPath)')`, which is false
-        // on both sides when nothing resolves, so there is nothing to be
-        // uncertain about.
-        let resolved = resolve_directory_build_path(
-            state,
-            "DirectoryBuildTargetsPath",
-            None,
-            &state.entry_project_dir.clone(),
-        );
-        state.note_directory_build_splice_decision(
-            DIRECTORY_BUILD_TARGETS_SPLICE,
-            resolved.is_some(),
-        );
-        state.sdk_reached_directory_build_targets_import = true;
+    let Some(raw) = node.attribute("Project") else {
+        return;
+    };
+    let expansion = item_pass::expand_silent(raw, state);
+    if expansion.had_issue() || expansion.unpinned_root.is_some() {
+        return;
     }
-    if is_sdk_directory_build_rediscovery_import(node, current_file_dir, state) {
-        // This IS MSBuild's real `Directory.Build.props` import position
-        // (inside `Microsoft.Common.props`, notably *before* the
-        // `NuGet.props` block). When the walker still owes the splice,
-        // fire it here so properties the file sets are visible to the
-        // rest of the SDK props chain (`NuGet.props` reads
-        // `ImportDirectoryPackagesProps`, and a repo's
-        // `Directory.Build.props` legitimately sets it). Two owed
-        // shapes: the entry-SDK props phase (pre-body, pending flag
-        // up), and the deferred pass's first *body-reached* nested
-        // `Sdk.props` (the stash is consumed here rather than at the
-        // nested file's return — same position MSBuild uses). Everywhere
-        // else this stays the usual rediscovery suppression.
-        let is_props_rediscovery = node
-            .attribute("Project")
-            .and_then(simple_property_reference)
-            .is_some_and(|name| name.eq_ignore_ascii_case("DirectoryBuildPropsPath"));
-        if is_props_rediscovery {
-            // What the real import here takes, decided before the splice runs:
-            // the spliced file can rewrite what decides it.
-            #[cfg(any(test, feature = "test-support"))]
-            let (real_import, spliced_before) = (
-                props_import_point(node, current_file_dir, state),
-                state.directory_build_splices.props_spliced,
-            );
-            if !state.in_entry_body && state.directory_build_props_splice_pending {
-                fire_entry_directory_build_props_splice(state);
-            } else if state.in_entry_body && state.pending_directory_build_props.take().is_some() {
-                // `fire_…` reads the same fallback the stash carried
-                // (both copies of `implicit_props` from `walk_once`),
-                // and lowers `directory_build_props_splice_pending`, so
-                // the post-`Sdk.props` consumption in
-                // `walk_external_file` (which `take()`s the stash) is a
-                // no-op afterwards.
-                fire_entry_directory_build_props_splice(state);
-            }
-            // The walk suppresses this import, so it is accounted for only when
-            // it takes nothing, or when the splice ran here, for the first
-            // time, on the file it takes.
-            #[cfg(any(test, feature = "test-support"))]
-            match real_import {
-                PropsImportPoint::TakesNothing => {}
-                PropsImportPoint::Takes(path)
-                    if !spliced_before
-                        && state.directory_build_splices.props_spliced
-                        && state.directory_build_props_splice_path.as_ref() == Some(&path) =>
-                {
-                    state.directory_build_splices.props_point_reached = true;
-                }
-                PropsImportPoint::Takes(_) | PropsImportPoint::Undecided => {
-                    state.directory_build_splices.props_point_unaccounted = true;
-                }
-            }
+    let targets: Vec<PathBuf> = expansion
+        .value
+        .split_list()
+        .filter(|segment| !segment.is_filespec_wildcard())
+        .map(|segment| normalise(&current_file_dir.join(segment.unescape().replace('\\', "/"))))
+        .collect();
+    if targets
+        .iter()
+        .any(|target| state.reaches_directory_build_point(target))
+    {
+        state.mark_structural_skip(
+            StructuralCompileItemUncertainty::ImportProjectUnresolved {
+                project: raw.to_string(),
+            },
+            node.range(),
+        );
+    }
+}
+
+/// Whether an `<Import>` in an SDK file decides content of the user's, so
+/// that an undecided gate or an unresolvable path on it (or on its enclosing
+/// `<ImportGroup>`'s `group_condition`) is judged as a user-authored file's
+/// would be rather than tolerated as SDK machinery. It does when
+///
+/// - its path or a condition deciding it reads one of
+///   [`DIRECTORY_BUILD_IMPORT_INPUTS`], whatever the files it names: these are
+///   the import points `Microsoft.Common.*` declare for the user's
+///   `Directory.Build.*`, and where the walk cannot pin their inputs it cannot
+///   tell which of the user's files they bring in, or whether any;
+/// - the files it names are known and one is outside the SDK
+///   ([`State::is_sdk_file`]): `Microsoft.Common.props`'s
+///   `$(DirectoryBuildPropsPath)`, NuGet's `$(DirectoryPackagesPropsPath)`, a
+///   project-extension import; or
+/// - the files it names are not known and its path or a condition deciding it
+///   reads a property a user's document may define
+///   ([`State::user_definitions`]): a gate or a redirect the user wrote under
+///   a condition the walk could not decide.
+///
+/// An SDK import whose path the walk cannot expand and whose inputs no user
+/// document writes stays tolerated (an SDK-computed shim path under opacity,
+/// say): that is the standing Compile-tolerance trade for SDK machinery, which
+/// this neither widens nor closes. An `<Import Sdk=…>` reading none of
+/// [`DIRECTORY_BUILD_IMPORT_INPUTS`] is taken to name its SDK's files.
+fn import_decides_user_content(
+    node: Node<'_, '_>,
+    group_condition: Option<&str>,
+    current_file_dir: &Path,
+    state: &State<'_>,
+) -> bool {
+    let reads = || {
+        [
+            node.attribute("Project"),
+            node.attribute("Condition"),
+            group_condition,
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(properties::property_references)
+    };
+    if reads().any(|name| {
+        DIRECTORY_BUILD_IMPORT_INPUTS
+            .iter()
+            .any(|input| input.eq_ignore_ascii_case(name))
+    }) {
+        return true;
+    }
+    if node.attribute("Sdk").is_some() {
+        return false;
+    }
+    match import_targets_in_sdk(node, current_file_dir, state) {
+        Some(in_sdk) => !in_sdk,
+        None => reads().any(|name| state.user_definitions.defines_property(name)),
+    }
+}
+
+/// The properties that decide whether, and which, `Directory.Build.props` and
+/// `.targets` an SDK's `Microsoft.Common.props` and `.targets` import: each
+/// file's gate and its path, in that order, file by file.
+const DIRECTORY_BUILD_IMPORT_INPUTS: [&str; 4] = [
+    "ImportDirectoryBuildProps",
+    "DirectoryBuildPropsPath",
+    "ImportDirectoryBuildTargets",
+    "DirectoryBuildTargetsPath",
+];
+
+/// Whether every file `node` names is one of the SDK's
+/// ([`State::is_sdk_file`]), or `None` when the walk cannot expand its path
+/// exactly.
+fn import_targets_in_sdk(
+    node: Node<'_, '_>,
+    current_file_dir: &Path,
+    state: &State<'_>,
+) -> Option<bool> {
+    let raw = node.attribute("Project")?;
+    let expansion = item_pass::expand_silent(raw, state);
+    if expansion.had_issue() || expansion.unpinned_root.is_some() {
+        return None;
+    }
+    let mut segments = expansion.value.split_list().peekable();
+    segments.peek()?;
+    Some(segments.all(|segment| {
+        let path = current_file_dir.join(segment.unescape().replace('\\', "/"));
+        if segment.is_filespec_wildcard() {
+            // A wildcard is confined to the final component (or declined), so
+            // its directory decides.
+            path.parent()
+                .is_some_and(|dir| state.is_sdk_file(&dir.join("_")))
+        } else {
+            state.is_sdk_file(&path)
         }
-        return;
-    }
+    }))
+}
+
+/// [`follow_explicit_import`], with [`State::in_sdk_subtree`] already
+/// standing for whether this import's gate and path are SDK-internal.
+fn follow_import_judged(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<'_>) {
     // The import's own `Condition` gates whether it (and any Compile items /
     // gating properties it carries) is brought in. If we can't trust it — an
     // unsupported condition, or one relying on an undefined property — a
@@ -5705,6 +5032,7 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
     if state.diagnostics.len() != diagnostics_before_gate || matches!(gate, CondGate::Unsupported) {
         let cause = state.gate_opacity_cause(node, diagnostics_before_gate);
         state.latch_walk_opaque(cause);
+        escalate_if_closure_reaches_directory_build(node, current_file_dir, state);
     }
     match gate {
         CondGate::Run => {}
@@ -5931,10 +5259,16 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
         };
         match resolution {
             SdkResolution::Single(sdk_paths) => {
-                // Tolerate this SDK's own files too — the
-                // `Microsoft.NET.Sdk.Web` → base `Microsoft.NET.Sdk`
-                // (sibling dir) case (P2.1).
-                state.note_sdk_tolerance(&sdk_paths.root);
+                if state.import_site_span.is_none() && project_attr == "Sdk.props" {
+                    // The entry body's own explicit-form SDK: the framework
+                    // SDK, as the `Sdk` attribute's would be.
+                    state.record_sdk_root(&sdk_paths.root);
+                } else {
+                    // Tolerate this SDK's own files too — the
+                    // `Microsoft.NET.Sdk.Web` → base `Microsoft.NET.Sdk`
+                    // (sibling dir) case (P2.1).
+                    state.note_sdk_tolerance(&sdk_paths.root);
+                }
                 // The two well-known stems are only meaningful for an
                 // ordinary single-root SDK.
                 match project_attr {
@@ -6202,172 +5536,6 @@ fn wildcard_matches(pattern: &str, name: &str) -> bool {
     p == pattern.len()
 }
 
-/// Fire the walker-owned entry `Directory.Build.props` splice: resolve
-/// the override/fallback, check the gate, seed the path property when the
-/// import came from discovery, walk the file, and lower the pending flag.
-/// Callable from two positions: MSBuild's real import point inside
-/// `Microsoft.Common.props` (preferred — properties the file sets are then
-/// visible to the rest of the SDK props chain, e.g. the `NuGet.props`
-/// gates), or right after `Sdk.props` as the fallback for SDK chains that
-/// never reach a real `Microsoft.Common.props`.
-fn fire_entry_directory_build_props_splice(state: &mut State<'_>) {
-    let project_dir = state.entry_project_dir.clone();
-    let fallback = state.implicit_directory_build_props_fallback.clone();
-    // Null `import_site_span` across the splice so diagnostics and items
-    // are attributed identically from both call positions (origin
-    // `Imported`, span `0..0`) — a no-op at the after-`Sdk.props`
-    // position where it is already `None`.
-    let saved_import_site_span = state.import_site_span.take();
-    let props_to_import = resolve_directory_build_path(
-        state,
-        "DirectoryBuildPropsPath",
-        fallback.as_deref(),
-        &project_dir,
-    );
-    // Only once a file has resolved: with nothing to import, MSBuild's own
-    // `exists('')` is false whatever the gate says, so both sides skip and the
-    // claim stays exact.
-    state.note_directory_build_splice_decision(
-        DIRECTORY_BUILD_PROPS_SPLICE,
-        props_to_import.is_some(),
-    );
-    if let Some(Resolution { path, source }) = props_to_import.as_ref()
-        && should_import_default_true(
-            state
-                .lookup
-                .get_unescaped("ImportDirectoryBuildProps")
-                .as_deref(),
-            state.is_sticky_global("ImportDirectoryBuildProps"),
-        )
-    {
-        // MSBuild assigns `DirectoryBuildPropsPath` only when the
-        // discovery-and-import path actually fires (the seeding sits
-        // inside the gated block in `Microsoft.Common.props`), so
-        // skip seeding when the import is gated out — otherwise the
-        // body sees a phantom path the real build never assigned.
-        if matches!(source, ResolutionSource::Fallback) {
-            seed_directory_build_path(state, "DirectoryBuildPropsPath", path);
-        }
-        walk_directory_build_file(path, 0..0, DirectoryBuildFile::Props, state);
-    }
-    state.directory_build_props_splice_pending = false;
-    state.import_site_span = saved_import_site_span;
-}
-
-/// Is `node` the SDK chain's own `Directory.Build.targets` import — the
-/// `<Import Project="$(DirectoryBuildTargetsPath)" Condition="… exists(…)"/>`
-/// in `Microsoft.Common.targets`?
-///
-/// Recognised by shape rather than by path, and deliberately the same shape
-/// test [`is_sdk_directory_build_rediscovery_import`] uses for the props side,
-/// so an SDK that reuses the property name for a custom import of its own is
-/// not mistaken for the well-known point.
-fn is_sdk_directory_build_targets_import_point(node: Node<'_, '_>, state: &State<'_>) -> bool {
-    state.in_sdk_subtree
-        && node
-            .attribute("Project")
-            .and_then(simple_property_reference)
-            .is_some_and(|name| {
-                name.eq_ignore_ascii_case("DirectoryBuildTargetsPath")
-                    && condition_has_exists_for_property(node.attribute("Condition"), name)
-            })
-}
-
-fn is_sdk_directory_build_rediscovery_import(
-    node: Node<'_, '_>,
-    current_file_dir: &Path,
-    state: &State<'_>,
-) -> bool {
-    // The SDK's Microsoft.Common.props rediscovers `Directory.Build.props`
-    // through its path property. The walker owns *that* import point — it
-    // splices the file before the body, because the body is where the `<Import>`
-    // elements that would tell us otherwise live — so following the SDK's
-    // rediscovery would double-walk it. Keep this narrow: an SDK can also use
-    // the property name for its own custom imports, and those must still go
-    // through normal condition/path evaluation.
-    //
-    // The **targets** side is deliberately not suppressed here. The walker does
-    // not own that import point: it walks `Sdk.targets` first precisely so
-    // `Microsoft.Common.targets` can place the import where MSBuild places it,
-    // and only splices when the chain did not. Suppressing the chain's import
-    // would defeat that and hand the file back to the fallback, which runs after
-    // *all* of `Sdk.targets` — past `CustomAfterDirectoryBuildTargets`, so a
-    // redirected `Directory.Build.targets` came out in the wrong order.
-    if !state.in_sdk_subtree {
-        return false;
-    }
-    let Some(raw_project) = node.attribute("Project") else {
-        return false;
-    };
-    let Some(property_name) = simple_property_reference(raw_project) else {
-        return false;
-    };
-    if !condition_has_exists_for_property(node.attribute("Condition"), property_name) {
-        return false;
-    }
-    let is_targets = property_name.eq_ignore_ascii_case("DirectoryBuildTargetsPath");
-    let (splice_path, written_by_splice) =
-        if property_name.eq_ignore_ascii_case("DirectoryBuildPropsPath") {
-            (
-                state.directory_build_props_splice_path.as_ref(),
-                state.directory_build_props_path_written_by_splice,
-            )
-        } else if is_targets {
-            // Not consulted below — see the targets carve-out. Kept resolving
-            // so the unset-path arm still classifies this import.
-            (None, false)
-        } else {
-            return false;
-        };
-    let Some(resolved) = resolve_property_import_target(property_name, current_file_dir, state)
-    else {
-        // Unset/empty path — the common no-`Directory.Build.*` case (or
-        // an explicit `ImportDirectoryBuild*=false`, which leaves the
-        // discovery group skipped). MSBuild's own `exists('$(…)')` gate
-        // makes this import a clean skip; evaluating the condition here
-        // would only manufacture an `UndefinedProperty` diagnostic for
-        // perfectly ordinary projects. The walker owns this import
-        // point, so treat it as the rediscovery it is.
-        return true;
-    };
-    if is_targets {
-        // The chain owns this import point; let it run.
-        return false;
-    }
-    if written_by_splice {
-        return true;
-    }
-    let resolved = canonicalise_or_normalise(state.observer, &resolved);
-    if splice_path.is_some_and(|path| resolved == *path) {
-        return true;
-    }
-    property_name.eq_ignore_ascii_case("DirectoryBuildPropsPath")
-        && pending_directory_build_props_splice_matches(&resolved, state)
-}
-
-fn pending_directory_build_props_splice_matches(resolved_import: &Path, state: &State<'_>) -> bool {
-    if !state.directory_build_props_splice_pending
-        || !should_import_default_true(
-            state
-                .lookup
-                .get_unescaped("ImportDirectoryBuildProps")
-                .as_deref(),
-            state.is_sticky_global("ImportDirectoryBuildProps"),
-        )
-    {
-        return false;
-    }
-    let Some(Resolution { path, .. }) = resolve_directory_build_path(
-        state,
-        "DirectoryBuildPropsPath",
-        None,
-        &state.entry_project_dir,
-    ) else {
-        return false;
-    };
-    canonicalise_or_normalise(state.observer, &path) == resolved_import
-}
-
 fn simple_property_reference(raw: &str) -> Option<&str> {
     let trimmed = raw.trim();
     let inner = trimmed.strip_prefix("$(")?.strip_suffix(')')?;
@@ -6381,90 +5549,6 @@ fn simple_property_reference(raw: &str) -> Option<&str> {
     Some(inner)
 }
 
-/// Split a leading `'…'` literal off `input`, returning its contents and the
-/// remaining text.
-fn parse_single_quoted(input: &str) -> Option<(&str, &str)> {
-    let rest = input.strip_prefix('\'')?;
-    let end = rest.find('\'')?;
-    Some((&rest[..end], &rest[end + 1..]))
-}
-
-fn condition_has_exists_for_property(condition: Option<&str>, property_name: &str) -> bool {
-    let Some(condition) = condition else {
-        return false;
-    };
-    for (idx, _) in condition.char_indices() {
-        let Some(rest) = condition[idx..].strip_prefix("Exists").or_else(|| {
-            condition[idx..]
-                .get(..6)
-                .filter(|s| s.eq_ignore_ascii_case("Exists"))
-                .map(|_| &condition[idx + 6..])
-        }) else {
-            continue;
-        };
-        if !keyword_boundary(condition, idx, 6) {
-            continue;
-        }
-        let Some(rest) = rest.trim_start().strip_prefix('(') else {
-            continue;
-        };
-        let Some((arg, rest)) = parse_single_quoted(rest.trim_start()) else {
-            continue;
-        };
-        if !rest.trim_start().starts_with(')') {
-            continue;
-        }
-        if simple_property_reference(arg)
-            .is_some_and(|name| name.eq_ignore_ascii_case(property_name))
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn keyword_boundary(source: &str, start: usize, len: usize) -> bool {
-    let bytes = source.as_bytes();
-    let before = start
-        .checked_sub(1)
-        .and_then(|idx| bytes.get(idx))
-        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
-    let after = bytes
-        .get(start + len)
-        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
-    !before && !after
-}
-
-fn resolve_property_import_target(
-    property_name: &str,
-    current_file_dir: &Path,
-    state: &State<'_>,
-) -> Option<PathBuf> {
-    // The property names a file on disk: a point of use, trimmed in the domain
-    // (an escaped `%20` is filename data, not padding).
-    let trimmed = state.lookup.get(property_name)?.trimmed_unescaped();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let normalised = trimmed.replace('\\', "/");
-    let path = Path::new(&normalised);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        current_file_dir.join(path)
-    })
-}
-
-/// Read, parse, and recursively walk an external MSBuild file.
-/// Caller-supplied `span` attributes any failure diagnostic to the
-/// source location of the *importer* (the `<Import>` element's
-/// range, or `0..0` for an implicit import).
-///
-/// Self-contained: both failure modes (depth, IO/parse) emit a single
-/// [`DiagnosticKind::ImportFailed`] and return without disturbing
-/// `state.depth`; a duplicate of an already-performed import returns
-/// silently (see below). The depth increment/decrement pair only runs
-/// on the happy path.
 /// Offer `root`'s `DefaultTargets` to `MSBuildProjectDefaultTargets`, as
 /// MSBuild's `Evaluator.UpdateDefaultTargets` does. Roots are offered in
 /// depth-first import order, each before its own implicit imports. A root
@@ -6479,11 +5563,7 @@ fn resolve_property_import_target(
 /// A root the walk cannot vouch for settles the offer with the property
 /// unset, so reads of it stay inexact. That is one whose expansion reads an
 /// undecided or unpinned value, one reached after the walk passed content it
-/// could not see (which may have set it first), and one in a
-/// `Directory.Build.*` file the walk spliced in itself, which MSBuild
-/// imports only when an SDK chain reaches the point that file stands for.
-/// So is any root outside an SDK's files once such a splice has run, since
-/// the properties it wrote may not exist in MSBuild's build (#676).
+/// could not see (which may have set it first).
 fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
     if state.default_targets_decided {
         return;
@@ -6492,14 +5572,7 @@ fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
         return;
     };
     let expansion = item_pass::expand_silent(raw, state);
-    if expansion.had_issue()
-        || expansion.unpinned_root.is_some()
-        || state.walk_opaque.is_some()
-        || state.active_directory_build_splice.is_some()
-        // What a splice wrote may be what no MSBuild build holds (#676): only a
-        // root in an SDK's own files, which a real chain reaches, is past it.
-        || (state.directory_build_file_spliced && !state.in_sdk_subtree)
-    {
+    if expansion.had_issue() || expansion.unpinned_root.is_some() || state.walk_opaque.is_some() {
         state.default_targets_decided = true;
         state.lookup.remove("MSBuildProjectDefaultTargets");
         return;
@@ -6520,6 +5593,16 @@ fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
         .insert_escaped("MSBuildProjectDefaultTargets", Escaped::from_xml(value));
 }
 
+/// Read, parse, and recursively walk an external MSBuild file.
+/// Caller-supplied `span` attributes any failure diagnostic to the
+/// source location of the *importer* (the `<Import>` element's
+/// range, or `0..0` for an implicit import).
+///
+/// Self-contained: both failure modes (depth, IO/parse) emit a single
+/// [`DiagnosticKind::ImportFailed`] and return without disturbing
+/// `state.depth`; a duplicate of an already-performed import returns
+/// silently (see below). The depth increment/decrement pair only runs
+/// on the happy path.
 fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     // MSBuild's duplicate-import skip: an import that resolves to an
     // already-imported path (same lexically-normalised, case-insensitive
@@ -6658,46 +5741,17 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     state.imports_seen_fuzzy.insert(fuzzy_key);
     state.walked_files.insert(canon.clone());
     state.depth += 1;
-    // Judge SDK-provenance by this file's *own* canonical path, independent of
-    // how it was reached. A user `Directory.Build.props` pulled in through the
-    // SDK's `Microsoft.Common.props` chain is still scored by its path (not
-    // under the SDK tree → respected); an SDK target reached from anywhere is
-    // tolerated. Save/restore so the parent file's verdict resumes on return.
-    //
-    // Two arms are ORed, both compared against the recorded (canonical) roots:
-    //
-    //  1. the file's own canonical path — the primary check (normal SDK files,
-    //     diamond imports through differently-spelt paths that agree only after
-    //     canonicalisation);
-    //  2. the canonicalisation of the reach path's *parent directory*.
-    //
-    // Arm 2 exists for the file-level symlink-merge layout (Nix's combined dotnet
-    // tree, but any store-of-symlinks qualifies): there the merge tree's
-    // directories are real while its leaf files are per-file symlinks back to the
-    // originating store, so a workload `WorkloadManifest.targets` canonicalises
-    // into a *different* store than its own directory does. Arm 1 alone then
-    // wrongly scores that SDK-internal manifest as a user file and lets its
-    // `<ImportGroup>` conditions (e.g. `'$(TargetPlatformIdentifier)' ==
-    // 'android'`) flip `items_uncertain`, refusing the fold for every real SDK
-    // project (`sdk_project_fold_e2e`). Canonicalising the *directory* (which is
-    // real in the merge tree) recovers tolerance.
-    //
-    // Crucially arm 2 canonicalises the directory, so it is not fooled by a
-    // reach path that only *lexically* sits under a root: an SDK file importing
-    // `../user.props` (parent canonicalises to the SDK's parent, outside every
-    // root) or a directory symlink inside the SDK tree pointing out (parent
-    // canonicalises to the escape target) are both correctly *not* tolerated —
-    // only a genuine leaf-file symlink out of a real in-tree directory is.
+    // Judge SDK-provenance by this file's *own* path, independent of how it
+    // was reached ([`State::is_sdk_file`]). A user `Directory.Build.props`
+    // pulled in through the SDK's `Microsoft.Common.props` chain is still
+    // scored by its path (not under the SDK tree → respected); an SDK target
+    // reached from anywhere is tolerated. Save/restore so the parent file's
+    // verdict resumes on return.
     let reach_parent_canon = path.parent().map(|dir| {
         observed::canonicalize(state.observer, dir).unwrap_or_else(|_| dir.to_path_buf())
     });
     let saved_in_sdk_subtree = state.in_sdk_subtree;
-    state.in_sdk_subtree = state.sdk_tolerance_roots.iter().any(|root| {
-        canon.starts_with(root)
-            || reach_parent_canon
-                .as_deref()
-                .is_some_and(|dir| dir.starts_with(root))
-    });
+    state.in_sdk_subtree = state.is_sdk_file(path);
     // The same two arms, against the entry SDK's version directory alone: a
     // file another SDK resolution brought into the tolerance set (a NuGet
     // MSBuild SDK, say) is still foreign to the entry .NET SDK.
@@ -6736,6 +5790,11 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     } else if !in_entry_sdk {
         state
             .foreign_definitions
+            .record_document(doc.root_element(), path);
+    }
+    if !state.in_sdk_subtree {
+        state
+            .user_definitions
             .record_document(doc.root_element(), path);
     }
     // Pin `import_site_span` on the *first* descent (when it's None)
@@ -6779,87 +5838,18 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
         .into_iter()
         .filter(|name| !state.reserved.contains(name) && state.protected.remove(name))
         .collect();
-    // Nested SDK roots are spliced through the same machinery the
-    // entry project uses: `resolve_project_sdk` returns paths on a
-    // happy resolve and pushes the appropriate diagnostic for every
+    // A nested root `Sdk` imports its `Sdk.props` and `Sdk.targets` around
+    // this file's body, as the entry's does: `resolve_project_sdk` returns
+    // paths on a happy resolve and pushes the appropriate diagnostic for every
     // failure mode (no resolver supplied, `Err(NotFound)`,
-    // `Err(VersionNotSatisfied)`). The recursive `walk_external_file`
-    // calls re-enter this same function, so the duplicate-import skip,
-    // depth limits, and the import-site span pin (already `Some` here
-    // for any descent beyond the first) all just work.
-    //
-    // The entry `Directory.Build.{props,targets}` splice is *not*
-    // re-done around each imported file — re-splicing would double-count
-    // it (MSBuild imports it once, via path-dedup). But MSBuild does
-    // import `Directory.Build.props` right after the *first* `Sdk.props`
-    // to run (that re-enters `Microsoft.Common.props`). When the entry
-    // project has no SDK of its own, that first `Sdk.props` is a nested
-    // one reached here — so the two-pass orchestrator in
-    // [`walk_with_imports`] defers the entry `Directory.Build.props` and
-    // we fire it below, once, right after the nested `Sdk.props`. (When
-    // the entry *has* an SDK, the eager before-body splice already ran
-    // and `pending_directory_build_props` is `None`, so nothing fires
-    // here.)
+    // `Err(VersionNotSatisfied)`). The recursive `walk_external_file` calls
+    // re-enter this same function, so the duplicate-import skip, depth limits,
+    // and the import-site span pin (already `Some` here for any descent beyond
+    // the first) all just work.
     latch_default_targets(doc.root_element(), state);
     let nested_sdk = resolve_project_sdk(doc.root_element(), state);
     if let Some(paths) = nested_sdk.as_ref() {
         walk_external_file(&paths.props, doc.root_element().range(), state);
-        // Only a nested `Sdk.props` reached *through the entry project's
-        // body* is the "first `Sdk.props`" MSBuild would run, and hence
-        // the point at which it imports `Directory.Build.props`. A nested
-        // SDK reached while walking an already-spliced
-        // `Directory.Build.{props,targets}` (outside the body) must not
-        // reposition the entry `Directory.Build.props`.
-        if state.in_entry_body {
-            // `take()` unconditionally so the orchestrator can tell "fire
-            // point reached" (consumed) from "dangle" (never consumed) —
-            // and so the import is attempted at most once regardless of
-            // how the gate resolves.
-            if let Some(DeferredDirectoryBuildProps { fallback }) =
-                state.pending_directory_build_props.take()
-            {
-                // Resolve exactly where MSBuild does — here, against live
-                // state — so a body/SDK property set before this nested
-                // `Sdk.props` (e.g. `ImportDirectoryBuildProps=false` or a
-                // redirected `DirectoryBuildPropsPath`) is honoured.
-                let project_dir = state.entry_project_dir.clone();
-                // This path resolves and imports directly rather than calling
-                // `fire_entry_directory_build_props_splice`, so it needs the
-                // splice decision's trust check of its own.
-                let resolved = resolve_directory_build_path(
-                    state,
-                    "DirectoryBuildPropsPath",
-                    fallback.as_deref(),
-                    &project_dir,
-                );
-                state.note_directory_build_splice_decision(
-                    DIRECTORY_BUILD_PROPS_SPLICE,
-                    resolved.is_some(),
-                );
-                if let Some(Resolution { path, source }) = resolved
-                    && should_import_default_true(
-                        state
-                            .lookup
-                            .get_unescaped("ImportDirectoryBuildProps")
-                            .as_deref(),
-                        state.is_sticky_global("ImportDirectoryBuildProps"),
-                    )
-                {
-                    // Null `import_site_span` across the splice so it is
-                    // byte-for-byte identical to the eager before-body
-                    // call site (where it is `None`): Directory.Build.props
-                    // items and diagnostics get origin `Imported` + span
-                    // `0..0`, not this nested file's import-site span.
-                    let saved = state.import_site_span.take();
-                    if matches!(source, ResolutionSource::Fallback) {
-                        seed_directory_build_path(state, "DirectoryBuildPropsPath", &path);
-                    }
-                    walk_directory_build_file(&path, 0..0, DirectoryBuildFile::Props, state);
-                    state.import_site_span = saved;
-                }
-                state.directory_build_props_splice_pending = false;
-            }
-        }
     }
     walk_doc_body(doc.root_element(), &file_dir, state);
     if let Some(paths) = nested_sdk.as_ref() {
@@ -6873,111 +5863,6 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     state.depth -= 1;
     state.current_file = saved_current_file;
     state.exit_this_file(frame);
-}
-
-/// What the `Microsoft.Common.props` import of `$(DirectoryBuildPropsPath)` at
-/// a props import point takes, as far as the walk can decide it. Only the
-/// target probe asks ([`reads::DirectoryBuildSplices`]).
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug, PartialEq, Eq)]
-enum PropsImportPoint {
-    /// Its condition decides true exactly and names this trusted file,
-    /// canonical as [`State::directory_build_props_splice_path`] holds it.
-    Takes(PathBuf),
-    /// Its condition decides false exactly: MSBuild imports nothing here.
-    TakesNothing,
-    /// Anything else.
-    Undecided,
-}
-
-/// Decide the props import at `node` before the walk does anything there.
-/// Read quietly ([`State::quiet_target_framework_reads`]): only the target
-/// probe asks.
-#[cfg(any(test, feature = "test-support"))]
-fn props_import_point(
-    node: Node<'_, '_>,
-    current_file_dir: &Path,
-    state: &State<'_>,
-) -> PropsImportPoint {
-    let previous = state.quiet_target_framework_reads.replace(true);
-    let outcome = match node.attribute("Condition") {
-        None => Some(true),
-        Some(condition) => {
-            let exists = |path: &str| condition_exists(state.observer, path, current_file_dir);
-            let eval = condition::evaluate_with_exists(
-                condition,
-                &state.lookup,
-                condition::Probes {
-                    exists: &exists,
-                    observer: state.observer,
-                },
-            );
-            let exact =
-                state.condition_is_decided_exactly(condition, Some(current_file_dir), &|name| {
-                    state.undefined_read_is_exact(name)
-                });
-            match eval.outcome {
-                condition::Outcome::True if exact => Some(true),
-                condition::Outcome::False if exact => Some(false),
-                _ => None,
-            }
-        }
-    };
-    state.quiet_target_framework_reads.set(previous);
-    match outcome {
-        Some(false) => PropsImportPoint::TakesNothing,
-        None => PropsImportPoint::Undecided,
-        Some(true) => {
-            if state
-                .trust_of("DirectoryBuildPropsPath")
-                .reference_is_untrusted()
-            {
-                return PropsImportPoint::Undecided;
-            }
-            let path = state
-                .lookup
-                .get_unescaped("DirectoryBuildPropsPath")
-                .unwrap_or_default();
-            let path = path.trim();
-            if path.is_empty() {
-                PropsImportPoint::Undecided
-            } else {
-                PropsImportPoint::Takes(canonicalise_or_normalise(
-                    state.observer,
-                    &current_file_dir.join(path),
-                ))
-            }
-        }
-    }
-}
-
-fn walk_directory_build_file(
-    path: &Path,
-    span: Range<usize>,
-    kind: DirectoryBuildFile,
-    state: &mut State<'_>,
-) {
-    state.directory_build_file_spliced = true;
-    #[cfg(any(test, feature = "test-support"))]
-    match kind {
-        DirectoryBuildFile::Props => state.directory_build_splices.props_spliced = true,
-        DirectoryBuildFile::Targets => state.directory_build_splices.targets_spliced = true,
-    }
-    match kind {
-        DirectoryBuildFile::Props => {
-            state.directory_build_props_splice_path =
-                Some(canonicalise_or_normalise(state.observer, path));
-            state.directory_build_props_splice_pending = false;
-        }
-        DirectoryBuildFile::Targets => {
-            state.directory_build_targets_splice_path =
-                Some(canonicalise_or_normalise(state.observer, path));
-        }
-    }
-    let saved = state.active_directory_build_splice;
-    state.active_directory_build_splice = Some(kind);
-    walk_external_file(path, span, state);
-    state.active_directory_build_splice = saved;
 }
 
 fn contains_glob(s: &str) -> bool {
@@ -7056,27 +5941,6 @@ fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
         out.push_str(text);
     }
     Some(out)
-}
-
-#[cfg(test)]
-mod orchestrator_tests {
-    use super::deferred_pass_can_change_result;
-
-    #[test]
-    fn deferred_pass_only_worth_running_with_resolver_and_no_entry_sdk() {
-        // The deferred second pass can only change the result by firing
-        // the stashed `Directory.Build.props` at a body-reached nested
-        // `<Project Sdk=...>`. That needs both (a) the entry to lack its
-        // own SDK — else pass 1's before-body splice is already faithful —
-        // and (b) an SDK resolver — else no nested `<Project Sdk=...>` can
-        // resolve, so the deferred splice can never be consumed and pass 2
-        // always dangles straight back to pass 1. Every other combination
-        // must skip the (otherwise discarded) second walk.
-        assert!(deferred_pass_can_change_result(false, true));
-        assert!(!deferred_pass_can_change_result(true, true));
-        assert!(!deferred_pass_can_change_result(false, false));
-        assert!(!deferred_pass_can_change_result(true, false));
-    }
 }
 
 #[cfg(test)]

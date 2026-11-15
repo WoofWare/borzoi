@@ -229,7 +229,7 @@ fn nested_sdk_does_not_double_splice_directory_build_props() {
     // and double-count any items it contributes.
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "MySdk", &common_props_sdk(), "<Project/>");
     write_at(
         tmp.path(),
         "Directory.Build.props",
@@ -290,11 +290,9 @@ fn entry_no_sdk_nested_sdk_props_visible_to_directory_build_props() {
     let (root, props, targets) = write_synthetic_sdk(
         tmp.path(),
         "MySdk",
-        r#"<Project>
-  <PropertyGroup>
-    <NestedFlag>yes</NestedFlag>
-  </PropertyGroup>
-</Project>"#,
+        &format!(
+            "<Project>\n  <PropertyGroup>\n    <NestedFlag>yes</NestedFlag>\n  </PropertyGroup>\n{COMMON_PROPS_BLOCK}</Project>"
+        ),
         "<Project/>",
     );
     write_at(
@@ -349,11 +347,9 @@ fn entry_no_sdk_nested_sdk_props_visible_to_directory_build_props() {
 }
 
 #[test]
-fn entry_no_sdk_no_nested_sdk_keeps_directory_build_props_before_body() {
-    // Pass-1 path preserved: with no entry SDK and no nested SDK firing,
-    // `Directory.Build.props` still splices before the entry body, so
-    // its items precede the body's. (No deferral when nothing nested
-    // fires.)
+fn a_project_with_no_sdk_anywhere_imports_no_directory_build_props() {
+    // Only an SDK's `Microsoft.Common.props` imports `Directory.Build.props`,
+    // so with no SDK anywhere MSBuild never reads it (#676).
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
@@ -378,8 +374,8 @@ fn entry_no_sdk_no_nested_sdk_keeps_directory_build_props_before_body() {
     let dir = canon(tmp.path());
     assert_eq!(
         paths_of(&result.items),
-        vec![dir.join("from-dirbuild.fs"), dir.join("body.fs")],
-        "Directory.Build.props items must precede the body when no nested SDK fires",
+        vec![dir.join("body.fs")],
+        "no SDK imports Directory.Build.props, so only the body's item is there",
     );
 }
 
@@ -393,11 +389,9 @@ fn nested_sdk_deferred_directory_build_props_imported_once() {
     let (root, props, targets) = write_synthetic_sdk(
         tmp.path(),
         "MySdk",
-        r#"<Project>
-  <PropertyGroup>
-    <NestedFlag>yes</NestedFlag>
-  </PropertyGroup>
-</Project>"#,
+        &format!(
+            "<Project>\n  <PropertyGroup>\n    <NestedFlag>yes</NestedFlag>\n  </PropertyGroup>\n{COMMON_PROPS_BLOCK}</Project>"
+        ),
         "<Project/>",
     );
     write_at(
@@ -454,20 +448,14 @@ fn nested_sdk_deferred_directory_build_props_imported_once() {
 }
 
 #[test]
-fn nested_sdk_deferred_dbp_falls_back_when_path_gated_on_dbp_property() {
-    // Pathological dangle case. The body's import of the nested-SDK file
-    // is gated on a property that *only* `Directory.Build.props` sets.
-    // In pass 1 (before-body splice) the gate is satisfied, the nested
-    // SDK fires, and we detect divergence. But in pass 2 (deferred) the
-    // gate is unsatisfied — the import never fires, so the pending
-    // splice dangles. The orchestrator must fall back to pass 1 rather
-    // than drop `Directory.Build.props` entirely. We witness the
-    // fallback by the nested body item being present: had pass 2 been
-    // returned, the gated import would not have fired and
-    // `nested-body.fs` would be absent.
+fn an_import_gated_on_what_only_directory_build_props_writes_never_fires() {
+    // The body's import of the nested-SDK file is gated on a property that
+    // *only* `Directory.Build.props` sets, and only the nested SDK would
+    // import `Directory.Build.props`. MSBuild decides the gate first, finds
+    // it false, and so imports neither file.
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "MySdk", &common_props_sdk(), "<Project/>");
     write_at(
         tmp.path(),
         "Directory.Build.props",
@@ -507,15 +495,10 @@ fn nested_sdk_deferred_dbp_falls_back_when_path_gated_on_dbp_property() {
             Err(SdkResolveError::NotFound)
         }
     });
-    let dir = canon(tmp.path());
-    let paths = paths_of(&result.items);
     assert!(
-        paths.contains(&dir.join("nested-body.fs")),
-        "fallback to pass 1: the gated import fires once Directory.Build.props sets $(FromDbp); got: {paths:?}",
-    );
-    assert!(
-        paths.contains(&dir.join("from-dirbuild.fs")),
-        "Directory.Build.props must not be dropped on the dangle fallback; got: {paths:?}",
+        result.items.is_empty() && !result.items_uncertain,
+        "neither file is imported, and that is certain; got: {:?}",
+        paths_of(&result.items)
     );
 }
 
@@ -530,15 +513,13 @@ fn entry_with_sdk_and_nested_sdk_splices_directory_build_props_once_after_entry(
     let (entry_root, entry_props, entry_targets) = write_synthetic_sdk(
         tmp.path(),
         "EntrySdk",
-        r#"<Project>
-  <ItemGroup>
-    <Compile Include="entry-props.fs" />
-  </ItemGroup>
-</Project>"#,
+        &format!(
+            "<Project>\n  <ItemGroup>\n    <Compile Include=\"entry-props.fs\" />\n  </ItemGroup>\n{COMMON_PROPS_BLOCK}</Project>"
+        ),
         "<Project/>",
     );
     let (nested_root, nested_props, nested_targets) =
-        write_synthetic_sdk(tmp.path(), "NestedSdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "NestedSdk", &common_props_sdk(), "<Project/>");
     write_at(
         tmp.path(),
         "Directory.Build.props",
@@ -617,7 +598,7 @@ fn nested_sdk_deferred_dbp_gate_reevaluated_after_body_property() {
     // at the fire point, not reuse the before-body value.
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "MySdk", &common_props_sdk(), "<Project/>");
     write_at(
         tmp.path(),
         "Directory.Build.props",
@@ -679,7 +660,7 @@ fn nested_sdk_deferred_dbp_path_override_reevaluated_after_body_property() {
     // before the body ran.
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "MySdk", &common_props_sdk(), "<Project/>");
     // Nearest-ancestor fallback (would be imported if we used the
     // stale before-body resolution).
     write_at(
@@ -758,7 +739,7 @@ fn entry_no_sdk_body_directory_build_props_path_override_imported_at_nested_sdk(
     // override entirely.
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "MySdk", &common_props_sdk(), "<Project/>");
     // The redirect target the body points at. Note: there is deliberately
     // *no* `Directory.Build.props` on disk, so pass 1 imports nothing.
     let alt = tmp.path().join("alt");
@@ -831,7 +812,7 @@ fn directory_build_props_cannot_suppress_nested_sdk_detection() {
     // pass 1's contaminated detection.
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "MySdk", &common_props_sdk(), "<Project/>");
     write_at(
         tmp.path(),
         "Directory.Build.props",
@@ -898,7 +879,7 @@ fn nested_sdk_deferred_dbp_gate_declines_when_the_body_write_is_undecidable() {
     // and import it.
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "MySdk", &common_props_sdk(), "<Project/>");
     write_at(
         tmp.path(),
         "Directory.Build.props",

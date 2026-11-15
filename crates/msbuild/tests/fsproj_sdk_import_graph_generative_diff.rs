@@ -26,7 +26,8 @@
 //!   redirect of `DirectoryBuildPropsPath`;
 //! - re-imports of either file by alias (a `..` respelling, a case respelling,
 //!   a directory symlink, a file symlink, a relative path to a symlink beside
-//!   the importing file), literal, through the path property, or by writing
+//!   the importing file, and one beside the importing file but not the
+//!   project), literal, through the path property, or by writing
 //!   the path property alone for an import point to read, from `Sdk.props`
 //!   (before or after its props import point), `Sdk.targets`, the body, or
 //!   `Directory.Build.targets`.
@@ -47,7 +48,9 @@
 //! the sweep. Membership is decided from the case's shape, never from the
 //! walk's answer. Each known family also has a witness case
 //! ([`Family::witness`]) that the test asserts *still* diverges, so the change
-//! that fixes a family turns this test red until the family is deleted.
+//! that fixes a family turns this test red until the family is deleted. A
+//! deleted family's witness moves to [`fixed_witnesses`], which must agree
+//! with MSBuild and stay outside every family.
 //!
 //! ## Anti-vacuity
 //!
@@ -55,7 +58,8 @@
 //! properties the walk has no legitimate reason to decline in that case, and a
 //! decline of one is reported like a divergence. Since the families exempt
 //! their cases, half the cases lean to the shape real projects have, and the
-//! sweep asserts that a quarter of them fall outside every family and that,
+//! sweep asserts that a quarter of them fall outside every family (all but a
+//! few percent do, now that the walk follows the SDK's own imports) and that,
 //! among those, MSBuild both imports and skips each `Directory.Build.*` file.
 //! A census asserts that every value of every dimension is generated.
 //!
@@ -107,6 +111,9 @@ enum PropsPoint {
     ConditionFalse,
     /// The import's condition reads a value `Sdk.props` writes: true or false.
     SdkWrittenGate(bool),
+    /// The standard block in a file `Sdk.props` imports under a condition
+    /// MSBuild finds true and the walk cannot decide.
+    BehindUndecidedImport,
 }
 
 /// The `Directory.Build.targets` import point in `Sdk.targets`.
@@ -119,6 +126,12 @@ enum TargetsPoint {
     /// The import's condition reads `DemoGate`, which `Directory.Build.props`
     /// may write.
     GateWrittenByProps,
+    /// The standard block with its import inside an `<ImportGroup>`, after an
+    /// import of the SDK's `Helper.targets`, which can rewrite its inputs.
+    InImportGroup,
+    /// The standard block in a file `Sdk.targets` imports under a condition
+    /// MSBuild finds true and the walk cannot decide.
+    BehindUndecidedImport,
 }
 
 /// Which `Directory.Build.*` file a re-import names.
@@ -143,6 +156,12 @@ enum Spelling {
     /// file the import is in: `rel.{props,targets}`, a symlink to the file in
     /// each directory a site's file is in.
     Relative,
+    /// A relative path to `relx.{props,targets}`, a symlink to the file beside
+    /// the SDK's files and `Directory.Build.targets` but not beside the
+    /// project. An `<Import>`'s condition resolves `Exists()` against the
+    /// importing file's directory, as the import itself does; most other
+    /// conditions resolve it against the project's (#786).
+    RelativeElsewhere,
 }
 
 /// How a re-import reaches its path.
@@ -156,6 +175,14 @@ enum Shape {
     /// Only writes the path to `DirectoryBuild{Props,Targets}Path`, leaving
     /// the import to whichever import point reads it next.
     PropertyOnly,
+    /// [`Shape::ViaProperty`] with the import qualified by the SDK
+    /// (`<Import Sdk="S" Project="$(…)"/>`), which MSBuild resolves by joining
+    /// the SDK's directory to the attribute as written. The path is written
+    /// relative to the SDK's directory, whatever the spelling.
+    ViaPropertySdk,
+    /// [`Shape::ViaPropertySdk`] with the spelling's absolute path, which the
+    /// join appends rather than substitutes (#793).
+    ViaPropertySdkAbsolute,
 }
 
 /// Where a re-import is written.
@@ -190,6 +217,52 @@ struct Props {
     redirects_props_path: bool,
 }
 
+/// Where an [`Undecided`] write sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum UndecidedSite {
+    /// In `Sdk.props`, before its props import point.
+    SdkProps,
+    /// In the body (before the props import, in the explicit form).
+    Body,
+    /// In the SDK's `Helper.targets`, which `Sdk.targets` imports just before
+    /// its targets import point (inside the group, for
+    /// [`TargetsPoint::InImportGroup`]).
+    SdkTargetsHelper,
+}
+
+/// One of the four properties that decide the `Directory.Build.*` imports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ImportInput {
+    PropsGate,
+    PropsPath,
+    TargetsGate,
+    TargetsPath,
+}
+
+/// How an [`Undecided`] write leaves its property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum UndecidedHow {
+    /// Written under a condition MSBuild finds true and the walk cannot
+    /// decide: a gate to `false`, a path to `other.props`.
+    UnderUndecidedCondition,
+    /// Written from a value the walk cannot compute, so it refuses the write,
+    /// then overwritten with a clean value.
+    RefusedThenOverwritten,
+    /// Refused, then overwritten from `$(UndecidedStale)`, which `Sdk.props`
+    /// defines and then redefines in an import the walk cannot decide: the
+    /// overwrite is clean text resting on a value hidden content changed.
+    RefusedThenStale,
+}
+
+/// A write to an import input the walk cannot pin down. The walk may decline
+/// whatever it decides; it must not commit what MSBuild does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Undecided {
+    site: UndecidedSite,
+    input: ImportInput,
+    how: UndecidedHow,
+}
+
 #[derive(Debug, Clone)]
 struct Case {
     form: Form,
@@ -205,6 +278,7 @@ struct Case {
     /// The body writes `ImportDirectoryBuildTargets=false`.
     body_disables_targets_import: bool,
     reimports: Vec<Reimport>,
+    undecided: Option<Undecided>,
 }
 
 /// The properties every case reads back.
@@ -251,6 +325,7 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
             PropsPoint::ConditionFalse,
             PropsPoint::SdkWrittenGate(true),
             PropsPoint::SdkWrittenGate(false),
+            PropsPoint::BehindUndecidedImport,
         ])
     };
     let targets_point = if usual {
@@ -261,6 +336,8 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
             TargetsPoint::Standard,
             TargetsPoint::ConditionFalse,
             TargetsPoint::GateWrittenByProps,
+            TargetsPoint::InImportGroup,
+            TargetsPoint::BehindUndecidedImport,
         ])
     };
     let props = Props {
@@ -278,8 +355,15 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
                 Spelling::DirLink,
                 Spelling::FileLink,
                 Spelling::Relative,
+                Spelling::RelativeElsewhere,
             ]),
-            shape: *rng.pick(&[Shape::Literal, Shape::ViaProperty, Shape::PropertyOnly]),
+            shape: *rng.pick(&[
+                Shape::Literal,
+                Shape::ViaProperty,
+                Shape::PropertyOnly,
+                Shape::ViaPropertySdk,
+                Shape::ViaPropertySdkAbsolute,
+            ]),
             site: *rng.pick(&[
                 Site::SdkPropsBeforePoint,
                 Site::SdkProps,
@@ -299,7 +383,84 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
         body_disables_props_import: rng.below(6) == 0,
         body_disables_targets_import: rng.below(6) == 0,
         reimports,
+        undecided: (rng.below(5) == 0).then(|| Undecided {
+            site: *rng.pick(&[
+                UndecidedSite::SdkProps,
+                UndecidedSite::Body,
+                UndecidedSite::SdkTargetsHelper,
+            ]),
+            input: *rng.pick(&[
+                ImportInput::PropsGate,
+                ImportInput::PropsPath,
+                ImportInput::TargetsGate,
+                ImportInput::TargetsPath,
+            ]),
+            how: *rng.pick(&[
+                UndecidedHow::UnderUndecidedCondition,
+                UndecidedHow::RefusedThenOverwritten,
+                UndecidedHow::RefusedThenStale,
+            ]),
+        }),
     }
+}
+
+/// `undecided`'s write, as a property group, when it sits at `site`.
+/// The `(name, value MSBuild ends with, value the walk holds when it cannot
+/// see the redefinition)` of an [`Undecided`] write.
+fn undecided_write(u: Undecided) -> (&'static str, &'static str, &'static str) {
+    match u.input {
+        ImportInput::PropsGate => ("ImportDirectoryBuildProps", "false", "true"),
+        ImportInput::PropsPath => (
+            "DirectoryBuildPropsPath",
+            "$(MSBuildProjectDirectory)/../other.props",
+            "$(MSBuildProjectDirectory)/../Directory.Build.props",
+        ),
+        ImportInput::TargetsGate => ("ImportDirectoryBuildTargets", "false", "true"),
+        ImportInput::TargetsPath => (
+            "DirectoryBuildTargetsPath",
+            "$(MSBuildProjectDirectory)/../other.props",
+            "$(MSBuildProjectDirectory)/../Directory.Build.targets",
+        ),
+    }
+}
+
+/// For [`UndecidedHow::RefusedThenStale`], `Sdk.props`'s definition of
+/// `UndecidedStale` and the import that redefines it, which the walk cannot
+/// decide (`Stale.props`, beside it).
+fn render_stale_source(case: &Case) -> String {
+    match case.undecided {
+        Some(u) if u.how == UndecidedHow::RefusedThenStale => {
+            let (_, _, stale) = undecided_write(u);
+            format!(
+                "  <PropertyGroup>\n    <UndecidedX>abc</UndecidedX>\n    \
+                 <UndecidedStale>{stale}</UndecidedStale>\n  </PropertyGroup>\n  \
+                 <Import Project=\"$(MSBuildThisFileDirectory)Stale.props\" \
+                 Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\" />\n"
+            )
+        }
+        _ => String::new(),
+    }
+}
+
+fn render_undecided(case: &Case, site: UndecidedSite) -> String {
+    let Some(u) = case.undecided.filter(|u| u.site == site) else {
+        return String::new();
+    };
+    let (name, value, _) = undecided_write(u);
+    // `$(UndecidedX.Substring(0,1))` is `a` to MSBuild; the walk computes no
+    // `Substring`.
+    let write = match u.how {
+        UndecidedHow::UnderUndecidedCondition => format!(
+            "    <{name} Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\">{value}</{name}>\n"
+        ),
+        UndecidedHow::RefusedThenOverwritten => format!(
+            "    <{name}>$(UndecidedX.Substring(0,1))</{name}>\n    <{name}>{value}</{name}>\n"
+        ),
+        UndecidedHow::RefusedThenStale => format!(
+            "    <{name}>$(UndecidedX.Substring(0,1))</{name}>\n    <{name}>$(UndecidedStale)</{name}>\n"
+        ),
+    };
+    format!("  <PropertyGroup>\n    <UndecidedX>abc</UndecidedX>\n{write}  </PropertyGroup>\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -307,12 +468,25 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
 // ---------------------------------------------------------------------------
 
 /// A file's marker: appended to `Trace`, and the target `T` and `T_<marker>`.
+/// A user's file also contributes the Compile item `<marker>.fs`, so the
+/// Compile set logs which of the user's files ran. An SDK's files contribute
+/// none: a Compile item an SDK import the walk cannot decide may carry is the
+/// standing SDK Compile-tolerance trade (`ParsedProject::items_uncertain`),
+/// not the import graph this harness grades.
 fn tracer(marker: &str) -> String {
+    let compile = if SDK_MARKERS.contains(&marker) {
+        String::new()
+    } else {
+        format!("  <ItemGroup>\n    <Compile Include=\"{marker}.fs\" />\n  </ItemGroup>\n")
+    };
     format!(
-        "  <PropertyGroup>\n    <Trace>$(Trace);{marker}</Trace>\n  </PropertyGroup>\n  \
+        "  <PropertyGroup>\n    <Trace>$(Trace);{marker}</Trace>\n  </PropertyGroup>\n{compile}  \
          <Target Name=\"T\" />\n  <Target Name=\"T_{marker}\" />\n"
     )
 }
+
+/// The markers of the SDK's own files.
+const SDK_MARKERS: [&str; 6] = ["sdkp", "common", "sdkt", "sdkt2", "behindp", "behindt"];
 
 /// `Microsoft.Common.props`'s `Directory.Build.props` block, with the import's
 /// condition replaced by `condition`.
@@ -372,38 +546,59 @@ fn reimport_path(which: Which, spelling: Spelling) -> String {
         Spelling::DirLink => format!("$(MSBuildProjectDirectory)/up/Directory.Build.{ext}"),
         Spelling::FileLink => format!("$(MSBuildProjectDirectory)/alias.{ext}"),
         Spelling::Relative => format!("rel.{ext}"),
+        Spelling::RelativeElsewhere => format!("relx.{ext}"),
     }
 }
 
-fn render_reimport(r: &Reimport) -> String {
-    let path = reimport_path(r.which, r.spelling);
+fn render_reimport(r: &Reimport, sdk: &str) -> String {
+    let path = if r.shape == Shape::ViaPropertySdk {
+        // `<root>/Sdks/S<n>/Sdk` to `<root>/case<n>`.
+        let ext = match r.which {
+            Which::Props => "props",
+            Which::Targets => "targets",
+        };
+        format!("../../../case{}/Directory.Build.{ext}", &sdk[1..])
+    } else {
+        reimport_path(r.which, r.spelling)
+    };
     match r.shape {
         Shape::Literal => {
             format!("  <Import Project=\"{path}\" Condition=\"Exists('{path}')\" />\n")
         }
-        Shape::ViaProperty | Shape::PropertyOnly => {
+        Shape::ViaProperty
+        | Shape::PropertyOnly
+        | Shape::ViaPropertySdk
+        | Shape::ViaPropertySdkAbsolute => {
             let name = match r.which {
                 Which::Props => "DirectoryBuildPropsPath",
                 Which::Targets => "DirectoryBuildTargetsPath",
             };
             let write =
                 format!("  <PropertyGroup>\n    <{name}>{path}</{name}>\n  </PropertyGroup>\n");
+            let qualifier = if matches!(
+                r.shape,
+                Shape::ViaPropertySdk | Shape::ViaPropertySdkAbsolute
+            ) {
+                format!(" Sdk=\"{sdk}\"")
+            } else {
+                String::new()
+            };
             if r.shape == Shape::PropertyOnly {
                 write
             } else {
                 format!(
-                    "{write}  <Import Project=\"$({name})\" Condition=\"exists('$({name})')\" />\n"
+                    "{write}  <Import{qualifier} Project=\"$({name})\" Condition=\"exists('$({name})')\" />\n"
                 )
             }
         }
     }
 }
 
-fn reimports_at(case: &Case, site: Site) -> String {
+fn reimports_at(case: &Case, site: Site, sdk: &str) -> String {
     case.reimports
         .iter()
         .filter(|r| r.site == site)
-        .map(render_reimport)
+        .map(|r| render_reimport(r, sdk))
         .collect()
 }
 
@@ -419,7 +614,9 @@ fn render(case: &Case, sdk: &str) -> Rendered {
     // Sdk.props.
     let mut sdk_props = String::from("<Project>\n");
     sdk_props.push_str(&tracer("sdkp"));
-    sdk_props.push_str(&reimports_at(case, Site::SdkPropsBeforePoint));
+    sdk_props.push_str(&render_stale_source(case));
+    sdk_props.push_str(&reimports_at(case, Site::SdkPropsBeforePoint, sdk));
+    sdk_props.push_str(&render_undecided(case, UndecidedSite::SdkProps));
     let mut sdk_files = Vec::new();
     match case.props_point {
         PropsPoint::Absent => {}
@@ -432,6 +629,21 @@ fn render(case: &Case, sdk: &str) -> Rendered {
                 format!(
                     "<Project>\n{}{}</Project>\n",
                     tracer("common"),
+                    props_block(STANDARD_PROPS_CONDITION)
+                ),
+            ));
+        }
+        PropsPoint::BehindUndecidedImport => {
+            sdk_props.push_str(
+                "  <PropertyGroup><UndecidedX>abc</UndecidedX></PropertyGroup>\n  \
+                 <Import Project=\"$(MSBuildThisFileDirectory)Behind.props\" \
+                 Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\" />\n",
+            );
+            sdk_files.push((
+                "Behind.props",
+                format!(
+                    "<Project>\n{}{}</Project>\n",
+                    tracer("behindp"),
                     props_block(STANDARD_PROPS_CONDITION)
                 ),
             ));
@@ -453,13 +665,34 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             "  <Import Project=\"$(DirectoryBuildPropsPath)\" Condition=\"{STANDARD_PROPS_CONDITION}\"/>\n"
         ));
     }
-    sdk_props.push_str(&reimports_at(case, Site::SdkProps));
+    sdk_props.push_str(&reimports_at(case, Site::SdkProps, sdk));
     sdk_props.push_str("</Project>\n");
     sdk_files.push(("Sdk.props", sdk_props));
 
     // Sdk.targets.
     let mut sdk_targets = String::from("<Project>\n");
     sdk_targets.push_str(&tracer("sdkt"));
+    if case.targets_point != TargetsPoint::InImportGroup {
+        sdk_targets
+            .push_str("  <Import Project=\"$(MSBuildThisFileDirectory)Helper.targets\" />\n");
+    }
+    if let Some(u) = case.undecided {
+        let (_, value, _) = undecided_write(u);
+        sdk_files.push((
+            "Stale.props",
+            format!(
+                "<Project>\n  <PropertyGroup>\n    <UndecidedStale>{value}</UndecidedStale>\n  \
+                 </PropertyGroup>\n</Project>\n"
+            ),
+        ));
+    }
+    sdk_files.push((
+        "Helper.targets",
+        format!(
+            "<Project>\n{}</Project>\n",
+            render_undecided(case, UndecidedSite::SdkTargetsHelper)
+        ),
+    ));
     match case.targets_point {
         TargetsPoint::Absent => {}
         TargetsPoint::Standard => sdk_targets.push_str(&targets_block(STANDARD_TARGETS_CONDITION)),
@@ -469,8 +702,37 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         TargetsPoint::GateWrittenByProps => sdk_targets.push_str(&targets_block(
             "'$(DemoGate)' == 'on' and exists('$(DirectoryBuildTargetsPath)')",
         )),
+        TargetsPoint::BehindUndecidedImport => {
+            sdk_targets.push_str(
+                "  <PropertyGroup><UndecidedX>abc</UndecidedX></PropertyGroup>\n  \
+                 <Import Project=\"$(MSBuildThisFileDirectory)Behind.targets\" \
+                 Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\" />\n",
+            );
+            sdk_files.push((
+                "Behind.targets",
+                format!(
+                    "<Project>\n{}{}</Project>\n",
+                    tracer("behindt"),
+                    targets_block(STANDARD_TARGETS_CONDITION)
+                ),
+            ));
+        }
+        TargetsPoint::InImportGroup => {
+            let import = format!(
+                "  <Import Project=\"$(DirectoryBuildTargetsPath)\" Condition=\"{STANDARD_TARGETS_CONDITION}\"/>\n"
+            );
+            let block = targets_block(STANDARD_TARGETS_CONDITION);
+            assert!(block.contains(&import), "the block ends in its import");
+            sdk_targets.push_str(&block.replace(
+                &import,
+                &format!(
+                    "  <ImportGroup Condition=\"'true' == 'true'\">\n  \
+                     <Import Project=\"$(MSBuildThisFileDirectory)Helper.targets\" />\n{import}  </ImportGroup>\n"
+                ),
+            ));
+        }
     }
-    sdk_targets.push_str(&reimports_at(case, Site::SdkTargets));
+    sdk_targets.push_str(&reimports_at(case, Site::SdkTargets, sdk));
     sdk_targets.push_str(&tracer("sdkt2"));
     sdk_targets.push_str("</Project>\n");
     sdk_files.push(("Sdk.targets", sdk_targets));
@@ -506,7 +768,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         let mut text = String::from("<Project>\n");
         text.push_str(&tracer("dbt"));
         text.push_str("  <PropertyGroup>\n    <InDbt>1</InDbt>\n  </PropertyGroup>\n");
-        text.push_str(&reimports_at(case, Site::DirectoryBuildTargets));
+        text.push_str(&reimports_at(case, Site::DirectoryBuildTargets, sdk));
         text.push_str("</Project>\n");
         case_files.push(("Directory.Build.targets", text));
     }
@@ -520,12 +782,16 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             "  <PropertyGroup>\n    <ImportDirectoryBuildTargets>false</ImportDirectoryBuildTargets>\n  </PropertyGroup>\n",
         );
     }
-    body.push_str(&reimports_at(case, Site::Body));
-    let disable_props = if case.body_disables_props_import {
-        "  <PropertyGroup>\n    <ImportDirectoryBuildProps>false</ImportDirectoryBuildProps>\n  </PropertyGroup>\n"
-    } else {
-        ""
-    };
+    body.push_str(&reimports_at(case, Site::Body, sdk));
+    let disable_props = format!(
+        "{}{}",
+        if case.body_disables_props_import {
+            "  <PropertyGroup>\n    <ImportDirectoryBuildProps>false</ImportDirectoryBuildProps>\n  </PropertyGroup>\n"
+        } else {
+            ""
+        },
+        render_undecided(case, UndecidedSite::Body)
+    );
     let project = match case.form {
         Form::SdkAttribute => format!("<Project Sdk=\"{sdk}\">\n{disable_props}{body}</Project>\n"),
         Form::ExplicitImports => format!(
@@ -558,99 +824,83 @@ fn render(case: &Case, sdk: &str) -> Rendered {
 /// MSBuild's (#677).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Family {
-    /// The walk splices `Directory.Build.*` into a project with no SDK, which
-    /// MSBuild never imports them into (#676, merged into #677).
-    SdkLessSplice,
-    /// The walk splices `Directory.Build.*` itself rather than following the
-    /// SDK's import, so it diverges wherever the SDK's import point is absent,
-    /// conditioned otherwise than the standard block, or reached in a
-    /// different place.
-    EmulatedImportPoint,
-    /// The walk takes every SDK import of `$(DirectoryBuildPropsPath)` for
-    /// the props import point it splices itself, and suppresses it when it
-    /// names the file the splice took or is about to take: compared by
-    /// canonical path, with a relative path resolved against the project's
-    /// directory. MSBuild has no such point: it imports any file it has not
-    /// imported yet, by lexical full path, resolved against the importing
-    /// file's directory. So an SDK that writes the property itself diverges
-    /// when it names the file through an alias, relative to itself, or before
-    /// a `Directory.Build.props` it imports redirects it.
-    PropsPointIdentity,
     /// `Exists()` on a symlink whose target is missing: MSBuild (.NET's
     /// `File.Exists`) says true, the walk says false. So an import guarded by
     /// it is skipped by the walk and attempted by MSBuild, which then rejects
     /// the project (#778).
     DanglingSymlinkExists,
+    /// An import input written under a condition the walk cannot decide, or
+    /// refused: the walk takes one side of every import it decides, and a
+    /// later write of a property the skipped (or followed) file also writes
+    /// is published as trusted, with only later *undefined* reads made
+    /// inexact (#791). Covers property findings only: the Compile set must
+    /// still be uncertain.
+    UndecidedImportHidesWrites,
+    /// An SDK-qualified import of a property holding a rooted path: MSBuild
+    /// joins the SDK's directory to the attribute as written and rejects the
+    /// project, the walk expands first and imports the rooted file (#793).
+    SdkImportJoinsRawText,
+    /// `Exists()` resolves `..` physically; .NET's `File.Exists` collapses it
+    /// as text first. They part on a relative path tested from a file reached
+    /// through the directory link `proj/up` (#778).
+    ExistsResolvesPhysically,
 }
 
 const KNOWN_DIVERGENCES: &[Family] = &[
-    Family::SdkLessSplice,
-    Family::EmulatedImportPoint,
-    Family::PropsPointIdentity,
     Family::DanglingSymlinkExists,
+    Family::UndecidedImportHidesWrites,
+    Family::SdkImportJoinsRawText,
+    Family::ExistsResolvesPhysically,
 ];
 
 impl Family {
     /// Whether `case` is in the family: decided from the case's shape alone,
     /// never from how the walk answered it.
     fn contains(self, case: &Case) -> bool {
-        let has_file = case.props.present || case.targets_present;
         match self {
-            Family::SdkLessSplice => case.form == Form::SdkLess && has_file,
-            Family::EmulatedImportPoint => {
-                // The splice and the SDK's real import agree only when the SDK
-                // is the project's own, reached through the attribute, and its
-                // import points are the standard blocks.
-                case.form != Form::SdkLess
-                    && has_file
-                    && (case.form != Form::SdkAttribute
-                        || !matches!(
-                            case.props_point,
-                            PropsPoint::Standard | PropsPoint::InSdkFile
-                        )
-                        || case.second_props_point
-                        || case.targets_point != TargetsPoint::Standard)
-            }
-            // Every site but the body can be in a file the walk counts as the
-            // SDK's: `Directory.Build.targets` too, when an SDK file reaches
-            // it through the `rel.targets` link in the SDK's directory.
-            Family::PropsPointIdentity => case.reimports.iter().any(|r| {
-                r.which == Which::Props
-                    && matches!(r.shape, Shape::ViaProperty | Shape::PropertyOnly)
-                    && r.site != Site::Body
-            }),
             Family::DanglingSymlinkExists => case.reimports.iter().any(|r| {
-                matches!(r.spelling, Spelling::FileLink | Spelling::Relative)
-                    && match r.which {
-                        Which::Props => !case.props.present,
-                        Which::Targets => !case.targets_present,
-                    }
+                matches!(
+                    r.spelling,
+                    Spelling::FileLink | Spelling::Relative | Spelling::RelativeElsewhere
+                ) && match r.which {
+                    Which::Props => !case.props.present,
+                    Which::Targets => !case.targets_present,
+                }
             }),
+            Family::UndecidedImportHidesWrites => {
+                case.undecided.is_some()
+                    || case.props_point == PropsPoint::BehindUndecidedImport
+                    || case.targets_point == TargetsPoint::BehindUndecidedImport
+            }
+            Family::SdkImportJoinsRawText => case
+                .reimports
+                .iter()
+                .any(|r| r.shape == Shape::ViaPropertySdkAbsolute),
+            Family::ExistsResolvesPhysically => {
+                case.reimports
+                    .iter()
+                    .any(|r| r.spelling == Spelling::DirLink)
+                    && case
+                        .reimports
+                        .iter()
+                        .any(|r| r.shape == Shape::ViaPropertySdk)
+            }
+        }
+    }
+
+    /// Whether the family explains `finding`, in a case it contains.
+    fn covers(self, finding: &Finding) -> bool {
+        match self {
+            Family::DanglingSymlinkExists => true,
+            Family::UndecidedImportHidesWrites => !finding.compile,
+            Family::SdkImportJoinsRawText | Family::ExistsResolvesPhysically => true,
         }
     }
 
     /// A case the family's divergence is known to show in, which the test
     /// asserts still diverges.
     fn witness(self) -> Case {
-        let base = Case::usual();
         match self {
-            Family::SdkLessSplice => Case {
-                form: Form::SdkLess,
-                ..base
-            },
-            Family::EmulatedImportPoint => Case {
-                props_point: PropsPoint::Absent,
-                ..base
-            },
-            Family::PropsPointIdentity => Case {
-                reimports: vec![Reimport {
-                    which: Which::Props,
-                    spelling: Spelling::FileLink,
-                    shape: Shape::ViaProperty,
-                    site: Site::SdkProps,
-                }],
-                ..base
-            },
             Family::DanglingSymlinkExists => Case {
                 targets_present: false,
                 reimports: vec![Reimport {
@@ -659,7 +909,41 @@ impl Family {
                     shape: Shape::Literal,
                     site: Site::Body,
                 }],
-                ..base
+                ..Case::usual()
+            },
+            Family::ExistsResolvesPhysically => Case {
+                reimports: vec![
+                    Reimport {
+                        which: Which::Targets,
+                        spelling: Spelling::DirLink,
+                        shape: Shape::PropertyOnly,
+                        site: Site::SdkProps,
+                    },
+                    Reimport {
+                        which: Which::Targets,
+                        spelling: Spelling::DotDot,
+                        shape: Shape::ViaPropertySdk,
+                        site: Site::DirectoryBuildTargets,
+                    },
+                ],
+                ..Case::usual()
+            },
+            Family::SdkImportJoinsRawText => Case {
+                reimports: vec![Reimport {
+                    which: Which::Props,
+                    spelling: Spelling::DotDot,
+                    shape: Shape::ViaPropertySdkAbsolute,
+                    site: Site::Body,
+                }],
+                ..Case::usual()
+            },
+            Family::UndecidedImportHidesWrites => Case {
+                undecided: Some(Undecided {
+                    site: UndecidedSite::SdkProps,
+                    input: ImportInput::PropsPath,
+                    how: UndecidedHow::UnderUndecidedCondition,
+                }),
+                ..Case::usual()
             },
         }
     }
@@ -682,6 +966,7 @@ impl Case {
             body_disables_props_import: false,
             body_disables_targets_import: false,
             reimports: Vec::new(),
+            undecided: None,
         }
     }
 
@@ -690,8 +975,15 @@ impl Case {
     /// every path is one the walk can spell, and nothing reads the
     /// environment, so the log of which files ran and the markers they wrote
     /// are all decided.
+    ///
+    /// A case with an [`Undecided`] write has no such obligation: that write
+    /// may decide every import that follows it.
     fn must_commit(&self) -> &'static [&'static str] {
-        &["Trace", "BodySaw", "InDbp", "InDbt", "InOther"]
+        if self.undecided.is_some() {
+            &[]
+        } else {
+            &["Trace", "BodySaw", "InDbp", "InDbt", "InOther"]
+        }
     }
 }
 
@@ -737,6 +1029,8 @@ struct Finding {
     what: String,
     ours: String,
     theirs: String,
+    /// About the Compile set, rather than a property or a target.
+    compile: bool,
 }
 
 /// What one case came to.
@@ -747,6 +1041,9 @@ struct Outcome {
     rejected: bool,
     committed_properties: usize,
     exact_targets: usize,
+    /// The walk called the Compile set certain (and MSBuild accepted the
+    /// project).
+    certain_compile: bool,
     /// Whether MSBuild imported `Directory.Build.props` and `.targets`, read
     /// off the markers they write.
     msbuild_imported: Option<(bool, bool)>,
@@ -792,6 +1089,16 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         Path::new("../Directory.Build.targets"),
         &case_dir.join("proj/alias.targets"),
     );
+    for dir in [sdk_dir.as_path(), case_dir.as_path()] {
+        symlink(
+            &case_dir.join("Directory.Build.props"),
+            &dir.join("relx.props"),
+        );
+        symlink(
+            &case_dir.join("Directory.Build.targets"),
+            &dir.join("relx.targets"),
+        );
+    }
     for dir in [
         sdk_dir.as_path(),
         case_dir.as_path(),
@@ -836,7 +1143,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         targets: TARGETS.iter().map(|t| (*t).to_owned()).collect(),
         ..ReadProbe::default()
     };
-    let (_, ours) = parse_fsproj_reads(
+    let (parsed, ours) = parse_fsproj_reads(
         &rendered.project,
         &project_path,
         &HashMap::new(),
@@ -846,9 +1153,10 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         &probe,
     )
     .expect("well-formed XML parses");
-    let theirs = shared
-        .oracle
-        .try_evaluated(&project_path, &[], &PROPERTIES, &[], &TARGETS);
+    let theirs =
+        shared
+            .oracle
+            .try_evaluated(&project_path, &[], &PROPERTIES, &["Compile"], &TARGETS);
 
     let mut outcome = Outcome::default();
     let mut describe = format!("{case:#?}\n--- p.proj\n{}", rendered.project);
@@ -859,12 +1167,21 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         // MSBuild refuses the project, so any value the walk commits is one no
         // build holds.
         outcome.rejected = true;
+        if !parsed.items_uncertain {
+            outcome.findings.push(Finding {
+                what: "Compile".to_owned(),
+                ours: "a certain item set".to_owned(),
+                theirs: "a rejected project".to_owned(),
+                compile: true,
+            });
+        }
         for name in PROPERTIES {
             if let read @ (PropertyRead::Value(_) | PropertyRead::Unset) = &ours.properties[name] {
                 outcome.findings.push(Finding {
                     what: name.to_owned(),
                     ours: format!("{read:?}"),
                     theirs: "a rejected project".to_owned(),
+                    compile: false,
                 });
             }
         }
@@ -890,6 +1207,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                         what: format!("{name} (must commit)"),
                         ours: format!("{read:?}"),
                         theirs: theirs.to_string(),
+                        compile: false,
                     });
                 }
                 continue;
@@ -901,6 +1219,38 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 what: name.to_owned(),
                 ours,
                 theirs: theirs.to_string(),
+                compile: false,
+            });
+        }
+    }
+    // A Compile set the walk calls certain must be MSBuild's, file for file
+    // and in order: that is what the LSP folds.
+    if !parsed.items_uncertain {
+        outcome.certain_compile = true;
+        let file_name = |path: &str| {
+            Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let ours: Vec<String> = parsed
+            .items
+            .iter()
+            .filter(|item| item.kind == borzoi_msbuild::ItemKind::Compile)
+            .map(|item| file_name(&item.include.to_string_lossy()))
+            .collect();
+        let theirs: Vec<String> = theirs["items"]["Compile"]
+            .as_array()
+            .expect("the Compile items")
+            .iter()
+            .map(|item| file_name(item["identity"].as_str().expect("an identity")))
+            .collect();
+        if ours != theirs {
+            outcome.findings.push(Finding {
+                what: "Compile".to_owned(),
+                ours: format!("{ours:?}"),
+                theirs: format!("{theirs:?}"),
+                compile: true,
             });
         }
     }
@@ -912,6 +1262,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 what: format!("target {name}"),
                 ours: why,
                 theirs: String::new(),
+                compile: false,
             }),
         }
     }
@@ -959,6 +1310,9 @@ fn brief(case: &Case) -> String {
             r.which, r.spelling, r.shape, r.site
         ));
     }
+    if let Some(u) = case.undecided {
+        s.push_str(&format!(" und[{:?} {:?} @{:?}]", u.input, u.how, u.site));
+    }
     s
 }
 
@@ -989,6 +1343,11 @@ fn census_keys(case: &Case) -> Vec<String> {
             case.body_disables_targets_import
         ),
     ];
+    if let Some(u) = case.undecided {
+        keys.push(format!("undecided.site={:?}", u.site));
+        keys.push(format!("undecided.input={:?}", u.input));
+        keys.push(format!("undecided.how={:?}", u.how));
+    }
     for r in &case.reimports {
         keys.push(format!("reimport.which={:?}", r.which));
         // A spelling is exercised only when it names a file that exists:
@@ -1012,6 +1371,8 @@ struct Report {
     rejected: usize,
     committed_properties: usize,
     exact_targets: usize,
+    /// Cases whose Compile set the walk called certain, each graded.
+    certain_compile: usize,
     /// Cases in no known family, which the sweep grades in full.
     outside_families: usize,
     /// Of those, how often MSBuild imported `(Directory.Build.props,
@@ -1044,6 +1405,7 @@ fn sweep(seed: u64, cases: usize) -> Report {
         report.rejected += usize::from(outcome.rejected);
         report.committed_properties += outcome.committed_properties;
         report.exact_targets += outcome.exact_targets;
+        report.certain_compile += usize::from(outcome.certain_compile);
         if families.is_empty() {
             report.outside_families += 1;
             if let Some(imported) = outcome.msbuild_imported {
@@ -1053,9 +1415,13 @@ fn sweep(seed: u64, cases: usize) -> Report {
         if outcome.findings.is_empty() {
             continue;
         }
-        if families.is_empty() {
-            let findings: Vec<String> = outcome
-                .findings
+        let unexplained: Vec<&Finding> = outcome
+            .findings
+            .iter()
+            .filter(|f| !families.iter().any(|family| family.covers(f)))
+            .collect();
+        if !unexplained.is_empty() {
+            let findings: Vec<String> = unexplained
                 .iter()
                 .map(|f| format!("    {}: ours {}, MSBuild {}", f.what, f.ours, f.theirs))
                 .collect();
@@ -1073,13 +1439,14 @@ fn sweep(seed: u64, cases: usize) -> Report {
 fn assert_clean(report: &Report) {
     eprintln!(
         "sdk import graph: {} cases, {} rejected, {} committed property reads, \
-         {} exact target reads; {} cases outside every family, MSBuild's \
+         {} exact target reads, {} certain Compile sets; {} cases outside every family, MSBuild's \
          (props, targets) imports among them: {:?}; known-family cases with \
          findings: {:?}",
         report.cases,
         report.rejected,
         report.committed_properties,
         report.exact_targets,
+        report.certain_compile,
         report.outside_families,
         report.outside_imports,
         report.explained
@@ -1138,11 +1505,11 @@ fn the_import_graph_is_exact_or_declined() {
             );
         }
     }
-    // MSBuild rejects only the dangling-symlink imports: a case it rejects
-    // grades little, so a generator drifting into rejected shapes would hollow
-    // the sweep out.
+    // MSBuild rejects only the dangling-symlink imports and the SDK-qualified
+    // rooted ones (each a known family): a case it rejects grades little, so a
+    // generator drifting into rejected shapes would hollow the sweep out.
     assert!(
-        report.rejected * 10 < report.cases,
+        report.rejected * 5 < report.cases,
         "MSBuild rejected {} of {} generated projects",
         report.rejected,
         report.cases
@@ -1159,11 +1526,14 @@ fn the_import_graph_is_exact_or_declined() {
         "props_point=ConditionFalse",
         "props_point=SdkWrittenGate(true)",
         "props_point=SdkWrittenGate(false)",
+        "props_point=BehindUndecidedImport",
         "second_props_point=true",
         "targets_point=Absent",
         "targets_point=Standard",
         "targets_point=ConditionFalse",
         "targets_point=GateWrittenByProps",
+        "targets_point=InImportGroup",
+        "targets_point=BehindUndecidedImport",
         "props.present=false",
         "props.disables_targets_import=true",
         "props.opens_demo_gate=true",
@@ -1178,14 +1548,27 @@ fn the_import_graph_is_exact_or_declined() {
         "reimport.spelling=DirLink",
         "reimport.spelling=FileLink",
         "reimport.spelling=Relative",
+        "reimport.spelling=RelativeElsewhere",
         "reimport.shape=Literal",
         "reimport.shape=ViaProperty",
         "reimport.shape=PropertyOnly",
+        "reimport.shape=ViaPropertySdk",
+        "reimport.shape=ViaPropertySdkAbsolute",
         "reimport.site=SdkPropsBeforePoint",
         "reimport.site=SdkProps",
         "reimport.site=SdkTargets",
         "reimport.site=Body",
         "reimport.site=DirectoryBuildTargets",
+        "undecided.site=SdkProps",
+        "undecided.site=Body",
+        "undecided.site=SdkTargetsHelper",
+        "undecided.input=PropsGate",
+        "undecided.input=PropsPath",
+        "undecided.input=TargetsGate",
+        "undecided.input=TargetsPath",
+        "undecided.how=UnderUndecidedCondition",
+        "undecided.how=RefusedThenOverwritten",
+        "undecided.how=RefusedThenStale",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1214,7 +1597,7 @@ fn every_known_divergence_still_diverges() {
             "{family:?}'s witness is not in the family"
         );
         let (outcome, describe) = evaluate(&mut shared, &case);
-        if outcome.findings.is_empty() {
+        if !outcome.findings.iter().any(|f| family.covers(f)) {
             fixed.push(format!("{family:?}\n{describe}"));
         }
     }
@@ -1223,6 +1606,79 @@ fn every_known_divergence_still_diverges() {
         "known divergences no longer diverge; delete them from KNOWN_DIVERGENCES:\n{}",
         fixed.join("\n=====\n")
     );
+}
+
+/// Witnesses of families that are fixed, each named for what it holds, which
+/// must stay outside every known family and agree with MSBuild.
+fn fixed_witnesses() -> Vec<(&'static str, Case)> {
+    vec![
+        (
+            // MSBuild imports no `Directory.Build.*` file into a project with
+            // no SDK (#676).
+            "a project with no SDK gets neither Directory.Build file",
+            Case {
+                form: Form::SdkLess,
+                ..Case::usual()
+            },
+        ),
+        (
+            // `Directory.Build.props` comes in only where the SDK imports it.
+            "an SDK with no props import point imports no Directory.Build.props",
+            Case {
+                props_point: PropsPoint::Absent,
+                ..Case::usual()
+            },
+        ),
+        (
+            // MSBuild deduplicates imports by lexical path, so a re-import of
+            // `Directory.Build.props` through a symlink alias, at an SDK import
+            // shaped like the props import point, runs the file again.
+            "a symlink alias of Directory.Build.props is another file",
+            Case {
+                reimports: vec![Reimport {
+                    which: Which::Props,
+                    spelling: Spelling::FileLink,
+                    shape: Shape::ViaProperty,
+                    site: Site::SdkProps,
+                }],
+                ..Case::usual()
+            },
+        ),
+        (
+            // A relative path resolves against the importing file's directory.
+            "an SDK's relative DirectoryBuildPropsPath names a file beside the SDK",
+            Case {
+                reimports: vec![Reimport {
+                    which: Which::Props,
+                    spelling: Spelling::Relative,
+                    shape: Shape::PropertyOnly,
+                    site: Site::SdkPropsBeforePoint,
+                }],
+                ..Case::usual()
+            },
+        ),
+    ]
+}
+
+#[test]
+fn fixed_divergences_stay_fixed() {
+    let mut shared = Shared::new();
+    for (name, case) in fixed_witnesses() {
+        assert!(
+            KNOWN_DIVERGENCES.iter().all(|f| !f.contains(&case)),
+            "{name}: the witness is in a known family, so the sweep would not grade it"
+        );
+        let (outcome, describe) = evaluate(&mut shared, &case);
+        assert!(
+            outcome.findings.is_empty() && !outcome.rejected,
+            "{name}: {:?}\n{describe}",
+            outcome.findings
+        );
+        assert!(
+            outcome.committed_properties > 0,
+            "{name}: the walk committed nothing"
+        );
+    }
 }
 
 #[test]

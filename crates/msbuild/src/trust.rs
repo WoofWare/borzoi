@@ -316,10 +316,10 @@ impl Trust {
     /// the binding was removed rather than stored.
     ///
     /// The real build stores that value, so a later undefined read of the name
-    /// is not exact, and neither is a splice decision resting on it. The mark
+    /// is not exact, and neither is a decision resting on it. The mark
     /// then stands for the rest of the walk: a later clean write does *not*
-    /// discharge it, because its reader consumes it mid-walk and tolerates
-    /// SDK-subtree opacity, under which a cleanly-computed value can still rest
+    /// discharge it, because a defined value read under SDK-subtree opacity
+    /// is trusted, and a cleanly-computed value can still rest
     /// on a property that hidden content redefined (see [`RefusedOutcome::Keep`]
     /// at the clean-write site). The one clear is the reserved-toolset seed,
     /// which re-establishes a name the real build refuses to let the document

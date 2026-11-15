@@ -29,7 +29,7 @@ fn imported_root_treat_as_local_property_unprotects_global() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
@@ -37,7 +37,7 @@ fn imported_root_treat_as_local_property_unprotects_global() {
     );
     let mut extras = HashMap::new();
     extras.insert("Foo".to_string(), "global".to_string());
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     assert_eq!(
         result.properties.get("Foo").map(String::as_str),
         Some("local"),
@@ -115,7 +115,7 @@ fn imported_treat_as_local_unprotects_empty_gate_global_and_imports() {
 </Project>"#,
     );
     let (root, props, targets) =
-        write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
+        write_synthetic_sdk(tmp.path(), "MySdk", &common_props_sdk(), "<Project/>");
     // The body-imported file carries both the SDK (so the deferred
     // fire reaches its `Sdk.props`) and the `TreatAsLocalProperty`
     // opt-out (so the empty global is locally writable in its scope).
@@ -205,9 +205,9 @@ fn locally_overridable_properties_reports_every_roots_opt_out() {
         let project_path = write_at(
             tmp.path(),
             "Demo.fsproj",
-            &format!("<Project{entry_attr}><PropertyGroup/></Project>"),
+            &format!("<Project Sdk=\"Std\"{entry_attr}><PropertyGroup/></Project>"),
         );
-        let result = parse_file_with_extras(&project_path, HashMap::new());
+        let result = parse_file_std_with_extras(&project_path, HashMap::new());
         let got: Vec<&str> = result
             .locally_overridable_properties
             .iter()

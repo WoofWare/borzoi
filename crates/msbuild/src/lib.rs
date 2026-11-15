@@ -166,8 +166,8 @@ impl From<SdkPaths> for SdkResolution {
 ///   state, ambiguous manifest versions, …). Remediation: none —
 ///   this is the deliberate "degrade, don't guess" path.
 ///
-/// In all error cases the walker falls back to the no-SDK code path
-/// (so `Directory.Build.*` is still spliced) and `is_partial` flips.
+/// In all error cases the walker walks the body with no SDK around it (so
+/// nothing imports `Directory.Build.*`) and `is_partial` flips.
 ///
 /// Locating SDKs requires knowing `$DOTNET_ROOT` (or running MSBuild's
 /// own SDK resolver), which is policy the parser stays out of — see
@@ -1158,14 +1158,11 @@ pub fn parse_fsproj(
     ))
 }
 
-/// Filesystem-touching counterpart to [`parse_fsproj`]: follows explicit
+/// Filesystem-touching counterpart to [`parse_fsproj`]: follows
 /// `<Import Project="...">` references (substituting `$(...)`, resolving
 /// relative paths against the importing file's directory, depth-checked,
 /// with duplicate imports — cycles included — silently skipped exactly
-/// as MSBuild skips them under warning MSB4011/MSB4210) and splices in
-/// the nearest implicit `Directory.Build.props` (before the project
-/// body) and `Directory.Build.targets` (after) discovered by
-/// [`detect_implicit_imports`].
+/// as MSBuild skips them under warning MSB4011/MSB4210).
 ///
 /// Failures during follow (file missing, malformed XML, depth limit,
 /// IO error) are reported via [`DiagnosticKind::ImportFailed`].
@@ -1176,96 +1173,24 @@ pub fn parse_fsproj(
 /// "what did we skip" surfacing in [`detect_implicit_imports`].
 ///
 /// `sdk_resolver`, if supplied, turns the project's `<Project Sdk="X">`
-/// shorthand (and `<Import Sdk="X" Project="Sdk.props|Sdk.targets" />`
-/// elements inside the body) into on-disk [`SdkPaths`] the walker can
-/// splice in. When the **root** carries the `Sdk` attribute and the
-/// resolver returns `Some`, the walker interleaves the SDK's pair
-/// with the Directory.Build.* pair, matching MSBuild's effective
-/// ordering:
-///
-/// ```text
-/// Sdk.props → Directory.Build.props → body
-///           → Directory.Build.targets → Sdk.targets
-/// ```
-///
-/// The Directory.Build.* splice stays live even under a resolved SDK so this
-/// evaluator owns the implicit import point directly rather than relying on
-/// deeper SDK files to rediscover and import the same files. Splicing
-/// `Sdk.props` first is what makes properties the SDK sets (e.g.
-/// `UsingMicrosoftNETSdk`) visible to a `Directory.Build.props` that
-/// conditions on them. When the resolver returns `None`, a
-/// [`DiagnosticKind::SdkNotFound`] diagnostic is emitted and the body
-/// still gets the Directory.Build.* splice. When `sdk_resolver` itself
-/// is `None`, any `Sdk` attribute surfaces as
+/// shorthand (and `<Import Sdk="X" Project="..." />` elements anywhere)
+/// into on-disk [`SdkPaths`] the walker follows. A root `Sdk` attribute
+/// imports `Sdk.props` before the body and `Sdk.targets` after it, in the
+/// entry project or in any file an import reaches; an explicit
+/// `<Import Sdk=…>` is an ordinary import at its own position. When the
+/// resolver returns `None`, a [`DiagnosticKind::SdkNotFound`] diagnostic is
+/// emitted and the body is still walked. When `sdk_resolver` itself is
+/// `None`, any `Sdk` attribute surfaces as
 /// [`DiagnosticKind::SdkResolverAbsent`].
 ///
-/// **Explicit-only SDK projects.** A project using the *explicit*
-/// form `<Project><Import Sdk="X" Project="Sdk.props"/>...</Project>`
-/// with no root `Sdk` attribute is handled by a body pre-scan: the
-/// first unconditional `<Import Sdk="X" Project="Sdk.props"/>` (and
-/// the matching trailing `Sdk.targets`, if present) is promoted to
-/// the same OUTERMOST splice positions the root-`Sdk` shorthand uses,
-/// so `Directory.Build.props` observes SDK-supplied properties just
-/// as it would under the shorthand. Promotion is conservative — it
-/// only fires when `Sdk.props` is the first element child of root
-/// (and `Sdk.targets` the last), so it never reorders user-visible
-/// work; anything else is walked at its in-body position.
-///
-/// **Nested SDK roots in imported files.** When an `<Import>` is
-/// chased into a file whose own `<Project>` carries `Sdk="X"`, that
-/// SDK is resolved through the same resolver and its
-/// `Sdk.props` / `Sdk.targets` are spliced before / after the
-/// imported file's body. The `Directory.Build.*` splice is still done
-/// exactly once (MSBuild walks ancestor dirs once from the entry
-/// project's location, not around each imported file). Spans for
-/// SDK-contributed items/diagnostics collapse to the entry project's
-/// `<Import>` site, like any other imported content.
-///
-/// MSBuild imports `Directory.Build.props` exactly once, right after
-/// whichever `Sdk.props` first re-enters `Microsoft.Common.props`.
-/// When the entry project carries (or promotes) its own SDK, that is
-/// the entry `Sdk.props` and the entry splice above already puts
-/// `Directory.Build.props` after it. When the entry project sets no
-/// such SDK but a *nested* imported `<Project Sdk="X">` does, the first
-/// `Sdk.props` is that nested one (mid-body): the walker defers the
-/// entry `Directory.Build.props` and fires it right after the nested
-/// `Sdk.props`, so a `Directory.Build.props` that conditions on (or
-/// substitutes) a nested-SDK-set property such as
-/// `$(UsingMicrosoftNETSdk)` observes it — matching MSBuild. For an entry
-/// with no SDK the walker always runs this deferred second pass: it cannot
-/// decide cheaply from the eager first pass whether the faithful order
-/// reaches a nested `Sdk.props`, because that pass runs
-/// `Directory.Build.props` in the wrong (before-body) position and a
-/// property it sets can itself flip the very `<Import>` that leads to the
-/// nested SDK. At the deferred fire point the import gate
-/// (`ImportDirectoryBuildProps`), the `DirectoryBuildPropsPath` override,
-/// and the resolved path are all re-evaluated against live state — exactly
-/// where MSBuild evaluates them — so a body/SDK property set before the
-/// nested `Sdk.props` (disabling the import or redirecting it) is honoured.
-/// The splice fires at most once.
-///
-/// Because the deferred import is fired and resolved at MSBuild's own
-/// position, the second pass is the faithful model: body imports before
-/// the nested `Sdk.props` don't see `Directory.Build.props` and those
-/// after it do, even when that flips a conditional `<Import>`. The one
-/// shape it cannot model is a *dangle* — see below — where the walker
-/// falls back to the historical before-body splice.
-///
-/// Two residual approximations remain in this nested case, both rare:
-///   * **Pathological gate (dangle).** If the very `<Import>` that
-///     reaches the nested SDK is itself conditioned on a property that
-///     *only* `Directory.Build.props` sets, deferring it suppresses the
-///     nested SDK too, so the deferred splice never fires. (MSBuild can't
-///     bootstrap that config either, but emitting *no*
-///     `Directory.Build.props` is a surprising regression.) The walker
-///     detects the unconsumed splice and falls back to the before-body
-///     position rather than drop the file.
-///   * **Non-promoted explicit body imports.** An explicit-form
-///     `<Import Sdk="X" Project="Sdk.props"/>` that is *not* promoted
-///     (because it is conditional or not the first/last element child)
-///     runs at its in-body position; the deferred `Directory.Build.props`
-///     repositioning keys on nested *root* `<Project Sdk=…>` files, not
-///     these in-body SDK imports.
+/// **`Directory.Build.*`.** The walk imports `Directory.Build.props` and
+/// `.targets` only where a file it walks imports them, under that import's
+/// own condition: for a real SDK, the blocks in `Microsoft.Common.props` and
+/// `Microsoft.Common.targets`. So a project whose SDK does not resolve, or
+/// that names none, gets neither file, as in MSBuild. Spans for
+/// SDK-contributed items/diagnostics collapse to the entry project's import
+/// site (the root `<Project>` for the `Sdk` attribute), like any other
+/// imported content.
 ///
 /// **Glob expansion.** When `glob_resolver` is supplied, an item
 /// element whose `Include` contains an MSBuild wildcard (or that carries
@@ -1411,29 +1336,22 @@ fn parse_fsproj_observed(
     if let Err(error) = validate_inputs(project_path, extra_properties) {
         return (Err(error), observer.finish_with_documents().2);
     }
-    // Detection only — we follow the props/targets ourselves and
-    // suppress the per-kind `ImplicitImportPresent` diagnostic that
-    // `detect_implicit_imports` would otherwise add to the result.
-    // `DirectoryPackagesProps` is *not spliced* here: NuGet's own
-    // `NuGet.props` (reached through `Sdk.props` →
-    // `Microsoft.Common.props` when an SDK resolves to the canonical
-    // dotnet layout) owns that import point, and the walker evaluates
-    // those real files. The detected path is passed down so the walk
+    // Detection only: every implicit file is imported by the file that
+    // really imports it (`Directory.Build.*` by `Microsoft.Common.*`,
+    // `Directory.Packages.props` by `NuGet.props`), which the walk follows.
+    // The detected `Directory.Packages.props` is passed down so the walk
     // keeps the conservative "central versions not folded in" cause
     // whenever it never reached the file (no resolver, non-SDK project,
     // or a break anywhere along the chain).
-    let mut implicit_props = None;
-    let mut implicit_targets = None;
-    let mut cpm_props_path = None;
-    for diag in imports::detect_implicit_imports(project_path, &observer) {
-        if let DiagnosticKind::ImplicitImportPresent { path, kind } = diag.kind {
-            match kind {
-                ImplicitImportKind::DirectoryBuildProps => implicit_props = Some(path),
-                ImplicitImportKind::DirectoryBuildTargets => implicit_targets = Some(path),
-                ImplicitImportKind::DirectoryPackagesProps => cpm_props_path = Some(path),
-            }
-        }
-    }
+    let cpm_props_path = imports::detect_implicit_imports(project_path, &observer)
+        .into_iter()
+        .find_map(|diag| match diag.kind {
+            DiagnosticKind::ImplicitImportPresent {
+                path,
+                kind: ImplicitImportKind::DirectoryPackagesProps,
+            } => Some(path),
+            _ => None,
+        });
     let doc = match roxmltree::Document::parse(source) {
         Ok(doc) => doc,
         Err(error) => return (Err(error.into()), observer.finish_with_documents().2),
@@ -1443,8 +1361,6 @@ fn parse_fsproj_observed(
         project_path,
         extra_properties,
         environment,
-        implicit_props.as_deref(),
-        implicit_targets.as_deref(),
         cpm_props_path.as_deref(),
         sdk_resolver,
         glob_resolver,

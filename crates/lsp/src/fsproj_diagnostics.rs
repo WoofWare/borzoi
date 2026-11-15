@@ -1938,12 +1938,11 @@ mod tests {
         // Meta-import diagnostics describe the chain itself and
         // should always reach the user.
         let tmp = TempDir::new().unwrap();
-        // A Directory.Build.props that itself tries to import a file
-        // that doesn't exist. The walker splices Directory.Build.props
-        // before the project body, descends into it, and tries to
-        // follow `child.props` from there.
+        // An imported file that itself tries to import a file that
+        // doesn't exist. The walker descends into it and tries to follow
+        // the nested import from there.
         fs::write(
-            tmp.path().join("Directory.Build.props"),
+            tmp.path().join("shared.props"),
             r#"<Project>
   <Import Project="./does-not-exist-nested.props" />
 </Project>"#,
@@ -1951,6 +1950,7 @@ mod tests {
         .unwrap();
         let project = tmp.path().join("App.fsproj");
         let text = r#"<Project>
+  <Import Project="shared.props" />
   <ItemGroup>
     <Compile Include="Program.fs" />
   </ItemGroup>
@@ -2090,12 +2090,12 @@ mod tests {
 
     #[test]
     fn discovery_failure_is_reported_at_an_imported_sdk_reference() {
-        // An `<Import Sdk>` inside `Directory.Build.props` is as much a part of
-        // the import chain as the entry's own SDK, so its failure surfaces even
+        // An `<Import Sdk>` inside an imported file is as much a part of the
+        // import chain as the entry's own SDK, so its failure surfaces even
         // though the diagnostic's origin is `Imported`.
         let tmp = TempDir::new().unwrap();
         fs::write(
-            tmp.path().join("Directory.Build.props"),
+            tmp.path().join("shared.props"),
             r#"<Project><Import Sdk="Other.Sdk" Project="Sdk.props" /></Project>"#,
         )
         .unwrap();
@@ -2106,7 +2106,12 @@ mod tests {
                 .expect_err("no dotnet root")
                 .to_string();
 
-        let diags = diagnostics_for("<Project />", &project, &env, &default_extras());
+        let diags = diagnostics_for(
+            r#"<Project><Import Project="shared.props" /></Project>"#,
+            &project,
+            &env,
+            &default_extras(),
+        );
         let reported: Vec<_> = diags
             .iter()
             .filter(|d| d.message.contains("'Other.Sdk'") && d.message.contains(&cause))
@@ -2249,19 +2254,19 @@ mod tests {
 
     #[test]
     fn conditioned_out_reference_does_not_warn() {
-        // Directory.Build.props sets UseLib=false; the buffer guards a (missing)
+        // An imported file sets UseLib=false; the buffer guards a (missing)
         // reference on that property. The real (with-imports) evaluation honors
         // the imported property and skips the reference, so we must not warn.
         // A buffer-only pure parse would treat $(UseLib) as empty, include the
         // reference, and emit a bogus "does not exist".
         let tmp = TempDir::new().unwrap();
         fs::write(
-            tmp.path().join("Directory.Build.props"),
+            tmp.path().join("shared.props"),
             "<Project><PropertyGroup><UseLib>false</UseLib></PropertyGroup></Project>",
         )
         .unwrap();
         let project = tmp.path().join("App.fsproj");
-        let text = "<Project>\n  <ItemGroup Condition=\"'$(UseLib)' != 'false'\">\n    <ProjectReference Include=\"Gone/Gone.fsproj\" />\n  </ItemGroup>\n</Project>";
+        let text = "<Project>\n  <Import Project=\"shared.props\" />\n  <ItemGroup Condition=\"'$(UseLib)' != 'false'\">\n    <ProjectReference Include=\"Gone/Gone.fsproj\" />\n  </ItemGroup>\n</Project>";
         let env = env_with(|e| e.dotnet_root = Some(tmp.path().join("dotnet")));
 
         let diags = diagnostics_for(text, &project, &env, &default_extras());

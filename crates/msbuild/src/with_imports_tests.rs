@@ -1,6 +1,6 @@
 //! Tests for [`super::parse_fsproj_with_imports`] — the
-//! filesystem-touching variant that follows explicit `<Import>` and
-//! splices in the nearest `Directory.Build.props` / `.targets`.
+//! filesystem-touching variant that follows `<Import>` and the SDK a root
+//! `Sdk` attribute names.
 //!
 //! Each test builds a fresh [`tempfile::TempDir`], writes a small
 //! cluster of fsproj/props files into it, and asserts on the merged
@@ -21,7 +21,6 @@ use crate::observed::{ImportDocuments, Observer};
 
 mod cycles_and_failures;
 mod directory_build;
-mod directory_build_position;
 mod explicit_imports;
 mod foreign_definitions;
 mod fsharp_core_netsdk_props;
@@ -195,6 +194,88 @@ fn parse_file_with_extras(project_path: &Path, extras: HashMap<String, String>) 
         &host_fs::read_to_string(project_path).unwrap(),
         extras,
     )
+}
+
+/// `Microsoft.Common.props`'s `Directory.Build.props` import block, verbatim
+/// from SDK 10.0.401.
+const COMMON_PROPS_BLOCK: &str = r#"  <PropertyGroup>
+    <ImportDirectoryBuildProps Condition="'$(ImportDirectoryBuildProps)' == ''">true</ImportDirectoryBuildProps>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ImportDirectoryBuildProps)' == 'true' and '$(DirectoryBuildPropsPath)' == ''">
+    <_DirectoryBuildPropsFile Condition="'$(_DirectoryBuildPropsFile)' == ''">Directory.Build.props</_DirectoryBuildPropsFile>
+    <_DirectoryBuildPropsBasePath Condition="'$(_DirectoryBuildPropsBasePath)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), '$(_DirectoryBuildPropsFile)'))</_DirectoryBuildPropsBasePath>
+    <DirectoryBuildPropsPath Condition="'$(_DirectoryBuildPropsBasePath)' != '' and '$(_DirectoryBuildPropsFile)' != ''">$([System.IO.Path]::Combine('$(_DirectoryBuildPropsBasePath)', '$(_DirectoryBuildPropsFile)'))</DirectoryBuildPropsPath>
+  </PropertyGroup>
+  <Import Project="$(CustomBeforeDirectoryBuildProps)" Condition="'$(CustomBeforeDirectoryBuildProps)' != ''" />
+  <Import Project="$(DirectoryBuildPropsPath)" Condition="'$(ImportDirectoryBuildProps)' == 'true' and exists('$(DirectoryBuildPropsPath)')"/>
+  <Import Project="$(CustomAfterDirectoryBuildProps)" Condition="'$(CustomAfterDirectoryBuildProps)' != ''" />
+"#;
+
+/// `Microsoft.Common.targets`'s `Directory.Build.targets` import block,
+/// verbatim from SDK 10.0.401.
+const COMMON_TARGETS_BLOCK: &str = r#"  <PropertyGroup>
+    <ImportDirectoryBuildTargets Condition="'$(ImportDirectoryBuildTargets)' == ''">true</ImportDirectoryBuildTargets>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ImportDirectoryBuildTargets)' == 'true' and '$(DirectoryBuildTargetsPath)' == ''">
+    <_DirectoryBuildTargetsFile Condition="'$(_DirectoryBuildTargetsFile)' == ''">Directory.Build.targets</_DirectoryBuildTargetsFile>
+    <_DirectoryBuildTargetsBasePath Condition="'$(_DirectoryBuildTargetsBasePath)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), '$(_DirectoryBuildTargetsFile)'))</_DirectoryBuildTargetsBasePath>
+    <DirectoryBuildTargetsPath Condition="'$(_DirectoryBuildTargetsBasePath)' != '' and '$(_DirectoryBuildTargetsFile)' != ''">$([System.IO.Path]::Combine('$(_DirectoryBuildTargetsBasePath)', '$(_DirectoryBuildTargetsFile)'))</DirectoryBuildTargetsPath>
+  </PropertyGroup>
+  <Import Project="$(CustomBeforeDirectoryBuildTargets)" Condition="'$(CustomBeforeDirectoryBuildTargets)' != ''" />
+  <Import Project="$(DirectoryBuildTargetsPath)" Condition="'$(ImportDirectoryBuildTargets)' == 'true' and exists('$(DirectoryBuildTargetsPath)')"/>
+  <Import Project="$(CustomAfterDirectoryBuildTargets)" Condition="'$(CustomAfterDirectoryBuildTargets)' != ''" />
+"#;
+
+/// The SDK `Std`: an `Sdk.props` and `Sdk.targets` holding exactly the
+/// `Microsoft.Common.*` blocks that import `Directory.Build.props` and
+/// `.targets`, as a real SDK reaches them. A test whose subject is what
+/// those imports bring in names it with `<Project Sdk="Std">`, since a
+/// project with no SDK imports neither file. Laid out under `dir`, in a
+/// directory of its own (`std-sdk`); returns its resolution.
+fn write_standard_sdk(dir: &Path) -> SdkPaths {
+    let root = dir.join("std-sdk");
+    SdkPaths {
+        props: write_at(
+            &root,
+            "Sdk.props",
+            &format!("<Project>\n{COMMON_PROPS_BLOCK}</Project>\n"),
+        ),
+        targets: write_at(
+            &root,
+            "Sdk.targets",
+            &format!("<Project>\n{COMMON_TARGETS_BLOCK}</Project>\n"),
+        ),
+        root,
+    }
+}
+
+/// An `Sdk.props` holding only `Microsoft.Common.props`'s
+/// `Directory.Build.props` import block.
+fn common_props_sdk() -> String {
+    format!("<Project>\n{COMMON_PROPS_BLOCK}</Project>\n")
+}
+
+/// [`parse_file_with_extras`] with the SDK `Std` ([`write_standard_sdk`])
+/// laid out beside the project and resolvable.
+fn parse_file_std_with_extras(
+    project_path: &Path,
+    extras: HashMap<String, String>,
+) -> ParsedProject {
+    let sdk = write_standard_sdk(project_path.parent().expect("a project has a directory"));
+    let resolver = move |name: &str| {
+        if name == "Std" {
+            Ok(SdkResolution::from(sdk.clone()))
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    };
+    parse_file_with_sdk_env(project_path, resolver, extras, HashMap::new())
+}
+
+/// [`parse_file`] with the SDK `Std` ([`write_standard_sdk`]) laid out
+/// beside the project and resolvable.
+fn parse_file_std(project_path: &Path) -> ParsedProject {
+    parse_file_std_with_extras(project_path, HashMap::new())
 }
 
 /// Materialise a synthetic SDK with caller-supplied props/targets
