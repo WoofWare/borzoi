@@ -591,7 +591,7 @@ fn structural_compile_item_uncertainty_message(kind: &StructuralCompileItemUncer
             "unsupported <Choose> may hide Compile items".to_string()
         }
         StructuralCompileItemUncertainty::DirectoryBuildImportUndecided { project, .. } => {
-            format!("the import of $({project}) could not be decided and may hide Compile items")
+            format!("the import of {project} could not be decided and may hide Compile items")
         }
     }
 }

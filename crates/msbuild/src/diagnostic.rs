@@ -382,8 +382,9 @@ pub enum StructuralCompileItemUncertainty {
     UnsupportedChoose,
     /// A `Directory.Build.*` import the walk could not decide (#677): MSBuild
     /// may import the file the walk did not, or not import the one it did,
-    /// so what it contributes is unknown. `project` is the path property the
-    /// import names the file by. `references` says whether that may include
+    /// so what it contributes is unknown; and an import of a file only such
+    /// an import made, which may or may not be a duplicate. `project` is the
+    /// import's `Project` text. `references` says whether that may include
     /// `<ProjectReference>` mutations: always when the file's identity was in
     /// doubt, else only when the file the walk doubted declares some.
     DirectoryBuildImportUndecided { project: String, references: bool },

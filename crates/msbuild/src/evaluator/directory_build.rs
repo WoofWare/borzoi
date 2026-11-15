@@ -91,6 +91,11 @@ impl DirectoryBuildFile {
         }
     }
 
+    /// The `Project` text of the SDK's import of the file.
+    fn project(self) -> String {
+        format!("$({})", self.path_name())
+    }
+
     fn file_name(self) -> &'static str {
         match self {
             DirectoryBuildFile::Props => "Directory.Build.props",
@@ -144,6 +149,8 @@ pub(super) struct Bookkeeping {
     /// walk follows its imports and conditions as an ordinary import, so that
     /// doubting the file loses nothing it would do.
     doubted_writes: Vec<String>,
+    /// The import keys ([`import_dedup_key`]) a fallback walk registered.
+    doubted_imports: std::collections::HashSet<String>,
     /// Whether a fallback walked a file that contributes something.
     pub(super) contributed: bool,
     /// Whether a group the walk deferred while inside a fallback walk declares
@@ -162,6 +169,37 @@ impl Bookkeeping {
             self.doubted_writes.push(name.to_owned());
         }
     }
+
+    /// Record the import of the file `key` names, if the walk is inside a
+    /// fallback walk.
+    pub(super) fn note_import(&mut self, key: &str) {
+        if self.fallback.is_some() {
+            self.doubted_imports.insert(key.to_owned());
+        }
+    }
+}
+
+/// An import of `path`, which the walk has already imported: a duplicate
+/// MSBuild skips, unless only a fallback walk imported it, which MSBuild may
+/// not have made. Then the walk imports it again, doubted, since MSBuild has
+/// imported it here or before, and the walk cannot tell which.
+pub(super) fn reimport_if_doubted(path: &Path, key: &str, state: &mut State<'_>) {
+    if state.directory_build.fallback.is_some()
+        || !state.directory_build.doubted_imports.contains(key)
+        || contributes_nothing(path, state)
+    {
+        return;
+    }
+    state.directory_build.doubted_imports.remove(key);
+    state.imports_seen.remove(key);
+    state
+        .imports_seen_fuzzy
+        .remove(&super::import_dedup_fuzzy_key(path));
+    let root = UnpinnedRoot::UnsupportedCondition(format!(
+        "the import of {}, which a doubted Directory.Build.* file may already have made",
+        path.display()
+    ));
+    walk_doubted_as(root, &path.display().to_string(), path, state);
 }
 
 /// Record the root of an SDK an imported file's own `Sdk` attribute names.
@@ -346,7 +384,12 @@ fn walk_doubted(kind: DirectoryBuildFile, file: &Path, state: &mut State<'_>) {
     if state.imports_seen.contains(&import_dedup_key(file)) || contributes_nothing(file, state) {
         return;
     }
-    let root = kind.root();
+    walk_doubted_as(kind.root(), &kind.project(), file, state);
+}
+
+/// [`walk_doubted`] for any doubted import: `root` is what its products carry
+/// and `project` the import's `Project` text.
+fn walk_doubted_as(root: UnpinnedRoot, project: &str, file: &Path, state: &mut State<'_>) {
     state.directory_build.contributed = true;
     let saved_fallback = state.directory_build.fallback.replace(root.clone());
     let saved_references = std::mem::take(&mut state.directory_build.doubted_references);
@@ -363,7 +406,7 @@ fn walk_doubted(kind: DirectoryBuildFile, file: &Path, state: &mut State<'_>) {
     for name in written {
         unpin(&name, &root, state);
     }
-    withdraw_facets(kind, root, references, state);
+    withdraw_facets(project, root, references, state);
 }
 
 /// Record `root` against `name`, leaving its value alone.
@@ -389,7 +432,7 @@ fn whole_evaluation_uncertain(kind: DirectoryBuildFile, state: &mut State<'_>) {
             unpin(&name, &root, state);
         }
     }
-    withdraw_facets(kind, root, true, state);
+    withdraw_facets(&kind.project(), root, true, state);
 }
 
 /// Withdraw the captured item facets and the define set. Through
@@ -399,15 +442,10 @@ fn whole_evaluation_uncertain(kind: DirectoryBuildFile, state: &mut State<'_>) {
 /// The `<ProjectReference>` list only when `references`: the SDK declares no
 /// reference, so a file changes the list only through its own items, and a
 /// body item reading what the file writes reads a doubted value.
-fn withdraw_facets(
-    kind: DirectoryBuildFile,
-    root: UnpinnedRoot,
-    references: bool,
-    state: &mut State<'_>,
-) {
+fn withdraw_facets(project: &str, root: UnpinnedRoot, references: bool, state: &mut State<'_>) {
     state.mark_structural_skip(
         StructuralCompileItemUncertainty::DirectoryBuildImportUndecided {
-            project: kind.path_name().to_string(),
+            project: project.to_string(),
             references,
         },
         0..0,

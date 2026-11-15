@@ -4801,7 +4801,7 @@ fn package_structural_uncertainty_from_compile(
         }
         StructuralCompileItemUncertainty::DirectoryBuildImportUndecided { project, .. } => {
             StructuralPackageReferenceUncertainty::ImportProjectUnresolved {
-                project: format!("$({project})"),
+                project: project.clone(),
             }
         }
     }
@@ -5712,6 +5712,9 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     // `is_partial` for evaluations MSBuild completes exactly.
     let dedup_key = import_dedup_key(path);
     if state.imports_seen.contains(&dedup_key) {
+        // A file only a `Directory.Build.*` fallback imported is one MSBuild
+        // may not have imported, so this import may not be a duplicate.
+        directory_build::reimport_if_doubted(path, &dedup_key, state);
         return;
     }
     // A near-duplicate under the wider Unicode fold: the pair differs in
@@ -5833,6 +5836,7 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
             retained: None,
         },
     );
+    state.directory_build.note_import(&dedup_key);
     state.imports_seen.insert(dedup_key);
     state.imports_seen_fuzzy.insert(fuzzy_key);
     state.walked_files.insert(canon.clone());
