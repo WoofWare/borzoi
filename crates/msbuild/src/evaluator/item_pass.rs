@@ -3339,12 +3339,18 @@ fn resolve_dependency_identity_sources(
                 let mut metadata_uncertainties = item.metadata_uncertainties.clone();
                 // A package metadatum whose trimmed reading is not MSBuild's
                 // value is uncertain for the copy, though the item table reads
-                // it exactly.
+                // it exactly. In name order, so the causes they record are too.
+                let mut unreadable: Vec<&String> = item
+                    .metadata
+                    .iter()
+                    .filter(|(_, value)| value.is_none())
+                    .map(|(name, _)| name)
+                    .collect();
+                unreadable.sort();
                 metadata_uncertainties.extend(
-                    item.metadata
-                        .iter()
-                        .filter(|(_, value)| value.is_none())
-                        .map(|(name, _)| HelperMetadataUncertainty::new(name, "")),
+                    unreadable
+                        .into_iter()
+                        .map(|name| HelperMetadataUncertainty::new(name, "")),
                 );
                 metadata_uncertainties.extend(helper_item_definition_default_uncertainties(
                     &key, &item, state,

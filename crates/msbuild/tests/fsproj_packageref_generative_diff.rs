@@ -622,15 +622,25 @@ fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
         "MSBuildSDKsPath".to_string(),
         sdks.to_string_lossy().into_owned(),
     );
-    let parsed = parse_fsproj_with_imports(
-        &project_xml,
-        &proj,
-        &HashMap::new(),
-        &environment,
-        Some(&resolver),
-        None,
-    )
-    .unwrap_or_else(|e| panic!("our parse: {e}\n{project_xml}"));
+    let parse = || {
+        parse_fsproj_with_imports(
+            &project_xml,
+            &proj,
+            &HashMap::new(),
+            &environment,
+            Some(&resolver),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("our parse: {e}\n{project_xml}"))
+    };
+    let parsed = parse();
+    // An evaluation is a function of its inputs: the causes it records, and
+    // their order, may not turn on a hash map's iteration order.
+    assert_eq!(
+        parsed,
+        parse(),
+        "two evaluations of one project differ\n{project_xml}"
+    );
     (
         Laid {
             case_dir,

@@ -2413,6 +2413,22 @@ fn package_metadata_msbuild_reads_its_own_way_is_uncertain() {
     }
 }
 
+/// A copy of a helper with several package metadata the capture cannot read
+/// records its causes in one order, evaluation after evaluation: they may not
+/// turn on a hash map's iteration order.
+#[test]
+fn a_copy_records_its_unreadable_metadata_in_one_order() {
+    let src = "<Project><ItemGroup>\
+        <HelperPkg Include=\"A\" Version=\" 1.0 \" PrivateAssets=\" all \" \
+         IncludeAssets=\" x \" ExcludeAssets=\" y \" VersionOverride=\" 2 \" />\
+        <PackageReference Include=\"@(HelperPkg)\" /></ItemGroup></Project>";
+    let first = parse(src);
+    assert!(first.package_references_uncertain);
+    for _ in 0..32 {
+        assert_eq!(parse(src), first);
+    }
+}
+
 /// A `CompileOrder` MSBuild reads its own way (#642) declines the compile
 /// order: an attribute holding a tab, a backslash, a body holding an element.
 #[test]
