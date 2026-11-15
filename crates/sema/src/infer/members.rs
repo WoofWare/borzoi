@@ -31,6 +31,14 @@ pub(super) enum MemberAccessKind {
         /// ([`Gen::static_callee`]) — the wake then consults the static method
         /// group. An instance call through a value receiver is `false`.
         is_static: bool,
+        /// Whether an argument is a lambda ([`has_lambda_argument`]). FCS
+        /// checks such an argument against its parameter's type before it
+        /// resolves the call, and where the lambda does not convert to it
+        /// the call is not typed as the member: `y.Insert(0, (fun () -> 1))`
+        /// is `'a`, where `y.Insert(0, 1)` is `string`. Whether it converts
+        /// is not modelled, so the call's type is not read off the member;
+        /// its identity still is.
+        lambda_arg: bool,
     },
 }
 
@@ -83,8 +91,8 @@ impl<'a> Gen<'a> {
     /// [`Constraint::HasMember`] (`kind = Data`) per trailing segment (Stage 3.3a).
     /// The `segments` are the member idents after the receiver (`["Length"]` for
     /// `s.Length`; `["A", "B"]` for a multi-dot `s.A.B`). Returns the variable
-    /// standing for the **final** member's type — the type of the whole access — or
-    /// `None` if there are no segments (a bare receiver, not a member access).
+    /// standing for the **final** member's type — the type of the whole access.
+    /// `segments` is not empty: a bare receiver is not a member access.
     ///
     /// Each segment chains: segment *i*'s constraint watches the previous result
     /// (the receiver for the first), so a multi-dot chain wakes segment by segment
@@ -96,16 +104,15 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         recv: TyVid,
         segments: &[SyntaxToken],
-    ) -> Option<TyVid> {
+    ) -> TyVid {
+        debug_assert!(!segments.is_empty(), "a member access names a member");
         let mut cur = recv;
-        let mut last = None;
         for seg in segments {
             let result = self.solver.table.fresh();
             self.has_member(scope, cur, seg, result, MemberAccessKind::Data);
             cur = result;
-            last = Some(result);
         }
-        last
+        cur
     }
 
     /// Type a **single-candidate instance method call** `recv.Method(args)` (Stage
@@ -149,47 +156,47 @@ impl<'a> Gen<'a> {
         callee: &Expr,
         arg: &Expr,
         expected: Expected,
-    ) -> Option<TyVid> {
+    ) -> Inferred {
         // Snapshot the emissions: everything `method_callee` and the argument
         // walk record inside the call — nodes and local binders alike — is
         // discarded below (see the doc).
         let emit_mark = self.out.mark();
-        let (recv, method_tok, is_static) = if let Some((path, method_tok)) =
-            self.static_callee(callee)
-        {
-            // The static receiver's type is the rooting entity itself, ground
-            // at generation time.
-            let recv = self.solver.table.fresh();
-            self.eq(
-                scope,
-                self.solver.tys.var(recv),
-                self.solver.tys.named_path(self.facts.env.names(), &path),
-            );
-            (recv, method_tok, true)
-        } else {
-            let recorded = scope.reasons_recorded();
-            let Some((recv, method_tok)) = self.method_callee(scope, callee) else {
-                self.out.discard_since(emit_mark);
-                scope.mark_consequence(recorded, Incomplete::MethodCallee(callee.syntax().kind()));
-                return None;
+        let (recv, method_tok, is_static) =
+            if let Some((path, method_tok)) = self.static_callee(callee) {
+                // The static receiver's type is the rooting entity itself, ground
+                // at generation time.
+                let recv = self.fresh_equal(
+                    scope,
+                    self.solver.tys.named_path(self.facts.env.names(), &path),
+                );
+                (recv, method_tok, true)
+            } else {
+                let recorded = scope.reasons_recorded();
+                let Some((recv, method_tok)) = self.method_callee(scope, callee) else {
+                    self.out.discard_since(emit_mark);
+                    return Inferred::untyped(self.decline_expected_consequence(
+                        scope,
+                        recorded,
+                        Incomplete::MethodCallee(callee.syntax().kind()),
+                    ));
+                };
+                // FCS resolves a data-member prefix of the callee
+                // (`s.Field.M(…)`) at its dot, before the arguments.
+                self.settle_access(scope);
+                // FCS looks the method up on the receiver at the dot, before its
+                // arguments: on a receiver it does not know there it reports
+                // FS0072, so nothing after is decided against it.
+                let head = self.solver.table.resolve(self.solver.tys.var(recv));
+                if matches!(self.solver.tys.kind(head), TyKind::Var(_)) {
+                    scope.mark_incomplete(Incomplete::UndecidedAccess);
+                }
+                (recv, method_tok, false)
             };
-            // FCS resolves a data-member prefix of the callee
-            // (`s.Field.M(…)`) at its dot, before the arguments.
-            self.settle_access(scope);
-            // FCS looks the method up on the receiver at the dot, before its
-            // arguments: on a receiver it does not know there it reports
-            // FS0072, so nothing after is decided against it.
-            let head = self.solver.table.resolve(self.solver.tys.var(recv));
-            if matches!(self.solver.tys.kind(head), TyKind::Var(_)) {
-                scope.mark_incomplete(Incomplete::UndecidedAccess);
-            }
-            (recv, method_tok, false)
-        };
         // FCS relates the call's return type to its expected type before it
         // checks the arguments when the method's arity leaves one overload
         // (`UnifyUniqueOverloading`), which inference does not know yet: so
         // whatever the expected type holds open is tainted first.
-        self.taint_expected(scope, expected);
+        let entry = self.taint_expected(scope, expected);
         // Walk each positional argument against an unknown expected type (the
         // parameter of the overload FCS resolves), collecting the per-argument
         // inference variable the OV-6 overload engine reads at the wake (its
@@ -211,6 +218,7 @@ impl<'a> Gen<'a> {
             MemberAccessKind::Method {
                 args: arg_vids,
                 is_static,
+                lambda_arg: has_lambda_argument(arg),
             },
         );
         // FCS resolves the overload once the arguments are checked.
@@ -218,8 +226,17 @@ impl<'a> Gen<'a> {
         // Discard every node emitted inside the call (receiver + argument
         // sub-expressions): a method call emits nothing inside itself (see the doc).
         self.out.discard_since(emit_mark);
-        self.relate(scope, result, expected);
-        Some(result)
+        let (_, exit) = self.relate(scope, result, expected);
+        let discharged = entry.and(exit);
+        // Under an equality (a `let` pattern's type) FCS checks the call
+        // against that type itself — `TcMethodApplicationThen` passes the
+        // overall type down when nothing follows the call — and its node has
+        // that type even where the call fails to resolve or to fit it.
+        let var = match expected {
+            Expected::Equal(d) => d,
+            _ => result,
+        };
+        Inferred::typed(var, discharged)
     }
 
     /// Recognise a **static-call callee** `Type.Method` (stage OV-7): a
@@ -383,7 +400,7 @@ impl<'a> Gen<'a> {
     /// a ground [`Ty`] for [`AssemblyEnv::may_apply`] /
     /// [`AssemblyEnv::must_apply`].
     fn walk_arg_element(&mut self, scope: &mut Scope, el: &Expr) -> TyVid {
-        match self.infer_expr(scope, el, Expected::Unknown) {
+        match self.infer_expr(scope, el, Expected::Unknown).var() {
             Some(v) => v,
             None => {
                 scope.mark_incomplete_propagated();
@@ -441,7 +458,7 @@ impl<'a> Gen<'a> {
                 // The receiver is a coercion-free (synth) sub-position — a member
                 // access never coerces its receiver — so synthesize it (emitting its
                 // own node).
-                let head_var = self.infer_expr(scope, &recv_expr, Expected::Synth)?;
+                let head_var = self.infer_expr(scope, &recv_expr, Expected::Synth).var()?;
                 let recv = self.chain_prefix(scope, head_var, prefix)?;
                 Some((recv, method.clone()))
             }
@@ -464,7 +481,7 @@ impl<'a> Gen<'a> {
         if prefix.is_empty() {
             Some(recv)
         } else {
-            self.gen_member_access(scope, recv, prefix)
+            Some(self.gen_member_access(scope, recv, prefix))
         }
     }
 
@@ -491,34 +508,35 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         li: &LongIdentExpr,
         expected: Expected,
-    ) -> Option<TyVid> {
+    ) -> Inferred {
         let Some(long_ident) = li.long_ident() else {
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         };
         // A module-qualified value (`List.length`), whose node FCS keys at
         // the whole path.
         if let Some(whole) = self.module_value_path(li) {
-            let uv = self.nonlocal_value_or_incomplete(scope, whole, Use::Value)?;
+            let Some(uv) = self.nonlocal_value_or_incomplete(scope, whole, Use::Value) else {
+                return Inferred::untyped(self.decline_expected_propagated(scope));
+            };
             if !self.facts.case_of_fields_at(whole) {
                 self.emit(whole, uv, expected);
             }
-            self.relate(scope, uv, expected);
-            return Some(uv);
+            let (_, d) = self.relate(scope, uv, expected);
+            return Inferred::typed(uv, d);
         }
         // An active-pattern name segment cannot be projected as a plain member
         // token, so a path carrying one is unmodelled here.
         if long_ident.active_pat_names().next().is_some() {
-            scope.mark_incomplete(Incomplete::MemberAccessShape);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::MemberAccessShape));
         }
         let idents: Vec<SyntaxToken> = long_ident.idents().collect();
         // Need a head *and* at least one member segment.
         let (head, segments) = match idents.split_first() {
             Some((head, segments)) if !segments.is_empty() => (head, segments),
             _ => {
-                scope.mark_incomplete(Incomplete::MemberAccessShape);
-                return None;
+                return Inferred::untyped(
+                    self.decline_expected(scope, Incomplete::MemberAccessShape),
+                );
             }
         };
         // The head must resolve to a value binder, in this file or a preceding
@@ -526,21 +544,24 @@ impl<'a> Gen<'a> {
         // not model here.
         let recorded = scope.reasons_recorded();
         let Some(recv) = self.receiver_var(scope, head) else {
-            scope.mark_consequence(recorded, Incomplete::QualifiedPath);
-            return None;
+            return Inferred::untyped(self.decline_expected_consequence(
+                scope,
+                recorded,
+                Incomplete::QualifiedPath,
+            ));
         };
         // Emit the receiver's own value node (coercion-free — synth), guarded on
         // the access resolving: FCS keeps no receiver node for a rejected one.
         self.out.open_receiver_guards(segments);
         self.emit(head.text_range(), recv, Expected::Synth);
         self.out.close_guards(segments.len());
-        let result = self.gen_member_access(scope, recv, segments)?;
+        let result = self.gen_member_access(scope, recv, segments);
         self.settle_access(scope);
         self.emit(self.facts.node_span(li.syntax()), result, expected);
         // FCS relates a member access to what its context expects once the
         // access is resolved (`Propagate` stops at a dot).
-        self.relate(scope, result, expected);
-        Some(result)
+        let (_, d) = self.relate(scope, result, expected);
+        Inferred::typed(result, d)
     }
 
     /// Type a `(expr).Member` member access — a `DOT_GET_EXPR` (Stage 3.3a). The
@@ -553,38 +574,37 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         dg: &DotGetExpr,
         expected: Expected,
-    ) -> Option<TyVid> {
+    ) -> Inferred {
         let Some(recv_expr) = dg.expr() else {
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         };
         let Some(long_ident) = dg.long_ident() else {
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         };
         if long_ident.active_pat_names().next().is_some() {
-            scope.mark_incomplete(Incomplete::MemberAccessShape);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::MemberAccessShape));
         }
         let segments: Vec<SyntaxToken> = long_ident.idents().collect();
         if segments.is_empty() {
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         }
         // The receiver is a coercion-free (synth) sub-position — a member access
         // never coerces its receiver — so synthesize it, emitting its own node,
         // guarded on the access resolving: FCS keeps nothing inside the receiver
         // of a rejected one.
         self.out.open_receiver_guards(&segments);
-        let recv = self.infer_expr(scope, &recv_expr, Expected::Synth);
+        let recv = self.infer_expr(scope, &recv_expr, Expected::Synth).var();
         self.out.close_guards(segments.len());
-        let recv = recv?;
+        let Some(recv) = recv else {
+            // The receiver's walk recorded why it is not typed.
+            return Inferred::untyped(self.decline_expected_propagated(scope));
+        };
         self.out.dot_get_receiver(dg.syntax().text_range(), recv);
-        let result = self.gen_member_access(scope, recv, &segments)?;
+        let result = self.gen_member_access(scope, recv, &segments);
         self.settle_access(scope);
         self.emit(self.facts.node_span(dg.syntax()), result, expected);
-        self.relate(scope, result, expected);
-        Some(result)
+        let (_, d) = self.relate(scope, result, expected);
+        Inferred::typed(result, d)
     }
 
     /// The inference variable for a member-access **receiver** whose head token
@@ -615,9 +635,7 @@ impl<'a> Gen<'a> {
                 }
             };
             let body = self.solver.instantiate(self.facts.env.types(), ty);
-            let uv = self.solver.table.fresh();
-            self.eq(scope, self.solver.tys.var(uv), body);
-            return Some(uv);
+            return Some(self.fresh_equal(scope, body));
         };
         if self.binders.is_withheld(def) {
             scope.mark_incomplete(Incomplete::RigidTypeVariable);
@@ -625,9 +643,7 @@ impl<'a> Gen<'a> {
         }
         if let Some(scheme) = self.binders.scheme(def) {
             let body = self.solver.instantiate(self.solver.tys, scheme);
-            let uv = self.solver.table.fresh();
-            self.eq(scope, self.solver.tys.var(uv), body);
-            return Some(uv);
+            return Some(self.fresh_equal(scope, body));
         }
         let dv = self.def_var(def);
         if !scope.is_param(def) {
@@ -678,10 +694,19 @@ impl<'a> Gen<'a> {
         let declared = record.record;
         let env_tys = self.facts.env.types();
         let mut fresh: HashMap<u32, TyVid> = HashMap::default();
+        let from = self.solver.table.mark();
         let receiver = self.solver.instantiate_rec(env_tys, declared, &mut fresh);
         let field = self.solver.instantiate_rec(env_tys, field, &mut fresh);
-        self.eq(scope, receiver, head);
-        self.eq(scope, self.solver.tys.var(m.result), field);
+        // The record's instance is this wake's own; so is the access's
+        // result, which the access made and settles at once.
+        let own = self.own_since(from);
+        self.eq(scope, receiver, head, own);
+        self.eq(
+            scope,
+            self.solver.tys.var(m.result),
+            field,
+            Own::var(m.result),
+        );
         true
     }
 
@@ -743,7 +768,9 @@ impl<'a> Gen<'a> {
         };
         let looked_up = match kind {
             MemberAccessKind::Data => self.facts.env.instance_data_member(handle, name),
-            MemberAccessKind::Method { args, is_static } => {
+            MemberAccessKind::Method {
+                args, is_static, ..
+            } => {
                 // A non-positional argument shape (named argument, recovery hole) is
                 // not typed by FCS as the method return — defer fully (no type, no
                 // member resolution recorded, since an ill-formed call has no
@@ -938,20 +965,24 @@ impl<'a> Gen<'a> {
         if !fsharp_field_carrier && !self.facts.env.identities_incomplete() {
             self.out.confirm_guard(use_range);
         }
+        // A lambda argument may not convert to its parameter, which leaves
+        // the call untyped in FCS ([`MemberAccessKind::Method::lambda_arg`]).
+        if matches!(
+            kind,
+            MemberAccessKind::Method {
+                lambda_arg: true,
+                ..
+            }
+        ) {
+            return Wake::Resolved;
+        }
         // A `void` method's call is F#'s `unit`, which FCS types it as —
         // unless the projection is incomplete, where the member read is not
         // provably the one FCS binds (the seal below).
         if is_void {
             if !self.facts.env.identities_incomplete() {
                 let unit = self.solver.tys.named(self.facts.env.names(), UNIT);
-                if self
-                    .solver
-                    .table
-                    .unify_atomic(self.solver.tys.var(result), unit)
-                    .is_err()
-                {
-                    scope.eq_failures += 1;
-                }
+                self.eq(scope, self.solver.tys.var(result), unit, Own::var(result));
             }
             return Wake::Resolved;
         }
@@ -979,15 +1010,37 @@ impl<'a> Gen<'a> {
         if self.facts.env.identities_incomplete() {
             return Wake::Resolved;
         }
-        if self
-            .solver
-            .table
-            .unify_atomic(self.solver.tys.var(result), member_ty)
-            .is_err()
-        {
-            scope.eq_failures += 1;
-        }
+        self.eq(
+            scope,
+            self.solver.tys.var(result),
+            member_ty,
+            Own::var(result),
+        );
         Wake::Resolved
+    }
+}
+
+/// Whether a method call's argument `arg` — the call's parentheses, or a bare
+/// argument — holds a lambda (`fun …` or `function …`, under parentheses) as
+/// one of its positional arguments: the arguments FCS checks against their
+/// parameters' types before it resolves the call.
+fn has_lambda_argument(arg: &Expr) -> bool {
+    let is_lambda = |e: &Expr| {
+        matches!(
+            unparenthesize(e.clone()),
+            Some(Expr::Fun(_) | Expr::MatchLambda(_))
+        )
+    };
+    let inner = match arg {
+        Expr::Paren(p) => match p.inner() {
+            Some(inner) => inner,
+            None => return false,
+        },
+        other => other.clone(),
+    };
+    match &inner {
+        Expr::Tuple(t) if !t.is_struct() => t.elements().any(|el| is_lambda(&el)),
+        other => is_lambda(other),
     }
 }
 

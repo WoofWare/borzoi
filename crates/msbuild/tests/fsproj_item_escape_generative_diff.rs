@@ -253,6 +253,8 @@ struct Fixture {
     pct: String,
     includes: Vec<String>,
     exclude: Option<String>,
+    /// Each item's `Condition`, written as it stands (whitespace included).
+    condition: Option<String>,
 }
 
 impl Fixture {
@@ -266,6 +268,7 @@ impl Fixture {
             pct: "pct%".to_string(),
             includes,
             exclude,
+            condition: None,
         }
     }
 
@@ -274,12 +277,19 @@ impl Fixture {
         s.push_str(&format!("    <Esc>{}</Esc>\n", self.esc));
         s.push_str(&format!("    <Pct>{}</Pct>\n", self.pct));
         s.push_str("  </PropertyGroup>\n  <ItemGroup>\n");
+        let condition = self
+            .condition
+            .as_ref()
+            .map(|c| format!(" Condition=\"{c}\""))
+            .unwrap_or_default();
         for include in &self.includes {
             match &self.exclude {
                 Some(exclude) => s.push_str(&format!(
-                    "    <Compile Include=\"{include}\" Exclude=\"{exclude}\" />\n"
+                    "    <Compile Include=\"{include}\" Exclude=\"{exclude}\"{condition} />\n"
                 )),
-                None => s.push_str(&format!("    <Compile Include=\"{include}\" />\n")),
+                None => s.push_str(&format!(
+                    "    <Compile Include=\"{include}\"{condition} />\n"
+                )),
             }
         }
         s.push_str("  </ItemGroup>\n</Project>\n");
@@ -409,6 +419,7 @@ fn hand_picked_corners() {
         pct: "pct%".to_string(),
         includes: vec![include.to_string()],
         exclude: exclude.map(str::to_string),
+        condition: None,
     };
     let cases = [
         // An escaped `;` is data: one item named `a;b.fs`, not two.
@@ -581,6 +592,7 @@ fn case_corners() {
         pct: "pct%".to_string(),
         includes: vec![include.to_string()],
         exclude: exclude.map(str::to_string),
+        condition: None,
     };
     let literal = [
         corner("plain.fs;z.fs", Some("PLAIN.FS")),
@@ -675,5 +687,98 @@ fn generated_item_specs_are_certain_implies_exact() {
     assert!(
         fast_committed > 0,
         "the literal fast path committed nothing — its seam is not being exercised"
+    );
+}
+
+/// The whitespace MSBuild reads in an attribute as written: it normalises
+/// neither attribute values nor line ends (#750).
+const WHITESPACE: &[&str] = &[" ", "\t", "\n", "\r", "\r\n"];
+
+/// `text` with each space respelt from [`WHITESPACE`].
+fn respell_spaces(rng: &mut SplitMix64, text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c == ' ' {
+                (*rng.pick(WHITESPACE)).to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// `spec` with its spaces respelt and whitespace from [`WHITESPACE`] padding
+/// its ends and each `;`, which MSBuild trims from every fragment.
+fn respell_spec(rng: &mut SplitMix64, spec: &str) -> String {
+    let pad = |rng: &mut SplitMix64| {
+        if rng.below(2) == 0 {
+            String::new()
+        } else {
+            (*rng.pick(WHITESPACE)).to_string()
+        }
+    };
+    let fragments: Vec<String> = spec
+        .split(';')
+        .map(|fragment| format!("{}{}{}", pad(rng), respell_spaces(rng, fragment), pad(rng)))
+        .collect();
+    fragments.join(";")
+}
+
+/// Item conditions whose quoted strings hold spaces, so a respelt space inside
+/// a quote decides whether the item is kept.
+const ITEM_CONDITIONS: &[&str] = &[
+    "'a b' == 'a b'",
+    "'a b' != 'a b'",
+    "'$(Esc) ' != 'plain.fs '",
+    "' $(Esc)' == ' plain.fs'",
+    "'$(Esc)' != ''",
+];
+
+/// The whitespace axis on item specs and conditions (#750): generated fixtures
+/// with every space in an `Include` or `Exclude` respelt as a raw tab, line
+/// feed, carriage return or CRLF, the same padding each fragment, a fragment
+/// whose file name holds one (`a b.fs`, respelt), and half the time an item
+/// `Condition` respelt the same way, held to certain-implies-exact through both
+/// seams.
+#[test]
+fn whitespace_respelt_specs_are_certain_implies_exact() {
+    let mut oracle = Oracle::spawn();
+    let mut rng = SplitMix64(0x0750_17e3_5bec);
+    const CASES: usize = 600;
+    let mut committed = 0usize;
+    let mut committed_with_condition = 0usize;
+    for _ in 0..CASES {
+        let mut fixture = Fixture::generate(&mut rng);
+        if rng.below(2) == 0 {
+            fixture.includes.push("a b.fs".to_string());
+        }
+        fixture.includes = fixture
+            .includes
+            .iter()
+            .map(|spec| respell_spec(&mut rng, spec))
+            .collect();
+        fixture.exclude = fixture
+            .exclude
+            .as_deref()
+            .map(|spec| respell_spec(&mut rng, spec));
+        fixture.condition = (rng.below(2) == 0).then(|| {
+            let condition = *rng.pick(ITEM_CONDITIONS);
+            respell_spaces(&mut rng, condition)
+        });
+        for with_resolver in [false, true] {
+            if check_with(&mut oracle, &fixture, with_resolver) == Outcome::Committed {
+                committed += 1;
+                committed_with_condition += usize::from(fixture.condition.is_some());
+            }
+        }
+    }
+    eprintln!(
+        "whitespace-respelt item specs: {committed} committed over {CASES} fixtures and two \
+         seams, {committed_with_condition} with a condition"
+    );
+    assert!(committed >= 400, "only {committed} committed");
+    assert!(
+        committed_with_condition >= 150,
+        "only {committed_with_condition} committed with a condition"
     );
 }

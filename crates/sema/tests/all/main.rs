@@ -147,6 +147,7 @@ mod type_qualified_prefix_grid;
 mod types_census;
 mod union_rqa_attribute_grid;
 mod unmodelled_contributor_grid;
+mod unresolved_pattern_heads;
 mod use_rec;
 mod uses_census;
 mod uses_census_project;

@@ -1032,7 +1032,22 @@ committed wrongly over 800 cases; with the channel, **0**. #614's witness is
 un-ignored and passes. The tier counts, and pins, the stale reads that reach
 other facts (1,199 over 800 cases, nearly all properties) as #792.
 
-**Re-measured with the implementation:** RESULTS2
+**Re-measured with the implementation, not the instrumentation:** zero on
+all three populations. The crate suite passes with no expectation changed
+(the #614 witness is the only test whose status moved, from ignored to
+passing); `fsproj_msbuild_corpus_diff` (71 real-SDK projects) and
+`sdk_chain_decline_attribution` leave their manifests unmoved; and every step
+of `project-corpus-gate.sh` (the LSP project corpus, the restore-cone census
+and the rest) passes with no manifest regenerated.
+
+A latch visits only the entries bound or given a verdict since the previous
+one (`PropertyMap::fresh`), since that one left every bound entry stale, and
+every stale value shares its latch's cause (`StaleCause`, an `Arc`): marking
+the whole table at each latch, and copying the cause into each entry, were
+each quadratic in a hostile project (codex measured 6.7 s for 10 000
+properties under 10 000 undecidable imports, and 93 MB for 3 000 properties
+under one 30 KB condition). A property test holds the incremental latch to
+the whole-table one.
 
 What the channel does *not* decide, deliberately: the SDK chain's own
 `Directory.Build.props` import point (`props_import_point`) asks

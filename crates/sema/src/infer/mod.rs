@@ -295,7 +295,10 @@
 //!   ([`InferredFile::refused_equalities`] counts what it refuses, and the
 //!   corpus expects none);
 //! - taint is placed where FCS takes the relation inference does not;
-//! - no decision is taken once the prefix has ended.
+//! - no decision is taken once the prefix has ended, and once it has, an
+//!   equality gives a term only to a class made purely of the variables its
+//!   site has just made ([`Gen::eq`], [`Own`]), so every term the table gains
+//!   then is one FCS gives those variables too.
 //!
 //! Generalisation still needs the whole binding complete, and a binding that
 //! declares type variables is still held to them at its close
@@ -402,9 +405,8 @@
 //!   the parameter's one variable: it binds the binder's variable, which the
 //!   uses read, to `bool`, and the slot with it ([`Gen::constrain_bool`]);
 //!   an earlier use that fixed the parameter makes it a failure between ground
-//!   types, which binds nothing. Once the prefix has ended, a condition
-//!   grounds only the slot, and only when nothing could have come before it
-//!   ([`Gen::is_first_occurrence`]). A parameter whose annotation names an
+//!   types, which binds nothing. Once the prefix has ended, or on a tainted
+//!   binder, a condition binds nothing. A parameter whose annotation names an
 //!   implicitly scoped type variable (below) is reached through every other
 //!   mention of the variable too, so a condition on it never grounds.
 //! - **A type variable in a function's head is one variable per name.** FCS
@@ -866,8 +868,10 @@ pub enum Incomplete {
     ConditionShape,
     /// A condition on a name that is not a parameter of the binding.
     ConditionNotParameter,
-    /// A condition on a parameter that is not the parameter's first occurrence.
-    ConditionNotFirstOccurrence,
+    /// A condition on a parameter that is not decided: once the prefix has
+    /// ended, on a tainted binder, or on a parameter whose annotation names an
+    /// implicitly scoped type variable.
+    ConditionUndecided,
     /// A pattern annotation outside the modelled set, or around anything but
     /// a name.
     PatternAnnotation,

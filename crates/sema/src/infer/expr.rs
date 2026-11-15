@@ -28,9 +28,9 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         e: &Expr,
         expected: Expected,
-    ) -> Option<TyVid> {
+    ) -> Inferred {
         let result = self.infer_expr_inner(scope, e, expected);
-        if result.is_none()
+        if result.var.is_none()
             && let Some(d) = expected.target()
         {
             scope.poison.push(d);
@@ -56,9 +56,8 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         e: &Expr,
         expected: Expected,
-    ) -> Option<TyVid> {
+    ) -> Inferred {
         self.out.enter_expression();
-        self.note_lost_prefix(scope);
         let result = if expected.records() {
             self.infer_construct(scope, e, expected)
         } else {
@@ -80,12 +79,7 @@ impl<'a> Gen<'a> {
     /// decision below is taken against a relation FCS took and inference
     /// skipped. Each arm relates its type to `expected` where FCS does
     /// ([`Self::relate`]).
-    fn infer_construct(
-        &mut self,
-        scope: &mut Scope,
-        e: &Expr,
-        expected: Expected,
-    ) -> Option<TyVid> {
+    fn infer_construct(&mut self, scope: &mut Scope, e: &Expr, expected: Expected) -> Inferred {
         match e {
             // A bare literal. A measure literal (`1.0<kg>`) is an
             // `Expr::MeasureLit`, not `Expr::Const`, so it is excluded
@@ -95,11 +89,10 @@ impl<'a> Gen<'a> {
                     // A deferred literal (`USER_NUM_LIT`, a source-location
                     // identifier) is unmodelled — its type is not fixed even in
                     // isolation — so the binding must not generalise.
-                    scope.mark_incomplete(Incomplete::DeferredLiteral);
-                    return None;
+                    let d = self.decline_expected(scope, Incomplete::DeferredLiteral);
+                    return Inferred::untyped(d);
                 };
-                let v = self.solver.table.fresh();
-                self.eq(scope, self.solver.tys.var(v), ty);
+                let v = self.fresh_equal(scope, ty);
                 // The literal *token*'s range, not the `ConstExpr` node's: in a
                 // tuple element (`(1, "hi")`) the node range swallows the leading
                 // ` ` trivia after the comma, but FCS's node spans only the
@@ -109,8 +102,8 @@ impl<'a> Gen<'a> {
                 } else if let Some(lit) = c.literal() {
                     self.emit(lit.text_range(), v, expected);
                 }
-                self.relate(scope, v, expected);
-                Some(v)
+                let (_, d) = self.relate(scope, v, expected);
+                Inferred::typed(v, d)
             }
             // A value use: its type is the referenced binder's. In synth mode the
             // use occurrence is emitted at its own range; a use resolving to a
@@ -121,8 +114,7 @@ impl<'a> Gen<'a> {
             // 3.2c-2c) — checked *before* the plain `def_var` path.
             Expr::Ident(ident) => {
                 let Some(tok) = ident.ident() else {
-                    scope.mark_incomplete(Incomplete::Recovery);
-                    return None;
+                    return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
                 };
                 let def = self
                     .facts
@@ -132,21 +124,24 @@ impl<'a> Gen<'a> {
                     // A referenced assembly's value, read off its signature, or
                     // a union case; anything else that is not an in-file binder
                     // (a preceding file's, a deferred name) is unmodelled.
-                    let uv =
-                        self.nonlocal_value_or_incomplete(scope, tok.text_range(), Use::Value)?;
+                    let Some(uv) =
+                        self.nonlocal_value_or_incomplete(scope, tok.text_range(), Use::Value)
+                    else {
+                        return Inferred::untyped(self.decline_expected_propagated(scope));
+                    };
                     if !self.facts.case_of_fields_at(tok.text_range()) {
                         self.emit(tok.text_range(), uv, expected);
                     }
-                    self.relate(scope, uv, expected);
-                    return Some(uv);
+                    let (_, d) = self.relate(scope, uv, expected);
+                    return Inferred::typed(uv, d);
                 };
                 if self.declines_use(scope, def) {
-                    return None;
+                    return Inferred::untyped(self.decline_expected_propagated(scope));
                 }
                 let uv = self.value_use(scope, def);
                 self.emit(tok.text_range(), uv, expected);
-                self.relate(scope, uv, expected);
-                Some(uv)
+                let (_, d) = self.relate(scope, uv, expected);
+                Inferred::typed(uv, d)
             }
             // Parentheses are transparent: the type, position (so `expected`
             // passes straight through), and emission are the inner expression's;
@@ -154,8 +149,7 @@ impl<'a> Gen<'a> {
             // wrapping a recovery hole (no inner expression) is unmodelled.
             Expr::Paren(p) => {
                 let Some(inner) = p.inner() else {
-                    scope.mark_incomplete(Incomplete::Recovery);
-                    return None;
+                    return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
                 };
                 self.infer_expr(scope, &inner, expected)
             }
@@ -178,44 +172,48 @@ impl<'a> Gen<'a> {
                 // Struct tuples (`struct (a, b)`) have a distinct runtime type
                 // and canonical rendering; defer them (unmodelled).
                 if t.is_struct() {
-                    scope.mark_incomplete(Incomplete::StructTuple);
-                    return None;
+                    return Inferred::untyped(
+                        self.decline_expected(scope, Incomplete::StructTuple),
+                    );
                 }
                 let arity = t.elements().count();
-                let (elem_expected, relate_at_end) =
+                let (elem_expected, split) =
                     self.tuple_element_expectations(scope, expected, arity);
-                let elems: Vec<Ty> = t
-                    .elements()
-                    .enumerate()
-                    .map(|(i, el)| {
-                        let elem_expected =
-                            elem_expected.get(i).copied().unwrap_or(Expected::Unknown);
-                        match self.infer_expr(scope, &el, elem_expected) {
-                            Some(v) => self.solver.tys.var(v),
-                            None => {
-                                // An element we cannot type leaves the tuple
-                                // un-ground; the element's own recursion already set
-                                // incomplete, but this arm may also be reached for a
-                                // recovery hole — be explicit.
-                                scope.mark_incomplete_propagated();
-                                self.solver.tys.var(self.solver.table.fresh())
-                            }
+                let mut by_elements: Option<Discharged> = None;
+                let mut elems: Vec<Ty> = Vec::with_capacity(arity);
+                for (el, elem_expected) in t.elements().zip(elem_expected) {
+                    let walked = self.infer_expr(scope, &el, elem_expected);
+                    by_elements = Some(match by_elements {
+                        Some(d) => d.and(walked.discharged),
+                        None => walked.discharged,
+                    });
+                    elems.push(match walked.var {
+                        Some(v) => self.solver.tys.var(v),
+                        None => {
+                            // An element we cannot type leaves the tuple
+                            // un-ground; the element's own recursion already
+                            // set incomplete.
+                            scope.mark_incomplete_propagated();
+                            self.solver.tys.var(self.solver.table.fresh())
                         }
-                    })
-                    .collect();
+                    });
+                }
                 // A well-formed tuple has ≥ 2 elements; anything less is a
                 // degenerate parse, not a tuple type.
-                if elems.len() < 2 {
-                    scope.mark_incomplete(Incomplete::Recovery);
-                    return None;
-                }
-                let tv = self.solver.table.fresh();
-                self.eq(scope, self.solver.tys.var(tv), self.solver.tys.tuple(elems));
+                let (Some(by_elements), 2..) = (by_elements, elems.len()) else {
+                    return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
+                };
+                let tv = self.fresh_equal(scope, self.solver.tys.tuple(elems));
                 self.emit(self.facts.node_span(t.syntax()), tv, expected);
-                if relate_at_end {
-                    self.relate(scope, tv, expected);
-                }
-                Some(tv)
+                let d = match split {
+                    TupleSplit::Split(d) => d.and(by_elements),
+                    TupleSplit::ByElements => by_elements,
+                    TupleSplit::AtEnd => {
+                        let (_, d) = self.relate(scope, tv, expected);
+                        d.and(by_elements)
+                    }
+                };
+                Inferred::typed(tv, d)
             }
             // `if c then a else b`: F# uses the *then*-branch's type as the result
             // and coerces `else` to it. The then-branch carries the if's mode (the
@@ -247,27 +245,34 @@ impl<'a> Gen<'a> {
                         // and mark incomplete (its then-branch's true type is a
                         // dropped unit-check relation).
                         if !if_chain_has_final_else(if_expr) {
-                            scope.mark_incomplete(Incomplete::ElselessIf);
-                            return None;
+                            return Inferred::untyped(
+                                self.decline_expected(scope, Incomplete::ElselessIf),
+                            );
                         }
                         let Some(then_branch) = if_expr.then_branch() else {
-                            scope.mark_incomplete(Incomplete::Recovery);
-                            return None;
+                            return Inferred::untyped(
+                                self.decline_expected(scope, Incomplete::Recovery),
+                            );
                         };
                         // A then-branch that cannot synthesize leaves the `if`'s
                         // result unknown; its recursion already set incomplete.
-                        let then_var = self.infer_expr(scope, &then_branch, Expected::Synth)?;
+                        let then_walk = self.infer_expr(scope, &then_branch, Expected::Synth);
+                        let Some(then_var) = then_walk.var else {
+                            return then_walk;
+                        };
                         // FCS checks the `else` branch against the overall
                         // type the `then` branch fixed, before anything in it.
                         if let Some(else_branch) = if_expr.else_branch() {
-                            self.infer_expr(scope, &else_branch, Expected::Known(then_var));
+                            let _ = self
+                                .infer_expr(scope, &else_branch, Expected::Known(then_var))
+                                .var();
                         }
                         self.emit(
                             self.facts.node_span(if_expr.syntax()),
                             then_var,
                             Expected::Synth,
                         );
-                        Some(then_var)
+                        Inferred::typed(then_var, then_walk.discharged)
                     }
                     // Each branch is checked against the overall type itself,
                     // known or not, which relates it where FCS does.
@@ -277,27 +282,23 @@ impl<'a> Gen<'a> {
                         // against `unit`. (An `elif` chain is an `if` in the
                         // `else` of another, which meets this rule itself.)
                         if if_expr.else_branch().is_none() {
-                            let unit = self.solver.table.fresh();
                             let unit_ty = self.solver.tys.named(self.facts.env.names(), UNIT);
-                            self.eq(scope, self.solver.tys.var(unit), unit_ty);
+                            let unit = self.fresh_equal(scope, unit_ty);
                             // FCS's `unit` equality is strict: where it fails, or
                             // against a type not known here, FCS reports it and
                             // what it checks next is not known, so the prefix
                             // ends before the branch.
-                            let related = match expected.target() {
-                                Some(d) => self.decide(scope, unit, d) == Decision::Taken,
-                                None => false,
-                            };
-                            let branch_expected = if related {
+                            let (decision, d) = self.relate(scope, unit, expected);
+                            let branch_expected = if decision == Some(Decision::Taken) {
                                 Expected::Known(unit)
                             } else {
                                 scope.mark_incomplete(Incomplete::ElselessIf);
                                 Expected::Unknown
                             };
                             if let Some(then_branch) = if_expr.then_branch() {
-                                self.infer_expr(scope, &then_branch, branch_expected);
+                                let _ = self.infer_expr(scope, &then_branch, branch_expected).var();
                             }
-                            return Some(unit);
+                            return Inferred::typed(unit, d);
                         }
                         // Under an equality the `then` branch is exact, but
                         // the `else` branch is checked against the type the
@@ -307,12 +308,21 @@ impl<'a> Gen<'a> {
                             Expected::Equal(d) => Expected::Known(d),
                             other => other,
                         };
-                        let mut result = None;
-                        if let Some(then_branch) = if_expr.then_branch() {
-                            result = self.infer_expr(scope, &then_branch, expected);
-                        }
+                        let Some(then_branch) = if_expr.then_branch() else {
+                            // A recovery hole: the `else` branch is still
+                            // walked, against what the `if` expects.
+                            if let Some(else_branch) = if_expr.else_branch() {
+                                let _ = self.infer_expr(scope, &else_branch, else_expected).var();
+                            }
+                            return Inferred::untyped(
+                                self.decline_expected(scope, Incomplete::Recovery),
+                            );
+                        };
+                        // Each branch is handed the expected type; the `then`
+                        // branch's proof stands for both.
+                        let then_walk = self.infer_expr(scope, &then_branch, expected);
                         if let Some(else_branch) = if_expr.else_branch() {
-                            self.infer_expr(scope, &else_branch, else_expected);
+                            let _ = self.infer_expr(scope, &else_branch, else_expected).var();
                         }
                         if let Expected::Equal(exp) = expected {
                             self.emit(self.facts.node_span(if_expr.syntax()), exp, expected);
@@ -321,8 +331,8 @@ impl<'a> Gen<'a> {
                         // under an equality it is what its `then` branch is,
                         // which the caller compares with what it expected.
                         match expected {
-                            Expected::Known(d) => Some(d),
-                            _ => result,
+                            Expected::Known(d) => Inferred::typed(d, then_walk.discharged),
+                            _ => then_walk,
                         }
                     }
                 }
@@ -337,16 +347,19 @@ impl<'a> Gen<'a> {
             // expected type.
             Expr::Match(m) => {
                 let Some(scrutinee) = m.scrutinee() else {
-                    scope.mark_incomplete(Incomplete::Recovery);
-                    return None;
+                    return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
                 };
                 // FCS elaborates a match of one clause to other nodes than
                 // its source's (`match o with _ -> "s"` keeps no node at
                 // `"s"`), so its dump cannot grade one; such a match is the
                 // rare spelling of a `let`, and declines.
                 if m.clauses().nth(1).is_none() {
-                    scope.mark_incomplete(Incomplete::Unmodelled(SyntaxKind::MATCH_EXPR));
-                    return None;
+                    return Inferred::untyped(
+                        self.decline_expected(
+                            scope,
+                            Incomplete::Unmodelled(SyntaxKind::MATCH_EXPR),
+                        ),
+                    );
                 }
                 // FCS's decision compiler keeps no node or binder of a
                 // clause no value reaches (FS0026: `_ -> 1 | Some x -> x`, or
@@ -355,11 +368,14 @@ impl<'a> Gen<'a> {
                 // node at `1`), so a match with an unreachable clause declines
                 // before any of it is walked, as a match of one clause does.
                 if !self.every_clause_provably_reachable(m) {
-                    scope.mark_incomplete(Incomplete::UnreachableClause);
-                    return None;
+                    return Inferred::untyped(
+                        self.decline_expected(scope, Incomplete::UnreachableClause),
+                    );
                 }
                 let mark = self.out.mark();
-                let sv = self.infer_expr(scope, &scrutinee, Expected::Synth)?;
+                let Some(sv) = self.infer_expr(scope, &scrutinee, Expected::Synth).var() else {
+                    return Inferred::untyped(self.decline_expected_propagated(scope));
+                };
                 // FCS may bind the scrutinee to a temporary at the
                 // scrutinee's own range — a `let` node typed as the whole
                 // match (`match c with 'a' -> true | _ -> false` reports
@@ -367,25 +383,27 @@ impl<'a> Gen<'a> {
                 // walk emitted, is not one FCS's dump can grade. What it
                 // contains is.
                 self.out.ungrade_last_since(mark);
-                let mut first: Option<TyVid> = None;
-                let mut any = false;
+                // The first clause's result is handed the expected type
+                // itself, and its proof stands for the match.
+                let mut first: Option<(TyVid, Discharged)> = None;
                 for clause in m.clauses() {
                     let (Some(pat), Some(body)) = (clause.pat(), clause.result()) else {
-                        scope.mark_incomplete(Incomplete::Recovery);
-                        return None;
+                        return Inferred::untyped(
+                            self.decline_expected(scope, Incomplete::Recovery),
+                        );
                     };
                     // A name bound twice is FS0038 (FCS keeps the second),
                     // as for a `let` pattern.
                     if binds_a_name_twice(std::slice::from_ref(&pat)) {
-                        scope.mark_incomplete(Incomplete::DuplicateBinder);
-                        return None;
+                        return Inferred::untyped(
+                            self.decline_expected(scope, Incomplete::DuplicateBinder),
+                        );
                     }
                     let shape =
                         match self.pattern_shape_in(&pat, PatSite::Match, AnnotationCx::Plain) {
                             Ok(shape) => shape,
                             Err(why) => {
-                                scope.mark_incomplete(why);
-                                return None;
+                                return Inferred::untyped(self.decline_expected(scope, why));
                             }
                         };
                     shape.names(&mut scope.match_locals);
@@ -394,7 +412,9 @@ impl<'a> Gen<'a> {
                     // before it is generated, once what came before settled.
                     self.settle(scope);
                     let failures = scope.eq_failures;
+                    let pat_from = self.solver.table.mark();
                     let pt = self.gen_pattern(scope, &shape, BinderSite::Local);
+                    let own = self.own_since(pat_from);
                     // As for a `let` pattern ([`Self::pattern_rhs`]): a
                     // pattern of structure must not give an earlier binding's
                     // open variable a shape of this binding's variables
@@ -410,8 +430,9 @@ impl<'a> Gen<'a> {
                         && (self.mentions_inherited_open(scope, sv)
                             || self.touches_opaque(scope, sv, sv))
                     {
-                        scope.mark_incomplete(Incomplete::InheritedOpen);
-                        return None;
+                        return Inferred::untyped(
+                            self.decline_expected(scope, Incomplete::InheritedOpen),
+                        );
                     }
                     // FCS checks in source order, so an argument check still
                     // pending here was applied before this pattern: a pattern
@@ -421,26 +442,17 @@ impl<'a> Gen<'a> {
                     if !matches!(self.solver.tys.kind(pt), TyKind::Var(_))
                         && self.pattern_preempts_earlier_relation(scope, sv, pt)
                     {
-                        scope.mark_incomplete(Incomplete::PatternAfterCheck);
-                        return None;
+                        return Inferred::untyped(
+                            self.decline_expected(scope, Incomplete::PatternAfterCheck),
+                        );
                     }
-                    // An unmodelled construct before the pattern may have
-                    // fixed what the scrutinee's open variables are in FCS
-                    // (`Some x -> (if x then …) | Some "" -> …` makes `x`
-                    // `bool`, then rejects the pattern), and it left no
-                    // relation to probe; so on an incomplete binding a
-                    // pattern of structure relates only a ground scrutinee.
-                    if !scope.complete
-                        && !matches!(self.solver.tys.kind(pt), TyKind::Var(_))
-                        && !self
-                            .solver
-                            .tys
-                            .is_ground(self.solver.table.resolve(self.solver.tys.var(sv)))
-                    {
-                        scope.mark_incomplete(Incomplete::PatternAfterCheck);
-                        return None;
-                    }
-                    self.eq(scope, self.solver.tys.var(sv), pt);
+                    // Once the prefix has ended, the equality binds only the
+                    // pattern's own variables ([`Self::eq`]): an unmodelled
+                    // construct before it may have fixed what the scrutinee's
+                    // open variables are in FCS (`Some x -> (if x then …) |
+                    // Some "" -> …` makes `x` `bool`, then rejects the
+                    // pattern). Refused, it leaves the pattern's names open.
+                    self.eq(scope, self.solver.tys.var(sv), pt, own);
                     // The pattern's names are typed before the clause's uses
                     // of them are walked, so a use reads a known type
                     // ([`Self::value_use`]).
@@ -451,8 +463,9 @@ impl<'a> Gen<'a> {
                     // against `int * string` keeps `x : int`): the clause
                     // declines rather than let its body type them.
                     if scope.eq_failures > failures {
-                        scope.mark_incomplete(Incomplete::PatternMismatch);
-                        return None;
+                        return Inferred::untyped(
+                            self.decline_expected(scope, Incomplete::PatternMismatch),
+                        );
                     }
                     if clause.guard().is_some() {
                         self.constrain_bool(scope, clause.guard());
@@ -460,30 +473,32 @@ impl<'a> Gen<'a> {
                     // With no expected type the first clause's result fixes
                     // the overall type, and each later one is checked against
                     // it; otherwise each is checked against the expected type.
-                    let arm_expected = match (expected, first) {
-                        (Expected::Synth, Some(first)) => Expected::Known(first),
+                    let arm_expected = match (expected, &first) {
+                        (Expected::Synth, Some((first, _))) => Expected::Known(*first),
                         // Under an equality only the first clause is exact:
                         // the rest are checked against the type it fixed.
                         (Expected::Equal(d), Some(_)) => Expected::Known(d),
                         _ => expected,
                     };
-                    let v = self.infer_expr(scope, &body, arm_expected);
+                    let walked = self.infer_expr(scope, &body, arm_expected);
                     if first.is_none() {
-                        first = Some(v?);
+                        let Some(v) = walked.var else {
+                            return walked;
+                        };
+                        first = Some((v, walked.discharged));
+                    } else {
+                        let _ = walked.var();
                     }
-                    any = true;
                 }
-                if !any {
-                    scope.mark_incomplete(Incomplete::Recovery);
-                    return None;
-                }
+                // Two or more clauses, each with a result, or a decline above.
+                let (first, d) = first.expect("a match of two or more clauses");
                 // Nothing is emitted at the match itself: FCS elaborates
                 // some matches to other nodes (a single irrefutable clause,
                 // `match o with x -> x`, is a `let`), so whether its dump has
                 // a node there is its decision compiler's to say.
                 match expected {
-                    Expected::Known(d) => Some(d),
-                    _ => first,
+                    Expected::Known(k) => Inferred::typed(k, d),
+                    _ => Inferred::typed(first, d),
                 }
             }
             // A lambda `fun x … -> body`. Walk the body so its sub-expressions get
@@ -501,7 +516,7 @@ impl<'a> Gen<'a> {
                 // type we cannot reproduce. FCS relates the expected type to the
                 // lambda's before its body, so the prefix ends here, before
                 // anything in the body is decided.
-                scope.mark_incomplete(Incomplete::Lambda);
+                let d = self.decline_expected(scope, Incomplete::Lambda);
                 if let Some(body) = fun.body() {
                     let body_expected = if expected.is_synth() {
                         Expected::Synth
@@ -512,12 +527,12 @@ impl<'a> Gen<'a> {
                     // are: behind a non-simple one the body's nodes move, so
                     // it records nothing (see [`is_simple_param`]).
                     let body_mark = self.out.mark();
-                    self.infer_expr(scope, &body, body_expected);
+                    let _ = self.infer_expr(scope, &body, body_expected).var();
                     if !fun.args().all(|arg| is_simple_param(&arg)) {
                         self.out.discard_since(body_mark);
                     }
                 }
-                None
+                Inferred::untyped(d)
             }
             // A `while c do body`: the condition is constrained to `bool`
             // (3.2c-2b), and the body is **checked against `unit`** — a check (not
@@ -530,12 +545,12 @@ impl<'a> Gen<'a> {
                 // defers — and marks the binding incomplete. FCS relates that type
                 // to the expected one before the condition, so the prefix ends
                 // before anything in the loop is decided.
-                scope.mark_incomplete(Incomplete::While);
+                let d = self.decline_expected(scope, Incomplete::While);
                 self.constrain_bool(scope, while_expr.cond());
                 if let Some(body) = while_expr.body() {
-                    self.infer_expr(scope, &body, Expected::Unknown);
+                    let _ = self.infer_expr(scope, &body, Expected::Unknown).var();
                 }
-                None
+                Inferred::untyped(d)
             }
             // Function application `f x` (Stage 3.2c-3). Both `APP_EXPR` and
             // `INFIX_APP_EXPR` cast to `Expr::App`. An infix `x + 1` is the outer
@@ -551,9 +566,11 @@ impl<'a> Gen<'a> {
             // succeeds (see `AppExpr::is_bracket_indexer`); when it fails, the
             // result is poisoned, as for any failed application.
             Expr::App(app) if !app.is_infix() && !app.is_bracket_indexer() => {
-                let r = self.infer_app(scope, app, expected)?;
-                self.emit(self.facts.node_span(app.syntax()), r, expected);
-                Some(r)
+                let walked = self.infer_app(scope, app, expected);
+                if let Some(r) = walked.var {
+                    self.emit(self.facts.node_span(app.syntax()), r, expected);
+                }
+                walked
             }
             // A dotted long-ident `s.Length` (Stage 3.3a). The parser stores a
             // value-receiver member access as a `LONG_IDENT_EXPR` (its head resolves
@@ -585,10 +602,9 @@ impl<'a> Gen<'a> {
             // **bracket-indexer** `App` too, which the guarded arm above deliberately
             // does not match, and an infix `App` outside a callee position, which
             // only a recovered parse produces.
-            _ => {
-                scope.mark_incomplete(Incomplete::Unmodelled(e.syntax().kind()));
-                None
-            }
+            _ => Inferred::untyped(
+                self.decline_expected(scope, Incomplete::Unmodelled(e.syntax().kind())),
+            ),
         }
     }
 
@@ -609,7 +625,7 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         e: &LetOrUseExpr,
         expected: Expected,
-    ) -> Option<TyVid> {
+    ) -> Inferred {
         for binding in e.bindings() {
             // A local that may carry `[<EntryPoint>]` is not typed, as at
             // module level ([`Self::let_binding`]).
@@ -622,8 +638,7 @@ impl<'a> Gen<'a> {
             self.local_binding(scope, &binding);
         }
         let Some(body) = e.body() else {
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         };
         let body_mark = self.out.mark();
         let result = self.infer_expr(scope, &body, expected);
@@ -740,7 +755,7 @@ impl<'a> Gen<'a> {
             // FCS relates the RHS to the annotation as it enters it, so the
             // prefix ends before the RHS is walked.
             scope.mark_incomplete(Incomplete::CoercedPattern);
-            self.infer_expr(scope, rhs, Expected::Unknown);
+            let _ = self.infer_expr(scope, rhs, Expected::Unknown).var();
             self.settle(scope);
             return;
         }
@@ -756,21 +771,21 @@ impl<'a> Gen<'a> {
         let structural = !matches!(self.solver.tys.kind(pat_ty), TyKind::Var(_));
         // The pattern's own variables: every one made since `pat_from`, the
         // pattern being the last thing typed.
-        let own = pat_from..self.solver.table.mark();
+        let own = self.own_since(pat_from);
         // FCS checks the RHS against the pattern's type, by equality: a
         // pattern of structure is related where the RHS's form relates its
         // expected type — an application's result before its arguments.
         let expected = if bound_directly {
             Expected::Known(self.solver.table.fresh())
         } else if structural && scope.complete {
-            let pv = self.solver.table.fresh();
-            self.eq(scope, self.solver.tys.var(pv), pat_ty);
-            Expected::Equal(pv)
+            Expected::Equal(self.fresh_equal(scope, pat_ty))
         } else {
             Expected::Synth
         };
         let mark = self.out.mark();
-        let rhs_var = self.infer_expr(scope, rhs, expected);
+        // The expected type is this function's own: the walk's proof that it
+        // was discharged is the equality's, taken inside the walk or below.
+        let rhs_var = self.infer_expr(scope, rhs, expected).var();
         self.settle(scope);
         if structural
             && rhs_var.is_some_and(|v| {
@@ -785,8 +800,8 @@ impl<'a> Gen<'a> {
             // may it give one whose type FCS may know and inference does not
             // (a tainted one) a structure: that is a decision, which such a
             // variable declines. (Once the prefix has ended no decision is
-            // taken, and the equality is applied unless it binds a variable
-            // older than that end, below.) The relation is dropped instead.
+            // taken, and the equality binds only the pattern's own variables,
+            // below.) The relation is dropped instead.
             scope.mark_incomplete(Incomplete::InheritedOpen);
             self.out.discard_since(mark);
             return;
@@ -797,17 +812,15 @@ impl<'a> Gen<'a> {
             && !(matches!(expected, Expected::Equal(_)) && scope.complete)
         {
             let rhs_ty = self.solver.tys.var(rhs_var);
-            if structural && !scope.complete {
-                if !self.eq_sparing_older(scope, pat_ty, rhs_ty, own) {
-                    // FCS may have bound the variable through the construct
-                    // that ended the prefix (`(p : int), (let () = p in ())`),
-                    // so the pattern's structure is not imposed on it.
-                    scope.mark_incomplete(Incomplete::InheritedOpen);
-                    self.out.discard_since(mark);
-                    return;
-                }
-            } else {
-                self.eq(scope, pat_ty, rhs_ty);
+            if self.eq(scope, pat_ty, rhs_ty, own) == Equated::Refused {
+                // Once the prefix has ended, FCS may have fixed what the
+                // right-hand side is by what inference did not model
+                // (`(p : int), (let () = p in ())`, or `let z = [s] in let
+                // () = z in z`), so the pattern's structure is imposed on no
+                // class but its own variables' ([`Self::eq`]).
+                scope.mark_incomplete(Incomplete::InheritedOpen);
+                self.out.discard_since(mark);
+                return;
             }
         }
         self.settle(scope);
@@ -848,26 +861,21 @@ impl<'a> Gen<'a> {
     /// [settled](Self::settle) also marks the binding **incomplete**, since FCS's
     /// unification would ground it to `unit` and a later argument check could
     /// otherwise ground it to something else (`let h x = x; mono x` has
-    /// `x : unit` in FCS, not `bool`). A condition grounding a parameter slot is
-    /// the one grounding incompleteness does not block; it is held to the
-    /// parameter's first occurrence instead ([`Self::is_first_occurrence`]),
-    /// which a statement naming the parameter already is. A ground statement
-    /// type is untouched by the unification, so it costs nothing.
+    /// `x : unit` in FCS, not `bool`). A ground statement type is untouched by
+    /// the unification, so it costs nothing.
     fn infer_sequential(
         &mut self,
         scope: &mut Scope,
         seq: &SequentialExpr,
         expected: Expected,
-    ) -> Option<TyVid> {
+    ) -> Inferred {
         let stmts: Vec<Expr> = seq.statements().collect();
         let Some((last, init)) = stmts.split_last() else {
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         };
         if init.is_empty() {
             // A one-statement sequence is a recovery artefact, not `e1; e2`.
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         }
         for stmt in init {
             // FCS checks a statement against a fresh type, and relates it to
@@ -876,7 +884,7 @@ impl<'a> Gen<'a> {
             // A statement that does not synthesize a variable has already marked
             // the binding incomplete in its own arm.
             let recorded = scope.reasons_recorded();
-            if let Some(v) = self.infer_expr(scope, stmt, fresh) {
+            if let Some(v) = self.infer_expr(scope, stmt, fresh).var() {
                 self.settle(scope);
                 if !self
                     .solver
@@ -887,9 +895,11 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        let v = self.infer_expr(scope, last, expected)?;
-        self.emit(self.facts.node_span(seq.syntax()), v, expected);
-        Some(v)
+        let walked = self.infer_expr(scope, last, expected);
+        if let Some(v) = walked.var {
+            self.emit(self.facts.node_span(seq.syntax()), v, expected);
+        }
+        walked
     }
 
     /// Constrain an `if` / `while` condition to `bool`. A condition admits **no**
@@ -944,7 +954,7 @@ impl<'a> Gen<'a> {
                     .and_then(|tok| self.facts.def_at(tok.text_range()));
                 match slot {
                     Some(_) if shares_typar => {
-                        scope.mark_incomplete(Incomplete::ConditionNotFirstOccurrence);
+                        scope.mark_incomplete(Incomplete::ConditionUndecided);
                     }
                     // While the prefix is faithful, the condition is FCS's
                     // equality at this point in its checking order, on the
@@ -964,28 +974,16 @@ impl<'a> Gen<'a> {
                             .solver
                             .tys
                             .named(self.facts.env.names(), "System.Boolean");
-                        let b = self.solver.table.fresh();
-                        self.eq(scope, self.solver.tys.var(b), bool_ty);
+                        let b = self.fresh_equal(scope, bool_ty);
                         if self.decide(scope, dv, b) == Decision::Taken {
-                            self.eq(scope, self.solver.tys.var(slot), bool_ty);
+                            self.eq(scope, self.solver.tys.var(slot), bool_ty, Own::var(slot));
                         }
                     }
-                    Some(slot)
-                        if ident
-                            .ident()
-                            .is_some_and(|tok| self.is_first_occurrence(scope, &tok)) =>
-                    {
-                        self.eq(
-                            scope,
-                            self.solver.tys.var(slot),
-                            self.solver
-                                .tys
-                                .named(self.facts.env.names(), "System.Boolean"),
-                        )
-                    }
-                    // A condition on a parameter something earlier may have
-                    // fixed: FCS reports the condition, it does not retype.
-                    Some(_) => scope.mark_incomplete(Incomplete::ConditionNotFirstOccurrence),
+                    // Once the prefix has ended, or on a tainted binder,
+                    // something inference did not model may have fixed the
+                    // parameter: FCS then reports the condition, it does not
+                    // retype.
+                    Some(_) => scope.mark_incomplete(Incomplete::ConditionUndecided),
                     // A condition ident that is not a slot-owning parameter of this
                     // binding (a value / annotated / `rec` binder, a cross-file
                     // name) is unmodelled here — its `bool`-ness is an FCS
@@ -1006,31 +1004,6 @@ impl<'a> Gen<'a> {
             // constraints on its sub-terms that we drop.
             _ => scope.mark_incomplete(Incomplete::ConditionShape),
         }
-    }
-
-    /// Whether the parameter token `tok` in a condition is the parameter's
-    /// **first occurrence** in the current function's body — the rule that lets
-    /// a condition ground the parameter's slot ([`Self::constrain_bool`]).
-    ///
-    /// FCS unifies in source order and reports a later conflict rather than
-    /// retyping: in `let f x = (mono x, if x then 1 else 2)` with
-    /// `mono : string -> int`, `x` is `string` and the condition is the error.
-    /// Our solver is not ordered — the condition's equality is discharged before
-    /// any argument check — so a condition grounds soundly only if nothing could
-    /// have constrained the parameter before it. A parameter's type is reachable
-    /// only through its occurrences (and aliases made from them), so "nothing
-    /// before" is "no earlier occurrence". The test is **syntactic**, over the
-    /// body's identifier tokens: an occurrence in a subtree the walk skips, or
-    /// one the resolver reads some other way, still counts.
-    fn is_first_occurrence(&self, scope: &Scope, tok: &SyntaxToken) -> bool {
-        let Some(body) = &scope.body else {
-            return false;
-        };
-        let name = ident_text(tok);
-        body.descendants_with_tokens()
-            .filter_map(|el| el.into_token())
-            .find(|t| t.kind() == SyntaxKind::IDENT_TOK && ident_text(t) == name)
-            .is_some_and(|first| first.text_range() == tok.text_range())
     }
 
     /// Record an expression's type variable `v` at `range` for read-off — but

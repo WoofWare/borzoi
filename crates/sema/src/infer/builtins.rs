@@ -32,7 +32,7 @@ impl<'a> Gen<'a> {
         func: &Expr,
         arg: &Expr,
         expected: Expected,
-    ) -> Option<Option<TyVid>> {
+    ) -> Option<Inferred> {
         let (builtin, operands) = self.builtin_shape(func, arg)?;
         // FCS relates the application's result to its expected type before
         // it checks the operands (`Propagate`). A conversion's signature fixes
@@ -41,22 +41,18 @@ impl<'a> Gen<'a> {
         // `^T -> ^T`), which inference does not model: whatever the expected
         // type holds open is tainted there instead, and the result is related
         // once the operands are walked.
-        let fixed = match &builtin {
+        let (fixed, entry) = match &builtin {
             Builtin::Convert { target } => {
-                let r = self.solver.table.fresh();
                 let ty = self.solver.tys.import(
                     self.facts.env.types(),
                     *target,
                     &mut HashMap::default(),
                 );
-                self.eq(scope, self.solver.tys.var(r), ty);
-                self.relate(scope, r, expected);
-                Some(r)
+                let r = self.fresh_equal(scope, ty);
+                let (_, d) = self.relate(scope, r, expected);
+                (Some(r), d)
             }
-            _ => {
-                self.taint_expected(scope, expected);
-                None
-            }
+            _ => (None, self.taint_expected(scope, expected)),
         };
         let mut vars = Vec::new();
         let mut walked = true;
@@ -70,7 +66,7 @@ impl<'a> Gen<'a> {
                 Builtin::Convert { .. } => Expected::Known(self.solver.table.fresh()),
                 _ => Expected::Unknown,
             };
-            match self.infer_expr(scope, operand, operand_expected) {
+            match self.infer_expr(scope, operand, operand_expected).var() {
                 Some(v) => vars.push(v),
                 // The operand's own walk recorded why it is not typed.
                 None => walked = false,
@@ -102,18 +98,19 @@ impl<'a> Gen<'a> {
                 .solver
                 .tys
                 .import(self.facts.env.types(), *target, &mut HashMap::default()),
-            _ => return Some(None),
+            // The operands' walk or the verdict recorded why it is not
+            // typed, and the expected type was tainted at the entry.
+            _ => return Some(Inferred::untyped(entry)),
         };
         match fixed {
             Some(r) => {
-                self.eq(scope, self.solver.tys.var(r), result);
-                Some(Some(r))
+                self.eq(scope, self.solver.tys.var(r), result, Own::var(r));
+                Some(Inferred::typed(r, entry))
             }
             None => {
-                let r = self.solver.table.fresh();
-                self.eq(scope, self.solver.tys.var(r), result);
-                self.relate(scope, r, expected);
-                Some(Some(r))
+                let r = self.fresh_equal(scope, result);
+                let (_, d) = self.relate(scope, r, expected);
+                Some(Inferred::typed(r, entry.and(d)))
             }
         }
     }

@@ -38,14 +38,12 @@ impl<'a> Gen<'a> {
         scope: &mut Scope,
         app: &AppExpr,
         expected: Expected,
-    ) -> Option<TyVid> {
+    ) -> Inferred {
         let Some(func) = app.func() else {
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         };
         let Some(arg) = app.arg() else {
-            scope.mark_incomplete(Incomplete::Recovery);
-            return None;
+            return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         };
         // Asked first: a prefix operator (`-a`) is a bare `LONG_IDENT_EXPR`
         // callee, which is otherwise read as a member access. The built-in
@@ -66,16 +64,18 @@ impl<'a> Gen<'a> {
             match head {
                 Expr::App(ref inner) if inner.is_infix() => {
                     let (Some(op), Some(lhs)) = (inner.func(), inner.arg()) else {
-                        scope.mark_incomplete(Incomplete::Recovery);
-                        return None;
+                        return Inferred::untyped(
+                            self.decline_expected(scope, Incomplete::Recovery),
+                        );
                     };
                     args.push(lhs);
                     break SpineHead::Operator(op);
                 }
                 Expr::App(ref inner) if self.continues_spine(inner) => {
                     let (Some(f), Some(a)) = (inner.func(), inner.arg()) else {
-                        scope.mark_incomplete(Incomplete::Recovery);
-                        return None;
+                        return Inferred::untyped(
+                            self.decline_expected(scope, Incomplete::Recovery),
+                        );
                     };
                     args.push(a);
                     head = f;
@@ -91,10 +91,15 @@ impl<'a> Gen<'a> {
         // applied as any other is.
         let case = matches!(&head, SpineHead::Callee(c) if args.len() == 1 && self.names_case(c));
         let tf = match head {
-            SpineHead::Operator(op) => self.operator_value(scope, &op)?,
-            SpineHead::Callee(callee) => self.infer_callee(scope, &callee)?,
+            SpineHead::Operator(op) => self.operator_value(scope, &op),
+            SpineHead::Callee(callee) => self.infer_callee(scope, &callee),
         };
-        Some(self.apply(scope, tf, &args, expected, case))
+        let Some(tf) = tf else {
+            // The head's walk recorded why it is not typed.
+            return Inferred::untyped(self.decline_expected_propagated(scope));
+        };
+        let (r, d) = self.apply(scope, tf, &args, expected, case);
+        Inferred::typed(r, d)
     }
 
     /// Whether the callee `e` is a bare union case, by name or by qualified
@@ -136,7 +141,8 @@ impl<'a> Gen<'a> {
     /// type over every argument, relate the result to `expected`, then check
     /// each argument against its domain — unless `tf` is a union `case`
     /// whose result failed that relation, whose fields FCS then never checks.
-    /// Returns the result variable.
+    /// Returns the result variable, and the proof that `expected` was
+    /// related to it.
     fn apply(
         &mut self,
         scope: &mut Scope,
@@ -144,11 +150,12 @@ impl<'a> Gen<'a> {
         args: &[Expr],
         expected: Expected,
         case: bool,
-    ) -> TyVid {
+    ) -> (TyVid, Discharged) {
         let tys = self.solver.tys;
         let mut f = tf;
         let mut domains = Vec::with_capacity(args.len());
         for _ in args {
+            let from = self.solver.table.mark();
             let d = self.solver.table.fresh();
             let r = self.solver.table.fresh();
             // Genuinely true: applying `f` forces it to a function shape. But
@@ -165,25 +172,27 @@ impl<'a> Gen<'a> {
                 self.taint(scope, tys.var(d));
                 self.taint(scope, tys.var(r));
             } else {
-                self.eq(scope, tys.var(f), tys.fun(tys.var(d), tys.var(r)));
+                let own = self.own_since(from);
+                self.eq(scope, tys.var(f), tys.fun(tys.var(d), tys.var(r)), own);
             }
             domains.push(d);
             f = r;
         }
-        if self.relate(scope, f, expected) == Some(Decision::Failed) && case {
-            return f;
+        let (decision, discharged) = self.relate(scope, f, expected);
+        if decision == Some(Decision::Failed) && case {
+            return (f, discharged);
         }
         for (arg, d) in args.iter().zip(domains) {
-            self.infer_arg(scope, arg, d);
+            let _ = self.infer_arg(scope, arg, d);
         }
-        f
+        (f, discharged)
     }
 
     /// Check an application's argument against its domain `d`
     /// ([`Expected::Known`]): the relation is taken where FCS takes it inside
     /// the argument ([`Self::infer_expr`]).
     pub(super) fn infer_arg(&mut self, scope: &mut Scope, arg: &Expr, d: TyVid) -> Option<TyVid> {
-        self.infer_expr(scope, arg, Expected::Known(d))
+        self.infer_expr(scope, arg, Expected::Known(d)).var()
     }
 
     /// The type variable of an infix operator's value, as [`Self::infer_callee`]
@@ -289,7 +298,7 @@ impl<'a> Gen<'a> {
             // `App` in the callee spine is unmodelled (⇒ the catch-all below
             // marks incomplete and the whole application defers).
             Expr::App(inner) if !inner.is_infix() && !inner.is_bracket_indexer() => {
-                self.infer_app(scope, inner, Expected::Synth)
+                self.infer_app(scope, inner, Expected::Synth).var()
             }
             // A value/function reference: mirror the ident arm's resolution, but
             // *do not* emit a node.

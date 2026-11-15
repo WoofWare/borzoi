@@ -1955,7 +1955,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/AsHighOrd
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/AsHighOrderFunc01.fs:7:19-7:20 binder	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/AsHighOrderFunc01.fs:7:30-7:42 expr	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/E_Error_NonParam03.fs	compared
-tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/E_Error_NonParam03.fs:4:33-4:43 expr	error-recovered ours="System.String" fcs=<no node>
+tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/E_Error_NonParam03.fs:4:33-4:43 expr	absent ours="System.String"
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/NamedLiteral02.fs	compared
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/NamedLiteral02.fs:12:5-12:10 binder	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/NamedLiteral02.fs:13:5-25:7 expr	agree

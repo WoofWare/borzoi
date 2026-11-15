@@ -3515,6 +3515,9 @@ impl<'a> Resolver<'a> {
                 // sub-pattern), so the default "recurse every arg" fallthrough must
                 // not run and re-process them through the constructor namespace.
                 let mut split_applied = false;
+                // Set when this head is qualified and unresolved, so the binders
+                // under it are undecided.
+                let mut undecided = false;
                 if let Some(head) = p.head().filter(|_| !head_names_active_pat) {
                     let segs: Vec<SyntaxToken> = head.idents().collect();
                     let applied = p.args().next().is_some() || p.name_pat_pairs().is_some();
@@ -3526,6 +3529,13 @@ impl<'a> Resolver<'a> {
                         // multi-segment head, and `case_reference` (single-segment)
                         // does not see it.
                         self.record_qualified_case_pattern(&segs);
+                        undecided = applied && !self.pattern_head_committed(&segs);
+                        // An enclosing undecided head has marked this whole
+                        // subtree already; marking it again at every level would
+                        // make a nest of them quadratic.
+                        if undecided && self.index.undecided_pattern_depth == 0 {
+                            self.mark_undecided_pattern_args(p);
+                        }
                     } else if applied
                         && let [single] = segs.as_slice()
                         && let Some((res, opened_shape)) =
@@ -3602,7 +3612,9 @@ impl<'a> Resolver<'a> {
                     // A constructor / function-head application (`Some (x : T)`,
                     // `f (x : T)`): the head names a value, but the argument patterns
                     // — curried and named-field-group alike — may carry annotations.
+                    self.index.undecided_pattern_depth += u32::from(undecided);
                     self.resolve_applied_arg_patterns(p);
+                    self.index.undecided_pattern_depth -= u32::from(undecided);
                 }
             }
             Pat::Quote(q) => {
@@ -3631,6 +3643,50 @@ impl<'a> Resolver<'a> {
             | Pat::MeasureLit(_)
             | Pat::Null(_)
             | Pat::OptionalVal(_) => {}
+        }
+    }
+
+    /// Whether a qualified pattern head (`segs`, two or more segments) has a
+    /// committed resolution: the head span, or failing that its last segment,
+    /// names something rather than declining.
+    fn pattern_head_committed(&self, segs: &[SyntaxToken]) -> bool {
+        let (Some(first), Some(last)) = (segs.first(), segs.last()) else {
+            return false;
+        };
+        let whole = TextRange::new(first.text_range().start(), last.text_range().end());
+        self.out
+            .resolutions
+            .get(&whole)
+            .or_else(|| self.out.resolutions.get(&last.text_range()))
+            .is_some_and(|res| !matches!(res, Resolution::Deferred(_) | Resolution::Unresolved))
+    }
+
+    /// Record every name occurrence in an applied pattern's arguments as
+    /// [undecided](crate::resolve::indexes::Indexes::undecided_pattern_binders):
+    /// the head is qualified and the walk committed no resolution for it.
+    ///
+    /// FCS binds an applied pattern's arguments only once it has resolved the
+    /// head. A qualified head it cannot resolve is an error that abandons the
+    /// whole sub-pattern, so nothing under it binds (`Q.R(x) as y` binds `y`
+    /// alone). A *single-segment* head it cannot resolve is a new definition
+    /// instead (`TcPatLongIdentNewDef`), which reports FS0039 and still binds
+    /// the arguments, so that form is not marked. Whether a qualified head the
+    /// walk declines would resolve is unknown, so the binders under it are
+    /// declined rather than committed.
+    fn mark_undecided_pattern_args(&mut self, p: &LongIdentPat) {
+        let mut args: Vec<Pat> = p.args().collect();
+        if let Some(group) = p.name_pat_pairs() {
+            args.extend(group.pairs().filter_map(|pair| pair.pat()));
+        }
+        for arg in &args {
+            for name in pattern_names(
+                arg,
+                BinderRole::Pattern,
+                &HashSet::default(),
+                self.assemblies,
+            ) {
+                self.index.undecided_pattern_binders.insert(name.range());
+            }
         }
     }
 

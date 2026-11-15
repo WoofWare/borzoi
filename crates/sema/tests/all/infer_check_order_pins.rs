@@ -153,6 +153,38 @@ const CASES: &[(&str, &str, &str)] = &[
         "once `applyObj x` fixes `x : obj -> int`, FCS loosens `x` at its next use, \
          so `x y` leaves `y` generic rather than fixing it to `obj`",
     ),
+    (
+        "unit-pattern-after-a-loss-over-an-applied-parameter",
+        "let x1 p = ((p : int -> string), (let z = p 1 in (let () = z in z)), p)",
+        "the annotation on an expression, which inference does not model, fixes `p : int -> \
+         string`, so `p 1` and `z` are `string`, and FCS rejects the `()` pattern; inference \
+         must not type `z` by the pattern it does not know is ill-typed (#774)",
+    ),
+    (
+        "unit-pattern-after-a-loss-over-an-application",
+        "let x2 p = ((p : string), (let z = idf p in (let () = z in z)), p)",
+        "as `x1`: `idf p` and `z` are `string` by an annotation inference does not see, and \
+         the `()` pattern is FCS's error (#774)",
+    ),
+    (
+        "unit-pattern-after-a-loss-over-a-list",
+        "let y3 (s: string) = ((s : string), (let z = [s] in (let () = z in z)), s)",
+        "a list expression, which inference does not model, is `string list`; `z` is that, \
+         and the `()` pattern is FCS's error (#774)",
+    ),
+    (
+        "lambda-method-argument-checked-before-resolution",
+        "let m1 (y: string) = (y.Insert(0, (fun () -> 1)), 0)",
+        "FCS checks a lambda argument against its parameter before it resolves the call: \
+         the lambda does not convert to `string`, and the call is `'a`, not `Insert`'s \
+         `string` (an argument that is not a lambda, `y.Insert(0, 1)`, keeps `string`)",
+    ),
+    (
+        "lambda-method-argument-control",
+        "let m2 (y: string) = (y.Insert(0, idf (fun () -> 1)), 0)",
+        "control: a lambda under an application is not a lambda argument, and FCS types \
+         the call `string` by the single-candidate shortcut",
+    ),
 ];
 
 /// The file every case is a `let` of.

@@ -97,6 +97,24 @@ lambda-access node 16-33 `fun s -> s.Length`	ours - fcs System.String -> System.
 lambda-access node 25-26 `s`	ours - fcs System.String
 lambda-access node 25-33 `s.Length`	ours - fcs System.Int32
 lambda-access node 9-34 `apply (fun s -> s.Length)`	ours System.Int32 fcs System.Int32
+lambda-method-argument-checked-before-resolution binder 4-6 `m1`	ours - fcs System.String -> 'a * System.Int32
+lambda-method-argument-checked-before-resolution binder 8-9 `y`	ours System.String fcs System.String
+lambda-method-argument-checked-before-resolution census	[Lambda]
+lambda-method-argument-checked-before-resolution fcs	errors FS0193
+lambda-method-argument-checked-before-resolution node 22-48 `y.Insert(0, (fun () -> 1))`	ours - fcs 'a
+lambda-method-argument-checked-before-resolution node 22-51 `y.Insert(0, (fun () -> 1)), 0`	ours - fcs 'a * System.Int32
+lambda-method-argument-checked-before-resolution node 50-51 `0`	ours System.Int32 fcs System.Int32
+lambda-method-argument-control binder 4-6 `m2`	ours System.String -> System.String * System.Int32 fcs System.String -> System.String * System.Int32
+lambda-method-argument-control binder 8-9 `y`	ours System.String fcs System.String
+lambda-method-argument-control census	[Lambda]
+lambda-method-argument-control fcs	errors FS0002
+lambda-method-argument-control node 22-23 `y`	ours - fcs System.String
+lambda-method-argument-control node 22-52 `y.Insert(0, idf (fun () -> 1))`	ours System.String fcs System.String
+lambda-method-argument-control node 22-55 `y.Insert(0, idf (fun () -> 1)), 0`	ours System.String * System.Int32 fcs System.String * System.Int32
+lambda-method-argument-control node 31-32 `0`	ours - fcs System.Int32
+lambda-method-argument-control node 34-51 `idf (fun () -> 1)`	ours - fcs System.String
+lambda-method-argument-control node 39-50 `fun () -> 1`	ours - fcs System.String
+lambda-method-argument-control node 54-55 `0`	ours System.Int32 fcs System.Int32
 parameter-loosened-once-known binder 4-6 `c6`	ours - fcs (System.Object -> System.Int32) -> 'a -> ('b -> System.Int32) * System.Int32 * 'a
 parameter-loosened-once-known binder 7-8 `x`	ours - fcs System.Object -> System.Int32
 parameter-loosened-once-known binder 9-10 `y`	ours - fcs 'a
@@ -147,3 +165,46 @@ unique-overload-relates-before-its-arguments node 41-45 `gi p`	ours - fcs System
 unique-overload-relates-before-its-arguments node 44-45 `p`	ours - fcs System.Int32
 unique-overload-relates-before-its-arguments node 47-50 `"z"`	ours - fcs System.String
 unique-overload-relates-before-its-arguments node 54-55 `p`	ours - fcs System.String
+unit-pattern-after-a-loss-over-a-list binder 4-6 `y3`	ours - fcs System.String -> System.String * Microsoft.FSharp.Collections.FSharpList<System.String> * System.String
+unit-pattern-after-a-loss-over-a-list binder 41-42 `z`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.String>
+unit-pattern-after-a-loss-over-a-list binder 8-9 `s`	ours System.String fcs System.String
+unit-pattern-after-a-loss-over-a-list census	[Unmodelled(TYPED_EXPR), Unmodelled(ARRAY_OR_LIST_EXPR), InheritedOpen]
+unit-pattern-after-a-loss-over-a-list fcs	errors FS0001
+unit-pattern-after-a-loss-over-a-list node 22-73 `(s : string), (let z = [s] in (let () = z in z)), s`	ours - fcs System.String * Microsoft.FSharp.Collections.FSharpList<System.String> * System.String
+unit-pattern-after-a-loss-over-a-list node 23-24 `s`	ours - fcs System.String
+unit-pattern-after-a-loss-over-a-list node 41-42 `z`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.String>
+unit-pattern-after-a-loss-over-a-list node 45-48 `[s]`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.String>
+unit-pattern-after-a-loss-over-a-list node 46-47 `s`	ours - fcs System.String
+unit-pattern-after-a-loss-over-a-list node 57-59 `()`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.String>
+unit-pattern-after-a-loss-over-a-list node 62-63 `z`	ours - fcs Microsoft.FSharp.Core.Unit
+unit-pattern-after-a-loss-over-a-list node 67-68 `z`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.String>
+unit-pattern-after-a-loss-over-a-list node 72-73 `s`	ours System.String fcs System.String
+unit-pattern-after-a-loss-over-an-application binder 31-32 `z`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-application binder 4-6 `x2`	ours - fcs System.String -> System.String * System.String * System.String
+unit-pattern-after-a-loss-over-an-application binder 7-8 `p`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-application census	[Unmodelled(TYPED_EXPR), OpenLocal, InheritedOpen]
+unit-pattern-after-a-loss-over-an-application fcs	errors FS0001
+unit-pattern-after-a-loss-over-an-application node 12-65 `(p : string), (let z = idf p in (let () = z in z)), p`	ours - fcs System.String * System.String * System.String
+unit-pattern-after-a-loss-over-an-application node 13-14 `p`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-application node 31-32 `z`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-application node 35-40 `idf p`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-application node 39-40 `p`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-application node 49-51 `()`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-application node 54-55 `z`	ours - fcs Microsoft.FSharp.Core.Unit
+unit-pattern-after-a-loss-over-an-application node 59-60 `z`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-application node 64-65 `p`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-applied-parameter binder 38-39 `z`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-applied-parameter binder 4-6 `x1`	ours - fcs (System.Int32 -> System.String) -> (System.Int32 -> System.String) * System.String * (System.Int32 -> System.String)
+unit-pattern-after-a-loss-over-an-applied-parameter binder 7-8 `p`	ours - fcs System.Int32 -> System.String
+unit-pattern-after-a-loss-over-an-applied-parameter census	[Unmodelled(TYPED_EXPR), OpenLocal, InheritedOpen]
+unit-pattern-after-a-loss-over-an-applied-parameter fcs	errors FS0001
+unit-pattern-after-a-loss-over-an-applied-parameter node 12-70 `(p : int -> string), (let z = p 1 in (let () = z in z)), p`	ours - fcs (System.Int32 -> System.String) * System.String * (System.Int32 -> System.String)
+unit-pattern-after-a-loss-over-an-applied-parameter node 13-14 `p`	ours - fcs System.Int32 -> System.String
+unit-pattern-after-a-loss-over-an-applied-parameter node 38-39 `z`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-applied-parameter node 42-43 `p`	ours - fcs System.Int32 -> System.String
+unit-pattern-after-a-loss-over-an-applied-parameter node 42-45 `p 1`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-applied-parameter node 44-45 `1`	ours - fcs System.Int32
+unit-pattern-after-a-loss-over-an-applied-parameter node 54-56 `()`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-applied-parameter node 59-60 `z`	ours - fcs Microsoft.FSharp.Core.Unit
+unit-pattern-after-a-loss-over-an-applied-parameter node 64-65 `z`	ours - fcs System.String
+unit-pattern-after-a-loss-over-an-applied-parameter node 69-70 `p`	ours - fcs System.Int32 -> System.String

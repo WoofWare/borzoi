@@ -61,6 +61,8 @@ use std::path::{Path, PathBuf};
 
 use roxmltree::{Document, Node};
 
+use crate::document::attribute;
+
 use super::condition;
 use super::diagnostic::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
@@ -142,7 +144,7 @@ pub fn walk(
     // `walk_with_imports` does in the no-resolver branch — including marking
     // the Compile set uncertain, since the SDK's (possibly default-item)
     // contributions never ran.
-    if let Some(sdk) = root.attribute("Sdk") {
+    if let Some(sdk) = attribute(root, "Sdk").as_deref() {
         state.push(
             DiagnosticKind::SdkResolverAbsent {
                 name: sdk.to_string(),
@@ -845,7 +847,8 @@ fn walk_once<'r>(
 /// best-effort Compile list and let the caller decide what to do with
 /// the diagnostic.
 fn resolve_project_sdk(root: Node<'_, '_>, state: &mut State<'_>) -> Option<SdkPaths> {
-    let sdk = root.attribute("Sdk")?;
+    let sdk = attribute(root, "Sdk")?;
+    let sdk: &str = &sdk;
     let Some(resolver) = state.sdk_resolver else {
         state.push(
             DiagnosticKind::SdkResolverAbsent {
@@ -957,7 +960,7 @@ fn find_explicit_sdk_promotion(
     root: Node<'_, '_>,
     state: &State<'_>,
 ) -> Option<ExplicitSdkPromotion> {
-    if root.attribute("Sdk").is_some() {
+    if root.has_attribute("Sdk") {
         return None;
     }
     let resolver = state.sdk_resolver?;
@@ -968,7 +971,7 @@ fn find_explicit_sdk_promotion(
     // Promotion needs the canonical entry points; a locator-style
     // resolution has none, so it is not a promotion candidate (the body
     // walk handles the import naturally).
-    let sdk_paths = match resolver(sdk_name, state.observer).ok()? {
+    let sdk_paths = match resolver(&sdk_name, state.observer).ok()? {
         SdkResolution::Single(paths) => paths,
         SdkResolution::Roots(_) => return None,
     };
@@ -1003,15 +1006,15 @@ fn find_explicit_sdk_promotion(
 fn canonical_sdk_import<'a, 'input>(
     node: Node<'a, 'input>,
     expected_project: &str,
-) -> Option<(Node<'a, 'input>, &'a str)> {
+) -> Option<(Node<'a, 'input>, std::borrow::Cow<'a, str>)> {
     if node.tag_name().name() != "Import" {
         return None;
     }
-    if node.attribute("Condition").is_some() {
+    if node.has_attribute("Condition") {
         return None;
     }
-    let sdk_name = node.attribute("Sdk")?;
-    if node.attribute("Project") != Some(expected_project) {
+    let sdk_name = attribute(node, "Sdk")?;
+    if attribute(node, "Project").as_deref() != Some(expected_project) {
         return None;
     }
     Some((node, sdk_name))
@@ -1226,7 +1229,8 @@ pub(crate) fn is_msbuild_true(value: &str) -> bool {
 /// `RestoreAdditionalProjectSources`). Names are stored lowercased to
 /// match MSBuild's OrdinalIgnoreCase property-name comparison.
 fn collect_local_overrides(root: Node<'_, '_>) -> HashSet<String> {
-    root.attribute("TreatAsLocalProperty")
+    attribute(root, "TreatAsLocalProperty")
+        .as_deref()
         .map(|s| {
             s.split(';')
                 .map(str::trim)
@@ -1252,8 +1256,8 @@ fn walk_doc_body(root: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // The executor does not run `InitialTargets` yet; it declines a project
     // any of whose files names some.
     #[cfg(any(test, feature = "test-support"))]
-    if root
-        .attribute("InitialTargets")
+    if attribute(root, "InitialTargets")
+        .as_deref()
         .is_some_and(|targets| !targets.trim().is_empty())
     {
         state.initial_targets_named = true;
@@ -1268,7 +1272,7 @@ fn walk_doc_body(root: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // exactly-undefined by properties earlier in the document.
     for child in root.children().filter(Node::is_element) {
         if child.tag_name().name() == "Sdk" {
-            let sdk = child.attribute("Name").unwrap_or_default().to_string();
+            let sdk = attribute(child, "Name").unwrap_or_default().to_string();
             state.push(
                 DiagnosticKind::UnsupportedConstruct {
                     element: format!("Sdk (Name={sdk:?})"),
@@ -3450,7 +3454,7 @@ impl<'r> State<'r> {
             self.unpinned_root_from_recent_diagnostics(diagnostics_before)
                 .unwrap_or_else(|| {
                     UnpinnedRoot::UnsupportedCondition(
-                        node.attribute("Condition").unwrap_or_default().to_string(),
+                        attribute(node, "Condition").unwrap_or_default().to_string(),
                     )
                 }),
         )
@@ -3513,7 +3517,8 @@ impl<'r> State<'r> {
     ///
     /// "Leans on" is about the *outcome*: see [`Self::condition_trust`].
     fn condition_reads_untrusted_value(&self, node: Node<'_, '_>) -> bool {
-        node.attribute("Condition")
+        attribute(node, "Condition")
+            .as_deref()
             .is_some_and(|cond| self.condition_trust(cond, None).reference_is_untrusted())
     }
 
@@ -3646,7 +3651,7 @@ impl<'r> State<'r> {
     }
 
     fn note_package_uncertain_if_condition_uses_sdk_taint(&mut self, node: Node<'_, '_>) {
-        if let Some(condition) = node.attribute("Condition") {
+        if let Some(condition) = attribute(node, "Condition").as_deref() {
             self.note_package_uncertain_from_sdk_property_taint(condition);
         }
     }
@@ -3826,13 +3831,13 @@ impl<'r> State<'r> {
     /// executor models, so it binds nothing new.
     #[cfg(any(test, feature = "test-support"))]
     fn record_using_task(&mut self, node: Node<'_, '_>) {
-        let name = node.attribute("TaskName").unwrap_or_default();
+        let name = attribute(node, "TaskName").unwrap_or_default();
         let built_in = name
             .strip_prefix("Microsoft.Build.Tasks.")
             .is_some_and(|task| {
                 !task.is_empty() && task.bytes().all(|b| b.is_ascii_alphanumeric())
             })
-            && node.attribute("AssemblyName") == Some(MSBUILD_TASKS_ASSEMBLY)
+            && attribute(node, "AssemblyName").as_deref() == Some(MSBUILD_TASKS_ASSEMBLY)
             && node
                 .attributes()
                 .all(|a| matches!(a.name(), "TaskName" | "AssemblyName" | "Condition"))
@@ -3846,7 +3851,7 @@ impl<'r> State<'r> {
                 "$(MSBuildThisFileName)",
                 &properties::escaping::unescape(file.as_escaped()),
             ),
-            None => name.to_owned(),
+            None => name.into_owned(),
         };
         self.using_task_names.push(name);
     }
@@ -3859,7 +3864,7 @@ impl<'r> State<'r> {
             CurrentFile::Entry => self.entry_project_path.clone(),
             CurrentFile::Imported { path, .. } => path.clone(),
         };
-        let name = node.attribute("Name").unwrap_or_default().to_owned();
+        let name = attribute(node, "Name").unwrap_or_default().into_owned();
         self.target_definitions.push((
             name,
             reads::TargetDefinition {
@@ -4043,8 +4048,9 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                 // MSBuild's property pass would make it true before items run.
                 state.note_package_uncertain_if_condition_uses_sdk_taint(node);
             }
-            let group_condition_uses_sdk_taint =
-                node.attribute("Condition").is_some_and(|condition| {
+            let group_condition_uses_sdk_taint = attribute(node, "Condition")
+                .as_deref()
+                .is_some_and(|condition| {
                     state
                         .condition_trust(condition, Some(current_file_dir))
                         .sdk_package()
@@ -4065,7 +4071,8 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                 state
                     .unpinned_root_from_recent_diagnostics(diagnostics_before_condition)
                     .or_else(|| {
-                        node.attribute("Condition")
+                        attribute(node, "Condition")
+                            .as_deref()
                             .map(|c| UnpinnedRoot::UnsupportedCondition(c.to_string()))
                     })
             } else {
@@ -4318,12 +4325,14 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
         if cpm_still_possible[index] {
             state.note_package_uncertain_if_condition_uses_sdk_taint(*when);
         }
-        let uses_sdk_taint = when.attribute("Condition").is_some_and(|condition| {
-            state
-                .condition_trust(condition, Some(current_file_dir))
-                .sdk_package()
-                .is_some()
-        });
+        let uses_sdk_taint = attribute(*when, "Condition")
+            .as_deref()
+            .is_some_and(|condition| {
+                state
+                    .condition_trust(condition, Some(current_file_dir))
+                    .sdk_package()
+                    .is_some()
+            });
         let diagnostics_before = state.diagnostics.len();
         let gate = evaluate_condition(*when, current_file_dir, state);
         let maybe_wrong =
@@ -4335,7 +4344,8 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             let unpinned_root = state
                 .unpinned_root_from_recent_diagnostics(diagnostics_before)
                 .or_else(|| {
-                    when.attribute("Condition")
+                    attribute(*when, "Condition")
+                        .as_deref()
                         .map(|c| UnpinnedRoot::UnsupportedCondition(c.to_string()))
                 });
             undecided = Some((index, unpinned_root));
@@ -4436,8 +4446,8 @@ fn choose_shape_is_valid_at(node: Node<'_, '_>, nesting: usize) -> bool {
             "When" => {
                 if saw_otherwise
                     || !attrs_ok(child, true)
-                    || child
-                        .attribute("Condition")
+                    || attribute(child, "Condition")
+                        .as_deref()
                         .is_none_or(|c| c.trim().is_empty())
                 {
                     return false;
@@ -4580,12 +4590,15 @@ fn walk_property_child_inner(
     // Property-element conditions resolve `Exists` against the entry project
     // (see `evaluate_property_condition`).
     let entry_dir = state.entry_project_dir.clone();
-    let condition_uses_sdk_taint = node.attribute("Condition").is_some_and(|condition| {
-        state
-            .condition_trust(condition, Some(&entry_dir))
-            .sdk_package()
-            .is_some()
-    });
+    let condition_uses_sdk_taint =
+        attribute(node, "Condition")
+            .as_deref()
+            .is_some_and(|condition| {
+                state
+                    .condition_trust(condition, Some(&entry_dir))
+                    .sdk_package()
+                    .is_some()
+            });
     let diagnostics_before_condition = state.diagnostics.len();
     let gate = evaluate_property_condition(node, state);
     let own_condition_maybe_wrong = state.diagnostics.len() != diagnostics_before_condition
@@ -4612,7 +4625,8 @@ fn walk_property_child_inner(
                 match state
                     .unpinned_root_from_recent_diagnostics(diagnostics_before_condition)
                     .or_else(|| {
-                        node.attribute("Condition")
+                        attribute(node, "Condition")
+                            .as_deref()
                             .map(|c| UnpinnedRoot::UnsupportedCondition(c.to_string()))
                     }) {
                     Some(root) => UnpinnedOutcome::Set(root),
@@ -4635,7 +4649,7 @@ fn walk_property_child_inner(
             return;
         }
         CondGate::Unsupported => {
-            let unpinned = match node.attribute("Condition") {
+            let unpinned = match attribute(node, "Condition").as_deref() {
                 Some(condition) => {
                     UnpinnedOutcome::Set(UnpinnedRoot::UnsupportedCondition(condition.to_string()))
                 }
@@ -4819,7 +4833,8 @@ fn walk_property_child_inner(
         state
             .unpinned_root_from_recent_diagnostics(diagnostics_before_condition)
             .or_else(|| {
-                node.attribute("Condition")
+                attribute(node, "Condition")
+                    .as_deref()
                     .map(|c| UnpinnedRoot::UnsupportedCondition(c.to_string()))
             })
     } else if inherited_condition_maybe_wrong {
@@ -4943,7 +4958,8 @@ fn evaluate_condition_with_exemptions(
     state: &mut State<'_>,
     self_default_names: &[String],
 ) -> CondGate {
-    let Some(cond) = node.attribute("Condition") else {
+    let cond = attribute(node, "Condition");
+    let Some(cond) = cond.as_deref() else {
         return CondGate::Run;
     };
     let mut eval = if state.follow_imports {
@@ -5127,7 +5143,8 @@ fn emit_unsupported_condition(node: Node<'_, '_>, state: &mut State<'_>) {
     // `DiagnosticKind::UnsupportedCondition`. We only reach this
     // path when `evaluate_condition` returned `Unsupported`, so the
     // attribute is present by construction.
-    let cond = node.attribute("Condition").unwrap_or("");
+    let cond = attribute(node, "Condition").unwrap_or_default();
+    let cond: &str = &cond;
     // In a Compile context the unmodeled condition was treated as exclusionary,
     // so any gated Compile items were dropped — possibly wrongly. Record the
     // carve-out so a consumer can surface *why* the Compile set is incomplete.
@@ -5532,7 +5549,8 @@ pub(crate) const DIRECTORY_BUILD_TARGETS_SPLICE: (&str, &str) =
 /// cleanly false — defined properties, supported grammar, no unpinned
 /// reads — so the write cannot happen regardless of the group gate.
 fn property_child_could_write(child: Node<'_, '_>, state: &State<'_>) -> bool {
-    let Some(cond) = child.attribute("Condition") else {
+    let cond = attribute(child, "Condition");
+    let Some(cond) = cond.as_deref() else {
         return true;
     };
     let mut eval = if state.follow_imports {
@@ -5608,7 +5626,7 @@ fn mark_property_group_children_provenance(
 }
 
 fn diagnose_item_op(node: Node<'_, '_>, attr: &str, state: &mut State<'_>) -> bool {
-    let Some(value) = node.attribute(attr) else {
+    let Some(value) = attribute(node, attr) else {
         return false;
     };
     state.push(
@@ -5627,7 +5645,10 @@ fn diagnose_item_op(node: Node<'_, '_>, attr: &str, state: &mut State<'_>) -> bo
 /// recurse into the referenced file via [`walk_external_file`].
 fn handle_import(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<'_>) {
     if !state.follow_imports {
-        let project = node.attribute("Project").unwrap_or("").to_string();
+        let project = attribute(node, "Project")
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
         state.push(
             DiagnosticKind::UnresolvedImport { path: project },
             node.range(),
@@ -5702,8 +5723,8 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
         // `Sdk.props` (the stash is consumed here rather than at the
         // nested file's return — same position MSBuild uses). Everywhere
         // else this stays the usual rediscovery suppression.
-        let is_props_rediscovery = node
-            .attribute("Project")
+        let is_props_rediscovery = attribute(node, "Project")
+            .as_deref()
             .and_then(simple_property_reference)
             .is_some_and(|name| name.eq_ignore_ascii_case("DirectoryBuildPropsPath"));
         if is_props_rediscovery {
@@ -5812,7 +5833,7 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
     // already. A missing entry point surfaces as
     // `ImportFailed::NotFound` from the IO path. Without a resolver,
     // every Sdk import surfaces as `SdkResolverAbsent`.
-    if let Some(sdk_name) = node.attribute("Sdk") {
+    if let Some(sdk_name) = attribute(node, "Sdk").as_deref() {
         let Some(resolver) = state.sdk_resolver else {
             state.push(
                 DiagnosticKind::SdkResolverAbsent {
@@ -5839,7 +5860,8 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
                 return;
             }
         };
-        let project_attr_raw = node.attribute("Project").unwrap_or("");
+        let project_attr_raw = attribute(node, "Project").unwrap_or_default();
+        let project_attr_raw: &str = &project_attr_raw;
         // MSBuild expands `$(...)` in `Import` `Project` attributes
         // before resolving them. The two well-known stems are matched
         // against the *expanded* value so a project that writes
@@ -6034,7 +6056,8 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
         }
         return;
     }
-    let Some(raw_path) = node.attribute("Project") else {
+    let raw_path = attribute(node, "Project");
+    let Some(raw_path) = raw_path.as_deref() else {
         // `<Import>` with no Project attribute is malformed; surfacing
         // as an UnsupportedConstruct keeps the diagnostic shape
         // uniform without inventing a new variant for this corner.
@@ -6135,8 +6158,8 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
         // entered the file, on this import or an earlier one (failed
         // walks never insert; a duplicate-skipped one was inserted by
         // its first walk).
-        if node
-            .attribute("Project")
+        if attribute(node, "Project")
+            .as_deref()
             .and_then(simple_property_reference)
             .is_some_and(|name| name.eq_ignore_ascii_case("DirectoryPackagesPropsPath"))
         {
@@ -6343,12 +6366,15 @@ fn fire_entry_directory_build_props_splice(state: &mut State<'_>) {
 /// not mistaken for the well-known point.
 fn is_sdk_directory_build_targets_import_point(node: Node<'_, '_>, state: &State<'_>) -> bool {
     state.in_sdk_subtree
-        && node
-            .attribute("Project")
+        && attribute(node, "Project")
+            .as_deref()
             .and_then(simple_property_reference)
             .is_some_and(|name| {
                 name.eq_ignore_ascii_case("DirectoryBuildTargetsPath")
-                    && condition_has_exists_for_property(node.attribute("Condition"), name)
+                    && condition_has_exists_for_property(
+                        attribute(node, "Condition").as_deref(),
+                        name,
+                    )
             })
 }
 
@@ -6375,13 +6401,14 @@ fn is_sdk_directory_build_rediscovery_import(
     if !state.in_sdk_subtree {
         return false;
     }
-    let Some(raw_project) = node.attribute("Project") else {
+    let raw_project = attribute(node, "Project");
+    let Some(raw_project) = raw_project.as_deref() else {
         return false;
     };
     let Some(property_name) = simple_property_reference(raw_project) else {
         return false;
     };
-    if !condition_has_exists_for_property(node.attribute("Condition"), property_name) {
+    if !condition_has_exists_for_property(attribute(node, "Condition").as_deref(), property_name) {
         return false;
     }
     let is_targets = property_name.eq_ignore_ascii_case("DirectoryBuildTargetsPath");
@@ -6574,7 +6601,8 @@ fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
     if state.default_targets_decided {
         return;
     }
-    let Some(raw) = root.attribute("DefaultTargets") else {
+    let raw = attribute(root, "DefaultTargets");
+    let Some(raw) = raw.as_deref() else {
         return;
     };
     let expansion = item_pass::expand_silent(raw, state);
@@ -6990,7 +7018,7 @@ fn props_import_point(
     state: &State<'_>,
 ) -> PropsImportPoint {
     let previous = state.quiet_target_framework_reads.replace(true);
-    let outcome = match node.attribute("Condition") {
+    let outcome = match attribute(node, "Condition").as_deref() {
         None => Some(true),
         Some(condition) => {
             let exists = |path: &str| condition_exists(state.observer, path, current_file_dir);

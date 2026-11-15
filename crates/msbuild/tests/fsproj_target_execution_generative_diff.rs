@@ -24,6 +24,7 @@ mod common;
 
 use std::collections::{BTreeMap, HashMap};
 
+use borzoi_msbuild::document::attribute;
 use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::test_support::{ExecutionProbe, ExecutionRead, ReadProbe, parse_fsproj_reads};
 use common::{Oracle, SplitMix64};
@@ -312,18 +313,17 @@ fn target(rng: &mut SplitMix64, index: usize, out: &mut String) {
 /// finish such a build (two targets `AfterTargets` each other hang it), so the
 /// oracle is not asked; the executor must decline.
 fn triggers_cycle(xml: &str) -> bool {
-    let document = roxmltree::Document::parse(xml).unwrap();
+    let document = borzoi_msbuild::document::parse(xml).unwrap();
     // The last definition of each name counts.
-    let mut last: BTreeMap<&str, roxmltree::Node<'_, '_>> = BTreeMap::new();
+    let mut last: BTreeMap<String, roxmltree::Node<'_, '_>> = BTreeMap::new();
     for target in document.descendants().filter(|n| n.has_tag_name("Target")) {
-        last.insert(target.attribute("Name").unwrap(), target);
+        last.insert(attribute(target, "Name").unwrap().into_owned(), target);
     }
     let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for target in last.into_values() {
-        let name = target.attribute("Name").unwrap().to_owned();
-        let list = |attribute: &str| -> Vec<String> {
-            target
-                .attribute(attribute)
+        let name = attribute(target, "Name").unwrap().into_owned();
+        let list = |which: &str| -> Vec<String> {
+            attribute(target, which)
                 // Hooks expand against the evaluation; a dependency read from a
                 // property is decided when it comes up, and a cycle through it
                 // fails the build rather than hanging it.

@@ -1314,7 +1314,7 @@ mod tests {
         std::fs::write(&file, "<A>").unwrap();
         let observer = Observer::new();
         let error = read_document(&observer, &file).unwrap().unwrap_err();
-        assert_eq!(error, roxmltree::Document::parse("<A>").unwrap_err());
+        assert_eq!(error, crate::document::parse("<A>").unwrap_err());
         let reference = Observer::new();
         read_to_string(&reference, &file).unwrap();
         let (reads, counts, documents) = observer.finish_with_documents();

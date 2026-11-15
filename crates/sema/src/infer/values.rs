@@ -137,9 +137,7 @@ impl<'a> Gen<'a> {
         if how == Use::Applied {
             ty = self.flexible_fields(scope, ty, scheme.fields.len());
         }
-        let uv = self.solver.table.fresh();
-        self.eq(scope, self.solver.tys.var(uv), ty);
-        Ok(uv)
+        Ok(self.fresh_equal(scope, ty))
     }
 
     /// An applied case's type `ty` (`field -> union`, or `f1 * … * fn ->
@@ -199,9 +197,7 @@ impl<'a> Gen<'a> {
             }
         }
         let ty = self.loosened(scope, body).unwrap_or(body);
-        let uv = self.solver.table.fresh();
-        self.eq(scope, self.solver.tys.var(uv), ty);
-        uv
+        self.fresh_equal(scope, ty)
     }
 
     /// The type variable of a use of a value whose type is `scheme`, a type of
@@ -210,9 +206,7 @@ impl<'a> Gen<'a> {
     fn scheme_use(&mut self, scope: &mut Scope, from: &TyTable, scheme: Ty) -> TyVid {
         let body = self.solver.instantiate(from, scheme);
         let ty = self.loosened(scope, body).unwrap_or(body);
-        let uv = self.solver.table.fresh();
-        self.eq(scope, self.solver.tys.var(uv), ty);
-        uv
+        self.fresh_equal(scope, ty)
     }
 
     /// The range of a qualified path `M.f` that names a referenced F# module's
@@ -335,11 +329,7 @@ impl<'a> Gen<'a> {
             return dv;
         };
         match self.loosened(scope, known) {
-            Some(ty) => {
-                let uv = self.solver.table.fresh();
-                self.eq(scope, self.solver.tys.var(uv), ty);
-                uv
-            }
+            Some(ty) => self.fresh_equal(scope, ty),
             None => dv,
         }
     }

@@ -246,6 +246,32 @@ const CONSTRUCTS: &[Construct] = &[
         status: Status::Interned,
     },
     Construct {
+        id: "match_qualified_case_field",
+        fcs: "SynPat.LongIdent (qualified head) argPats",
+        template: "type U = A of int | B\nlet f (o: U) =\n    match o with\n    | U.A «x» -> ignore USE\n    | U.B -> ()\n",
+        status: Status::Interned,
+    },
+    Construct {
+        id: "let_module_deconstruction_abbreviation_qualified_head",
+        fcs: "SynBinding / SynPat.LongIdent (head through a type abbreviation) argPats",
+        // An exported value stays interned under a head the walk declines: an
+        // `open` of its module must find it, not the decoy.
+        template: "module Inner =\n    type U = Case of int\n    type W = U\n    let (W.Case «x») = U.Case 1\n    do ignore USE\n",
+        status: Status::Interned,
+    },
+    Construct {
+        id: "match_abbreviation_qualified_case_field",
+        fcs: "SynPat.LongIdent (head through a type abbreviation) argPats",
+        template: "type U = A of int | B\ntype W = U\nlet f (o: W) =\n    match o with\n    | W.A «x» -> ignore USE\n    | _ -> ()\n",
+        status: Status::Opaque,
+    },
+    Construct {
+        id: "match_assembly_abbreviation_qualified_case_field",
+        fcs: "SynPat.LongIdent (head through an assembly type abbreviation) argPats",
+        template: "type O = Option<int>\nlet f (o: O) =\n    match o with\n    | O.Some «x» -> ignore USE\n    | _ -> ()\n",
+        status: Status::Opaque,
+    },
+    Construct {
         id: "match_guard",
         fcs: "SynMatchClause whenExpr",
         template: "let f (o: int) =\n    match o with\n    | «x» when (ignore USE; true) -> ()\n    | _ -> ()\n",
@@ -743,6 +769,10 @@ const CONSTRUCTS: &[Construct] = &[
     },
 ];
 
+/// The start of a row whose binder is declared directly in module `Inner`,
+/// which [`cells`] also checks through an `open Inner` after it.
+const OPENED_MODULE: &str = "module Inner =\n    ";
+
 /// One program the grid checks: a row, written with one spelling of its
 /// `USE`.
 struct Cell {
@@ -763,22 +793,29 @@ fn cells() -> Vec<Cell> {
             &[("as-written", "")]
         };
         for (variant, spelling) in variants {
-            out.push(cell(row, variant, spelling));
+            out.push(cell(row, variant, spelling, ""));
+        }
+        // A module-level binder is also reached through an `open` of its
+        // module, which reads what the module exports rather than its frame:
+        // the use after the module must find the binder (or decline), never
+        // the decoy.
+        if row.template.starts_with(OPENED_MODULE) {
+            out.push(cell(row, "opened", "‹N›", "open Inner\ndo ignore ‹N›\n"));
         }
     }
     out
 }
 
 /// Strip `row`'s markers, recording the binder's range and every use's.
-fn cell(row: &'static Construct, variant: &'static str, use_spelling: &str) -> Cell {
+fn cell(row: &'static Construct, variant: &'static str, use_spelling: &str, suffix: &str) -> Cell {
     let (open, close) = (
         row.template.find('«').expect("a binder marker"),
         row.template.find('»').expect("a binder marker"),
     );
     let name = &row.template[open + '«'.len_utf8()..close];
-    let text = row
-        .template
-        .replace("USE", &use_spelling.replace('N', name));
+    let text = format!("{}{suffix}", row.template)
+        .replace("USE", &use_spelling.replace('N', name))
+        .replace("‹N›", &format!("‹{name}›"));
     let mut src = PRELUDE.to_string();
     let mut binder = None;
     let mut uses = Vec::new();

@@ -44,6 +44,9 @@ borzoi-stats.workspace = true
 # `--features` flag on the test command.
 borzoi-sema = { path = ".", features = ["test-support"] }
 proptest.workspace = true
+# Reads `Gen::infer_construct`'s arms for the expected-type alphabet
+# (`tests/all/infer_entry_order_diff.rs`).
+syn.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # The overload-coverage measurement identifies its corpus by digesting the
