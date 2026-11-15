@@ -8,6 +8,7 @@
 //! still offers every type, variant and accessor it had when it was frozen;
 //! nothing in them runs.
 
+mod v11;
 mod v4_6;
 mod v5;
 mod v8;

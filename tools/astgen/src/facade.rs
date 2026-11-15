@@ -118,10 +118,9 @@ pub fn versions() -> Vec<Version> {
 /// break. Each of these modules has a frozen consumer fixture
 /// (`crates/cst/tests/all/facade_consumers/`) if it is a distinct facade.
 ///
-/// The numbered versions up to F# 10.0 are published; `v11` waits until the
-/// union models the syntax F# 11.0 adds (record spreads), and `preview` is
-/// never published.
-pub const PUBLISHED: &[&str] = &["v4_6", "v4_7", "v5", "v6", "v7", "v8", "v9", "v10"];
+/// The numbered versions up to F# 11.0 are published, and `preview` is never
+/// published.
+pub const PUBLISHED: &[&str] = &["v4_6", "v4_7", "v5", "v6", "v7", "v8", "v9", "v10", "v11"];
 
 /// The freeze epoch: the only route by which a published facade's lock is
 /// re-baselined rather than evolved. Every published lock and consumer
@@ -2367,7 +2366,7 @@ mod tests {
                 .and_then(|(_, l)| l.alias_of().map(str::to_string))
         };
         // v9 equals v8's surface plus `WithNull`, so it is distinct either way;
-        // v10 and v11 equal v9's.
+        // v10 equals v9's.
         assert_eq!(alias_of(&g, "v10"), Some("v9".to_string()));
         let published = &["v4_6", "v4_7", "v5", "v6", "v7", "v8", "v9"];
         let disk = published_disk(published, 1);

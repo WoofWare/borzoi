@@ -7,7 +7,8 @@
 > node), PR 6 (a deep facade per language version, `Parse::view`) and PR 7
 > (the freeze: `v4_6` … `v10` published) have landed, and so have PR 8's first
 > two steps (retiring deleted features, D12; the corpus pin and the table),
-> its oracle bump (step 3a) and its new syntax (step 4).
+> its oracle bump (step 3a), its new syntax (step 4) and the publication of
+> `v11` (step 5).
 > Earlier stages that
 > still stand: `LanguageVersion` as a parse input (#592/#597/#606) and the
 > LSP's `<LangVersion>` wiring (#613). The goal:
@@ -209,9 +210,9 @@ those, and every accessor whose owner and return type survive, delegating to
 the union accessor of its own name. A delegate that names another union
 accessor is how a published facade survives a rename.
 
-- An **unpublished** facade's lock (`v11`, `preview`) is derived and
-  regenerated freely.
-- A **published** facade (astgen's `PUBLISHED`: `v4_6` … `v10`) is frozen.
+- An **unpublished** facade's lock (`preview`) is derived and regenerated
+  freely.
+- A **published** facade (astgen's `PUBLISHED`: `v4_6` … `v11`) is frozen.
   Its lock is derived and written once, at publication, stamped
   `# freeze-epoch: N` with astgen's `FREEZE_EPOCH`; from then on the generator
   reads it and never writes it, and the staleness test checks
@@ -258,8 +259,9 @@ with the union. On every generation astgen derives it and compares:
 
 An unpublished version never aliases a published head: an alias's versions
 are its head's `Facade::VERSIONS`, so the head's frozen code would otherwise
-follow whatever the unpublished version derives. `v11` is therefore its own
-facade until it is published, and only then may it become an alias of `v9`.
+follow whatever the unpublished version derives. A new version is therefore
+its own facade until it is published, and only then may it become an alias
+of the published head whose surface it equals.
 
 Checks:
 
@@ -320,9 +322,9 @@ change, so it lands in the union and in unpublished facades, and the published
 
 The runbook, for the compiler upgrade and after it.
 
-**Publishing a new version's facade** (`v11` after the upgrade). Once the
-table and the union model everything the new compiler adds, add the module to
-`PUBLISHED` in `tools/astgen/src/facade.rs` and run
+**Publishing a new version's facade** (as `v11` was, after the F# 11
+upgrade). Once the table and the union model everything the new compiler
+adds, add the module to `PUBLISHED` in `tools/astgen/src/facade.rs` and run
 `cargo run -p borzoi-astgen --example generate`. The lock is derived one last
 time and written stamped, and if the version is a distinct facade its consumer
 fixture is written beside it and declared in `facade_consumers/mod.rs`. If its
@@ -408,9 +410,10 @@ no stable facade's `VERSIONS` names the preview version.
 
 The distinct surfaces are {4.6, 4.7} (`v4_6`), {5, 6, 7} (`v5`, adding
 `Expr::InterpString`), {8} (`v8`, adding `Expr::DotLambda`, `Expr::WhileBang`
-and `Type::Intersection`), {9, 10, 11} (`v9`, adding `Type::WithNull`; it
-serves 9.0 and 10.0, and the unpublished `v11` has the same surface but its
-own types until it is published) and `preview` (adding `Expr::IndexFromEnd`).
+and `Type::Intersection`), {9, 10} (`v9`, adding `Type::WithNull`), {11}
+(`v11`, adding record spreads: `RecordSpread`, `RecordSpreadDecl` and the
+item enums `RecordExprItem` and `RecordReprItem`, read through `items()`) and
+`preview` (adding `Expr::IndexFromEnd` and `TupleTypeExtensionHead`).
 A kind with no FCS `LanguageFeature` gets no interval, so it is in every facade
 (`Expr::Typar` is in all of them).
 
@@ -818,6 +821,14 @@ diagnostic for its feature" rather than "under a `Legality` one".
   `items()` over `RecordExprItem` and `RecordReprItem`, in place of the
   indexed `spreads()`; `fields()` stays. The synthetic-feature test adds a
   new dispatch enum and value enum to its new version.
+- **PR 8, step 5 — `v11` published**: `PUBLISHED` gains `v11`, whose lock
+  is stamped at freeze epoch 1 (no re-baseline: every other published lock
+  and fixture is untouched) beside its consumer fixture,
+  `facade_consumers/v11.rs`. Its surface is `v9`'s plus record spreads
+  (`RecordSpread`, `RecordSpreadDecl`, `RecordExprItem`, `RecordReprItem`,
+  their accessors and the three `items()`), so it is distinct, not an alias.
+  `preview` stays unpublished: it adds `IndexFromEndExpr` and the
+  tuple-type-extension head.
 
 ## PR sequence
 
@@ -857,12 +868,13 @@ diagnostic for its feature" rather than "under a `Legality` one".
    4. New syntax, each a kind and a gate: record spreads (4a) and tuple-type
       extensions (4b). *Landed.* A new enum is absent from the frozen
       facades, which lets records read their items as one enum (4c).
-   5. `v11` published ([Publishing a facade](#publishing-a-facade)).
+   5. `v11` published ([Publishing a facade](#publishing-a-facade)), a
+      distinct facade: `v9`'s surface plus record spreads. *Landed.*
    6. SDK 11 the devshell default, at GA.
 
 ## Still to do
 
-Everything in PR 8 above. Beyond them:
+PR 8's step 6 above. Beyond it:
 
 - **Stale issues.** #14 (facades below 8.0) and #12 (`Parse::view`) are done
   by PR 6, and #17 (preview) is decided (D11).
