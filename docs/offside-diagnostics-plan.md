@@ -59,9 +59,9 @@ Code comments refer to these constructs by the letters in this table (`§A`,
 | G | `IncorrentIndentationOfIn` | warning (always) | none | **Stage 4** |
 | H | `SeparatorTokensOfPatternMatchMisaligned` | error (always) | none | **Stage 3** |
 
-Our parse default is **F# 10.0** (`LanguageVersion::DEFAULT`, frozen); `tools/fcs-dump`
-parses at the same default, so the differential oracle sees all of these as the
-corpus does.
+Our parse default is **F# 11.0** (`LanguageVersion::DEFAULT`). The offside
+gates above all sit at or below 10.0, so `tools/fcs-dump` sees all of these as
+the corpus does whether it parses at its own default or at ours.
 
 ### Load-bearing finding (applies to every remaining stage)
 

@@ -34,7 +34,6 @@ use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::SemanticState;
 use borzoi::uri::UriExt as _;
 use borzoi::workspace::Workspace;
-use borzoi_cst::language_version::LanguageVersion;
 use borzoi_oracle_harness::corpus_key::{Positions, corpus_relative};
 use borzoi_oracle_harness::manifest::{Manifest, UPDATE_ENV, check};
 use borzoi_oracle_harness::panic_silence::silence_panics_here;
@@ -62,10 +61,9 @@ fn load(project: &Path, workspace: &mut Workspace, sema: &mut SemanticState) -> 
         .parses_for_project(project, workspace, &docs)
         .unwrap_or_else(|| panic!("the LSP declined to load {project:?}"))
         .clone();
-    let lang_version = {
-        let v = workspace.lang_version_for_project(project);
-        (v != LanguageVersion::DEFAULT).then(|| v.to_string())
-    };
+    // The version our side parsed at, always threaded: the oracle's own
+    // default need not be ours.
+    let lang_version = Some(workspace.lang_version_for_project(project).to_string());
     let mut symbols: Vec<String> = workspace.symbols_for_project(project).into_iter().collect();
     symbols.sort();
     let dotnet_root = workspace.dotnet_root_for_project(project);
