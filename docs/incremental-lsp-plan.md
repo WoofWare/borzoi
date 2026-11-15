@@ -603,14 +603,11 @@ So two steps come first, both on one thread:
   whose document has a newer queued change is answered `ContentModified`.
 - **re-measuring**, with Stage 0.
 
-A snapshot worker (Stage 9) is built only if, after those steps, a
-representative script still blocks edits behind requests for longer than a
-stated budget. Stage 9 writes the budget and the script down now. Coalescing
-cannot interrupt a request that is already running, so the case it leaves
-open is an edit that arrives during a cold fold. That is the case the issue's
-snapshot proposal addressed. If it is built, the snapshot is the `Vfs` (cloned: about a
-hundred `Arc`s) plus the memo tables behind a lock. It is not a persistent data
-structure.
+Coalescing cannot interrupt a request that is already running, so the case
+it leaves open is an edit that arrives during a cold fold. That is the case
+the issue's snapshot proposal addressed. Stage 9 measures it with a
+representative script (`blocked-edit`) and stops a running request at its
+next memo boundary instead of running it on a snapshot.
 
 ### D7. The oracle: an incremental answer equals a from-scratch answer
 
@@ -3177,7 +3174,7 @@ whose document has a newer queued change is answered `ContentModified`.
 This only touches messages that are still queued. It cannot interrupt a
 request that is already running, so an edit that arrives during a cold fold
 (3.1 G instructions today) still waits for the whole fold. That case is the
-one the issue's snapshot proposal addresses, and Stage 9's gate measures it.
+one the issue's snapshot proposal addresses, and Stage 9's `blocked-edit` measures it.
 
 **Oracle**:
 - A loop-level test over generated interleavings of changes, requests and
@@ -3634,7 +3631,7 @@ and the env resolution's, plus the resolution itself (about 35 M). The
 first confirmations take a witness per read, which a confirmation born with
 its witnesses (as Stage 4b's listings are) would save; that is left open.
 
-Stage 9's gate, `blocked-edit` (a define added or taken away while
+Stage 9's measurement, `blocked-edit` (a define added or taken away while
 `semanticTokens L` re-folds, five runs of five rounds):
 
 | project | the edit waited, Stage 8 | this | envs built 8 | this |
@@ -3647,9 +3644,8 @@ the edit waits for is now the evaluation (about 330 M), its first
 confirmation, the resolution and its first confirmation (about 110 M
 together), and the fold, which the define makes cold (every tree is new;
 the per-file parse cache serves the other define's trees from an earlier
-round, so `p.new` stays at 2). Both still exceed Stage 9's 50 M budget, by
-20 and 16 times: the gate's verdict stands, and the snapshot worker is what
-takes the rest off the edit's path.
+round, so `p.new` stays at 2). Most of it is still the rest of a request
+that began before the edit, which Stage 9 takes off the edit's path.
 
 The keystroke and the two saves move within their runs' spread. The cold
 env build (`semanticTokens E (cold)`) costs 1,670 allocations more (two sets
@@ -3674,15 +3670,14 @@ of checks where there was one), its instructions within the spread.
   so they are walked again after any evaluation is run again (a few `stat`s
   and a scan of the Compile items), and a fold refusal is reported only
   under the evaluation it was refused under.
-- Stage 9's gate still fails (above).
 
-### Stage 9 (gated): requests on a snapshot
+### Stage 9: requests yield to notifications
 
 **Dependencies**: Stage 8 and its measurement. **Implements**: D6's second
-step, only if the gate fails.
+step.
 
-**The measurement**, fixed now so that the gate is not set after the fact, is
-an `edit_counts` mode, `EDIT_COUNTS_SCRIPT=blocked-edit`:
+**The measurement** is an `edit_counts` mode,
+`EDIT_COUNTS_SCRIPT=blocked-edit`:
 
 1. Open `E` and `L`, and warm the fold as the default script does.
 2. Rewrite the `.fsproj` on disk with one more `<DefineConstants>` symbol, so
@@ -3695,22 +3690,141 @@ an `edit_counts` mode, `EDIT_COUNTS_SCRIPT=blocked-edit`:
    `didChange E` + `diagnostic E` measured on their own. The difference is
    what the edit waited for.
 
-**The budget**: the edit waits for at most **50 M** server instructions. That
-is about what one steady keystroke is expected to cost after Stages 1–5
-(about 50 M), so an edit never waits much longer than the work it causes. The
-gate is measured on macOS, where the instruction counter exists, under
-`nix develop`, on WoofWare.Incremental and on WoofWare.PawPrint.Domain. The
-re-fold in step 3 reads every file, so its count carries the kernel component
-described under "Kernel instructions". The wait is taken as the minimum over
-five runs, which compares the vnode-cached level.
+The edit's own pull needs the re-evaluation: the defines moved, so
+`diagnostic E` parses `E` under the new ones, and validation is exact. So
+the window splits into two parts: what the edit waits for after it is
+sent, which the script holds to a band, and the re-evaluation before it,
+which it reports.
 
-**The gate**: if either project's wait exceeds the budget after Stage 8, this
-stage is built. Otherwise it is not, and the measurement is recorded here.
-On today's numbers the wait is a whole re-fold, so the gate fails unless
-Stages 3b–7 make the post-save fold far cheaper than a cold one. Writing it
-down now means measurement decides, not preference.
+**The band.** `blocked-edit` fails a run unless what the edit waits for
+after it is sent, less what `didChange E` and `diagnostic E` cost on their
+own, is at most **30 M** instructions (`BlockedEditBand` in
+`crates/lsp/examples/edit_counts.rs`). That is the rest of the unit the
+request was in when the edit arrived, the stop, and the new evaluation's
+first confirmation, which the edit's first step pays. It is the minimum of
+the window's part after the edit less the minimum of the edit and its pull
+alone, each taken over the rounds apart: the two are read at different
+moments of a round, so one round's difference can be inflated, or negative,
+by a spike in either reading.
 
-**Measured after Stage 8: the gate fails, so this stage is built.**
+The band was measured on 2026-11-15 at a7148ddb4, on the build box, under
+`nix develop`, on private copies of the two corpus projects. It holds on
+macOS only, where the instruction counter exists, and on a quiet machine.
+The counts include kernel instructions, which differ by machine and rise
+when other processes' file activity recycles the projects' vnodes ("Kernel
+instructions"), so the band is set from two conditions:
+
+| after the edit, less alone: minima per run (five rounds each) | quiet box (load 1 to 5), 5 runs | loaded box (load 14 to 180), 8 runs |
+|---|---:|---:|
+| WoofWare.Incremental | 8.9 M* | 8.7–15.5 M |
+| WoofWare.PawPrint.Domain | 8.6–8.7 M* | 8.5–27.7 M |
+
+\* Read as each round's own difference, the minimum over the rounds; the
+loaded runs read it as the band now takes it.
+
+On the quiet box the part after the edit lay at 8.6 M to 9.1 M in every
+round. On the loaded box every run's fewest `stat`s in a window were a
+quiet run's (294 and 309), so the minima rose by the kernel's share, not by
+a confirmation asking the SDK's reads again (some rounds did, after another
+job's Nix store write; a minimum is unaffected unless every round does).
+One run reached 27.7 M, which set the band at 30 M. Under the heaviest load
+it still fails: a run at load about 100 waited 46 M after the edit with its
+file-system counts exactly those of a quiet run. So a failure on a loaded
+machine is read beside a run of the base commit on the same machine. On a
+quiet machine a new evaluation's first confirmation that shares no
+witnesses fails it: with sharing planted out, the part after the edit was
+60 M and 64 M. A later run on another machine (load 11 to 72) held it at
+10.1 M. No CI job runs `edit_counts`, so the band is checked when someone
+runs it.
+
+**The re-evaluation's cost, for reference.** The window's part before the
+edit is the request's re-evaluation of the project. It is reported, not
+held to a band, because it depends on the environment the project is
+evaluated in, as these two measurements of WoofWare.Incremental show:
+
+| | the build box | a second machine |
+|---|---:|---:|
+| conditions | a7148ddb4; quiet (load 1 to 5), 5 runs of 5 rounds; the copy under `~/borzoi-741-blocked-edit.projects/` | the same server code; load 11 to 72, 1 run of 3 rounds; the copy under the session's scratch directory in `/private/tmp` |
+| the re-evaluation before the edit, minimum | 194.4–195.1 M | 244.4 M |
+| its opens, `stat`s, listings, canonicalisations, distinct reads | 114, 175, 34, 153, 476 | 114, 228, 39, 153, 534 |
+
+The second machine's evaluation of the same project made 53 more `stat`s,
+5 more listings and had 58 more distinct reads; what differed between the
+two was the machine, the copy's location, and the load, and which of these
+moved the reads was not established. On the build box WoofWare.PawPrint.Domain's
+re-evaluation was 194.8–195.3 M quiet and its loaded minima 195.5–214.1 M.
+`eval_counts` (`crates/lsp/examples/eval_counts.rs`) measures the same
+evaluation outside the dispatch loop, phase by phase (196.7 M and 197.5 M on
+the build box), and is the way to measure it.
+
+**The script assumes a single-pass project.** It holds the server at the
+first evaluation pass of each round's re-evaluation. A multi-target project
+evaluates twice, the outer pass and the pass for the target it selects, so
+"before the edit" would be the outer pass alone and the rest would land in
+the part after the edit, so the band would not measure what it names.
+The two projects the band was measured on, WoofWare.Incremental and
+WoofWare.PawPrint.Domain, are single-pass; the script does not check that
+the project it is pointed at is.
+
+**The file-system counts, for reference.** In the same runs these counts did
+not depend on load, and are recorded here as reference values, not as a
+band:
+
+| | WoofWare.Incremental | WoofWare.PawPrint.Domain |
+|---|---:|---:|
+| each re-evaluation, and the cold first evaluation: opens, `stat`s, listings, canonicalisations, distinct reads | 114, 175, 34, 153, 476 | 115, 176, 34, 155, 480 |
+| a steady confirmation of the evaluation (`v.stat`, a generation of `didChange E` + `diagnostic E` alone) | 135 | 140 |
+| a round's confirming generations: the stopped request's, then each later one | 24, 135, 135, 135 | 29, 140, 140, 140 |
+
+The re-evaluation's counts were the same in every round of 20 runs of
+WoofWare.Incremental and 19 of WoofWare.PawPrint.Domain, quiet and loaded.
+A round's confirmations were those above in every round that met no Nix
+store write; a round that met one asked the SDK's reads again (1,922 `stat`s
+per confirming generation). The absolute counts are facts about where the
+project is, not about the server alone: a copy at the same depth under
+other names counts the same; one two directories deeper counts 179 `stat`s
+in each evaluation, 137 in a steady confirmation and 26 in the stopped
+request's, since MSBuild probes every ancestor for its `Directory.Build`
+files and a confirmation stamps every directory a read resolves through; a
+path reached through a symlink also walks its target's directories
+(`ReadChecks::resolution`); and a multi-target project's first evaluation
+counts both passes.
+
+What the confirmation row shows, that the new evaluation's first
+confirmation costs exactly a steady one because it shares the dropped
+evaluation's witnesses, is held by the suite, on fixtures shaped for it and
+on every platform CI runs:
+`workspace::tests::validation::a_project_evaluated_again_starts_with_the_dropped_ones_witnesses`
+and `semantic::tests::an_env_resolved_again_starts_with_the_witnesses_it_shares`.
+With witness sharing planted out (`ReadChecks::check` never handing out a
+held check), both fail, and in `blocked-edit` the new evaluation's first
+confirmation asked 2,239 and 2,280 `stat`s.
+
+**What an edit arriving inside each unit waits for.** These are measured
+worst cases, not a band. A running request stops only between units (below),
+and a notification always runs to completion, so an edit that arrives as a
+unit begins waits for all of it. `EDIT_COUNTS_UNITS` prints each unit's
+instructions as it ends; the same machine as the band, one run of
+each project:
+
+| unit | WoofWare.Incremental | WoofWare.PawPrint.Domain |
+|---|---:|---:|
+| a cold env build (`build_assembly_env`) | 2,418 M | 3,030 M |
+| a cold fold (`resolve_project`) | 563 M | 395 M |
+| the fold a define change makes cold again (each round's restarted `semanticTokens L`) | 574 M | 400 M |
+| one evaluation (`evaluate_project`), the first of a session | 259 M | 260 M |
+| one evaluation, its imports' parses reused | 194 M | 195 M |
+| a cold `didOpen` (a notification, which evaluates the project) | 268 M | 268 M |
+| the first confirmation of an evaluation no retired checks share witnesses with (the cold `didOpen` of a second document: 1,926 `stat`s, 32 listings, 31 canonicalisations on WoofWare.Incremental) | 54 M | 56 M |
+| inference (`infer_project`) | 85 M | 125 M |
+| one Compile item's parse, 95th percentile | 1.3 M | 5.0 M |
+
+A `workspace/diagnostic` sweep is stepped one unit at a time (one directory
+listed, one project evaluated or one file diagnosed), and is not stopped
+inside one, so a message waits for at most one evaluation behind it.
+
+**Measured after Stage 8, the edit waited for a whole re-fold, so this stage
+is built.**
 `EDIT_COUNTS_SCRIPT=blocked-edit` (`crates/lsp/examples/edit_counts.rs`)
 does steps 1–4 as fixed above. It holds the server at the MSBuild evaluation
 `semanticTokens L` makes, queues `didChange E` and `diagnostic E` then, so
@@ -3723,24 +3837,24 @@ after the round once the rewritten file is past the racy window. The
 Five runs of five rounds each, under `nix develop` on macOS, the minimum of
 each row:
 
-| project | `semanticTokens L` .. `diagnostic E` | `didChange E` + `diagnostic E` alone | **the edit waited** | budget |
-|---|---:|---:|---:|---:|
-| WoofWare.Incremental (82 items) | 3,446.1 M | 3.7 M | **3,437.2 M** | 50 M |
-| WoofWare.PawPrint.Domain (34 items) | 3,910.7 M | 8.6 M | **3,901.9 M** | 50 M |
+| project | `semanticTokens L` .. `diagnostic E` | `didChange E` + `diagnostic E` alone | **the edit waited** |
+|---|---:|---:|---:|
+| WoofWare.Incremental (82 items) | 3,446.1 M | 3.7 M | **3,437.2 M** |
+| WoofWare.PawPrint.Domain (34 items) | 3,910.7 M | 8.6 M | **3,901.9 M** |
 
-Both exceed the budget by about 70 times. In every round the request
+In every round the request
 re-evaluates the project (115 files opened), builds an env (`a.built` 1)
 and folds once from cold (`f.new` 1). The env is rebuilt because its read
 set holds the entry project's `.fsproj` text (Stage 7's open gap: an
 evaluation re-run to new defines rebuilds the env too), and that is most of
 the wait. Without it the wait would still be a cold fold, which costs at least
 0.62 G on WoofWare.Incremental (the cold pass's `semanticTokens L`, which
-folds only the items after `E`, over a built env), twelve times the budget. Stage 8
-cannot shorten either, since the edit arrives while the request runs.
+folds only the items after `E`, over a built env). Stage 8 cannot shorten
+either, since the edit arrives while the request runs.
 
 The follow-up cutoffs on the evaluation's consumed outputs (above) remove
-the env rebuild: the wait is now 995.1 M on WoofWare.Incremental and
-814.4 M on WoofWare.PawPrint.Domain, still 20 and 16 times the budget.
+the env rebuild: without this stage the wait is 995.1 M on
+WoofWare.Incremental and 814.4 M on WoofWare.PawPrint.Domain.
 
 The sketch, written before the measurement: a worker runs semantic requests
 against a cloned `Vfs` and the memo tables behind a lock. The dispatch thread
@@ -3953,7 +4067,7 @@ The oracle, as built:
   after the handler passed it once every unit was followed by one. Each was
   a scenario the sweep did not have, so each is now one of its scenarios.
 - `dispatch_coalescing::an_edit_that_arrives_mid_request_is_answered_before_it`:
-  the gate in small. A change to `A` and a pull of `A` arrive at a hover on
+  the blocked edit in small. A change to `A` and a pull of `A` arrive at a hover on
   `C`'s first checkpoint; the hover stops, the pull is answered first, and
   the hover after it, with the type the new `A` gives.
 - `dispatch_coalescing::a_stopped_rebuild_still_owes_the_refresh_for_an_unannounced_change`
@@ -3980,7 +4094,7 @@ and the state machine's warm and stopping properties):
 
 | plant | caught by |
 |---|---|
-| no cancellation (a checkpoint never sees the count move) | the exhaustive and full-inbox tests, the coalescing property, the latency sweep, the gate in small, the stopping state machine |
+| no cancellation (a checkpoint never sees the count move) | the exhaustive and full-inbox tests, the coalescing property, the latency sweep, the blocked edit in small, the stopping state machine |
 | a stale answer: no checkpoint after the handler | the latency sweep, once it covered every span (a notification during references' scan) |
 | no checkpoint before a project's first parse (Codex) | the latency sweep, once it covered `workspace/symbol` over two projects |
 | no checkpoint between a cached prefix and the inference (Codex) | the latency sweep, once it covered a hover over a cached fold |
@@ -3995,10 +4109,10 @@ and the state machine's warm and stopping properties):
 | no checkpoint between the candidates an ownership walk weighs (Codex) | the latency sweep, once it covered a directory of three projects that all evaluate again |
 | an unbounded inbox | `a_full_inbox_holds_the_sender_back` |
 | an unbounded epoch | `the_epoch_holds_at_most_its_bound` |
-| a stopped request answered as well as run again | the coalescing property, the latency sweep, the gate in small, the stopping state machine |
+| a stopped request answered as well as run again | the coalescing property, the latency sweep, the blocked edit in small, the stopping state machine |
 | a stopped request refused rather than run again | the same four |
-| a restart in its arrival position (no `Restart`) | the gate in small |
-| a restart's place taken before reading what arrived | the gate in small |
+| a restart in its arrival position (no `Restart`) | the blocked edit in small |
+| a restart's place taken before reading what arrived | the blocked edit in small |
 | no checkpoint after the env | the latency sweep |
 | no checkpoint between Compile items | the latency sweep |
 | no checkpoint after the fold | nothing, once every unit was preceded by a checkpoint: it guarded no unit (the next is preceded by its own) and no answer (the loop's checks it), so it was deleted, with the one after the inference |
@@ -4045,35 +4159,31 @@ planned as in Stage 8 (one fold, one parse).
 `blocked-edit`, from before `semanticTokens L` is sent to the arrival of
 `diagnostic E`'s answer:
 
-| project | window 8 | 9 | of which before the edit 8 | 9 | after the edit, less alone, 8 | 9 | alone 8 | 9 | **the edit waited** 8 | **9** | budget |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| WoofWare.Incremental | 3,478.0 M | 384.5 M | 297.6 M | 300.0 M | 3,125.8 M | 79.7 M | 3.9 M | 4.0 M | 3,436.2 M | **379.8 M** | 50 M |
-| WoofWare.PawPrint.Domain | 3,950.3 M | 394.3 M | 300.9 M | 299.7 M | 3,630.5 M | 43.6 M | 8.8 M | 8.9 M | 3,941.5 M | **356.4 M** | 50 M |
+| project | window 8 | 9 | of which before the edit 8 | 9 | after the edit, less alone, 8 | 9 | alone 8 | 9 | **the edit waited** 8 | **9** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| WoofWare.Incremental | 3,478.0 M | 384.5 M | 297.6 M | 300.0 M | 3,125.8 M | 79.7 M | 3.9 M | 4.0 M | 3,436.2 M | **379.8 M** |
+| WoofWare.PawPrint.Domain | 3,950.3 M | 394.3 M | 300.9 M | 299.7 M | 3,630.5 M | 43.6 M | 8.8 M | 8.9 M | 3,941.5 M | **356.4 M** |
 
 In every round the request stopped once, and `diagnostic E` was answered
-before it. **The gate as the plan fixed it still fails, by about 7 times.**
-What the window now consists of, on WoofWare.Incremental (attributed by
+before it. What the window consisted of at this stage's head, on
+WoofWare.Incremental (attributed by
 `EDIT_COUNTS_GENERATIONS` and, once, by probes at the evaluation's steps):
 
 - **300 M before the edit was sent**: the request's work up to the
   evaluation the script holds it at, nearly all of it the re-evaluation of
   the rewritten `.fsproj` (115 files opened). The edit had not been sent
-  then, so it cannot have waited for it, but the plan's window starts when
+  then, so it cannot have waited for it, but the window starts when
   `semanticTokens L` arrives; nothing this stage does reaches it.
 - **31 M, the rest of the unit the request was in**: after the evaluation
   returns, building its checks (`Evaluation::checks_and_exempt`) costs 31 M
   before it is cached and the next checkpoint is reached. This is the
-  cancellation latency the gate meets.
+  cancellation latency the edit meets.
 - **45–54 M, the first confirmation of the new evaluation**, which
   `diagnostic E` pays: a fresh evaluation's checks have no witnesses yet, so
   the first generation after it asks each read again (2,262 `stat`s, 32
   listings, 31 canonicalisations) where later ones `stat` 135 paths. Stage 8
   paid it inside the request.
 - **4 M, the edit and the pull themselves**, as alone.
-
-So the part after the edit is under the budget on WoofWare.PawPrint.Domain
-(43.6 M) and over it on WoofWare.Incremental (79.7 M), and the window is
-over it on both because of work done before the edit was sent.
 
 The tables were taken at d2b7f874 (main merged). `blocked-edit` was taken
 again at 282c5e50, after Codex's rounds added checkpoints (before the
@@ -4084,7 +4194,8 @@ same time: window 381.1 M and 392.2 M, the edit waited 377.1 M and 383.0 M,
 of which before the edit 294.2 M and 298.7 M. The part after the edit is
 the window less two readings taken at different moments of different
 rounds, so its minimum moves between runs (43.6 M and 83.9 M on
-WoofWare.PawPrint.Domain); the window and the wait are the gate's figures.
+WoofWare.PawPrint.Domain), which is why the pin on it takes the minimum of
+each reading apart.
 The final head differs from 282c5e50 only in what a stop settles, which
 in this script is nothing (the evaluation moved, so no fold is kept
 stale).
@@ -4109,10 +4220,10 @@ cutoffs alone (7547cb2a, with this stage's harness) beside them:
 | 4 keystrokes | 89.6 M | 89.4 M | 89.1 M |
 | 16 keystrokes | 300.1 M | 302.4 M | 299.4 M |
 
-| `blocked-edit`: the edit waited | Stage 8 | cutoffs alone | Stage 9 alone | **combined** | budget |
-|---|---:|---:|---:|---:|---:|
-| WoofWare.Incremental | 3,436.2 M | 990.7 M | 379.8 M | **377.5 M** | 50 M |
-| WoofWare.PawPrint.Domain | 3,941.5 M | 825.9 M | 356.4 M | **379.3 M** | 50 M |
+| `blocked-edit`: the edit waited | Stage 8 | cutoffs alone | Stage 9 alone | **combined** |
+|---|---:|---:|---:|---:|
+| WoofWare.Incremental | 3,436.2 M | 990.7 M | 379.8 M | **377.5 M** |
+| WoofWare.PawPrint.Domain | 3,941.5 M | 825.9 M | 356.4 M | **379.3 M** |
 
 The combined window is 381.3 M and 388.0 M, of which 294.5 M and 295.0 M
 come before the edit is sent; the request stopped once in every round, and
@@ -4123,8 +4234,7 @@ work a stopped request no longer does before the edit is handled. What is
 left is what Stage 9 alone left: the re-evaluation before the edit is sent
 (about 295 M), the rest of the evaluation unit the edit arrives in (31 M,
 `checks_and_exempt`), and the new evaluation's first confirmation, which
-`diagnostic E` pays (2,397 and 2,448 `stat`s). The gate fails by about 7
-times.
+`diagnostic E` pays (2,397 and 2,448 `stat`s).
 
 **Departures.**
 
@@ -4154,25 +4264,34 @@ times.
 
 **Open gaps.**
 
-- The gate fails: the window is 384.5 M and 394.3 M against 50 M. 300 M of
-  it is the re-evaluation, done before the edit was sent.
-- A fresh evaluation's first confirmation asks every read again (2,262
-  `stat`s, 45–54 M on WoofWare.Incremental), because its checks are taken
-  with no witnesses; the request that would have paid it stopped, so the
-  edit's pull pays it.
-- Building a fresh evaluation's checks (`Evaluation::checks_and_exempt`)
-  costs 31 M after the evaluation itself, within the unit, so before the
-  next checkpoint.
 - An edit that arrives during an env build waits for the rest of it (up to
-  2.7 G on WoofWare.Incremental, cold), and one that arrives during a cold
-  fold or inference for the rest of that (0.6 G and 0.1 G): each is one unit.
-- An edit waits in full for a notification ahead of it (a `didOpen` that
-  evaluates a project, about 0.3 G); only requests stop.
+  2.4 G on WoofWare.Incremental and 3.0 G on WoofWare.PawPrint.Domain,
+  cold), and one that arrives during a fold, an evaluation or inference for
+  the rest of that: each is one unit (the measured worst cases, above).
+  Finer checkpoints inside the env build and the fold (per DLL, per file)
+  would bound the wait by one DLL or one file, provided a stopped unit
+  caches nothing partial and its completed parts are still reused.
+- An edit waits in full for a notification ahead of it (a cold `didOpen`
+  evaluates the project, about 268 M); only requests stop. Deferring a
+  notification's derived work (the evaluation, the publish, the moved
+  evaluations' response) to the first request that needs it would let the
+  edit through, and would change what a notification does.
+- The re-evaluation the edit's own pull needs (about 195 M) is most of what
+  an edit behind a `.fsproj` change waits for. Exact validation leaves no
+  way round it, only making it cheaper: handing the dropped evaluation's
+  trusted canonicalisations to the next (about 60 M, needing the version
+  directories' existence confirmed in the generation that reuses them), or
+  reusing the evaluator's state after `Sdk.props` (a larger change to
+  `borzoi-msbuild`, held to `same_as_reference`).
 - A client whose notifications never pause starves its requests, now also
   mid-request: each stops at its next checkpoint.
 - A notification that cannot change what a request read (a cancellation of
   another request, `didSave`) stops it all the same.
-- A `workspace/diagnostic` sweep in flight is not stopped (as in Stage 8).
+- A `workspace/diagnostic` sweep in flight is not stopped (as in Stage 8):
+  a message waits for at most one of its steps, the largest of which is one
+  evaluation. Putting that evaluation under the checkpoints would bound it
+  by the units above, and would change how a sweep interleaves with what
+  arrives.
 - A stop that finds a fold stale owes a semantic-token refresh even when an
   open buffer's sync already announced the change: one refresh more than
   the finished request would owe.
@@ -4340,19 +4459,18 @@ tree into the store: `/nix/store`'s stamp moved under every witness through
 it, and every message asked those reads again (682 M a round). The runs in
 the table were taken on a quiet box, interleaved with `main`'s.
 
-`blocked-edit` (Stage 9's gate):
+`blocked-edit` (Stage 9's measurement):
 
-| project | window `main` | this | the edit waited `main` | **this** | `v.stat` in the window, `main` | this | budget |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| WoofWare.Incremental | 399.1 M | 329.0 M | 369.1 M | **285.7 M** | 2,397 | 293 | 50 M |
-| WoofWare.PawPrint.Domain | 403.3 M | 327.2 M | 366.3 M | **275.3 M** | 2,448 | 308 | 50 M |
+| project | window `main` | this | the edit waited `main` | **this** | `v.stat` in the window, `main` | this |
+|---|---:|---:|---:|---:|---:|---:|
+| WoofWare.Incremental | 399.1 M | 329.0 M | 369.1 M | **285.7 M** | 2,397 | 293 |
+| WoofWare.PawPrint.Domain | 403.3 M | 327.2 M | 366.3 M | **275.3 M** | 2,448 | 308 |
 
 Of the window, about 305 M comes before the edit is sent (the
 re-evaluation), as before. What the edit meets after it is the rest of the
 evaluation's unit (the checks) and the first confirmation (now about
-3.5 M). The gate still fails: what is left is the re-evaluation
-itself, which the edit cannot have waited for and which the plan's window
-counts all the same.
+3.5 M). What is left is the re-evaluation itself, which the edit's own pull
+needs.
 
 Some rounds still pay a full first confirmation (the maximum of the edit's
 wait stays near 380 M): `/nix/store` is one of the directories every
@@ -4371,7 +4489,6 @@ something carrying a witness over can save.
   through it are asked again in full however little moved.
 - On a Nix install, any store write moves `/nix/store`, under every
   witness of a read through it.
-- Stage 9's gate fails, on the re-evaluation before the edit.
 
 ### Follow-up: identical requests share one run
 

@@ -123,7 +123,7 @@
 //!   the parses and the env read from it as it was. The run puts the file
 //!   back as it found it; it still writes the project file, so point it at
 //!   a copy of the project, not the shared corpus cache.
-//!   `blocked-edit` is Stage 9's gate (`docs/incremental-lsp-plan.md`): it
+//!   `blocked-edit` is Stage 9's measurement (`docs/incremental-lsp-plan.md`): it
 //!   rewrites the measured project's `.fsproj` with one more
 //!   `DefineConstants` symbol (no watch event), so the next fold re-evaluates
 //!   the project and re-parses every item, sends `semanticTokens L`, and,
@@ -138,7 +138,17 @@
 //!   (`borzoi::inbox::STOPPED_EVENT`). Each round adds the symbol or takes it
 //!   away again, and the run puts the file back as it found it; it still
 //!   writes the project file, so point it at a copy of the project, not the
-//!   shared corpus cache.
+//!   shared corpus cache. The run fails unless its band holds
+//!   ([`BlockedEditBand`]): what the edit waited for after it was sent, less
+//!   its own cost, on minima over the rounds. The band holds on a quiet
+//!   machine. The script holds the server at the first evaluation pass of
+//!   each round's re-evaluation, so it measures what it says only for a
+//!   single-pass project, as the two projects its band was measured on are;
+//!   a multi-target project evaluates twice.
+//! * `EDIT_COUNTS_UNITS`: when set, print to stderr the instructions spent
+//!   inside each unit of work a running request cannot be stopped inside, and
+//!   each notification, as it ends ([`UNIT_SPANS`]): what an edit that arrives
+//!   as the unit begins waits for.
 //! * `EDIT_COUNTS_UNRELATED`: the other project for those scripts. Default:
 //!   `WoofWare.Incremental.Test` beside the default project, which references
 //!   it rather than the other way round.
@@ -341,6 +351,42 @@ fn trace_generation(what: &str, fields: &str) {
     }
 }
 
+/// The spans around the units of work a running request cannot be stopped
+/// inside (`docs/incremental-lsp-plan.md`, Stage 9), and the work around them
+/// that a notification runs to completion. With `EDIT_COUNTS_UNITS` set, each
+/// is given a span id of its own, and the instructions the process retired
+/// inside it are printed to stderr as it exits: what an edit arriving as the
+/// unit begins waits for. None of them nests in a span of its own name. The
+/// parses of a project's Compile items are not one unit (a running request
+/// can stop before each item), so each item's parse is listed, not the span
+/// around them all.
+const UNIT_SPANS: [&str; 9] = [
+    "lsp.notification",
+    "publish_diagnostics",
+    "evaluate_project",
+    "parse_compile_item",
+    "resolve_references",
+    "build_assembly_env",
+    ENV_BUILD_SPAN,
+    "resolve_project",
+    "infer_project",
+];
+
+/// Whether to print each unit span's instructions (`EDIT_COUNTS_UNITS`).
+static TRACE_UNITS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn trace_units() -> bool {
+    *TRACE_UNITS.get_or_init(|| std::env::var_os("EDIT_COUNTS_UNITS").is_some())
+}
+
+/// The process's instruction count as each unit span was last entered.
+static UNIT_ENTERED: [AtomicU64; UNIT_SPANS.len()] =
+    [const { AtomicU64::new(0) }; UNIT_SPANS.len()];
+
+/// The span id a unit span gets: one per name, apart from the shared id
+/// every other span gets.
+const UNIT_ID_BASE: u64 = 100;
+
 /// Cached envs whose references were resolved again to confirm them
 /// ([`borzoi::semantic::ENV_RESOLVED_AGAIN_SPAN`]), kept or not.
 static ENVS_RESOLVED_AGAIN: AtomicU64 = AtomicU64::new(0);
@@ -509,11 +555,12 @@ impl tracing::Subscriber for FoldObserver {
         }
     }
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        (metadata.is_span()
-            && matches!(
-                metadata.name(),
-                PROJECT_LOOKUP_SPAN | ENV_BUILD_SPAN | ENV_RESOLVED_AGAIN_SPAN | REQUEST_SPAN
-            ))
+        (metadata.is_span() && trace_units() && UNIT_SPANS.contains(&metadata.name()))
+            || (metadata.is_span()
+                && matches!(
+                    metadata.name(),
+                    PROJECT_LOOKUP_SPAN | ENV_BUILD_SPAN | ENV_RESOLVED_AGAIN_SPAN | REQUEST_SPAN
+                ))
             || (metadata.is_event()
                 && matches!(
                     metadata.name(),
@@ -521,6 +568,16 @@ impl tracing::Subscriber for FoldObserver {
                 ))
     }
     fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        let unit = UNIT_SPANS
+            .iter()
+            .position(|name| *name == span.metadata().name());
+        // A unit span is enabled only when units are traced, and is no
+        // project lookup; the env build's span is counted below as well.
+        if let Some(unit) = unit
+            && span.metadata().name() != ENV_BUILD_SPAN
+        {
+            return tracing::span::Id::from_u64(UNIT_ID_BASE + unit as u64);
+        }
         if span.metadata().name() == REQUEST_SPAN {
             REQUESTS_RUN.fetch_add(1, Relaxed);
         } else if counted() && span.metadata().name() == ENV_RESOLVED_AGAIN_SPAN {
@@ -541,8 +598,12 @@ impl tracing::Subscriber for FoldObserver {
             };
             counter.fetch_add(1, Relaxed);
         }
-        // Nothing is recorded per span, so one id serves them all.
-        tracing::span::Id::from_u64(1)
+        // Nothing is recorded per span, so one id serves them all but the
+        // units.
+        match unit {
+            Some(unit) if trace_units() => tracing::span::Id::from_u64(UNIT_ID_BASE + unit as u64),
+            _ => tracing::span::Id::from_u64(1),
+        }
     }
     fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
@@ -599,8 +660,25 @@ impl tracing::Subscriber for FoldObserver {
             hold_if_armed(Gate::AtGeneration);
         }
     }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
+    fn enter(&self, id: &tracing::span::Id) {
+        if let Some(unit) = id.into_u64().checked_sub(UNIT_ID_BASE)
+            && let Some((process, _)) = instructions()
+        {
+            UNIT_ENTERED[unit as usize].store(process, Relaxed);
+        }
+    }
+    fn exit(&self, id: &tracing::span::Id) {
+        if let Some(unit) = id.into_u64().checked_sub(UNIT_ID_BASE)
+            && let Some((process, _)) = instructions()
+        {
+            let entered = UNIT_ENTERED[unit as usize].load(Relaxed);
+            eprintln!(
+                "unit {:<24} {:>14}",
+                UNIT_SPANS[unit as usize],
+                process.saturating_sub(entered)
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1663,6 +1741,56 @@ fn blocked_edit(
         stops.iter().min().copied().unwrap_or(0),
         stops.iter().max().copied().unwrap_or(0),
     );
+    // Each part's minimum over the rounds, taken apart: "alone" is measured
+    // in another moment of the round than the window, so one round's
+    // difference can be inflated or negative by a spike in either reading
+    // (a full first confirmation after a Nix store write), which a minimum of
+    // differences would carry into the pin.
+    let min_of = |costs: &[Cost]| costs.iter().filter_map(|cost| cost.instructions).min();
+    let after_pinned = min_of(&after_edit)
+        .zip(min_of(&alone))
+        .map(|(after, alone)| i128::from(after) - i128::from(alone));
+    println!(
+        "{:<34} {:>14}",
+        "after the edit min, less alone min",
+        show(after_pinned)
+    );
+    BlockedEditBand::check(after_pinned);
+}
+
+/// The measured value `blocked-edit` holds a run to
+/// (`docs/incremental-lsp-plan.md`, Stage 9, "The band"), on minima over
+/// the run's rounds, as the plan measures them. It holds on macOS under
+/// `nix develop`, on a quiet machine: the counts include kernel
+/// instructions, which differ by machine and rise when other processes' file
+/// activity recycles the projects' vnodes.
+struct BlockedEditBand;
+
+impl BlockedEditBand {
+    /// What the edit may wait for after it is sent, less what the edit and
+    /// its pull cost on their own: the rest of the unit the stopped request
+    /// was in, the stop, and the new evaluation's first confirmation.
+    const AFTER_THE_EDIT_AT_MOST: i128 = 30_000_000;
+
+    /// Fail the run unless the band holds. `after` is the minimum over the
+    /// rounds of the window's part after the edit, less the minimum of the
+    /// edit and its pull alone; `None` without an instruction counter.
+    fn check(after: Option<i128>) {
+        let Some(after) = after else {
+            println!("the band is not checked: no instruction counter on this platform");
+            return;
+        };
+        assert!(
+            after <= Self::AFTER_THE_EDIT_AT_MOST,
+            "blocked-edit's band (docs/incremental-lsp-plan.md, Stage 9) does not hold: the edit \
+             waited {after} instructions after it was sent, less alone; the band is at most {}\n\
+             (it holds on a quiet machine: the counts include kernel instructions, so on a \
+             loaded machine compare with a run of the base commit on the same machine before \
+             reading this as a regression)",
+            Self::AFTER_THE_EDIT_AT_MOST
+        );
+        println!("blocked-edit's band holds (it is measured to hold on a quiet machine)");
+    }
 }
 
 fn main() {
