@@ -17,6 +17,7 @@ use crate::binders::{BinderRole, pattern_names};
 use crate::def::{Def, DefId, DefKind};
 
 use super::contributors::RequireQualifiedAccess;
+use super::decls::CaseExport;
 use super::id_text;
 use super::model::{
     CaseKind, DeclineCause, DeclineSite, DeclineTier, DeferredReason, EarlierType, ExportDeclKind,
@@ -437,6 +438,10 @@ impl<'a> Resolver<'a> {
             // cross-file uses too. A require-qualified case is not value-exported or
             // framed (reachable only as `T.Case`); an anonymous-root case cannot be
             // exported, so it stays a `Local` and its module is marked hidden.
+            // What FCS checks of a case heading a pattern before its
+            // arguments: its attributes and its type's.
+            let case_attributed =
+                defn.attributes().next().is_some() || case.attributes().next().is_some();
             let res = if require_qualified {
                 // Reachable only as `T.Case`: give it a cross-file handle via the
                 // type-qualified index (no value-namespace export) and use that
@@ -445,10 +450,13 @@ impl<'a> Resolver<'a> {
                     name,
                     id,
                     &type_key,
-                    type_is_private,
-                    repr_access_root.clone(),
-                    CaseKind::Union {
-                        require_qualified: true,
+                    CaseExport {
+                        type_is_private,
+                        repr_access_root: repr_access_root.clone(),
+                        kind: CaseKind::Union {
+                            require_qualified: true,
+                        },
+                        case_attributed,
                     },
                 ) {
                     Some(item_id) => Resolution::Item(item_id),
@@ -458,10 +466,13 @@ impl<'a> Resolver<'a> {
                 match self.export_case(
                     name,
                     id,
-                    type_is_private,
-                    repr_access_root.clone(),
-                    CaseKind::Union {
-                        require_qualified: false,
+                    CaseExport {
+                        type_is_private,
+                        repr_access_root: repr_access_root.clone(),
+                        kind: CaseKind::Union {
+                            require_qualified: false,
+                        },
+                        case_attributed,
                     },
                 ) {
                     Some(item_id) => {
@@ -620,11 +631,14 @@ impl<'a> Resolver<'a> {
                 case_name,
                 id,
                 &type_key,
-                type_is_private,
-                // An enum's representation takes no modifier
-                // (`parsEnumTypesCannotHaveVisibilityDeclarations`).
-                None,
-                CaseKind::Enum,
+                CaseExport {
+                    type_is_private,
+                    // An enum's representation takes no modifier
+                    // (`parsEnumTypesCannotHaveVisibilityDeclarations`).
+                    repr_access_root: None,
+                    kind: CaseKind::Enum,
+                    case_attributed: false,
+                },
             ) {
                 Some(item_id) => Resolution::Item(item_id),
                 None => Resolution::Local(id),
@@ -667,7 +681,13 @@ impl<'a> Resolver<'a> {
         // declaration, frame entry, and cross-file open (so find-references spans
         // its cross-file uses); an anonymous-root constructor stays `Local` and its
         // module is marked hidden.
-        let res = match self.export_case(entry_name, id, is_private, None, CaseKind::Exception) {
+        let exception = CaseExport {
+            type_is_private: is_private,
+            repr_access_root: None,
+            kind: CaseKind::Exception,
+            case_attributed: false,
+        };
+        let res = match self.export_case(entry_name, id, exception) {
             Some(item_id) => Resolution::Item(item_id),
             None => {
                 self.note_hidden_value_module(self.lexical.container_path.to_vec());
@@ -846,6 +866,7 @@ impl<'a> Resolver<'a> {
                         access_root_len: self.export_access_root_len(is_private),
                         repr_access_root: None,
                         attributed: false,
+                        case_attributed: false,
                     });
                     Some((item_idx, item_id))
                 };
@@ -3347,11 +3368,12 @@ impl<'a> Resolver<'a> {
     /// other type of the name could find anything:
     ///
     /// * `T` is no module alias, so the types tried are those named `T`;
-    /// * the project declares no type named `T` but the found union: for an
-    ///   earlier file's, this file declares none and every earlier file's
-    ///   declaration of the name is placed at its path and arity (a signature
-    ///   and its implementation); this file's is the project's only one,
-    ///   exceptions included;
+    /// * the project declares no type named `T` but the found union: its one
+    ///   declaration of the name, exceptions included, in an earlier file or
+    ///   this one;
+    /// * the found case and its union carry no attribute list, since an
+    ///   error-level attribute (`[<Obsolete(…, true)>]`) abandons the
+    ///   sub-pattern before its arguments are checked;
     /// * every referenced assembly's type named `T` under a prefix the type
     ///   walk visits finds nothing named `C`
     ///   ([`AssemblyEnv::pattern_lookup_in_type_finds_nothing`](crate::AssemblyEnv::pattern_lookup_in_type_finds_nothing)), and no
@@ -3364,7 +3386,8 @@ impl<'a> Resolver<'a> {
         case_res: Resolution,
         found: FoundUnion<'_>,
     ) -> bool {
-        if !self.resolves_to_union_case(case_res) || self.lexical_alias_target(type_name).is_some()
+        if !self.resolves_to_plain_union_case(case_res)
+            || self.lexical_alias_target(type_name).is_some()
         {
             return false;
         }
@@ -3373,14 +3396,12 @@ impl<'a> Resolver<'a> {
             FoundUnion::EarlierFile(type_path) => {
                 type_path.last().map(String::as_str) == Some(type_name)
                     && !self.prescan.own_type_simple_names.contains(type_name)
-                    // Two arities at one path are two types; one arity twice is
-                    // a signature and its implementation.
+                    // Two declarations at one path are two types (at two
+                    // arities, or an FS0037 duplicate). A signature's
+                    // implementation exports no type-qualified case, so the
+                    // union is no signature pair's.
                     && earlier.is_some_and(|decls| {
-                        let arity = decls.first().and_then(|d| d.arity);
-                        arity.is_some()
-                            && decls
-                                .iter()
-                                .all(|d| d.path.as_deref() == Some(type_path) && d.arity == arity)
+                        matches!(decls.as_slice(), [d] if d.path.as_deref() == Some(type_path))
                     })
             }
             FoundUnion::InFile => {
@@ -3419,18 +3440,19 @@ impl<'a> Resolver<'a> {
             })
     }
 
-    /// Whether `res` names a union case — not an enum case, an exception
-    /// constructor or anything else: this file's def by its kind, an export by
-    /// its [`CaseKind`], this file's or an earlier
-    /// one's ([`ProjectItems::is_union_case_item`](super::model::ProjectItems::is_union_case_item)).
-    fn resolves_to_union_case(&self, res: Resolution) -> bool {
+    /// Whether `res` names a union case whose case and type carry no attribute
+    /// list ([`ExportedItem::case_attributed`](super::model::ExportedItem::case_attributed)),
+    /// as an export of this file's or an earlier one's
+    /// ([`ProjectItems::is_plain_union_case_item`](super::model::ProjectItems::is_plain_union_case_item)):
+    /// not an enum case, an exception constructor, or a case with no handle.
+    fn resolves_to_plain_union_case(&self, res: Resolution) -> bool {
         match res {
-            Resolution::Local(def) => self.out.defs[def].kind == DefKind::UnionCase,
             Resolution::Item(id) => match id.index().checked_sub(self.item_base as usize) {
                 Some(local) => self.out.items.get(local).is_some_and(|it| {
                     matches!(it.case, Some(super::model::CaseKind::Union { .. }))
+                        && !it.case_attributed
                 }),
-                None => self.preceding.is_union_case_item(id),
+                None => self.preceding.is_plain_union_case_item(id),
             },
             _ => false,
         }

@@ -268,6 +268,7 @@ impl<'a> Resolver<'a> {
                         ),
                         repr_access_root: None,
                         attributed,
+                        case_attributed: false,
                     });
                     // The export-decl-list twin of the `ExportedItem` push: an
                     // ordinary `let` value (no case, no type-qualified path). Its
