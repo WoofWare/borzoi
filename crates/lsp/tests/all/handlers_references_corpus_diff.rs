@@ -48,9 +48,10 @@ use std::path::{Path, PathBuf};
 
 use borzoi::handlers::references;
 use borzoi::position::{offset_to_position, position_to_offset};
-use borzoi::server::State;
+use borzoi::server::{SERVER_STACK_BYTES, State};
 use borzoi_oracle_harness::manifest::{Manifest, UPDATE_ENV, check};
 use borzoi_oracle_harness::panic_silence::silence_panics_here;
+use borzoi_oracle_harness::stack_probe::on_stack;
 use lsp_types::{
     PartialResultParams, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
     TextDocumentPositionParams, Uri, WorkDoneProgressParams,
@@ -65,29 +66,32 @@ const TARGETS_PER_FILE: usize = 4;
 const SAMPLE: usize = 40;
 
 /// Population and completeness ratchets for the default sample. Measured
-/// 2026-07-19 against the pinned F# corpus (`c3c01c99`): 401 files sampled,
-/// 373 with source targets, 17,580 distinct source targets, 1,228 selected,
-/// 826 answered (672‰), and 330 files with an answer. Floors leave modest
-/// headroom for FCS isolation-check variation; raise them when coverage grows.
+/// 2026-11-15 against the pinned F# corpus (`142fe4e6`, v15.2.101): 432 of
+/// 5,607 files sampled, 406 with source targets, 19,583 distinct source
+/// targets, 1,367 selected, 905 answered (662‰), and 362 files with an answer.
+/// The sample is every 13th file by path, so moving the pin changes which
+/// files it holds and moves every count, whatever the handler does. Floors
+/// leave modest headroom for FCS isolation-check variation and for the host's
+/// path order; raise them when coverage grows.
 const MIN_FILES_WITH_TARGETS: usize = 360;
 const MIN_FILES_ANSWERED: usize = 320;
 const MIN_SOURCE_TARGETS: usize = 17_000;
 const MIN_SELECTED_TARGETS: usize = 1_200;
 const MIN_ANSWERED_PERMILLE: usize = 650;
 
-/// Returned-location and oracle-quality ratchets from the same run: 1,539
-/// locations corroborated by FCS (826 definitions and 713 ordinary uses), with
-/// 136 ranges unobserved in FCS-erroring files. The corroboration denominator
+/// Returned-location and oracle-quality ratchets from the same run: 1,531
+/// locations corroborated by FCS (905 definitions and 626 ordinary uses), with
+/// 118 ranges unobserved in FCS-erroring files. The corroboration denominator
 /// includes alternate binders and divergences as well as omissions.
 const MIN_EXACT_LOCATIONS: usize = 1_500;
 const MIN_DEFINITION_LOCATIONS: usize = 800;
-const MIN_USE_LOCATIONS: usize = 680;
+const MIN_USE_LOCATIONS: usize = 600;
 const MIN_CORROBORATED_PERMILLE: usize = 900;
 
 /// FCS must never contradict us with a different symbol or omit a returned
 /// range from a clean check. Same-name alternate binders are admitted only in
 /// FCS-erroring files, where isolation recovery can bind to an enclosing
-/// same-named declaration; none were measured in the pinned run.
+/// same-named declaration; two were measured in the pinned run.
 const MAX_DIVERGENCES: usize = 0;
 const MAX_ALT_BINDERS: usize = 5;
 const MAX_HANDLER_PANICS: usize = 0;
@@ -644,13 +648,16 @@ fn every_reported_corpus_reference_is_the_cursor_symbol_according_to_fcs() {
     );
 
     let census = parse_fcs_census_jsonl(&invoke_fcs_dump_census(&sample));
-    let mut tally = Tally::default();
-    {
+    // The handler runs on the stack the server gives every request; the test
+    // thread's default is far smaller than what a deep corpus file needs.
+    let tally = on_stack(SERVER_STACK_BYTES, move || {
         let _silence = silence_panics_here();
+        let mut tally = Tally::default();
         for (ordinal, file) in census.iter().enumerate() {
             compare_file(file, ordinal, &mut tally);
         }
-    }
+        tally
+    });
 
     let answered_permille = tally.answered_targets * 1000 / tally.selected_targets.max(1);
     let returned_locations = tally.exact_locations

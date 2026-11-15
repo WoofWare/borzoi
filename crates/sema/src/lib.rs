@@ -76,11 +76,12 @@ pub use qnof::{QualifiedNameOfFile, qualified_names};
 pub use recovery::SyntaxRecovery;
 pub use resolve::{
     ActivePatternShape, CaseKind, DeclineCause, DeclineSite, DeclineTier, DeferredReason,
-    ExportedItem, ExportedItems, ItemId, OpaqueRegion, OpenOpacity, OpenTrace, ProjectFile,
-    ProjectItems, Resolution, ResolutionTrace, ResolvedFile, ResolvedProject, SourceFile,
-    resolve_file, resolve_project, resolve_project_files, resolve_project_files_incremental,
-    resolve_project_files_prefix, resolve_project_files_prefix_incremental,
-    resolve_project_incremental, resolve_project_incremental_with_reuse, signature_partners,
+    ExportedItem, ExportedItems, FieldLabel, ItemId, OpaqueRegion, OpenOpacity, OpenTrace,
+    ProjectFile, ProjectItems, Resolution, ResolutionTrace, ResolvedFile, ResolvedProject,
+    SourceFile, resolve_file, resolve_project, resolve_project_files,
+    resolve_project_files_incremental, resolve_project_files_prefix,
+    resolve_project_files_prefix_incremental, resolve_project_incremental,
+    resolve_project_incremental_with_reuse, signature_partners,
 };
 // The path-labelled fold variants exist only in profiling builds; the LSP calls
 // them (in place of the prefix fold variants) to tag each file's span with its

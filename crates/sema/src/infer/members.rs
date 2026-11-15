@@ -109,12 +109,59 @@ impl<'a> Gen<'a> {
         let mut cur = recv;
         let mut results = Vec::with_capacity(segments.len());
         for seg in segments {
+            self.decide_receiver_by_label(scope, cur, seg);
             let result = self.solver.table.fresh();
             self.has_member(scope, cur, seg, result, MemberAccessKind::Data);
             results.push(result);
             cur = result;
         }
         results
+    }
+
+    /// Decide the receiver `recv` of the label `label` by FCS's record-label
+    /// table, where the receiver's type is not known at the access: FCS's
+    /// member lookup on a type variable finds nothing, so it resolves the
+    /// label to the table's latest record and fixes the receiver to that
+    /// record, freshly instantiated (`ResolveExprDotLongIdent`,
+    /// `FreshenRecdFieldRef`). The resolver answers which record
+    /// ([`ResolvedFile::field_label_under`]); binding the receiver to it is a
+    /// decision ([`Self::decide`]), taken only on a faithful prefix and an
+    /// untainted receiver. The access then wakes on the record like any
+    /// other ([`Self::wake_record_field`]).
+    ///
+    /// Nothing is done where the resolver declines, where the receiver is
+    /// known (FCS looks the label up in that type), or where the record has
+    /// no path inference names it by: the access is then settled as before.
+    fn decide_receiver_by_label(&mut self, scope: &mut Scope, recv: TyVid, label: &SyntaxToken) {
+        let Some(field) = self.facts.resolved.field_label_under(
+            label.text_range(),
+            self.facts.env,
+            &self.facts.ext_scope,
+        ) else {
+            return;
+        };
+        // FCS resolved the segments before this one at their dots: one it
+        // did not resolve there is declined, which ends the prefix, so the
+        // receiver is not mistaken for one FCS knows nothing about.
+        self.settle_access(scope);
+        let tys = self.solver.tys;
+        if !matches!(
+            tys.kind(self.solver.table.resolve(tys.var(recv))),
+            TyKind::Var(_)
+        ) {
+            return;
+        }
+        let Some((path, arity)) = self.facts.project_types.get(&field.record).cloned() else {
+            return;
+        };
+        if arity != field.arity {
+            return;
+        }
+        let args: Vec<Ty> = (0..arity)
+            .map(|_| tys.var(self.solver.table.fresh()))
+            .collect();
+        let record = self.fresh_equal(scope, tys.project(path, args));
+        self.decide(scope, record, recv);
     }
 
     /// Type a **single-candidate instance method call** `recv.Method(args)` (Stage
@@ -710,9 +757,9 @@ impl<'a> Gen<'a> {
     ///
     /// FCS looks a field up by the receiver's type when it knows that type
     /// at the access. When it does not, it resolves the label through the
-    /// record-label environment and fixes the receiver to that record, so a
-    /// receiver inference learns only later is that record too, or FCS
-    /// rejects the program.
+    /// record-label table and fixes the receiver to that record, which
+    /// [`Self::decide_receiver_by_label`] decides before the access is
+    /// generated, so the access then wakes here too.
     pub(super) fn wake_record_field(
         &mut self,
         scope: &mut Scope,

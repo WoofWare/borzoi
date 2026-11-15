@@ -1561,3 +1561,21 @@ fn intrinsic_member_table_agrees_with_the_per_record_scan() {
         "{declined} declined, {named} named"
     );
 }
+
+/// A label on a parameter whose type nothing else gives resolves through the
+/// record-label table, and the parameter takes the record's type: the latest
+/// record declaring the label, as FCS reads it.
+#[test]
+fn label_types_an_unannotated_receiver() {
+    let types = def_types(
+        "module M\ntype R = { B: int }\ntype S = { B: bool; C: int }\nlet f p = p.B\nlet g p = p.C\n",
+    );
+    assert_eq!(
+        types.get("f").map(String::as_str),
+        Some("M.S -> System.Boolean")
+    );
+    assert_eq!(
+        types.get("g").map(String::as_str),
+        Some("M.S -> System.Int32")
+    );
+}
