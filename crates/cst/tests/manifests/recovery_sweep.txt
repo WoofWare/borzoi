@@ -74,7 +74,7 @@ tests/EndToEndBuildTests/BasicProvider/BasicProvider.DesignTime/BasicProvider.Pr
 tests/FSharp.Compiler.ComponentTests/CompilerDirectives/Line.fs@3560 token	outside-damage 33/33/34
 tests/FSharp.Compiler.ComponentTests/CompilerDirectives/Line.fs@4357 member	exact 33/33/34
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/Fsc/Optimize.fs@504 token	outside-damage 7/7/8
-tests/FSharp.Compiler.ComponentTests/CompilerOptions/Fsc/UncoveredOptions.fs@2872 token	outside-damage 8/8/10
+tests/FSharp.Compiler.ComponentTests/CompilerOptions/Fsc/UncoveredOptions.fs@2872 token	exact 8/8/10
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/Fsc/out/out.fs@1181 token	outside-damage 11/11/12
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/Fsc/out/out.fs@1641 member	exact 11/11/12
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/flaterrors/E_MultiLine01.fs@356 token	exact 2/2/2
@@ -120,7 +120,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ExceptionD
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ExplicitObjectConstructors/WithAttribute02.fs@232 token	exact 2/2/3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/FieldMembers/E_StaticField02a.fs@1201 token	outside-damage 3/3/4 beyond-fcs:2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/FieldMembers/FieldMembers.fs@2184 token	exact 13/13/13
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImplicitObjectConstructors/ImplicitObjectConstructors.fs@629 token	outside-damage 5/5/6
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImplicitObjectConstructors/ImplicitObjectConstructors.fs@629 token	exact 5/5/6
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImportDeclarations/openSystem01.fs@81 token	divergent 1/1/2 at:module[0]/Expr@146
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/GenericMethodsOnInterface02.fs@593 token	outside-damage 6/6/7
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/InterfaceSpecificationsAndImplementations.fs@947 token	outside-damage 8/8/10
@@ -137,14 +137,14 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefi
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MethodResolution/OptionalAndOutParameters.fs@195 token	exact 4/4/5
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleAbbreviations/useInsideNamespaceDefExternal_DLL.fs@217 member	exact 4/4/5
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleAbbreviations/useInsideNamespaceDefExternal_DLL.fs@79 token	divergent 2/2/5 at:module[0]/Expr@77
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleDefinitions/AutoOpen01.fs@244 token	outside-damage 3/3/4
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleDefinitions/AutoOpen01.fs@244 token	exact 3/3/4
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleDefinitions/E_ModuleWithExpression02.fs@217 token	exact 0/0/1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleDefinitions/FullyQualify01.fs@434 token	exact 10/10/10
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleDefinitions/ModuleWithExpression02.fs@342 member	exact 2/2/3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleDefinitions/ModuleWithExpression02.fs@358 token	exact 1/1/3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleDefinitions/Production_ExceptionDefinition.fsx@145 token	exact 1/1/3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleDefinitions/W_ModuleAbbreviationWithNamespace01.fs@282 token	exact 4/4/4
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/NamespaceDeclGroups/NamespaceDeclGroups.fs@1730 token	outside-damage 10/10/12
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/NamespaceDeclGroups/NamespaceDeclGroups.fs@1730 token	exact 10/10/12
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/NamespaceDeclGroups/NoWarnOnJustNamespace.fs@148 token	exact 1/1/1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/OperatorNames/AstrSymbOper01.fs@184 token	exact 3/3/3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/StaticLet/SimpleEmptyType.fs@205 token	exact 6/6/6
@@ -273,7 +273,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Types/RecordTypes/E_Interface_I
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/RecordTypes/MutableFields_SampleFromSpec02.fsx@155 token	exact 1/1/2
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/RecordTypes/Overload_ToString.fs@131 token	exact 1/1/2
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/DuplicateBuiltinOperatorDistinctScopes.fs@702 token	outside-damage 2/2/3 beyond-fcs:11
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ExtensionPrecedence.fs@1559 token	outside-damage 24/24/26
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ExtensionPrecedence.fs@1559 token	exact 24/24/26
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/IWSAMsAndSRTPs/testFiles/BasicTests.fs@788 member	exact 21/21/22
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/IWSAMsAndSRTPs/testFiles/BasicTests.fs@918 token	outside-damage 21/21/22
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/IWSAMsAndSRTPs/testFiles/UseSRTPFromIWSAMGenericCode.fs@915 token	exact 16/16/16
@@ -351,7 +351,7 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/TestFunctions/TestFunction22f.fs@
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Tuples/Tuple04.fs@56 token	outside-damage 1/1/2
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Tuples/TupleMonster.fs@124 token	outside-damage 1/1/2
 tests/FSharp.Compiler.ComponentTests/ErrorMessages/ActivePatternArgCountMismatchTest.fs@34444 token	exact 152/152/152
-tests/FSharp.Compiler.ComponentTests/ErrorMessages/InvalidLiteralTests.fs@360 token	outside-damage 4/4/5
+tests/FSharp.Compiler.ComponentTests/ErrorMessages/InvalidLiteralTests.fs@360 token	exact 4/4/5
 tests/FSharp.Compiler.ComponentTests/Globalization/GlobalizationTestCases.fs@965 token	outside-damage 17/17/18
 tests/FSharp.Compiler.ComponentTests/Interop/StaticsInInterfaces.fs@15682 member	exact 16/16/17
 tests/FSharp.Compiler.ComponentTests/Interop/StaticsInInterfaces.fs@3168 token	exact 17/17/17
@@ -396,7 +396,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/StringsAndCharacters/UnicodeString01.fs@161 token	exact 8/8/9
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/SymbolicKeywords/GreaterThanClosedParenthesis01.fs@236 token	exact 4/4/4
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/SymbolicOperators/GreaterThanColon001.fs@225 token	exact 2/2/2
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/SymbolicOperators/GreaterThanDotParen01.fs@346 token	outside-damage 9/9/11
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/SymbolicOperators/GreaterThanDotParen01.fs@346 token	exact 9/9/11
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/SymbolicOperators/QMarkPrecedenceArray.fs@176 token	exact 7/7/7
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalFiltering/HighPrecedenceApplication/BasicCheck02.fs@452 token	outside-damage 6/6/7 beyond-fcs:3
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalFiltering/HighPrecedenceApplication/RangeOperator01.fsx@454 token	exact 17/17/17
@@ -568,7 +568,7 @@ tests/service/data/SyntaxTree/MatchClause/RangeOfBarInMultipleSynMatchClausesInS
 tests/service/data/SyntaxTree/Measure/Constant - 07.fs@18 token	outside-damage 1/1/2
 tests/service/data/SyntaxTree/Member/MemberWithInlineKeyword.fs@37 token	outside-damage 1/1/2
 tests/service/data/SyntaxTree/Member/ReadwritePropertyInSynMemberDefnMemberContainsTheRangeOfTheWithKeyword.fs@144 token	outside-damage 1/1/1
-tests/service/data/SyntaxTree/MemberFlag/SynMemberDefnAbstractSlotHasCorrectKeyword.fs@27 token	outside-damage 1/1/2
+tests/service/data/SyntaxTree/MemberFlag/SynMemberDefnAbstractSlotHasCorrectKeyword.fs@27 token	exact 1/1/2
 tests/service/data/SyntaxTree/ModuleMember/Let 01.fs@21 token	exact 2/2/3
 tests/service/data/SyntaxTree/NestedModule/NestedModuleWithBeginEndAndDecls.fs@50 token	exact 2/2/3
 tests/service/data/SyntaxTree/Nullness/MatchWithTypeCast.fs@36 token	exact 1/1/2
@@ -622,7 +622,7 @@ vsintegration/src/FSharp.LanguageService/FSharpSource.fs@15642 member	exact 27/2
 vsintegration/src/FSharp.LanguageService/Vs.fs@187 token	exact 54/54/56
 vsintegration/src/FSharp.LanguageService/Vs.fs@4198 member	exact 55/55/56
 vsintegration/tests/FSharp.Editor.IntegrationTests/TestData/Debugging/SequencePointIssues.fs@491 member	exact 7/7/8
-vsintegration/tests/FSharp.Editor.IntegrationTests/TestData/Debugging/SequencePointIssues.fs@717 token	outside-damage 7/7/8
+vsintegration/tests/FSharp.Editor.IntegrationTests/TestData/Debugging/SequencePointIssues.fs@717 token	exact 7/7/8
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/FixIndexerAccessLegacyTests.fs@856 token	outside-damage 5/5/7
 vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs@2884 token	outside-damage 25/25/26
 vsintegration/tests/FSharp.Editor.Tests/QuickInfoProviderTests.fs@3308 member	exact 25/25/26

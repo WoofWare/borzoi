@@ -1488,6 +1488,43 @@ impl<'src> Parser<'src> {
         )
     }
 
+    /// Whether the pattern head at the cursor (an identifier or `_`) is
+    /// followed by a `.` that no path segment follows (`e.`, `_.`, `this.`):
+    /// FCS's `pathOp: ident DOT %prec prec_recover` and
+    /// `underscoreLongIdentPat: UNDERSCORE DOT %prec prec_recover` arms, which
+    /// keep the one-segment path and report the missing identifier. Like
+    /// [`Self::pat_head_has_dotted_tail`], the `.` must be the next filtered
+    /// token. An `opName` after it (`x.(+)`) is a path segment, which
+    /// [`Self::peek_dotted_opname_pat_head`] claims.
+    pub(super) fn pat_head_has_trailing_dot(&self) -> bool {
+        matches!(
+            self.next_non_trivia_filtered_after_pos(),
+            Some(FilteredToken::Raw(Token::Dot))
+        ) && matches!(self.nth_significant_raw_at_pos(1), Some(Token::Dot))
+            && !matches!(
+                self.nth_significant_raw_at_pos(2),
+                Some(Token::Ident(_) | Token::QuotedIdent(_))
+            )
+            && self.peek_dotted_opname_pat_head().is_none()
+    }
+
+    /// Emit a one-segment path with a trailing dot (see
+    /// [`Self::pat_head_has_trailing_dot`]) whose head FCS's
+    /// `atomicPatternLongIdent` reads as a variable — a non-uppercase
+    /// identifier, or `_` — as `NAMED_PAT > [IDENT_TOK, DOT_TOK]`, FCS's
+    /// `SynPat.Named`, reporting the missing identifier at the dot's end.
+    pub(super) fn emit_trailing_dot_named_pat(&mut self) {
+        self.builder.start_node(SyntaxKind::NAMED_PAT);
+        self.bump_into(SyntaxKind::IDENT_TOK);
+        let dot_end = self.peek().map_or(self.source.len(), |(_, s)| s.end);
+        self.bump_into(SyntaxKind::DOT_TOK);
+        self.push_in_place_recovery_error(ParseError {
+            message: "expected an identifier after `.`".to_string(),
+            span: dot_end..dot_end,
+        });
+        self.builder.finish_node(); // NAMED_PAT
+    }
+
     /// `Some(kind)` when the cursor is at a dotted pattern path whose *final*
     /// segment is an `opName` — an operator value (`A.B.(+)`, the spaced
     /// `A.B.( * )`, the glued `A.B.(*)`) or an active-pattern name
@@ -1877,6 +1914,15 @@ impl<'src> Parser<'src> {
                 self.emit_rooted_long_ident_pat();
                 true
             }
+            Some((Ok(FilteredToken::Raw(Token::Underscore)), _))
+                if self.pat_head_has_trailing_dot() =>
+            {
+                // `_.` with nothing after the dot — FCS's `underscoreLongIdentPat:
+                // UNDERSCORE DOT %prec prec_recover`, a one-segment path, which
+                // `atomicPatternLongIdent` reads as the variable `_`.
+                self.emit_trailing_dot_named_pat();
+                true
+            }
             Some((Ok(FilteredToken::Raw(Token::Underscore)), _)) => {
                 // A bare `_` is the wildcard.
                 self.builder.start_node(SyntaxKind::WILDCARD_PAT);
@@ -1919,9 +1965,14 @@ impl<'src> Parser<'src> {
                 // `LONG_IDENT_PAT` regardless of case (FCS does the same —
                 // function-form is `applPat`, not `atomicPattern`), so this
                 // classifier only fires at truly-atomic positions.
+                // A lowercase ident with a trailing dot (`e.`, FCS's `pathOp: ident
+                // DOT %prec prec_recover`) is still a one-segment path, so a
+                // `NAMED_PAT` that keeps the dot.
                 let text = &self.source[span.clone()];
                 if self.pat_head_has_dotted_tail() || ident_text_leads_uppercase(text) {
                     self.emit_rooted_long_ident_pat();
+                } else if self.pat_head_has_trailing_dot() {
+                    self.emit_trailing_dot_named_pat();
                 } else {
                     self.builder.start_node(SyntaxKind::NAMED_PAT);
                     self.bump_into(SyntaxKind::IDENT_TOK);

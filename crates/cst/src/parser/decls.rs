@@ -192,7 +192,7 @@ fn debris_brackets(
 
 /// Whether `t` begins a module-level declaration, which ends a stray token's
 /// debris outside any bracket (see [`Parser::consume_stray_debris`]).
-fn begins_module_decl(t: &Token<'_>) -> bool {
+pub(super) fn begins_module_decl(t: &Token<'_>) -> bool {
     matches!(
         t,
         Token::Let
@@ -926,7 +926,7 @@ impl<'src> Parser<'src> {
                     self.bump_into(SyntaxKind::ERROR);
                     continue;
                 }
-                self.parse_module_let();
+                let unseparated_next = self.parse_module_let();
                 // A trailing `;` inside the binding's `typedSequentialExpr` RHS
                 // (`let x = a;`) is absorbed by the RHS block, so it never reaches
                 // the loop's `Semi` arm. The following decl is still separated the
@@ -942,7 +942,7 @@ impl<'src> Parser<'src> {
                 // directly after the `in` yields a `SynModuleDecl.Expr(LetOrUse)`,
                 // while an `in` followed by a dedented sibling stays a flat
                 // `SynModuleDecl.Let` with the `in` claimed as a bare terminator.
-                needs_sep = true;
+                needs_sep = !unseparated_next;
                 seen_decl = true;
                 seen_non_hash_decl = true;
                 continue;

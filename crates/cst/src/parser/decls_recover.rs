@@ -198,6 +198,148 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Consume the rest of an unfinished member as `ERROR`, the tokens FCS's
+    /// error recovery discards after a member's `recover` arm (an abstract
+    /// slot that stops after its keywords, name or `:`): everything up to the
+    /// next layout token, `;`, `;;`, closer, or member or class-binding
+    /// keyword outside the offside blocks the rest itself opens. Layout tokens are consumed zero-width, like
+    /// [`Self::skip_offside_block_as_error`]'s. A no-op when the member
+    /// already ends at the cursor.
+    ///
+    /// Only the rest's own `OBLOCKBEGIN`s can hide a layout token, since
+    /// LexFilter closes each with an `OBLOCKEND`. A bracket or an `OWITH` is
+    /// counted only to tell its own closer (`)`, `OEND`) from the enclosing
+    /// construct's (`class abstract end`, an object expression's `OEND`):
+    /// LexFilter may swallow a closer (`abstract (x)⏎` leaves no `)` in the
+    /// filtered stream) or emit none (`abstract P = match x with⏎` leaves its
+    /// `with` open), and one counted open would run the skip past the
+    /// member's end and the type's.
+    pub(super) fn skip_unfinished_member_rest(&mut self) {
+        let mut blocks = 0u32;
+        let mut brackets = 0u32;
+        let mut withs = 0u32;
+        // Whether the rest has crossed a layout token or an `OWITH`, after
+        // which the lex filter's contexts no longer frame a next member.
+        let mut crossed_layout = false;
+        while let Some((res, _)) = self.peek() {
+            // A closer LexFilter swallowed is on the raw stream only: one of
+            // the rest's own brackets, or a stray one on the member's line
+            // (`abstract)`), is taken with the rest, or it is left pending for
+            // whatever follows the member.
+            if (brackets > 0 || !crossed_layout)
+                && let Some((Token::RParen | Token::RBrace, span)) =
+                    self.next_non_trivia_raw_at_pos_with_span()
+                && !self.filtered_stream_carries(span.start)
+            {
+                self.bump_swallowed_closer(
+                    SyntaxKind::ERROR,
+                    |t| matches!(t, Token::RParen | Token::RBrace),
+                    ")",
+                    "an unfinished member",
+                );
+                brackets = brackets.saturating_sub(1);
+                continue;
+            }
+            match res {
+                Ok(FilteredToken::Virtual(Virtual::BlockBegin)) => blocks += 1,
+                Ok(FilteredToken::Virtual(Virtual::BlockEnd)) if blocks > 0 => blocks -= 1,
+                Ok(FilteredToken::Virtual(Virtual::With)) => withs += 1,
+                Ok(FilteredToken::Virtual(Virtual::End)) if blocks > 0 || withs > 0 => {
+                    withs = withs.saturating_sub(1);
+                }
+                Ok(FilteredToken::Virtual(_)) if self.parked_on_layout_virtual() => {
+                    if blocks == 0 {
+                        return;
+                    }
+                }
+                Ok(FilteredToken::Raw(Token::Semi | Token::SemiSemi))
+                    if blocks == 0 && brackets == 0 =>
+                {
+                    return;
+                }
+                // Attribute lists heading the next member, on the same line:
+                // the member begins at its attributes.
+                Ok(FilteredToken::Raw(Token::LBrackLess))
+                    if brackets == 0
+                        && !crossed_layout
+                        && self.classify_object_model_item_from_raw().is_some() =>
+                {
+                    return;
+                }
+                // The next member's or class binding's keyword, on the same line: FCS's error
+                // recovery shifts it as the start of the next member. After a
+                // bracket, a layout token or a `with` of the rest's, the lex
+                // filter's contexts around the member are the rest's, not the
+                // type body's, so the rest runs on to the member's end.
+                Ok(FilteredToken::Raw(
+                    Token::Member
+                    | Token::Abstract
+                    | Token::Override
+                    | Token::Default
+                    | Token::Static
+                    | Token::Val
+                    | Token::New
+                    | Token::Inherit
+                    | Token::Let
+                    | Token::Use
+                    | Token::Do,
+                ))
+                | Ok(FilteredToken::Virtual(
+                    Virtual::InterfaceMember | Virtual::Let | Virtual::Do,
+                )) if brackets == 0 && !crossed_layout => {
+                    return;
+                }
+                Ok(FilteredToken::Raw(
+                    Token::LParen
+                    | Token::LBrack
+                    | Token::LBrackBar
+                    | Token::LBrackLess
+                    | Token::LBrace
+                    | Token::LBraceBar
+                    | Token::LQuote
+                    | Token::LQuoteRaw
+                    | Token::Begin,
+                )) => brackets += 1,
+                Ok(FilteredToken::Raw(
+                    Token::RParen
+                    | Token::RBrack
+                    | Token::BarRBrack
+                    | Token::GreaterRBrack
+                    | Token::RBrace
+                    | Token::BarRBrace
+                    | Token::RQuote
+                    | Token::RQuoteDot
+                    | Token::RQuoteRaw
+                    | Token::RQuoteRawDot
+                    | Token::End,
+                )) => {
+                    if brackets == 0 {
+                        if blocks == 0 {
+                            return;
+                        }
+                    } else {
+                        brackets -= 1;
+                    }
+                }
+                _ => {}
+            }
+            if self.parked_on_layout_virtual()
+                || matches!(
+                    self.peek(),
+                    Some((Ok(FilteredToken::Virtual(Virtual::With)), _))
+                )
+            {
+                crossed_layout = true;
+            }
+            if self.parked_on_layout_virtual() {
+                self.builder.token(SyntaxKind::ERROR, "");
+                self.filtered.advance();
+            } else {
+                self.bump_into(SyntaxKind::ERROR);
+            }
+        }
+    }
+
     /// Consume the remainder of the *current* offside block as `ERROR`, stopping
     /// *before* the matching (depth-0) `OBLOCKEND` (left for the caller's
     /// close-drain). Unlike [`Self::skip_offside_block_as_error`], the caller is

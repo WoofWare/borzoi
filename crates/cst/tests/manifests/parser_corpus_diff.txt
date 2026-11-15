@@ -320,13 +320,13 @@ tests/fsharp/typecheck/sigs/neg70.fsx	both-reject outside-damage 51/51/52
 tests/fsharp/typecheck/sigs/neg71.fsx	both-reject divergent 1/1/1 beyond-fcs:46 at:Module@0
 tests/fsharp/typecheck/sigs/neg72.fsx	both-reject outside-damage 51/51/52
 tests/fsharp/typecheck/sigs/neg73.fsx	both-reject outside-damage 51/51/52
-tests/fsharp/typecheck/sigs/neg74.fsx	both-reject outside-damage 50/50/52
-tests/fsharp/typecheck/sigs/neg75.fsx	both-reject outside-damage 51/51/52
-tests/fsharp/typecheck/sigs/neg76.fsx	both-reject outside-damage 51/51/52
+tests/fsharp/typecheck/sigs/neg74.fsx	both-reject exact 50/50/52
+tests/fsharp/typecheck/sigs/neg75.fsx	both-reject exact 51/51/52
+tests/fsharp/typecheck/sigs/neg76.fsx	both-reject exact 51/51/52
 tests/fsharp/typecheck/sigs/neg77.fsx	both-reject outside-damage 51/51/52
 tests/fsharp/typecheck/sigs/neg79.fsx	both-reject outside-damage 15/15/16
 tests/fsharp/typecheck/sigs/neg80.fsx	both-reject exact 15/15/16
-tests/fsharp/typecheck/sigs/neg81.fsx	both-reject outside-damage 2/2/4
+tests/fsharp/typecheck/sigs/neg81.fsx	both-reject exact 2/2/4
 tests/fsharp/typecheck/sigs/neg82.fsx	both-reject divergent 7/7/9 at:module[0]/Expr@3153
 tests/fsharp/typecheck/sigs/neg83.fsx	both-reject exact 1/1/2
 tests/fsharp/typecheck/sigs/neg84.fsx	both-reject exact 1/1/2
@@ -342,15 +342,15 @@ tests/service/data/SyntaxTree/Expression/AnonymousRecords-02.fs	both-reject exac
 tests/service/data/SyntaxTree/Expression/AnonymousRecords-03.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Expression/AnonymousRecords-04.fs	both-reject exact 0/0/2
 tests/service/data/SyntaxTree/Expression/AnonymousRecords-05.fs	both-reject exact 1/1/2
-tests/service/data/SyntaxTree/Expression/Binary - Eq 03.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/Binary - Eq 04.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/Binary - Eq 05.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/Binary - Eq 06.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Expression/Binary - Eq 03.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Expression/Binary - Eq 04.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Expression/Binary - Eq 05.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Expression/Binary - Eq 06.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Expression/Binary - Eq 07.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/Binary - Plus 02.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/Binary - Plus 03.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/Binary - Plus 04.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/Binary - Plus 05.fs	both-reject outside-damage 1/1/3
+tests/service/data/SyntaxTree/Expression/Binary - Plus 02.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Expression/Binary - Plus 03.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Expression/Binary - Plus 04.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Expression/Binary - Plus 05.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Expression/Do 02.fs	range-divergent
 tests/service/data/SyntaxTree/Expression/Do 03.fs	both-reject outside-damage 1/1/3
 tests/service/data/SyntaxTree/Expression/DotLambda - _ Recovery - Casts.fsx	both-reject outside-damage 1/1/4
@@ -374,17 +374,17 @@ tests/service/data/SyntaxTree/Expression/If 05.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Expression/If 06.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Expression/If 07.fs	both-reject exact 0/0/2
 tests/service/data/SyntaxTree/Expression/If 10.fs	both-reject exact 1/1/3
-tests/service/data/SyntaxTree/Expression/If 11.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/If 12.fs	both-reject outside-damage 1/1/3
-tests/service/data/SyntaxTree/Expression/If 13.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/If 14.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Expression/If 11.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Expression/If 12.fs	both-reject exact 1/1/3
+tests/service/data/SyntaxTree/Expression/If 13.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Expression/If 14.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Expression/Lambda - Missing expr 01.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Expression/Lambda - Missing expr 02.fs	both-reject exact 0/0/2
 tests/service/data/SyntaxTree/Expression/Lazy 03.fs	both-reject outside-damage 1/1/3
 tests/service/data/SyntaxTree/Expression/Let 02.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Expression/List - Comprehension 02.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/Match - When 02.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Expression/Match - When 03.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Expression/Match - When 02.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Expression/Match - When 03.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Expression/Match - When 04.fs	both-reject exact 2/2/3
 tests/service/data/SyntaxTree/Expression/Object - Class 04.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Expression/Object - Class 05.fs	both-reject outside-damage 2/2/3
@@ -395,7 +395,7 @@ tests/service/data/SyntaxTree/Expression/Object - Class 09.fs	both-reject outsid
 tests/service/data/SyntaxTree/Expression/Object - Class 10.fs	both-reject exact 2/2/3
 tests/service/data/SyntaxTree/Expression/Object - Class 11.fs	both-reject exact 2/2/3
 tests/service/data/SyntaxTree/Expression/Object - Class 12.fs	both-reject exact 2/2/3
-tests/service/data/SyntaxTree/Expression/Object - Class 13.fs	both-reject outside-damage 2/2/3
+tests/service/data/SyntaxTree/Expression/Object - Class 13.fs	both-reject exact 2/2/3
 tests/service/data/SyntaxTree/Expression/Object - Class 14.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Expression/Object - Class 15.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Expression/Rarrow 01.fs	both-reject outside-damage 0/0/2
@@ -504,8 +504,8 @@ tests/service/data/SyntaxTree/Member/Abstract - Property 04.fs	both-reject exact
 tests/service/data/SyntaxTree/Member/Abstract - Property 05.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Member/Abstract - Property 06.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Member/Abstract - Property 07.fs	both-reject exact 1/1/3
-tests/service/data/SyntaxTree/Member/Abstract - Property 08.fs	both-reject outside-damage 1/1/3
-tests/service/data/SyntaxTree/Member/Abstract - Property 09.fs	both-reject outside-damage 1/1/3
+tests/service/data/SyntaxTree/Member/Abstract - Property 08.fs	both-reject exact 1/1/3
+tests/service/data/SyntaxTree/Member/Abstract - Property 09.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Member/Auto property 02.fs	both-reject outside-damage 1/1/3
 tests/service/data/SyntaxTree/Member/Auto property 03.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Member/Auto property 04.fs	we-reject-fcs-accepts outside-damage 2/2/3
@@ -558,14 +558,14 @@ tests/service/data/SyntaxTree/Member/Member - Attributes 01.fs	both-reject outsi
 tests/service/data/SyntaxTree/Member/Member - Param - Missing type 01.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Member/Member 01.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/Member/Member 02.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Member/Member 03.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Member/Member 03.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Member/Member 04.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Member/Member 05.fs	both-reject exact 1/1/2
-tests/service/data/SyntaxTree/Member/Member 07.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Member/Member 07.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Member/Member 08.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Member/Member 09.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/Member/Member 10.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Member/Member 11.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Member/Member 11.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Member/Member 12.fs	both-reject outside-damage 1/1/3
 tests/service/data/SyntaxTree/Member/Member 13.fs	both-reject outside-damage 2/2/4
 tests/service/data/SyntaxTree/Member/MemberMispelledToMeme.fs	both-reject outside-damage 1/1/2

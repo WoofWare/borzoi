@@ -574,6 +574,20 @@ impl<'src> Parser<'src> {
         self.builder.finish_node(); // node_kind
     }
 
+    /// Whether the cursor is at a `|` followed by the start of a clause
+    /// pattern (an attribute list included), so that a clause ending there
+    /// leaves the next one to the clause loop.
+    fn at_bar_before_clause_pattern(&self) -> bool {
+        if !matches!(self.peek(), Some((Ok(FilteredToken::Raw(Token::Bar)), _))) {
+            return false;
+        }
+        matches!(
+            self.filtered.tokens().get(self.filtered.pos() + 1),
+            Some((Ok(FilteredToken::Raw(t)), _))
+                if raw_starts_pat_element(&t) || matches!(t, Token::LBrackLess)
+        )
+    }
+
     /// Parse the `|`-separated clause list shared by `match … with …` and
     /// `function …` (FCS's `patternClauses`, `pars.fsy:4958`). On entry the
     /// cursor sits at the first clause's optional leading `|` (or its
@@ -653,6 +667,7 @@ impl<'src> Parser<'src> {
             // relabel it); the guard is a normal expression that `parse_expr`
             // reads up to the clause `->` (`->` is consumed only by the type
             // parser and the fun/match parsers, never the expr climber).
+            let mut guard_missing = false;
             if matches!(self.peek(), Some((Ok(FilteredToken::Raw(Token::When)), _))) {
                 self.bump_into(SyntaxKind::WHEN_TOK);
                 if self.peek_is_expr_start() {
@@ -684,10 +699,11 @@ impl<'src> Parser<'src> {
                         .peek()
                         .map(|(_, s)| s.clone())
                         .unwrap_or_else(|| self.source.len()..self.source.len());
-                    self.errors.push(ParseError {
+                    self.push_in_place_recovery_error(ParseError {
                         message: "expected guard expression after `when`".to_string(),
                         span,
                     });
+                    guard_missing = true;
                 }
             }
 
@@ -698,6 +714,15 @@ impl<'src> Parser<'src> {
             ) {
                 self.bump_into(SyntaxKind::RARROW_TOK);
             } else {
+                // FCS's `parenPattern WHEN barCanBeRightBeforeNull
+                // patternClauses` arm: a `when` with neither a guard nor a
+                // result before the next clause's `|` ends its clause (no
+                // guard, an `ArbitraryAfterError` result), and the clauses go
+                // on. A `|` that starts no clause ends the list, as below.
+                if guard_missing && self.at_bar_before_clause_pattern() {
+                    self.builder.finish_node(); // MATCH_CLAUSE
+                    continue;
+                }
                 let span = self
                     .peek()
                     .map(|(_, s)| s.clone())

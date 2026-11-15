@@ -1,0 +1,667 @@
+# Generated; do not edit by hand. One line per graded item, sorted.
+# Regenerate with:
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-cst --test all parser_diff_unfinished::recover_followers
+"module M\nlet x = (a *) in module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = (a *) in module N = let n = 1\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = (a *) in module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@26
+"module M\nlet x = (a *) in module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@26/Let@37
+"module M\nlet x = (a *) in type S = int\nlet z = 2\n" | divergent
+"module M\nlet x = (a *) in type S = int\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = (a *) in type S = int\nlet z = 2\n" | loses module[0]/Types@26
+"module M\nlet x = (a *) in\n    module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = (a *) in\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = (a *) in\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@30
+"module M\nlet x = (a *) in\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@30/Let@41
+"module M\nlet x = (a *) in\n    type S = int\nlet z = 2\n" | divergent
+"module M\nlet x = (a *) in\n    type S = int\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = (a *) in\n    type S = int\nlet z = 2\n" | loses module[0]/Types@30
+"module M\nlet x = (a *) in\n  module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = (a *) in\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = (a *) in\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@28
+"module M\nlet x = (a *) in\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@28/Let@39
+"module M\nlet x = (a *) in\n  type S = int\nlet z = 2\n" | divergent
+"module M\nlet x = (a *) in\n  type S = int\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = (a *) in\n  type S = int\nlet z = 2\n" | loses module[0]/Types@28
+"module M\nlet x = (a *) in\n module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = (a *) in\n module N = let n = 1\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = (a *) in\n module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@27
+"module M\nlet x = (a *) in\n module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@27/Let@38
+"module M\nlet x = (a *) in\n type S = int\nlet z = 2\n" | divergent
+"module M\nlet x = (a *) in\n type S = int\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = (a *) in\n type S = int\nlet z = 2\n" | loses module[0]/Types@27
+"module M\nlet x = (a *) module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@23
+"module M\nlet x = (a *) module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@23/Let@34
+"module M\nlet x = (a *) type S = int\nlet z = 2\n" | loses module[0]/Types@23
+"module M\nlet x = (a *)\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = (a *)\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = (a *)\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = a * in module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = a * in module N = let n = 1\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = a * in module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@24
+"module M\nlet x = a * in module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@24/Let@35
+"module M\nlet x = a * in type S = int\nlet z = 2\n" | divergent
+"module M\nlet x = a * in type S = int\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = a * in type S = int\nlet z = 2\n" | loses module[0]/Types@24
+"module M\nlet x = a * in\n    module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = a * in\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = a * in\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@28
+"module M\nlet x = a * in\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@28/Let@39
+"module M\nlet x = a * in\n    type S = int\nlet z = 2\n" | divergent
+"module M\nlet x = a * in\n    type S = int\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = a * in\n    type S = int\nlet z = 2\n" | loses module[0]/Types@28
+"module M\nlet x = a * in\n  module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = a * in\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = a * in\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@26
+"module M\nlet x = a * in\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@26/Let@37
+"module M\nlet x = a * in\n  type S = int\nlet z = 2\n" | divergent
+"module M\nlet x = a * in\n  type S = int\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = a * in\n  type S = int\nlet z = 2\n" | loses module[0]/Types@26
+"module M\nlet x = a * in\n module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = a * in\n module N = let n = 1\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = a * in\n module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@25
+"module M\nlet x = a * in\n module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@25/Let@36
+"module M\nlet x = a * in\n type S = int\nlet z = 2\n" | divergent
+"module M\nlet x = a * in\n type S = int\nlet z = 2\n" | loses module[0]/Let@9
+"module M\nlet x = a * in\n type S = int\nlet z = 2\n" | loses module[0]/Types@25
+"module M\nlet x = a * module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@21
+"module M\nlet x = a * module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@21/Let@32
+"module M\nlet x = a * type S = int\nlet z = 2\n" | loses module[0]/Types@21
+"module M\nlet x = a *\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = a *\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = a *\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = a module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@19
+"module M\nlet x = a module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@19/Let@30
+"module M\nlet x = a type S = int\nlet z = 2\n" | loses module[0]/Types@19
+"module M\nlet x = a\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = a\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = a\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = f (a *) b module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@27
+"module M\nlet x = f (a *) b module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@27/Let@38
+"module M\nlet x = f (a *) b type S = int\nlet z = 2\n" | loses module[0]/Types@27
+"module M\nlet x = f (a *) b\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = f (a *) b\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = f (a *) b\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = function | _ when | y -> () then\n    [<A>] let q = 1\nlet z = 2\n" | loses module[0]/Let@54
+"module M\nlet x = function | _ when | y -> () then\n    [<A>] type S = int\nlet z = 2\n" | loses module[0]/Types@54
+"module M\nlet x = function | _ when | y -> () then\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = function | _ when | y -> () then\n    exception E\nlet z = 2\n" | loses module[0]/Exception@54
+"module M\nlet x = function | _ when | y -> () then\n    let y = 1\nlet z = 2\n" | loses module[0]/Let@54
+"module M\nlet x = function | _ when | y -> () then\n    module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = function | _ when | y -> () then\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@54
+"module M\nlet x = function | _ when | y -> () then\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@54/Let@65
+"module M\nlet x = function | _ when | y -> () then\n    open System\nlet z = 2\n" | loses module[0]/Open@54
+"module M\nlet x = function | _ when | y -> () then\n    type S = int\nlet z = 2\n" | loses module[0]/Types@54
+"module M\nlet x = function | _ when | y -> () then\n  [<A>] let q = 1\nlet z = 2\n" | loses module[0]/Let@52
+"module M\nlet x = function | _ when | y -> () then\n  [<A>] type S = int\nlet z = 2\n" | loses module[0]/Types@52
+"module M\nlet x = function | _ when | y -> () then\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = function | _ when | y -> () then\n  exception E\nlet z = 2\n" | loses module[0]/Exception@52
+"module M\nlet x = function | _ when | y -> () then\n  let y = 1\nlet z = 2\n" | loses module[0]/Let@52
+"module M\nlet x = function | _ when | y -> () then\n  module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = function | _ when | y -> () then\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@52
+"module M\nlet x = function | _ when | y -> () then\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@52/Let@63
+"module M\nlet x = function | _ when | y -> () then\n  open System\nlet z = 2\n" | loses module[0]/Open@52
+"module M\nlet x = function | _ when | y -> () then\n  type S = int\nlet z = 2\n" | loses module[0]/Types@52
+"module M\nlet x = function | _ when | y -> () then\n [<A>] let q = 1\nlet z = 2\n" | loses module[0]/Let@51
+"module M\nlet x = function | _ when | y -> () then\n [<A>] type S = int\nlet z = 2\n" | loses module[0]/Types@51
+"module M\nlet x = function | _ when | y -> () then\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = function | _ when | y -> () then\n exception E\nlet z = 2\n" | loses module[0]/Exception@51
+"module M\nlet x = function | _ when | y -> () then\n let y = 1\nlet z = 2\n" | loses module[0]/Let@51
+"module M\nlet x = function | _ when | y -> () then\n module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = function | _ when | y -> () then\n module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@51
+"module M\nlet x = function | _ when | y -> () then\n module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@51/Let@62
+"module M\nlet x = function | _ when | y -> () then\n open System\nlet z = 2\n" | loses module[0]/Open@51
+"module M\nlet x = function | _ when | y -> () then\n type S = int\nlet z = 2\n" | loses module[0]/Types@51
+"module M\nlet x = function | _ when | y -> ()\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = function | _ when | y -> ()\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = function | _ when | y -> ()\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = if a * then 1 else 2 [<A>] type S = int\nlet z = 2\n" | loses module[0]/Types@44
+"module M\nlet x = if a * then 1 else 2\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = if a * then 1 else 2\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = if a * then 1 else 2\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = if a * then [<A>] type S = int\nlet z = 2\n" | loses module[0]/Types@35
+"module M\nlet x = if a * then\n    [<A>] let q = 1\nlet z = 2\n" | loses module[0]/Let@33
+"module M\nlet x = if a * then\n    [<A>] type S = int\nlet z = 2\n" | loses module[0]/Types@33
+"module M\nlet x = if a * then\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = if a * then\n    exception E\nlet z = 2\n" | loses module[0]/Exception@33
+"module M\nlet x = if a * then\n    let y = 1\nlet z = 2\n" | loses module[0]/Let@33
+"module M\nlet x = if a * then\n    module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = if a * then\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@33
+"module M\nlet x = if a * then\n    module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@33/Let@44
+"module M\nlet x = if a * then\n    open System\nlet z = 2\n" | loses module[0]/Open@33
+"module M\nlet x = if a * then\n    type S = int\nlet z = 2\n" | loses module[0]/Types@33
+"module M\nlet x = if a * then\n  [<A>] let q = 1\nlet z = 2\n" | loses module[0]/Let@31
+"module M\nlet x = if a * then\n  [<A>] type S = int\nlet z = 2\n" | loses module[0]/Types@31
+"module M\nlet x = if a * then\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = if a * then\n  exception E\nlet z = 2\n" | loses module[0]/Exception@31
+"module M\nlet x = if a * then\n  let y = 1\nlet z = 2\n" | loses module[0]/Let@31
+"module M\nlet x = if a * then\n  module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = if a * then\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@31
+"module M\nlet x = if a * then\n  module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@31/Let@42
+"module M\nlet x = if a * then\n  open System\nlet z = 2\n" | loses module[0]/Open@31
+"module M\nlet x = if a * then\n  type S = int\nlet z = 2\n" | loses module[0]/Types@31
+"module M\nlet x = if a * then\n [<A>] let q = 1\nlet z = 2\n" | loses module[0]/Let@30
+"module M\nlet x = if a * then\n [<A>] type S = int\nlet z = 2\n" | loses module[0]/Types@30
+"module M\nlet x = if a * then\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = if a * then\n exception E\nlet z = 2\n" | loses module[0]/Exception@30
+"module M\nlet x = if a * then\n let y = 1\nlet z = 2\n" | loses module[0]/Let@30
+"module M\nlet x = if a * then\n module N = let n = 1\nlet z = 2\n" | divergent
+"module M\nlet x = if a * then\n module N = let n = 1\nlet z = 2\n" | loses module[0]/NestedModule@30
+"module M\nlet x = if a * then\n module N = let n = 1\nlet z = 2\n" | loses module[0]/nested@30/Let@41
+"module M\nlet x = if a * then\n open System\nlet z = 2\n" | loses module[0]/Open@30
+"module M\nlet x = if a * then\n type S = int\nlet z = 2\n" | loses module[0]/Types@30
+"module M\nlet x = match a with | b when -> ()\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = match a with | b when -> ()\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = match a with | b when -> ()\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = match a with | b. -> ()\n    do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = match a with | b. -> ()\n  do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nlet x = match a with | b. -> ()\n do ()\nlet z = 2\n" | loses module[0]/Expr@9
+"module M\nmodule A =\n    let x = (a *) [<A>] type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = (a *) [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@61
+"module M\nmodule A =\n    let x = (a *) in [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@61
+"module M\nmodule A =\n    let x = (a *) in [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@71
+"module M\nmodule A =\n    let x = (a *) in module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = (a *) in module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = (a *) in module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@66
+"module M\nmodule A =\n    let x = (a *) in module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@41
+"module M\nmodule A =\n    let x = (a *) in module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@41/Let@52
+"module M\nmodule A =\n    let x = (a *) in type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = (a *) in type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = (a *) in type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@58
+"module M\nmodule A =\n    let x = (a *) in type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@41
+"module M\nmodule A =\n    let x = (a *) in\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@69
+"module M\nmodule A =\n    let x = (a *) in\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@79
+"module M\nmodule A =\n    let x = (a *) in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = (a *) in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = (a *) in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@74
+"module M\nmodule A =\n    let x = (a *) in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@49
+"module M\nmodule A =\n    let x = (a *) in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@49/Let@60
+"module M\nmodule A =\n    let x = (a *) in\n        type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = (a *) in\n        type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = (a *) in\n        type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@66
+"module M\nmodule A =\n    let x = (a *) in\n        type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@49
+"module M\nmodule A =\n    let x = (a *) in\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@67
+"module M\nmodule A =\n    let x = (a *) in\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@77
+"module M\nmodule A =\n    let x = (a *) in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = (a *) in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = (a *) in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@72
+"module M\nmodule A =\n    let x = (a *) in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@47
+"module M\nmodule A =\n    let x = (a *) in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@47/Let@58
+"module M\nmodule A =\n    let x = (a *) in\n      type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = (a *) in\n      type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = (a *) in\n      type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@64
+"module M\nmodule A =\n    let x = (a *) in\n      type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@47
+"module M\nmodule A =\n    let x = (a *) in\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@66
+"module M\nmodule A =\n    let x = (a *) in\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@76
+"module M\nmodule A =\n    let x = (a *) in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = (a *) in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = (a *) in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@71
+"module M\nmodule A =\n    let x = (a *) in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@46
+"module M\nmodule A =\n    let x = (a *) in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@46/Let@57
+"module M\nmodule A =\n    let x = (a *) in\n     type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = (a *) in\n     type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = (a *) in\n     type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@63
+"module M\nmodule A =\n    let x = (a *) in\n     type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@46
+"module M\nmodule A =\n    let x = (a *) in\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@65
+"module M\nmodule A =\n    let x = (a *) in\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@75
+"module M\nmodule A =\n    let x = (a *) module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@38
+"module M\nmodule A =\n    let x = (a *) module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@38/Let@49
+"module M\nmodule A =\n    let x = (a *) type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@38
+"module M\nmodule A =\n    let x = (a *)\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@76
+"module M\nmodule A =\n    let x = (a *)\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = (a *)\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@70
+"module M\nmodule A =\n    let x = (a *)\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@74
+"module M\nmodule A =\n    let x = (a *)\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = (a *)\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@68
+"module M\nmodule A =\n    let x = (a *)\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@73
+"module M\nmodule A =\n    let x = (a *)\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = (a *)\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@67
+"module M\nmodule A =\n    let x = (a *)\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@62
+"module M\nmodule A =\n    let x = (a *)\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@72
+"module M\nmodule A =\n    let x = a * [<A>] type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a * [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@59
+"module M\nmodule A =\n    let x = a * in [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@59
+"module M\nmodule A =\n    let x = a * in [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@69
+"module M\nmodule A =\n    let x = a * in module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a * in module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = a * in module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@64
+"module M\nmodule A =\n    let x = a * in module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@39
+"module M\nmodule A =\n    let x = a * in module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@39/Let@50
+"module M\nmodule A =\n    let x = a * in type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a * in type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = a * in type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@56
+"module M\nmodule A =\n    let x = a * in type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@39
+"module M\nmodule A =\n    let x = a * in\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@67
+"module M\nmodule A =\n    let x = a * in\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@77
+"module M\nmodule A =\n    let x = a * in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a * in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = a * in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@72
+"module M\nmodule A =\n    let x = a * in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@47
+"module M\nmodule A =\n    let x = a * in\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@47/Let@58
+"module M\nmodule A =\n    let x = a * in\n        type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a * in\n        type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = a * in\n        type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@64
+"module M\nmodule A =\n    let x = a * in\n        type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@47
+"module M\nmodule A =\n    let x = a * in\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@65
+"module M\nmodule A =\n    let x = a * in\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@75
+"module M\nmodule A =\n    let x = a * in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a * in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = a * in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@70
+"module M\nmodule A =\n    let x = a * in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@45
+"module M\nmodule A =\n    let x = a * in\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@45/Let@56
+"module M\nmodule A =\n    let x = a * in\n      type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a * in\n      type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = a * in\n      type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@62
+"module M\nmodule A =\n    let x = a * in\n      type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@45
+"module M\nmodule A =\n    let x = a * in\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@64
+"module M\nmodule A =\n    let x = a * in\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@74
+"module M\nmodule A =\n    let x = a * in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a * in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = a * in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@69
+"module M\nmodule A =\n    let x = a * in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@44
+"module M\nmodule A =\n    let x = a * in\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@44/Let@55
+"module M\nmodule A =\n    let x = a * in\n     type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a * in\n     type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@24
+"module M\nmodule A =\n    let x = a * in\n     type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@61
+"module M\nmodule A =\n    let x = a * in\n     type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@44
+"module M\nmodule A =\n    let x = a * in\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@63
+"module M\nmodule A =\n    let x = a * in\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@73
+"module M\nmodule A =\n    let x = a * let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@60
+"module M\nmodule A =\n    let x = a * module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@36
+"module M\nmodule A =\n    let x = a * module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@36/Let@47
+"module M\nmodule A =\n    let x = a * type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@36
+"module M\nmodule A =\n    let x = a *\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@74
+"module M\nmodule A =\n    let x = a *\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = a *\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@68
+"module M\nmodule A =\n    let x = a *\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@72
+"module M\nmodule A =\n    let x = a *\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = a *\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@66
+"module M\nmodule A =\n    let x = a *\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@71
+"module M\nmodule A =\n    let x = a *\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = a *\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@65
+"module M\nmodule A =\n    let x = a *\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@60
+"module M\nmodule A =\n    let x = a *\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@70
+"module M\nmodule A =\n    let x = a [<A>] type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = a [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@57
+"module M\nmodule A =\n    let x = a module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@34
+"module M\nmodule A =\n    let x = a module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@34/Let@45
+"module M\nmodule A =\n    let x = a type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@34
+"module M\nmodule A =\n    let x = a\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@72
+"module M\nmodule A =\n    let x = a\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = a\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@66
+"module M\nmodule A =\n    let x = a\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@70
+"module M\nmodule A =\n    let x = a\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = a\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@64
+"module M\nmodule A =\n    let x = a\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@69
+"module M\nmodule A =\n    let x = a\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = a\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@63
+"module M\nmodule A =\n    let x = a\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@58
+"module M\nmodule A =\n    let x = a\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@68
+"module M\nmodule A =\n    let x = f (a *) b [<A>] type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = f (a *) b [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@65
+"module M\nmodule A =\n    let x = f (a *) b module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@42
+"module M\nmodule A =\n    let x = f (a *) b module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@42/Let@53
+"module M\nmodule A =\n    let x = f (a *) b type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@42
+"module M\nmodule A =\n    let x = f (a *) b\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@80
+"module M\nmodule A =\n    let x = f (a *) b\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = f (a *) b\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@74
+"module M\nmodule A =\n    let x = f (a *) b\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@78
+"module M\nmodule A =\n    let x = f (a *) b\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = f (a *) b\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@72
+"module M\nmodule A =\n    let x = f (a *) b\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@77
+"module M\nmodule A =\n    let x = f (a *) b\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = f (a *) b\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@71
+"module M\nmodule A =\n    let x = f (a *) b\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@66
+"module M\nmodule A =\n    let x = f (a *) b\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@76
+"module M\nmodule A =\n    let x = function | _ when | y -> () [<A>] type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@83
+"module M\nmodule A =\n    let x = function | _ when | y -> () module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@85
+"module M\nmodule A =\n    let x = function | _ when | y -> () then [<A>] type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@88
+"module M\nmodule A =\n    let x = function | _ when | y -> () then exception E\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then exception E\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@81
+"module M\nmodule A =\n    let x = function | _ when | y -> () then module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@90
+"module M\nmodule A =\n    let x = function | _ when | y -> () then open System\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then open System\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@81
+"module M\nmodule A =\n    let x = function | _ when | y -> () then type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@82
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@103
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@73
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@93
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@73
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        exception E\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        exception E\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Exception@73
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@73
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@87
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@97
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@73
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@73/Let@84
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        open System\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        open System\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Open@73
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n        type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@73
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@101
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@71
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@91
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@71
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      exception E\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      exception E\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Exception@71
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@71
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@85
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@95
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@71
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@71/Let@82
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      open System\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      open System\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Open@71
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n      type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@71
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@100
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@70
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@90
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@70
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     exception E\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     exception E\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Exception@70
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@70
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@84
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@94
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@70
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@70/Let@81
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     open System\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     open System\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Open@70
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n     type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@70
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@89
+"module M\nmodule A =\n    let x = function | _ when | y -> () then\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@99
+"module M\nmodule A =\n    let x = function | _ when | y -> () type S = int\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = function | _ when | y -> () type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@77
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@98
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@92
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@96
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@90
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@95
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@89
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@84
+"module M\nmodule A =\n    let x = function | _ when | y -> ()\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@94
+"module M\nmodule A =\n    let x = if a * then 1 else 2 [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@83
+"module M\nmodule A =\n    let x = if a * then 1 else 2 [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@59
+"module M\nmodule A =\n    let x = if a * then 1 else 2 let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@77
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@91
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@85
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@89
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@83
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@88
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@82
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@77
+"module M\nmodule A =\n    let x = if a * then 1 else 2\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@87
+"module M\nmodule A =\n    let x = if a * then [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@74
+"module M\nmodule A =\n    let x = if a * then [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@50
+"module M\nmodule A =\n    let x = if a * then\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@52
+"module M\nmodule A =\n    let x = if a * then\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@72
+"module M\nmodule A =\n    let x = if a * then\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@82
+"module M\nmodule A =\n    let x = if a * then\n        [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@52
+"module M\nmodule A =\n    let x = if a * then\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = if a * then\n        exception E\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = if a * then\n        exception E\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Exception@52
+"module M\nmodule A =\n    let x = if a * then\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@52
+"module M\nmodule A =\n    let x = if a * then\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@66
+"module M\nmodule A =\n    let x = if a * then\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@76
+"module M\nmodule A =\n    let x = if a * then\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = if a * then\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@52
+"module M\nmodule A =\n    let x = if a * then\n        module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@52/Let@63
+"module M\nmodule A =\n    let x = if a * then\n        open System\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = if a * then\n        open System\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Open@52
+"module M\nmodule A =\n    let x = if a * then\n        type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@52
+"module M\nmodule A =\n    let x = if a * then\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@50
+"module M\nmodule A =\n    let x = if a * then\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@70
+"module M\nmodule A =\n    let x = if a * then\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@80
+"module M\nmodule A =\n    let x = if a * then\n      [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@50
+"module M\nmodule A =\n    let x = if a * then\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = if a * then\n      exception E\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = if a * then\n      exception E\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Exception@50
+"module M\nmodule A =\n    let x = if a * then\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@50
+"module M\nmodule A =\n    let x = if a * then\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@64
+"module M\nmodule A =\n    let x = if a * then\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@74
+"module M\nmodule A =\n    let x = if a * then\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = if a * then\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@50
+"module M\nmodule A =\n    let x = if a * then\n      module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@50/Let@61
+"module M\nmodule A =\n    let x = if a * then\n      open System\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = if a * then\n      open System\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Open@50
+"module M\nmodule A =\n    let x = if a * then\n      type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@50
+"module M\nmodule A =\n    let x = if a * then\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@49
+"module M\nmodule A =\n    let x = if a * then\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@69
+"module M\nmodule A =\n    let x = if a * then\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@79
+"module M\nmodule A =\n    let x = if a * then\n     [<A>] type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@49
+"module M\nmodule A =\n    let x = if a * then\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = if a * then\n     exception E\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = if a * then\n     exception E\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Exception@49
+"module M\nmodule A =\n    let x = if a * then\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@49
+"module M\nmodule A =\n    let x = if a * then\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@63
+"module M\nmodule A =\n    let x = if a * then\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@73
+"module M\nmodule A =\n    let x = if a * then\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = if a * then\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/NestedModule@49
+"module M\nmodule A =\n    let x = if a * then\n     module N = let n = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/nested@49/Let@60
+"module M\nmodule A =\n    let x = if a * then\n     open System\n    let z = 2\nlet w = 3\n" | divergent
+"module M\nmodule A =\n    let x = if a * then\n     open System\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Open@49
+"module M\nmodule A =\n    let x = if a * then\n     type S = int\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Types@49
+"module M\nmodule A =\n    let x = if a * then\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@68
+"module M\nmodule A =\n    let x = if a * then\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@78
+"module M\nmodule A =\n    let x = match a with | b when -> () [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@80
+"module M\nmodule A =\n    let x = match a with | b when -> () [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@90
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@98
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@92
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@96
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@90
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@95
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@89
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@84
+"module M\nmodule A =\n    let x = match a with | b when -> ()\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@94
+"module M\nmodule A =\n    let x = match a with | b. -> () [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@76
+"module M\nmodule A =\n    let x = match a with | b. -> () [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@86
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n        [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@94
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n        do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n        let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@88
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n      [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@92
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n      do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n      let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@86
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n     [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@91
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n     do ()\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Expr@24
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n     let y = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@85
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@80
+"module M\nmodule A =\n    let x = match a with | b. -> ()\n    [<A>] let q = 1\n    let z = 2\nlet w = 3\n" | loses module[0]/nested@9/Let@90
+"module M\ntype T() = abstract P 1\n#nowarn \"1\"\nlet x = 1\n" | divergent
+"module M\ntype T() = abstract P 1\n[<A>] let q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() = abstract P 1\n[<A>] type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() = abstract P 1\ndo ()\nlet x = 1\n" | divergent
+"module M\ntype T() = abstract P 1\nexception E\nlet x = 1\n" | divergent
+"module M\ntype T() = abstract P 1\nlet y = 1\nlet x = 1\n" | divergent
+"module M\ntype T() = abstract P 1\nmodule N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() = abstract P 1\nopen System\nlet x = 1\n" | divergent
+"module M\ntype T() = abstract P 1\ntype S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x) exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x) open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x) with get member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract (x) with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x) with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract (x)\n        exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x)\n        open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x)\n        with get member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract (x)\n        with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x)\n        with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract (x)\n    [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@47
+"module M\ntype T() =\n    abstract (x)\n    exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x)\n    module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x)\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@41
+"module M\ntype T() =\n    abstract (x)\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@41/Let@52
+"module M\ntype T() =\n    abstract (x)\n    open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x)\n    type S = int\nlet x = 1\n" | loses module[0]/Types@41
+"module M\ntype T() =\n    abstract (x)\n    with get member _.Q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x)\n    with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x)\n [<A>] let q = 1\nlet x = 1\n" | loses module[0]/Let@38
+"module M\ntype T() =\n    abstract (x)\n [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@38
+"module M\ntype T() =\n    abstract (x)\n exception E\nlet x = 1\n" | loses module[0]/Exception@38
+"module M\ntype T() =\n    abstract (x)\n let y = 1\nlet x = 1\n" | loses module[0]/Let@38
+"module M\ntype T() =\n    abstract (x)\n module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract (x)\n module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@38
+"module M\ntype T() =\n    abstract (x)\n module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@38/Let@49
+"module M\ntype T() =\n    abstract (x)\n open System\nlet x = 1\n" | loses module[0]/Open@38
+"module M\ntype T() =\n    abstract (x)\n type S = int\nlet x = 1\n" | loses module[0]/Types@38
+"module M\ntype T() =\n    abstract P 1 #nowarn \"1\"\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1 [<A>] type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1 exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1 open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1 type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1 with get member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P 1 with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1 with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P 1\n        #nowarn \"1\"\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n        [<A>] type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n        exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n        open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n        type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n        with get member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P 1\n        with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n        with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P 1\n    #nowarn \"1\"\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n    [<A>] type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n    exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n    module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n    open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n    type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n    with get member _.Q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n    with get member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P 1\n    with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n    with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P 1\n #nowarn \"1\"\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n [<A>] type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n do ()\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n#nowarn \"1\"\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n[<A>] let q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\n[<A>] type S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\ndo ()\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\nexception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\nlet y = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\nmodule N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\nopen System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P 1\ntype S = int\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P: [<A(if true then 1 else 2)>] member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P: [<A>] member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P: exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P: open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P: with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P: with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P:\n        [<A(if true then 1 else 2)>] member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P:\n        [<A>] member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P:\n        exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n        module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n        open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n        with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n        with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P:\n    [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@46
+"module M\ntype T() =\n    abstract P:\n    exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n    module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@40
+"module M\ntype T() =\n    abstract P:\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@40/Let@51
+"module M\ntype T() =\n    abstract P:\n    open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n    type S = int\nlet x = 1\n" | loses module[0]/Types@40
+"module M\ntype T() =\n    abstract P:\n    with get member _.Q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n    with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n [<A>] let q = 1\nlet x = 1\n" | loses module[0]/Let@37
+"module M\ntype T() =\n    abstract P:\n [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@37
+"module M\ntype T() =\n    abstract P:\n exception E\nlet x = 1\n" | loses module[0]/Exception@37
+"module M\ntype T() =\n    abstract P:\n let y = 1\nlet x = 1\n" | loses module[0]/Let@37
+"module M\ntype T() =\n    abstract P:\n module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P:\n module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@37
+"module M\ntype T() =\n    abstract P:\n module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@37/Let@48
+"module M\ntype T() =\n    abstract P:\n open System\nlet x = 1\n" | loses module[0]/Open@37
+"module M\ntype T() =\n    abstract P:\n type S = int\nlet x = 1\n" | loses module[0]/Types@37
+"module M\ntype T() =\n    abstract P\n        exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P\n        open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P\n        with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P\n        with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P\n    [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@45
+"module M\ntype T() =\n    abstract P\n    exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P\n    module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@39
+"module M\ntype T() =\n    abstract P\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@39/Let@50
+"module M\ntype T() =\n    abstract P\n    open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P\n    type S = int\nlet x = 1\n" | loses module[0]/Types@39
+"module M\ntype T() =\n    abstract P\n    with get member _.Q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P\n    with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P\n [<A>] let q = 1\nlet x = 1\n" | loses module[0]/Let@36
+"module M\ntype T() =\n    abstract P\n [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@36
+"module M\ntype T() =\n    abstract P\n exception E\nlet x = 1\n" | loses module[0]/Exception@36
+"module M\ntype T() =\n    abstract P\n let y = 1\nlet x = 1\n" | loses module[0]/Let@36
+"module M\ntype T() =\n    abstract P\n module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract P\n module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@36
+"module M\ntype T() =\n    abstract P\n module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@36/Let@47
+"module M\ntype T() =\n    abstract P\n open System\nlet x = 1\n" | loses module[0]/Open@36
+"module M\ntype T() =\n    abstract P\n type S = int\nlet x = 1\n" | loses module[0]/Types@36
+"module M\ntype T() =\n    abstract exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract member _.Q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract with get member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract)\n    [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@44
+"module M\ntype T() =\n    abstract)\n    module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract)\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@38
+"module M\ntype T() =\n    abstract)\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@38/Let@49
+"module M\ntype T() =\n    abstract)\n    type S = int\nlet x = 1\n" | loses module[0]/Types@38
+"module M\ntype T() =\n    abstract)\n    with get member _.Q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract)\n    with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract)\n [<A>] let q = 1\nlet x = 1\n" | loses module[0]/Let@35
+"module M\ntype T() =\n    abstract)\n [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@35
+"module M\ntype T() =\n    abstract)\n exception E\nlet x = 1\n" | loses module[0]/Exception@35
+"module M\ntype T() =\n    abstract)\n let y = 1\nlet x = 1\n" | loses module[0]/Let@35
+"module M\ntype T() =\n    abstract)\n module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract)\n module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@35
+"module M\ntype T() =\n    abstract)\n module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@35/Let@46
+"module M\ntype T() =\n    abstract)\n open System\nlet x = 1\n" | loses module[0]/Open@35
+"module M\ntype T() =\n    abstract)\n type S = int\nlet x = 1\n" | loses module[0]/Types@35
+"module M\ntype T() =\n    abstract\n        exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n        member _.Q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n        member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract\n        open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n        with get member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract\n        with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n        with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract\n    [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@43
+"module M\ntype T() =\n    abstract\n    exception E\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n    module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@37
+"module M\ntype T() =\n    abstract\n    module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@37/Let@48
+"module M\ntype T() =\n    abstract\n    open System\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n    type S = int\nlet x = 1\n" | loses module[0]/Types@37
+"module M\ntype T() =\n    abstract\n    with get member _.Q = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n    with get\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n [<A>] let q = 1\nlet x = 1\n" | loses module[0]/Let@34
+"module M\ntype T() =\n    abstract\n [<A>] type S = int\nlet x = 1\n" | loses module[0]/Types@34
+"module M\ntype T() =\n    abstract\n exception E\nlet x = 1\n" | loses module[0]/Exception@34
+"module M\ntype T() =\n    abstract\n let y = 1\nlet x = 1\n" | loses module[0]/Let@34
+"module M\ntype T() =\n    abstract\n module N = let n = 1\nlet x = 1\n" | divergent
+"module M\ntype T() =\n    abstract\n module N = let n = 1\nlet x = 1\n" | loses module[0]/NestedModule@34
+"module M\ntype T() =\n    abstract\n module N = let n = 1\nlet x = 1\n" | loses module[0]/nested@34/Let@45
+"module M\ntype T() =\n    abstract\n open System\nlet x = 1\n" | loses module[0]/Open@34
+"module M\ntype T() =\n    abstract\n type S = int\nlet x = 1\n" | loses module[0]/Types@34

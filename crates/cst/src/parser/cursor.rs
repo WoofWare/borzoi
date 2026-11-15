@@ -32,6 +32,7 @@ impl<'src> Parser<'src> {
             errors: Vec::new(),
             last_binding_owns_close: false,
             rhs_closed_cleanly: false,
+            in_place_recoveries: 0,
             warnings: Vec::new(),
             interp_nest: Vec::new(),
             obj_brace_base_new: None,
@@ -381,6 +382,13 @@ impl<'src> Parser<'src> {
     /// expression, FCS's `UNDERSCORE DOT recover`). Records the error at the
     /// current token (or end-of-source) and emits the same zero-width ERROR
     /// placeholder, so the enclosing node still closes losslessly.
+    /// Record a diagnostic for a construct FCS's grammar recovers in place
+    /// (see [`Self::in_place_recoveries`]).
+    pub(super) fn push_in_place_recovery_error(&mut self, error: ParseError) {
+        self.errors.push(error);
+        self.in_place_recoveries += 1;
+    }
+
     pub(super) fn push_missing_operand_error_with(&mut self, message: &str) {
         let span = self
             .peek()
@@ -463,14 +471,15 @@ impl<'src> Parser<'src> {
     /// LexFilter-swallowed paren/brace closer (`)` / `}`) — i.e. an operator
     /// ending at `op_end` has its right operand stripped from the filtered
     /// stream because the enclosing body ends with that dangling operator
-    /// (`(1 +)`, `(a ::)`, `{1 +}`). The operator-admission gates
-    /// ([`Parser::peek_infix_continuation`], [`Parser::peek_cons_continuation`],
-    /// [`Parser::peek_type_op_continuation`], [`Parser::at_app_continuation`])
-    /// use this to *decline* a body-trailing operator: the filtered RHS-start
-    /// lookahead peers past the swallowed closer and would otherwise pull the
-    /// post-closer token into the body, draining the real `)` / `}` as `ERROR`.
-    /// Leaving the operator for enclosing recovery keeps the closer ending the
-    /// body and the following token a sibling.
+    /// (`(1 +)`, `(a ::)`, `{1 +}`). The filtered RHS-start lookahead peers
+    /// past the swallowed closer and would otherwise pull the post-closer token
+    /// into the body, draining the real `)` / `}` as `ERROR`, so the
+    /// operator-admission gates consult this first: the infix and cons gates
+    /// ([`Parser::peek_infix_continuation`], [`Parser::peek_cons_continuation`])
+    /// take the operator with a missing right operand, and the others
+    /// ([`Parser::peek_type_op_continuation`], [`Parser::at_app_continuation`])
+    /// decline it, leaving it for enclosing recovery. Either way the closer
+    /// ends the body and the following token is a sibling.
     pub(super) fn op_rhs_is_swallowed_closer(&self, op_end: usize) -> bool {
         matches!(
             self.next_non_trivia_raw_after(op_end),
@@ -861,7 +870,7 @@ fn virtual_class(virtual_token: &Virtual) -> VirtualClass {
 }
 
 /// Whether `virtual_token` is pure layout ([`VirtualClass::Layout`]).
-fn is_layout_virtual(virtual_token: &Virtual) -> bool {
+pub(super) fn is_layout_virtual(virtual_token: &Virtual) -> bool {
     virtual_class(virtual_token) == VirtualClass::Layout
 }
 

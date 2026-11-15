@@ -1485,16 +1485,13 @@ fn normalise_member(m: &MemberDefn) -> NormalisedMember {
             // `ACTIVE_PAT_NAME` child, folded to FCS's single `idText`
             // (`"|Foo|_|"`); every other name (ident or operator, the latter kept
             // as the bare operator under `IDENT_TOK`) reads from the `VAL_SIG`'s
-            // ident — same rule as the member-sig name above.
+            // ident — same rule as the member-sig name above. A slot that stops
+            // before its name is FCS's `recover` arm, which names it `""`.
             let name = if let Some(active) = vs.active_pat_name() {
                 active_pat_id_text(&active)
             } else {
-                strip_backticks(
-                    vs.ident()
-                        .expect("an abstract slot must have a name")
-                        .text(),
-                )
-                .to_string()
+                vs.ident()
+                    .map_or_else(String::new, |id| strip_backticks(id.text()).to_string())
             };
             let ty = type_slot(vs.ty());
             let (typars, constraints) = val_sig_typars(&vs);
@@ -3530,6 +3527,10 @@ fn normalise_type_app(t: &TypeAppExpr, counter: &mut u32) -> NormalisedExpr {
 /// rather than carrying a separate flag.
 fn normalise_app(a: &AppExpr, counter: &mut u32) -> NormalisedExpr {
     let func = a.func().expect("APP_EXPR must have a func child");
+    // An infix operator with no right operand (`a +` before a token that
+    // cannot start an expression) is FCS's `declExpr OP %prec prec_recover`
+    // arm, whose operand is `ArbitraryAfterError`; so is an argument a
+    // misplaced spread left out.
     let arg = a.arg();
     // Struct fields evaluate in source order, so `func` consumes the shared
     // lambda counter before `arg` — matching FCS's left-to-right reduction.
@@ -3538,12 +3539,7 @@ fn normalise_app(a: &AppExpr, counter: &mut u32) -> NormalisedExpr {
         is_infix: a.is_infix(),
         bracket_indexer: a.is_bracket_indexer(),
         func: Box::new(normalise_expr(&func, counter)),
-        arg: Box::new(expr_or_misplaced_spread(
-            arg,
-            a.syntax(),
-            counter,
-            "APP_EXPR must have an arg child",
-        )),
+        arg: Box::new(arg.map_or(NormalisedExpr::Error, |arg| normalise_expr(&arg, counter))),
     }
 }
 
@@ -3562,7 +3558,8 @@ fn normalise_app(a: &AppExpr, counter: &mut u32) -> NormalisedExpr {
 /// lambda-free and consumes no counter.
 fn normalise_cons(c: &ConsExpr, counter: &mut u32) -> NormalisedExpr {
     let lhs = c.lhs().expect("CONS_EXPR must have a head expr");
-    let rhs = c.rhs().expect("CONS_EXPR must have a tail expr");
+    // A missing tail is FCS's `declExpr COLON_COLON %prec prec_recover` arm.
+    let rhs = c.rhs();
     NormalisedExpr::App {
         is_atomic: false,
         is_infix: true,
@@ -3570,7 +3567,10 @@ fn normalise_cons(c: &ConsExpr, counter: &mut u32) -> NormalisedExpr {
         func: Box::new(NormalisedExpr::LongIdent(vec!["::".to_string()])),
         arg: Box::new(NormalisedExpr::Tuple {
             is_struct: false,
-            elements: vec![normalise_expr(&lhs, counter), normalise_expr(&rhs, counter)],
+            elements: vec![
+                normalise_expr(&lhs, counter),
+                rhs.map_or(NormalisedExpr::Error, |rhs| normalise_expr(&rhs, counter)),
+            ],
         }),
     }
 }

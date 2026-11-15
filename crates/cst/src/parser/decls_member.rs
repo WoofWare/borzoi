@@ -102,7 +102,20 @@ impl<'src> Parser<'src> {
         }
         let raw_run = seen.len();
         if !self.next_tokens_unbroken(raw_run) {
-            return None;
+            // An abstract slot's keywords end where the break is: FCS's
+            // `abstractMemberFlags` then meets the layout token, which its
+            // `recover` arm takes as the end of an unfinished slot
+            // (`abstract⏎member …` is a slot named `""`, then a member).
+            let unbroken = (0..raw_run)
+                .rev()
+                .find(|&k| self.next_tokens_unbroken(k))
+                .unwrap_or(0);
+            return match seen[..unbroken] {
+                [Token::Abstract, ..] | [Token::Static, Token::Abstract, ..] => {
+                    Some(ObjectModelItem::AbstractSlot)
+                }
+                _ => None,
+            };
         }
         self.classify_object_model_item_from_raw()
     }
@@ -124,34 +137,6 @@ impl<'src> Parser<'src> {
     /// (class-local `[<A>] let` / `[<A>] interface`) is not classifiable from the
     /// raw stream — the entry gate [`Self::peek_is_object_model_start`] catches
     /// those via the leading `[<` on the filtered cursor instead.
-    /// `true` if `tok` (the token in name position after an `abstract [member]
-    /// [access] [inline]` run) and the following raw tokens from `sig` form a
-    /// valid abstract-slot *name* — an identifier / quoted identifier, the glued
-    /// `(*)` operator-value, or a parenthesised operator (`(+)`) or active-pattern
-    /// (`(|Foo|_|)`) name. Mirrors the member-sig start gate's name check
-    /// (`peek_is_member_sig_start`) so the classifier and [`Self::parse_abstract_
-    /// slot_at`] stay in lockstep: an over-accept routes an unparseable form into
-    /// the slot parser, an under-accept leaves a valid one on the error path.
-    fn raw_is_abstract_slot_name(
-        tok: Option<Token<'src>>,
-        sig: &mut impl Iterator<Item = Token<'src>>,
-    ) -> bool {
-        match tok {
-            Some(Token::Ident(_) | Token::QuotedIdent(_)) => true,
-            Some(Token::LParenStarRParen) => true,
-            Some(Token::LParen) => match sig.next() {
-                // Active-pattern name (`(|Foo|_|)`): `(` then a bare `|`.
-                Some(Token::Bar) => true,
-                // Operator name (`(+)`, `( * )`): `( op )`.
-                Some(t) if is_paren_operator_name(&t) || matches!(t, Token::Op("*")) => {
-                    matches!(sig.next(), Some(Token::RParen))
-                }
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-
     pub(super) fn classify_object_model_item_from_raw(&self) -> Option<ObjectModelItem> {
         let mut sig = self.significant_raw_from_cursor().peekable();
         while matches!(sig.peek(), Some(Token::LBrackLess)) {
@@ -199,65 +184,25 @@ impl<'src> Parser<'src> {
                 // `do` opens with the `Virtual::Do` and is caught at the virtual
                 // level in `classify_object_model_item`.)
                 Some(Token::Do) => Some(ObjectModelItem::StaticDo),
-                // `static abstract [member] [access] [inline] <ident>` — a
-                // static-abstract interface slot (F# 7 IWSAM). Same shape as the
-                // bare `abstract` arm below, one keyword deeper; `parse_abstract_
-                // slot_at` consumes the leading `static`. Only `static abstract`
-                // (this order) is legal — `abstract static` is an FCS error and
-                // stops cleanly (the bare `Abstract` arm never sees a `static`).
-                Some(Token::Abstract) => {
-                    let mut tok = sig.next();
-                    if matches!(tok, Some(Token::Member)) {
-                        tok = sig.next();
-                    }
-                    while matches!(
-                        tok,
-                        Some(Token::Private | Token::Internal | Token::Public | Token::Inline)
-                    ) {
-                        tok = sig.next();
-                    }
-                    if Self::raw_is_abstract_slot_name(tok, &mut sig) {
-                        Some(ObjectModelItem::AbstractSlot)
-                    } else {
-                        None
-                    }
-                }
+                // `static abstract [member] …` — a static-abstract interface
+                // slot (F# 7 IWSAM). Same shape as the bare `abstract` arm
+                // below, one keyword deeper; `parse_abstract_slot_at` consumes
+                // the leading `static`. Only `static abstract` (this order) is
+                // legal — `abstract static` is an FCS error and stops cleanly
+                // (the bare `Abstract` arm never sees a `static`).
+                Some(Token::Abstract) => Some(ObjectModelItem::AbstractSlot),
                 _ => None,
             },
             // `val …` — a field (9.9b).
             Some(Token::Val) => Some(ObjectModelItem::ValField),
-            // `abstract [member] <nameop> : …` — an abstract slot (9.10c). The
-            // `nameop` is an identifier, a parenthesised operator (`abstract (+) :
-            // …`), or an active-pattern name (`abstract (|Foo|_|) : …`) — the same
-            // name surface the `val`-sig / member-sig / member-def heads and the
-            // `let (+)` / `let (|Foo|_|)` binding head accept. `parse_abstract_
-            // slot_at` routes all three through the binding-head machinery, so the
-            // classifier claims all three (kept in lockstep via the shared
-            // [`Self::raw_is_abstract_slot_name`]).
-            Some(Token::Abstract) => {
-                // `abstract [member] [access] [inline] <nameop>` (FCS's
-                // `abstractMemberFlags opt_access opt_inline nameop`,
-                // `pars.fsy:2060`). The `opt_access` is *illegal* (abstract slots
-                // inherit the type's visibility), but FCS still recovers an
-                // `AbstractSlot` + a diagnostic, so we claim it and the slot parser
-                // reports the error (consuming `access`/`inline` in either order is
-                // harmless — both are elided).
-                let mut tok = sig.next();
-                if matches!(tok, Some(Token::Member)) {
-                    tok = sig.next();
-                }
-                while matches!(
-                    tok,
-                    Some(Token::Private | Token::Internal | Token::Public | Token::Inline)
-                ) {
-                    tok = sig.next();
-                }
-                if Self::raw_is_abstract_slot_name(tok, &mut sig) {
-                    Some(ObjectModelItem::AbstractSlot)
-                } else {
-                    None
-                }
-            }
+            // `abstract [member] [access] [inline] <nameop> : …` — an abstract
+            // slot (9.10c, FCS's `abstractMemberFlags opt_access opt_inline
+            // nameop`). Whatever follows the keywords, FCS builds an
+            // `AbstractSlot`: its `recover` arms take a slot that stops after
+            // its keywords, modifiers, name or `:`, so the slot parser
+            // ([`Self::parse_abstract_slot_at`]) is the one that reads (or
+            // recovers) the rest.
+            Some(Token::Abstract) => Some(ObjectModelItem::AbstractSlot),
             // `new(…) = …` — an explicit constructor (9.10b), optionally access-
             // modified (`private new(…)` — FCS's `opt_access` before `NEW`,
             // `pars.fsy:2106`, accepted with no diagnostic). A leading access
@@ -1661,6 +1606,14 @@ impl<'src> Parser<'src> {
             self.parse_head_binding_pat();
             return true;
         }
+        // A self-id with nothing after its dot (`member this.`, `member _.`):
+        // FCS's `pathOp: ident DOT %prec prec_recover` /
+        // `underscoreLongIdentPat: UNDERSCORE DOT %prec prec_recover` keep a
+        // one-segment path, which reads as the variable it names.
+        if self.member_head_is_trailing_dot_self_id() {
+            self.emit_trailing_dot_named_pat();
+            return false;
+        }
         self.builder.start_node(SyntaxKind::LONG_IDENT_PAT);
         self.parse_long_ident_path_with("member", true);
         // Explicit value-typar decls after the name (`member M<'a>(x) = …`,
@@ -1689,6 +1642,19 @@ impl<'src> Parser<'src> {
         self.sweep_curried_arg_pats();
         self.builder.finish_node(); // LONG_IDENT_PAT
         false
+    }
+
+    /// `true` iff the member head at the cursor is a self-id — `_` or a
+    /// non-uppercase-leading identifier — followed by a dot with no name after
+    /// it (see [`Self::pat_head_has_trailing_dot`]).
+    fn member_head_is_trailing_dot_self_id(&self) -> bool {
+        match self.peek() {
+            Some((Ok(FilteredToken::Raw(Token::Underscore)), _)) => {}
+            Some((Ok(FilteredToken::Raw(Token::Ident(_) | Token::QuotedIdent(_))), span))
+                if !ident_text_leads_uppercase(&self.source[span.clone()]) => {}
+            _ => return false,
+        }
+        self.pat_head_has_trailing_dot()
     }
 
     /// `true` iff the member head at the cursor is a property-style value member
@@ -1928,6 +1894,9 @@ impl<'src> Parser<'src> {
         ) {
             self.bump_into(SyntaxKind::IDENT_TOK);
         } else {
+            // FCS's `abstractMemberFlags opt_access opt_inline recover` arm: a
+            // slot that stops before its name is named `""`, with a
+            // `FromParseError` type, and the rest of the member is discarded.
             let span = self
                 .peek()
                 .map(|(_, s)| s.clone())
@@ -1936,6 +1905,10 @@ impl<'src> Parser<'src> {
                 message: "expected an abstract member name".to_string(),
                 span,
             });
+            self.skip_unfinished_member_rest();
+            self.builder.finish_node(); // VAL_SIG
+            self.builder.finish_node(); // ABSTRACT_SLOT
+            return;
         }
         // Optional postfix `< … >` type parameters (`abstract M<'U> : …`, FCS's
         // `opt_explicitValTyparDecls` → `SynValSig.explicitTypeParams`, elided).
@@ -1978,6 +1951,16 @@ impl<'src> Parser<'src> {
                 message: "expected `:` and a type in an abstract member signature".to_string(),
                 span,
             });
+            // FCS's `nameop opt_explicitValTyparDecls recover` arm: the slot
+            // keeps its name, with a `FromParseError` type, and the rest of the
+            // member is discarded, short of a `with get, set` clause, which the
+            // slot still takes below.
+            if !matches!(
+                self.peek(),
+                Some((Ok(FilteredToken::Virtual(Virtual::With)), _))
+            ) {
+                self.skip_unfinished_member_rest();
+            }
         }
         self.builder.finish_node(); // VAL_SIG
         // Optional `with get[, set]` accessor clause (FCS's `classMemberSpfnGetSet`,
