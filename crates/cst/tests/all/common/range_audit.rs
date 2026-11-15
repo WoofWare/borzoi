@@ -339,23 +339,16 @@ fn nested_module_end_closes_its_block(nested: &NestedModuleDecl) -> bool {
     token_column(&end) < token_column(&block_start)
 }
 
-/// The column FCS's lexer gives `token`: UTF-16 code units from the start of
-/// its line, not counting the byte-order mark FCS strips from the file's first.
-fn token_column(token: &SyntaxToken) -> usize {
+/// The column FCS's lexer gives `token`, by [`LineIndex`]'s rule.
+fn token_column(token: &SyntaxToken) -> u32 {
     let root = token
         .parent_ancestors()
         .last()
         .expect("a token has a parent");
     let text = root.text().to_string();
-    let start = usize::from(token.text_range().start());
-    let line_start = text[..start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
-    let line = &text[line_start..start];
-    let line = if line_start == 0 {
-        line.strip_prefix('\u{feff}').unwrap_or(line)
-    } else {
-        line
-    };
-    line.encode_utf16().count()
+    LineIndex::new(&text)
+        .position(usize::from(token.text_range().start()))
+        .1
 }
 
 fn expr_decl_includes_trailing_trivia(expr_decl: &SyntaxNode) -> bool {

@@ -549,13 +549,16 @@ fn diff_ast_ranges_extend_anon_module_past_onside_nested_module_end() {
     assert_ast_ranges_match("module M =\n  begin\n    let x = 1\n  end\n");
 }
 
-/// Columns count UTF-16 code units, and not the byte-order mark FCS strips.
+/// Columns are FCS's (`LineIndex`): UTF-16 code units, not the byte-order mark
+/// FCS strips, and a lone `\r` (here in a comment) does not end a line.
 #[test]
-fn diff_ast_ranges_nested_module_end_columns_skip_bom_and_count_utf16() {
+fn diff_ast_ranges_nested_module_end_columns_are_fcs_columns() {
     assert_ast_ranges_match("\u{feff}module M = begin\n    let x = 1\n           end\n");
     assert_ast_ranges_match("\u{feff}module M = begin\n    let x = 1\n          end\n");
     assert_ast_ranges_match("module Ü = begin\n    let x = 1\n           end\n");
     assert_ast_ranges_match("module Ü = begin\n    let x = 1\n          end\n");
+    assert_ast_ranges_match("module M = begin\n    let x = 1\n(*\r*)     end\n");
+    assert_ast_ranges_match("module M = begin\n    let x = 1\n(*\r*)       end\n");
 }
 
 #[test]

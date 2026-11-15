@@ -73,6 +73,19 @@ impl<'a> LineIndex<'a> {
         }
         byte
     }
+
+    /// The FCS position `(line, col)` of byte offset `byte`: the inverse of
+    /// [`Self::offset`] at every character boundary. An offset inside a leading
+    /// byte-order mark is line 1, column 0.
+    pub fn position(&self, byte: usize) -> (u32, u32) {
+        let line = (self.starts.partition_point(|&start| start <= byte) - 1).max(1);
+        let base = self.starts[line].min(byte);
+        let col = self.source[base..byte].encode_utf16().count();
+        (
+            u32::try_from(line).expect("a line number fits a u32"),
+            u32::try_from(col).expect("a column fits a u32"),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -148,6 +161,15 @@ mod tests {
             let idx = LineIndex::new(&text);
             for (line, col, byte) in positions(&text) {
                 prop_assert_eq!(idx.offset(line, col), byte, "{:?} at {}:{}", text, line, col);
+            }
+        }
+
+        /// Every character boundary maps back to the position that names it.
+        #[test]
+        fn every_byte_names_its_position(text in text()) {
+            let idx = LineIndex::new(&text);
+            for (line, col, byte) in positions(&text) {
+                prop_assert_eq!(idx.position(byte), (line, col), "{:?} at byte {}", text, byte);
             }
         }
 
