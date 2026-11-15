@@ -355,11 +355,17 @@ pub fn project_compiler(
     {
         return None;
     }
-    // Only the SDK's props can have written it, and they name their own. A
-    // name the walk cannot vouch is unset may have been written by anything.
-    if parsed.property("DotnetFscCompilerPath") != PropertyRead::Unset
-        && !names_own("DotnetFscCompilerPath", "fsc.dll")
-    {
+    // Only the SDK's props can have written it (nothing outside the SDK
+    // defines a selector, checked above), and they name their own, so a value
+    // the walk holds, trusted or not, must say so. A write it holds no value
+    // for, undecided or refused, is the SDK's by the same argument, which
+    // rests on what the build cannot be told rather than on the value: the
+    // trust-blind table is the right question here.
+    let holds_compiler_path = parsed
+        .properties
+        .keys()
+        .any(|written| written.eq_ignore_ascii_case("DotnetFscCompilerPath"));
+    if holds_compiler_path && !names_own("DotnetFscCompilerPath", "fsc.dll") {
         return None;
     }
     Some(ProjectCompiler {
@@ -759,6 +765,7 @@ mod tests {
                 format!(r"{root}\FSharp\Microsoft.FSharp.NetSdk.targets"),
             ),
         ] {
+            parsed.properties.insert(name.to_string(), value.clone());
             parsed
                 .property_reads
                 .named
@@ -893,8 +900,13 @@ mod tests {
         parsed.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
         assert_eq!(compiler_of(&parsed, &[]), None, "content unseen");
 
+        // `read` is what the evaluation publishes for `name`; a `Value` is one
+        // the walk holds too.
         let with_read = |name: &str, read: PropertyRead| {
             let mut parsed = on_sdk("10.0.401");
+            if let PropertyRead::Value(value) = &read {
+                parsed.properties.insert(name.to_string(), value.clone());
+            }
             parsed
                 .property_reads
                 .named
@@ -935,6 +947,7 @@ mod tests {
             );
         }
         let mut parsed = on_sdk("10.0.401");
+        parsed.properties.remove("FSharpTargetsShim");
         parsed.property_reads.named.remove("fsharptargetsshim");
         assert_eq!(compiler_of(&parsed, &[]), None, "no targets shim");
         let untrusted = PropertyRead::Untrusted(UntrustedCause::Unentered("a gate".to_string()));
@@ -945,14 +958,9 @@ mod tests {
         );
         let refused = PropertyRead::UnsetInexact(InexactUnset::Refused);
         assert_eq!(
-            compiler_of(&with_read("FSharpPropsShim", refused.clone()), &[]),
+            compiler_of(&with_read("FSharpPropsShim", refused), &[]),
             None,
             "refused props shim"
-        );
-        assert_eq!(
-            compiler_of(&with_read("DotnetFscCompilerPath", refused), &[]),
-            None,
-            "a compiler path the project writes and the walk cannot compute"
         );
         let mut parsed = on_sdk("10.0.401");
         parsed.resolved_sdk_root = Some("/opt/my-sdk".into());
