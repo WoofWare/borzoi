@@ -72,6 +72,11 @@ pub struct Slot {
     /// a merge keeps the smaller. `u32::MAX` in a value merged in only to set
     /// another field.
     oldest: u32,
+    /// The index of the class's newest variable: a merge keeps the larger.
+    /// With [`Self::oldest`] it bounds the class's variables, which
+    /// [`InferTable::refusing_unowned`] reads. `0` in a value merged in only to
+    /// set another field.
+    newest: u32,
     /// The constraints whose variable's resolution mentions this class
     /// ([`InferTable::attach_constraint`]), as the caller numbers them.
     constraints: Option<Rc<Attached>>,
@@ -101,6 +106,7 @@ impl Default for Slot {
             binding: None,
             tainted: false,
             oldest: u32::MAX,
+            newest: 0,
             constraints: None,
         }
     }
@@ -121,6 +127,7 @@ impl UnifyValue for Slot {
             binding,
             tainted: a.tainted || b.tainted,
             oldest: a.oldest.min(b.oldest),
+            newest: a.newest.max(b.newest),
             constraints: join(&a.constraints, &b.constraints),
         })
     }
@@ -141,9 +148,10 @@ pub(crate) enum UnifyError {
     /// records ([`InferTable::over_budget`]): whether the terms unify is not
     /// known.
     OverBudget(TypeBudgetExceeded),
-    /// The unification would bind a tainted class to a term, which the table
-    /// was set to refuse ([`InferTable::refusing_tainted`]).
-    Tainted,
+    /// The unification would bind a class to a term which the table was set
+    /// to refuse: a tainted one ([`InferTable::refusing_tainted`]), or one not
+    /// made purely of the variables it owns ([`InferTable::refusing_unowned`]).
+    Refused,
 }
 
 impl From<TypeBudgetExceeded> for UnifyError {
@@ -285,10 +293,10 @@ pub(crate) struct InferTable<'t> {
     /// Whether a unification in progress refuses to bind a tainted class to
     /// a term ([`Self::refusing_tainted`]).
     refuse_tainted: bool,
-    /// A unification in progress refuses to bind a class to a term when its
-    /// oldest variable is below the first bound and outside the range
-    /// ([`Self::refusing_older`]); `(0, 0..0)` refuses none.
-    refuse_older: (u32, std::ops::Range<u32>),
+    /// A unification in progress refuses to bind a class to a term unless
+    /// every variable of the class lies in this range
+    /// ([`Self::refusing_unowned`]); `None` refuses none.
+    refuse_unowned: Option<std::ops::Range<u32>>,
 }
 
 impl<'t> InferTable<'t> {
@@ -303,7 +311,7 @@ impl<'t> InferTable<'t> {
             exceeded: None,
             walks: TypeWalks::default(),
             refuse_tainted: false,
-            refuse_older: (0, 0..0),
+            refuse_unowned: None,
         }
     }
 
@@ -338,6 +346,7 @@ impl<'t> InferTable<'t> {
         let index = self.table.len() as u32;
         self.table.new_key(Slot {
             oldest: index,
+            newest: index,
             ..Slot::default()
         })
     }
@@ -703,7 +712,7 @@ impl<'t> InferTable<'t> {
         self.probe(|t| t.unify(a, b))
     }
 
-    /// [`Self::unify_atomic`], refusing — with [`UnifyError::Tainted`], and
+    /// [`Self::unify_atomic`], refusing — with [`UnifyError::Refused`], and
     /// leaving no trace — to bind a [tainted](Self::taint) class to a term.
     /// Merging a tainted class with another variable is allowed: the merged
     /// class is tainted.
@@ -716,21 +725,21 @@ impl<'t> InferTable<'t> {
     }
 
     /// Set whether a unification refuses to bind a [tainted](Self::taint)
-    /// class to a term ([`UnifyError::Tainted`]), returning the setting it
+    /// class to a term ([`UnifyError::Refused`]), returning the setting it
     /// replaces.
     pub(crate) fn refusing_tainted(&mut self, on: bool) -> bool {
         std::mem::replace(&mut self.refuse_tainted, on)
     }
 
-    /// Set the index below which a unification refuses to bind a class to a
-    /// term ([`UnifyError::Tainted`]) — judged by the class's oldest variable,
-    /// unless that variable lies in `spared` — returning the setting it
-    /// replaces; `(0, 0..0)` refuses none.
-    pub(crate) fn refusing_older(
+    /// Set the range of variables a unification may bind to a term: a class
+    /// with any variable outside it is refused ([`UnifyError::Refused`]),
+    /// though it may still be merged with another unbound class. Returns the
+    /// setting it replaces; `None` refuses none.
+    pub(crate) fn refusing_unowned(
         &mut self,
-        setting: (u32, std::ops::Range<u32>),
-    ) -> (u32, std::ops::Range<u32>) {
-        std::mem::replace(&mut self.refuse_older, setting)
+        owned: Option<std::ops::Range<u32>>,
+    ) -> Option<std::ops::Range<u32>> {
+        std::mem::replace(&mut self.refuse_unowned, owned)
     }
 
     /// Run `f` against a **scoped snapshot** of the table: keep its effects iff it
@@ -905,11 +914,12 @@ impl<'t> InferTable<'t> {
         walk: &mut Walk,
     ) -> Result<(), UnifyError> {
         let slot = self.table.probe_value(v);
-        let (below, spared) = &self.refuse_older;
-        if (self.refuse_tainted && slot.tainted)
-            || (slot.oldest < *below && !spared.contains(&slot.oldest))
-        {
-            return Err(UnifyError::Tainted);
+        let unowned = self
+            .refuse_unowned
+            .as_ref()
+            .is_some_and(|owned| slot.oldest < owned.start || slot.newest >= owned.end);
+        if (self.refuse_tainted && slot.tainted) || unowned {
+            return Err(UnifyError::Refused);
         }
         if self.occurs_in(v, term, depth, walk)? {
             return Err(UnifyError::Occurs);
@@ -1422,7 +1432,7 @@ mod tests {
             let case = format!("{pre:?}, tainted {tainted:?}, then {a:?} ~ {b:?}");
             if binds_tainted {
                 refused += 1;
-                assert_eq!(g, Err(UnifyError::Tainted), "{case}");
+                assert_eq!(g, Err(UnifyError::Refused), "{case}");
                 assert_eq!(
                     canonicalize(&before),
                     canonicalize(&guarded.pool()),
@@ -1460,6 +1470,108 @@ mod tests {
             refused >= 100 && applied >= 100 && failed >= 20,
             "the cases should reach every verdict: {refused} refused, {applied} applied, \
              {failed} failed"
+        );
+    }
+
+    /// The owned-range law: a unification refusing what it does not own
+    /// ([`InferTable::refusing_unowned`]) refuses exactly when the plain one
+    /// would bind to a term a class some variable of which lies outside the
+    /// range, judged against the classes before it — a class merged with an
+    /// owned one is not owned, however it is spelled — and a refusal leaves
+    /// the table as it was; one that succeeds leaves the table the plain one
+    /// does.
+    #[test]
+    fn owned_unification_refuses_exactly_an_unowned_binding() {
+        let mut runner = proptest::test_runner::TestRunner::deterministic();
+        let strategy = (
+            constraint_list(),
+            0..=POOL,
+            0..=POOL,
+            ty_strategy(),
+            ty_strategy(),
+            0..4usize,
+            (0..POOL, 0..POOL),
+        );
+        let (mut refused, mut applied, mut failed, mut merged_unowned) = (0, 0, 0, 0);
+        for _ in 0..2048 {
+            let (pre, s0, s1, a, b, shape, (k, j)) =
+                strategy.new_tree(&mut runner).expect("a case").current();
+            let owned = s0.min(s1)..s0.max(s1);
+            // Half the cases unify a pool variable with a term, so that a
+            // binding is reached often, and a quarter two pool variables, so
+            // that an unowned class is often merged without being bound.
+            let (a, b) = match shape {
+                0 => (var(k), b),
+                1 => (a, var(k)),
+                2 => (var(k), var(j)),
+                _ => (a, b),
+            };
+            let g_tys = TyTable::session();
+            let mut guarded = Session::pooled(&g_tys, None);
+            let u_tys = TyTable::session();
+            let mut plain = Session::pooled(&u_tys, None);
+            for (x, y) in &pre {
+                let _ = guarded.unify_atomic(x, y);
+                let _ = plain.unify_atomic(x, y);
+            }
+            // The open classes before, each as the set of its members.
+            let class_of = |s: &mut Session<'_>, k: u32| -> Vec<u32> {
+                (0..POOL)
+                    .filter(|&j| s.table.unioned(TyVid(j), TyVid(k)))
+                    .collect()
+            };
+            let mut open_before: Vec<(u32, Vec<u32>)> = Vec::new();
+            for k in 0..POOL {
+                if matches!(plain.resolve(&var(k)), SpelledTy::Var(_)) {
+                    let class = class_of(&mut plain, k);
+                    open_before.push((k, class));
+                }
+            }
+            let before = guarded.pool();
+            let (ga, gb) = (guarded.ty(&a), guarded.ty(&b));
+            let was = guarded.table.refusing_unowned(Some(owned.clone()));
+            let g = guarded.table.unify_atomic(ga, gb);
+            guarded.table.refusing_unowned(was);
+            let p = plain.unify_atomic(&a, &b);
+            let binds_unowned = p.is_ok()
+                && open_before.iter().any(|(k, class)| {
+                    !matches!(plain.resolve(&var(*k)), SpelledTy::Var(_))
+                        && class.iter().any(|j| !owned.contains(j))
+                });
+            let case = format!("{pre:?}, owning {owned:?}, then {a:?} ~ {b:?}");
+            if binds_unowned {
+                refused += 1;
+                assert_eq!(g, Err(UnifyError::Refused), "{case}");
+                assert_eq!(
+                    canonicalize(&before),
+                    canonicalize(&guarded.pool()),
+                    "{case}"
+                );
+            } else if p.is_ok() {
+                applied += 1;
+                assert_eq!(g, Ok(()), "{case}");
+                assert_eq!(
+                    canonicalize(&guarded.pool()),
+                    canonicalize(&plain.pool()),
+                    "{case}"
+                );
+                // An applied unification that merged an unowned class with
+                // another, binding neither.
+                if open_before.iter().any(|(k, class)| {
+                    class.iter().any(|j| !owned.contains(j))
+                        && class_of(&mut plain, *k).len() > class.len()
+                }) {
+                    merged_unowned += 1;
+                }
+            } else {
+                failed += 1;
+                assert!(g.is_err(), "{case}");
+            }
+        }
+        assert!(
+            refused >= 100 && applied >= 100 && failed >= 20 && merged_unowned >= 20,
+            "the cases should reach every verdict: {refused} refused, {applied} applied, \
+             {failed} failed, {merged_unowned} merged an unowned class"
         );
     }
 

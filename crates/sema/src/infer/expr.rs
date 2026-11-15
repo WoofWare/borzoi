@@ -58,7 +58,6 @@ impl<'a> Gen<'a> {
         expected: Expected,
     ) -> Option<TyVid> {
         self.out.enter_expression();
-        self.note_lost_prefix(scope);
         let result = if expected.records() {
             self.infer_construct(scope, e, expected)
         } else {
@@ -98,8 +97,7 @@ impl<'a> Gen<'a> {
                     scope.mark_incomplete(Incomplete::DeferredLiteral);
                     return None;
                 };
-                let v = self.solver.table.fresh();
-                self.eq(scope, self.solver.tys.var(v), ty);
+                let v = self.fresh_equal(scope, ty);
                 // The literal *token*'s range, not the `ConstExpr` node's: in a
                 // tuple element (`(1, "hi")`) the node range swallows the leading
                 // ` ` trivia after the comma, but FCS's node spans only the
@@ -209,8 +207,7 @@ impl<'a> Gen<'a> {
                     scope.mark_incomplete(Incomplete::Recovery);
                     return None;
                 }
-                let tv = self.solver.table.fresh();
-                self.eq(scope, self.solver.tys.var(tv), self.solver.tys.tuple(elems));
+                let tv = self.fresh_equal(scope, self.solver.tys.tuple(elems));
                 self.emit(self.facts.node_span(t.syntax()), tv, expected);
                 if relate_at_end {
                     self.relate(scope, tv, expected);
@@ -277,9 +274,8 @@ impl<'a> Gen<'a> {
                         // against `unit`. (An `elif` chain is an `if` in the
                         // `else` of another, which meets this rule itself.)
                         if if_expr.else_branch().is_none() {
-                            let unit = self.solver.table.fresh();
                             let unit_ty = self.solver.tys.named(self.facts.env.names(), UNIT);
-                            self.eq(scope, self.solver.tys.var(unit), unit_ty);
+                            let unit = self.fresh_equal(scope, unit_ty);
                             // FCS's `unit` equality is strict: where it fails, or
                             // against a type not known here, FCS reports it and
                             // what it checks next is not known, so the prefix
@@ -394,7 +390,9 @@ impl<'a> Gen<'a> {
                     // before it is generated, once what came before settled.
                     self.settle(scope);
                     let failures = scope.eq_failures;
+                    let pat_from = self.solver.table.mark();
                     let pt = self.gen_pattern(scope, &shape, BinderSite::Local);
+                    let own = self.own_since(pat_from);
                     // As for a `let` pattern ([`Self::pattern_rhs`]): a
                     // pattern of structure must not give an earlier binding's
                     // open variable a shape of this binding's variables
@@ -424,23 +422,13 @@ impl<'a> Gen<'a> {
                         scope.mark_incomplete(Incomplete::PatternAfterCheck);
                         return None;
                     }
-                    // An unmodelled construct before the pattern may have
-                    // fixed what the scrutinee's open variables are in FCS
-                    // (`Some x -> (if x then …) | Some "" -> …` makes `x`
-                    // `bool`, then rejects the pattern), and it left no
-                    // relation to probe; so on an incomplete binding a
-                    // pattern of structure relates only a ground scrutinee.
-                    if !scope.complete
-                        && !matches!(self.solver.tys.kind(pt), TyKind::Var(_))
-                        && !self
-                            .solver
-                            .tys
-                            .is_ground(self.solver.table.resolve(self.solver.tys.var(sv)))
-                    {
-                        scope.mark_incomplete(Incomplete::PatternAfterCheck);
-                        return None;
-                    }
-                    self.eq(scope, self.solver.tys.var(sv), pt);
+                    // Once the prefix has ended, the equality binds only the
+                    // pattern's own variables ([`Self::eq`]): an unmodelled
+                    // construct before it may have fixed what the scrutinee's
+                    // open variables are in FCS (`Some x -> (if x then …) |
+                    // Some "" -> …` makes `x` `bool`, then rejects the
+                    // pattern). Refused, it leaves the pattern's names open.
+                    self.eq(scope, self.solver.tys.var(sv), pt, own);
                     // The pattern's names are typed before the clause's uses
                     // of them are walked, so a use reads a known type
                     // ([`Self::value_use`]).
@@ -756,16 +744,14 @@ impl<'a> Gen<'a> {
         let structural = !matches!(self.solver.tys.kind(pat_ty), TyKind::Var(_));
         // The pattern's own variables: every one made since `pat_from`, the
         // pattern being the last thing typed.
-        let own = pat_from..self.solver.table.mark();
+        let own = self.own_since(pat_from);
         // FCS checks the RHS against the pattern's type, by equality: a
         // pattern of structure is related where the RHS's form relates its
         // expected type — an application's result before its arguments.
         let expected = if bound_directly {
             Expected::Known(self.solver.table.fresh())
         } else if structural && scope.complete {
-            let pv = self.solver.table.fresh();
-            self.eq(scope, self.solver.tys.var(pv), pat_ty);
-            Expected::Equal(pv)
+            Expected::Equal(self.fresh_equal(scope, pat_ty))
         } else {
             Expected::Synth
         };
@@ -785,8 +771,8 @@ impl<'a> Gen<'a> {
             // may it give one whose type FCS may know and inference does not
             // (a tainted one) a structure: that is a decision, which such a
             // variable declines. (Once the prefix has ended no decision is
-            // taken, and the equality is applied unless it binds a variable
-            // older than that end, below.) The relation is dropped instead.
+            // taken, and the equality binds only the pattern's own variables,
+            // below.) The relation is dropped instead.
             scope.mark_incomplete(Incomplete::InheritedOpen);
             self.out.discard_since(mark);
             return;
@@ -797,17 +783,15 @@ impl<'a> Gen<'a> {
             && !(matches!(expected, Expected::Equal(_)) && scope.complete)
         {
             let rhs_ty = self.solver.tys.var(rhs_var);
-            if structural && !scope.complete {
-                if !self.eq_sparing_older(scope, pat_ty, rhs_ty, own) {
-                    // FCS may have bound the variable through the construct
-                    // that ended the prefix (`(p : int), (let () = p in ())`),
-                    // so the pattern's structure is not imposed on it.
-                    scope.mark_incomplete(Incomplete::InheritedOpen);
-                    self.out.discard_since(mark);
-                    return;
-                }
-            } else {
-                self.eq(scope, pat_ty, rhs_ty);
+            if self.eq(scope, pat_ty, rhs_ty, own) == Equated::Refused {
+                // Once the prefix has ended, FCS may have fixed what the
+                // right-hand side is by what inference did not model
+                // (`(p : int), (let () = p in ())`, or `let z = [s] in let
+                // () = z in z`), so the pattern's structure is imposed on no
+                // class but its own variables' ([`Self::eq`]).
+                scope.mark_incomplete(Incomplete::InheritedOpen);
+                self.out.discard_since(mark);
+                return;
             }
         }
         self.settle(scope);
@@ -848,11 +832,8 @@ impl<'a> Gen<'a> {
     /// [settled](Self::settle) also marks the binding **incomplete**, since FCS's
     /// unification would ground it to `unit` and a later argument check could
     /// otherwise ground it to something else (`let h x = x; mono x` has
-    /// `x : unit` in FCS, not `bool`). A condition grounding a parameter slot is
-    /// the one grounding incompleteness does not block; it is held to the
-    /// parameter's first occurrence instead ([`Self::is_first_occurrence`]),
-    /// which a statement naming the parameter already is. A ground statement
-    /// type is untouched by the unification, so it costs nothing.
+    /// `x : unit` in FCS, not `bool`). A ground statement type is untouched by
+    /// the unification, so it costs nothing.
     fn infer_sequential(
         &mut self,
         scope: &mut Scope,
@@ -944,7 +925,7 @@ impl<'a> Gen<'a> {
                     .and_then(|tok| self.facts.def_at(tok.text_range()));
                 match slot {
                     Some(_) if shares_typar => {
-                        scope.mark_incomplete(Incomplete::ConditionNotFirstOccurrence);
+                        scope.mark_incomplete(Incomplete::ConditionUndecided);
                     }
                     // While the prefix is faithful, the condition is FCS's
                     // equality at this point in its checking order, on the
@@ -964,28 +945,16 @@ impl<'a> Gen<'a> {
                             .solver
                             .tys
                             .named(self.facts.env.names(), "System.Boolean");
-                        let b = self.solver.table.fresh();
-                        self.eq(scope, self.solver.tys.var(b), bool_ty);
+                        let b = self.fresh_equal(scope, bool_ty);
                         if self.decide(scope, dv, b) == Decision::Taken {
-                            self.eq(scope, self.solver.tys.var(slot), bool_ty);
+                            self.eq(scope, self.solver.tys.var(slot), bool_ty, Own::var(slot));
                         }
                     }
-                    Some(slot)
-                        if ident
-                            .ident()
-                            .is_some_and(|tok| self.is_first_occurrence(scope, &tok)) =>
-                    {
-                        self.eq(
-                            scope,
-                            self.solver.tys.var(slot),
-                            self.solver
-                                .tys
-                                .named(self.facts.env.names(), "System.Boolean"),
-                        )
-                    }
-                    // A condition on a parameter something earlier may have
-                    // fixed: FCS reports the condition, it does not retype.
-                    Some(_) => scope.mark_incomplete(Incomplete::ConditionNotFirstOccurrence),
+                    // Once the prefix has ended, or on a tainted binder,
+                    // something inference did not model may have fixed the
+                    // parameter: FCS then reports the condition, it does not
+                    // retype.
+                    Some(_) => scope.mark_incomplete(Incomplete::ConditionUndecided),
                     // A condition ident that is not a slot-owning parameter of this
                     // binding (a value / annotated / `rec` binder, a cross-file
                     // name) is unmodelled here — its `bool`-ness is an FCS
@@ -1006,31 +975,6 @@ impl<'a> Gen<'a> {
             // constraints on its sub-terms that we drop.
             _ => scope.mark_incomplete(Incomplete::ConditionShape),
         }
-    }
-
-    /// Whether the parameter token `tok` in a condition is the parameter's
-    /// **first occurrence** in the current function's body — the rule that lets
-    /// a condition ground the parameter's slot ([`Self::constrain_bool`]).
-    ///
-    /// FCS unifies in source order and reports a later conflict rather than
-    /// retyping: in `let f x = (mono x, if x then 1 else 2)` with
-    /// `mono : string -> int`, `x` is `string` and the condition is the error.
-    /// Our solver is not ordered — the condition's equality is discharged before
-    /// any argument check — so a condition grounds soundly only if nothing could
-    /// have constrained the parameter before it. A parameter's type is reachable
-    /// only through its occurrences (and aliases made from them), so "nothing
-    /// before" is "no earlier occurrence". The test is **syntactic**, over the
-    /// body's identifier tokens: an occurrence in a subtree the walk skips, or
-    /// one the resolver reads some other way, still counts.
-    fn is_first_occurrence(&self, scope: &Scope, tok: &SyntaxToken) -> bool {
-        let Some(body) = &scope.body else {
-            return false;
-        };
-        let name = ident_text(tok);
-        body.descendants_with_tokens()
-            .filter_map(|el| el.into_token())
-            .find(|t| t.kind() == SyntaxKind::IDENT_TOK && ident_text(t) == name)
-            .is_some_and(|first| first.text_range() == tok.text_range())
     }
 
     /// Record an expression's type variable `v` at `range` for read-off — but

@@ -50,6 +50,21 @@
 //! checks around it fired. `p` is open until something fixes it, so its node
 //! and the function's binder show what the checks did to it.
 //!
+//! Two further axes reach what happens once the faithful prefix has ended.
+//! With a probability drawn per file a construct inference does not model is
+//! put before the sink (`(p : int)`, `(fun () -> gt p)`, `(while false do
+//! ignore (gi p))`, `y.Insert(0, p)`, or one that leaves `p` alone), most of
+//! them fixing `p` in FCS where inference cannot see it. And up to two
+//! **term-position contexts** follow the extras: a term whose type FCS may
+//! know and inference, after such a construct, does not (`idf p`, `[y]`, `p
+//! 1`, …) related to a type of the context's own — a `let` pattern with a term
+//! position (`let () = z`, `let (a, ()) = (1, T)`), a union case pattern, a
+//! match pattern of structure, a condition, an argument, an operand, a
+//! branch, a receiver. These are mostly ill-typed: FCS types the term, then
+//! rejects the context, and inference must not type the term by the context
+//! (`let x2 p = ((p : string), (let z = idf p in (let () = z in z)), p)`
+//! keeps `z : string`, #774).
+//!
 //! The other cases are a body under a return annotation,
 //! `let cK (y: string) (n: int) (b: bool) p : T = ARG`, with `ARG` generated
 //! against `T` (`let c4 p : string = both p (gi p)`).
@@ -64,8 +79,9 @@
 //!     there;
 //!   - the witness after the sink, `p`'s node, and the binders, in a case FCS
 //!     accepts built only from the plain constructs — no lambda, no ill-typed
-//!     leaf, no second use of `p`, no branch, method call, applied parameter
-//!     or return annotation: every check in it is one inference models,
+//!     leaf, no second use of `p`, no branch, method call, applied parameter,
+//!     return annotation, construct ending the prefix or term-position
+//!     context: every check in it is one inference models,
 //!     decided where FCS decides it. The richer constructs are graded by
 //!     certain-implies-exact alone, since L2 may soundly decline inside them.
 //!
@@ -103,7 +119,9 @@ const HEADER: &str = "module EntryOrder\n\
                       let gpo (o: obj option) = 0\n\
                       let xs = ResizeArray<int * string>()\n\
                       type U1 = U1 of (obj * int)\n\
-                      type U2 = U2 of obj * int\n";
+                      type U2 = U2 of obj * int\n\
+                      type 'a W = WA of 'a | WN\n\
+                      type K = static member M (s: string) = s\n";
 
 /// The types the generator builds an argument against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +192,13 @@ struct Features {
     conversion: bool,
     /// A `while` loop or a `let` pattern of structure in an argument.
     statement_form: bool,
+    /// A construct inference does not model before the sink, which ends the
+    /// binding's faithful prefix there ([`ArgGen::loss`]).
+    lost: bool,
+    /// A context that relates a term to a type of its own — a `let`
+    /// pattern with a term position, a match pattern, a condition, an
+    /// argument ([`ArgGen::context`]).
+    term_position: bool,
 }
 
 impl Features {
@@ -188,7 +213,9 @@ impl Features {
             || self.applied_fn
             || self.annotated
             || self.conversion
-            || self.statement_form)
+            || self.statement_form
+            || self.lost
+            || self.term_position)
     }
 }
 
@@ -205,6 +232,10 @@ struct Regime {
     /// The chance of each of up to two extra elements.
     extra_pct: usize,
     annotated_pct: usize,
+    /// The chance of a construct that ends the prefix before the sink.
+    lost_pct: usize,
+    /// The chance of each of up to two term-position contexts.
+    context_pct: usize,
 }
 
 struct ArgGen<'r> {
@@ -365,6 +396,134 @@ impl ArgGen<'_> {
             }
             .into(),
             (Want::StrToInt, true) => "mono".into(),
+        }
+    }
+
+    /// A construct inference does not model, put before the sink so that
+    /// everything after it is walked once the binding's faithful prefix has
+    /// ended. Most fix `p` in FCS — to `int`, `string`, `int * string` or
+    /// `int -> string` — through what inference does not see (a type
+    /// annotation on an expression, a lambda's body, a loop's body, a method
+    /// argument); the rest leave `p` as it was.
+    fn loss(&mut self) -> String {
+        self.features.lost = true;
+        let fixed = match self.rng.below(4) {
+            0 => ("int", "gi"),
+            1 => ("string", "monos"),
+            2 => ("(int * string)", "gt"),
+            _ => ("(int -> string)", ""),
+        };
+        let form = match self.rng.below(7) {
+            0 | 1 => format!("(p : {})", fixed.0),
+            2 if !fixed.1.is_empty() => format!("(fun () -> {} p)", fixed.1),
+            3 if !fixed.1.is_empty() => format!("(while false do ignore ({} p))", fixed.1),
+            4 => "y.Insert(0, p)".into(),
+            5 => return "(y : string)".into(),
+            6 => return "(fun () -> 1)".into(),
+            _ => format!("(p : {})", fixed.0),
+        };
+        self.p_uses += 1;
+        self.features.open_param = true;
+        self.features.multi_p |= self.p_uses > 1;
+        form
+    }
+
+    /// A term whose type FCS may know where inference, once the prefix has
+    /// ended, does not: one built from `p`, or a list expression (which
+    /// inference does not model) of a parameter whose type both know.
+    fn term(&mut self, depth: usize) -> String {
+        let mut uses_p = true;
+        let t = match self.rng.below(18) {
+            // Method calls, whose node FCS types by the expected type itself
+            // under a `let` pattern, resolved or not.
+            14 => {
+                uses_p = false;
+                "y.Insert(0, \"s\")".into()
+            }
+            15 => {
+                uses_p = false;
+                "System.Int32.TryParse(y)".into()
+            }
+            16 => {
+                uses_p = false;
+                "K.M(y)".into()
+            }
+            17 => "y.Insert(0, p)".into(),
+            0 => "p".into(),
+            1 => "idf p".into(),
+            2 => "both p p".into(),
+            3 => "(if b then p else p)".into(),
+            4 => "(match n with 0 -> p | _ -> p)".into(),
+            5 => "fst (p, 1)".into(),
+            6 => "singleton p".into(),
+            7 => "Some p".into(),
+            8 => "(p, 1)".into(),
+            9 => "[p]".into(),
+            10 => "p 1".into(),
+            11 => {
+                uses_p = false;
+                if self.rng.chance(50) { "[y]" } else { "[n]" }.into()
+            }
+            12 => {
+                uses_p = false;
+                let want = if self.rng.chance(50) {
+                    Want::Int
+                } else {
+                    Want::Str
+                };
+                format!("idf ({})", self.expr(&want, depth, false))
+            }
+            _ => "(0; p)".into(),
+        };
+        if uses_p {
+            self.p_uses += 1;
+            self.features.open_param = true;
+            self.features.multi_p |= self.p_uses > 1;
+        }
+        t
+    }
+
+    /// A context that relates a term ([`Self::term`]) to a type of its own,
+    /// by each form that carries an expected type or a pattern: a `let`
+    /// pattern with a term position (`()`, or a tuple holding one), a union
+    /// case pattern, a match pattern of structure, a condition, an
+    /// application's or a method's argument, an operator's or a conversion's
+    /// operand, a statement, a branch, a union case's field, a loop
+    /// condition, a member access's receiver. Many are ill-typed at the type
+    /// FCS gives the term, which is the point: FCS types the term before it
+    /// rejects the context, and inference must not type it by the context.
+    fn context(&mut self, depth: usize) -> String {
+        self.features.term_position = true;
+        let t = self.term(depth);
+        match self.rng.below(28) {
+            0 => format!("(let () = {t} in 0)"),
+            1 => format!("(let z = {t} in (let () = z in z))"),
+            2 => format!("(let (a, ()) = (1, {t}) in a)"),
+            3 => format!("(let ((), a) = ({t}, 1) in a)"),
+            4 => format!("(let (a, b) = {t} in (let () = a in b))"),
+            5 => format!("(let z = {t} in (let (a, ()) = (z, z) in a))"),
+            6 => format!("(match {t} with 1 -> 1 | _ -> 2)"),
+            7 => format!("(match {t} with \"s\" -> 1 | _ -> 2)"),
+            8 => format!("(match {t} with (1, _) -> 1 | _ -> 2)"),
+            9 => format!("(if {t} then 1 else 2)"),
+            10 => format!("gi ({t})"),
+            11 => format!("monos ({t})"),
+            12 => format!("y.Insert({t}, \"z\")"),
+            13 => format!("-({t})"),
+            14 => format!("int ({t})"),
+            15 => format!("({t}; 0)"),
+            16 => format!("(if b then {t})"),
+            17 => format!("(if b then {t} else 1)"),
+            18 => format!("(if b then \"s\" else {t})"),
+            19 => format!("U1 ({t}, 1)"),
+            20 => format!("(while {t} do ())"),
+            21 => format!("({t}).Length"),
+            22 => format!("both ({t}) 1"),
+            23 => format!("(let (WA ()) = WA ({t}) in 0)"),
+            24 => format!("(let z = WA ({t}) in (let (WA ()) = z in 0))"),
+            25 => format!("(let z = {t} in (match z with 1 -> 1 | _ -> 2))"),
+            26 => format!("(let z = {t} in (if z then 1 else 2))"),
+            _ => format!("(let z = {t} in (let (a, b) = z in a))"),
         }
     }
 
@@ -533,7 +692,7 @@ struct Case {
 
 fn regime_for(seed: u64) -> Regime {
     let mut rng = Rng(seed ^ 0x0e47_0e4d);
-    Regime {
+    let mut regime = Regime {
         depth: [1, 2, 3][rng.below(3)],
         lambda_pct: [0, 10, 30][rng.below(3)],
         ill_pct: [0, 8, 25][rng.below(3)],
@@ -542,7 +701,16 @@ fn regime_for(seed: u64) -> Regime {
         method_pct: [0, 10, 25][rng.below(3)],
         extra_pct: [10, 40, 70][rng.below(3)],
         annotated_pct: [0, 15, 30][rng.below(3)],
+        // Half the files reach past the prefix's end; the other half keep the
+        // plain cases the must-commit points need.
+        lost_pct: 0,
+        context_pct: 0,
+    };
+    if rng.chance(50) {
+        regime.lost_pct = [30, 60][rng.below(2)];
+        regime.context_pct = [40, 70][rng.below(2)];
     }
+    regime
 }
 
 /// Cases per file.
@@ -561,6 +729,13 @@ fn file_for(seed: u64) -> (String, Vec<Case>) {
             0
         } else {
             usize::from(rng.chance(regime.extra_pct)) + usize::from(rng.chance(regime.extra_pct))
+        };
+        let lost = !annotated && rng.chance(regime.lost_pct);
+        let contexts = if annotated {
+            0
+        } else {
+            usize::from(rng.chance(regime.context_pct))
+                + usize::from(rng.chance(regime.context_pct))
         };
         let mut g = ArgGen {
             rng: &mut rng,
@@ -590,12 +765,18 @@ fn file_for(seed: u64) -> (String, Vec<Case>) {
             after = None;
             p_node = None;
         } else {
+            let loss = lost.then(|| g.loss());
             let arg = g.expr(domain, regime.depth, false);
-            let extra: Vec<String> = (0..extras).map(|_| g.extra(regime.depth)).collect();
+            let mut extra: Vec<String> = (0..extras).map(|_| g.extra(regime.depth)).collect();
+            extra.extend((0..contexts).map(|_| g.context(regime.depth)));
             body.push_str(" = (");
             let before_at = body.len();
             body.push_str("idf 3");
             before = Some((before_at, body.len()));
+            if let Some(loss) = &loss {
+                body.push_str(", ");
+                body.push_str(loss);
+            }
             body.push_str(&format!(", {sink} ({arg}), "));
             for e in &extra {
                 body.push_str(e);
@@ -749,6 +930,9 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
                 ("annotated", f.annotated),
                 ("conversion", f.conversion),
                 ("statement form", f.statement_form),
+                ("lost before", f.lost),
+                ("term position", f.term_position),
+                ("lost before a term position", f.lost && f.term_position),
                 (
                     "clean-coerced-inside",
                     clean && f.coerced_inside && f.plain(),
@@ -849,6 +1033,9 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
         "annotated",
         "conversion",
         "statement form",
+        "lost before",
+        "term position",
+        "lost before a term position",
         "clean-coerced-inside",
         "clean-plain",
     ] {

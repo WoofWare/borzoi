@@ -36,14 +36,6 @@ pub(super) struct Scope {
     /// Why the binding is incomplete, in the order the walk found out: its
     /// census entry ([`InferredFile::incompleteness`]).
     pub(super) reasons: Vec<Incomplete>,
-    /// The table's vid mark when the walk first met the prefix ended
-    /// ([`Gen::note_lost_prefix`]): FCS may have bound any variable older
-    /// than it by what inference did not model, so a pattern of structure
-    /// afterwards does not bind one to a term ([`Gen::pattern_rhs`]).
-    pub(super) lost_at: Option<u32>,
-    /// The body of the function binding being walked, for
-    /// [`Gen::is_first_occurrence`]. `None` outside a function binding.
-    pub(super) body: Option<SyntaxNode>,
     /// The poison set (Stage 3.2c-2c): the raw variables of every check-mode
     /// [`Gen::infer_expr`] call (the expected and the returned var), whose
     /// cross-relation this stage drops. At generalisation its one-step closure
@@ -162,8 +154,6 @@ impl<'a> Gen<'a> {
             constraints: self.solver.constraint_mark(),
             complete: true,
             reasons: Vec::new(),
-            lost_at: None,
-            body: None,
             poison: Vec::new(),
             params: Vec::new(),
             binding_params: Vec::new(),

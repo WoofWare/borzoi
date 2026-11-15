@@ -189,21 +189,24 @@ impl<'a> Gen<'a> {
         match tys.kind(resolved) {
             TyKind::Tuple(elems) if elems.len() == arity => {
                 let elems = elems.to_vec();
+                // An element type that is a variable is the element's expected
+                // type itself, not an alias of it: a `let` pattern's own
+                // variable stays a class of its own variables alone, which
+                // its equality may still bind once the prefix has ended
+                // ([`Self::eq`]).
                 let known = elems
                     .into_iter()
-                    .map(|e| {
-                        let v = self.solver.table.fresh();
-                        self.eq(scope, tys.var(v), e);
-                        wrap(v)
+                    .map(|e| match *tys.kind(e) {
+                        TyKind::Var(v) => wrap(v),
+                        _ => wrap(self.fresh_equal(scope, e)),
                     })
                     .collect();
                 (known, false)
             }
             TyKind::Var(_) => {
                 let vars: Vec<TyVid> = (0..arity).map(|_| self.solver.table.fresh()).collect();
-                let tv = self.solver.table.fresh();
                 let tuple = tys.tuple(vars.iter().map(|&v| tys.var(v)).collect::<Vec<Ty>>());
-                self.eq(scope, tys.var(tv), tuple);
+                let tv = self.fresh_equal(scope, tuple);
                 let decision = if matches!(expected, Expected::Equal(_)) {
                     self.decide_equal(scope, tv, d)
                 } else {
@@ -229,7 +232,8 @@ impl<'a> Gen<'a> {
     /// ([`Expected::Equal`]): a `let` pattern's against its right-hand side.
     /// Once the prefix has ended nothing is decided here, and nothing is
     /// tainted: the pattern's own equality relates the whole right-hand side
-    /// afterwards ([`Self::pattern_rhs`]), as any equality is applied then.
+    /// afterwards ([`Self::pattern_rhs`]), binding only the pattern's own
+    /// variables ([`Self::eq`]).
     pub(super) fn decide_equal(
         &mut self,
         scope: &mut Scope,

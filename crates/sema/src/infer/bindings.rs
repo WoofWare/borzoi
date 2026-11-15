@@ -210,7 +210,12 @@ impl<'a> Gen<'a> {
                     // let g x = (x, a)`).
                     let dv = self.def_var(def);
                     if let Some(rhs_var) = rhs_var {
-                        self.eq(scope, self.solver.tys.var(dv), self.solver.tys.var(rhs_var));
+                        self.eq(
+                            scope,
+                            self.solver.tys.var(dv),
+                            self.solver.tys.var(rhs_var),
+                            Own::var(dv),
+                        );
                     }
                 }
                 self.solve(scope);
@@ -232,7 +237,6 @@ impl<'a> Gen<'a> {
             Some(Pat::LongIdent(head))
                 if head.args().next().is_some() || head.name_pat_pairs().is_some() =>
             {
-                scope.body = Some(rhs.syntax().clone());
                 let head_typars = self.open_head_typars(scope, &head, None, Some(rhs));
                 let arg_vars =
                     self.param_vars(scope, &head, AnnotationCx::head(head_typars.as_ref()));
@@ -375,11 +379,9 @@ impl<'a> Gen<'a> {
             scope.mark_incomplete(Incomplete::BindingAnnotation);
             return Census::Record;
         };
-        scope.body = rhs.as_ref().map(|rhs| rhs.syntax().clone());
 
         let arg_vars = self.param_vars(scope, head, cx);
-        let r = self.solver.table.fresh();
-        self.eq(scope, self.solver.tys.var(r), t);
+        let r = self.fresh_equal(scope, t);
         if let Some(rhs) = rhs {
             debug_assert!(
                 rhs.syntax()
@@ -444,7 +446,7 @@ impl<'a> Gen<'a> {
             && let Some(def) = self.facts.def_at(tok.text_range())
         {
             let dv = self.def_var(def);
-            self.eq(scope, self.solver.tys.var(dv), t);
+            self.eq(scope, self.solver.tys.var(dv), t, Own::var(dv));
             if let Some(rhs) = rhs {
                 debug_assert!(
                     rhs.syntax()
@@ -475,7 +477,12 @@ impl<'a> Gen<'a> {
     fn slot_binder_reunify(&mut self, scope: &mut Scope) {
         for (def, slot) in scope.params.clone() {
             let dv = self.def_var(def);
-            self.eq(scope, self.solver.tys.var(slot), self.solver.tys.var(dv));
+            self.eq(
+                scope,
+                self.solver.tys.var(slot),
+                self.solver.tys.var(dv),
+                Own::var(slot),
+            );
         }
     }
 
@@ -531,7 +538,7 @@ impl<'a> Gen<'a> {
             fun_ty = self.solver.tys.fun(self.solver.tys.var(arg), fun_ty);
         }
         let fv = self.def_var(f_def);
-        self.eq(scope, self.solver.tys.var(fv), fun_ty);
+        self.eq(scope, self.solver.tys.var(fv), fun_ty, Own::var(fv));
         // This binding's parameters are this head's: the scope is the
         // binding's own, and a local function is not walked.
         for &(param, _) in &scope.params {
@@ -580,11 +587,7 @@ impl<'a> Gen<'a> {
             .map(|t| (t, self.solver.tys.kind(t)))
         {
             Ok((_, TyKind::Var(slot))) => *slot,
-            Ok((t, _)) => {
-                let slot = self.solver.table.fresh();
-                self.eq(scope, self.solver.tys.var(slot), t);
-                slot
-            }
+            Ok((t, _)) => self.fresh_equal(scope, t),
             Err(why) => {
                 scope.mark_incomplete(why);
                 self.solver.table.fresh()
