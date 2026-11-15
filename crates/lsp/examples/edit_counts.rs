@@ -145,7 +145,7 @@
 //!   server at the first evaluation pass of each round's re-evaluation, so
 //!   it measures what it says only for a single-pass project; when the cold
 //!   `didOpen E` ran more than one pass (a multi-target project), the run
-//!   says so loudly and goes on.
+//!   says so loudly and does not check the bands.
 //! * `EDIT_COUNTS_UNITS`: when set, print to stderr the instructions spent
 //!   inside each unit of work a running request cannot be stopped inside, and
 //!   each notification, as it ends ([`UNIT_SPANS`]): what an edit that arrives
@@ -1768,15 +1768,17 @@ fn blocked_edit(
     );
     if cold_passes != 1 {
         // Not a failure: the bands were measured on single-pass projects,
-        // and on this one they hold different work to them.
+        // and on this one they would hold different work to them, so they
+        // are not checked.
         let warning = format!(
             "WARNING: the cold `didOpen E` ran {cold_passes} evaluation passes. The script holds \
              the server at the first pass of each round's re-evaluation, so \"before the edit\" \
              is that pass alone and the rest lands after the edit: the instruction bands do not \
              mean what they say for this project."
         );
-        println!("{warning}");
-        eprintln!("{warning}");
+        println!("{warning} The bands are not checked.");
+        eprintln!("{warning} The bands are not checked.");
+        return;
     }
     BlockedEditPins::check(project, after_pinned, min_of(&before_edit));
 }

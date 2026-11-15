@@ -3720,7 +3720,7 @@ evaluates twice, the outer pass and the pass for the target it selects, so
 "before the edit" would be the outer pass alone and the rest would land in
 the part after the edit. Both measured projects are single-pass; when the
 cold `didOpen E` runs more than one pass, the run says so loudly and does
-not fail, since the bands then do not measure what they name.
+not check the bands, since they would not measure what they name.
 
 **The file-system counts, for reference.** In the same runs these counts did
 not depend on load, and are recorded here as reference values, not as
