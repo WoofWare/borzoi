@@ -4339,9 +4339,11 @@ impl ResolvedFile {
     /// FCS's member lookup on it finds nothing and it looks the label up in
     /// its record-label table, the latest declaration of the label winning
     /// (`ResolveExprDotLongIdent`, NameResolution.fs). `None` declines: the
-    /// table's winner is not one the walk can name, or something FCS consults
+    /// table's winner is not one the walk can name, something FCS consults
     /// before the table — an extension member of the label's name — may be in
-    /// scope.
+    /// scope, or the file's recovery reading does not show it parsed cleanly
+    /// up to the label (a recovered declaration's labels are FCS's to keep or
+    /// drop).
     ///
     /// The answer is conditional: on a receiver whose type FCS knows, FCS
     /// looks the label up in that type instead, and this says nothing. Only
@@ -4353,9 +4355,9 @@ impl ResolvedFile {
         env: &AssemblyEnv,
     ) -> Option<FieldLabel> {
         let entry = self.field_labels.get(&label)?;
-        crate::infer::ExtensionScope::of(self, env)
-            .absent(env, &entry.name, false)
-            .then_some(entry.label)
+        (self.recovery.clean_before(label.end())
+            && crate::infer::ExtensionScope::of(self, env).absent(env, &entry.name, false))
+        .then_some(entry.label)
     }
 
     /// [`Self::field_label_on_unknown_receiver`] against an extension scope
@@ -4367,8 +4369,7 @@ impl ResolvedFile {
         extensions: &crate::infer::ExtensionScope,
     ) -> Option<FieldLabel> {
         let entry = self.field_labels.get(&label)?;
-        extensions
-            .absent(env, &entry.name, false)
+        (self.recovery.clean_before(label.end()) && extensions.absent(env, &entry.name, false))
             .then_some(entry.label)
     }
 

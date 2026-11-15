@@ -76,7 +76,7 @@ impl<'a> Resolver<'a> {
                     // walk does not know (the head may be no value at all;
                     // the answer is read only where it is one).
                     if let [_, labels @ ..] = segments.as_slice() {
-                        self.record_field_labels(e.syntax(), labels);
+                        self.record_field_labels(labels);
                     }
                 }
             }
@@ -108,7 +108,7 @@ impl<'a> Resolver<'a> {
                     && li.active_pat_names().next().is_none()
                 {
                     let segments: Vec<SyntaxToken> = li.idents().collect();
-                    self.record_field_labels(e.syntax(), &segments);
+                    self.record_field_labels(&segments);
                 }
             }
             Expr::Dynamic(e) => {

@@ -35,7 +35,8 @@
 //! - an entry that may or may not be there: a record whose
 //!   `[<RequireQualifiedAccess>]` is uncertain, a label it declares twice, an
 //!   `[<AutoOpen>]` close that is uncertain or of a `rec` module;
-//! - recovered syntax anywhere before the use.
+//! - recovered syntax anywhere before the use, which the published accessor
+//!   checks: the walk reads nothing of the recovery reading.
 //!
 //! FCS consults the table only once its member lookup on the receiver has
 //! found nothing. A type variable's type hierarchy is `obj`, so a label named
@@ -46,7 +47,7 @@
 use crate::hash::{HashMap, HashSet};
 
 use borzoi_cst::syntax::{
-    AstNode, NestedModuleDecl, SyntaxNode, SyntaxToken, TextRange, TypeDefn, TypeDefnRepr,
+    AstNode, NestedModuleDecl, SyntaxToken, TextRange, TypeDefn, TypeDefnRepr,
 };
 
 use super::contributors::RequireQualifiedAccess;
@@ -183,10 +184,7 @@ impl Resolver<'_> {
 
     /// Record what the table answers, here, at each of `segments`: labels
     /// after a receiver, whose type the walk does not know.
-    pub(super) fn record_field_labels(&mut self, node: &SyntaxNode, segments: &[SyntaxToken]) {
-        if !self.recovery.clean_through(node) {
-            return;
-        }
+    pub(super) fn record_field_labels(&mut self, segments: &[SyntaxToken]) {
         for seg in segments {
             let name = id_text(seg);
             if !self.labels.names.contains(&*name) {
