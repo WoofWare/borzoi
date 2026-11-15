@@ -2,8 +2,8 @@
 //! can share it: [`crate::observed::ImportDocuments`] keeps one per imported
 //! file across evaluations, and the item pass replays deferred groups
 //! against the document the property pass walked. Every document the crate
-//! reads is parsed through [`parse`], and its attributes read through
-//! [`attribute`], as MSBuild reads them.
+//! reads is parsed through [`parse`], and its attributes and text read through
+//! [`attribute`] and [`text`], as MSBuild reads them.
 
 use std::borrow::Cow;
 
@@ -104,32 +104,10 @@ fn read_attribute<'a>(raw: &'a str, normalised: &'a str) -> Cow<'a, str> {
     let mut rest = raw;
     while let Some(c) = rest.chars().next() {
         if c == '&' {
-            // [`parse`] parsed the document, so every reference in it is one
-            // of XML's five entities or a well-formed character reference to
-            // a Unicode scalar value.
-            let end = rest.find(';').expect("a parsed reference ends in `;`");
-            let decoded = match &rest[1..end] {
-                "lt" => '<',
-                "gt" => '>',
-                "amp" => '&',
-                "quot" => '"',
-                "apos" => '\'',
-                reference => {
-                    let code = match reference.strip_prefix("#x") {
-                        Some(hex) => u32::from_str_radix(hex, 16),
-                        None => reference
-                            .strip_prefix('#')
-                            .expect("a parsed reference is an entity or a character")
-                            .parse(),
-                    };
-                    code.ok()
-                        .and_then(char::from_u32)
-                        .expect("a parsed character reference names a character")
-                }
-            };
+            let (decoded, after) = reference(rest);
             value.push(decoded);
             folded.push(decoded);
-            rest = &rest[end + 1..];
+            rest = after;
         } else if rest.starts_with("\r\n") {
             value.push_str("\r\n");
             folded.push(' ');
@@ -146,6 +124,85 @@ fn read_attribute<'a>(raw: &'a str, normalised: &'a str) -> Cow<'a, str> {
     }
     debug_assert_eq!(folded, normalised, "XML normalisation of {raw:?}");
     Cow::Owned(value)
+}
+
+/// The text node `node` as MSBuild reads it: its source text with entity and
+/// character references decoded, and line ends as written.
+///
+/// MSBuild's `XmlTextReader` has `Normalization` off, so a carriage return in
+/// element content reaches it as written and a CRLF is two characters; the
+/// project's own reader then takes an element's text as `InnerText`, the
+/// concatenation of its text nodes (`Utilities.GetXmlNodeInnerContents`).
+/// `roxmltree` applies XML's line-end folding (XML 1.0 §2.11), mostly: it
+/// reads a CRLF, and a lone CR before anything but a reference, as a line
+/// feed, and keeps a lone CR before a reference or ending the text.
+///
+/// `None` for a node that is not text, and for one holding a CDATA section,
+/// which `roxmltree` merges into the adjacent text while keeping only the
+/// first piece's range. The reading is checked against `roxmltree`'s with
+/// every line end taken out of both, so anything else it reads apart declines
+/// too.
+pub fn text<'a>(node: Node<'a, '_>) -> Option<Cow<'a, str>> {
+    if !node.is_text() {
+        return None;
+    }
+    #[allow(clippy::disallowed_methods)] // roxmltree's folded reading, to check ours by
+    let folded_by_roxmltree = node.text()?;
+    let source = node.document().input_text();
+    let raw = source.get(node.range())?;
+    // A CDATA section first in the node is in its range; one after the first
+    // piece starts where the range ends.
+    if raw.contains("<![CDATA[") || source[node.range().end..].starts_with("<![CDATA[") {
+        return None;
+    }
+    if !raw.contains(['&', '\r']) {
+        return (raw == folded_by_roxmltree).then_some(Cow::Borrowed(folded_by_roxmltree));
+    }
+    let mut value = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(c) = rest.chars().next() {
+        if c == '&' {
+            let (decoded, after) = reference(rest);
+            value.push(decoded);
+            rest = after;
+        } else {
+            value.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    // Which line ends `roxmltree` folds turns on what follows them, a
+    // reference's character included, so the check leaves them out.
+    let without_line_ends = |text: &str| text.replace(['\r', '\n'], "");
+    (without_line_ends(&value) == without_line_ends(folded_by_roxmltree))
+        .then_some(Cow::Owned(value))
+}
+
+/// The reference that `rest` starts with, decoded, and the text after it.
+fn reference(rest: &str) -> (char, &str) {
+    // [`parse`] parsed the document, so every reference in it is one of XML's
+    // five entities or a well-formed character reference to a Unicode scalar
+    // value.
+    let end = rest.find(';').expect("a parsed reference ends in `;`");
+    let decoded = match &rest[1..end] {
+        "lt" => '<',
+        "gt" => '>',
+        "amp" => '&',
+        "quot" => '"',
+        "apos" => '\'',
+        reference => {
+            let code = match reference.strip_prefix("#x") {
+                Some(hex) => u32::from_str_radix(hex, 16),
+                None => reference
+                    .strip_prefix('#')
+                    .expect("a parsed reference is an entity or a character")
+                    .parse(),
+            };
+            code.ok()
+                .and_then(char::from_u32)
+                .expect("a parsed character reference names a character")
+        }
+    };
+    (decoded, &rest[end + 1..])
 }
 
 self_cell::self_cell!(
@@ -220,8 +277,9 @@ mod tests {
             .document()
             .descendants()
             .find(|n| n.has_tag_name("A"))
-            .and_then(|n| n.text());
-        assert_eq!(a, Some("x"));
+            .and_then(|n| n.first_child())
+            .and_then(text);
+        assert_eq!(a.as_deref(), Some("x"));
         assert_eq!(shared.digest(), digest);
     }
 
@@ -307,6 +365,111 @@ mod tests {
             let doc = parse(&source).unwrap();
             let read = attribute(doc.root_element(), "v");
             proptest::prop_assert_eq!(read.as_deref(), Some(&*value));
+        }
+    }
+
+    /// The text of each of `element`'s text children as [`text`] reads it,
+    /// concatenated, or `None` if it declines any.
+    fn element_text(element: Node<'_, '_>) -> Option<String> {
+        element
+            .children()
+            .filter(Node::is_text)
+            .map(|child| text(child).map(Cow::into_owned))
+            .collect()
+    }
+
+    /// Each body's reading, and roxmltree's folded one beside it.
+    #[test]
+    fn element_text_reads_its_line_ends_as_written() {
+        for (body, msbuild, folded) in [
+            ("a\r\nb", "a\r\nb", "a\nb"),
+            ("a\rb", "a\rb", "a\nb"),
+            ("a\r\r\nb", "a\r\r\nb", "a\n\nb"),
+            ("a\n\rb", "a\n\rb", "a\n\nb"),
+            ("\r\n  x\r\n", "\r\n  x\r\n", "\n  x\n"),
+            ("a&#13;&#10;b", "a\r\nb", "a\r\nb"),
+            ("a&#xD;\nb", "a\r\nb", "a\r\nb"),
+            ("a&amp;\r\nb&lt;", "a&\r\nb<", "a&\nb<"),
+            (
+                "caf\u{e9}\r\u{85}\u{2028}",
+                "caf\u{e9}\r\u{85}\u{2028}",
+                "caf\u{e9}\n\u{85}\u{2028}",
+            ),
+            ("plain", "plain", "plain"),
+            // roxmltree keeps a lone CR before a reference or ending the text.
+            ("a\r&#97;", "a\ra", "a\ra"),
+            ("a&amp;\r", "a&\r", "a&\r"),
+            ("a\r&#10;", "a\r\n", "a\r\n"),
+        ] {
+            let source = format!("<A>{body}</A>");
+            let doc = parse(&source).unwrap();
+            let child = doc.root_element().first_child().unwrap();
+            assert_eq!(text(child).as_deref(), Some(msbuild), "{body:?}");
+            #[allow(clippy::disallowed_methods)] // the folded reading, for contrast
+            let theirs = child.text();
+            assert_eq!(theirs, Some(folded), "{body:?}");
+        }
+        // Text split by a comment: each piece keeps its own line ends.
+        let doc = parse("<A>a\r<!-- c\r\n -->\nb</A>").unwrap();
+        assert_eq!(element_text(doc.root_element()).as_deref(), Some("a\r\nb"));
+        // A node that is not text has no text to read.
+        assert_eq!(text(doc.root_element()), None);
+    }
+
+    /// A CDATA section holding text declines every text node it touches:
+    /// `roxmltree` merges it with the text beside it and keeps the first
+    /// piece's range.
+    #[test]
+    fn element_text_declines_cdata() {
+        for body in [
+            "<![CDATA[a\r\nb]]>",
+            "x<![CDATA[y]]>",
+            "<![CDATA[y]]>x",
+            "x\r\n<![CDATA[y]]>z",
+            // Content the check alone would not see: only a line end, or nothing.
+            "x<![CDATA[\r\n]]>",
+            "x<![CDATA[]]>",
+            "<![CDATA[]]>x",
+        ] {
+            let source = format!("<A>{body}</A>");
+            let doc = parse(&source).unwrap();
+            let root = doc.root_element();
+            assert!(root.children().any(|c| c.is_text()), "{body:?}");
+            for child in root.children() {
+                assert_eq!(text(child), None, "{body:?}");
+            }
+        }
+    }
+
+    proptest::proptest! {
+        /// Any text, each character spelt any legal way (a line end as
+        /// itself or as a reference), split into pieces by comments, reads
+        /// back as itself, so [`text`]'s check that its folding is
+        /// roxmltree's holds throughout.
+        #[test]
+        fn every_spelling_of_element_text_reads_back_as_it(
+            pieces in proptest::collection::vec(
+                proptest::collection::vec(
+                    (
+                        proptest::sample::select(vec![
+                            'a', ' ', '\t', '\n', '\r', '<', '>', '&', '"', '\'', '%', ';',
+                            '$', '=', '\u{e9}', '\u{a0}', '\u{85}', '\u{2028}', '\u{1d11e}',
+                        ]),
+                        0u8..3,
+                    ),
+                    0..12,
+                ),
+                1..4,
+            ),
+        ) {
+            let value: String = pieces.iter().flatten().map(|(c, _)| *c).collect();
+            let spelt: Vec<String> = pieces
+                .iter()
+                .map(|piece| piece.iter().map(|(c, how)| spell(*c, *how, '\0')).collect())
+                .collect();
+            let source = format!("<A>{}</A>", spelt.join("<!-- c\r\n -->"));
+            let doc = parse(&source).unwrap();
+            proptest::prop_assert_eq!(element_text(doc.root_element()), Some(value));
         }
     }
 

@@ -3609,22 +3609,6 @@ fn read_generic_item_metadata(node: Node<'_, '_>, state: &mut State<'_>) -> Gene
     metadata.finish()
 }
 
-/// Whether `element`'s body is nothing but comments and text that is its
-/// source verbatim. Text that line-ending normalisation or entity decoding
-/// touched (a CRLF, which MSBuild keeps; a `&amp;`) is not the text roxmltree
-/// hands back, and an element or processing instruction makes MSBuild take the
-/// inner XML.
-pub(super) fn body_is_plain(element: Node<'_, '_>) -> bool {
-    let source = element.document().input_text();
-    element.children().all(|c| {
-        c.is_comment()
-            || (c.is_text()
-                && source
-                    .get(c.range())
-                    .is_some_and(|raw| Some(raw) == c.text()))
-    })
-}
-
 /// Whether `attr`'s value is its source text verbatim, free of what XML
 /// attribute-value normalisation and entity decoding touch (a tab, a line
 /// break, a `&`). Only then is the value roxmltree hands back the one MSBuild
@@ -3670,21 +3654,14 @@ fn read_generic_metadata_child(
     match gate {
         CondGate::Run => {
             // An unmodellable body (CDATA, entity-encoded whitespace, an
-            // element or processing instruction, a carriage return — see
-            // `collect_element_text`) drops the metadatum and marks it
-            // uncertain, exactly like an expansion we couldn't evaluate. A
-            // body whose text entity decoding touched is read by both, and the
-            // exact table holds no value for it.
-            let body_exact = body_is_plain(child);
+            // element or processing instruction — see `collect_element_text`)
+            // drops the metadatum and marks it uncertain, exactly like an
+            // expansion we couldn't evaluate. Any other body is read as
+            // MSBuild reads it.
             match collect_element_text(child) {
-                Some(raw) => set_generic_metadata_value(
-                    name,
-                    &raw,
-                    condition_tainted,
-                    body_exact,
-                    state,
-                    metadata,
-                ),
+                Some(raw) => {
+                    set_generic_metadata_value(name, &raw, condition_tainted, true, state, metadata)
+                }
                 None => {
                     metadata.values.remove(&item_key(name));
                     mark_generic_metadata_uncertain(name, "", &mut metadata.uncertainties);
@@ -3704,7 +3681,7 @@ fn set_generic_metadata_value(
     name: &str,
     raw: &str,
     condition_tainted: bool,
-    body_exact: bool,
+    read_exact: bool,
     state: &mut State<'_>,
     metadata: &mut GenericItemMetadataBuilder,
 ) {
@@ -3739,12 +3716,11 @@ fn set_generic_metadata_value(
             path_fixup::worlds(full).is_some(),
         )
     };
-    let exact = (body_exact && !rewritable).then_some(exact);
+    let exact = (read_exact && !rewritable).then_some(exact);
     // The dependency capture reads a copied item's package metadata from
     // `values`, trimmed. Where that is not MSBuild's value (padding, a value
-    // its path fixup may rewrite, a body it reads as inner XML or with its
-    // carriage returns, an attribute it parses as XML), it holds `None`, which
-    // a copy's capture reads as uncertain (#642).
+    // its path fixup may rewrite, an attribute it parses as XML), it holds
+    // `None`, which a copy's capture reads as uncertain (#642).
     if package {
         let readable = exact.as_deref() == Some(normalised.as_str());
         metadata

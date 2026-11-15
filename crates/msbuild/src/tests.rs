@@ -2333,13 +2333,24 @@ fn substitution_applies_to_a_metadata_child_element() {
 /// `Unknown` on a reference: an attribute MSBuild parses as XML (holding a
 /// `<`, here an encoded CDATA section), a value holding a backslash (its Unix
 /// path fixup may rewrite it), and a body holding an element (MSBuild reads the
-/// inner XML) or a carriage return (MSBuild keeps it). An attribute holding a
-/// tab or an entity reads exactly, as MSBuild reads it.
+/// inner XML). An attribute holding a tab or an entity, and a body holding a
+/// carriage return, read exactly, as MSBuild reads them.
 #[test]
 fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
-    for (metadata, value) in [("all\tx", "all\tx"), ("a&amp;b", "a&b")] {
+    for (metadata, value) in [
+        ("ExcludeAssets=\"all\tx\" />", "all\tx"),
+        ("ExcludeAssets=\"a&amp;b\" />", "a&b"),
+        (
+            "><ExcludeAssets>a\r\nb</ExcludeAssets></ProjectReference>",
+            "a\r\nb",
+        ),
+        (
+            "><ExcludeAssets>a\rb&amp;</ExcludeAssets></ProjectReference>",
+            "a\rb&",
+        ),
+    ] {
         let src = format!(
-            "<Project><ItemGroup><ProjectReference Include=\"../Lib/Lib.fsproj\" ExcludeAssets=\"{metadata}\" /></ItemGroup></Project>"
+            "<Project><ItemGroup><ProjectReference Include=\"../Lib/Lib.fsproj\" {metadata}</ItemGroup></Project>"
         );
         assert_eq!(
             parse(&src).project_references[0].exclude_assets,
@@ -2352,7 +2363,6 @@ fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
         "ExcludeAssets=\"\\tmp\\all\"",
         "><ExcludeAssets>a<x/>b</ExcludeAssets></ProjectReference",
         "><ExcludeAssets>a<?p q?>b</ExcludeAssets></ProjectReference",
-        "><ExcludeAssets>a\r\nb</ExcludeAssets></ProjectReference",
     ] {
         // MSBuild runs its path fixup on Unix hosts alone.
         if cfg!(windows) && metadata.contains('\\') {
@@ -2394,7 +2404,10 @@ fn package_metadata_msbuild_reads_its_own_way_is_uncertain() {
         ("><Version>1.0</Version></X", true),
         ("><Version>1<x/>0</Version></X", false),
         ("><Version>1<?p q?>0</Version></X", false),
-        ("><Version>1\r\n0</Version></X", false),
+        // A carriage return inside reads exactly; one at either end is padding.
+        ("><Version>1\r\n0</Version></X", true),
+        ("><Version>1\r0</Version></X", true),
+        ("><Version>1.0\r\n</Version></X", false),
         // A metadatum whose absence makes no other cause, unlike `Version`.
         ("Version=\"1.0\" PrivateAssets=\"all\"", true),
         ("Version=\"1.0\" PrivateAssets=\" all \"", false),
@@ -2407,7 +2420,7 @@ fn package_metadata_msbuild_reads_its_own_way_is_uncertain() {
         ),
         (
             "Version=\"1.0\"><PrivateAssets>a\r\nll</PrivateAssets></X",
-            false,
+            true,
         ),
     ] {
         // MSBuild runs its path fixup on Unix hosts alone.

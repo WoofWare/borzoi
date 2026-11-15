@@ -630,7 +630,10 @@ fn cone_text(cone: &Cone, key: &str) -> ConeText {
                 }
             };
             if node.is_text() {
-                scan(node.text().unwrap_or_default());
+                // A scan for references, which no line end folds.
+                #[allow(clippy::disallowed_methods)]
+                let raw = node.text().unwrap_or_default();
+                scan(raw);
                 continue;
             }
             if !node.is_element() {

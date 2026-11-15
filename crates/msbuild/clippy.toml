@@ -50,6 +50,11 @@ disallowed-methods = [
     # MSBuild does, from a document `borzoi_msbuild::document::parse` admits.
     { path = "roxmltree::Node::attribute", reason = "read an attribute as MSBuild does, through borzoi_msbuild::document::attribute — see crates/msbuild/clippy.toml" },
     { path = "roxmltree::Document::parse", reason = "parse through borzoi_msbuild::document::parse, which refuses what no reader here can read as MSBuild does — see crates/msbuild/clippy.toml" },
+    # `roxmltree` folds a CRLF or a lone CR in element content to a line feed,
+    # where MSBuild reads it as written (#787); `borzoi_msbuild::document::text`
+    # reads a text node as MSBuild does. A scan for which the fold cannot matter
+    # (blankness, a `%(` or `@(`) may allow it, saying so.
+    { path = "roxmltree::Node::text", reason = "read element text as MSBuild does, through borzoi_msbuild::document::text — see crates/msbuild/clippy.toml" },
 ]
 
 # `lsp_types::Uri` wraps a `fluent_uri::Uri`, which caches its parsed
