@@ -1,0 +1,80 @@
+{
+  "observation_schema_version": 1,
+  "series": "v1-142fe4e6a0b1-9a9f264695aa",
+  "repository": "WoofWare/borzoi",
+  "commit": "147feac7c95f7018ddf4a2bcaa9162135290f1ad",
+  "measured_at": "2026-11-15T17:36:47Z",
+  "workflow": {
+    "run_id": 43740937915,
+    "run_number": 433,
+    "run_attempt": 1,
+    "url": "https://github.com/WoofWare/borzoi/actions/runs/43740937915"
+  },
+  "corpus": {
+    "source": "dotnet/fsharp",
+    "revision": "142fe4e6a0b1cbef6f8e18e473e03b9137644cc0"
+  },
+  "flake_lock_hash": "1d8fecb61977dd5f76129f28d2eaeb8d9adb5eaf6e494ffcb42283bd56035227",
+  "generator": {
+    "schema_version": 1,
+    "measurement": "resolution-divergence",
+    "configuration": {
+      "corpus": "fsharp-src",
+      "file_extensions": [
+        "fs"
+      ],
+      "limit": null,
+      "scope": "in-file",
+      "stride": 13
+    },
+    "statistics": {
+      "alt_binders": 7,
+      "b1_coverage": {
+        "basis_points": 8920,
+        "matched": 22657,
+        "seen": 25399
+      },
+      "divergences": 0,
+      "files_compared": 382,
+      "gap_b1_by_tag": {
+        "active-pattern-case": 4,
+        "active-pattern-fn": 0,
+        "constructor": 214,
+        "entity:module": 133,
+        "entity:namespace": 37,
+        "entity:type": 279,
+        "parameter": 98,
+        "static-member": 101,
+        "static-member:overloaded(group)": 37,
+        "type-parameter": 1106,
+        "union-case": 19,
+        "value:local-or-param": 617,
+        "value:module-or-import": 97
+      },
+      "gaps": {
+        "b1": 2742,
+        "b2": 2001,
+        "b3": 126,
+        "other": 0,
+        "total": 4869
+      },
+      "infrastructure": {
+        "fcs_not_ok": 0,
+        "our_panics": 0,
+        "our_parser_errors": 49,
+        "unreadable": 1
+      },
+      "matches": {
+        "by_bucket": {
+          "B1": 22657,
+          "B2": 51,
+          "B3": 0,
+          "other": 0
+        },
+        "total": 22708
+      },
+      "out_of_file": 20499,
+      "uses_adjudicated": 27584
+    }
+  }
+}
