@@ -456,6 +456,8 @@ struct Case {
     repeat_which: Which,
     point_doubt: PointDoubt,
     repeats: Vec<Repeat>,
+    /// Never at an SDK site in an SDK-less project, which has no SDK file to
+    /// write it in, so a case with one always evaluates its gate.
     gated: Option<GatedImport>,
 }
 
@@ -621,19 +623,22 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
                 ]),
             })
             .collect(),
-        gated: (rng.below(3) == 0).then(|| GatedImport {
-            site: *rng.pick(&[GatedSite::SdkProps, GatedSite::Body, GatedSite::SdkTargets]),
-            input: *rng.pick(&[
-                GateInput::UnderUndecidedCondition,
-                GateInput::UnseededToolset,
-                GateInput::SdkTaintedOnly,
-                GateInput::SdkTaintedOnly,
-                GateInput::RefusedThenOverwritten,
-                GateInput::HiddenRewrite,
-            ]),
-            group: rng.below(2) == 0,
-            taken: rng.below(2) == 0,
-        }),
+        gated: (rng.below(3) == 0)
+            .then(|| GatedImport {
+                site: *rng.pick(&[GatedSite::SdkProps, GatedSite::Body, GatedSite::SdkTargets]),
+                input: *rng.pick(&[
+                    GateInput::UnderUndecidedCondition,
+                    GateInput::UnseededToolset,
+                    GateInput::SdkTaintedOnly,
+                    GateInput::SdkTaintedOnly,
+                    GateInput::RefusedThenOverwritten,
+                    GateInput::HiddenRewrite,
+                ]),
+                group: rng.below(2) == 0,
+                taken: rng.below(2) == 0,
+            })
+            // An SDK-less project has no SDK file to write the import in.
+            .filter(|g| g.site == GatedSite::Body || form != Form::SdkLess),
     }
 }
 
@@ -1403,12 +1408,6 @@ impl Family {
 }
 
 impl Case {
-    /// Whether the gated import is written: an SDK site needs the SDK.
-    fn gated_is_rendered(&self) -> bool {
-        self.gated
-            .is_some_and(|g| g.site == GatedSite::Body || self.form != Form::SdkLess)
-    }
-
     /// Whether content the walk cannot see imports a file the point reaches.
     fn has_hidden_repeat(&self) -> bool {
         self.repeats.iter().any(Repeat::is_hidden)
@@ -1976,7 +1975,7 @@ fn census_keys(case: &Case) -> Vec<String> {
         keys.push(format!("repeat.site={:?}", r.site));
         keys.push(format!("repeat.with={:?}", case.point_doubt));
     }
-    if let Some(g) = case.gated.filter(|_| case.gated_is_rendered()) {
+    if let Some(g) = case.gated {
         keys.push(format!("gated.site={:?}", g.site));
         keys.push(format!("gated.input={:?}", g.input));
         keys.push(format!("gated.group={}", g.group));
@@ -2073,7 +2072,6 @@ fn sweep(seed: u64, cases: usize) -> Report {
             }
         }
         if let Some(g) = case.gated
-            && case.gated_is_rendered()
             && outcome.certain_compile
             && outcome.certain_defines
         {
