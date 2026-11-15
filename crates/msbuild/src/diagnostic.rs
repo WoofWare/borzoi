@@ -380,6 +380,14 @@ pub enum StructuralCompileItemUncertainty {
     /// one whose branch decision we could not pin down, with a Compile item in
     /// a still-possible branch, or one MSBuild would refuse to load.
     UnsupportedChoose,
+    /// A `Directory.Build.*` import the walk could not decide (#677): MSBuild
+    /// may import the file the walk did not, or not import the one it did,
+    /// so what it contributes is unknown; and an import of a file only such
+    /// an import made, which may or may not be a duplicate. `project` is the
+    /// import's `Project` text. `references` says whether that may include
+    /// `<ProjectReference>` mutations: always when the file's identity was in
+    /// doubt, else only when the file the walk doubted declares some.
+    DirectoryBuildImportUndecided { project: String, references: bool },
 }
 
 impl StructuralCompileItemUncertainty {
@@ -391,13 +399,19 @@ impl StructuralCompileItemUncertainty {
     /// scans a `<Choose>`'s still-possible branches for reference operations
     /// itself, so a Compile-only branch says nothing about the list, and an
     /// Include-only one stays at worst a missed reference rather than a wrong
-    /// list.
+    /// list. [`Self::DirectoryBuildImportUndecided`] says for itself.
     ///
     /// Public because a consumer explaining a dropped reference set must borrow
     /// exactly this subset — attributing the drop to a Compile-only `<Choose>`
     /// would name a construct that had nothing to do with it.
     pub fn hides_project_references(&self) -> bool {
-        !matches!(self, StructuralCompileItemUncertainty::UnsupportedChoose)
+        match self {
+            StructuralCompileItemUncertainty::UnsupportedChoose => false,
+            StructuralCompileItemUncertainty::DirectoryBuildImportUndecided {
+                references, ..
+            } => *references,
+            _ => true,
+        }
     }
 }
 

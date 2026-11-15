@@ -831,6 +831,9 @@ fn render_structural(structural: &StructuralCompileItemUncertainty) -> String {
         StructuralCompileItemUncertainty::UnsupportedChoose => {
             "a `<Choose>` block I couldn't evaluate, which may add Compile items".to_string()
         }
+        StructuralCompileItemUncertainty::DirectoryBuildImportUndecided { project, .. } => {
+            format!("an import of `{project}` I couldn't decide, so I can't tell what it adds")
+        }
     }
 }
 

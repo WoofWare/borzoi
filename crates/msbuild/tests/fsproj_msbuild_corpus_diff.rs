@@ -759,6 +759,12 @@ fn compare_lang_version(parsed: &ParsedProject, msbuild: &MsbuildOutput) -> Face
         return FacetReport::skipped("lang_version", "unset on both sides".to_string())
             .classed("skip(unset on both sides)".to_string());
     }
+    // The value is published beside its trust: an untrusted `LangVersion` is a
+    // decline, which makes no claim.
+    if !parsed.property("LangVersion").is_exact() {
+        return FacetReport::skipped("lang_version", format!("untrusted; ours={ours:?}"))
+            .classed("decline(LangVersion untrusted)".to_string());
+    }
     compare_scalar("lang_version", ours, theirs)
 }
 

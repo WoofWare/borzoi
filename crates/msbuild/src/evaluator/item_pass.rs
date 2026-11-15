@@ -152,6 +152,17 @@ impl<'r> State<'r> {
     /// must not be resolved against the properties-so-far table the
     /// property pass is still building.
     pub(super) fn defer_item_group(&mut self, node: Node<'_, '_>, kind: DeferredGroupKind) {
+        if self.directory_build.fallback.is_some()
+            && node.children().any(|child| {
+                child.is_element()
+                    && child
+                        .tag_name()
+                        .name()
+                        .eq_ignore_ascii_case("ProjectReference")
+            })
+        {
+            self.directory_build.doubted_references = true;
+        }
         let file = match self.current_file.clone() {
             CurrentFile::Entry => DeferredFileKey::Entry,
             CurrentFile::Imported {

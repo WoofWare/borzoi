@@ -23,10 +23,10 @@
 >
 > **#614 is closed by a fourth channel, `stale`** (see "#614: as landed"): a
 > value bound before content the walk could not see, or computed from one,
-> carries the opacity behind it, and the `Directory.Build.*` splice and the
-> Compile items decline on it (see "#792: the Compile reader"). Every other
-> reader still trusts a held value under opacity (#792, a measured trade-off
-> the metamorphic gate's opacity tier counts).
+> carries the opacity behind it, and a `Directory.Build.*` import point
+> (#677) and the Compile items decline on it (see "#792: the Compile
+> reader"). Every other reader still trusts a held value under opacity (#792,
+> a measured trade-off the metamorphic gate's opacity tier counts).
 >
 > **P4 step 1 has landed** (see "P4 step 1: one read per name"): the
 > property table is published as one `PropertyRead` per name, and a refused
@@ -36,14 +36,14 @@
 > **Open, in order:** the rest of P4; #792 per reader, measured; the three
 > P2″ precision items; P1′.
 >
-> **Known wrong commits, reproducible, not fixed:** #781 (a file spliced on
-> an undecided gate publishes trusted values), #782 (a single-witness root
-> lets the `DefineConstants` self-append exemption drop a cause), #792 (a
-> stale value published as trusted by a reader other than the splice and the
-> Compile items) and #811 (the fallback splice reads an unbound gate or path
-> that hidden content may have defined). #781, #782 and #811 are pinned by
-> ignored tests that assert the right answer; #781, #792 and #811 are set
-> aside by the metamorphic gate with their counts pinned.
+> **Known wrong commits, reproducible, not fixed:** #782 (a single-witness
+> root lets the `DefineConstants` self-append exemption drop a cause) and #792
+> (a stale value published as trusted by a reader other than the import points
+> and the Compile items). #782 is pinned by an ignored test that asserts the
+> right answer; #792 is set aside by the metamorphic gate with its count
+> pinned. #781 (a file spliced on an undecided gate publishing trusted values)
+> and #811 (the fallback splice reading an unbound gate or path that hidden
+> content may have defined) are fixed by #677's import points.
 
 ## The rule
 
@@ -1023,10 +1023,12 @@ measured:
 - **joined** through `Reads` like the other channels, so a value read from a
   stale binding carries it with no code at the read;
 - **stored** by the clean-write verdict (`StaleOutcome::after_write`) from what
-  the value carried and what its own condition's scan reads, kept by every
-  write that stores nothing, and cleared with the rest by the reserved-toolset
-  scrub;
-- **consumed** by `gate_value_is_exact` alone, through `Trust::is_certain`.
+  the value carried and what its own condition's scan reads, or an enclosing
+  `<PropertyGroup>`'s or chosen `<Choose>` branch's (#677: a write a stale
+  group gate let run is one MSBuild may never make), kept by every write that
+  stores nothing, and cleared with the rest by the reserved-toolset scrub;
+- **consumed** by the `Directory.Build.*` import points alone
+  (`evaluator::directory_build`, #677), through `Trust::is_certain`.
   `reference_is_untrusted` and `untrusted_cause` leave it out, so
   `untrusted_properties` and every condition decision are unchanged.
 
@@ -1056,8 +1058,8 @@ lines, all forced by the rule.** `FSharpDiagServer.fsproj` and the two
 everything after that point as hidden. That point comes after each project's
 `Directory.Build.props` has written `ImportDirectoryBuildTargets=false`, so
 the gate value is stale when the fallback `Directory.Build.targets` splice
-reads it (`gate_value_is_exact`). The workload props the walk cannot see may
-set the gate back, so the decline is owed:
+reads it. The workload props the walk cannot see may set the gate back, so
+the decline is owed:
 - `FSharpDiagServer`'s Compile set and `ProjectReference` list move from
   `match` to `decline`;
 - so does the `ProjectReference` list of each `CompilerCompat` project.
@@ -1075,12 +1077,10 @@ properties under 10 000 undecidable imports, and 93 MB for 3 000 properties
 under one 30 KB condition). A property test holds the incremental latch to
 the whole-table one.
 
-What the channel does *not* decide, deliberately: the SDK chain's own
-`Directory.Build.props` import point (`props_import_point`) asks
-`reference_is_untrusted` of `DirectoryBuildPropsPath`, which leaves staleness
-out. No generated case reaches that reader (the synthetic SDKs have no
-`Microsoft.Common.props` import point), so it was not widened; it is inert
-by construction (see below).
+Since #677 the walk follows the SDK chain's own `Directory.Build.*` import
+points, and decides each from its condition's and path's trust, staleness
+included; the splice survives only as a fallback whose products are
+uncertain.
 
 #### #792: the Compile reader
 
@@ -1102,29 +1102,75 @@ the walk is opaque, where `condition_is_decided_exactly` vouches for nothing.
 The other readers stay as they are, each for a reason recorded on #792: the
 user `DefineConstants` write (zero cost, but the tier's `define_constants`
 cases come from SDK writes, which `define_context` leaves out, so no test can
-see it fail), `props_import_point` (inert: its only reader, `read_target`,
-already requires that the walk hid nothing), and the published properties,
+see it fail), and the published properties,
 `target_name` and the final `DefineConstants` (sound declines that cost the LSP
 its reference set on most SDK projects, because content after the body is
 hidden there; a decision for the project owner).
 
 The opacity tier now holds the Compile items wholly: a Compile set that differs
 from a world's is a violation whatever the difference, not only when it is in
-whether the spliced file joined. To reach the reader often, 40% of its cases
+whether the `Directory.Build.targets` file joined. To reach the reader often, 40% of its cases
 add a Compile item whose `Include` or `Condition` reads a value the hidden file
 rewrites (the condition compares with that rewritten value), and half of those
 drop the body's other Compile items, whose own uncertainty would otherwise
 decline the set whatever the new item reads.
 
-**#811 is set aside, not fixed.** The tier also generates, in one case in
-eight, a hidden file that writes a splice gate or path nothing else writes,
-with a value that turns the splice off. The fallback splice reads that unbound
-name as certain (an unbound name carries no trust to doubt), so the Compile set
-commits to the spliced file that the real build leaves out. The fix costs two
-F# corpus lines and five tests, and belongs to #677's import-point rewrite; the
-tier counts the cases (9 of 800) and pins the count, and
-`an_unbound_splice_input_hidden_content_defined_declines` is the ignored
-witness.
+**#811 is fixed by #677.** The tier also generates, in one case in eight, a
+hidden file that writes a `Directory.Build.targets` gate or path nothing else
+writes, with a value that turns the import off. The splice read that unbound
+name as certain (an unbound name carries no trust to doubt); the import points
+treat a file whose point the walk never reached as one whose identity is in
+doubt, so those cases decline, and
+`an_unbound_splice_input_hidden_content_defined_declines` passes.
+
+#### #677: the import points, as landed
+
+`evaluator::directory_build` holds the rule; its module docs are the
+specification, and `is_decided_point` is the one place the domain is stated.
+A point is *decided*, and is an ordinary import, only when the walk is not
+opaque there (content it could not see may have imported the file already,
+making this import a duplicate MSBuild skips), the route of import gates to
+it is decided, its condition is a conjunction whose conjuncts are each
+decided from certain inputs (`Trust::is_certain`, so `stale` counts) or
+exactly `Exists` of its own path, and the path is certain and names one
+literal file. Every other point, and a file the walk never accounted for
+once it has passed hidden content (settled at the end of the property pass),
+takes one fallback: every bound property is unpinned, the walk latches
+opacity, every facet is withdrawn, and the file is walked doubted. The
+exception is a point with nothing to import (no write touched the path, no
+`Directory.Build.*` file exists above the project) whose condition is false
+whenever its `Exists` is. #781 and #811 are closed by it. Writes a stale
+group or `<Choose>` condition let run are stale too, which the import points
+need.
+
+The cost, measured on the pinned F# corpus (SDK 11 rc, its prerelease
+workload bands modelled since #810): 25 manifest lines move; 2 Compile, 25
+`ProjectReference` and 22 `LangVersion` facets from `match` to `decline`,
+none to anything else, and 17 Compile declines report a different first
+cause. The msbuild corpus differential gained a trust check on
+`lang_version`. The 23 multi-targeting projects reach the
+`Directory.Build.targets` point after an import gate read `TargetFramework`
+undefined, which latches opacity, and on a route through
+`IsCrossTargetingBuild`, which reads it too, so the whole evaluation is
+withdrawn (#824 asks whether the walk can certify that read for the outer
+build). The two `buildtools/checkpackages` projects compute
+`BaseIntermediateOutputPath` from `$([System.Guid]::NewGuid())`, which no
+walk can know, so an SDK gate reading `MSBuildProjectExtensionsPath` latches
+opacity before the point, which the walk then never reaches. The LSP project
+corpus (SDK 10) moves no line.
+
+A fallback walk registers the imports it makes apart from the certain ones,
+so a later import of a file only a fallback walk imported is walked again,
+doubted, and never skipped as a certain duplicate; the module docs list every
+field of walk state a fallback walk may change, and why each is safe.
+`fsproj_sdk_import_graph_generative_diff` grades re-imports of the file a
+point imports, its child and its grandchild, from the body, the SDK before
+and after the point, and the file's own children, under each kind of doubt.
+
+The metamorphic gate's opacity tier pays for this in reach: its SDK holds a
+`Directory.Build.targets` point, which opacity leaves in doubt, so the whole
+evaluation is withdrawn and the tier commits 328 of its 14,400 facts (26 of
+them stale reads set aside as #792).
 
 ### The census, re-run — and what it says about P3's priority
 
@@ -1538,9 +1584,9 @@ value.
   witness, and the `DefineConstants` self-append exemption, keyed on the
   witness's name, then drops the other.
 
-#781 is set aside by the gate, counted and the count pinned for the fixed
-seeds, so a fix must move the pin (#780 was too, until P4 step 1 removed the
-set-aside); #782 is pinned as an ignored witness.
+#780 and #781 were set aside by the gate, each count pinned for the fixed
+seeds, until P4 step 1 and #677's import points removed the set-asides;
+#782 is pinned as an ignored witness.
 
 **The opacity tier** wraps an import rather than a write: a synthetic SDK
 writes properties, then imports a file behind an undecidable gate that may

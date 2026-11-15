@@ -51,30 +51,19 @@
 //! No new contract was needed, only a harness that varies what the other one
 //! holds fixed.
 //!
-//! ## The gate's *vocabulary*, and the one route with no project oracle
+//! ## The gate's *vocabulary*
 //!
 //! The hooks above are swept with literal `true`/`false`. That leaves the
 //! comparison itself untested — `'$(ImportDirectoryBuild*)' == 'true'` is an
-//! MSBuild `==`, so `on`, `yes` and `!false` open it too. Two tests cover it,
-//! and the split between them is the point:
+//! MSBuild `==`, so `on`, `yes` and `!false` open it too. Two tests cover it:
 //!
 //! - [`the_directory_build_props_gate_vocabulary_is_exact_or_declined`] sweeps
-//!   the vocabulary through a whole SDK-resolved evaluation. This is genuine
-//!   coverage of the composition, but it is **blind to the walker's own gate
-//!   predicate** — with the chain present, a wrongly-closed hand-rolled gate
-//!   just stops suppressing the chain's rediscovery import, and `condition.rs`
-//!   decides it correctly instead. The errors cancel.
-//! - [`the_gate_predicate_matches_msbuild_equality`] therefore diffs the
-//!   predicate against MSBuild's `==` directly. The predicate decides the
-//!   import only when the SDK chain is *absent* — which is exactly when
-//!   MSBuild cannot evaluate the project either, so no whole-project oracle
-//!   for that route can exist. Diffing the reimplemented comparison is what is
-//!   left, and it is enough.
-//!
-//! Both were checked by mutation (`is_msbuild_true` reverted to
-//! `eq_ignore_ascii_case("true")`): the first stays green, the second reports
-//! 54 divergences. A differential that cannot fail is worse than none, because
-//! it reads as coverage.
+//!   the vocabulary through a whole SDK-resolved evaluation, where the gate is
+//!   the SDK's own condition, decided by `condition.rs`.
+//! - [`the_gate_predicate_matches_msbuild_equality`] diffs the walker's own
+//!   `'$(Prop)' == 'true'` predicate, which reads the CPM opt-in flags,
+//!   against MSBuild's `==` directly. Checked by mutation (`is_msbuild_true`
+//!   reverted to `eq_ignore_ascii_case("true")`): it reports 54 divergences.
 
 mod common;
 
@@ -428,24 +417,10 @@ fn evaluate_gate(oracle: &mut Oracle, dir: &Path, value: &str) -> (Option<String
 ///
 /// ## What this does and does not cover
 ///
-/// It covers the composition — gate value, rediscovery suppression, splice
-/// position, chain ownership — across the vocabulary rather than the two
-/// literal spellings the hook cases above use.
-///
-/// It does **not** cover `should_import_default_true`, the walker's own
-/// reimplementation of the gate, and cannot: with the SDK resolved, a closed
-/// hand-rolled gate simply stops suppressing the chain's own rediscovery
-/// import, so the real `Microsoft.Common.props` condition runs through
-/// `condition.rs` — which models the vocabulary correctly — and the two errors
-/// cancel exactly. Confirmed by mutation: replacing the predicate with
-/// `eq_ignore_ascii_case("true")` leaves this test green.
-///
-/// That is not a gap to be widened away. The predicate decides the import
-/// precisely when the SDK chain is *absent*, and a project whose SDK does not
-/// resolve is one the real MSBuild cannot evaluate either — so there is no
-/// whole-project oracle for the route that uses it, in principle and not just
-/// here. It is diffed directly instead, by
-/// [`the_gate_predicate_matches_msbuild_equality`].
+/// It covers the composition — gate value, the real `Microsoft.Common.props`
+/// import the walk follows, and its position — across the vocabulary rather
+/// than the two literal spellings the hook cases above use. The gate is the
+/// SDK's own condition, so `condition.rs` decides it.
 #[test]
 fn the_directory_build_props_gate_vocabulary_is_exact_or_declined() {
     let mut oracle = Oracle::spawn();
@@ -541,16 +516,9 @@ fn gen_gate_value(rng: &mut common::SplitMix64) -> String {
     value
 }
 
-/// Diff the walker's gate predicate directly against MSBuild's `==`.
-///
-/// This is the gate that catches the defect
-/// [`the_directory_build_props_gate_vocabulary_is_exact_or_declined`]
-/// structurally cannot (see its docs): `should_import_default_true` decides the
-/// import only when the SDK chain is absent, and a project with no resolvable
-/// SDK has no whole-project oracle. What *is* diffable is the comparison being
-/// reimplemented — `'$(Prop)' == 'true'`, the literal condition text from
-/// `Microsoft.Common.props` — so the predicate is checked against the real
-/// evaluator on that condition, value by value.
+/// Diff the walker's `'$(Prop)' == 'true'` predicate (`is_msbuild_true`, which
+/// reads the CPM opt-in flags) directly against MSBuild's `==`, on the literal
+/// condition text from `Microsoft.Common.props`, value by value.
 ///
 /// The obligation is equality, not implication. A gate predicate that is
 /// merely *conservative* is not safe in either direction here: reading true as

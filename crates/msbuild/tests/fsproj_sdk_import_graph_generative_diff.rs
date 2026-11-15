@@ -282,6 +282,69 @@ struct Undecided {
     how: UndecidedHow,
 }
 
+/// How an import point's decision is put in doubt to the walk, though not to
+/// MSBuild, which decides it (#677).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PointDoubt {
+    /// Nothing: the walk decides the point.
+    Decided,
+    /// The point's condition gains a conjunct MSBuild finds true and the walk
+    /// cannot evaluate: the walk is unsure whether the file is imported.
+    GateTrue,
+    /// The same, with a conjunct MSBuild finds false.
+    GateFalse,
+    /// The point's `Exists` becomes a disjunct beside a term MSBuild finds
+    /// true and the walk cannot evaluate: MSBuild imports the path whether or
+    /// not the file exists, and rejects the project when it does not (MSB4019).
+    GateOr,
+    /// The SDK's discovery computes the path with an expression the walk
+    /// refuses and MSBuild evaluates to the default: the walk is unsure which
+    /// file is imported.
+    PathRefused,
+}
+
+/// Which file a [`Repeat`] imports again: the `Directory.Build.*` file its
+/// point imports, or the file that one imports (`child`), or the file that
+/// one imports (`grandchild`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RepeatTarget {
+    File,
+    Child,
+    Grandchild,
+}
+
+/// Where a [`Repeat`] is written, relative to the point of its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RepeatSite {
+    /// In the body: after the props point, before the targets point.
+    Body,
+    /// In the SDK file holding the point, before it.
+    SdkBeforePoint,
+    /// The same, under a condition MSBuild takes and the walk cannot decide:
+    /// content the walk cannot see imports the file before the point.
+    HiddenBeforePoint,
+    /// In the SDK file holding the point, after it.
+    SdkAfterPoint,
+    /// In `child` (a cycle when it imports the file or itself).
+    InChild,
+    /// In `grandchild`.
+    InGrandchild,
+}
+
+/// An import, by its own spelling, of a file the point of [`Case::repeat_which`]
+/// imports or reaches, which MSBuild skips when that file is imported already
+/// and walks otherwise. The site sets `Seen`, `SeenChild` and
+/// `SeenGrandchild` to `pre<i>` just before it and copies them to
+/// `Repeat<i>`, `Repeat<i>Child` and `Repeat<i>Grandchild` just after. Every
+/// file it may import writes its marker to `Seen`, and `child` and
+/// `grandchild` to their own as well, so the copies say which files ran
+/// there, a file's own one even when a later file overwrote `Seen`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Repeat {
+    target: RepeatTarget,
+    site: RepeatSite,
+}
+
 #[derive(Debug, Clone)]
 struct Case {
     form: Form,
@@ -298,10 +361,24 @@ struct Case {
     body_disables_targets_import: bool,
     reimports: Vec<Reimport>,
     undecided: Option<Undecided>,
+    /// The kind whose point [`Self::point_doubt`] doubts and whose files
+    /// [`Self::repeats`] import again.
+    repeat_which: Which,
+    point_doubt: PointDoubt,
+    repeats: Vec<Repeat>,
 }
 
 /// The properties every case reads back.
-const PROPERTIES: [&str; 12] = [
+const PROPERTIES: [&str; 21] = [
+    "Seen",
+    "SeenChild",
+    "SeenGrandchild",
+    "Repeat0",
+    "Repeat0Child",
+    "Repeat0Grandchild",
+    "Repeat1",
+    "Repeat1Child",
+    "Repeat1Grandchild",
     "Trace",
     "BodySaw",
     "InDbp",
@@ -424,6 +501,138 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
                 UndecidedHow::RefusedThenStale,
             ]),
         }),
+        repeat_which: *rng.pick(&[Which::Props, Which::Targets]),
+        point_doubt: *rng.pick(&[
+            PointDoubt::Decided,
+            PointDoubt::Decided,
+            PointDoubt::GateTrue,
+            PointDoubt::GateFalse,
+            PointDoubt::GateOr,
+            PointDoubt::PathRefused,
+        ]),
+        repeats: (0..[0, 1, 1, 2][rng.below(4)])
+            .map(|_| Repeat {
+                target: *rng.pick(&[
+                    RepeatTarget::File,
+                    RepeatTarget::Child,
+                    RepeatTarget::Grandchild,
+                ]),
+                site: *rng.pick(&[
+                    RepeatSite::Body,
+                    RepeatSite::SdkBeforePoint,
+                    RepeatSite::HiddenBeforePoint,
+                    RepeatSite::SdkAfterPoint,
+                    RepeatSite::InChild,
+                    RepeatSite::InGrandchild,
+                ]),
+            })
+            .collect(),
+    }
+}
+
+fn ext(which: Which) -> &'static str {
+    match which {
+        Which::Props => "props",
+        Which::Targets => "targets",
+    }
+}
+
+/// The repeats written at `site`, each between its `Seen` reset and copy.
+fn repeats_at(case: &Case, site: RepeatSite) -> String {
+    let ext = ext(case.repeat_which);
+    case.repeats
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.site == site)
+        .map(|(i, r)| {
+            let file = match r.target {
+                RepeatTarget::File => format!("Directory.Build.{ext}"),
+                RepeatTarget::Child => format!("child.{ext}"),
+                RepeatTarget::Grandchild => format!("grandchild.{ext}"),
+            };
+            let path = format!("$(MSBuildProjectDirectory)/../{file}");
+            let (hide, condition) = if r.site == RepeatSite::HiddenBeforePoint {
+                (
+                    "    <UndecidedX>abc</UndecidedX>\n",
+                    format!("Exists('{path}') and '$(UndecidedX.Substring(0,1))' == 'a'"),
+                )
+            } else {
+                ("", format!("Exists('{path}')"))
+            };
+            format!(
+                "  <PropertyGroup>\n{hide}    <Seen>pre{i}</Seen>\n    <SeenChild>pre{i}</SeenChild>\n    \
+                 <SeenGrandchild>pre{i}</SeenGrandchild>\n  </PropertyGroup>\n  \
+                 <Import Project=\"{path}\" Condition=\"{condition}\" />\n  \
+                 <PropertyGroup>\n    <Repeat{i}>$(Seen)</Repeat{i}>\n    \
+                 <Repeat{i}Child>$(SeenChild)</Repeat{i}Child>\n    \
+                 <Repeat{i}Grandchild>$(SeenGrandchild)</Repeat{i}Grandchild>\n  </PropertyGroup>\n"
+            )
+        })
+        .collect()
+}
+
+/// `Directory.Build.*`'s import of `child`, when the case has repeats.
+fn child_import(case: &Case, which: Which) -> String {
+    if case.repeats.is_empty() || case.repeat_which != which {
+        return String::new();
+    }
+    format!(
+        "  <PropertyGroup>\n    <Seen>{}</Seen>\n  </PropertyGroup>\n  \
+         <Import Project=\"$(MSBuildProjectDirectory)/../child.{}\" />\n",
+        match which {
+            Which::Props => "dbp",
+            Which::Targets => "dbt",
+        },
+        ext(which)
+    )
+}
+
+/// Put the point of `case.repeat_which` in doubt in an SDK file's `text`.
+fn doubt_point(case: &Case, text: String) -> String {
+    let name = match case.repeat_which {
+        Which::Props => "DirectoryBuildPropsPath",
+        Which::Targets => "DirectoryBuildTargetsPath",
+    };
+    let file = match case.repeat_which {
+        Which::Props => "_DirectoryBuildPropsFile",
+        Which::Targets => "_DirectoryBuildTargetsFile",
+    };
+    let base = match case.repeat_which {
+        Which::Props => "_DirectoryBuildPropsBasePath",
+        Which::Targets => "_DirectoryBuildTargetsBasePath",
+    };
+    let gate = |conjunct: &str| {
+        text.replace(
+            &format!("exists('$({name})')\"/>"),
+            &format!("exists('$({name})') and {conjunct}\"/>"),
+        )
+    };
+    match case.point_doubt {
+        PointDoubt::Decided => text,
+        PointDoubt::GateTrue => gate("$([System.String]::IsNullOrWhiteSpace(''))"),
+        PointDoubt::GateFalse => gate("$([System.String]::IsNullOrWhiteSpace('no'))"),
+        PointDoubt::GateOr => text.replace(
+            &format!("exists('$({name})')\"/>"),
+            &format!("($([System.String]::IsNullOrWhiteSpace('')) Or exists('$({name})'))\"/>"),
+        ),
+        PointDoubt::PathRefused => {
+            let combine =
+                format!("$([System.IO.Path]::Combine('$({base})', '$({file})'))</{name}>");
+            if !text.contains(&combine) {
+                return text;
+            }
+            text.replace(
+                &combine,
+                &format!(
+                    "$([System.IO.Path]::Combine('$({base})', '$({file})'))$(UndecidedX.Substring(0,0))</{name}>"
+                ),
+            )
+            .replacen(
+                "<Project>\n",
+                "<Project>\n  <PropertyGroup><UndecidedX>abc</UndecidedX></PropertyGroup>\n",
+                1,
+            )
+        }
     }
 }
 
@@ -640,6 +849,10 @@ fn render(case: &Case, sdk: &str) -> Rendered {
     sdk_props.push_str(&render_stale_source(case));
     sdk_props.push_str(&reimports_at(case, Site::SdkPropsBeforePoint, sdk));
     sdk_props.push_str(&render_undecided(case, UndecidedSite::SdkProps));
+    if case.repeat_which == Which::Props {
+        sdk_props.push_str(&repeats_at(case, RepeatSite::SdkBeforePoint));
+        sdk_props.push_str(&repeats_at(case, RepeatSite::HiddenBeforePoint));
+    }
     let mut sdk_files = Vec::new();
     match case.props_point {
         PropsPoint::Absent => {}
@@ -689,6 +902,9 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         ));
     }
     sdk_props.push_str(&reimports_at(case, Site::SdkProps, sdk));
+    if case.repeat_which == Which::Props {
+        sdk_props.push_str(&repeats_at(case, RepeatSite::SdkAfterPoint));
+    }
     sdk_props.push_str("</Project>\n");
     sdk_files.push(("Sdk.props", sdk_props));
 
@@ -716,6 +932,10 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             render_undecided(case, UndecidedSite::SdkTargetsHelper)
         ),
     ));
+    if case.repeat_which == Which::Targets {
+        sdk_targets.push_str(&repeats_at(case, RepeatSite::SdkBeforePoint));
+        sdk_targets.push_str(&repeats_at(case, RepeatSite::HiddenBeforePoint));
+    }
     match case.targets_point {
         TargetsPoint::Absent => {}
         TargetsPoint::Standard => sdk_targets.push_str(&targets_block(STANDARD_TARGETS_CONDITION)),
@@ -756,9 +976,16 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         }
     }
     sdk_targets.push_str(&reimports_at(case, Site::SdkTargets, sdk));
+    if case.repeat_which == Which::Targets {
+        sdk_targets.push_str(&repeats_at(case, RepeatSite::SdkAfterPoint));
+    }
     sdk_targets.push_str(&tracer("sdkt2"));
     sdk_targets.push_str("</Project>\n");
     sdk_files.push(("Sdk.targets", sdk_targets));
+    let sdk_files: Vec<(&'static str, String)> = sdk_files
+        .into_iter()
+        .map(|(name, text)| (name, doubt_point(case, text)))
+        .collect();
 
     // The user's files.
     let mut case_files = Vec::new();
@@ -783,6 +1010,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             );
         }
         text.push_str("  </PropertyGroup>\n");
+        text.push_str(&child_import(case, Which::Props));
         if case.props.probes_exists {
             text.push_str(
                 "  <PropertyGroup Condition=\"Exists('p.proj')\">\n    \
@@ -806,9 +1034,31 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         let mut text = String::from("<Project>\n");
         text.push_str(&tracer("dbt"));
         text.push_str("  <PropertyGroup>\n    <InDbt>1</InDbt>\n  </PropertyGroup>\n");
+        text.push_str(&child_import(case, Which::Targets));
         text.push_str(&reimports_at(case, Site::DirectoryBuildTargets, sdk));
         text.push_str("</Project>\n");
         case_files.push(("Directory.Build.targets", text));
+    }
+
+    if !case.repeats.is_empty() {
+        let ext = ext(case.repeat_which);
+        let child = format!(
+            "<Project>\n{}  <PropertyGroup>\n    <Seen>child</Seen>\n    <SeenChild>child</SeenChild>\n  </PropertyGroup>\n  \
+             <Import Project=\"$(MSBuildProjectDirectory)/../grandchild.{ext}\" />\n{}</Project>\n",
+            tracer("child"),
+            repeats_at(case, RepeatSite::InChild)
+        );
+        let grandchild = format!(
+            "<Project>\n{}  <PropertyGroup>\n    <Seen>grandchild</Seen>\n    <SeenGrandchild>grandchild</SeenGrandchild>\n  </PropertyGroup>\n{}</Project>\n",
+            tracer("grandchild"),
+            repeats_at(case, RepeatSite::InGrandchild)
+        );
+        let (child_name, grandchild_name) = match case.repeat_which {
+            Which::Props => ("child.props", "grandchild.props"),
+            Which::Targets => ("child.targets", "grandchild.targets"),
+        };
+        case_files.push((child_name, child));
+        case_files.push((grandchild_name, grandchild));
     }
 
     // The project.
@@ -821,6 +1071,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         );
     }
     body.push_str(&reimports_at(case, Site::Body, sdk));
+    body.push_str(&repeats_at(case, RepeatSite::Body));
     let disable_props = format!(
         "{}{}",
         if case.body_disables_props_import {
@@ -862,24 +1113,6 @@ fn render(case: &Case, sdk: &str) -> Rendered {
 /// MSBuild's (#677).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Family {
-    /// The walk splices `Directory.Build.*` into a project with no SDK, which
-    /// MSBuild never imports them into (#676, merged into #677).
-    SdkLessSplice,
-    /// The walk splices `Directory.Build.*` itself rather than following the
-    /// SDK's import, so it diverges wherever the SDK's import point is absent,
-    /// conditioned otherwise than the standard block, or reached in a
-    /// different place (#677).
-    EmulatedImportPoint,
-    /// The walk takes every SDK import of `$(DirectoryBuildPropsPath)` for
-    /// the props import point it splices itself, and suppresses it when it
-    /// names the file the splice took or is about to take: compared by
-    /// canonical path, with a relative path resolved against the project's
-    /// directory. MSBuild has no such point: it imports any file it has not
-    /// imported yet, by lexical full path, resolved against the importing
-    /// file's directory. So an SDK that writes the property itself diverges
-    /// when it names the file through an alias, relative to itself, or before
-    /// a `Directory.Build.props` it imports redirects it (#677).
-    PropsPointIdentity,
     /// `Exists()` in a `<When>` condition, in an imported file, resolves
     /// against the file's directory; MSBuild resolves it against the
     /// project's (#786). Covers `ExistsProbe` only: the element and group
@@ -905,48 +1138,45 @@ enum Family {
     /// as text first. They part on a relative path tested from a file reached
     /// through the directory link `proj/up` (#778).
     ExistsResolvesPhysically,
+    /// Content the walk cannot see imports a file, and a later plain import of
+    /// it (or of a file it imports) is one MSBuild skips as a duplicate; the
+    /// walk does not know the earlier import, walks the later one, and commits
+    /// the Compile items it contributes at the later position (#819). Covers
+    /// Compile findings only: an import point after hidden content is never
+    /// decided, so a point's import of the file must still decline.
+    HiddenImportThenPlainImport,
+    /// An import point whose `Exists` is a disjunct ([`PointDoubt::GateOr`]):
+    /// MSBuild imports its path regardless, and rejects the project (MSB4019)
+    /// when the path names no file. A reached point is never decided and
+    /// withdraws the whole evaluation, but a literal write after it is
+    /// committed for an evaluation MSBuild refuses, and a point in content the
+    /// walk cannot see makes MSBuild refuse an evaluation the walk accepts
+    /// (#820). Covers property findings, and Compile findings on a project
+    /// MSBuild rejects.
+    UndecidedImportOfMissingFile,
+    /// Content the walk cannot see, in an SDK file, imports a user file with
+    /// Compile items: the SDK's Compile tolerance keeps the set certain
+    /// without them (#821). Covers Compile findings only.
+    SdkToleratedHiddenImport,
 }
 
 const KNOWN_DIVERGENCES: &[Family] = &[
-    Family::SdkLessSplice,
-    Family::EmulatedImportPoint,
-    Family::PropsPointIdentity,
     Family::ExistsBaseDirectory,
     Family::DanglingSymlinkExists,
     Family::UndecidedImportHidesWrites,
     Family::SdkImportJoinsRawText,
     Family::ExistsResolvesPhysically,
+    Family::HiddenImportThenPlainImport,
+    Family::UndecidedImportOfMissingFile,
+    Family::SdkToleratedHiddenImport,
 ];
 
 impl Family {
     /// Whether `case` is in the family: decided from the case's shape alone,
     /// never from how the walk answered it.
     fn contains(self, case: &Case) -> bool {
-        let has_file = case.props.present || case.targets_present;
         match self {
-            Family::SdkLessSplice => case.form == Form::SdkLess && has_file,
             Family::ExistsBaseDirectory => case.props.probes_exists,
-            Family::EmulatedImportPoint => {
-                // The splice and the SDK's real import agree only when the SDK
-                // is the project's own, reached through the attribute, and its
-                // import points are the standard blocks. (Whether a
-                // `Directory.Build.*` file exists does not matter: an input
-                // written under an undecided condition can name `other.props`.)
-                case.form != Form::SdkLess
-                    && (case.form != Form::SdkAttribute
-                        || !matches!(
-                            case.props_point,
-                            PropsPoint::Standard | PropsPoint::InSdkFile
-                        )
-                        || case.second_props_point
-                        || case.targets_point != TargetsPoint::Standard)
-            }
-            // Every site but the body can be in a file the walk counts as the
-            // SDK's: `Directory.Build.targets` too, when an SDK file reaches
-            // it through the `rel.targets` link in the SDK's directory.
-            Family::PropsPointIdentity => case.reimports.iter().any(|r| {
-                r.which == Which::Props && r.shape != Shape::Literal && r.site != Site::Body
-            }),
             Family::DanglingSymlinkExists => case.reimports.iter().any(|r| {
                 matches!(
                     r.spelling,
@@ -960,6 +1190,20 @@ impl Family {
                 case.undecided.is_some()
                     || case.props_point == PropsPoint::BehindUndecidedImport
                     || case.targets_point == TargetsPoint::BehindUndecidedImport
+                    || case.has_hidden_repeat()
+            }
+            Family::UndecidedImportOfMissingFile => case.point_doubt == PointDoubt::GateOr,
+            Family::SdkToleratedHiddenImport => case
+                .repeats
+                .iter()
+                .any(|r| r.site == RepeatSite::HiddenBeforePoint && r.target != RepeatTarget::File),
+            Family::HiddenImportThenPlainImport => {
+                case.has_hidden_repeat()
+                    && (!case.reimports.is_empty()
+                        || case
+                            .repeats
+                            .iter()
+                            .any(|r| r.site != RepeatSite::HiddenBeforePoint))
             }
             Family::SdkImportJoinsRawText => case
                 .reimports
@@ -980,14 +1224,18 @@ impl Family {
     /// Whether the family explains `finding`, in a case it contains.
     fn covers(self, finding: &Finding) -> bool {
         match self {
-            Family::SdkLessSplice | Family::EmulatedImportPoint | Family::PropsPointIdentity => {
-                true
-            }
             Family::DanglingSymlinkExists => true,
             Family::ExistsBaseDirectory => {
                 finding.what == "ExistsProbe" || finding.what == "ExistsProbe (must commit)"
             }
             Family::UndecidedImportHidesWrites => finding.kind == FindingKind::Property,
+            Family::HiddenImportThenPlainImport => finding.kind == FindingKind::Compile,
+            Family::UndecidedImportOfMissingFile => {
+                finding.kind == FindingKind::Property
+                    || (finding.kind == FindingKind::Compile
+                        && finding.theirs == "a rejected project")
+            }
+            Family::SdkToleratedHiddenImport => finding.kind == FindingKind::Compile,
             Family::SdkImportJoinsRawText | Family::ExistsResolvesPhysically => true,
         }
     }
@@ -996,29 +1244,12 @@ impl Family {
     /// asserts still diverges.
     fn witness(self) -> Case {
         match self {
-            Family::SdkLessSplice => Case {
-                form: Form::SdkLess,
-                ..Case::usual()
-            },
             Family::ExistsBaseDirectory => Case {
                 props: Props {
                     present: true,
                     probes_exists: true,
                     ..Props::default()
                 },
-                ..Case::usual()
-            },
-            Family::EmulatedImportPoint => Case {
-                props_point: PropsPoint::Absent,
-                ..Case::usual()
-            },
-            Family::PropsPointIdentity => Case {
-                reimports: vec![Reimport {
-                    which: Which::Props,
-                    spelling: Spelling::FileLink,
-                    shape: Shape::ViaProperty,
-                    site: Site::SdkProps,
-                }],
                 ..Case::usual()
             },
             Family::DanglingSymlinkExists => Case {
@@ -1057,12 +1288,56 @@ impl Family {
                 }],
                 ..Case::usual()
             },
+            // With no `Directory.Build.*` file, nothing withdraws the values
+            // the hidden `Behind.props` would have changed: `Trace` lacks its
+            // marker and is published as trusted.
             Family::UndecidedImportHidesWrites => Case {
-                undecided: Some(Undecided {
-                    site: UndecidedSite::SdkProps,
-                    input: ImportInput::PropsPath,
-                    how: UndecidedHow::UnderUndecidedCondition,
-                }),
+                props_point: PropsPoint::BehindUndecidedImport,
+                props: Props::default(),
+                targets_present: false,
+                ..Case::usual()
+            },
+            // The SDK resets `Seen` after the point, a literal the walk commits.
+            Family::UndecidedImportOfMissingFile => Case {
+                targets_present: false,
+                point_doubt: PointDoubt::GateOr,
+                repeats: vec![Repeat {
+                    target: RepeatTarget::File,
+                    site: RepeatSite::SdkAfterPoint,
+                }],
+                ..Case::usual()
+            },
+            // No `Directory.Build.*` file, so the point withdraws nothing, and
+            // `child` (with `grandchild`) is imported only by the hidden import.
+            Family::SdkToleratedHiddenImport => Case {
+                props: Props::default(),
+                targets_present: false,
+                repeat_which: Which::Props,
+                repeats: vec![Repeat {
+                    target: RepeatTarget::Child,
+                    site: RepeatSite::HiddenBeforePoint,
+                }],
+                ..Case::usual()
+            },
+            // No point and no `Directory.Build.*` file, so nothing withdraws
+            // the Compile set: MSBuild runs `child` and `grandchild` once, in
+            // `Sdk.props`, and the walk runs them at the body's import.
+            Family::HiddenImportThenPlainImport => Case {
+                props_point: PropsPoint::Absent,
+                targets_point: TargetsPoint::Absent,
+                props: Props::default(),
+                targets_present: false,
+                repeat_which: Which::Props,
+                repeats: vec![
+                    Repeat {
+                        target: RepeatTarget::Child,
+                        site: RepeatSite::HiddenBeforePoint,
+                    },
+                    Repeat {
+                        target: RepeatTarget::Child,
+                        site: RepeatSite::Body,
+                    },
+                ],
                 ..Case::usual()
             },
         }
@@ -1070,6 +1345,13 @@ impl Family {
 }
 
 impl Case {
+    /// Whether content the walk cannot see imports a file the point reaches.
+    fn has_hidden_repeat(&self) -> bool {
+        self.repeats
+            .iter()
+            .any(|r| r.site == RepeatSite::HiddenBeforePoint)
+    }
+
     /// The SDK attribute form with the standard import points and both
     /// `Directory.Build.*` files.
     fn usual() -> Case {
@@ -1087,6 +1369,9 @@ impl Case {
             body_disables_targets_import: false,
             reimports: Vec::new(),
             undecided: None,
+            repeat_which: Which::Targets,
+            point_doubt: PointDoubt::Decided,
+            repeats: Vec::new(),
         }
     }
 
@@ -1097,9 +1382,16 @@ impl Case {
     /// are all decided.
     ///
     /// A case with an [`Undecided`] write has no such obligation: that write
-    /// may decide every import that follows it.
+    /// may decide every import that follows it. Nor has a case whose import
+    /// point is behind an import the walk cannot decide: what the hidden file
+    /// writes is the walk's to doubt.
     fn must_commit(&self) -> &'static [&'static str] {
-        if self.undecided.is_some() {
+        if self.undecided.is_some()
+            || self.has_hidden_repeat()
+            || self.point_doubt != PointDoubt::Decided
+            || self.props_point == PropsPoint::BehindUndecidedImport
+            || self.targets_point == TargetsPoint::BehindUndecidedImport
+        {
             &[]
         } else {
             &["Trace", "BodySaw", "InDbp", "InDbt", "InOther"]
@@ -1167,6 +1459,8 @@ struct Outcome {
     /// MSBuild rejected the project.
     rejected: bool,
     committed_properties: usize,
+    /// The properties the walk committed, graded against MSBuild.
+    committed: Vec<&'static str>,
     exact_targets: usize,
     /// The walk called the Compile set certain (and MSBuild accepted the
     /// project).
@@ -1341,6 +1635,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
             }
         };
         outcome.committed_properties += 1;
+        outcome.committed.push(name);
         if let Some(ours) = committed {
             outcome.findings.push(Finding {
                 what: name.to_owned(),
@@ -1438,6 +1733,18 @@ fn brief(case: &Case) -> String {
     if let Some(u) = case.undecided {
         s.push_str(&format!(" und[{:?} {:?} @{:?}]", u.input, u.how, u.site));
     }
+    if case.point_doubt != PointDoubt::Decided {
+        s.push_str(&format!(
+            " doubt[{:?} {:?}]",
+            case.repeat_which, case.point_doubt
+        ));
+    }
+    for r in &case.repeats {
+        s.push_str(&format!(
+            " rep[{:?} {:?} {:?}]",
+            case.repeat_which, r.target, r.site
+        ));
+    }
     s
 }
 
@@ -1469,6 +1776,12 @@ fn census_keys(case: &Case) -> Vec<String> {
             case.body_disables_targets_import
         ),
     ];
+    keys.push(format!("point_doubt={:?}", case.point_doubt));
+    for r in &case.repeats {
+        keys.push(format!("repeat.target={:?}", r.target));
+        keys.push(format!("repeat.site={:?}", r.site));
+        keys.push(format!("repeat.with={:?}", case.point_doubt));
+    }
     if let Some(u) = case.undecided {
         keys.push(format!("undecided.site={:?}", u.site));
         keys.push(format!("undecided.input={:?}", u.input));
@@ -1527,6 +1840,29 @@ fn sweep(seed: u64, cases: usize) -> Report {
             .filter(|f| f.contains(&case))
             .collect();
         let (outcome, describe) = evaluate(&mut shared, &case);
+        // Which re-imports reached a graded commit: the walk committed what
+        // the import left in `Repeat<i>`, and MSBuild agreed or it is a
+        // finding.
+        for (i, r) in case.repeats.iter().enumerate() {
+            let copies = [
+                format!("Repeat{i}"),
+                format!("Repeat{i}Child"),
+                format!("Repeat{i}Grandchild"),
+            ];
+            if outcome
+                .committed
+                .iter()
+                .any(|name| copies.iter().any(|copy| copy == name))
+            {
+                for key in [
+                    format!("repeat_commit.site={:?}", r.site),
+                    format!("repeat_commit.target={:?}", r.target),
+                    format!("repeat_commit.with={:?}", case.point_doubt),
+                ] {
+                    *report.census.entry(key).or_default() += 1;
+                }
+            }
+        }
         report.cases += 1;
         report.rejected += usize::from(outcome.rejected);
         report.committed_properties += outcome.committed_properties;
@@ -1696,6 +2032,25 @@ fn the_import_graph_is_exact_or_declined() {
         "undecided.how=UnderUndecidedCondition",
         "undecided.how=RefusedThenOverwritten",
         "undecided.how=RefusedThenStale",
+        "point_doubt=Decided",
+        "point_doubt=GateTrue",
+        "point_doubt=GateFalse",
+        "point_doubt=GateOr",
+        "point_doubt=PathRefused",
+        "repeat.target=File",
+        "repeat.target=Child",
+        "repeat.target=Grandchild",
+        "repeat.site=Body",
+        "repeat.site=SdkBeforePoint",
+        "repeat.site=HiddenBeforePoint",
+        "repeat.site=SdkAfterPoint",
+        "repeat.site=InChild",
+        "repeat.site=InGrandchild",
+        "repeat.with=Decided",
+        "repeat.with=GateTrue",
+        "repeat.with=GateFalse",
+        "repeat.with=GateOr",
+        "repeat.with=PathRefused",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1707,6 +2062,79 @@ fn the_import_graph_is_exact_or_declined() {
     assert!(
         missing.is_empty(),
         "dimension values generated fewer than 5 times: {missing:?}"
+    );
+    // And each re-import shape reaches a commit the oracle grades. Only with
+    // the point decided: an undecided point withdraws the whole evaluation,
+    // so the walk commits nothing after it, by design; nor after content it
+    // cannot see, so `HiddenBeforePoint` has no commit to reach either.
+    let uncommitted: Vec<String> = [
+        "repeat_commit.site=Body",
+        "repeat_commit.site=SdkBeforePoint",
+        "repeat_commit.site=SdkAfterPoint",
+        "repeat_commit.site=InChild",
+        "repeat_commit.site=InGrandchild",
+        "repeat_commit.target=File",
+        "repeat_commit.target=Child",
+        "repeat_commit.target=Grandchild",
+        "repeat_commit.with=Decided",
+    ]
+    .into_iter()
+    .filter(|key| report.census.get(*key).copied().unwrap_or(0) < 3)
+    .map(str::to_owned)
+    .collect();
+    assert!(
+        uncommitted.is_empty(),
+        "re-import shapes that reached a graded commit fewer than 3 times: {uncommitted:?}"
+    );
+}
+
+/// An import point whose `Exists` is a disjunct beside a term the walk cannot
+/// evaluate, over a certain path to a missing file: MSBuild takes the term,
+/// imports the missing file and rejects the project (MSB4019), so the walk
+/// must commit nothing.
+#[test]
+fn an_or_exists_point_over_a_missing_file_commits_nothing() {
+    let mut shared = Shared::new();
+    let case = Case {
+        targets_present: false,
+        point_doubt: PointDoubt::GateOr,
+        ..Case::usual()
+    };
+    let (outcome, describe) = evaluate(&mut shared, &case);
+    assert!(
+        outcome.rejected,
+        "MSBuild accepted the project:\n{describe}"
+    );
+    assert!(
+        outcome.findings.is_empty(),
+        "{:#?}\n{describe}",
+        outcome.findings
+    );
+}
+
+/// Content the walk cannot see imports `Directory.Build.props`, and the SDK's
+/// point imports it again, which MSBuild skips (import-graph soak seed 112233,
+/// case 9706): the walk must not commit the order its own import would give.
+#[test]
+fn a_point_after_a_hidden_import_of_its_file_commits_no_order() {
+    let mut shared = Shared::new();
+    let case = Case {
+        repeat_which: Which::Props,
+        repeats: vec![Repeat {
+            target: RepeatTarget::File,
+            site: RepeatSite::HiddenBeforePoint,
+        }],
+        ..Case::usual()
+    };
+    let (outcome, describe) = evaluate(&mut shared, &case);
+    assert!(
+        !outcome.rejected,
+        "MSBuild rejected the project:\n{describe}"
+    );
+    assert!(
+        outcome.findings.is_empty(),
+        "{:#?}\n{describe}",
+        outcome.findings
     );
 }
 

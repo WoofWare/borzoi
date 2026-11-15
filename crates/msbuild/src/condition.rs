@@ -280,6 +280,57 @@ pub fn decide_without(
     }
 }
 
+/// Whether `source` is a conjunction (nested conjunctions flattened) each of
+/// whose conjuncts is either an `Exists` whose raw argument `is_the_exists`
+/// accepts, with `fs` there to answer it, or decided by [`decide_without`]'s
+/// evaluation on its own. Stricter than deciding the whole condition: an
+/// undecidable conjunct beside a false one is not accepted, though the
+/// condition is false whatever the conjunct holds.
+pub fn decided_conjunctwise(
+    source: &str,
+    props: &PropertyMap,
+    fs: Option<Probes<'_>>,
+    untrusted: &dyn Fn(&str) -> bool,
+    is_the_exists: &dyn Fn(&str) -> bool,
+) -> bool {
+    let expr = match parse_condition(source) {
+        Ok(Some(expr)) => expr,
+        Ok(None) => return true,
+        Err(()) => return false,
+    };
+    let mut pending = vec![&expr];
+    while let Some(conjunct) = pending.pop() {
+        match conjunct {
+            BoolExpr::And(operands) => pending.extend(operands),
+            BoolExpr::Exists(arg) if fs.is_some() && is_the_exists(arg) => {}
+            other => {
+                if !matches!(eval_kleene(other, props, fs, untrusted), Ok(Some(_))) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Whether `source` is a conjunction (nested conjunctions flattened) one of
+/// whose conjuncts is an `Exists` whose raw argument `is_the_exists` accepts:
+/// the condition is false whenever that `Exists` is.
+pub fn requires_exists(source: &str, is_the_exists: &dyn Fn(&str) -> bool) -> bool {
+    let Ok(Some(expr)) = parse_condition(source) else {
+        return false;
+    };
+    let mut pending = vec![&expr];
+    while let Some(conjunct) = pending.pop() {
+        match conjunct {
+            BoolExpr::And(operands) => pending.extend(operands),
+            BoolExpr::Exists(arg) if is_the_exists(arg) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// [`decide_without`]'s evaluation: `Ok(None)` is unknown.
 fn eval_kleene(
     expr: &BoolExpr,
