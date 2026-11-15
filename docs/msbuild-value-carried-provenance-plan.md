@@ -1176,7 +1176,17 @@ gone.
   property A checked on every input the suite and the corpora reach instead
   of on a generated sample.
 
-**Unmoved, as a representation change must be:** RESULTS_PENDING
+**Unmoved, as a representation change must be:** the whole `borzoi-msbuild` suite (every oracle
+differential and `taint_closure_metamorphic`, its set-aside counts
+included), the workspace suite, `fsproj_msbuild_corpus_diff`,
+`sdk_chain_decline_attribution` and every step of
+`tools/ci/project-corpus-gate.sh` pass with no manifest moved, and with the
+two mirror assertions armed throughout (the gate profile keeps debug
+assertions). The mirror fired once while this stage was built, and what it
+found was a stale claim rather than a refactoring bug: `Trust`'s docs said
+every refused name is unbound, but P2‴'s `RefusedOutcome::Keep` leaves the
+mark on a name a clean write has since re-bound. The claim is corrected, and
+the mirror compares only the two value-describing channels.
 
 #### The two questions, settled
 
