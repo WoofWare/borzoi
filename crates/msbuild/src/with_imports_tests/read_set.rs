@@ -509,7 +509,8 @@ fn lay_link_tree(root: &Path, specs: &[LinkSpec]) -> Vec<PathBuf> {
         if spec.absolute {
             root.join(from_root)
         } else if below.is_empty() {
-            PathBuf::from(from_root)
+            // An empty target is no path (Linux refuses it): the root is `.`.
+            PathBuf::from(if from_root.is_empty() { "." } else { from_root })
         } else if let Some(local) = from_root.strip_prefix(&format!("{below}/")) {
             PathBuf::from(local)
         } else {
@@ -646,7 +647,8 @@ proptest! {
 /// The trees the planner's earlier versions got wrong, pinned: two links in
 /// different directories whose relative targets are spelt alike; a target
 /// through a link (`hop/..`); and a dangling link whose target's directory
-/// does not exist.
+/// does not exist. And a link in the root to the root, whose relative target
+/// is spelt `.`, an empty target being no path.
 #[cfg(unix)]
 #[test]
 fn the_sweep_perturbs_the_pinned_link_trees() {
@@ -665,6 +667,7 @@ fn the_sweep_perturbs_the_pinned_link_trees() {
             spec(2, LinkTarget::File(2), false),
         ],
         vec![spec(1, LinkTarget::MissingParent, false)],
+        vec![spec(0, LinkTarget::Dir(0), false)],
     ] {
         if let Err(why) = check_link_perturbations(&specs) {
             panic!("{specs:?}: {why}");
