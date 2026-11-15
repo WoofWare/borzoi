@@ -27,8 +27,9 @@
 //! ([`Workspace::hint`]): it names paths to ask again whatever their stamps
 //! say, and a structural one ([`Workspace::note_structural_event`]) makes the
 //! next confirmation of every evaluation cover the installed contents it
-//! trusts too. The one input no evaluation records, NuGet's settings, is
-//! covered by its watch event alone ([`Workspace::drop_every_evaluation`]).
+//! trusts too. NuGet's settings, which choose the packages folder versioned
+//! SDKs resolve from, are read through the discovery's observer
+//! ([`SdkDiscovery::for_project`]) and confirmed like the rest.
 //!
 //! SDK resolution is wired through [`SdkDiscovery`]: each project gets
 //! its own discovery context (built from a [`SdkDiscoveryEnv`] held on
@@ -126,8 +127,8 @@ pub struct Workspace {
     /// generation that reads it ([`Self::validate`]).
     projects: HashMap<ProjectId, CachedEvaluation>,
     /// Bumped whenever an evaluation the cache served is dropped (by a
-    /// validation that finds an entry's reads moved, or by
-    /// [`Self::drop_every_evaluation`]), whenever a file's owner moves, and
+    /// validation that finds an entry's reads moved), whenever a file's owner
+    /// moves, and
     /// whenever a structural watch event arrives
     /// ([`Self::note_structural_event`]). So a caller that read several
     /// evaluations across a span of time can tell whether they all came from
@@ -1014,13 +1015,9 @@ impl Workspace {
 
     /// Drop every cached project evaluation and every remembered owner, so
     /// that each is evaluated (or walked) afresh on its next lookup, and end
-    /// the [`Self::projects_generation`].
-    ///
-    /// For the one input of an evaluation that nothing records: NuGet's
-    /// settings, which choose the packages folder SDK discovery resolves
-    /// versioned SDKs from (`borzoi_nuget::settings`, read directly). A watch
-    /// event naming a `nuget.config` is all that covers a change to them
-    /// ([`crate::server::State::apply_watched_changes`]).
+    /// the [`Self::projects_generation`]: for a caller that evaluates again
+    /// with nothing having moved (a test, or `examples/eval_counts.rs`, which
+    /// measures what evaluating costs).
     pub fn drop_every_evaluation(&mut self) {
         for (project, dropped) in std::mem::take(&mut self.projects) {
             self.retire(project, dropped);
@@ -1080,8 +1077,7 @@ impl Workspace {
     /// from now. Two lookups observed under one generation read the same
     /// on-disk project state — the cache is the only path to an evaluation,
     /// and a generation ends whenever an evaluation it served is dropped (a
-    /// validation that finds its reads moved, or
-    /// [`Self::drop_every_evaluation`]), whenever a file's owner it served
+    /// validation that finds its reads moved), whenever a file's owner it served
     /// moves ([`Self::owning_project`]), and whenever a structural watch
     /// event arrives ([`Self::note_structural_event`]) — so a consumer
     /// accumulating facts across many lookups (the stepped
@@ -8187,6 +8183,235 @@ mod tests {
             ws.begin_generation(Nanos(i128::MAX / 2 + 1));
             assert!(ws.symbols_for(&file).contains("TWO"));
             ws.end_generation();
+        }
+
+        /// A world whose project names a versioned SDK (`My.Sdk/1.0.0`),
+        /// which NuGet's SDK resolver takes from the global packages folder
+        /// NuGet's settings choose: `pkg-a` and `pkg-b` each hold it, its
+        /// `Sdk.props` defining `PKG_A` or `PKG_B`. The user's config chooses
+        /// `pkg-a`. The project's source; the folders, by name; the
+        /// environment, whose home and (where the platform lets it be moved)
+        /// machine-wide config folder lie under `root`.
+        fn nuget_world(root: &Path) -> (PathBuf, SdkDiscoveryEnv) {
+            let dotnet = root.join("dotnet");
+            install_sdk(&dotnet, "10.0.100", "SDK_ONE");
+            for (folder, define) in [("pkg-a", "PKG_A"), ("pkg-b", "PKG_B")] {
+                let sdk = root.join(folder).join("my.sdk/1.0.0/Sdk");
+                write_file(
+                    &sdk.join("Sdk.props"),
+                    &format!(
+                        "<Project><PropertyGroup><DefineConstants>$(DefineConstants);{define}</DefineConstants></PropertyGroup></Project>"
+                    ),
+                );
+                write_file(&sdk.join("Sdk.targets"), "<Project />");
+            }
+            write_file(
+                &root.join("repo/App/App.fsproj"),
+                r#"<Project Sdk="My.Sdk/1.0.0"><ItemGroup><Compile Include="A.fs" /></ItemGroup></Project>"#,
+            );
+            write_file(&root.join("repo/App/A.fs"), "module A\n");
+            write_file(
+                &root.join("home/.nuget/NuGet/NuGet.Config"),
+                &nuget_config(&root.join("pkg-a")),
+            );
+            fs::create_dir_all(root.join("machine/NuGet/Config")).unwrap();
+            let env = SdkDiscoveryEnv {
+                dotnet_root: Some(dotnet),
+                home_dir: Some(root.join("home")),
+                build_environment: HashMap::from([(
+                    "NUGET_COMMON_APPLICATION_DATA".to_string(),
+                    root.join("machine").to_str().unwrap().to_string(),
+                )]),
+                ..SdkDiscoveryEnv::default()
+            };
+            (root.join("repo/App/A.fs"), env)
+        }
+
+        /// A NuGet config choosing `folder` as the global packages folder.
+        fn nuget_config(folder: &Path) -> String {
+            format!(
+                r#"<configuration><config><add key="globalPackagesFolder" value="{}" /></config></configuration>"#,
+                folder.display()
+            )
+        }
+
+        /// What a NuGet config file can hold, from the grid of
+        /// [`nuget_settings_moves_are_seen_without_an_event`].
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Setting {
+            Absent,
+            Folder(&'static str),
+            /// A file NuGet's settings model declines (an `add` without a
+            /// value), which declines the folder and so the versioned SDK.
+            Declined,
+        }
+
+        /// Every file of the settings chain NuGet reads for the global
+        /// packages folder, and the home folder itself, set from one
+        /// [`Setting`] to another with no watch event between two
+        /// generations: the warm workspace's symbols for the project's source
+        /// are a fresh workspace's. The files: a config in the project's
+        /// directory and in its parent (the walk), the user's config, a file
+        /// in the user's `config` folder, and the machine-wide folder's (on
+        /// Linux, where `NUGET_COMMON_APPLICATION_DATA` moves it under the
+        /// root); and the home folder, deleted with everything in it. Each
+        /// transition is made on its own, from the world's start.
+        /// `NUGET_PACKAGES` and the home variables are the environment the
+        /// workspace was made with, which cannot change under a running
+        /// server.
+        #[test]
+        fn nuget_settings_moves_are_seen_without_an_event() {
+            let settings = [
+                Setting::Absent,
+                Setting::Folder("pkg-a"),
+                Setting::Folder("pkg-b"),
+                Setting::Declined,
+            ];
+            let files: Vec<&str> = [
+                "repo/App/nuget.config",
+                "repo/nuget.config",
+                "home/.nuget/NuGet/NuGet.Config",
+                "home/.nuget/NuGet/config/extra.config",
+            ]
+            .into_iter()
+            .chain(cfg!(target_os = "linux").then_some("machine/NuGet/Config/machine.config"))
+            .collect();
+            let set = |root: &Path, file: &str, setting: Setting| {
+                let path = root.join(file);
+                match setting {
+                    Setting::Absent => {
+                        let _ = fs::remove_file(&path);
+                    }
+                    Setting::Folder(folder) => write_file(&path, &nuget_config(&root.join(folder))),
+                    Setting::Declined => write_file(
+                        &path,
+                        r#"<configuration><config><add key="globalPackagesFolder" /></config></configuration>"#,
+                    ),
+                }
+            };
+            let mut moved = 0;
+            let mut cases = 0;
+            for file in &files {
+                for from in settings {
+                    for to in settings {
+                        if from == to {
+                            continue;
+                        }
+                        let tmp = TempDir::new().unwrap();
+                        let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+                        let (source, env) = nuget_world(&root);
+                        set(&root, file, from);
+                        let mut warm = Workspace::with_env(env.clone());
+                        warm.begin_generation(Nanos(i128::MAX / 2));
+                        let before = warm.symbols_for(&source);
+                        warm.end_generation();
+                        set(&root, file, to);
+                        warm.begin_generation(Nanos(i128::MAX / 2 + 1));
+                        let after = warm.symbols_for(&source);
+                        warm.end_generation();
+                        let mut fresh = Workspace::with_env(env);
+                        fresh.begin_generation(Nanos(i128::MAX / 2 + 1));
+                        let want = fresh.symbols_for(&source);
+                        fresh.end_generation();
+                        assert_eq!(
+                            after, want,
+                            "{file}: {from:?} to {to:?} with no event left the warm workspace \
+                             on {before:?}"
+                        );
+                        cases += 1;
+                        moved += usize::from(before != after);
+                    }
+                }
+            }
+            // Deleting the home folder, with the user's config in it.
+            let tmp = TempDir::new().unwrap();
+            let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+            let (source, env) = nuget_world(&root);
+            let mut warm = Workspace::with_env(env.clone());
+            warm.begin_generation(Nanos(i128::MAX / 2));
+            let before = warm.symbols_for(&source);
+            warm.end_generation();
+            fs::remove_dir_all(root.join("home")).unwrap();
+            warm.begin_generation(Nanos(i128::MAX / 2 + 1));
+            let after = warm.symbols_for(&source);
+            warm.end_generation();
+            let mut fresh = Workspace::with_env(env);
+            fresh.begin_generation(Nanos(i128::MAX / 2 + 1));
+            assert_eq!(after, fresh.symbols_for(&source), "the home folder deleted");
+            assert_ne!(before, after, "deleting the home folder moves nothing");
+            // Non-vacuity: the grid moves the warm workspace's answer, and
+            // the world starts on the user's folder.
+            assert!(before.contains("PKG_A"), "{before:?}");
+            assert!(
+                moved > cases / 2,
+                "{moved} of {cases} transitions moved the answer"
+            );
+        }
+
+        /// Two spellings of the walk's config file in the project's
+        /// directory, hard links to one file, could be read either way by
+        /// NuGet's belief about the volume's case, so the folder declines.
+        /// One replaced by an independent, byte-identical file, straight after
+        /// and with no event, makes the folder admitted: what is recorded of
+        /// each spelling is its identity, not its contents alone. Linux only:
+        /// on a case-insensitive macOS volume the spellings are one entry.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_walk_spelling_replaced_by_an_identical_file_is_seen() {
+            let tmp = TempDir::new().unwrap();
+            let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+            let (source, env) = nuget_world(&root);
+            let first = root.join("repo/App/nuget.config");
+            let second = root.join("repo/App/NuGet.config");
+            let text = nuget_config(&root.join("pkg-b"));
+            write_file(&first, &text);
+            fs::hard_link(&first, &second).unwrap();
+            let mut warm = Workspace::with_env(env.clone());
+            warm.begin_generation(Nanos(i128::MAX / 2));
+            let before = warm.symbols_for(&source);
+            warm.end_generation();
+            assert!(
+                !before.contains("PKG_A") && !before.contains("PKG_B"),
+                "precondition: one file under two spellings declines: {before:?}"
+            );
+            fs::remove_file(&second).unwrap();
+            write_file(&second, &text);
+            warm.begin_generation(Nanos(i128::MAX / 2 + 1));
+            let after = warm.symbols_for(&source);
+            warm.end_generation();
+            let mut fresh = Workspace::with_env(env);
+            fresh.begin_generation(Nanos(i128::MAX / 2 + 1));
+            assert_eq!(after, fresh.symbols_for(&source));
+            assert!(after.contains("PKG_B"), "{after:?}");
+        }
+
+        /// The read-set soundness sweep over [`nuget_world`]: every file
+        /// under the root rewritten, deleted, and created under every name in
+        /// every directory (`nuget.config` and `NuGet.Config` among them, in
+        /// the project's directories, the home folder's and the machine-wide
+        /// folder), every recorded absence created and every listing grown.
+        /// Whenever every read the evaluation recorded stands, evaluating
+        /// again gives the same evaluation, so NuGet's settings reads are in
+        /// it. Choosing the other folder in the project's directory moves it.
+        #[test]
+        fn the_workspace_read_set_is_sound_under_nuget_settings() {
+            let tmp = TempDir::new().unwrap();
+            let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+            let (source, env) = nuget_world(&root);
+            let project = source.with_file_name("App.fsproj");
+            let extra = [Perturbation {
+                why: Why::Extra,
+                edits: vec![Edit::Write(
+                    root.join("repo/App/nuget.config"),
+                    nuget_config(&root.join("pkg-b")).into_bytes(),
+                )],
+            }];
+            let tally = soundness::sweep(&root, &|| evaluation(&project, &env), &extra);
+            assert_eq!(
+                tally.moved(Why::Extra),
+                1,
+                "choosing the other folder moves the evaluation: {tally:#?}"
+            );
         }
 
         /// A read inside a version directory is trusted only while that

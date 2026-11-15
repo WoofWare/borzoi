@@ -458,9 +458,6 @@ impl State {
     ///   ([`crate::semantic::SemanticState::invalidate_assembly_state`]). No
     ///   republish (binaries can't change an open buffer's lexer/parser
     ///   diagnostics either).
-    /// - A NuGet settings file (`nuget.config`, any casing) drops every
-    ///   evaluation and every env: SDK discovery reads NuGet's settings
-    ///   directly, and nothing records it.
     ///
     /// Pure of IO beyond cache mutation, so it is testable without a
     /// [`Connection`]; the shell does the actual publishing.
@@ -476,14 +473,6 @@ impl State {
         self.docs.hint(hinted.iter().map(PathBuf::as_path));
         self.workspace.hint(hinted.iter().map(PathBuf::as_path));
         self.semantic.hint_assembly_paths(&hinted);
-        // NuGet's settings choose the packages folder SDK discovery resolves
-        // versioned SDKs from, and nothing records reading them, so no
-        // evaluation's or env's read set can say whether one moved it: every
-        // evaluation and every env goes.
-        if hinted.iter().any(|path| is_nuget_config(path)) {
-            self.workspace.drop_every_evaluation();
-            self.semantic.drop_every_env();
-        }
         for change in changes {
             match classify_change(&change.uri, change.typ) {
                 ChangeClass::Structural => structural = true,
@@ -572,14 +561,6 @@ fn watched_files_registration_entry() -> Registration {
             serde_json::to_value(options).expect("watcher registration options serialise"),
         ),
     }
-}
-
-/// Whether `path` names a NuGet settings file (`nuget.config`, in any
-/// casing), as [`classify_change`] matches one.
-fn is_nuget_config(path: &Path) -> bool {
-    path.file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| name.eq_ignore_ascii_case("nuget.config"))
 }
 
 /// What a `workspace/didChangeWatchedFiles` change affects.
@@ -3407,8 +3388,8 @@ mod tests {
     /// does not reference) leaves the cached env standing, and so does a
     /// watched change to a path the env's resolution read (here the entry
     /// project file, which it found absent) when the next confirmation finds
-    /// it as recorded. A NuGet settings file, which nothing records, drops
-    /// every env. Cache identity is observed by `Arc::ptr_eq` — the
+    /// it as recorded, and so does a NuGet settings file. Cache identity is
+    /// observed by `Arc::ptr_eq` — the
     /// un-resolvable project here caches a (stable, empty) env, which is
     /// exactly enough to see the hit/miss behaviour without real DLL
     /// fixtures; `env_validation` holds a DLL event to dropping the env that
@@ -3453,23 +3434,26 @@ mod tests {
             "an event naming a read the next confirmation finds as recorded dropped the env"
         );
 
-        // NuGet's settings are read by no recorded reader, so a change to any
-        // of them drops every env, wherever it is (and every evaluation:
-        // `a_nuget_settings_event_re_evaluates_every_project`).
+        // NuGet's settings are recorded where SDK discovery reads them, so an
+        // event naming one is a structural event like any other, which
+        // drops no env whose reads are all recorded.
+        state.begin_generation();
         state.apply_watched_changes(&[changed(url("file:///elsewhere/NuGet.Config"))]);
+        let third = env(&mut state);
+        state.end_generation();
         assert!(
-            !Arc::ptr_eq(&second, &env(&mut state)),
-            "a NuGet settings change left an env standing"
+            Arc::ptr_eq(&second, &third),
+            "a NuGet settings event dropped an env whose reads are all recorded"
         );
     }
 
-    /// NuGet's settings are read by SDK discovery directly, and no
-    /// evaluation records them, so an event naming a `nuget.config`
-    /// re-evaluates every cached project even when everything it recorded
-    /// still holds; an event naming any other project-structure file that
-    /// changed nothing re-evaluates nothing.
+    /// NuGet's settings are recorded where SDK discovery reads them, so an
+    /// event naming a `nuget.config` that changed nothing re-evaluates
+    /// nothing, as an event naming any other project-structure file does
+    /// (`workspace::tests::validation::nuget_settings_moves_are_seen_without_an_event`
+    /// holds that a change is seen with no event at all).
     #[test]
-    fn a_nuget_settings_event_re_evaluates_every_project() {
+    fn a_nuget_settings_event_re_evaluates_nothing_that_still_holds() {
         let tmp = TempDir::new().unwrap();
         let proj = tmp.path().join("App.fsproj");
         let file = tmp.path().join("Lib.fs");
@@ -3488,7 +3472,7 @@ mod tests {
         assert!(state.workspace.symbols_for(&file).contains("ALPHA"));
         assert_eq!(state.end_generation().evaluations.evaluated, 1);
         assert_eq!(evaluated_after(&mut state, "Directory.Build.props"), 0);
-        assert_eq!(evaluated_after(&mut state, "nuget.config"), 1);
+        assert_eq!(evaluated_after(&mut state, "nuget.config"), 0);
     }
 
     /// A `.csproj` *existence* change is structural: an open `.fsproj`'s

@@ -90,6 +90,14 @@
 //!
 //! The folder is compared modulo a trailing separator: NuGet's default ends in
 //! one and a configured value need not, and both name the same folder.
+//!
+//! # The file system
+//!
+//! Every query the loading makes goes through a [`SettingsFs`]:
+//! [`global_packages_folder`] asks the host ([`HostFs`]), and
+//! [`global_packages_folder_with`] asks the caller's, so that a caller that
+//! records what an answer rests on (the LSP, which confirms it before reusing
+//! the answer) sees every file, folder and absence the answer read.
 
 use crate::dgspec::nuspec::{NuspecDecline, admitted_declaration};
 
@@ -114,6 +122,102 @@ pub const WALK_FILE_NAMES: [&str; 3] = ["nuget.config", "NuGet.config", "NuGet.C
 /// The name of the user config file, and of the walk's file on a
 /// case-insensitive file system.
 const DEFAULT_FILE_NAME: &str = "NuGet.Config";
+
+/// The file-system queries loading NuGet's settings makes, answered by the
+/// host ([`HostFs`]) or by a caller that records what it read.
+pub trait SettingsFs {
+    /// [`std::fs::metadata`]: what `path` names, following symlinks.
+    fn metadata(&self, path: &Path) -> std::io::Result<Metadata>;
+    /// The identity (device and inode) of the file `path` names, following
+    /// symlinks, which tells two spellings of one file apart from two files.
+    /// Asked only of spellings [`Self::metadata`] found to be files, and only
+    /// where more than one is.
+    fn identity(&self, path: &Path) -> std::io::Result<(u64, u64)>;
+    /// [`std::fs::read`].
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+    /// [`std::fs::read_dir`], read to the end: each entry, or why it could
+    /// not be read. The order is not significant.
+    fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::io::Result<DirEntry>>>;
+}
+
+/// What [`SettingsFs::metadata`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Metadata {
+    pub is_file: bool,
+    pub is_dir: bool,
+}
+
+/// One entry of a directory [`SettingsFs::read_dir`] listed.
+#[derive(Debug)]
+pub struct DirEntry {
+    pub name: OsString,
+    /// The entry's own type, not following a symlink.
+    pub kind: std::io::Result<EntryKind>,
+}
+
+/// A directory entry's own type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+/// The host's file system.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostFs;
+
+impl SettingsFs for HostFs {
+    fn metadata(&self, path: &Path) -> std::io::Result<Metadata> {
+        let metadata = std::fs::metadata(path)?;
+        Ok(Metadata {
+            is_file: metadata.is_file(),
+            is_dir: metadata.is_dir(),
+        })
+    }
+
+    fn identity(&self, path: &Path) -> std::io::Result<(u64, u64)> {
+        let metadata = std::fs::metadata(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Ok((metadata.dev(), metadata.ino()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            Err(std::io::Error::other("no file identity on this host"))
+        }
+    }
+
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+
+    fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::io::Result<DirEntry>>> {
+        Ok(std::fs::read_dir(path)?
+            .map(|entry| {
+                let entry = entry?;
+                let kind = entry.file_type().map(|file_type| {
+                    if file_type.is_symlink() {
+                        EntryKind::Symlink
+                    } else if file_type.is_dir() {
+                        EntryKind::Dir
+                    } else if file_type.is_file() {
+                        EntryKind::File
+                    } else {
+                        EntryKind::Other
+                    }
+                });
+                Ok(DirEntry {
+                    name: entry.file_name(),
+                    kind,
+                })
+            })
+            .collect())
+    }
+}
 
 /// One item of a settings file's `config` section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -536,6 +640,14 @@ impl fmt::Display for GlobalPackagesFolderDecline {
 /// .NET answers the empty string for a folder it cannot, and NuGet then works
 /// under the working folder.
 pub fn nuget_home(environment: &BTreeMap<OsString, OsString>) -> Option<PathBuf> {
+    nuget_home_with(environment, &HostFs)
+}
+
+/// [`nuget_home`], asking `fs`.
+pub fn nuget_home_with(
+    environment: &BTreeMap<OsString, OsString>,
+    fs: &dyn SettingsFs,
+) -> Option<PathBuf> {
     let absolute = |value: &OsString| {
         value
             .to_str()
@@ -546,7 +658,7 @@ pub fn nuget_home(environment: &BTreeMap<OsString, OsString>) -> Option<PathBuf>
         return absolute(cli_home);
     }
     let home = absolute(environment.get(OsStr::new("HOME"))?)?;
-    std::fs::read_dir(&home).ok()?;
+    fs.read_dir(&home).ok()?;
     Some(home)
 }
 
@@ -568,6 +680,15 @@ pub fn global_packages_folder(
     root: &Path,
     environment: &BTreeMap<OsString, OsString>,
 ) -> Result<GlobalPackagesFolder, GlobalPackagesFolderDecline> {
+    global_packages_folder_with(root, environment, &HostFs)
+}
+
+/// [`global_packages_folder`], asking `fs` every query it makes.
+pub fn global_packages_folder_with(
+    root: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+    fs: &dyn SettingsFs,
+) -> Result<GlobalPackagesFolder, GlobalPackagesFolderDecline> {
     if cfg!(windows) {
         return Err(GlobalPackagesFolderDecline::WindowsHost);
     }
@@ -576,12 +697,12 @@ pub fn global_packages_folder(
             root: root.to_owned(),
         });
     }
-    let home = nuget_home(environment).ok_or(GlobalPackagesFolderDecline::HomeUnknown)?;
-    let files = config_files(root, &home, environment)?;
+    let home = nuget_home_with(environment, fs).ok_or(GlobalPackagesFolderDecline::HomeUnknown)?;
+    let files = config_files(root, &home, environment, fs)?;
     let mut parsed = Vec::with_capacity(files.len());
     for file in &files {
         parsed.push(if file.exists {
-            read_config_file(&file.path)?
+            read_config_file(&file.path, fs)?
         } else {
             SettingsFile::default()
         });
@@ -647,11 +768,16 @@ pub fn global_packages_folder(
     })
 }
 
-fn read_config_file(path: &Path) -> Result<SettingsFile, GlobalPackagesFolderDecline> {
-    let bytes = std::fs::read(path).map_err(|error| GlobalPackagesFolderDecline::ConfigFile {
-        file: path.to_owned(),
-        decline: SettingsFileDecline::Unreadable(error.to_string()),
-    })?;
+fn read_config_file(
+    path: &Path,
+    fs: &dyn SettingsFs,
+) -> Result<SettingsFile, GlobalPackagesFolderDecline> {
+    let bytes = fs
+        .read(path)
+        .map_err(|error| GlobalPackagesFolderDecline::ConfigFile {
+            file: path.to_owned(),
+            decline: SettingsFileDecline::Unreadable(error.to_string()),
+        })?;
     parse_settings_file(&bytes).map_err(|decline| GlobalPackagesFolderDecline::ConfigFile {
         file: path.to_owned(),
         decline,
@@ -663,10 +789,11 @@ fn config_files(
     root: &Path,
     home: &Path,
     environment: &BTreeMap<OsString, OsString>,
+    fs: &dyn SettingsFs,
 ) -> Result<Vec<ConfigFileRef>, GlobalPackagesFolderDecline> {
     let mut files = Vec::new();
     for folder in root.ancestors() {
-        if let Some(path) = walk_config_file(folder)? {
+        if let Some(path) = walk_config_file(folder, fs)? {
             files.push(ConfigFileRef {
                 path,
                 folder: folder.to_owned(),
@@ -679,8 +806,8 @@ fn config_files(
     let user_file = user_folder.join(DEFAULT_FILE_NAME);
     // NuGet writes a default config (package sources only) where there is
     // none, and fails where it cannot.
-    let exists = match std::fs::metadata(&user_file) {
-        Ok(metadata) if metadata.is_file() => true,
+    let exists = match fs.metadata(&user_file) {
+        Ok(metadata) if metadata.is_file => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         _ => {
             return Err(GlobalPackagesFolderDecline::Folder {
@@ -695,7 +822,7 @@ fn config_files(
     });
 
     let additional = user_folder.join("config");
-    for name in listed_config_files(&additional)? {
+    for name in listed_config_files(&additional, fs)? {
         files.push(ConfigFileRef {
             path: additional.join(name),
             folder: additional.clone(),
@@ -704,7 +831,7 @@ fn config_files(
     }
 
     let machine_wide = machine_wide_folder(environment)?;
-    let names = listed_config_files(&machine_wide)?;
+    let names = listed_config_files(&machine_wide, fs)?;
     if names.len() > 1 {
         return Err(GlobalPackagesFolderDecline::Folder {
             folder: machine_wide,
@@ -721,28 +848,33 @@ fn config_files(
 }
 
 /// The config file NuGet loads from `folder` in its walk up from the root.
-fn walk_config_file(folder: &Path) -> Result<Option<PathBuf>, GlobalPackagesFolderDecline> {
-    let present: Vec<(usize, std::fs::Metadata)> = WALK_FILE_NAMES
+fn walk_config_file(
+    folder: &Path,
+    fs: &dyn SettingsFs,
+) -> Result<Option<PathBuf>, GlobalPackagesFolderDecline> {
+    let present: Vec<usize> = WALK_FILE_NAMES
         .iter()
         .enumerate()
-        .filter_map(|(index, name)| {
-            std::fs::metadata(folder.join(name))
-                .ok()
-                .filter(std::fs::Metadata::is_file)
-                .map(|metadata| (index, metadata))
+        .filter(|(_, name)| {
+            fs.metadata(&folder.join(name))
+                .is_ok_and(|metadata| metadata.is_file)
         })
+        .map(|(index, _)| index)
         .collect();
-    let Some((first, _)) = present.first() else {
+    let Some(first) = present.first() else {
         return Ok(None);
     };
     let unpredictable = || GlobalPackagesFolderDecline::Folder {
         folder: folder.to_owned(),
     };
+    // A spelling whose identity cannot be had cannot be said to be the same
+    // file as the others, nor another one.
+    let same_file = || same_file(folder, &present, fs).ok_or_else(unpredictable);
     if cfg!(target_os = "macos") {
         // NuGet believes a macOS volume case-insensitive and looks for
         // `NuGet.Config` alone; that agrees with every belief only where all
         // three spellings name one file.
-        if present.len() != WALK_FILE_NAMES.len() || !same_file(&present) {
+        if present.len() != WALK_FILE_NAMES.len() || !same_file()? {
             return Err(unpredictable());
         }
         Ok(Some(folder.join(DEFAULT_FILE_NAME)))
@@ -750,41 +882,41 @@ fn walk_config_file(folder: &Path) -> Result<Option<PathBuf>, GlobalPackagesFold
         // NuGet believes a Linux volume case-sensitive and takes the first
         // spelling present; on a case-insensitive one every spelling is
         // present and names one file, and the belief may differ.
-        if present.len() > 1 && same_file(&present) {
+        if present.len() > 1 && same_file()? {
             return Err(unpredictable());
         }
         Ok(Some(folder.join(WALK_FILE_NAMES[*first])))
     }
 }
 
-/// Whether every entry of `present` is one file.
-fn same_file(present: &[(usize, std::fs::Metadata)]) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        present
-            .windows(2)
-            .all(|pair| pair[0].1.dev() == pair[1].1.dev() && pair[0].1.ino() == pair[1].1.ino())
+/// Whether the spellings of [`WALK_FILE_NAMES`] at the indices `present`, in
+/// `folder`, all name one file; `None` where an identity cannot be had.
+fn same_file(folder: &Path, present: &[usize], fs: &dyn SettingsFs) -> Option<bool> {
+    if !cfg!(unix) {
+        return Some(false);
     }
-    #[cfg(not(unix))]
-    {
-        let _ = present;
-        false
-    }
+    let identities = present
+        .iter()
+        .map(|index| fs.identity(&folder.join(WALK_FILE_NAMES[*index])).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some(identities.windows(2).all(|pair| pair[0] == pair[1]))
 }
 
 /// The names of the config files NuGet loads from a folder it lists (the
 /// user's `config` folder, the machine-wide folder), in its order, or a
 /// decline where that order or set depends on the platform's case rules.
-fn listed_config_files(folder: &Path) -> Result<Vec<String>, GlobalPackagesFolderDecline> {
+fn listed_config_files(
+    folder: &Path,
+    fs: &dyn SettingsFs,
+) -> Result<Vec<String>, GlobalPackagesFolderDecline> {
     let unpredictable = || GlobalPackagesFolderDecline::Folder {
         folder: folder.to_owned(),
     };
-    let entries = match std::fs::read_dir(folder) {
+    let entries = match fs.read_dir(folder) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(_) => {
-            return if folder.is_dir() || folder.exists() {
+            return if fs.metadata(folder).is_ok() {
                 Err(unpredictable())
             } else {
                 Ok(Vec::new())
@@ -794,7 +926,7 @@ fn listed_config_files(folder: &Path) -> Result<Vec<String>, GlobalPackagesFolde
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|_| unpredictable())?;
-        let name = entry.file_name();
+        let name = entry.name;
         let candidate = name
             .as_encoded_bytes()
             .to_ascii_lowercase()
@@ -802,15 +934,14 @@ fn listed_config_files(folder: &Path) -> Result<Vec<String>, GlobalPackagesFolde
         if !candidate {
             continue;
         }
-        let file_type = entry.file_type().map_err(|_| unpredictable())?;
-        if file_type.is_dir() {
+        let kind = entry.kind.map_err(|_| unpredictable())?;
+        if kind == EntryKind::Dir {
             continue;
         }
         let Some(name) = name.to_str().filter(|name| name.is_ascii()) else {
             return Err(unpredictable());
         };
-        if file_type.is_symlink()
-            || !file_type.is_file()
+        if kind != EntryKind::File
             || !(name.ends_with(".config") || name.ends_with(".Config"))
             || name.eq_ignore_ascii_case(DEFAULT_FILE_NAME)
         {
