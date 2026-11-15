@@ -2665,12 +2665,7 @@ impl<'r> State<'r> {
     /// A write's verdict with its taint span resolved — remapped to the entry
     /// file and stamped with the current origin — because that is walk state
     /// the write sites don't carry.
-    fn resolve_provenance(&self, mut provenance: PropertyProvenance) -> ResolvedProvenance {
-        // Inside a `Directory.Build.*` fallback walk, MSBuild may not make the
-        // write at all, so the value it leaves may be the one before it.
-        if let Some(root) = &self.directory_build.fallback {
-            provenance.unpinned = UnpinnedOutcome::Set(root.clone());
-        }
+    fn resolve_provenance(&self, provenance: PropertyProvenance) -> ResolvedProvenance {
         provenance.map_taint(|span| SdkPackagePropertyTaint {
             span: self.effective_span(span),
             origin: self.current_origin(),
@@ -2682,6 +2677,7 @@ impl<'r> State<'r> {
     /// value (skipped under a gate, or refused after [`PropertyMap::unbind`]).
     /// A write that stores one goes through [`Self::write_property`].
     fn apply_property_provenance(&mut self, name: &str, provenance: PropertyProvenance) {
+        self.directory_build.note_write(name);
         let resolved = self.resolve_provenance(provenance);
         self.lookup.apply_provenance(name, resolved);
     }
@@ -2690,6 +2686,7 @@ impl<'r> State<'r> {
     /// cannot enter the table without the write saying what it does to the
     /// name's trust.
     fn write_property(&mut self, name: &str, value: Escaped, provenance: PropertyProvenance) {
+        self.directory_build.note_write(name);
         let resolved = self.resolve_provenance(provenance);
         self.lookup.write(name, value, resolved);
     }

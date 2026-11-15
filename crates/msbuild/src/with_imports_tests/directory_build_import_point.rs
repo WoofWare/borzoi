@@ -282,6 +282,77 @@ fn a_doubted_file_without_references_leaves_the_reference_list_alone() {
     );
 }
 
+/// What a doubted file imports is doubted too: here the file names its child
+/// through a property it writes itself. Doubting the file must not lose the
+/// child, whose write would otherwise leave an earlier value trusted.
+#[test]
+fn a_doubted_file_s_own_imports_are_doubted_with_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_at(
+        tmp.path(),
+        "Directory.Build.targets",
+        "<Project>\n  <PropertyGroup><ChildPath>$(MSBuildThisFileDirectory)child.props</ChildPath></PropertyGroup>\n  \
+         <Import Project=\"$(ChildPath)\" />\n</Project>\n",
+    );
+    write_at(
+        tmp.path(),
+        "child.props",
+        "<Project><PropertyGroup><LangVersion>preview</LangVersion></PropertyGroup></Project>",
+    );
+    let project = write_at(
+        tmp.path(),
+        "p.fsproj",
+        &format!(
+            "<Project Sdk=\"Std\">\n  <PropertyGroup>\n    <LangVersion>8.0</LangVersion>\n{NAMES_THE_FILE}    \
+             <ImportDirectoryBuildTargets Condition=\"{UNDECIDABLE}\">false</ImportDirectoryBuildTargets>\n  \
+             </PropertyGroup>\n</Project>\n"
+        ),
+    );
+    let parsed = parse_file_std(&project);
+    assert!(
+        untrusted(&parsed, "LangVersion"),
+        "the doubted file's child may write it: {:?}",
+        property(&parsed, "LangVersion")
+    );
+    assert!(untrusted(&parsed, "ChildPath"));
+}
+
+/// An import point decided on an undefined `TargetFramework` read is as exact
+/// as the walk's reads of it are: on the walk that reads it exactly (a
+/// project that builds its own framework), the point is decided.
+#[test]
+fn a_point_behind_an_exact_target_framework_read_is_decided() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolver = custom_sdk(
+        tmp.path(),
+        "<Project>\n  <Import Project=\"$(MSBuildThisFileDirectory)Common.props\" \
+         Condition=\"'$(TargetFramework)' == ''\" />\n</Project>\n",
+        "<Project />\n",
+        &[(
+            "Common.props",
+            &format!("<Project>\n{COMMON_PROPS_BLOCK}</Project>\n"),
+        )],
+    );
+    write_at(tmp.path(), "Directory.Build.props", &contributing("Dbp"));
+    let project = write_at(
+        tmp.path(),
+        "p.fsproj",
+        "<Project Sdk=\"Custom\">\n  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n  \
+         <ItemGroup>\n    <Compile Include=\"A.fs\" />\n  </ItemGroup>\n</Project>\n",
+    );
+    let parsed = parse_file_with_sdk_resolution(&project, resolver);
+    assert!(
+        !parsed.items_uncertain,
+        "{:?}",
+        parsed.compile_item_uncertainties
+    );
+    let dir = canon(tmp.path());
+    assert_eq!(
+        paths_of(&parsed.items),
+        vec![dir.join("Dbp.fs"), dir.join("A.fs")]
+    );
+}
+
 /// With no path of its own, the same gate decides whether the SDK's discovery
 /// runs, so the path it computes rests on the gate too, and the walk, which
 /// tells a path's doubt from a gate's only by its trust, treats the file's

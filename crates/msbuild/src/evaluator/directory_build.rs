@@ -136,9 +136,14 @@ pub(super) struct Bookkeeping {
     /// SDK's ([`State::in_sdk_subtree`]), but their `Microsoft.Common.*`
     /// imports are import points all the same.
     nested_sdk_roots: Vec<PathBuf>,
-    /// The root every property write carries while the walk is inside a
-    /// fallback walk.
+    /// Set while the walk is inside a fallback walk: the root its products
+    /// carry.
     pub(super) fallback: Option<UnpinnedRoot>,
+    /// The names a fallback walk wrote (or skipped or refused a write of),
+    /// unpinned when it returns. Not as they are written: inside the file the
+    /// walk follows its imports and conditions as an ordinary import, so that
+    /// doubting the file loses nothing it would do.
+    doubted_writes: Vec<String>,
     /// Whether a fallback walked a file that contributes something.
     pub(super) contributed: bool,
     /// Whether a group the walk deferred while inside a fallback walk declares
@@ -149,6 +154,13 @@ pub(super) struct Bookkeeping {
 impl Bookkeeping {
     pub(super) fn discover(&mut self, props: Option<&Path>, targets: Option<&Path>) {
         self.discovered = [props.map(Path::to_path_buf), targets.map(Path::to_path_buf)];
+    }
+
+    /// Record a write of `name`, if the walk is inside a fallback walk.
+    pub(super) fn note_write(&mut self, name: &str) {
+        if self.fallback.is_some() {
+            self.doubted_writes.push(name.to_owned());
+        }
     }
 }
 
@@ -338,13 +350,33 @@ fn walk_doubted(kind: DirectoryBuildFile, file: &Path, state: &mut State<'_>) {
     state.directory_build.contributed = true;
     let saved_fallback = state.directory_build.fallback.replace(root.clone());
     let saved_references = std::mem::take(&mut state.directory_build.doubted_references);
+    let saved_writes = std::mem::take(&mut state.directory_build.doubted_writes);
     let saved_span = state.import_site_span.take();
     walk_external_file(file, 0..0, state);
     state.import_site_span = saved_span;
     state.directory_build.fallback = saved_fallback;
     let references = state.directory_build.doubted_references;
     state.directory_build.doubted_references |= saved_references;
+    // MSBuild may not make any of these writes, so the value each name holds
+    // may be the one before it.
+    let written = std::mem::replace(&mut state.directory_build.doubted_writes, saved_writes);
+    for name in written {
+        unpin(&name, &root, state);
+    }
     withdraw_facets(kind, root, references, state);
+}
+
+/// Record `root` against `name`, leaving its value alone.
+fn unpin(name: &str, root: &UnpinnedRoot, state: &mut State<'_>) {
+    state.apply_property_provenance(
+        name,
+        PropertyProvenance {
+            taint: TaintOutcome::Keep,
+            unpinned: UnpinnedOutcome::Set(root.clone()),
+            refused: RefusedOutcome::Keep,
+            stale: StaleOutcome::Keep,
+        },
+    );
 }
 
 /// The whole evaluation from here is uncertain: any file may be imported.
@@ -353,18 +385,9 @@ fn whole_evaluation_uncertain(kind: DirectoryBuildFile, state: &mut State<'_>) {
     state.latch_walk_opaque(OpacityCause::Gate(root.clone()));
     let names: Vec<String> = state.lookup.canonical_keys().map(str::to_owned).collect();
     for name in names {
-        if state.protected.contains(&name.to_ascii_lowercase()) {
-            continue;
+        if !state.protected.contains(&name.to_ascii_lowercase()) {
+            unpin(&name, &root, state);
         }
-        state.apply_property_provenance(
-            &name,
-            PropertyProvenance {
-                taint: TaintOutcome::Keep,
-                unpinned: UnpinnedOutcome::Set(root.clone()),
-                refused: RefusedOutcome::Keep,
-                stale: StaleOutcome::Keep,
-            },
-        );
     }
     withdraw_facets(kind, root, true, state);
 }
@@ -436,13 +459,12 @@ fn named_file(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf>
     point_path(state, path_name, dir).filter(|path| observed::exists(state.observer, path))
 }
 
-/// Whether a read of `name` now is what the real build reads.
+/// Whether a read of `name` now is what the real build reads. An undefined
+/// `TargetFramework` is judged by the walk's mode, as every other read of it
+/// is, and leaning on its exactness is recorded as every other read records it.
 fn is_certain(state: &State<'_>, name: &str) -> bool {
-    let previous = state.quiet_target_framework_reads.replace(true);
-    let certain = state.trust_of(name).is_certain()
-        && (state.lookup.is_bound(name) || state.undefined_read_is_exact(name));
-    state.quiet_target_framework_reads.set(previous);
-    certain
+    state.trust_of(name).is_certain()
+        && (state.lookup.is_bound(name) || state.undefined_read_is_exact(name))
 }
 
 /// Whether `condition` decides the same way whatever the names the walk is
