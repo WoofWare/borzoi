@@ -58,6 +58,7 @@ mod infer_dropped_namespace_perturbation;
 mod infer_entry_order_diff;
 mod infer_equality_constraints_diff;
 mod infer_fsharp_core_abbreviation_diff;
+mod infer_group_shape_diff;
 mod infer_headerless_type_diff;
 mod infer_incremental_diff;
 mod infer_legality_pin_diff;

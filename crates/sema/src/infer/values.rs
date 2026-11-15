@@ -21,6 +21,28 @@ impl<'a> Gen<'a> {
     }
 }
 
+impl<'a> Gen<'a> {
+    /// The type of a position FCS makes flexible (`a :> ty`): `ty` itself
+    /// where it is sealed ([`Self::is_sealed_here`]), else a fresh variable
+    /// standing for a subtype of it, poisoned, and bounded
+    /// ([`Scope::bounded_flex`]) unless `ty` is `obj`, which every type meets.
+    /// A loosened use's parameters ([`Self::loosened`]), an applied case's
+    /// fields ([`Self::case_use`]) and a method's parameters
+    /// ([`Self::unique_call`]) are such positions.
+    pub(super) fn flexible(&mut self, scope: &mut Scope, ty: Ty) -> Ty {
+        if self.is_sealed_here(ty) {
+            return ty;
+        }
+        let tys = self.solver.tys;
+        let v = self.solver.table.fresh();
+        scope.poison.push(v);
+        if !tys.is_named(self.facts.env.names(), ty, &OBJECT_PATH) {
+            scope.bounded_flex.push(v);
+        }
+        tys.var(v)
+    }
+}
+
 /// How a value is used: as a value, or in an application's function
 /// position, where a union case's fields are flexible ([`Gen::case_use`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,17 +179,7 @@ impl<'a> Gen<'a> {
         };
         let flexed: Vec<Ty> = fields
             .into_iter()
-            .map(|f| {
-                if self.is_sealed_here(f) {
-                    return f;
-                }
-                let v = self.solver.table.fresh();
-                scope.poison.push(v);
-                if !tys.is_named(self.facts.env.names(), f, &OBJECT_PATH) {
-                    scope.bounded_flex.push(v);
-                }
-                tys.var(v)
-            })
+            .map(|f| self.flexible(scope, f))
             .collect();
         let arg = if n == 1 { flexed[0] } else { tys.tuple(flexed) };
         tys.fun(arg, ret)
@@ -365,17 +377,7 @@ impl<'a> Gen<'a> {
         for group in groups {
             let mut elems: Vec<Ty> = elements(group)
                 .into_iter()
-                .map(|e| {
-                    if self.is_sealed_here(e) {
-                        return e;
-                    }
-                    let v = self.solver.table.fresh();
-                    scope.poison.push(v);
-                    if !tys.is_named(self.facts.env.names(), e, &OBJECT_PATH) {
-                        scope.bounded_flex.push(v);
-                    }
-                    tys.var(v)
-                })
+                .map(|e| self.flexible(scope, e))
                 .collect();
             loosened.push(match tys.kind(group) {
                 TyKind::Tuple(_) => tys.tuple(elems),

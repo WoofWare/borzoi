@@ -12,7 +12,6 @@ pub(super) struct SuspendedMember {
     pub(super) name: String,
     pub(super) result: TyVid,
     pub(super) use_range: TextRange,
-    pub(super) kind: MemberAccessKind,
 }
 
 impl<'a> Gen<'a> {
@@ -115,19 +114,17 @@ impl<'a> Gen<'a> {
                 name: m.name,
                 result: m.result,
                 use_range: m.use_range,
-                kind: m.kind,
             });
         }
     }
 
-    /// Settle at a member access, where FCS decides it: wake what can wake,
-    /// and **decline** every access still suspended — its receiver is not
-    /// known at the access (a variable, a generic receiver, an overload whose
-    /// arguments are not known), which FCS rejects or decides by what
-    /// inference does not see. A declined access records nothing, its result
-    /// is [tainted](Self::taint), and the binding's prefix ends
-    /// ([`Incomplete::IndeterminateReceiver`], [`Incomplete::GenericReceiver`],
-    /// [`Incomplete::OverloadUnresolved`]); it never wakes later, since a later
+    /// Settle at a data-member access, where FCS decides it: wake what can
+    /// wake, and **decline** every access still suspended — its receiver is not
+    /// known at the access (a variable, or a generic receiver), which FCS
+    /// rejects or decides by what inference does not see. A declined access
+    /// records nothing, its result is [tainted](Self::taint), and the binding's
+    /// prefix ends ([`Incomplete::IndeterminateReceiver`],
+    /// [`Incomplete::GenericReceiver`]); it never wakes later, since a later
     /// wake is one FCS did not make at the access.
     ///
     /// Every access settles where it is generated, so what is still suspended
@@ -138,13 +135,11 @@ impl<'a> Gen<'a> {
         for c in std::mem::take(&mut self.solver.constraints) {
             let Constraint::HasMember { recv, result, .. } = c;
             let head = self.solver.table.resolve(self.solver.tys.var(recv));
-            // A worklist that never woke the access left one of three heads:
-            // a variable, a generic receiver it does not look up, or a named
-            // one whose overload asked to retry on arguments not yet known.
+            // A worklist that never woke the access left a variable, or a
+            // generic receiver it does not look up: every other head wakes.
             declined.push(match self.solver.tys.kind(head) {
-                TyKind::Var(_) => Incomplete::IndeterminateReceiver,
-                TyKind::Named { args, .. } if !args.is_empty() => Incomplete::GenericReceiver,
-                _ => Incomplete::OverloadUnresolved,
+                TyKind::Named { .. } => Incomplete::GenericReceiver,
+                _ => Incomplete::IndeterminateReceiver,
             });
             self.taint(scope, self.solver.tys.var(result));
         }
@@ -164,14 +159,12 @@ impl<'a> Gen<'a> {
                     name,
                     result,
                     use_range,
-                    kind,
                 } = c;
                 SuspendedMember {
                     recv,
                     name,
                     result,
                     use_range,
-                    kind,
                 }
             })
             .collect();
@@ -189,15 +182,9 @@ impl<'a> Gen<'a> {
                 match self.solver.tys.kind(head) {
                     // Unresolved receiver — keep it parked for a later wake.
                     TyKind::Var(_) => still_pending.push(m),
-                    // A concrete named receiver — attempt the member lookup (a data
-                    // member or a method, per `m.kind`), which may unify
-                    // `result` with the member's type and record the resolved member's
-                    // identity at `use_range` (Stage 3.3b). A retry request (an
-                    // overload whose argument is not yet ground) re-parks without
-                    // counting as progress, so a later wake that grounds the
-                    // argument re-triggers this one. Termination holds — a retry
-                    // sets no `woke`, and the number of progress passes is bounded
-                    // by the (finite) suspension count.
+                    // A concrete named receiver — attempt the data-member lookup,
+                    // which may unify `result` with the member's type and record
+                    // the resolved member's identity at `use_range` (Stage 3.3b).
                     // `wake_member` looks the head up at arity 0, so a GENERIC
                     // receiver must not reach it: with both `N.C` and `N.C<'T>`
                     // in the env it would resolve the nullary one and commit a
@@ -209,30 +196,20 @@ impl<'a> Gen<'a> {
                     }
                     TyKind::Named { path, .. } => {
                         let path = path.spelled(self.facts.env.names());
-                        match self.wake_member(
-                            scope,
-                            &path,
-                            &m.name,
-                            m.result,
-                            m.use_range,
-                            &m.kind,
-                        ) {
-                            Wake::Retry => still_pending.push(m),
-                            wake => {
-                                woke = true;
-                                // A result the wake did not bind (a `void`
-                                // return, a type the bridge does not carry) is
-                                // one FCS knows; an access no member answers
-                                // is declined.
-                                if !self.solver.tys.is_ground(
-                                    self.solver.table.resolve(self.solver.tys.var(m.result)),
-                                ) {
-                                    self.taint(scope, self.solver.tys.var(m.result));
-                                }
-                                if let Wake::Declined(why) = wake {
-                                    scope.mark_incomplete(why);
-                                }
-                            }
+                        let wake = self.wake_member(scope, &path, &m.name, m.result, m.use_range);
+                        woke = true;
+                        // A result the wake did not bind (a type the bridge
+                        // does not carry) is one FCS knows; an access no member
+                        // answers is declined.
+                        if !self
+                            .solver
+                            .tys
+                            .is_ground(self.solver.table.resolve(self.solver.tys.var(m.result)))
+                        {
+                            self.taint(scope, self.solver.tys.var(m.result));
+                        }
+                        if let Wake::Declined(why) = wake {
+                            scope.mark_incomplete(why);
                         }
                     }
                     // A field of a project record, read off its declaration.

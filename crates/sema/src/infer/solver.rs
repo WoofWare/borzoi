@@ -8,29 +8,23 @@ use super::*;
 /// ([`Gen::eq`]).
 #[derive(Debug, Clone)]
 pub(super) enum Constraint {
-    /// The receiver `recv` has an instance member named `name` — of [`kind`] a data
-    /// member (field / non-indexer property, Stage 3.3a) *or* a method (a
-    /// single-candidate method **call**, Stage 3.3d) — whose type is `result`.
+    /// The receiver `recv` has an instance data member (a field or non-indexer
+    /// property, Stage 3.3a) named `name`, whose type is `result`.
     /// **Suspended**: it discharges only once `recv` resolves to a concrete
-    /// [`TyKind::Named`] head, at which point the member is looked up against the
-    /// [`AssemblyEnv`] (dispatched on `kind`: `instance_data_member` vs
-    /// `instance_method`) and its type — a data member's type, or a method's
-    /// **return** type — bridged to a [`Ty`] and unified with `result`. A
-    /// failed / ambiguous / unmodelled lookup silently drops the constraint (D5:
-    /// `result` stays open, so the access defers). Each fires at most once.
+    /// [`TyKind::Named`] head, at which point the member is looked up against
+    /// the [`AssemblyEnv`] (`instance_data_member`) and its type bridged to a
+    /// [`Ty`] and unified with `result`. A failed or unmodelled lookup declines
+    /// the access (`result` stays open). Each fires at most once.
     ///
     /// `use_range` is the member-name token's source range (Stage 3.3b): on a
     /// successful wake the resolved member's identity is recorded there in
     /// [`InferredFile::member_resolutions`], so the LSP can surface hover /
     /// go-to-definition on the member name. It is inert until a wake succeeds.
-    ///
-    /// [`kind`]: MemberAccessKind
     HasMember {
         recv: TyVid,
         name: String,
         result: TyVid,
         use_range: TextRange,
-        kind: MemberAccessKind,
     },
 }
 

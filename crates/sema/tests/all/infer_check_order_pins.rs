@@ -45,7 +45,15 @@ const HEADER: &str = "module Pins\n\
                       let gi (i: int) = 0\n\
                       let both (x: 'a) (y: 'a) = x\n\
                       let applyObj (k: obj -> int) = k\n\
-                      let uu = fst ((7, \"u\"), 1)\n";
+                      let uu = fst ((7, \"u\"), 1)\n\
+                      type T =\n    \
+                          static member M (f: int -> int, s: string) = 1\n    \
+                          static member M (f: string -> int, i: int) = 2\n\
+                      type T2 =\n    \
+                          static member N (s: string, f: int -> int) = 1\n    \
+                          static member N (i: int, f: string -> int) = 2\n\
+                      type T3 =\n    \
+                          static member I (x: int, y: string) = \"\"\n";
 
 /// Each case: its name, its `let`, and what entry and exit order each make of
 /// it.
@@ -184,6 +192,110 @@ const CASES: &[(&str, &str, &str)] = &[
         "let m2 (y: string) = (y.Insert(0, idf (fun () -> 1)), 0)",
         "control: a lambda under an application is not a lambda argument, and FCS types \
          the call `string` by the single-candidate shortcut",
+    ),
+    (
+        "overload-argument-checked-against-a-fresh-type",
+        "let k1 (s: string) = s.StartsWith(idf \"h\")",
+        "`StartsWith` has two overloads of one argument, so FCS checks `idf \"h\"` against a \
+         fresh type, which it decides (`string`), and then resolves the call to \
+         `StartsWith(string)` (#775). Checking the argument against a type inference does \
+         not know leaves it open at the call, which is then declined",
+    ),
+    (
+        "arity-unique-overload-fixes-its-argument",
+        "let k2 (s: string) p = (s.Substring(p), p)",
+        "`Substring` has one overload of one argument, whose parameter FCS relates to the \
+         argument's type before it checks `p` (`UnifyUniqueOverloading`), so `p : int`",
+    ),
+    (
+        "arity-unique-overload-relates-its-return-first",
+        "let k3 (s: string) p = (both p (s.Substring(gi p)), p)",
+        "the one overload's return is related to the call's expected type, `both`'s `'a`, \
+         before the arguments are checked, so `p` is `string` when `gi p` is checked, which \
+         FCS rejects",
+    ),
+    (
+        "failed-return-relation-still-checks-the-arguments",
+        "let k4 (s: string) p = (gi (s.Insert(p, \"z\")), p)",
+        "the one candidate's return, `string`, does not relate to `gi`'s `int`; FCS reports \
+         that after it has checked the arguments, so `p : int` all the same",
+    ),
+    (
+        "lambda-argument-before-the-argument-that-picks-the-overload",
+        "let k5 = T.M((fun x -> x.Length), 1)",
+        "FCS checks a method's arguments in order: when the lambda is checked, both \
+         overloads are still candidates and disagree about its parameter, so `x` is open \
+         at `x.Length` (FS0072); the `1` after it is not seen first",
+    ),
+    (
+        "lambda-argument-after-the-argument-that-picks-the-overload",
+        "let k6 = T2.N(1, (fun x -> x.Length))",
+        "control: the `1` checked first leaves one overload whose parameter is a function, \
+         which gives the lambda's `x : string` before its body is checked",
+    ),
+    (
+        "object-member-on-a-variable-receiver",
+        "let k7 x = (x.ToString(), (x: int))",
+        "FCS looks `ToString` up on a receiver whose type is a variable as on `obj`, and \
+         accepts; inference declines an access whose receiver is a variable there, whatever \
+         FCS makes of it",
+    ),
+    (
+        "receiver-canonicalised-before-the-lookup",
+        "let k8 x = ((x + 1).ToString(), x)",
+        "FCS solves what it can of the receiver's type before a lookup on a variable \
+         (`CanonicalizePartialInferenceProblem`), which defaults `+` to `int` here",
+    ),
+    (
+        "overload-with-an-argument-open-at-the-call",
+        "let k9 (s: string) p = (s.Contains(idf p), monos p)",
+        "`Contains` has overloads of one argument, and `idf p` is open when FCS resolves \
+         the call (FS0041); `monos p` fixes `p` only after it",
+    ),
+    (
+        "shaped-argument-against-the-one-candidate",
+        "let h1 p = (both p (T3.I(1, (fun x -> x))), p)",
+        "FCS gives the lambda a function type before it relates `I`'s parameters, \
+         relates them in order and stops at the first that fails (`string` against the \
+         lambda's), so `I`'s return is never related to `both`'s `'a` and `p` stays \
+         generic (FS0193). Relating the return first would fix `p : string`",
+    ),
+    (
+        "shaped-argument-after-an-argument-the-candidate-fixes",
+        "let h2 p q = (both p (T3.I(q, (fun x -> x))), p, q)",
+        "as `h1`: `I`'s first parameter is related before the lambda's fails, so `q : int`, \
+         and `p` stays generic",
+    ),
+    (
+        "shaped-argument-against-a-bcl-candidate",
+        "let h3 (s: string) p q = (both p (s.Insert(q, (fun x -> x))), p, q)",
+        "`h2` on `String.Insert(int, string)`, the one candidate of two arguments: `q : int`, \
+         `p` generic",
+    ),
+    (
+        "no-candidate-of-the-call-shape",
+        "let h5 (s: string) p = (s.Insert(both p (\"s\", \"t\")), p)",
+        "`Insert` has no candidate of one argument; FCS checks a single argument to a method \
+         of several plain parameters as a tuple of them (the \"single named item\" rule), so \
+         `p : int * string`. Checking it against a fresh type would fix `p : string * string`",
+    ),
+    (
+        "named-argument-related-to-the-candidate",
+        "let h6 (s: string) p = (s.Insert(startIndex = both p \"s\", value = \"z\"), p)",
+        "a named argument is related to its parameter like a positional one: `p : int`. \
+         Inference does not read named arguments, so it commits nothing here",
+    ),
+    (
+        "member-not-found-checks-no-argument",
+        "let h7 (s: string) p = (s.Foo(gi p), p)",
+        "FCS reports `Foo` (FS0039) before it checks the argument, so `gi p` fixes nothing \
+         and `p` stays generic; checking the argument anyway would fix `p : int`",
+    ),
+    (
+        "overload-resolution-that-binds-an-open-argument",
+        "let k10 (s: string) p = (s.Equals(p), p)",
+        "FCS resolves `Equals` with `p` open, preferring `Equals(string)`, and fixes `p` by \
+         it: an overload decided on an open argument, which inference declines",
     ),
 ];
 

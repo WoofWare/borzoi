@@ -88,6 +88,71 @@ pub fn arity_window(method: &MethodLike) -> ArityWindow {
     }
 }
 
+/// A candidate FCS forms of a method for a call (`CalledMeth`): a method with
+/// a trailing `[<ParamArray>]` gives two at a call that can take either form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallForm {
+    /// The arguments supplied one to each parameter, after any trailing
+    /// optional or `out` ones are omitted.
+    Normal,
+    /// The trailing `[<ParamArray>]` parameter taking the surplus arguments,
+    /// each an element of it.
+    Expanded,
+}
+
+/// The candidates FCS forms of `method` for a call of `n` positional
+/// arguments, by its `IsCandidate` arity check (MethodCalls.fs, `CalledMeth`):
+///
+/// - with fewer arguments than parameters, the parameters past the supplied
+///   ones (a trailing `[<ParamArray>]` set aside) are omitted only when
+///   each is optional xor `out`; otherwise none is;
+/// - a trailing `[<ParamArray>]` vector then gives an [`CallForm::Expanded`]
+///   candidate whenever at least all but it are supplied;
+/// - and a [`CallForm::Normal`] candidate when the arguments number the
+///   parameters left.
+///
+/// So a `[<ParamArray>]` method is two candidates at exactly its declared
+/// count and one at any other count it admits. Every count with a form lies
+/// in [`arity_window`].
+pub(crate) fn call_forms(method: &MethodLike, n: usize) -> Vec<CallForm> {
+    let params = &method.signature.parameters;
+    let mut called: Vec<&Parameter> = params.iter().collect();
+    if n < called.len() {
+        let mut trimmed: Vec<&Parameter> = called[..n].to_vec();
+        let mut rest: Vec<&Parameter> = called[n..].to_vec();
+        if rest.last().is_some_and(|p| p.is_param_array) {
+            trimmed.extend(rest.pop());
+        }
+        let optional = |p: &Parameter| {
+            matches!(
+                p.default,
+                ParamDefault::Optional(_) | ParamDefault::FSharpOptional
+            )
+        };
+        let out = |p: &Parameter| p.is_out && p.is_byref;
+        if rest.iter().all(|p| optional(p) != out(p)) {
+            called = trimmed;
+        }
+    }
+    let c = called.len();
+    let mut forms = Vec::new();
+    if c >= 1
+        && n + 1 >= c
+        && called[c - 1].is_param_array
+        && matches!(
+            &called[c - 1].ty,
+            TypeRef::Array { rank: 1, sizes, lower_bounds, .. }
+                if sizes.is_empty() && lower_bounds.is_empty()
+        )
+    {
+        forms.push(CallForm::Expanded);
+    }
+    if c == n {
+        forms.push(CallForm::Normal);
+    }
+    forms
+}
+
 /// Whether a parameter is trailing-trimmable: optional **xor** `out`. A param
 /// that is both (the §2.2 landmine) or neither is not omittable.
 fn is_omittable(p: &Parameter) -> bool {
@@ -1799,5 +1864,55 @@ mod tests {
                 prop_assert!(w.min <= max);
             }
         }
+
+        /// FCS's candidate forms of a method ([`call_forms`]) at `n` arguments:
+        /// every count with a form lies in the method's arity window; an
+        /// expanded form needs a trailing param array; there are at most two;
+        /// and a call supplying every parameter has the normal form.
+        #[test]
+        fn call_forms_lie_in_the_arity_window(m in arb_method(), n in 0usize..8) {
+            let forms = call_forms(&m, n);
+            let params = &m.signature.parameters;
+            prop_assert!(forms.is_empty() || arity_window(&m).contains(n), "{forms:?} at {n}");
+            prop_assert!(forms.len() <= 2);
+            if forms.contains(&CallForm::Expanded) {
+                prop_assert!(params.last().is_some_and(|p| p.is_param_array));
+            }
+            if n == params.len() {
+                prop_assert!(forms.contains(&CallForm::Normal));
+            }
+        }
+    }
+
+    /// [`call_forms`] on the shapes FCS's `CalledMeth` tells apart.
+    #[test]
+    fn call_forms_count_fcs_candidates() {
+        let i4 = || TypeRef::Primitive(Primitive::I4);
+        let s = || TypeRef::Primitive(Primitive::String);
+        let ret = int_ty_ref;
+        // A param-array method is two candidates at exactly its declared
+        // count, and one at any other it admits.
+        let w = method("W", vec![param(i4()), params_param(s())], ret());
+        assert_eq!(call_forms(&w, 0), vec![]);
+        assert_eq!(call_forms(&w, 1), vec![CallForm::Expanded]);
+        assert_eq!(
+            call_forms(&w, 2),
+            vec![CallForm::Expanded, CallForm::Normal]
+        );
+        assert_eq!(call_forms(&w, 3), vec![CallForm::Expanded]);
+        // A trailing optional parameter may be omitted…
+        let x = method("X", vec![param(i4()), opt_param(s())], ret());
+        assert_eq!(call_forms(&x, 1), vec![CallForm::Normal]);
+        // …and so may a trailing `out` one…
+        let o = method("O", vec![param(i4()), out_param(i4())], ret());
+        assert_eq!(call_forms(&o, 1), vec![CallForm::Normal]);
+        // …but not a mix of a required parameter with an optional one.
+        let m = method("M", vec![param(i4()), param(s()), opt_param(s())], ret());
+        assert_eq!(call_forms(&m, 1), vec![]);
+        assert_eq!(call_forms(&m, 2), vec![CallForm::Normal]);
+        // No parameter can be supplied by fewer arguments otherwise.
+        let p = method("P", vec![param(i4()), param(s())], ret());
+        assert_eq!(call_forms(&p, 1), vec![]);
+        assert_eq!(call_forms(&p, 3), vec![]);
     }
 }
