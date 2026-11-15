@@ -1,6 +1,6 @@
 //! SDK-provenance for `package_references_uncertain`: the mirror-image of
-//! `items_uncertain`. For the *Compile* set, the SDK tree is tolerated (its
-//! default-item machinery is standard and doesn't drop hand-written sources).
+//! `items_uncertain`. For the *Compile* set, the SDK tree's dead Compile operations
+//! are tolerated (its default-item machinery doesn't drop hand-written sources).
 //! For the *dependency* set, SDK item groups are evaluated normally: the SDK is
 //! exactly where implicit `PackageReference`/`FrameworkReference` items live
 //! (framework refs like `Microsoft.NETCore.App`, implicit `FSharp.Core`), so we
@@ -681,8 +681,8 @@ fn sdk_tainted_import_condition_marks_package_uncertain_when_false() {
         result.package_reference_uncertainties
     );
     assert!(
-        !result.items_uncertain,
-        "SDK-tainted import-gate package uncertainty must not reintroduce Compile uncertainty"
+        result.items_uncertain,
+        "the import the gate may take can carry Compile items as well (#821)"
     );
 }
 
@@ -2137,7 +2137,7 @@ fn sdk_authored_cpm_items_still_mark_package_uncertain() {
 /// A structural SDK construct we cannot decide can hide dependency items:
 /// the `When` gate reads `RoslynTargetsPath` (a toolset name the walk does
 /// not seed, never exactly unset), so the Choose is not exactly decidable and its subtree is
-/// dropped. Compile uncertainty is still tolerated in SDK files, but the
+/// dropped. It holds no Compile item, so the Compile set stays certain, but the
 /// package set must not be reported as certain when a dependency-bearing
 /// subtree is dropped.
 #[test]
@@ -2270,7 +2270,7 @@ fn sdk_choose_with_clean_gates_keeps_package_set_certain() {
 
 /// An SDK import skipped because its condition is outside our supported subset
 /// could have carried dependency items in the imported file. That skip is
-/// package-affecting even though SDK Compile machinery stays tolerated.
+/// package-affecting, and Compile-affecting too: the file may hold anything.
 #[test]
 fn sdk_import_condition_uncertainty_marks_package_uncertain() {
     let tmp = TempDir::new().unwrap();
@@ -2331,8 +2331,8 @@ fn sdk_import_condition_uncertainty_marks_package_uncertain() {
         result.package_reference_uncertainties
     );
     assert!(
-        !result.items_uncertain,
-        "SDK import-condition package uncertainty must not reintroduce Compile uncertainty"
+        result.items_uncertain,
+        "the skipped import can carry Compile items as well (#821)"
     );
 }
 
@@ -2392,8 +2392,8 @@ fn sdk_import_unresolved_project_path_marks_package_uncertain() {
         result.package_reference_uncertainties
     );
     assert!(
-        !result.items_uncertain,
-        "SDK unresolved-import package uncertainty must not reintroduce Compile uncertainty"
+        result.items_uncertain,
+        "the dropped import can carry Compile items as well (#821)"
     );
 }
 
@@ -2468,8 +2468,8 @@ fn sdk_tainted_import_project_path_marks_package_uncertain() {
         result.package_reference_uncertainties
     );
     assert!(
-        !result.items_uncertain,
-        "SDK-tainted import-path package uncertainty must not reintroduce Compile uncertainty"
+        result.items_uncertain,
+        "the import the real build makes can carry Compile items as well (#821)"
     );
 }
 

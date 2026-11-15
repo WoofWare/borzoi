@@ -614,7 +614,7 @@ pub struct ParsedProject {
     /// not follow, or one whose gate it could not decide), or `None` when it
     /// entered everything the build imports. Content it did not see may define
     /// anything, so [`Self::foreign_definitions`] is complete only when this is
-    /// `None`.
+    /// `None`, and [`Self::items_uncertain`] is `true` whenever it is `Some`.
     pub hidden_content: Option<UntrustedCause>,
     pub diagnostics: Vec<Diagnostic>,
     /// `true` if any diagnostic was emitted — i.e. the result may diverge
@@ -651,7 +651,15 @@ pub struct ParsedProject {
     /// SDK Compile operation that *can* run is honoured exactly like a
     /// user-authored one, because it can decide which sources compile: the
     /// default `**/*.fs` glob runs whenever `EnableDefaultCompileItems` ends up
-    /// `true`, and puts its files in front of the project's own list.
+    /// `true`, and puts its files in front of the project's own list. So is one
+    /// in a branch of a `<Choose>` the walk could not decide.
+    ///
+    /// **Hidden content.** Content the walk did not enter is never tolerated,
+    /// in an SDK file or anywhere: an import it could not follow, or whose gate
+    /// it could not decide, may hold a Compile item, import a user file that
+    /// does (#821), or import a file a later import names again, which MSBuild
+    /// then skips as a duplicate (#819). So this is `true` whenever
+    /// [`Self::hidden_content`] is `Some`.
     ///
     /// **Known gaps** (deliberately *not* flagged; each is an "under-resolve,
     /// possibly wrong in a rare contrived case" rather than a common hazard):
@@ -660,13 +668,6 @@ pub struct ParsedProject {
     ///   include resolves to a wrong path with no diagnostic at the include
     ///   site (the undefinedness was upstream). Closing this needs taint
     ///   tracking we don't do.
-    /// - A user `<Import>` skipped by an *unsupported/undefined condition*
-    ///   (rather than an unresolved path or a missing file, both of which *are*
-    ///   flagged) could hide Compile items.
-    /// - A *structural* failure inside the SDK tree — an SDK sub-import we
-    ///   cannot follow — is still tolerated, though such an import could carry
-    ///   a Compile operation that runs. Flagging it today declines 7 of the
-    ///   pinned corpus's 62 compared projects.
     /// - A `<Target>` that mutates `@(Compile)` (adds/removes items at build
     ///   time) is *deliberately* not flagged. We never run targets, so a
     ///   target-added source is invisible — but this is the common, intended
