@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use crate::hash::{HashMap, HashSet};
 
 use borzoi_cst::syntax::{
-    AstNode, ExceptionDefnDecl, ExternDecl, ImplFile, JoinInExpr, ModuleDecl, NestedModuleDecl,
-    SyntaxKind, SyntaxNode, TextRange, TypeDefn, TypeDefnRepr, UnionCase,
+    AstNode, AttributeList, ExceptionDefnDecl, ExternDecl, ImplFile, JoinInExpr, ModuleDecl,
+    NestedModuleDecl, SyntaxKind, SyntaxNode, TextRange, TypeDefn, TypeDefnRepr, UnionCase,
 };
 
 use super::contributors;
@@ -149,6 +149,8 @@ pub(super) struct Prescan {
     /// [`FileContributions::extension_statics`](crate::resolve::contributors::FileContributions::extension_statics),
     /// in later ones.
     pub(super) extension_statics: BTreeSet<String>,
+    /// See [`abbreviation_attributes`].
+    pub(super) abbreviation_attributes: Vec<Option<TextRange>>,
 }
 
 impl Prescan {
@@ -176,6 +178,7 @@ impl Prescan {
             own_abbrev_type_simple_names: HashSet::default(),
             own_auto_open_type_names: HashSet::default(),
             extension_statics: BTreeSet::new(),
+            abbreviation_attributes: abbreviation_attributes(file.syntax()),
         };
         // EX-3 §2(d): pre-scan every type definition's simple name for the
         // attribute resolution's project-type guard. Whole-file and up front (not
@@ -415,4 +418,40 @@ pub(super) fn declares_core_attribute_alias(root: &SyntaxNode) -> bool {
         || root
             .descendants_of::<ExceptionDefnDecl>()
             .any(|exn| exception_named_like_core_attribute(&exn))
+}
+
+/// The written name of every attribute on a type **abbreviation** in the file
+/// rooted at `root`, an implementation or a signature, keyed as
+/// [`ResolvedFile::attribute_resolutions`](super::model::ResolvedFile::attribute_resolutions)
+/// keys an attribute's verdict (first ident to last), or `None` for an
+/// attribute whose name has no ident to key it by.
+///
+/// An abbreviation carrying `[<AutoOpen>]` or `[<Extension>]` brings the
+/// extension members of the type it abbreviates into scope (#831): FCS reads
+/// either attribute off the abbreviation's own type and then works on its
+/// target. The extension gate reads these through
+/// [`ResolvedFile::attributes_may_declare_extension`](super::model::ResolvedFile::attributes_may_declare_extension).
+pub(super) fn abbreviation_attributes(root: &SyntaxNode) -> Vec<Option<TextRange>> {
+    root.descendants_of::<TypeDefn>()
+        .filter(|defn| matches!(defn.repr(), Some(TypeDefnRepr::Abbrev(_))))
+        .flat_map(|defn| {
+            defn.syntax()
+                .descendants_of::<AttributeList>()
+                .flat_map(|list| list.attributes().collect::<Vec<_>>())
+                .map(|attr| {
+                    let toks: Vec<_> = attr
+                        .type_name()
+                        .map(|name| name.idents().collect())
+                        .unwrap_or_default();
+                    match (toks.first(), toks.last()) {
+                        (Some(first), Some(last)) => Some(TextRange::new(
+                            first.text_range().start(),
+                            last.text_range().end(),
+                        )),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }

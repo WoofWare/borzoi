@@ -3838,6 +3838,10 @@ pub struct ResolvedFile {
     /// [`Self::attributes_may_declare_extension`] treats it as a possible
     /// marker.
     pub(super) own_abbrev_type_simple_names: HashSet<String>,
+    /// The written name of every attribute on a type abbreviation in the
+    /// file ([`super::prescan::abbreviation_attributes`]), read by
+    /// [`Self::attributes_may_declare_extension`].
+    pub(super) abbreviation_attributes: Vec<Option<TextRange>>,
     /// What the file contributes to later files through routes the walk does
     /// not model ([`FileContributions`]), carried into
     /// [`ProjectItems`] by the Compile-order fold.
@@ -4121,6 +4125,8 @@ impl ResolvedFile {
             unplaced_type_places: HashMap::default(),
             own_module_simple_names: HashSet::default(),
             own_abbrev_type_simple_names: HashSet::default(),
+            // Filled by the fold from the signature's own declarations.
+            abbreviation_attributes: Vec::new(),
             contributions: FileContributions::default(),
             declares_core_attribute_alias: false,
             unknowables: Unknowables::default(),
@@ -4441,12 +4447,33 @@ impl ResolvedFile {
     /// - an attribute with **no record** — both candidates missed everywhere
     ///   with no shadow possible (the differential's decline-by-absence
     ///   agreement: FCS errors and binds nothing) — contributes nothing.
+    ///
+    /// An attribute on a type **abbreviation** is asked a wider question
+    /// (#831): one that may be `[<Extension>]` *or* `[<AutoOpen>]` brings the
+    /// extension members of the abbreviated type into scope wherever the
+    /// abbreviation is (FCS reads either attribute off the abbreviation and
+    /// then works on its target), and that target's members are not
+    /// enumerated here. Such an attribute with no verdict at all (the walk
+    /// never reached it, or it names nothing FCS can bind) is taken to be
+    /// either: no verdict is no proof.
     pub fn attributes_may_declare_extension(&self, env: &AssemblyEnv) -> bool {
         self.unknowables.contains(Unknowable::AttributeShape)
             || self
                 .attribute_resolutions
                 .keys()
                 .any(|&range| self.attribute_may_be(range, env, |h| env.is_extension_attribute(h)))
+            || self
+                .abbreviation_attributes
+                .iter()
+                .any(|range| match range {
+                    None => true,
+                    Some(range) => {
+                        !self.attribute_resolutions.contains_key(range)
+                            || self.attribute_may_be(*range, env, |h| {
+                                env.is_extension_attribute(h) || env.is_auto_open_attribute(h)
+                            })
+                    }
+                })
     }
 
     /// Whether the attribute written at `range` (its name's range, the

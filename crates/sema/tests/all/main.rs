@@ -48,6 +48,7 @@ mod infer_annotation_entity_diff;
 mod infer_annotation_shape_gen_diff;
 mod infer_annotation_typar_diff;
 mod infer_assembly_values_diff;
+mod infer_attributed_abbreviation_diff;
 mod infer_binder_types_diff;
 mod infer_builtin_operators_diff;
 mod infer_check_order_pins;

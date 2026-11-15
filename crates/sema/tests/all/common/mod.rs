@@ -14,6 +14,7 @@
 pub mod companion_corpus;
 pub mod corpus_manifest;
 pub mod edit_script;
+pub mod ext_scope;
 pub mod fold_matrix;
 pub mod fsharp_member_corpus;
 pub mod generator;
@@ -2336,6 +2337,54 @@ pub fn ensure_constrained_fixture_built() -> &'static Path {
                 .join("SemaConstrainedFixture.dll")
         })
         .as_path()
+}
+
+/// Build the extension-universe fixture (`tests/fixtures/ext_universe_env`)
+/// once per test binary and return its `.dll` path: extension members that
+/// reach a project file only through an `open` (of a module, a namespace or a
+/// type) or through an attributed type abbreviation.
+pub fn ensure_ext_universe_fixture_built() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let project =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ext_universe_env");
+            let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
+            dotnet_build(&project, "dotnet build extension-universe fixture");
+            project
+                .join("bin")
+                .join("Release")
+                .join("net10.0")
+                .join("SemaExtUniverseFixture.dll")
+        })
+        .as_path()
+}
+
+/// [`full_bcl_env`] plus the extension-universe fixture
+/// ([`ensure_ext_universe_fixture_built`]), which is exactly what
+/// [`ext_scope::check`] hands the oracle beside the SDK's references.
+pub fn ext_universe_env() -> &'static borzoi_sema::AssemblyEnv {
+    static ENV: OnceLock<borzoi_sema::AssemblyEnv> = OnceLock::new();
+    ENV.get_or_init(|| {
+        use borzoi_assembly::Ecma335Assembly;
+        let core = std::fs::read(ensure_fsharp_core_dll()).expect("read FSharp.Core.dll");
+        let sysrt_path = ensure_system_runtime_dll();
+        let netstd_path = sysrt_path
+            .parent()
+            .expect("ref dir")
+            .join("netstandard.dll");
+        let sysrt = std::fs::read(&sysrt_path).expect("read System.Runtime.dll");
+        let netstd = std::fs::read(&netstd_path).expect("read netstandard.dll");
+        let fixture = std::fs::read(ensure_ext_universe_fixture_built())
+            .expect("read the extension-universe fixture");
+        let views = vec![
+            Ecma335Assembly::parse(&core).expect("parse FSharp.Core.dll"),
+            Ecma335Assembly::parse(&sysrt).expect("parse System.Runtime.dll"),
+            Ecma335Assembly::parse(&netstd).expect("parse netstandard.dll"),
+            Ecma335Assembly::parse(&fixture).expect("parse SemaExtUniverseFixture.dll"),
+        ];
+        borzoi_sema::AssemblyEnv::from_views(&views).expect("build AssemblyEnv")
+    })
 }
 
 /// Build the **companion-head** corpus (`tests/fixtures/companion_env`) once per

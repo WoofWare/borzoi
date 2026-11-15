@@ -3790,6 +3790,15 @@ impl AssemblyEnv {
             && e.namespace[2] == "CompilerServices"
     }
 
+    /// Whether `handle` **is** FSharp.Core's `AutoOpenAttribute`, matched by
+    /// metadata identity. On a type abbreviation it opens the abbreviated
+    /// type's static content, its C#-style extension members included,
+    /// wherever the abbreviation is in scope.
+    pub fn is_auto_open_attribute(&self, handle: EntityHandle) -> bool {
+        let e = self.entity(handle);
+        e.name == "AutoOpenAttribute" && e.namespace == ["Microsoft", "FSharp", "Core"]
+    }
+
     /// Whether `handle` **is** FSharp.Core's `EntryPointAttribute`, matched by
     /// metadata identity. FCS unifies a binding carrying it with
     /// `string[] -> int` before checking the binding's body.

@@ -1579,6 +1579,9 @@ fn signature_slot(
     );
     contributors::signature_contributions(sig, preceding, assemblies, &mut rf);
     (rf.unplaced_types, rf.unplaced_type_places) = signature_type_decls(sig);
+    // The walk resolves no attribute of a signature, so each of these has no
+    // verdict and counts as possibly `[<AutoOpen>]` or `[<Extension>]`.
+    rf.abbreviation_attributes = prescan::abbreviation_attributes(sig.syntax());
     rf
 }
 
