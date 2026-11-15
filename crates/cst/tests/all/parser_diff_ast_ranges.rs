@@ -549,6 +549,15 @@ fn diff_ast_ranges_extend_anon_module_past_onside_nested_module_end() {
     assert_ast_ranges_match("module M =\n  begin\n    let x = 1\n  end\n");
 }
 
+/// Columns count UTF-16 code units, and not the byte-order mark FCS strips.
+#[test]
+fn diff_ast_ranges_nested_module_end_columns_skip_bom_and_count_utf16() {
+    assert_ast_ranges_match("\u{feff}module M = begin\n    let x = 1\n           end\n");
+    assert_ast_ranges_match("\u{feff}module M = begin\n    let x = 1\n          end\n");
+    assert_ast_ranges_match("module Ü = begin\n    let x = 1\n           end\n");
+    assert_ast_ranges_match("module Ü = begin\n    let x = 1\n          end\n");
+}
+
 #[test]
 fn diff_ast_ranges_include_anon_module_final_indented_nested_module_trailing_whitespace() {
     assert_ast_ranges_match("module M =\n    let x = 1\n        ");

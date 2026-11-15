@@ -340,7 +340,7 @@ fn nested_module_end_closes_its_block(nested: &NestedModuleDecl) -> bool {
 }
 
 /// The column FCS's lexer gives `token`: UTF-16 code units from the start of
-/// its line.
+/// its line, not counting the byte-order mark FCS strips from the file's first.
 fn token_column(token: &SyntaxToken) -> usize {
     let root = token
         .parent_ancestors()
@@ -349,7 +349,13 @@ fn token_column(token: &SyntaxToken) -> usize {
     let text = root.text().to_string();
     let start = usize::from(token.text_range().start());
     let line_start = text[..start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
-    text[line_start..start].encode_utf16().count()
+    let line = &text[line_start..start];
+    let line = if line_start == 0 {
+        line.strip_prefix('\u{feff}').unwrap_or(line)
+    } else {
+        line
+    };
+    line.encode_utf16().count()
 }
 
 fn expr_decl_includes_trailing_trivia(expr_decl: &SyntaxNode) -> bool {
