@@ -53,7 +53,7 @@
 //! Two further axes reach what happens once the faithful prefix has ended.
 //! With a probability drawn per file a construct inference does not model is
 //! put before the sink (`(p : int)`, `(fun () -> gt p)`, `(while false do
-//! ignore (gi p))`, `y.Insert(0, p)`, or one that leaves `p` alone), most of
+//! ignore (gi p))`, `(fun () -> y.Insert(0, p))`, or one that leaves `p` alone), most of
 //! them fixing `p` in FCS where inference cannot see it. And up to two
 //! **term-position contexts** follow the extras: a term whose type FCS may
 //! know and inference, after such a construct, does not (`idf p`, `[y]`, `p
@@ -122,7 +122,9 @@
 use std::collections::BTreeMap;
 
 use borzoi_cst::parser::parse;
-use borzoi_cst::syntax::{AstNode, Expr, ImplFile, Pat, SyntaxKind, SyntaxNode, TextRange, TextSize};
+use borzoi_cst::syntax::{
+    AstNode, Expr, ImplFile, Pat, SyntaxKind, SyntaxNode, TextRange, TextSize,
+};
 use borzoi_sema::{
     Incomplete, PrecedingTypes, ProjectFile, ProjectItems, SourceFile, SyntaxRecovery, infer_file,
     infer_project, qualified_names, resolve_file, resolve_project_files,
@@ -295,10 +297,11 @@ impl ArgGen<'_> {
     fn expr(&mut self, want: &Want, depth: usize, under_obj_element: bool) -> String {
         // First, so that the other forms do not crowd it out of the plain
         // cases its must-commit points need.
-        if depth > 0 && self.rng.chance(self.regime.access_pct) {
-            if let Some(access) = self.access(want, depth - 1) {
-                return access;
-            }
+        if depth > 0
+            && self.rng.chance(self.regime.access_pct)
+            && let Some(access) = self.access(want, depth - 1)
+        {
+            return access;
         }
         if depth > 0 && self.rng.chance(self.regime.lambda_pct) {
             self.features.lambda = true;
@@ -490,7 +493,7 @@ impl ArgGen<'_> {
     /// ended. Most fix `p` in FCS — to `int`, `string`, `int * string` or
     /// `int -> string` — through what inference does not see (a type
     /// annotation on an expression, a lambda's body, a loop's body, a method
-    /// argument); the rest leave `p` as it was.
+    /// argument under a lambda); the rest leave `p` as it was.
     fn loss(&mut self) -> String {
         self.features.lost = true;
         let fixed = match self.rng.below(4) {
@@ -503,7 +506,7 @@ impl ArgGen<'_> {
             0 | 1 => format!("(p : {})", fixed.0),
             2 if !fixed.1.is_empty() => format!("(fun () -> {} p)", fixed.1),
             3 if !fixed.1.is_empty() => format!("(while false do ignore ({} p))", fixed.1),
-            4 => "y.Insert(0, p)".into(),
+            4 => "(fun () -> y.Insert(0, p))".into(),
             5 => return "(y : string)".into(),
             6 => return "(fun () -> 1)".into(),
             _ => format!("(p : {})", fixed.0),

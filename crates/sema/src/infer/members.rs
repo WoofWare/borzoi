@@ -1,48 +1,10 @@
-//! Member accesses and method calls: what the walk generates for them, and
-//! the wakes that resolve them.
+//! Member accesses and method calls: what the walk generates for them, the
+//! wakes that resolve a data member, and the regime a method call's
+//! arguments are checked under.
 
 use super::*;
 
-/// Which kind of member a suspended [`Constraint::HasMember`] resolves to — a
-/// **data** member (field / non-indexer property, Stage 3.3a) or a **method** (a
-/// single-candidate instance method call, Stage 3.3d). It selects only the
-/// assembly lookup the wake runs; everything else the wake does (bridge the type,
-/// record the member's identity at `use_range`, unify the result) is **shared**.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum MemberAccessKind {
-    /// A field or non-indexer property (`recv.Length`), typed as the member's type
-    /// ([`AssemblyEnv::instance_data_member`]).
-    Data,
-    /// A method **call** — an instance `recv.M(args)`, or (stage OV-7,
-    /// `is_static`) a type-qualified static `Type.M(args)` — typed as the chosen
-    /// overload's **return** type by the OV-6 engine ([`Gen::wake_member`] runs
-    /// the group's [`AssemblyEnv::instance_method_group`] /
-    /// [`AssemblyEnv::static_method_group`] +
-    /// [`AssemblyEnv::resolve_overload`]). `args` carries the per-argument
-    /// inference variable of each positional argument ([`Gen::method_arg_vids`]) —
-    /// its length is the argument count the arity gate reads, and each variable is
-    /// resolved to a ground [`Ty`] the applicability matcher consumes. `None` when
-    /// the argument shape is not a plain positional list (a named argument, a
-    /// recovery hole), which the wake defers — FCS does not type an ill-formed
-    /// call as the method return (`s.Insert(foo = 0, …)` ⇒ `obj`, not `string`).
-    Method {
-        args: Option<Vec<TyVid>>,
-        /// Whether this is a **static** call through a type-qualified path
-        /// ([`Gen::static_callee`]) — the wake then consults the static method
-        /// group. An instance call through a value receiver is `false`.
-        is_static: bool,
-        /// Whether an argument is a lambda ([`has_lambda_argument`]). FCS
-        /// checks such an argument against its parameter's type before it
-        /// resolves the call, and where the lambda does not convert to it
-        /// the call is not typed as the member: `y.Insert(0, (fun () -> 1))`
-        /// is `'a`, where `y.Insert(0, 1)` is `string`. Whether it converts
-        /// is not modelled, so the call's type is not read off the member;
-        /// its identity still is.
-        lambda_arg: bool,
-    },
-}
-
-/// What a wake ([`Gen::wake_member`]) made of a member access.
+/// What a data member's wake ([`Gen::wake_member`]) made of the access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Wake {
     /// The member was identified and its resolution recorded; its result is
@@ -51,8 +13,108 @@ pub(super) enum Wake {
     /// No member is identified: the access is declined, for the reason it
     /// carries.
     Declined(Incomplete),
-    /// An overload whose arguments are not yet known.
-    Retry,
+}
+
+/// A method call's argument list, read before anything in it is walked: FCS
+/// chooses the regime the arguments are checked under from the call's shape
+/// before it checks any of them ([`Gen::call_regime`]).
+pub(super) struct CallArgs {
+    /// The positional arguments, in order. `M()` has none; `M(())` has one.
+    elements: Vec<Expr>,
+    /// Whether the call is the direct unit call `M()`, which FCS passes to
+    /// a single method of one parameter as that argument.
+    unit: bool,
+    /// Why the list is not a plain positional one, if it is not: a recovery
+    /// hole ([`Incomplete::Recovery`]), or a named argument or a malformed
+    /// list ([`Incomplete::MethodArgShape`]).
+    not_positional: Option<Incomplete>,
+}
+
+impl CallArgs {
+    /// Read the argument list of a call `recv.M ARG`. Only the call's own
+    /// parentheses are peeled: `M((a, b))` is one argument, a tuple, which FCS
+    /// elaborates as a method-value application.
+    pub(super) fn of(arg: &Expr) -> CallArgs {
+        let positional = |elements| CallArgs {
+            elements,
+            unit: false,
+            not_positional: None,
+        };
+        if is_unit_literal(arg) {
+            return CallArgs {
+                elements: Vec::new(),
+                unit: true,
+                not_positional: None,
+            };
+        }
+        let inner = match arg {
+            Expr::Paren(p) => match p.inner() {
+                Some(inner) => inner,
+                None => {
+                    return CallArgs {
+                        elements: Vec::new(),
+                        unit: false,
+                        not_positional: Some(Incomplete::Recovery),
+                    };
+                }
+            },
+            other => other.clone(),
+        };
+        if is_unit_literal(&inner) {
+            return positional(vec![inner]);
+        }
+        match &inner {
+            Expr::Tuple(t) if !t.is_struct() => {
+                let elements: Vec<Expr> = t.elements().collect();
+                // A well-formed positional tuple has one more element than
+                // commas; a trailing or doubled comma is a recovery FCS types
+                // as `obj`.
+                let commas = t
+                    .syntax()
+                    .children_with_tokens()
+                    .filter(|c| c.kind() == SyntaxKind::COMMA_TOK)
+                    .count();
+                let malformed = elements.iter().any(is_named_arg) || elements.len() != commas + 1;
+                CallArgs {
+                    elements,
+                    unit: false,
+                    not_positional: malformed.then_some(Incomplete::MethodArgShape),
+                }
+            }
+            _ => CallArgs {
+                not_positional: is_named_arg(&inner).then_some(Incomplete::MethodArgShape),
+                elements: vec![inner],
+                unit: false,
+            },
+        }
+    }
+}
+
+/// The regime FCS checks a method call's arguments under, chosen from the
+/// call's shape before any argument is checked (`TcMethodApplication`).
+pub(super) enum CallRegime<'e> {
+    /// Exactly one candidate of the group has the call's shape, and it is one
+    /// inference reads ([`Gen::unique_candidate`]): FCS relates its parameters
+    /// to the arguments' types and its return to the call's expected type
+    /// before it checks any argument (`UnifyUniqueOverloading`).
+    Unique {
+        decl: EntityHandle,
+        idx: MemberIndex,
+        method: &'e MethodLike,
+        /// The candidate's form ([`call_forms`]): its trailing
+        /// `[<ParamArray>]` parameter takes the surplus arguments when
+        /// [`CallForm::Expanded`], each related to its element type.
+        form: CallForm,
+    },
+    /// Several candidates have it: FCS checks each argument against a fresh
+    /// type, and resolves the call once they are checked.
+    Several(Vec<(EntityHandle, MemberIndex, &'e MethodLike)>),
+    /// The call is not one inference decides, for this reason: the receiver is
+    /// not known at the dot, no member of the name is identified, the group
+    /// is not provably FCS's, no candidate has the call's shape, or the call
+    /// is of a shape inference does not read (a named argument, a shaped
+    /// argument such as a lambda).
+    Otherwise(Incomplete),
 }
 
 impl<'a> Gen<'a> {
@@ -62,20 +124,12 @@ impl<'a> Gen<'a> {
     /// Both type endpoints are **poisoned** unconditionally at the point of
     /// generation ([`Self::gen_member_access`]), so this only enqueues the
     /// relation; the solver wakes it when `recv`'s head is concrete.
-    fn has_member(
-        &mut self,
-        scope: &mut Scope,
-        recv: TyVid,
-        member: &SyntaxToken,
-        result: TyVid,
-        kind: MemberAccessKind,
-    ) {
+    fn has_member(&mut self, scope: &mut Scope, recv: TyVid, member: &SyntaxToken, result: TyVid) {
         self.solver.constraints.push(Constraint::HasMember {
             recv,
             name: ident_text(member),
             result,
             use_range: member.text_range(),
-            kind,
         });
         // Poison both endpoints: an unwoken (open) member relation must not let its
         // receiver or result generalise. A ground endpoint is unaffected (poison
@@ -111,7 +165,7 @@ impl<'a> Gen<'a> {
         for seg in segments {
             self.decide_receiver_by_label(scope, cur, seg);
             let result = self.solver.table.fresh();
-            self.has_member(scope, cur, seg, result, MemberAccessKind::Data);
+            self.has_member(scope, cur, seg, result);
             results.push(result);
             cur = result;
         }
@@ -164,41 +218,39 @@ impl<'a> Gen<'a> {
         self.decide(scope, record, recv);
     }
 
-    /// Type a **single-candidate instance method call** `recv.Method(args)` (Stage
-    /// 3.3d), returning the call's type variable — the method's **return** type. The
-    /// whole-call node is emitted by [`Self::infer_app`]'s callers at the `APP_EXPR`
-    /// range (where FCS emits its `call:instance` node), read back only when
-    /// [`ground`](TyTable::is_ground) — and a *rejected* call's `result` stays open (its
-    /// wake never discharges), so the whole-call node naturally drops. In a check
-    /// position the whole-call node is not emitted at all.
+    /// Type a **method call** `recv.Method(args)` or `Type.Method(args)`,
+    /// returning the call's type variable — the chosen member's return type.
+    /// The whole-call node is emitted by [`Self::infer_app`]'s callers at the
+    /// `APP_EXPR` range, read back only when ground.
     ///
-    /// **A method call emits *no node inside itself*** — not its receiver, not its
-    /// argument's sub-expressions. FCS lowers a rejected / ill-formed call to a
-    /// single node and emits nothing inside it, and its receiver `result` can even be
-    /// grounded by a *surrounding* constraint (`f (s.ToLowerInvariant(1))` grounds the
-    /// bad call to `f`'s domain), so gating the receiver on its own groundness is
-    /// unsound. Rather than track per-call acceptance, this **discards** every
-    /// emission `method_callee` and the argument walk produce (a snapshot + truncate):
-    /// the receiver's *type* still flows to the wake (and its hover comes from name
-    /// resolution), only its expression-*node* is dropped. Sound by under-emission —
-    /// we never publish a node FCS lacks.
+    /// FCS takes a method call in this order (`TcMethodApplication`), and so
+    /// does the walk:
+    ///
+    /// 1. the receiver, and any data member before the method (`s.Field.M(…)`),
+    ///    decided at its dot;
+    /// 2. the method group, looked up on the receiver's type at the dot;
+    /// 3. the regime the arguments are checked under ([`CallRegime`]), from
+    ///    how many candidates of the group have the call's shape, before any
+    ///    argument is checked;
+    /// 4. the arguments, in source order, under that regime;
+    /// 5. the resolution.
+    ///
+    /// **A method call emits no node inside itself** — not its receiver, not its
+    /// argument's sub-expressions. FCS keeps nothing inside a call it rejects,
+    /// and inference does not know whether FCS accepted the call, so every
+    /// emission the receiver and the arguments make is discarded (#795): the
+    /// receiver's *type* still flows to the lookup, only its node is dropped.
     ///
     /// A **static** call `Type.Method(args)` (stage OV-7) — a callee whose
     /// second-to-last segment the resolver resolved to a referenced-assembly
-    /// *type* entity ([`Self::static_callee`]) — takes the same path with
-    /// `is_static` set: the receiver variable is unified with the entity's
-    /// [`TyKind::Named`] immediately (a static receiver is known at generation, so
-    /// the wake fires on the first fixpoint pass), and no receiver node is
-    /// emitted (FCS emits no node anywhere on the qualified path — probed
-    /// 2026-07-10: one `call:static*` node at the whole application, argument
-    /// consts inside, nothing at the path or method name).
+    /// *type* entity ([`Self::static_callee`]) — takes the same path through the
+    /// static group, its receiver unified with the entity's [`TyKind::Named`]
+    /// at once; no receiver node is emitted (FCS emits none on the qualified
+    /// path).
     ///
-    /// `None` (deferred, incomplete) when the callee is neither a modelled member
-    /// access nor an entity-rooted static path — e.g. a qualified call whose root
-    /// is a *module* (module-function application has F# value semantics, not
-    /// .NET method-call semantics — out of scope), a project-defined type, or an
-    /// unresolved head (leaving the resolver's static-member resolution
-    /// untouched).
+    /// A callee that is neither a modelled member access nor an entity-rooted
+    /// static path — a module's function, a project type, an unresolved head —
+    /// is declined before anything is walked.
     pub(super) fn infer_method_call(
         &mut self,
         scope: &mut Scope,
@@ -206,9 +258,8 @@ impl<'a> Gen<'a> {
         arg: &Expr,
         expected: Expected,
     ) -> Inferred {
-        // Snapshot the emissions: everything `method_callee` and the argument
-        // walk record inside the call — nodes and local binders alike — is
-        // discarded below (see the doc).
+        // Snapshot the emissions: everything the receiver and the argument
+        // walks record inside the call is discarded below (see the doc).
         let emit_mark = self.out.mark();
         let (recv, method_tok, is_static) =
             if let Some((path, method_tok)) = self.static_callee(callee) {
@@ -237,51 +288,39 @@ impl<'a> Gen<'a> {
                     path: &path,
                     receivers,
                 });
-                // FCS looks the method up on the receiver at the dot, before its
-                // arguments: on a receiver it does not know there it reports
-                // FS0072, so nothing after is decided against it.
-                let head = self.solver.table.resolve(self.solver.tys.var(recv));
-                if matches!(self.solver.tys.kind(head), TyKind::Var(_)) {
-                    scope.mark_incomplete(Incomplete::IndeterminateReceiver);
-                }
                 (recv, method_tok, false)
             };
-        // FCS relates the call's return type to its expected type before it
-        // checks the arguments when the method's arity leaves one overload
-        // (`UnifyUniqueOverloading`), which inference does not know yet: so
-        // whatever the expected type holds open is tainted first.
-        let entry = self.taint_expected(scope, expected);
-        // Walk each positional argument against an unknown expected type (the
-        // parameter of the overload FCS resolves), collecting the per-argument
-        // inference variable the OV-6 overload engine reads at the wake (its
-        // length is the argument count the arity gate uses). `None` means the
-        // argument shape is not a plain positional list (a named argument, a
-        // recovery hole); the wake defers such a call. A direct unit `()` is
-        // `Some([])` (no walk, no gratuitous incompleteness — the common `s.M()`
-        // shape).
-        let arg_vids = self.method_arg_vids(scope, arg);
-        // Suspend the method lookup; `result` is the whole call's (return) type.
-        // `has_member` poisons `recv` and `result` — an unwoken method relation must
-        // not let either generalise (a ground discharge is unaffected).
+        let args = CallArgs::of(arg);
         let result = self.solver.table.fresh();
-        self.has_member(
-            scope,
-            recv,
-            &method_tok,
-            result,
-            MemberAccessKind::Method {
-                args: arg_vids,
-                is_static,
-                lambda_arg: has_lambda_argument(arg),
-            },
-        );
-        // FCS resolves the overload once the arguments are checked.
-        self.settle_access(scope);
-        // Discard every node emitted inside the call (receiver + argument
-        // sub-expressions): a method call emits nothing inside itself (see the doc).
+        // An undecided call must not let its receiver or result generalise;
+        // a ground one is unaffected.
+        scope.poison.push(recv);
+        scope.poison.push(result);
+        let discharged = match self.call_regime(recv, &method_tok, is_static, &args) {
+            CallRegime::Unique {
+                decl,
+                idx,
+                method,
+                form,
+            } => self.unique_call(
+                scope,
+                (decl, idx, method, form),
+                method_tok.text_range(),
+                &args,
+                result,
+                expected,
+            ),
+            CallRegime::Several(group) => self.several_call(
+                scope,
+                &group,
+                method_tok.text_range(),
+                &args,
+                result,
+                expected,
+            ),
+            CallRegime::Otherwise(why) => self.undecided_call(scope, why, &args, result, expected),
+        };
         self.out.discard_since(emit_mark);
-        let (_, exit) = self.relate(scope, result, expected);
-        let discharged = entry.and(exit);
         // Under an equality (a `let` pattern's type) FCS checks the call
         // against that type itself — `TcMethodApplicationThen` passes the
         // overall type down when nothing follows the call — and its node has
@@ -291,6 +330,338 @@ impl<'a> Gen<'a> {
             _ => result,
         };
         Inferred::typed(var, discharged)
+    }
+
+    /// The regime FCS checks a call's arguments under ([`CallRegime`]),
+    /// read from the receiver's type at the dot, the method group of the
+    /// name on it, and the argument list's shape — before any argument is
+    /// walked. Anything inference cannot be certain of is
+    /// [`CallRegime::Otherwise`].
+    fn call_regime(
+        &mut self,
+        recv: TyVid,
+        method: &SyntaxToken,
+        is_static: bool,
+        args: &CallArgs,
+    ) -> CallRegime<'a> {
+        if let Some(why) = args.not_positional {
+            return CallRegime::Otherwise(why);
+        }
+        // FCS gives a lambda, a `function`, a `_.X`, an `&x` or a quotation
+        // argument a type of its syntax's shape before it relates the one
+        // candidate's parameters (`GetNewInferenceTypeForMethodArg`), and
+        // stops relating at the first that fails: which of the candidate's
+        // relations it took is not modelled.
+        if args.elements.iter().any(is_shaped_argument) {
+            return CallRegime::Otherwise(Incomplete::OverloadUnresolved);
+        }
+        let tys = self.solver.tys;
+        let head = self.solver.table.resolve(tys.var(recv));
+        let path = match tys.kind(head) {
+            // FCS looks the method up on the receiver at the dot: on a
+            // variable it reports FS0072, or looks it up on `obj`.
+            TyKind::Var(_) => return CallRegime::Otherwise(Incomplete::IndeterminateReceiver),
+            // The lookup is by name at arity 0, which cannot tell a generic
+            // receiver from a non-generic type of the same name.
+            TyKind::Named { args, .. } if !args.is_empty() => {
+                return CallRegime::Otherwise(Incomplete::GenericReceiver);
+            }
+            TyKind::Named { path, .. } => path.spelled(self.facts.env.names()),
+            TyKind::Project { .. } => {
+                return CallRegime::Otherwise(Incomplete::ProjectTypeMember);
+            }
+            TyKind::Array { .. } | TyKind::Tuple(_) | TyKind::Fun { .. } | TyKind::Param(_) => {
+                return CallRegime::Otherwise(Incomplete::ReceiverShape);
+            }
+        };
+        let env = self.facts.env;
+        let name = ident_text(method);
+        let Some((type_name, namespace)) = path.split_last() else {
+            return CallRegime::Otherwise(Incomplete::NoSuchMember);
+        };
+        // This is the one place inference itself names an assembly type — a
+        // literal's receiver type (`"hi".Length`) is a path this phase writes
+        // down, vetted by nothing — so it reads through the drop-marker pairing
+        // ([`AssemblyEnv::lookup_type_if_certain`]): a dropped same-FQN sibling
+        // would leave the survivor's members read where FCS binds the dropped
+        // type's.
+        let Some(handle) = env.lookup_type_if_certain(namespace, type_name, 0) else {
+            return CallRegime::Otherwise(Incomplete::NoSuchMember);
+        };
+        // An in-scope extension member of the name would join FCS's method
+        // group and could win (§4.1(4)), for a static call too: an F#
+        // augmentation `type T with static member …` joins a type-qualified
+        // static group the same way.
+        if !self.facts.ext_scope.absent(env, &name, is_static) {
+            return CallRegime::Otherwise(Incomplete::ExtensionInScope);
+        }
+        // The provably complete intrinsic group, instance or static per the
+        // call's shape: an instance and a static member of one name never
+        // share a candidate set (`HasCorrectObjArgs`).
+        let group = if is_static {
+            env.static_method_group(handle, &name)
+        } else {
+            env.instance_method_group(handle, &name)
+        };
+        let Some(group) = group else {
+            return CallRegime::Otherwise(Incomplete::NoSuchMember);
+        };
+        // An F# member with several argument groups (`member x.M a b`) compiles
+        // to a parameter list a tupled member's is indistinguishable from, and
+        // FCS takes a curried member as a first-class use (FS0816 beside an
+        // overload): a group holding a possibly curried member is not read
+        // (`docs/completed/ov-6.1-curry-detection-plan.md`).
+        if group
+            .iter()
+            .any(|(_, _, m)| m.signature.parameters.len() >= 2 && m.arg_group_count != Some(1))
+        {
+            return CallRegime::Otherwise(Incomplete::OverloadUnresolved);
+        }
+        let n = args.elements.len();
+        // The candidates FCS forms of the group at `n` arguments (`IsCandidate`),
+        // a `[<ParamArray>]` method being two at exactly its declared count.
+        let forms: usize = group.iter().map(|(_, _, m)| call_forms(m, n).len()).sum();
+        match forms {
+            0 => {
+                // `M()` on a group of one method of one plain parameter: FCS
+                // passes the unit as that argument (the "single named item"
+                // rule), and commits that method whatever it takes.
+                if args.unit
+                    && let [(decl, idx, m)] = group.as_slice()
+                    && let [only] = m.signature.parameters.as_slice()
+                    && !only.is_param_array
+                    && !only.is_out
+                    && matches!(only.default, ParamDefault::None)
+                    && self.unique_candidate(m, 0, CallForm::Normal)
+                {
+                    return CallRegime::Unique {
+                        decl: *decl,
+                        idx: *idx,
+                        method: m,
+                        form: CallForm::Normal,
+                    };
+                }
+                // FCS reports a call no candidate has the shape of
+                // (FS0501, FS0505).
+                CallRegime::Otherwise(Incomplete::OverloadUnresolved)
+            }
+            1 => {
+                let (decl, idx, m) = *group
+                    .iter()
+                    .find(|(_, _, m)| !call_forms(m, n).is_empty())
+                    .expect("one candidate has the call's shape");
+                match call_forms(m, n).as_slice() {
+                    &[form] if self.unique_candidate(m, n, form) => CallRegime::Unique {
+                        decl,
+                        idx,
+                        method: m,
+                        form,
+                    },
+                    _ => CallRegime::Otherwise(Incomplete::OverloadUnresolved),
+                }
+            }
+            // The resolution reads each candidate's parameter types, and an
+            // IL parameter type whose unit of measure was erased admits an
+            // argument FCS rejects (`O(float<m>)` reads as `O(float64)`).
+            _ if group
+                .iter()
+                .all(|(level, _, _)| env.member_types_keep_their_measures(*level)) =>
+            {
+                CallRegime::Several(group)
+            }
+            _ => CallRegime::Otherwise(Incomplete::OverloadUnresolved),
+        }
+    }
+
+    /// Whether the one candidate of a call of `n` arguments, in `form`, is
+    /// one whose relations to the call inference reads: not generic, not a
+    /// constructor, and no `byref`, `out`, `[<ParamArray>]` or F# optional
+    /// (`?x`, of an option type the argument is not) parameter among those
+    /// the arguments are supplied to, and no `out` parameter among those
+    /// omitted, which FCS folds into the return. A .NET optional parameter
+    /// supplied an argument takes it as a required one does. In its expanded
+    /// form the trailing `[<ParamArray>]` parameter takes the arguments past
+    /// the others, and nothing is omitted.
+    fn unique_candidate(&self, m: &MethodLike, n: usize, form: CallForm) -> bool {
+        let params = &m.signature.parameters;
+        let plain = |p: &&borzoi_assembly::Parameter| {
+            !p.is_byref
+                && !p.is_out
+                && !p.is_param_array
+                && matches!(p.default, ParamDefault::None | ParamDefault::Optional(_))
+        };
+        m.generic_parameters.is_empty()
+            && !m.is_constructor
+            && match form {
+                CallForm::Normal => {
+                    params.iter().take(n).all(|p| plain(&p))
+                        && params.iter().skip(n).all(|p| !p.is_out)
+                }
+                CallForm::Expanded => params
+                    .split_last()
+                    .is_some_and(|(_, rest)| rest.iter().all(|p| plain(&p))),
+            }
+    }
+
+    /// The parameter type the `i`-th argument of a call to `method` in `form`
+    /// is related to: its own parameter's, or, past the others in the expanded
+    /// form, the element type of the trailing `[<ParamArray>]` vector.
+    fn argument_parameter(method: &MethodLike, form: CallForm, i: usize) -> Option<&TypeRef> {
+        let params = &method.signature.parameters;
+        match form {
+            CallForm::Normal => params.get(i).map(|p| &p.ty),
+            CallForm::Expanded => {
+                let (array, rest) = params.split_last()?;
+                if i < rest.len() {
+                    return Some(&rest[i].ty);
+                }
+                match &array.ty {
+                    TypeRef::Array { element, .. } => Some(&element.ty),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// A call with exactly one candidate (`UnifyUniqueOverloading`): FCS
+    /// relates each of its parameters to its argument's type, then its return
+    /// to the call's expected type, then checks each argument against its
+    /// parameter. A parameter `obj` takes any argument, a sealed one is the
+    /// argument's type, and any other is a type the argument's is a subtype of
+    /// ([`Self::flexible`]). A parameter or return whose type inference does
+    /// not read ([`Self::readable_member_type`]) is not related: its argument
+    /// is checked against an unknown type, and the call's expected type is
+    /// tainted where FCS relates the return. The member is committed whatever
+    /// the arguments are, as FCS commits it.
+    fn unique_call(
+        &mut self,
+        scope: &mut Scope,
+        (decl, idx, method, form): (EntityHandle, MemberIndex, &'a MethodLike, CallForm),
+        use_range: TextRange,
+        args: &CallArgs,
+        result: TyVid,
+        expected: Expected,
+    ) -> Discharged {
+        self.record_member(decl, idx, use_range);
+        let params: Vec<Option<TyVid>> = (0..args.elements.len())
+            .map(|i| {
+                let declared = Self::argument_parameter(method, form, i)?;
+                let ty = self.readable_member_type(decl, declared)?;
+                let flexible = self.flexible(scope, ty);
+                Some(self.fresh_equal(scope, flexible))
+            })
+            .collect();
+        let entry = match self.readable_member_type(decl, &method.signature.return_type) {
+            Some(ret) => {
+                self.eq(scope, self.solver.tys.var(result), ret, Own::var(result));
+                self.relate(scope, result, expected).1
+            }
+            None => {
+                self.taint(scope, self.solver.tys.var(result));
+                self.taint_expected(scope, expected)
+            }
+        };
+        for (el, param) in args.elements.iter().zip(params) {
+            let expected = param.map_or(Expected::Unknown, Expected::Known);
+            let _ = self.walk_method_arg(scope, el, expected);
+        }
+        entry
+    }
+
+    /// A call with several candidates: FCS checks each argument against a
+    /// fresh type, then resolves the call on the arguments' types. Those
+    /// inference resolves on only when every one is ground: FCS solves what
+    /// it can of open ones first (`CanonicalizePartialInferenceProblem`) and
+    /// may resolve on what is left open, fixing it (`s.Equals(p)` picks
+    /// `Equals(string)`), so a call with an open argument is declined
+    /// ([`Incomplete::OverloadUnresolved`]). The chosen member's return is then
+    /// related to the call's expected type.
+    fn several_call(
+        &mut self,
+        scope: &mut Scope,
+        group: &[(EntityHandle, MemberIndex, &'a MethodLike)],
+        use_range: TextRange,
+        args: &CallArgs,
+        result: TyVid,
+        expected: Expected,
+    ) -> Discharged {
+        let vars: Vec<Option<TyVid>> = args
+            .elements
+            .iter()
+            .map(|el| {
+                let fresh = self.solver.table.fresh();
+                self.walk_method_arg(scope, el, Expected::Known(fresh))
+            })
+            .collect();
+        let tys = self.solver.tys;
+        let mut arg_tys = Vec::with_capacity(vars.len());
+        for v in vars {
+            let Some(v) = v else { break };
+            let ty = self.solver.table.resolve(tys.var(v));
+            if !tys.is_ground(ty) {
+                break;
+            }
+            arg_tys.push(ty);
+        }
+        let chosen = (arg_tys.len() == args.elements.len())
+            .then(|| self.facts.env.resolve_overload(group, tys, &arg_tys))
+            .flatten();
+        match chosen {
+            Some((decl, idx, m)) => {
+                self.record_member(decl, idx, use_range);
+                match self.readable_member_type(decl, &m.signature.return_type) {
+                    Some(ret) => {
+                        self.eq(scope, tys.var(result), ret, Own::var(result));
+                    }
+                    None => self.taint(scope, tys.var(result)),
+                }
+            }
+            None => {
+                self.taint(scope, tys.var(result));
+                scope.mark_incomplete(Incomplete::OverloadUnresolved);
+            }
+        }
+        self.relate(scope, result, expected).1
+    }
+
+    /// A call inference does not decide, for `why`. The prefix ends before
+    /// the arguments are walked: FCS reports a member it does not find, or a
+    /// receiver it does not know, before it checks any argument, so what an
+    /// argument would decide is not what FCS has. The arguments are walked
+    /// against an unknown type, the call's expected type tainted where FCS
+    /// would relate the return, and the result tainted.
+    fn undecided_call(
+        &mut self,
+        scope: &mut Scope,
+        why: Incomplete,
+        args: &CallArgs,
+        result: TyVid,
+        expected: Expected,
+    ) -> Discharged {
+        scope.mark_incomplete(why);
+        let entry = self.taint_expected(scope, expected);
+        for el in &args.elements {
+            let _ = self.walk_method_arg(scope, el, Expected::Unknown);
+        }
+        self.taint(scope, self.solver.tys.var(result));
+        let (_, exit) = self.relate(scope, result, expected);
+        entry.and(exit)
+    }
+
+    /// Walk one method argument against `expected`, returning its type
+    /// variable, or `None` where it is not modelled (which has ended the
+    /// prefix).
+    fn walk_method_arg(
+        &mut self,
+        scope: &mut Scope,
+        el: &Expr,
+        expected: Expected,
+    ) -> Option<TyVid> {
+        let var = self.infer_expr(scope, el, expected).var();
+        if var.is_none() {
+            scope.mark_incomplete_propagated();
+        }
+        var
     }
 
     /// Recognise a **static-call callee** `Type.Method` (stage OV-7): a
@@ -351,116 +722,6 @@ impl<'a> Gen<'a> {
         let mut path = entity.namespace.clone();
         path.push(entity.name.clone());
         Some((path, method.clone()))
-    }
-
-    /// The **per-argument inference variables** a method call `recv.M(args)`
-    /// supplies (Stage 3.3d / OV-6), or `None` when the argument shape is one this
-    /// stage cannot confidently read as a plain positional list — in which case
-    /// the call defers (D5). Mirrors the arity decomposition the pre-OV-6
-    /// `method_arg_count` used, but now walks each element ([`Self::walk_arg_element`])
-    /// to capture its variable; the returned vector's length *is* the argument
-    /// count:
-    ///
-    /// - a **direct** unit `()` (`M()`) is `Some([])` — no element, no walk;
-    /// - the list `M(a, b)` parses as `Paren(Tuple(a, b))`; peeling that **one**
-    ///   call-parenthesis layer gives the reference tuple, one variable per element;
-    /// - a **parenthesized** unit `M(())` is one explicit unit argument;
-    /// - any other single expression is one argument (`M(a)`, `M(a + b)`, `M(f x)`,
-    ///   and — deliberately — `M((a, b))`, whose extra parentheses make the tuple a
-    ///   single value FCS elaborates as a method-value application, so counting its
-    ///   inner tuple would wrongly accept it);
-    /// - a **named argument** (`M(name = value)`) or a recovery hole is `None`.
-    ///
-    /// Only the *one* call-argument parenthesis layer is peeled, so the double-paren
-    /// `M((a, b))` stays a single argument and defers for a multi-parameter method.
-    ///
-    /// **Every** element is walked in check mode for its poison side effect even
-    /// when the shape is ultimately non-positional (a named argument): a parameter
-    /// used inside a named argument (`s.Insert(startIndex = x, …)`) must still be
-    /// poisoned, exactly as the pre-OV-6 whole-argument check walk did — otherwise
-    /// it could wrongly generalise when the result is grounded by an annotation. A
-    /// non-positional shape additionally marks the binding walk-incomplete before
-    /// returning `None`.
-    fn method_arg_vids(&mut self, scope: &mut Scope, arg: &Expr) -> Option<Vec<TyVid>> {
-        // Peel exactly the call's own argument parentheses: `M()` is a bare unit
-        // const, `M(e)` wraps its argument in one `Paren`, `M e` is a bare argument.
-        let inner = match arg {
-            _ if is_unit_literal(arg) => return Some(Vec::new()), // `M()`
-            // `M(e)` — the call parens; a recovery hole (no inner) is incomplete.
-            Expr::Paren(p) => match p.inner() {
-                Some(inner) => inner,
-                None => {
-                    scope.mark_incomplete(Incomplete::Recovery);
-                    return None;
-                }
-            },
-            other => other.clone(), // `M e`
-        };
-        // A unit *inside* the call parens (`M(())`) is one explicit unit argument.
-        if is_unit_literal(&inner) {
-            return Some(vec![self.walk_arg_element(scope, &inner)]);
-        }
-        match &inner {
-            Expr::Tuple(t) if !t.is_struct() => {
-                // Walk every element (for its poison / incompleteness side effect),
-                // recording whether the shape is a clean positional list.
-                let mut vids = Vec::new();
-                let mut positional = true;
-                for el in t.elements() {
-                    if is_named_arg(&el) {
-                        positional = false;
-                    }
-                    vids.push(self.walk_arg_element(scope, &el));
-                }
-                // A **well-formed** positional tuple has exactly one more element
-                // than commas. A trailing / doubled comma is a parser *recovery* on
-                // a malformed argument list (`s.Insert(0, "z",)`), which FCS types
-                // as `obj` (no method) — so reject it rather than counting elements.
-                let commas = t
-                    .syntax()
-                    .children_with_tokens()
-                    .filter(|c| c.kind() == SyntaxKind::COMMA_TOK)
-                    .count();
-                if !positional || vids.len() != commas + 1 {
-                    scope.mark_incomplete(Incomplete::MethodArgShape);
-                    return None;
-                }
-                Some(vids)
-            }
-            // A single argument — walk it regardless (poison), then classify: a named
-            // argument is non-positional (defer + incomplete); anything else is one
-            // positional value.
-            _ => {
-                let v = self.walk_arg_element(scope, &inner);
-                if is_named_arg(&inner) {
-                    scope.mark_incomplete(Incomplete::MethodArgShape);
-                    None
-                } else {
-                    Some(vec![v])
-                }
-            }
-        }
-    }
-
-    /// Walk one method-argument element in **check mode**, returning the inference
-    /// variable carrying its type. An element that cannot be typed (a unit, or an
-    /// unmodelled sub-expression) leaves an **unbound** fresh var — so the argument
-    /// *count* stays exact while its type reads as Deferred at the wake — and marks
-    /// the binding walk-incomplete. The element is checked against an unknown
-    /// expected type ([`Expected::Unknown`]): FCS checks it against the
-    /// parameter of the overload it resolves, which may relate it before
-    /// anything inside it is checked, so whatever FCS would relate is tainted
-    /// where FCS relates it. The overload wake later resolves the variable to
-    /// a ground [`Ty`] for [`AssemblyEnv::may_apply`] /
-    /// [`AssemblyEnv::must_apply`].
-    fn walk_arg_element(&mut self, scope: &mut Scope, el: &Expr) -> TyVid {
-        match self.infer_expr(scope, el, Expected::Unknown).var() {
-            Some(v) => v,
-            None => {
-                scope.mark_incomplete_propagated();
-                self.solver.table.fresh()
-            }
-        }
     }
 
     /// Resolve a **method-call callee** (a member access in function position) into
@@ -769,9 +1030,6 @@ impl<'a> Gen<'a> {
         let TyKind::Project { path, args } = self.solver.tys.kind(head) else {
             return false;
         };
-        if !matches!(m.kind, MemberAccessKind::Data) {
-            return false;
-        }
         let record = self
             .facts
             .project_records
@@ -805,29 +1063,12 @@ impl<'a> Gen<'a> {
         true
     }
 
-    /// Wake a suspended member: look up the member `name` on the receiver type
-    /// `path` — dispatched on `kind` to the unambiguous public instance **data
-    /// member** ([`AssemblyEnv::instance_data_member`], Stage 3.3a) or the
-    /// single-candidate public instance **method** ([`AssemblyEnv::instance_method`],
-    /// Stage 3.3d) — unify its bridged type (a data member's type, or a method's
-    /// **return** type) with `result`, and record its identity at `use_range` (Stage
-    /// 3.3b). Silent on any miss (D5): no such entity, no such member, an ambiguous /
-    /// overloaded name, or a member type this stage does not bridge — in each case
-    /// `result` stays open, the access defers, and **nothing** is recorded at
-    /// `use_range` (never from a guess).
-    ///
-    /// The member resolution is recorded even when the *type bridge* fails (a generic
-    /// member type) or the return is `void` (a `unit` type this phase does not model)
-    /// as long as the member is unambiguously identified — hover / go-to-definition
-    /// can render a member whose type inference cannot yet express. It is placed
-    /// **before** the bridge/void checks accordingly.
-    ///
-    /// Returns whether the wake **fired** — committed *or* definitively deferred, so
-    /// the solve loop drops it. `false` is a **retry** request: an overload group
-    /// whose argument types are not yet ground (an argument that is itself a pending
-    /// member/application). The loop re-parks it so a later wake that grounds the
-    /// argument can re-trigger resolution, rather than dropping the call after one
-    /// premature attempt.
+    /// Wake a suspended data-member access: look up the field or non-indexer
+    /// property `name` on the receiver type `path`
+    /// ([`AssemblyEnv::instance_data_member`], walking its base chain), record
+    /// its identity at `use_range` ([`Self::record_member`]) and bind `result`
+    /// to its type where inference reads it ([`Self::readable_member_type`]).
+    /// Declined, recording nothing, when no member is identified.
     pub(super) fn wake_member(
         &mut self,
         scope: &mut Scope,
@@ -835,311 +1076,96 @@ impl<'a> Gen<'a> {
         name: &str,
         result: TyVid,
         use_range: TextRange,
-        kind: &MemberAccessKind,
     ) -> Wake {
+        let env = self.facts.env;
         let Some((type_name, namespace)) = path.split_last() else {
             return Wake::Declined(Incomplete::NoSuchMember);
         };
-        // The receiver is a non-generic `TyKind::Named`, so arity 0. A missing entity is
-        // silence. The member lookup below walks this entity's base chain (Stage
-        // 3.x-inh), so an inherited member is found and returned under its declaring
-        // base's handle.
-        //
-        // This is the one place inference itself names an assembly type — a
-        // literal's receiver type (`"hi".Length`) is a path this phase writes down,
-        // vetted by nothing. So it reads through the drop-marker
-        // pairing ([`AssemblyEnv::lookup_type_if_certain`]) rather than the raw
-        // index: a dropped same-FQN sibling would leave us committing the
-        // survivor's members where FCS binds the dropped type's. The other two
-        // doors ([`Self::entity_annotation_ty`], [`Self::static_callee`]) key on an
-        // `Entity` the resolver's type-path walk already vetted, and reach this
-        // lookup only through the path they reconstruct from it.
-        let Some(handle) = self
-            .facts
-            .env
-            .lookup_type_if_certain(namespace, type_name, 0)
-        else {
+        // The receiver's type is a path inference may have written itself (a
+        // literal's), so it is read through the drop-marker pairing, as a
+        // method call's is ([`Self::call_regime`]).
+        let Some(handle) = env.lookup_type_if_certain(namespace, type_name, 0) else {
             return Wake::Declined(Incomplete::NoSuchMember);
         };
-        let looked_up = match kind {
-            MemberAccessKind::Data => self.facts.env.instance_data_member(handle, name),
-            MemberAccessKind::Method {
-                args, is_static, ..
-            } => {
-                // A non-positional argument shape (named argument, recovery hole) is
-                // not typed by FCS as the method return — defer fully (no type, no
-                // member resolution recorded, since an ill-formed call has no
-                // resolution FCS would agree on).
-                let Some(arg_vids) = args else {
-                    return Wake::Declined(Incomplete::OverloadUnresolved);
-                };
-                // Resolve each argument's inference variable to its (possibly still
-                // open) ground type — the applicability matcher's input.
-                let arg_tys: Vec<Ty> = arg_vids
-                    .iter()
-                    .map(|v| self.solver.table.resolve(self.solver.tys.var(*v)))
-                    .collect();
-                // **Extension-absence gate** (§4.1(4), the P15 landmine): an in-scope
-                // extension member of the name would join FCS's method group and
-                // could win, so commit *any* intrinsic overload only when no such
-                // extension can exist ([`ExtensionScope`]). Unproven ⇒ defer. The
-                // gate covers statics too (OV-7): an F# augmentation `type T with
-                // static member …` in an opened / auto-opened module joins a
-                // type-qualified static group the same way.
-                if !self
-                    .facts
-                    .ext_scope
-                    .absent(self.facts.env, name, *is_static)
-                {
-                    return Wake::Declined(Incomplete::ExtensionInScope);
-                }
-                // The provably-complete intrinsic method group (§4.1(1)(2)(3)(5)),
-                // instance or static per the call shape (OV-7); an incomplete group
-                // (unresolvable base, Object-cap, skipped or kind-clashing member)
-                // declines and the call defers.
-                let group = if *is_static {
-                    self.facts.env.static_method_group(handle, name)
-                } else {
-                    self.facts.env.instance_method_group(handle, name)
-                };
-                let Some(group) = group else {
-                    return Wake::Declined(Incomplete::NoSuchMember);
-                };
-                // **Curried-member gate** (OV-6.1; plan §5). An F# member with
-                // several argument groups (`member x.M a b`) compiles to a
-                // *flattened* parameter list indistinguishable from a tupled
-                // `member x.M(a, b)` — so committing the tupled return type for a
-                // curried member is unsound (FCS types `c.M 1 2` a function, not
-                // the return). A member is provably a single argument group only
-                // when `arg_group_count == Some(1)` — the C#/VB fact stamped by
-                // the projector, blanked to `None` for any F# assembly — or it
-                // takes ≤ 1 parameter (which cannot split across groups). If ANY
-                // candidate in the group is possibly curried, the *whole* call
-                // defers: FCS reports FS0816 (curried overload) and types the
-                // call `obj`, so even a single-group winner beside a curried
-                // loser must not commit. See `docs/completed/ov-6.1-curry-detection-plan.md`.
-                // *Possibly curried* = ≥ 2 parameters and not provably a single
-                // group (`arg_group_count != Some(1)`).
-                if group.iter().any(|(_, _, m)| {
-                    m.signature.parameters.len() >= 2 && m.arg_group_count != Some(1)
-                }) {
-                    return Wake::Declined(Incomplete::OverloadUnresolved);
-                }
-                match group.as_slice() {
-                    // FCS's **single-candidate shortcut** (§2.2): one intrinsic
-                    // candidate is committed on arity alone (no per-argument type
-                    // check — wrong types surface as later errors, but the call still
-                    // elaborates with that member). Decline the generic / constructor
-                    // shapes v1 does not type, and — crucially — any **byref/out**
-                    // signature (§5): the arity window counts a trailing `out` as
-                    // omittable, but FCS folds an *omitted* `out` into a tuple return
-                    // (`bool` → `bool * v`) this stage does not model, so committing
-                    // the raw return would be unsound. The arity window otherwise
-                    // admits the optional/`params` trimming FCS applies.
-                    //
-                    // A trailing **`[<ParamArray>]`** is excluded from this shortcut:
-                    // a single declared params method is *two* FCS candidates
-                    // (expanded and direct-array, §2.2), so it is not a single-candidate
-                    // shortcut at all — `V(params int[])` called `V("x")` fails both
-                    // forms' applicability, which arity alone cannot see. Route it
-                    // through the matcher (the `_` arm) like a genuine overload set.
-                    [(level, idx, m)]
-                        if !m
-                            .signature
-                            .parameters
-                            .last()
-                            .is_some_and(|p| p.is_param_array) =>
-                    {
-                        // Direct unit syntax (`M()` — `arg_tys` is empty, the only
-                        // zero-argument shape) is **candidate-dependent** in FCS:
-                        // zero arguments when the candidate admits arity 0, else
-                        // ONE (possibly ill-typed) unit argument — and the
-                        // single-candidate shortcut still elaborates the call as
-                        // the member (probed 2026-07-10, GPT-5.6 review:
-                        // `String.IsNullOrEmpty()` ⇒ `Boolean`; instance `c.M()`
-                        // on a 1-param `M(string)` ⇒ `Int32`). So a unit call also
-                        // accepts a window containing 1. The multi-candidate
-                        // matcher below keeps the zero reading only — FCS does not
-                        // elaborate an ill-typed unit arg through overload
-                        // resolution (`"hi".Substring()` ⇒ `obj`, no member call),
-                        // and a deferral there is sound regardless.
-                        let window = arity_window(m);
-                        let arity_fits = window.contains(arg_tys.len())
-                            || (arg_tys.is_empty() && window.contains(1));
-                        if !m.is_constructor
-                            && m.generic_parameters.is_empty()
-                            && !m
-                                .signature
-                                .parameters
-                                .iter()
-                                .any(|p| p.is_byref || p.is_out)
-                            && arity_fits
-                        {
-                            Some((*level, *idx, *m))
-                        } else {
-                            None
-                        }
-                    }
-                    // A genuine overload set (≥ 2 distinct members) — or a single
-                    // params method (two normalised FCS forms): the OV-6 commit
-                    // keystone (§1) needs GROUND argument types. If any argument is
-                    // not yet ground — it may be a pending member/application whose
-                    // result grounds on a later wake — signal a **retry** (`false`)
-                    // so the loop re-parks rather than dropping the call. Once ground,
-                    // commit the unique applicable candidate or defer
-                    // ([`AssemblyEnv::resolve_overload`]).
-                    _ => {
-                        if !arg_tys.iter().all(|&t| self.solver.tys.is_ground(t)) {
-                            return Wake::Retry;
-                        }
-                        // The matcher reads each candidate's parameter types,
-                        // and an IL parameter type with an erased unit of
-                        // measure admits an argument FCS rejects: `O(float<m>)`
-                        // beside `O(string)` reads as `O(float64)`, so `O(1.0)`
-                        // would pick it where FCS finds no overload. Which
-                        // member is chosen is then not known either, so the
-                        // whole call defers.
-                        if !group.iter().all(|(level, _, _)| {
-                            self.facts.env.member_types_keep_their_measures(*level)
-                        }) {
-                            return Wake::Declined(Incomplete::OverloadUnresolved);
-                        }
-                        self.facts
-                            .env
-                            .resolve_overload(&group, self.solver.tys, &arg_tys)
-                    }
-                }
-                // The curried-member gate above already deferred the whole call
-                // when any candidate was possibly curried, so every survivor here
-                // is a provably single-group member — map it to its return type.
-                .map(|(level, idx, m)| (level, idx, &m.signature.return_type))
-            }
+        let Some((decl, idx, member_ty)) = env.instance_data_member(handle, name) else {
+            return Wake::Declined(Incomplete::NoSuchMember);
         };
-        // `decl_handle` is the entity that *declares* the member — `handle` itself for
-        // a member declared on the receiver, or a base type when it is inherited
-        // (Stage 3.x-inh). The member resolution is recorded under it so hover /
-        // go-to-def point at the declaring type.
-        let Some((decl_handle, idx, member_ty_ref)) = looked_up else {
-            return Wake::Declined(match kind {
-                MemberAccessKind::Data => Incomplete::NoSuchMember,
-                MemberAccessKind::Method { .. } => Incomplete::OverloadUnresolved,
-            });
-        };
-        // Bridge the member type before touching `self` mutably (the borrow of
-        // `member_ty_ref` from `self.facts.env` would otherwise conflict with the insert
-        // / unify below); `type_ref_to_ty` yields an owned `Ty` or `None`, and the
-        // void check reads the `TypeRef` while it is still borrowed.
-        let member_ty = type_ref_to_ty(self.facts.env.names(), self.solver.tys, member_ty_ref);
-        // A `void`-returning method's call type is F# `unit`, which this phase does
-        // not model — so its type defers even though its identity is known (a data
-        // member is never `void`, so this is a no-op for `kind = Data`). Bridging
-        // `void` would yield the wrong `System.Void`, so we must skip the unify.
-        let is_void = matches!(member_ty_ref, TypeRef::Primitive(Primitive::Void));
-        // A single unambiguous public instance member was identified: record its
-        // resolution for the LSP (Stage 3.3b), in the resolver's own shape. Recorded
-        // even if the type bridge failed (a generic member type) or the return is
-        // void — the member's *identity* is known, so hover / go-to-definition can
-        // render it though the type defers.
-        self.out.member_resolution(
-            use_range,
-            Resolution::Member {
-                parent: decl_handle,
-                idx,
-            },
-        );
-        // The access is one FCS accepts, so what its receiver emitted stands.
-        // Whether the receiver has nodes at all is then an assembly reading —
-        // the member's existence — so under the seal below it is not confirmed:
-        // an incomplete projection publishes only what an empty env would.
-        //
-        // Nor is it on an F# record, union or exception type: FCS reads such a
-        // type's field as a field get, under which the typed tree keeps no
-        // node at the receiver (`let f (v: R) = v.Q` has one at `v.Q` only).
-        // Its other members keep one, so this under-publishes there.
+        self.record_member(decl, idx, use_range);
+        if let Some(ty) = self.readable_member_type(decl, member_ty) {
+            self.eq(scope, self.solver.tys.var(result), ty, Own::var(result));
+        }
+        Wake::Resolved
+    }
+
+    /// Record that the member name at `use_range` resolves to the member
+    /// `idx` of `decl` — the entity that *declares* it, a base type for an
+    /// inherited one — in the resolver's own shape, for the LSP's hover and
+    /// go-to-definition. Recorded even where the member's type is not read: its
+    /// identity is known.
+    ///
+    /// The access is one FCS accepts, so what its receiver emitted stands
+    /// ([`Emissions::confirm_guard`]), unless the receiver's nodes turn on an
+    /// assembly reading the seal withholds (an incomplete projection publishes
+    /// only what an empty env would), or the member is a field of an F#
+    /// record, union or exception type: FCS reads that as a field get, under
+    /// which the typed tree keeps no node at the receiver (`let f (v: R) = v.Q`
+    /// has one at `v.Q` only).
+    fn record_member(&mut self, decl: EntityHandle, idx: MemberIndex, use_range: TextRange) {
+        let env = self.facts.env;
+        self.out
+            .member_resolution(use_range, Resolution::Member { parent: decl, idx });
         let fsharp_field_carrier = matches!(
-            self.facts.env.entity(decl_handle).kind,
+            env.entity(decl).kind,
             EntityKind::Record | EntityKind::Union | EntityKind::Exception
         );
-        if !fsharp_field_carrier && !self.facts.env.identities_incomplete() {
+        if !fsharp_field_carrier && !env.identities_incomplete() {
             self.out.confirm_guard(use_range);
         }
-        // A lambda argument may not convert to its parameter, which leaves
-        // the call untyped in FCS ([`MemberAccessKind::Method::lambda_arg`]).
-        if matches!(
-            kind,
-            MemberAccessKind::Method {
-                lambda_arg: true,
-                ..
-            }
-        ) {
-            return Wake::Resolved;
+    }
+
+    /// A member's type `ty`, declared by `decl`, as inference reads it: F#'s
+    /// `unit` for `void`, else its bridged type ([`type_ref_to_ty`]); `None`
+    /// where the bridge does not carry it, where the declaring entity's pickle
+    /// says a unit of measure was erased (IL reads `float<m>` as `float64`),
+    /// or under an incomplete projection.
+    ///
+    /// **The seal, drawn at the door** (see [`Self::finish`]): under an
+    /// incomplete projection an unread DLL could declare a colliding receiver
+    /// type whose member of this name has another type, so this one is not
+    /// provably the member's — and once it is unified into a variable nothing
+    /// downstream can tell it apart from a type owing the assemblies nothing.
+    fn readable_member_type(&self, decl: EntityHandle, ty: &TypeRef) -> Option<Ty> {
+        let env = self.facts.env;
+        if env.identities_incomplete() {
+            return None;
         }
-        // A `void` method's call is F#'s `unit`, which FCS types it as —
-        // unless the projection is incomplete, where the member read is not
-        // provably the one FCS binds (the seal below).
-        if is_void {
-            if !self.facts.env.identities_incomplete() {
-                let unit = self.solver.tys.named(self.facts.env.names(), UNIT);
-                self.eq(scope, self.solver.tys.var(result), unit, Own::var(result));
-            }
-            return Wake::Resolved;
+        if matches!(ty, TypeRef::Primitive(Primitive::Void)) {
+            return Some(self.solver.tys.named(env.names(), UNIT));
         }
-        let Some(member_ty) = member_ty else {
-            return Wake::Resolved;
-        };
-        // IL erases units of measure, so the signature read above is the
-        // member's F# type only when its declaring entity's pickle says no
-        // measure was erased: a `float<m>` field reads as `float64`, and FCS
-        // types the access `float<m>`. The member's identity is known either
-        // way, and stays recorded above.
-        if !self.facts.env.member_types_keep_their_measures(decl_handle) {
-            return Wake::Resolved;
-        }
-        // **The seal, drawn at the door** (see [`Self::finish`]). Under an
-        // incomplete projection the unread DLL could declare a colliding
-        // receiver type whose member of this name returns something else, so
-        // this type is not provably the member's — and once it is unified into
-        // `result` nothing downstream can tell it apart from a type owing the
-        // assemblies nothing (a literal's). Declining the unify here is what
-        // makes the two distinguishable at all: `result` stays open, so
-        // `finish` drops it for being non-ground, while `let n = 1` keeps its
-        // `int`. The member's *identity* is still recorded above — and sealed
-        // with the rest — so the LSP can say why the type is missing.
-        if self.facts.env.identities_incomplete() {
-            return Wake::Resolved;
-        }
-        self.eq(
-            scope,
-            self.solver.tys.var(result),
-            member_ty,
-            Own::var(result),
-        );
-        Wake::Resolved
+        let bridged = type_ref_to_ty(env.names(), self.solver.tys, ty)?;
+        env.member_types_keep_their_measures(decl)
+            .then_some(bridged)
     }
 }
 
-/// Whether a method call's argument `arg` — the call's parentheses, or a bare
-/// argument — holds a lambda (`fun …` or `function …`, under parentheses) as
-/// one of its positional arguments: the arguments FCS checks against their
-/// parameters' types before it resolves the call.
-fn has_lambda_argument(arg: &Expr) -> bool {
-    let is_lambda = |e: &Expr| {
-        matches!(
-            unparenthesize(e.clone()),
-            Some(Expr::Fun(_) | Expr::MatchLambda(_))
+/// Whether a method argument is one FCS gives a type of its syntax's shape
+/// before it relates the call's one candidate to the arguments
+/// (`GetNewInferenceTypeForMethodArg`): a lambda (`fun …`), a `function`, a
+/// `_.X`, an address-of (`&x`) or a quotation, under any parentheses. Relating
+/// a candidate's non-function parameter to a lambda's function type fails,
+/// and FCS relates the candidate's remaining parameters and its return only
+/// up to that failure, so which of them it related is not modelled.
+fn is_shaped_argument(el: &Expr) -> bool {
+    matches!(
+        unparenthesize(el.clone()),
+        Some(
+            Expr::Fun(_)
+                | Expr::MatchLambda(_)
+                | Expr::DotLambda(_)
+                | Expr::AddressOf(_)
+                | Expr::Quote(_)
         )
-    };
-    let inner = match arg {
-        Expr::Paren(p) => match p.inner() {
-            Some(inner) => inner,
-            None => return false,
-        },
-        other => other.clone(),
-    };
-    match &inner {
-        Expr::Tuple(t) if !t.is_struct() => t.elements().any(|el| is_lambda(&el)),
-        other => is_lambda(other),
-    }
+    )
 }
 
 /// Whether an argument element is a **named argument** `name = value` (Stage 3.3d).

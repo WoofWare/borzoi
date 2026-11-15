@@ -425,17 +425,18 @@ fn static_data_member_access_still_defers() {
 }
 
 #[test]
-fn static_call_argument_poison_blocks_generalisation() {
-    // `let f x = (System.String.IsNullOrEmpty x, x)`: the call commits (arity
-    // shortcut — the argument's *type* is not checked), but `x` flows into the
-    // method argument, a subsumption we drop; FCS grounds `x : string`, so `f`
-    // must not generalise to `'a -> bool * 'a` — the argument poison blocks it.
+fn static_call_argument_is_fixed_by_the_one_candidate() {
+    // `let f x = (System.String.IsNullOrEmpty x, x)`: `IsNullOrEmpty` is the one
+    // candidate of one argument, whose `string` FCS relates to `x`'s type
+    // before `x` is checked, so `f : string -> bool * string`; never the
+    // generalised `'a -> bool * 'a`.
     let src = "module M\nlet f x = (System.String.IsNullOrEmpty x, x)\n";
+    assert_sound(src);
     let (_, def_types) = infer_bcl(src);
     assert_eq!(
-        def_types.get("f"),
-        None,
-        "a static-call argument parameter use must block generalisation"
+        def_types.get("f").map(String::as_str),
+        Some("System.String -> System.Boolean * System.String"),
+        "the one candidate's parameter fixes the argument (#662 L3a)"
     );
 }
 

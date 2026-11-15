@@ -32,29 +32,29 @@ argument-check-before-an-unmodelled-suffix node 13-19 `idf uu`	ours System.Int32
 argument-check-before-an-unmodelled-suffix node 13-43 `idf uu, Unchecked.defaultof<_>`	ours - fcs (System.Int32 * System.String) * 'a
 argument-check-before-an-unmodelled-suffix node 17-19 `uu`	ours - fcs System.Int32 * System.String
 argument-check-before-an-unmodelled-suffix node 21-40 `Unchecked.defaultof`	ours - fcs 'a
-arity-unique-overload-fixes-its-argument binder 19-20 `p`	ours - fcs System.Int32
-arity-unique-overload-fixes-its-argument binder 4-6 `k2`	ours - fcs System.String -> System.Int32 -> System.String * System.Int32
+arity-unique-overload-fixes-its-argument binder 19-20 `p`	ours System.Int32 fcs System.Int32
+arity-unique-overload-fixes-its-argument binder 4-6 `k2`	ours System.String -> System.Int32 -> System.String * System.Int32 fcs System.String -> System.Int32 -> System.String * System.Int32
 arity-unique-overload-fixes-its-argument binder 8-9 `s`	ours System.String fcs System.String
-arity-unique-overload-fixes-its-argument census	[UndecidedAccess]
+arity-unique-overload-fixes-its-argument census	[]
 arity-unique-overload-fixes-its-argument fcs	clean
 arity-unique-overload-fixes-its-argument node 24-25 `s`	ours - fcs System.String
-arity-unique-overload-fixes-its-argument node 24-38 `s.Substring(p)`	ours - fcs System.String
-arity-unique-overload-fixes-its-argument node 24-41 `s.Substring(p), p`	ours - fcs System.String * System.Int32
+arity-unique-overload-fixes-its-argument node 24-38 `s.Substring(p)`	ours System.String fcs System.String
+arity-unique-overload-fixes-its-argument node 24-41 `s.Substring(p), p`	ours System.String * System.Int32 fcs System.String * System.Int32
 arity-unique-overload-fixes-its-argument node 36-37 `p`	ours - fcs System.Int32
-arity-unique-overload-fixes-its-argument node 40-41 `p`	ours - fcs System.Int32
-arity-unique-overload-relates-its-return-first binder 19-20 `p`	ours - fcs System.String
-arity-unique-overload-relates-its-return-first binder 4-6 `k3`	ours - fcs System.String -> System.String -> System.String * System.String
+arity-unique-overload-fixes-its-argument node 40-41 `p`	ours System.Int32 fcs System.Int32
+arity-unique-overload-relates-its-return-first binder 19-20 `p`	ours System.String fcs System.String
+arity-unique-overload-relates-its-return-first binder 4-6 `k3`	ours System.String -> System.String -> System.String * System.String fcs System.String -> System.String -> System.String * System.String
 arity-unique-overload-relates-its-return-first binder 8-9 `s`	ours System.String fcs System.String
 arity-unique-overload-relates-its-return-first census	[]
 arity-unique-overload-relates-its-return-first fcs	errors FS0001
-arity-unique-overload-relates-its-return-first node 24-50 `both p (s.Substring(gi p))`	ours - fcs System.String
-arity-unique-overload-relates-its-return-first node 24-53 `both p (s.Substring(gi p)), p`	ours - fcs System.String * System.String
+arity-unique-overload-relates-its-return-first node 24-50 `both p (s.Substring(gi p))`	ours System.String fcs System.String
+arity-unique-overload-relates-its-return-first node 24-53 `both p (s.Substring(gi p)), p`	ours System.String * System.String fcs System.String * System.String
 arity-unique-overload-relates-its-return-first node 29-30 `p`	ours - fcs System.String
 arity-unique-overload-relates-its-return-first node 32-33 `s`	ours - fcs System.String
 arity-unique-overload-relates-its-return-first node 32-49 `s.Substring(gi p)`	ours - fcs System.String
 arity-unique-overload-relates-its-return-first node 44-48 `gi p`	ours - fcs System.Int32
 arity-unique-overload-relates-its-return-first node 47-48 `p`	ours - fcs System.Int32
-arity-unique-overload-relates-its-return-first node 52-53 `p`	ours - fcs System.String
+arity-unique-overload-relates-its-return-first node 52-53 `p`	ours System.String fcs System.String
 branch-relates-before-its-arguments binder 4-6 `c1`	ours System.Boolean -> System.String -> System.String * System.String fcs System.Boolean -> System.String -> System.String * System.String
 branch-relates-before-its-arguments binder 7-8 `b`	ours System.Boolean fcs System.Boolean
 branch-relates-before-its-arguments binder 9-10 `p`	ours System.String fcs System.String
@@ -98,15 +98,15 @@ declared-variable-fixed-by-a-check census	[RigidTypeVariable]
 declared-variable-fixed-by-a-check fcs	errors FS0001
 declared-variable-fixed-by-a-check node 22-26 `gi x`	ours - fcs System.Int32
 declared-variable-fixed-by-a-check node 25-26 `x`	ours - fcs System.Int32
-failed-return-relation-still-checks-the-arguments binder 19-20 `p`	ours - fcs System.Int32
-failed-return-relation-still-checks-the-arguments binder 4-6 `k4`	ours - fcs System.String -> System.Int32 -> System.Int32 * System.Int32
+failed-return-relation-still-checks-the-arguments binder 19-20 `p`	ours System.Int32 fcs System.Int32
+failed-return-relation-still-checks-the-arguments binder 4-6 `k4`	ours System.String -> System.Int32 -> System.Int32 * System.Int32 fcs System.String -> System.Int32 -> System.Int32 * System.Int32
 failed-return-relation-still-checks-the-arguments binder 8-9 `s`	ours System.String fcs System.String
 failed-return-relation-still-checks-the-arguments census	[]
 failed-return-relation-still-checks-the-arguments fcs	errors FS0193
 failed-return-relation-still-checks-the-arguments node 24-45 `gi (s.Insert(p, "z"))`	ours System.Int32 fcs System.Int32
-failed-return-relation-still-checks-the-arguments node 24-48 `gi (s.Insert(p, "z")), p`	ours - fcs System.Int32 * System.Int32
+failed-return-relation-still-checks-the-arguments node 24-48 `gi (s.Insert(p, "z")), p`	ours System.Int32 * System.Int32 fcs System.Int32 * System.Int32
 failed-return-relation-still-checks-the-arguments node 28-44 `s.Insert(p, "z")`	ours - fcs System.Int32
-failed-return-relation-still-checks-the-arguments node 47-48 `p`	ours - fcs System.Int32
+failed-return-relation-still-checks-the-arguments node 47-48 `p`	ours System.Int32 fcs System.Int32
 id-wrapped-access binder 4-6 `r5`	ours System.String -> System.Int32 fcs System.String -> System.Int32
 id-wrapped-access binder 8-9 `x`	ours System.String fcs System.String
 id-wrapped-access census	[]
@@ -146,7 +146,7 @@ lambda-argument-before-the-argument-that-picks-the-overload node 34-35 `1`	ours 
 lambda-argument-before-the-argument-that-picks-the-overload node 9-36 `T.M((fun x -> x.Length), 1)`	ours - fcs System.Int32
 lambda-method-argument-checked-before-resolution binder 4-6 `m1`	ours - fcs System.String -> 'a * System.Int32
 lambda-method-argument-checked-before-resolution binder 8-9 `y`	ours System.String fcs System.String
-lambda-method-argument-checked-before-resolution census	[Lambda]
+lambda-method-argument-checked-before-resolution census	[OverloadUnresolved, Lambda]
 lambda-method-argument-checked-before-resolution fcs	errors FS0193
 lambda-method-argument-checked-before-resolution node 22-48 `y.Insert(0, (fun () -> 1))`	ours - fcs 'a
 lambda-method-argument-checked-before-resolution node 22-51 `y.Insert(0, (fun () -> 1)), 0`	ours - fcs 'a * System.Int32
@@ -162,26 +162,61 @@ lambda-method-argument-control node 31-32 `0`	ours - fcs System.Int32
 lambda-method-argument-control node 34-51 `idf (fun () -> 1)`	ours - fcs System.String
 lambda-method-argument-control node 39-50 `fun () -> 1`	ours - fcs System.String
 lambda-method-argument-control node 54-55 `0`	ours System.Int32 fcs System.Int32
+member-not-found-checks-no-argument binder 19-20 `p`	ours - fcs 'a
+member-not-found-checks-no-argument binder 4-6 `h7`	ours - fcs System.String -> 'a -> 'b * 'a
+member-not-found-checks-no-argument binder 8-9 `s`	ours System.String fcs System.String
+member-not-found-checks-no-argument census	[NoSuchMember]
+member-not-found-checks-no-argument fcs	errors FS0039
+member-not-found-checks-no-argument node 24-35 `s.Foo(gi p)`	ours - fcs 'a
+member-not-found-checks-no-argument node 24-38 `s.Foo(gi p), p`	ours - fcs 'a * 'b
+member-not-found-checks-no-argument node 37-38 `p`	ours - fcs 'a
+named-argument-related-to-the-candidate binder 19-20 `p`	ours - fcs System.Int32
+named-argument-related-to-the-candidate binder 4-6 `h6`	ours - fcs System.String -> System.Int32 -> System.String * System.Int32
+named-argument-related-to-the-candidate binder 8-9 `s`	ours System.String fcs System.String
+named-argument-related-to-the-candidate census	[MethodArgShape, Operator(Unresolved), Operator(Unresolved)]
+named-argument-related-to-the-candidate fcs	errors FS0001
+named-argument-related-to-the-candidate node 24-25 `s`	ours - fcs System.String
+named-argument-related-to-the-candidate node 24-70 `s.Insert(startIndex = both p "s", value = "z")`	ours - fcs System.String
+named-argument-related-to-the-candidate node 24-73 `s.Insert(startIndex = both p "s", value = "z"), p`	ours - fcs System.String * System.Int32
+named-argument-related-to-the-candidate node 46-56 `both p "s"`	ours - fcs System.Int32
+named-argument-related-to-the-candidate node 51-52 `p`	ours - fcs System.Int32
+named-argument-related-to-the-candidate node 53-56 `"s"`	ours - fcs System.Int32
+named-argument-related-to-the-candidate node 66-69 `"z"`	ours - fcs System.String
+named-argument-related-to-the-candidate node 72-73 `p`	ours - fcs System.Int32
+no-candidate-of-the-call-shape binder 19-20 `p`	ours - fcs System.Int32 * System.String
+no-candidate-of-the-call-shape binder 4-6 `h5`	ours - fcs System.String -> System.Int32 * System.String -> System.String * (System.Int32 * System.String)
+no-candidate-of-the-call-shape binder 8-9 `s`	ours System.String fcs System.String
+no-candidate-of-the-call-shape census	[OverloadUnresolved]
+no-candidate-of-the-call-shape fcs	errors FS0001
+no-candidate-of-the-call-shape node 19-20 `p`	ours - fcs System.String * (System.Int32 * System.String)
+no-candidate-of-the-call-shape node 24-51 `s.Insert(both p ("s", "t"))`	ours - fcs System.String
+no-candidate-of-the-call-shape node 24-54 `s.Insert(both p ("s", "t")), p`	ours - fcs System.String * (System.Int32 * System.String)
+no-candidate-of-the-call-shape node 33-50 `both p ("s", "t")`	ours - fcs System.Int32 * System.String
+no-candidate-of-the-call-shape node 38-39 `p`	ours - fcs System.Int32 * System.String
+no-candidate-of-the-call-shape node 41-44 `"s"`	ours - fcs System.Int32
+no-candidate-of-the-call-shape node 41-49 `"s", "t"`	ours - fcs System.Int32 * System.String
+no-candidate-of-the-call-shape node 46-49 `"t"`	ours - fcs System.String
+no-candidate-of-the-call-shape node 53-54 `p`	ours - fcs System.Int32 * System.String
 object-member-on-a-variable-receiver binder 4-6 `k7`	ours - fcs System.Int32 -> System.String * System.Int32
 object-member-on-a-variable-receiver binder 7-8 `x`	ours - fcs System.Int32
-object-member-on-a-variable-receiver census	[UndecidedAccess, UndecidedAccess, Unmodelled(TYPED_EXPR)]
+object-member-on-a-variable-receiver census	[IndeterminateReceiver, Unmodelled(TYPED_EXPR)]
 object-member-on-a-variable-receiver fcs	clean
 object-member-on-a-variable-receiver node 12-13 `x`	ours - fcs System.Int32
 object-member-on-a-variable-receiver node 12-24 `x.ToString()`	ours - fcs System.String
 object-member-on-a-variable-receiver node 12-34 `x.ToString(), (x: int)`	ours - fcs System.String * System.Int32
 object-member-on-a-variable-receiver node 27-28 `x`	ours - fcs System.Int32
-overload-argument-checked-against-a-fresh-type binder 4-6 `k1`	ours - fcs System.String -> System.Boolean
+overload-argument-checked-against-a-fresh-type binder 4-6 `k1`	ours System.String -> System.Boolean fcs System.String -> System.Boolean
 overload-argument-checked-against-a-fresh-type binder 8-9 `s`	ours System.String fcs System.String
-overload-argument-checked-against-a-fresh-type census	[UndecidedAccess]
+overload-argument-checked-against-a-fresh-type census	[]
 overload-argument-checked-against-a-fresh-type fcs	clean
 overload-argument-checked-against-a-fresh-type node 21-22 `s`	ours - fcs System.String
-overload-argument-checked-against-a-fresh-type node 21-42 `s.StartsWith(idf "h")`	ours - fcs System.Boolean
+overload-argument-checked-against-a-fresh-type node 21-42 `s.StartsWith(idf "h")`	ours System.Boolean fcs System.Boolean
 overload-argument-checked-against-a-fresh-type node 34-41 `idf "h"`	ours - fcs System.String
 overload-argument-checked-against-a-fresh-type node 38-41 `"h"`	ours - fcs System.String
 overload-resolution-that-binds-an-open-argument binder 20-21 `p`	ours - fcs System.String
 overload-resolution-that-binds-an-open-argument binder 4-7 `k10`	ours - fcs System.String -> System.String -> System.Boolean * System.String
 overload-resolution-that-binds-an-open-argument binder 9-10 `s`	ours System.String fcs System.String
-overload-resolution-that-binds-an-open-argument census	[UndecidedAccess]
+overload-resolution-that-binds-an-open-argument census	[OverloadUnresolved]
 overload-resolution-that-binds-an-open-argument fcs	clean
 overload-resolution-that-binds-an-open-argument node 25-26 `s`	ours - fcs System.String
 overload-resolution-that-binds-an-open-argument node 25-36 `s.Equals(p)`	ours - fcs System.Boolean
@@ -191,7 +226,7 @@ overload-resolution-that-binds-an-open-argument node 38-39 `p`	ours - fcs System
 overload-with-an-argument-open-at-the-call binder 19-20 `p`	ours - fcs System.String
 overload-with-an-argument-open-at-the-call binder 4-6 `k9`	ours - fcs System.String -> System.String -> 'a * System.Int32
 overload-with-an-argument-open-at-the-call binder 8-9 `s`	ours System.String fcs System.String
-overload-with-an-argument-open-at-the-call census	[UndecidedAccess]
+overload-with-an-argument-open-at-the-call census	[OverloadUnresolved]
 overload-with-an-argument-open-at-the-call fcs	errors FS0041
 overload-with-an-argument-open-at-the-call node 24-41 `s.Contains(idf p)`	ours - fcs 'a
 overload-with-an-argument-open-at-the-call node 24-50 `s.Contains(idf p), monos p`	ours - fcs 'a * System.Int32
@@ -219,6 +254,38 @@ receiver-canonicalised-before-the-lookup node 13-14 `x`	ours - fcs System.Int32
 receiver-canonicalised-before-the-lookup node 13-18 `x + 1`	ours - fcs System.Int32
 receiver-canonicalised-before-the-lookup node 17-18 `1`	ours - fcs System.Int32
 receiver-canonicalised-before-the-lookup node 32-33 `x`	ours - fcs System.Int32
+shaped-argument-after-an-argument-the-candidate-fixes binder 4-6 `h2`	ours - fcs 'a -> System.Int32 -> 'a * 'a * System.Int32
+shaped-argument-after-an-argument-the-candidate-fixes binder 7-8 `p`	ours - fcs 'a
+shaped-argument-after-an-argument-the-candidate-fixes binder 9-10 `q`	ours - fcs System.Int32
+shaped-argument-after-an-argument-the-candidate-fixes census	[OverloadUnresolved, Lambda]
+shaped-argument-after-an-argument-the-candidate-fixes fcs	errors FS0193
+shaped-argument-after-an-argument-the-candidate-fixes node 14-44 `both p (T3.I(q, (fun x -> x)))`	ours - fcs 'a
+shaped-argument-after-an-argument-the-candidate-fixes node 14-50 `both p (T3.I(q, (fun x -> x))), p, q`	ours - fcs 'a * 'a * System.Int32
+shaped-argument-after-an-argument-the-candidate-fixes node 19-20 `p`	ours - fcs 'a
+shaped-argument-after-an-argument-the-candidate-fixes node 22-43 `T3.I(q, (fun x -> x))`	ours - fcs 'a
+shaped-argument-after-an-argument-the-candidate-fixes node 46-47 `p`	ours - fcs 'a
+shaped-argument-after-an-argument-the-candidate-fixes node 49-50 `q`	ours - fcs System.Int32
+shaped-argument-against-a-bcl-candidate binder 19-20 `p`	ours - fcs 'a
+shaped-argument-against-a-bcl-candidate binder 21-22 `q`	ours - fcs System.Int32
+shaped-argument-against-a-bcl-candidate binder 4-6 `h3`	ours - fcs System.String -> 'a -> System.Int32 -> 'a * 'a * System.Int32
+shaped-argument-against-a-bcl-candidate binder 8-9 `s`	ours System.String fcs System.String
+shaped-argument-against-a-bcl-candidate census	[OverloadUnresolved, Lambda]
+shaped-argument-against-a-bcl-candidate fcs	errors FS0193
+shaped-argument-against-a-bcl-candidate node 26-60 `both p (s.Insert(q, (fun x -> x)))`	ours - fcs 'a
+shaped-argument-against-a-bcl-candidate node 26-66 `both p (s.Insert(q, (fun x -> x))), p, q`	ours - fcs 'a * 'a * System.Int32
+shaped-argument-against-a-bcl-candidate node 31-32 `p`	ours - fcs 'a
+shaped-argument-against-a-bcl-candidate node 34-59 `s.Insert(q, (fun x -> x))`	ours - fcs 'a
+shaped-argument-against-a-bcl-candidate node 62-63 `p`	ours - fcs 'a
+shaped-argument-against-a-bcl-candidate node 65-66 `q`	ours - fcs System.Int32
+shaped-argument-against-the-one-candidate binder 4-6 `h1`	ours - fcs 'a -> 'a * 'a
+shaped-argument-against-the-one-candidate binder 7-8 `p`	ours - fcs 'a
+shaped-argument-against-the-one-candidate census	[OverloadUnresolved, Lambda]
+shaped-argument-against-the-one-candidate fcs	errors FS0193
+shaped-argument-against-the-one-candidate node 12-42 `both p (T3.I(1, (fun x -> x)))`	ours - fcs 'a
+shaped-argument-against-the-one-candidate node 12-45 `both p (T3.I(1, (fun x -> x))), p`	ours - fcs 'a * 'a
+shaped-argument-against-the-one-candidate node 17-18 `p`	ours - fcs 'a
+shaped-argument-against-the-one-candidate node 20-41 `T3.I(1, (fun x -> x))`	ours - fcs 'a
+shaped-argument-against-the-one-candidate node 44-45 `p`	ours - fcs 'a
 singleton-into-obj-list binder 4-6 `r1`	ours System.String -> System.Int32 fcs System.String -> System.Int32
 singleton-into-obj-list binder 8-9 `y`	ours System.String fcs System.String
 singleton-into-obj-list census	[]
@@ -243,20 +310,20 @@ singleton-into-string-list fcs	clean
 singleton-into-string-list node 21-37 `gs (singleton y)`	ours System.Int32 fcs System.Int32
 singleton-into-string-list node 25-36 `singleton y`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.String>
 singleton-into-string-list node 35-36 `y`	ours - fcs System.String
-unique-overload-relates-before-its-arguments binder 19-20 `p`	ours - fcs System.String
-unique-overload-relates-before-its-arguments binder 4-6 `c2`	ours - fcs System.String -> System.String -> System.String * System.String
+unique-overload-relates-before-its-arguments binder 19-20 `p`	ours System.String fcs System.String
+unique-overload-relates-before-its-arguments binder 4-6 `c2`	ours System.String -> System.String -> System.String * System.String fcs System.String -> System.String -> System.String * System.String
 unique-overload-relates-before-its-arguments binder 8-9 `s`	ours System.String fcs System.String
 unique-overload-relates-before-its-arguments census	[]
 unique-overload-relates-before-its-arguments fcs	errors FS0001
-unique-overload-relates-before-its-arguments node 24-52 `both p (s.Insert(gi p, "z"))`	ours - fcs System.String
-unique-overload-relates-before-its-arguments node 24-55 `both p (s.Insert(gi p, "z")), p`	ours - fcs System.String * System.String
+unique-overload-relates-before-its-arguments node 24-52 `both p (s.Insert(gi p, "z"))`	ours System.String fcs System.String
+unique-overload-relates-before-its-arguments node 24-55 `both p (s.Insert(gi p, "z")), p`	ours System.String * System.String fcs System.String * System.String
 unique-overload-relates-before-its-arguments node 29-30 `p`	ours - fcs System.String
 unique-overload-relates-before-its-arguments node 32-33 `s`	ours - fcs System.String
 unique-overload-relates-before-its-arguments node 32-51 `s.Insert(gi p, "z")`	ours - fcs System.String
 unique-overload-relates-before-its-arguments node 41-45 `gi p`	ours - fcs System.Int32
 unique-overload-relates-before-its-arguments node 44-45 `p`	ours - fcs System.Int32
 unique-overload-relates-before-its-arguments node 47-50 `"z"`	ours - fcs System.String
-unique-overload-relates-before-its-arguments node 54-55 `p`	ours - fcs System.String
+unique-overload-relates-before-its-arguments node 54-55 `p`	ours System.String fcs System.String
 unit-pattern-after-a-loss-over-a-list binder 4-6 `y3`	ours - fcs System.String -> System.String * Microsoft.FSharp.Collections.FSharpList<System.String> * System.String
 unit-pattern-after-a-loss-over-a-list binder 41-42 `z`	ours - fcs Microsoft.FSharp.Collections.FSharpList<System.String>
 unit-pattern-after-a-loss-over-a-list binder 8-9 `s`	ours System.String fcs System.String

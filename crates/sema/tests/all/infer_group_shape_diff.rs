@@ -57,7 +57,9 @@ use std::collections::BTreeMap;
 use borzoi_assembly::{Member, MethodLike, ParamDefault, Primitive, TypeRef};
 use borzoi_cst::parser::parse;
 use borzoi_cst::syntax::{AstNode, ImplFile};
-use borzoi_sema::{AssemblyEnv, PrecedingTypes, ProjectItems, SyntaxRecovery, infer_file, resolve_file};
+use borzoi_sema::{
+    AssemblyEnv, PrecedingTypes, ProjectItems, SyntaxRecovery, infer_file, resolve_file,
+};
 
 use crate::common::{GradedDumps, env_usize_or, full_bcl_env, temp_fs_file, try_invoke_fcs_dump};
 
@@ -133,6 +135,7 @@ struct Case {
     text: String,
     kind: Kind,
     group: String,
+    probe: &'static str,
     /// The `p` at the case's end, relative to its start.
     p_node: (usize, usize),
 }
@@ -229,6 +232,7 @@ fn cases(env: &AssemblyEnv, per_group: usize, found: &mut usize) -> Vec<Case> {
                     text: head + &body,
                     kind,
                     group: format!("{recv}.{method}/{n}"),
+                    probe,
                     p_node: (p_at, p_at + 1),
                 });
             }
@@ -338,8 +342,16 @@ fn method_calls_check_their_arguments_under_fcss_regime() {
             if ours_types.contains_key(&at) {
                 *tally.committed.entry(case.kind).or_default() += 1;
             }
-            let plain = matches!(case.kind, Kind::PlainOne | Kind::PlainSeveral);
-            if !(plain && clean) {
+            // With several candidates FCS checks the probe against a fresh
+            // type, so `both p LIT` fixes `p` there and `idf p` leaves it to
+            // the resolution, which FCS may take on an open argument and
+            // inference does not.
+            let decided = match case.kind {
+                Kind::PlainOne => true,
+                Kind::PlainSeveral => case.probe.starts_with("both"),
+                Kind::PlainNone | Kind::Other => false,
+            };
+            if !(decided && clean) {
                 continue;
             }
             let Some(fcs) = dumps.types.get(&at) else {
@@ -356,7 +368,9 @@ fn method_calls_check_their_arguments_under_fcss_regime() {
                     case.kind,
                     case.group,
                     ours_types.get(&at),
-                    inferred.incompleteness().get(2 + starts.iter().position(|&s| s == start).unwrap())
+                    inferred
+                        .incompleteness()
+                        .get(2 + starts.iter().position(|&s| s == start).unwrap())
                 ));
             }
         }
@@ -382,7 +396,10 @@ fn method_calls_check_their_arguments_under_fcss_regime() {
     );
     for kind in [Kind::PlainOne, Kind::PlainSeveral] {
         let n = tally.must.get(&kind).copied().unwrap_or(0);
-        assert!(n >= 10, "only {n} must-commit points in {kind:?} groups: {tally:?}");
+        assert!(
+            n >= 10,
+            "only {n} must-commit points in {kind:?} groups: {tally:?}"
+        );
     }
     for kind in [Kind::PlainNone, Kind::Other] {
         let n: usize = [true, false]

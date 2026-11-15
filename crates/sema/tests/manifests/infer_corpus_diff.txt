@@ -1146,7 +1146,11 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeCon
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/CheckingSyntacticTypes/E_MemberConstraint02.fs:10:5-10:26 unconverted-decl	"f"
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/CheckingSyntacticTypes/NativePtrArrayElementUsage.fs	compared
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/CheckingSyntacticTypes/NativePtrArrayElementUsage.fs:11:23-11:26 binder	agree
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/CheckingSyntacticTypes/NativePtrArrayElementUsage.fs:13:11-13:14 binder	agree
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/CheckingSyntacticTypes/NativePtrArrayElementUsage.fs:13:17-13:35 expr	agree
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/CheckingSyntacticTypes/NativePtrArrayElementUsage.fs:7:15-7:29 binder	agree
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/CheckingSyntacticTypes/NativePtrArrayElementUsage.fs:7:31-7:34 binder	agree
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/CheckingSyntacticTypes/NativePtrArrayElementUsage.fs:9:10-9:49 expr	agree
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/LogicalPropertiesOfTypes/BaseTypes_DiscriminatedUnion.fs	compared
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/TypesAndTypeConstraints/TypeConstraints/E_ConstructorConstraint01.fs	compared
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/General/E_Big_int01.fs	compared

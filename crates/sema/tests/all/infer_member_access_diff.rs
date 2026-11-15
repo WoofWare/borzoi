@@ -2424,36 +2424,35 @@ fn unwoken_method_call_blocks_generalisation() {
 }
 
 #[test]
-fn method_argument_use_blocks_generalisation() {
-    // `let s = "hi"` then `let f x = (s.Insert(x, "z"), x)`: the call grounds to
-    // `string` regardless of `x`, but `x` flows into the method argument (a
-    // subsumption we drop). FCS grounds `x : int` there, so `f` must NOT generalise
-    // to `'a -> string * 'a`; the argument poison blocks it and `f` defers.
+fn method_argument_fixes_the_parameter_it_is_checked_against() {
+    // `let s = "hi"` then `let f x = (s.Insert(x, "z"), x)`: `Insert` is the one
+    // candidate of two arguments, whose `int` FCS relates to `x`'s type before
+    // `x` is checked, so `f : int -> string * int`; never the generalised
+    // `'a -> string * 'a`.
     let src = "module M\nlet s = \"hi\"\nlet f x = (s.Insert(x, \"z\"), x)\n";
+    assert_sound(src);
     let (_, def_types) = infer_bcl(src);
     assert_eq!(
-        def_types.get("f"),
-        None,
-        "a method-argument parameter use must block generalisation"
+        def_types.get("f").map(String::as_str),
+        Some("System.Int32 -> System.String * System.Int32"),
+        "the one candidate's parameter fixes the argument (#662 L3a)"
     );
 }
 
 #[test]
-fn method_arg_nested_application_of_param_blocks_generalisation() {
-    // The subtle case: a parameter flows through a *nested application* in the method
-    // argument (`s.Insert(id y, "z")` with an in-file generic `id`). FCS grounds
-    // `y : int` through `Insert`'s parameter, so `f : int -> string` — not
-    // `'a -> string`. The nested `id y` is walked in check mode, so its result var
-    // (which for `id : 'a -> 'a` is its domain) is poisoned, and the application wake
-    // unifies `y` with that poisoned var — poisoning `y` transitively. `f` defers
-    // rather than publishing a wrong `'a -> string` (the check-mode poison reaching a
-    // param through a nested application, D5).
+fn method_arg_nested_application_of_param_is_fixed_by_the_parameter() {
+    // A parameter flowing through a *nested application* in the method argument
+    // (`s.Insert(id y, "z")` with an in-file generic `id`): FCS relates
+    // `Insert`'s `int` to the argument's type before checking it, so `id`'s
+    // result, and `y` with it, is `int`: `f : int -> string`, never the
+    // generalised `'a -> string`.
     let src = "module M\nlet id x = x\nlet s = \"hi\"\nlet f y = s.Insert(id y, \"z\")\n";
+    assert_sound(src);
     let (_, def_types) = infer_bcl(src);
     assert_eq!(
-        def_types.get("f"),
-        None,
-        "a parameter used inside a nested application in a method argument must not generalise"
+        def_types.get("f").map(String::as_str),
+        Some("System.Int32 -> System.String"),
+        "the parameter's type reaches the nested application's argument (#662 L3a)"
     );
 }
 
@@ -2747,12 +2746,12 @@ fn arity_unique_overload_fixes_its_argument_before_checking_it() {
     // overload's parameter to the argument's type before it checks the
     // argument (`UnifyUniqueOverloading`), so `p : int`, and the call is
     // `Substring(int)`'s `string`.
-    let src = "module M\nlet k (s: string) p = (s.Substring(p), p)\n";
+    let src = "module M\nlet s = \"hi\"\nlet k p = (s.Substring(p), p)\n";
     assert_sound(src);
     let (_, def_types) = infer_bcl(src);
     assert_eq!(
         def_types.get("k").map(String::as_str),
-        Some("System.String -> System.Int32 -> System.String * System.Int32"),
+        Some("System.Int32 -> System.String * System.Int32"),
         "the one overload of the call's arity fixes `p` before `p` is checked (#662 L3)"
     );
 }
@@ -2764,13 +2763,13 @@ fn arity_unique_overload_relates_its_return_before_its_arguments() {
     // is `string` when `gi p` is checked, which FCS rejects, keeping
     // `p : string`. Relating the return only after the arguments would let
     // `gi p` fix `p : int`.
-    let src = "module M\nlet both (x: 'a) (y: 'a) = x\nlet gi (i: int) = 0\n\
-               let k (s: string) p = (both p (s.Substring(gi p)), p)\n";
+    let src = "module M\nlet both (x: 'a) (y: 'a) = x\nlet gi (i: int) = 0\nlet s = \"hi\"\n\
+               let k p = (both p (s.Substring(gi p)), p)\n";
     assert_sound(src);
     let (_, def_types) = infer_bcl(src);
     assert_eq!(
         def_types.get("k").map(String::as_str),
-        Some("System.String -> System.String -> System.String * System.String"),
+        Some("System.String -> System.String * System.String"),
         "the call's return is related before its arguments are checked (#662 L3)"
     );
 }

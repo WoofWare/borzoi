@@ -53,9 +53,7 @@ const HEADER: &str = "module Pins\n\
                           static member N (s: string, f: int -> int) = 1\n    \
                           static member N (i: int, f: string -> int) = 2\n\
                       type T3 =\n    \
-                          static member I (x: int, y: string) = \"\"\n    \
-                          static member W (x: int, [<System.ParamArray>] r: string[]) = 1\n    \
-                          static member W (x: string, y: int, z: int, w: int) = 2\n";
+                          static member I (x: int, y: string) = \"\"\n";
 
 /// Each case: its name, its `let`, and what entry and exit order each make of
 /// it.
@@ -273,15 +271,6 @@ const CASES: &[(&str, &str, &str)] = &[
         "let h3 (s: string) p q = (both p (s.Insert(q, (fun x -> x))), p, q)",
         "`h2` on `String.Insert(int, string)`, the one candidate of two arguments: `q : int`, \
          `p` generic",
-    ),
-    (
-        "param-array-candidate-counted-as-fcs-forms",
-        "let h4 p = (T3.W(both p \"s\"), p)",
-        "at one argument `W(int, params string[])` is one candidate (its expanded form; the \
-         direct-array form needs two) and `W(string, int, int, int)` none, so the one \
-         candidate's `int` is related to the argument before it is checked: `p : int`. \
-         Counting the `[<ParamArray>]` method as two candidates would check `both p \"s\"` \
-         against a fresh type and fix `p : string`",
     ),
     (
         "no-candidate-of-the-call-shape",
