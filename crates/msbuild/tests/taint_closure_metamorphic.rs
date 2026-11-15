@@ -1085,6 +1085,25 @@ fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
     );
 }
 
+/// The other side of #780's gate fix: a refused name that a later clean write
+/// binds holds a value computed exactly, so a gate reading it decides exactly.
+#[test]
+fn a_project_reference_gated_on_a_rewritten_refused_name_is_certain() {
+    let project = pure_evaluate(
+        r#"<Project>
+  <PropertyGroup><Bar>$(Configuration.Substring(0,1))</Bar></PropertyGroup>
+  <PropertyGroup><Bar>x</Bar></PropertyGroup>
+  <ItemGroup Condition="'$(Bar)' == 'x'"><ProjectReference Include="x.fsproj" /></ItemGroup>
+</Project>"#,
+    );
+    assert!(!project.project_references_uncertain);
+    assert_eq!(project.project_references.len(), 1);
+    assert_eq!(
+        project.property("Bar"),
+        PropertyRead::Value("x".to_string())
+    );
+}
+
 /// #781: a `Directory.Build.targets` spliced on an undecided gate publishes
 /// its writes as trusted.
 #[test]
