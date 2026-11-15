@@ -33,11 +33,16 @@ pub fn parse(text: &str) -> Result<Document<'_>, roxmltree::Error> {
             Some(hex) => (hex, 16),
             None => (reference, 10),
         };
-        let digits = &digits[..digits.find(';').unwrap_or(digits.len())];
-        // Digits that are no `u32` fail `roxmltree`'s parse wherever they
-        // form a reference, so here they are text.
-        let names_no_character =
-            u32::from_str_radix(digits, radix).is_ok_and(|code| char::from_u32(code).is_none());
+        // Only the run of digits is read, so the scan stays linear in the text.
+        let run = digits
+            .bytes()
+            .take_while(|b| char::from(*b).is_digit(radix))
+            .count();
+        // A run not closed by `;`, or that is no `u32`, fails `roxmltree`'s
+        // parse wherever it would form a reference, so here it is text.
+        let names_no_character = digits[run..].starts_with(';')
+            && u32::from_str_radix(&digits[..run], radix)
+                .is_ok_and(|code| char::from_u32(code).is_none());
         if names_no_character {
             let offset = text.len() - rest.len() + at;
             return Err(roxmltree::Error::MalformedEntityReference(
@@ -329,6 +334,21 @@ mod tests {
             "<A><!-- &#xyz; &#99999999999; --></A>",
         ] {
             assert!(parse(admitted).is_ok(), "{admitted}");
+        }
+    }
+
+    /// [`parse`]'s scan reads each byte a bounded number of times: comment
+    /// text holding a reference's opening again and again, never closed,
+    /// parses in what a linear scan takes, where one reading to the next `;`
+    /// each time took 18 s on 200,000 of them.
+    #[test]
+    fn the_reference_scan_is_linear() {
+        for opening in ["&#", "&#1", "&#x"] {
+            let source = format!("<A><!-- {} --></A>", opening.repeat(200_000));
+            let started = std::time::Instant::now();
+            assert!(parse(&source).is_ok());
+            let took = started.elapsed();
+            assert!(took.as_secs() < 3, "{opening}: {took:?}");
         }
     }
 
