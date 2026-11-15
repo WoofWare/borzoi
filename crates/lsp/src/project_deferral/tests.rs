@@ -231,8 +231,9 @@ mod properties {
                                     origin: origin.clone(),
                                 })
                             }
-                            // The define axis has no structural arm.
-                            CompileItemUncertaintyCauseKind::Structural(_) => None,
+                            // The define axis has no structural or stale arm.
+                            CompileItemUncertaintyCauseKind::Structural(_)
+                            | CompileItemUncertaintyCauseKind::StaleValue { .. } => None,
                         })
                         .collect();
                     parsed.compile_condition_uncertainties = cond_kinds

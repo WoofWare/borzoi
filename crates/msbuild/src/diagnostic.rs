@@ -347,6 +347,14 @@ pub enum CompileItemUncertaintyCauseKind {
     /// A dropped structural construct whose generic diagnostic does not itself
     /// say why Compile items may be missing.
     Structural(StructuralCompileItemUncertainty),
+    /// A Compile item's `Include` or `Condition` (or another text deciding the
+    /// source set) read a value the walk held from before content it could not
+    /// see, which may have rewritten it: `reference` is that text as written,
+    /// and `hidden_by` what the walk could not see.
+    StaleValue {
+        reference: String,
+        hidden_by: crate::UntrustedCause,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
