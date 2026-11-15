@@ -520,10 +520,14 @@
 "module M\ntype T() =\n    abstract P open System\nlet x = 1\n" | divergent
 "module M\ntype T() =\n    abstract P with get\nlet x = 1\n" | divergent
 "module M\ntype T() =\n    abstract P with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P: [<A(if true then 1 else 2)>] member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P: [<A>] member _.Q = 1\nlet x = 1\n" | loses a member
 "module M\ntype T() =\n    abstract P: exception E\nlet x = 1\n" | divergent
 "module M\ntype T() =\n    abstract P: open System\nlet x = 1\n" | divergent
 "module M\ntype T() =\n    abstract P: with get\nlet x = 1\n" | divergent
 "module M\ntype T() =\n    abstract P: with get\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P:\n        [<A(if true then 1 else 2)>] member _.Q = 1\nlet x = 1\n" | loses a member
+"module M\ntype T() =\n    abstract P:\n        [<A>] member _.Q = 1\nlet x = 1\n" | loses a member
 "module M\ntype T() =\n    abstract P:\n        exception E\nlet x = 1\n" | divergent
 "module M\ntype T() =\n    abstract P:\n        module N = let n = 1\nlet x = 1\n" | divergent
 "module M\ntype T() =\n    abstract P:\n        open System\nlet x = 1\n" | divergent

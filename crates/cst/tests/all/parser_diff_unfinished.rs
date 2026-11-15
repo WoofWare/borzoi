@@ -505,6 +505,8 @@ fn recover_followers_of_unfinished_constructs_grid() {
         "inherit B()",
         "static member S = 1",
         "override _.O = 1",
+        "[<A>] member _.Q = 1",
+        "[<A(if true then 1 else 2)>] member _.Q = 1",
     ];
     const DECL_FOLLOWERS: &[&str] = &[
         "type S = int",

@@ -256,6 +256,15 @@ impl<'src> Parser<'src> {
                 {
                     return;
                 }
+                // Attribute lists heading the next member, on the same line:
+                // the member begins at its attributes.
+                Ok(FilteredToken::Raw(Token::LBrackLess))
+                    if brackets == 0
+                        && !crossed_layout
+                        && self.classify_object_model_item_from_raw().is_some() =>
+                {
+                    return;
+                }
                 // The next member's or class binding's keyword, on the same line: FCS's error
                 // recovery shifts it as the start of the next member. After a
                 // bracket, a layout token or a `with` of the rest's, the lex
