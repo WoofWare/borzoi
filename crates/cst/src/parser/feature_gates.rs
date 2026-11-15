@@ -72,17 +72,100 @@ pub(super) fn feature_gate_diagnostics(
     root: &SyntaxNode,
     lang: LanguageVersion,
 ) -> Vec<ParseDiagnostic> {
-    let mut out = Vec::new();
     // A parse at preview (an orphan buffer) has every feature gated here, so
     // skip the walk. `POSITIONAL_GATES` is every live `Kind` or `Positional`
-    // row of the feature table, a superset of what this walk gates; a
-    // numbered version lacks `FromEndSlicing`, so its parse always walks.
+    // row of the feature table, a superset of what this walk gates.
     if LanguageFeature::POSITIONAL_GATES
         .iter()
         .all(|&f| lang.supports(f))
     {
-        return out;
+        return Vec::new();
     }
+    // Every gate below reports only for a feature `lang` lacks, so a node can
+    // draw a diagnostic only if its kind is gated by such a feature, and the
+    // walk visits only those, building no handle for the rest of the file
+    // (at F# 10, every node but a `^e`). The exception is `static abstract`,
+    // which `static_abstract_span` finds on a node of any kind, so below its
+    // version every node is visited.
+    let unsupported = |feature: LanguageFeature| !lang.supports(feature);
+    let every_node = unsupported(LanguageFeature::InterfacesWithAbstractStaticMembers);
+    let out = gates_over(
+        root.descendants_where(|kind| {
+            every_node
+                || kind_feature(kind).is_some_and(unsupported)
+                || positional_gate(kind).is_some_and(|(feature, _)| unsupported(feature))
+        }),
+        root.tokens_where(|kind| kind == SyntaxKind::IEEE32_LIT),
+        lang,
+    );
+    #[cfg(feature = "walk-reference")]
+    assert_eq!(
+        out,
+        gates_over(
+            root.descendants(),
+            root.descendants_with_tokens()
+                .filter_map(SyntaxElement::into_token),
+            lang,
+        ),
+        "the filtered gate walk reports what the walk over every element reports"
+    );
+    out
+}
+
+/// A gate checked on a node of one kind: the detector returns the span to
+/// report at, if the node uses the feature.
+type PositionalGate = (LanguageFeature, fn(&SyntaxNode) -> Option<Range<usize>>);
+
+/// A [`PositionalGate`] on `feature`. The feature table's census
+/// (`tests/all/language_features.rs`) reads `positional(LanguageFeature::…`
+/// as a consultation of the feature.
+fn positional(
+    feature: LanguageFeature,
+    detect: fn(&SyntaxNode) -> Option<Range<usize>>,
+) -> PositionalGate {
+    (feature, detect)
+}
+
+/// The gate the walk checks on a node of `kind`, besides its
+/// [`kind_feature`]. This is the walk's whole dispatch, so the kinds it
+/// filters on are the kinds it acts on.
+fn positional_gate(kind: SyntaxKind) -> Option<PositionalGate> {
+    Some(match kind {
+        SyntaxKind::LONG_IDENT_PAT => positional(
+            LanguageFeature::SingleUnderscorePattern,
+            underscore_dot_pattern_span,
+        ),
+        SyntaxKind::FOR_EXPR => {
+            positional(LanguageFeature::WildCardInForLoop, wildcard_for_loop_span)
+        }
+        SyntaxKind::TYPAR_DECL => positional(
+            LanguageFeature::ConstraintIntersectionOnFlexibleTypes,
+            typar_decl_intersection_span,
+        ),
+        SyntaxKind::MODULE_OR_NAMESPACE | SyntaxKind::NESTED_MODULE_DECL => positional(
+            LanguageFeature::AttributesToRightOfModuleKeyword,
+            module_attributes_span,
+        ),
+        SyntaxKind::BINDING => positional(
+            LanguageFeature::AllowTypedLetUseAndBang,
+            typed_bang_binding_span,
+        ),
+        SyntaxKind::YIELD_OR_RETURN_EXPR | SyntaxKind::YIELD_OR_RETURN_FROM_EXPR => positional(
+            LanguageFeature::AllowTypedLetUseAndBang,
+            typed_yield_or_return_span,
+        ),
+        _ => return None,
+    })
+}
+
+/// The gates' errors over `nodes` and `tokens`, in tree order, parsed at
+/// `lang`. [`feature_gate_diagnostics`] passes the elements that can draw one.
+fn gates_over(
+    nodes: impl Iterator<Item = SyntaxNode>,
+    tokens: impl Iterator<Item = SyntaxToken>,
+    lang: LanguageVersion,
+) -> Vec<ParseDiagnostic> {
+    let mut out = Vec::new();
     let mut gate = |feature: LanguageFeature, span: Range<usize>| {
         if !lang.supports(feature) {
             out.push(ParseDiagnostic::gate(
@@ -94,7 +177,7 @@ pub(super) fn feature_gate_diagnostics(
     };
     // `^e` below preview where it is not an index argument.
     let mut static_constraint_invocations = Vec::new();
-    for node in root.descendants() {
+    for node in nodes {
         if node.kind() == SyntaxKind::INDEX_FROM_END_EXPR && !is_index_argument(&node, lang) {
             static_constraint_invocations.extend(significant_range(&node));
         } else if let Some(feature) = kind_feature(node.kind())
@@ -102,38 +185,10 @@ pub(super) fn feature_gate_diagnostics(
         {
             gate(feature, span);
         }
-        match node.kind() {
-            SyntaxKind::LONG_IDENT_PAT => {
-                if let Some(span) = underscore_dot_pattern_span(&node) {
-                    gate(LanguageFeature::SingleUnderscorePattern, span);
-                }
-            }
-            SyntaxKind::FOR_EXPR => {
-                if let Some(span) = wildcard_for_loop_span(&node) {
-                    gate(LanguageFeature::WildCardInForLoop, span);
-                }
-            }
-            SyntaxKind::TYPAR_DECL => {
-                if let Some(span) = typar_decl_intersection_span(&node) {
-                    gate(LanguageFeature::ConstraintIntersectionOnFlexibleTypes, span);
-                }
-            }
-            SyntaxKind::MODULE_OR_NAMESPACE | SyntaxKind::NESTED_MODULE_DECL => {
-                if let Some(span) = module_attributes_span(&node) {
-                    gate(LanguageFeature::AttributesToRightOfModuleKeyword, span);
-                }
-            }
-            SyntaxKind::BINDING => {
-                if let Some(span) = typed_bang_binding_span(&node) {
-                    gate(LanguageFeature::AllowTypedLetUseAndBang, span);
-                }
-            }
-            SyntaxKind::YIELD_OR_RETURN_EXPR | SyntaxKind::YIELD_OR_RETURN_FROM_EXPR => {
-                if let Some(span) = typed_yield_or_return_span(&node) {
-                    gate(LanguageFeature::AllowTypedLetUseAndBang, span);
-                }
-            }
-            _ => {}
+        if let Some((feature, detect)) = positional_gate(node.kind())
+            && let Some(span) = detect(&node)
+        {
+            gate(feature, span);
         }
         // From 7.0 on, FCS warns on every `static abstract` instead (FS3535,
         // `tcUsingInterfacesWithStaticAbstractMethods`). That warning is not
@@ -155,10 +210,7 @@ pub(super) fn feature_gate_diagnostics(
         }));
     }
     if !lang.supports(LanguageFeature::DotlessFloat32Literal) {
-        for token in root
-            .descendants_with_tokens()
-            .filter_map(SyntaxElement::into_token)
-        {
+        for token in tokens {
             if let Some(span) = dotless_float32_span(&token) {
                 out.push(ParseDiagnostic::gate(
                     LanguageFeature::DotlessFloat32Literal,
