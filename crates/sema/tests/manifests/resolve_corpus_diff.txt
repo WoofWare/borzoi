@@ -312,8 +312,10 @@ src/Compiler/Driver/CreateILModule.fs:127:42 "&&"	assembly-gap
 src/Compiler/Driver/CreateILModule.fs:146:27 "||"	assembly-gap
 src/Compiler/Driver/CreateILModule.fs:242:16 "AttributeHelpers"	gap
 src/Compiler/Driver/CreateILModule.fs:242:16 "AttributeHelpers.ILVersion"	gap
+src/Compiler/Driver/CreateILModule.fs:242:49 "v"	gap
 src/Compiler/Driver/CreateILModule.fs:256:16 "AttributeHelpers"	gap
 src/Compiler/Driver/CreateILModule.fs:256:16 "AttributeHelpers.ILVersion"	gap
+src/Compiler/Driver/CreateILModule.fs:256:49 "v"	gap
 src/Compiler/Driver/CreateILModule.fs:271:38 "Char.IsDigit"	assembly-gap
 src/Compiler/Driver/CreateILModule.fs:271:68 "c.ToString"	assembly-gap
 src/Compiler/Driver/CreateILModule.fs:275:19 "UInt16.TryParse"	assembly-gap
@@ -797,18 +799,18 @@ src/Compiler/Service/ServiceParseTreeWalk.fs:605:37 "::"	assembly-gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:630:77 "::"	assembly-gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:638:24 "ok.IsSome"	assembly-gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:780:48 "::"	assembly-gap
-src/Compiler/Service/ServiceParseTreeWalk.fs:783:58 "p"	alt-binder fcs=779:33 ours=783:32 fcs-check-errors
-src/Compiler/Service/ServiceParseTreeWalk.fs:792:44 "p"	alt-binder fcs=779:33 ours=791:33 fcs-check-errors
-src/Compiler/Service/ServiceParseTreeWalk.fs:800:44 "p"	alt-binder fcs=779:33 ours=799:32 fcs-check-errors
-src/Compiler/Service/ServiceParseTreeWalk.fs:805:67 "p"	alt-binder fcs=779:33 ours=805:41 fcs-check-errors
-src/Compiler/Service/ServiceParseTreeWalk.fs:816:55 "pat"	alt-binder fcs=813:31 ours=815:42 fcs-check-errors
+src/Compiler/Service/ServiceParseTreeWalk.fs:783:58 "p"	gap
+src/Compiler/Service/ServiceParseTreeWalk.fs:792:44 "p"	gap
+src/Compiler/Service/ServiceParseTreeWalk.fs:800:44 "p"	gap
+src/Compiler/Service/ServiceParseTreeWalk.fs:805:67 "p"	gap
+src/Compiler/Service/ServiceParseTreeWalk.fs:816:55 "pat"	gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:824:39 "StripParenTypes ty"	gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:826:50 "::"	assembly-gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:830:87 "::"	assembly-gap
-src/Compiler/Service/ServiceParseTreeWalk.fs:836:67 "ty"	alt-binder fcs=825:33 ours=832:40 fcs-check-errors
+src/Compiler/Service/ServiceParseTreeWalk.fs:836:67 "ty"	gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:872:53 "::"	assembly-gap
-src/Compiler/Service/ServiceParseTreeWalk.fs:890:117 "synMemberDefns"	alt-binder fcs=871:90 ours=887:72 fcs-check-errors
-src/Compiler/Service/ServiceParseTreeWalk.fs:893:33 "synMemberDefns"	alt-binder fcs=871:90 ours=887:72 fcs-check-errors
+src/Compiler/Service/ServiceParseTreeWalk.fs:890:117 "synMemberDefns"	gap
+src/Compiler/Service/ServiceParseTreeWalk.fs:893:33 "synMemberDefns"	gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:914:35 "SynField(attributes = attributes)"	gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:919:35 "SynEnumCase(attributes = attributes)"	gap
 src/Compiler/Service/ServiceParseTreeWalk.fs:924:35 "SynUnionCase(attributes = attributes; caseType = caseType)"	gap
@@ -6070,6 +6072,7 @@ tests/FSharp.Test.Utilities/CompilerAssert.fs:1019:63 "_"	gap
 tests/FSharp.Test.Utilities/CompilerAssert.fs:1022:15 "Result"	assembly-gap
 tests/FSharp.Test.Utilities/CompilerAssert.fs:1022:15 "Result.Error"	assembly-gap
 tests/FSharp.Test.Utilities/CompilerAssert.fs:1022:34 "errorMessages.Add"	assembly-gap
+tests/FSharp.Test.Utilities/CompilerAssert.fs:1022:52 "ex"	gap
 tests/FSharp.Test.Utilities/CompilerAssert.fs:1028:13 "CultureInfo"	assembly-gap
 tests/FSharp.Test.Utilities/CompilerAssert.fs:1028:13 "CultureInfo.CurrentUICulture"	assembly-gap
 tests/FSharp.Test.Utilities/CompilerAssert.fs:1031:57 "string"	assembly-gap

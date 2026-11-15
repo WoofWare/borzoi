@@ -237,8 +237,8 @@ pat_list (nested) Long	height 407, resolved at depth 407, inference nested 5
 pat_list (nested) TallestClean	height 407, resolved at depth 407, inference nested 5
 pat_list Long	height 10, resolved at depth 9, inference nested 5
 pat_list TallestClean	height 10, resolved at depth 9, inference nested 5
-pat_long_ident (nested) Long	height 408, resolved at depth 408, inference nested 5
-pat_long_ident (nested) TallestClean	height 408, resolved at depth 408, inference nested 5
+pat_long_ident (nested) Long	height 408, resolved at depth 406, inference nested 5
+pat_long_ident (nested) TallestClean	height 408, resolved at depth 406, inference nested 5
 pat_long_ident Long	height 10, resolved at depth 9, inference nested 5
 pat_long_ident TallestClean	height 10, resolved at depth 9, inference nested 5
 pat_or (nested) Long	height 1024 (stopped), resolved at depth 406, inference nested 5

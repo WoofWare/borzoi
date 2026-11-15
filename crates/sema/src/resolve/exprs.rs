@@ -940,6 +940,10 @@ impl<'a> Resolver<'a> {
                 if self.index.excluded_param_ranges.contains(&pat_name.range()) {
                     continue;
                 }
+                if let Some(mask) = self.undecided_pattern_name(&pat_name) {
+                    entries.extend(mask);
+                    continue;
+                }
                 let def = match pat_name {
                     PatternName::Alias { range, binder } => {
                         if let Some(res) = aliases.resolution_of(binder) {
@@ -975,6 +979,59 @@ impl<'a> Resolver<'a> {
             }
         }
         entries
+    }
+
+    /// What the binder-interning loops do with a pattern name occurrence that
+    /// may or may not bind, because it sits under a qualified pattern head the
+    /// walk could not resolve
+    /// ([`Indexes::undecided_pattern_binders`](super::indexes::Indexes::undecided_pattern_binders)):
+    /// `None` for an occurrence that is not undecided, which the caller
+    /// handles as usual.
+    ///
+    /// An undecided binder is an [opaque binder](super::ResolvedFile::opaque_binders),
+    /// and its name enters scope as an entry that declines, since FCS binds it
+    /// whenever the head resolves; a nullary head naming a case in scope binds
+    /// nothing either way, so it is neither.
+    ///
+    /// An or-pattern alias is opaque when it is undecided itself, or when the
+    /// binder it re-spells is: then, if the first alternative's head does not
+    /// resolve, FCS binds the name at the alias instead. The binder's
+    /// declining entry already carries the name, so an alias adds none.
+    pub(super) fn undecided_pattern_name(
+        &mut self,
+        pat_name: &PatternName,
+    ) -> Option<Option<ScopeEntry>> {
+        let undecided = &self.index.undecided_pattern_binders;
+        match pat_name {
+            PatternName::Binder(def) if undecided.contains(&def.range) => {
+                // A nullary head naming a case in scope (`None` in
+                // `Q.R(None)`) is no binder whichever way the head goes: a
+                // reference to the case when it resolves, nothing when it does
+                // not. So it is left unrecorded, and hides nothing.
+                if def.provisional
+                    && self
+                        .case_reference(self.assemblies.names().text(def.name()))
+                        .is_some_and(|r| !matches!(r, Resolution::Deferred(_)))
+                {
+                    return Some(None);
+                }
+                self.out.opaque_binders.insert(def.range);
+                let mut mask = ScopeEntry::binding_named(
+                    def.name(),
+                    Resolution::Deferred(DeferredReason::UnboundName),
+                    self.scope.open_generation,
+                );
+                mask.decline = Some(DeclineCause::OpaqueBinder);
+                Some(Some(mask))
+            }
+            PatternName::Alias { range, binder }
+                if undecided.contains(range) || undecided.contains(binder) =>
+            {
+                self.out.opaque_binders.insert(*range);
+                Some(None)
+            }
+            _ => None,
+        }
     }
 
     /// Resolve a **bare** name use, and where it declines, record which guard
