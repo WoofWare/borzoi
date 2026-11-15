@@ -37,10 +37,12 @@ pub(super) struct Emissions {
     /// `(range, var)` per expression whose type to emit; `range` is the read-off
     /// key (and the same range the resolver keyed the occurrence under).
     exprs: Vec<(TextRange, TyVid)>,
-    /// Every expression-level `let` binder [`super::Gen::local_binding`] bound (CE-1).
+    /// Every expression-level `let` binder [`super::Gen::local_binding`] bound (CE-1),
+    /// and every lambda parameter ([`Self::unpublished_local`]).
     /// Unlike a declaration's binder, a local sits *inside* an expression, so
     /// its publication is an emission like a node's: [`super::Gen::finish`] publishes
-    /// one only if it is still in [`Self::local_emits`].
+    /// one only if it is still in [`Self::local_emits`], where a lambda
+    /// parameter never is.
     local_defs: HashSet<DefId>,
     /// The local binders to publish, in walk order — the binder-side twin of
     /// [`Self::exprs`], and discarded with it by an emission barrier
@@ -55,8 +57,9 @@ pub(super) struct Emissions {
     incompleteness: Vec<Vec<Incomplete>>,
     /// Ranges whose emission [`super::Gen::finish`] drops: a `match` scrutinee's own
     /// node, which FCS may cover with a temporary's `let` typed as the whole
-    /// match. Filtered at read-off rather than cut from [`Self::exprs`], whose
-    /// positions emission marks record.
+    /// match, and a lambda FCS folds into a declaration's parameters
+    /// ([`super::Gen::fold_binding_lambdas`]). Filtered at read-off rather
+    /// than cut from [`Self::exprs`], whose positions emission marks record.
     ungraded_ranges: HashSet<TextRange>,
     /// Each successfully-woken member access → its resolved identity, keyed by the
     /// member-name use range (Stage 3.3b). Filled by [`super::Gen::wake_member`] on a
@@ -122,6 +125,17 @@ impl Emissions {
     /// if it is complete.
     pub(super) fn census(&mut self, reasons: Vec<Incomplete>) {
         self.incompleteness.push(reasons);
+    }
+
+    /// Record the binder `def` as one never published: a lambda's parameter
+    /// ([`super::Gen::infer_lambda`]).
+    pub(super) fn unpublished_local(&mut self, def: DefId) {
+        self.local_defs.insert(def);
+    }
+
+    /// Leave ungraded any node recorded at `range`.
+    pub(super) fn ungrade(&mut self, range: TextRange) {
+        self.ungraded_ranges.insert(range);
     }
 
     /// Leave ungraded the last node recorded since `mark`, if any.

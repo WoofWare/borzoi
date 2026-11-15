@@ -408,7 +408,7 @@ impl<'a> Gen<'a> {
                                 return Inferred::untyped(self.decline_expected(scope, why));
                             }
                         };
-                    shape.names(&mut scope.match_locals);
+                    shape.names(&mut scope.pattern_locals);
                     // Every equality the pattern generates — its fields'
                     // included — counts toward its fit, so the count is taken
                     // before it is generated, once what came before settled.
@@ -511,39 +511,8 @@ impl<'a> Gen<'a> {
                     _ => Inferred::typed(first, d),
                 }
             }
-            // A lambda `fun x … -> body`. Walk the body so its sub-expressions get
-            // typed, carrying the lambda's **mode**: coercion-free (synth) only when
-            // the lambda itself is (a bare `let g = fun … -> …`); reached in *check*
-            // mode (e.g. an `if`-branch checked against another function), an
-            // expected function type could retarget the body, so we check it —
-            // emission suppressed. The lambda's own function type is not modelled
-            // yet (`TyKind::Fun` is a later slice), so it defers. A param use in the
-            // body binds lazily via name resolution. (3.2c-2a)
-            Expr::Fun(fun) => {
-                // The lambda's own function type is not modelled yet (`TyKind::Fun` on
-                // a `fun` value is a later slice), so it defers — and marks the
-                // binding incomplete, since a body containing a lambda has an FCS
-                // type we cannot reproduce. FCS relates the expected type to the
-                // lambda's before its body, so the prefix ends here, before
-                // anything in the body is decided.
-                let d = self.decline_expected(scope, Incomplete::Lambda);
-                if let Some(body) = fun.body() {
-                    let body_expected = if expected.is_synth() {
-                        Expected::Synth
-                    } else {
-                        Expected::Unknown
-                    };
-                    // A lambda's parameters are elaborated as a function's
-                    // are: behind a non-simple one the body's nodes move, so
-                    // it records nothing (see [`is_simple_param`]).
-                    let body_mark = self.out.mark();
-                    let _ = self.infer_expr(scope, &body, body_expected).var();
-                    if !fun.args().all(|arg| is_simple_param(&arg)) {
-                        self.out.discard_since(body_mark);
-                    }
-                }
-                Inferred::untyped(d)
-            }
+            // A lambda `fun x … -> body` ([`Self::infer_lambda`]).
+            Expr::Fun(fun) => self.infer_lambda(scope, fun, expected),
             // A `while c do body`: the condition is constrained to `bool`
             // (3.2c-2b), and the body is **checked against `unit`** — a check (not
             // synth) position — so it is walked in check mode (emission suppressed:
@@ -915,23 +884,25 @@ impl<'a> Gen<'a> {
     /// as a condition (`let f c = if c then …` ⇒ `c : bool`), feeding that
     /// binder's function type (3.2c-2b).
     ///
-    /// It grounds the parameter's **private function-type slot**
-    /// ([`BinderEnv::param_slot`]), *not* its binder variable — so the `bool` reaches
-    /// only the function's `TyKind::Fun`, never a standalone parameter read-off. It
-    /// fires only for a binder that owns such a slot (a simple named parameter of
-    /// the function head), so a condition referencing any *other* binder (an
-    /// annotated / `rec` / value binder whose type this stage defers) is left
-    /// untouched — grounding it would risk `bool` where FCS, on ill-typed input,
-    /// keeps that binder's own type. The condition itself records no expression
-    /// node.
+    /// While the prefix is faithful it is a decision on the parameter's binder
+    /// variable, and grounds the parameter's **private function-type slot**
+    /// ([`BinderEnv::param_slot`]) with it; once the prefix has ended it binds
+    /// nothing. A name a `match` pattern or a lambda parameter binds
+    /// ([`Scope::pattern_locals`]) has no slot: it is one variable, which the
+    /// condition decides in the same way. Any other in-file value already
+    /// `bool` needs nothing, and a condition on any other binder (an annotated /
+    /// `rec` / value binder whose type this stage defers) is left untouched —
+    /// grounding it would risk `bool` where FCS, on ill-typed input, keeps that
+    /// binder's own type. The condition itself records no expression node.
     ///
     /// **Completeness (Stage 3.2c-2c).** A condition shape this method *fully*
-    /// models — a paren-peeled ident that resolves to a slot-owning parameter of
-    /// this binding, or a `bool` literal — leaves the binding complete. Anything
-    /// else (a compound `x && y`, a member `p.HasValue`, an ident that is not such
-    /// a parameter) drops FCS constraints on the condition's sub-terms, so it marks
-    /// the binding **incomplete** — otherwise a function whose only openness came
-    /// from an unmodelled condition would wrongly generalise.
+    /// models — a paren-peeled ident that resolves to a slot-owning parameter or
+    /// a pattern local of this binding, or to a value already `bool`, or a
+    /// `bool` literal — leaves the binding complete. Anything else (a compound
+    /// `x && y`, a member `p.HasValue`, any other ident) drops FCS constraints
+    /// on the condition's sub-terms, so it marks the binding **incomplete** —
+    /// otherwise a function whose only openness came from an unmodelled
+    /// condition would wrongly generalise.
     fn constrain_bool(&mut self, scope: &mut Scope, cond: Option<Expr>) {
         let Some(cond) = cond else {
             // A missing condition (recovery) is unmodelled.
@@ -989,6 +960,31 @@ impl<'a> Gen<'a> {
                     // parameter: FCS then reports the condition, it does not
                     // retype.
                     Some(_) => scope.mark_incomplete(Incomplete::ConditionUndecided),
+                    // A name a `match` pattern or a lambda parameter binds is
+                    // the binding's own monomorphic variable, used as a
+                    // parameter is ([`Scope::pattern_locals`]): the condition
+                    // is FCS's equality on it here, decided as a parameter's
+                    // is, while the prefix is faithful and the variable
+                    // untainted.
+                    None if def.is_some_and(|def| scope.pattern_locals.contains(&def)) => {
+                        let dv = self.def_var(def.expect("checked above"));
+                        if scope.complete
+                            && !self.solver.table.touches_taint(self.solver.tys.var(dv))
+                        {
+                            let bool_ty = self
+                                .solver
+                                .tys
+                                .named(self.facts.env.names(), "System.Boolean");
+                            let b = self.fresh_equal(scope, bool_ty);
+                            let _ = self.decide(scope, dv, b);
+                        } else {
+                            scope.mark_incomplete(Incomplete::ConditionUndecided);
+                        }
+                    }
+                    // Any other in-file value whose type is `bool` already
+                    // needs nothing more, as a `bool` literal does: the
+                    // condition's equality holds, and binds nothing.
+                    None if def.is_some_and(|def| self.is_bool_value(def)) => {}
                     // A condition ident that is not a slot-owning parameter of this
                     // binding (a value / annotated / `rec` binder, a cross-file
                     // name) is unmodelled here — its `bool`-ness is an FCS
@@ -1009,6 +1005,21 @@ impl<'a> Gen<'a> {
             // constraints on its sub-terms that we drop.
             _ => scope.mark_incomplete(Incomplete::ConditionShape),
         }
+    }
+
+    /// Whether the in-file binder `def` is a value whose type is `bool`, as
+    /// solved: a use of it is `bool` whatever follows. A generalised binder,
+    /// or one whose use FCS may reject, is not.
+    fn is_bool_value(&mut self, def: DefId) -> bool {
+        if self.binders.scheme(def).is_some() || self.facts.use_may_be_rejected(def) {
+            return false;
+        }
+        let Some(v) = self.binders.var(def) else {
+            return false;
+        };
+        let tys = self.solver.tys;
+        let resolved = self.solver.table.resolve(tys.var(v));
+        tys.is_named(self.facts.env.names(), resolved, &["System", "Boolean"])
     }
 
     /// Record an expression's type variable `v` at `range` for read-off — but

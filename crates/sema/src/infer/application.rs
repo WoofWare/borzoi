@@ -90,16 +90,25 @@ impl<'a> Gen<'a> {
         // the fields are never checked. A parenthesized case is an expression
         // applied as any other is.
         let case = matches!(&head, SpineHead::Callee(c) if args.len() == 1 && self.names_case(c));
+        // What the head records — a lambda's node and its body's — FCS keeps
+        // only where the head is applicable to every argument: it rejects an
+        // application of a non-function whole, keeping nothing inside it. So
+        // it is kept only where the head is typed and shown to split over
+        // every argument.
+        let head_mark = self.out.mark();
         let tf = match head {
             SpineHead::Operator(op) => self.operator_value(scope, &op),
             SpineHead::Callee(callee) => self.infer_callee(scope, &callee),
         };
-        let Some(tf) = tf else {
+        let applied = tf.map(|tf| self.apply(scope, tf, &args, expected, case));
+        if !matches!(applied, Some((_, _, true))) {
+            self.out.discard_since(head_mark);
+        }
+        match applied {
+            Some((r, d, _)) => Inferred::typed(r, d),
             // The head's walk recorded why it is not typed.
-            return Inferred::untyped(self.decline_expected_propagated(scope));
-        };
-        let (r, d) = self.apply(scope, tf, &args, expected, case);
-        Inferred::typed(r, d)
+            None => Inferred::untyped(self.decline_expected_propagated(scope)),
+        }
     }
 
     /// Whether the callee `e` is a bare union case, by name or by qualified
@@ -141,8 +150,9 @@ impl<'a> Gen<'a> {
     /// type over every argument, relate the result to `expected`, then check
     /// each argument against its domain — unless `tf` is a union `case`
     /// whose result failed that relation, whose fields FCS then never checks.
-    /// Returns the result variable, and the proof that `expected` was
-    /// related to it.
+    /// Returns the result variable, the proof that `expected` was related to
+    /// it, and whether `tf` is shown to split over every argument: each split
+    /// unified, where FCS's `UnifyFunctionType` succeeds too.
     fn apply(
         &mut self,
         scope: &mut Scope,
@@ -150,9 +160,10 @@ impl<'a> Gen<'a> {
         args: &[Expr],
         expected: Expected,
         case: bool,
-    ) -> (TyVid, Discharged) {
+    ) -> (TyVid, Discharged, bool) {
         let tys = self.solver.tys;
         let mut f = tf;
+        let mut shaped = true;
         let mut domains = Vec::with_capacity(args.len());
         for _ in args {
             let from = self.solver.table.mark();
@@ -171,21 +182,23 @@ impl<'a> Gen<'a> {
             {
                 self.taint(scope, tys.var(d));
                 self.taint(scope, tys.var(r));
+                shaped = false;
             } else {
                 let own = self.own_since(from);
-                self.eq(scope, tys.var(f), tys.fun(tys.var(d), tys.var(r)), own);
+                let split = self.eq(scope, tys.var(f), tys.fun(tys.var(d), tys.var(r)), own);
+                shaped &= split == Equated::Unified;
             }
             domains.push(d);
             f = r;
         }
         let (decision, discharged) = self.relate(scope, f, expected);
         if decision == Some(Decision::Failed) && case {
-            return (f, discharged);
+            return (f, discharged, shaped);
         }
         for (arg, d) in args.iter().zip(domains) {
             let _ = self.infer_arg(scope, arg, d);
         }
-        (f, discharged)
+        (f, discharged, shaped)
     }
 
     /// Check an application's argument against its domain `d`
@@ -271,8 +284,11 @@ impl<'a> Gen<'a> {
     ///   logic with its own node emission suppressed (an inner curried application
     ///   carries no FCS node either).
     ///
-    /// Any other callee shape (an applied `DotGet`, a lambda, a literal) is
-    /// unmodelled ⇒ incomplete, and the whole application defers.
+    /// - **A lambda** ([`Expr::Fun`]): checked as an expression of its own,
+    ///   synthesized, its node recorded ([`Self::infer_lambda`]).
+    ///
+    /// Any other callee shape (an applied `DotGet`, a literal) is unmodelled ⇒
+    /// incomplete, and the whole application defers.
     fn infer_callee(&mut self, scope: &mut Scope, e: &Expr) -> Option<TyVid> {
         self.out.enter_expression();
         let result = self.infer_callee_spine(scope, e);
@@ -323,6 +339,11 @@ impl<'a> Gen<'a> {
                 }
                 Some(self.value_use(scope, def))
             }
+            // A lambda applied where it is written (`(fun x -> …) a`): FCS
+            // checks it against a fresh type before the arguments, keeping
+            // its node and its body's, as for any expression in function
+            // position that is not a name.
+            Expr::Fun(_) => self.infer_expr(scope, e, Expected::Synth).var(),
             // A module-qualified value (`List.map f`).
             Expr::LongIdent(li) => match self.module_value_path(li) {
                 Some(whole) => self.nonlocal_value_or_incomplete(scope, whole, Use::Applied),

@@ -214,6 +214,7 @@ impl<'a> Gen<'a> {
             // rejects `let g = id` / `let x = []` with FS0030), so it just
             // links and solves.
             Some(Pat::Named(named)) => {
+                self.fold_binding_lambdas(rhs);
                 let rhs_var = self.infer_expr(scope, rhs, Expected::Synth).var();
                 if let Some(tok) = named.ident()
                     && let Some(def) = self.facts.def_at(tok.text_range())
@@ -265,6 +266,7 @@ impl<'a> Gen<'a> {
                 // body's root to the `()`). The body's type is still the
                 // function's result, exactly, so it is walked as usual, but
                 // nothing it records is kept.
+                self.fold_binding_lambdas(rhs);
                 let body_mark = self.out.mark();
                 let ret = self.infer_expr(scope, rhs, Expected::Synth).var();
                 if !head.args().all(|arg| is_simple_param(&arg)) {

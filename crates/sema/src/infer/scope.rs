@@ -50,11 +50,11 @@ pub(super) struct Scope {
     /// The binding's parameters, as registered: what
     /// [`Gen::withhold_if_not_rigid`] withholds with the function.
     pub(super) binding_params: Vec<DefId>,
-    /// The names the binding's `match` patterns bind. FCS never generalises a
-    /// pattern variable, so each is this binding's own monomorphic variable,
-    /// used as a parameter is ([`Gen::value_use`]): not another binding's
-    /// opaque one.
-    pub(super) match_locals: HashSet<DefId>,
+    /// The names the binding's `match` patterns and lambda parameters bind.
+    /// FCS never generalises either, so each is this binding's own
+    /// monomorphic variable, used as a parameter is ([`Gen::value_use`]): not
+    /// another binding's opaque one.
+    pub(super) pattern_locals: HashSet<DefId>,
     /// [`Solver::constraint_mark`] at the binding's start: the binding's
     /// per-variable constraints are those recorded since
     /// ([`Gen::constrained_scheme_use`]), and its checks read those alone —
@@ -157,7 +157,7 @@ impl<'a> Gen<'a> {
             poison: Vec::new(),
             params: Vec::new(),
             binding_params: Vec::new(),
-            match_locals: HashSet::default(),
+            pattern_locals: HashSet::default(),
             typar_params: HashSet::default(),
             rigid_typars: Vec::new(),
             declares_typars: false,
