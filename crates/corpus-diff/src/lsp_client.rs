@@ -1,12 +1,12 @@
 //! A client for the real LSP server, driven over the protocol.
 //!
 //! The server's dispatch loop ([`borzoi::server::run_with_fetcher`]) runs on its
-//! own thread behind an in-memory [`Connection`], exactly as `main` runs it
-//! behind stdio. Everything this client sends is JSON built by hand — positions
-//! are bare numbers, documents are URIs — and everything it reads back is JSON,
-//! so a request goes through the server's own parameter decoding, dispatch,
-//! position conversion and response encoding. Nothing of the handlers'
-//! internals is called.
+//! own thread of [`borzoi::server::SERVER_STACK_BYTES`] behind an in-memory
+//! [`Connection`], exactly as `main` runs it behind stdio. Everything this
+//! client sends is JSON built by hand — positions are bare numbers, documents
+//! are URIs — and everything it reads back is JSON, so a request goes through
+//! the server's own parameter decoding, dispatch, position conversion and
+//! response encoding. Nothing of the handlers' internals is called.
 //!
 //! No SourceLink fetcher is configured, so a go-to-definition into a referenced
 //! assembly's remote source answers with the source URL rather than touching
@@ -16,7 +16,9 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use borzoi::server::{State, client_capabilities_from_initialize, run_with_fetcher};
+use borzoi::server::{
+    SERVER_STACK_BYTES, State, client_capabilities_from_initialize, run_with_fetcher,
+};
 use borzoi::uri::UriExt as _;
 use borzoi::workspace::Workspace;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
@@ -57,13 +59,17 @@ impl LspClient {
         });
         let capabilities = client_capabilities_from_initialize(&initialize)
             .expect("the initialize object is well-formed");
-        let thread = thread::spawn(move || {
-            let mut state = State::new();
-            state.workspace = workspace();
-            state.semantic = crate::corpus_semantic_state();
-            state.set_client_capabilities(capabilities);
-            run_with_fetcher(server, state, None).expect("the server loop ends cleanly");
-        });
+        let thread = thread::Builder::new()
+            .name("borzoi server".into())
+            .stack_size(SERVER_STACK_BYTES)
+            .spawn(move || {
+                let mut state = State::new();
+                state.workspace = workspace();
+                state.semantic = crate::corpus_semantic_state();
+                state.set_client_capabilities(capabilities);
+                run_with_fetcher(server, state, None).expect("the server loop ends cleanly");
+            })
+            .expect("spawn the server thread");
         Self {
             client,
             thread: Some(thread),
