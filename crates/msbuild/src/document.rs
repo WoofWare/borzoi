@@ -169,10 +169,11 @@ pub struct ParsedDocument {
 }
 
 impl ParsedDocument {
-    /// Parse `text`, whose digest is `digest`.
-    pub fn parse(text: String, digest: TextDigest) -> Result<Self, roxmltree::Error> {
+    /// Parse `text`, whose digest is `digest`. A text that does not parse is
+    /// handed back with `roxmltree`'s error.
+    pub fn parse(text: String, digest: TextDigest) -> Result<Self, (String, roxmltree::Error)> {
         debug_assert_eq!(digest, TextDigest::of(&text));
-        let cell = Cell::try_new(text, |text| parse(text))?;
+        let cell = Cell::try_new_or_recover(text, |text| parse(text))?;
         Ok(Self { cell, digest })
     }
 
@@ -416,10 +417,11 @@ mod tests {
     #[test]
     fn malformed_text_fails_as_roxmltree_does() {
         let source = String::from("<Project>");
-        let ours =
+        let (text, ours) =
             ParsedDocument::parse(source.clone(), TextDigest::of(&source)).expect_err("malformed");
         #[allow(clippy::disallowed_methods)] // the error roxmltree gives
         let theirs = Document::parse(&source).expect_err("malformed");
         assert_eq!(ours, theirs);
+        assert_eq!(text, source, "the text is handed back");
     }
 }
