@@ -5338,11 +5338,20 @@ fn toolset_honours_env_extensions_path(version_dir: &Path) -> Option<bool> {
 ///
 /// Probed with `dotnet msbuild` and no `VisualStudioVersion` in the
 /// environment: `17.0` under 6.0.418, 8.0.425, 9.0.200 and 9.0.315; `18.0` under
-/// 10.0.109, 10.0.300, 10.0.400 and 10.0.401. Prereleases decline: a preview SDK
-/// can ship the previous MSBuild major (the early .NET 10 previews carried
-/// MSBuild 17), and an unprobed major may have moved on.
-fn toolset_visual_studio_version(version_dir: &Path) -> Option<&'static str> {
+/// 10.0.109, 10.0.112, 10.0.300, 10.0.400 and 10.0.401. A prerelease commits only
+/// where its exact version was probed ([`PROBED_PRERELEASE_VISUAL_STUDIO_VERSIONS`]):
+/// a preview SDK can ship the previous MSBuild major (the early .NET 10
+/// previews carried MSBuild 17), and an unprobed major may have moved on.
+/// `tests/toolset_visual_studio_version_diff.rs` holds every SDK the devshell
+/// installs to its MSBuild.
+pub(crate) fn toolset_visual_studio_version(version_dir: &Path) -> Option<&'static str> {
     let name = version_dir.file_name()?.to_str()?;
+    if let Some((_, value)) = PROBED_PRERELEASE_VISUAL_STUDIO_VERSIONS
+        .iter()
+        .find(|(version, _)| *version == name)
+    {
+        return Some(value);
+    }
     let parts: Vec<&str> = name.split('.').collect();
     let is_release = parts.len() == 3
         && parts
@@ -5357,6 +5366,12 @@ fn toolset_visual_studio_version(version_dir: &Path) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// Prerelease SDKs whose MSBuild's `VisualStudioVersion` was probed (as for
+/// [`toolset_visual_studio_version`]): SDK 11.0.100-rc.1.26425.128 ships
+/// MSBuild 18.11.0, whose `VisualStudioVersion` is `18.0`.
+const PROBED_PRERELEASE_VISUAL_STUDIO_VERSIONS: &[(&str, &str)] =
+    &[("11.0.100-rc.1.26425.128", "18.0")];
 
 /// The property names MSBuild's toolset defines, non-empty, before any
 /// project text is evaluated: the toolset seeds of
@@ -7286,7 +7301,10 @@ mod toolset_tests {
             ("/dotnet/sdk/10.0.401", Some("18.0")),
             // A preview can carry the previous MSBuild major.
             ("/dotnet/sdk/10.0.100-preview.3.25201.16", None),
-            ("/dotnet/sdk/11.0.100-rc.1.26425.128", None),
+            // A probed prerelease commits, and only its exact version.
+            ("/dotnet/sdk/11.0.100-rc.1.26425.128", Some("18.0")),
+            ("/dotnet/sdk/11.0.100-rc.1.26425.129", None),
+            ("/dotnet/sdk/11.0.100-rc.2.26501.1", None),
             // Unprobed majors.
             ("/dotnet/sdk/7.0.410", None),
             ("/dotnet/sdk/11.0.100", None),

@@ -81,6 +81,27 @@ pub fn property_references(raw: &str) -> Vec<&str> {
     crate::properties::property_references(raw).collect()
 }
 
+/// The `VisualStudioVersion` the walk seeds for the SDK in `version_dir`, or
+/// `None` where it seeds none. Exposed so
+/// `tests/toolset_visual_studio_version_diff.rs` can hold it to each installed
+/// SDK's MSBuild.
+pub fn toolset_visual_studio_version(version_dir: &std::path::Path) -> Option<&'static str> {
+    crate::evaluator::toolset_visual_studio_version(version_dir)
+}
+
+/// The feature band the workload locators take the host SDK `version` to be
+/// in (`SdkFeatureBand`), or `None` where they decline. Exposed so
+/// `tests/workload_locator_diff.rs` can hold it to the resolver's.
+pub fn workload_feature_band(version: &str) -> Option<String> {
+    crate::sdk_resolver::workloads::feature_band_of(version)
+}
+
+/// The order the workload locators put the feature bands of `a` and `b` in,
+/// or `None` where either declines. Exposed for the same differential.
+pub fn compare_workload_feature_bands(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    crate::sdk_resolver::workloads::compare_feature_bands(a, b)
+}
+
 pub use crate::evaluator::executor::{ExecutedItem, ExecutionProbe, ExecutionRead};
 pub use crate::evaluator::reads::{
     EvaluationReads, InexactUnset, ItemRead, ItemRow, PropertyRead, ReadProbe, TargetDefinition,

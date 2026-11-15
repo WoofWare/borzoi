@@ -675,9 +675,12 @@ fn user_root_shadows_by_name_even_when_it_holds_no_valid_manifest() {
     // The user root claims an id *by directory name* before its contents are
     // validated (MSBuild overwrites `directoriesWithManifests` by name, then
     // `ProbeDirectory` skips a directory that resolves to nothing). So an empty
-    // user id-dir shadows the dotnet root's *same-band* copy out of existence —
-    // it is NOT backfilled from dotnet's current band. With no lower band to
-    // fall back to, the id resolves to nothing at all.
+    // user id-dir shadows the dotnet root's same-band copy in the primary
+    // pass. The id is then missing, and the fallback finds that copy: it
+    // searches the dotnet root's bands below the host band *and* the host's
+    // release band, which for a release host is the host band itself. Every
+    // graded SDK's resolver answers so (10.0.112, 10.0.401,
+    // 11.0.100-rc.1.26425.128).
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("dotnet");
     let user = tmp.path().join("user-dotnet");
@@ -696,9 +699,9 @@ fn user_root_shadows_by_name_even_when_it_holds_no_valid_manifest() {
     let result = resolve_targets(&root, &version_dir, &env).unwrap();
     assert_eq!(
         result,
-        SdkResolution::Roots(vec![]),
-        "the empty user id-dir shadows dotnet's same-band copy by name; it must \
-         not fall through to that copy"
+        SdkResolution::Roots(vec![root.join("sdk-manifests/10.0.300/w.workload/1.0.0")]),
+        "the empty user id-dir shadows dotnet's same-band copy in the primary \
+         pass, and the fallback finds it in the host's release band"
     );
 }
 
@@ -739,10 +742,71 @@ fn known_manifests_file_missing_means_current_band_only() {
 }
 
 #[test]
-fn prerelease_host_sdk_degrades() {
+fn prerelease_host_sdk_resolves_in_its_own_band() {
+    // `11.0.100-rc.1.26425.128` is band `11.0.100-rc.1`, the directory
+    // its manifests are installed under.
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
-    let version_dir = host_sdk(root, "10.0.100-preview.3.25201.16", &["w.workload"]);
+    let version_dir = host_sdk(root, "11.0.100-rc.1.26425.128", &["w.workload"]);
+    let expected = manifest(root, "11.0.100-rc.1", "w.workload", "1.0.0");
+    manifest(root, "11.0.100", "w.workload", "2.0.0");
+
+    let result = resolve_targets(root, &version_dir, &no_user_env()).unwrap();
+    assert_eq!(result, SdkResolution::Roots(vec![expected]));
+}
+
+#[test]
+fn prerelease_host_falls_back_to_earlier_previews_and_its_release_band() {
+    // The fallback's candidates are the bands below the host band and the
+    // host's release band, which a prerelease host *precedes*. The highest
+    // that resolves wins: here the release band, above the earlier preview.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let version_dir = host_sdk(
+        root,
+        "11.0.100-rc.1.26425.128",
+        &["a.workload", "b.workload"],
+    );
+    manifest(root, "11.0.100-preview.6", "a.workload", "1.0.0");
+    let a = manifest(root, "11.0.100", "a.workload", "1.0.0");
+    let b = manifest(root, "11.0.100-preview.6", "b.workload", "1.0.0");
+    // Above the host band, and not its release band: never a candidate.
+    manifest(root, "11.0.100-rc.2", "b.workload", "1.0.0");
+    manifest(root, "11.0.200", "b.workload", "1.0.0");
+
+    let result = resolve_targets(root, &version_dir, &no_user_env()).unwrap();
+    assert_eq!(result, SdkResolution::Roots(vec![a, b]));
+}
+
+#[test]
+fn a_fallback_band_is_looked_up_under_its_own_name() {
+    // `FallbackForMissingManifest` reads each directory name as the feature
+    // band it spells and builds the path from the band, so a directory named
+    // with a build suffix stands for a band directory that may not exist.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
+    manifest(root, "10.0.200-preview.3.25123.4", "w.workload", "2.0.0");
+    let expected = manifest(root, "10.0.100", "w.workload", "1.0.0");
+
+    let result = resolve_targets(root, &version_dir, &no_user_env()).unwrap();
+    assert_eq!(result, SdkResolution::Roots(vec![expected]));
+}
+
+#[test]
+fn a_missing_outdated_id_still_enumerates_the_fallback_bands() {
+    // An outdated id is skipped wherever it is found, so it is always
+    // missing, and its fallback enumerates the band directories: a stray
+    // name among them fails the real resolution.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let version_dir = host_sdk(
+        root,
+        "10.0.300",
+        &["w.workload", "microsoft.net.workload.ios"],
+    );
+    manifest(root, "10.0.300", "w.workload", "1.0.0");
+    fs::create_dir_all(root.join("sdk-manifests/not-a-band")).unwrap();
 
     let err = resolve_targets(root, &version_dir, &no_user_env()).unwrap_err();
     assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));

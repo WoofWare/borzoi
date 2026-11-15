@@ -25,12 +25,19 @@
 //!   `packs` tree is consulted whenever the marker is present and the
 //!   directory exists, with or without manifests
 //!   (`WorkloadResolver.Create` vs the manifest provider).
+//! * The host band is the host SDK version's [`FeatureBand`]: a
+//!   prerelease SDK has its own (`11.0.100-rc.1.26425.128` is band
+//!   `11.0.100-rc.1`, whose directory is `sdk-manifests/11.0.100-rc.1`).
 //! * Ids from `KnownWorkloadManifests.txt` (fallback filename
 //!   `IncludedWorkloadManifests.txt`) that the primary pass did not
 //!   find go through **band fallback**: the *dotnet* manifests root
-//!   only (never the user-local root), bands strictly below the host
-//!   band, highest band wins. An id found nowhere is silently skipped
-//!   (`samsung.net.sdk.tizen` on the probed layout).
+//!   only (never the user-local root). Each directory under it is read
+//!   as the feature band its name spells, and looked up under *that*
+//!   band's name (so `11.0.100-rc.1.5` stands for `11.0.100-rc.1`);
+//!   the candidates are the bands below the host band, and the host's
+//!   own release band (so a prerelease host falls back to the release
+//!   it precedes); highest band wins. An id found nowhere is silently
+//!   skipped (`samsung.net.sdk.tizen` on the probed layout).
 //! * Inside an id directory, versioned subdirectories containing
 //!   `WorkloadManifest.json` take precedence over a flat manifest, and
 //!   the **highest version wins**; a directory resolving to no
@@ -57,9 +64,9 @@
 //! workload-set selection (`sdk.workloadVersion` — it selects a
 //! workload set or fails the real evaluation when the set is
 //! missing), a `userlocal` marker when the caller supplied no
-//! user-local root (we cannot see what a real build would), a
-//! prerelease host band (prerelease band strings follow rules we
-//! don't model), workload environment overrides, any manifest
+//! user-local root (we cannot see what a real build would), a host
+//! SDK version or band directory name outside the spellings
+//! [`FeatureBand`] certifies, workload environment overrides, any manifest
 //! version directory name `SdkVersion` cannot parse (we cannot
 //! reproduce MSBuild's comparison for those), and any directory or
 //! known-list file that exists but cannot be enumerated/read (the
@@ -72,6 +79,9 @@ use std::path::{Path, PathBuf};
 use super::{SdkResolveError, SdkVersion};
 use crate::SdkResolution;
 use crate::observed::{self, EntryKind, Failure, Observer};
+
+mod feature_band;
+use feature_band::FeatureBand;
 
 pub const WORKLOAD_MANIFEST_TARGETS_LOCATOR: &str =
     "Microsoft.NET.SDK.WorkloadManifestTargetsLocator";
@@ -234,30 +244,34 @@ pub fn resolve_workload_locator(
     Ok(SdkResolution::Roots(Vec::new()))
 }
 
-/// The feature band of the host SDK (`10.0.301` → `10.0.300`), as both
-/// the directory-name string and the comparable version. Prerelease
-/// host SDKs use prerelease-qualified bands whose exact rules we don't
-/// model — degrade.
-fn host_feature_band(sdk_version_dir: &Path) -> Result<(String, SdkVersion), SdkResolveError> {
+/// The feature band of the host SDK (`10.0.301` → `10.0.300`,
+/// `11.0.100-rc.1.26425.128` → `11.0.100-rc.1`): `SdkFeatureBand` of the
+/// version directory's name. A name [`FeatureBand`] does not certify
+/// degrades.
+fn host_feature_band(sdk_version_dir: &Path) -> Result<FeatureBand, SdkResolveError> {
     let name = sdk_version_dir
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| unsupported("host SDK directory has a non-UTF-8 name"))?;
-    let version = SdkVersion::parse(name)
-        .ok_or_else(|| unsupported(format!("host SDK directory is not a version: {name}")))?;
-    if version.is_prerelease() {
-        return Err(unsupported(format!(
-            "prerelease host SDK bands are not modelled: {name}"
-        )));
-    }
-    let band_string = format!(
-        "{}.{}.{}",
-        version.major(),
-        version.minor(),
-        version.feature_band() * 100
-    );
-    let band = SdkVersion::parse(&band_string).expect("bands built from numerics parse");
-    Ok((band_string, band))
+    FeatureBand::parse(name).ok_or_else(|| {
+        unsupported(format!(
+            "host SDK directory is not a version whose feature band we certify: {name}"
+        ))
+    })
+}
+
+/// The feature band [`resolve_workload_locator`] takes a host SDK version
+/// to be in, or `None` where it declines. Exposed for the differential.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn feature_band_of(version: &str) -> Option<String> {
+    FeatureBand::parse(version).map(|band| band.to_string())
+}
+
+/// The order of the feature bands of two versions, or `None` where either
+/// band declines. Exposed for the differential.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn compare_feature_bands(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    Some(FeatureBand::parse(a)?.cmp(&FeatureBand::parse(b)?))
 }
 
 /// The consultation roots. Manifest enumeration and pack scanning gate
@@ -321,14 +335,21 @@ impl WorkloadRoots {
 
 fn workload_roots(
     dotnet_root: &Path,
-    band: &(String, SdkVersion),
+    band: &FeatureBand,
     env: &WorkloadEnvironment<'_>,
     observer: &Observer,
 ) -> Result<WorkloadRoots, SdkResolveError> {
+    // `WorkloadFileBasedInstall.IsUserLocal` keys the marker by the release
+    // band (it derives `major.minor.hundreds` from any band with a `-`), and
+    // `GetWorkloadInstallType` keys the MSI marker by
+    // `ToStringWithoutPrerelease`; the install state is keyed by the band
+    // itself.
+    let release_band = band.without_prerelease().to_string();
+    let band_name = band.to_string();
     let marker = dotnet_root
         .join("metadata")
         .join("workloads")
-        .join(&band.0)
+        .join(&release_band)
         .join("userlocal");
     let mut user = None;
     // CLR `File.Exists` (what `WorkloadFileBasedInstall.IsUserLocal` uses)
@@ -367,7 +388,7 @@ fn workload_roots(
         // ProgramData, outside anything we are handed — degrade on the
         // marker (`GetWorkloadInstallType` in dotnet/sdk).
         let msi_marker = workloads_metadata
-            .join(&band.0)
+            .join(&release_band)
             .join("installertype")
             .join("msi");
         // `GetWorkloadInstallType` tests this marker with CLR `File.Exists`
@@ -388,7 +409,7 @@ fn workload_roots(
         // arch-less location as a candidate too.
         let mut candidates = vec![
             workloads_metadata
-                .join(&band.0)
+                .join(&band_name)
                 .join("InstallState")
                 .join("default.json"),
         ];
@@ -396,7 +417,7 @@ fn workload_roots(
             candidates.push(
                 entry
                     .path
-                    .join(&band.0)
+                    .join(&band_name)
                     .join("InstallState")
                     .join("default.json"),
             );
@@ -427,10 +448,11 @@ struct ResolvedManifest {
 /// alphabetical.
 fn enumerate_manifest_roots(
     sdk_version_dir: &Path,
-    band: &(String, SdkVersion),
+    band: &FeatureBand,
     roots: &WorkloadRoots,
     observer: &Observer,
 ) -> Result<Vec<PathBuf>, SdkResolveError> {
+    let band_name = band.to_string();
     // Known-id list: `KnownWorkloadManifests.txt`, falling back to the
     // older `IncludedWorkloadManifests.txt`; a missing file just means
     // no fallback pass and no preferential ordering. A file that
@@ -493,7 +515,7 @@ fn enumerate_manifest_roots(
     // host band, never the shadowed same-band dotnet copy.
     let mut winners: HashMap<String, (String, PathBuf)> = HashMap::new();
     for root in roots.manifest_roots() {
-        let band_dir = root.join("sdk-manifests").join(&band.0);
+        let band_dir = root.join("sdk-manifests").join(&band_name);
         for entry in read_dir_or_degrade(&band_dir, observer)? {
             let Some(id) = entry.name.to_str().map(str::to_owned) else {
                 continue;
@@ -521,46 +543,54 @@ fn enumerate_manifest_roots(
         }
     }
 
-    // Band fallback for known ids the primary pass missed: dotnet root
-    // only, bands strictly below the host band, highest matching band
-    // wins (whether or not it resolves to a manifest).
+    // Band fallback for known ids the primary pass missed
+    // (`FallbackForMissingManifest`): dotnet root only. Every directory
+    // there is read as the feature band its name spells, and the band is
+    // looked up under its own name, not the directory's. The candidates are
+    // the bands below the host band and the host's release band (for a
+    // release host, the host band itself, whose id directory the primary
+    // pass already found unresolvable); the highest band whose id directory
+    // resolves to a manifest wins.
     //
     // MSBuild calls `FallbackForMissingManifest` only for ids that are actually
     // missing, and it is *that* call which enumerates the band directories (and
     // can throw on a stray non-version name). So the enumeration — and its
     // degrade — must be gated on there being a missing id: a fully-resolved set
     // never triggers it, even if a stray directory happens to sit alongside.
+    // A known id the resolver skips (an outdated one) is never found, so it is
+    // always missing: it enumerates the bands as any other does, and resolves
+    // in none of them.
     let any_missing = known_ids
         .as_deref()
         .unwrap_or(&[])
         .iter()
-        .any(|id| !found.contains_key(&id.to_ascii_lowercase()) && !is_skipped_manifest_id(id));
+        .any(|id| !found.contains_key(&id.to_ascii_lowercase()));
     if let Some(known) = &known_ids
         && any_missing
     {
         let manifests_dir = roots.dotnet_root.join("sdk-manifests");
-        let mut fallback_bands: Vec<(SdkVersion, PathBuf)> = Vec::new();
+        let release_band = band.without_prerelease();
+        let mut fallback_bands: Vec<(FeatureBand, PathBuf)> = Vec::new();
         for entry in read_dir_or_degrade(&manifests_dir, observer)? {
             let Some(name) = entry.name.to_str().map(str::to_owned) else {
                 continue;
             };
-            let Some(version) = SdkVersion::parse(&name) else {
+            let Some(candidate) = FeatureBand::parse(&name) else {
                 // `FallbackForMissingManifest` constructs `new SdkFeatureBand`
                 // for *every* directory under `sdk-manifests` — with no
                 // try/catch — so a name that isn't a valid feature band throws a
                 // `FormatException` and fails the real resolution. Silently
                 // skipping it here would return a *supposedly exact* locator
-                // result for a layout MSBuild rejects. `SdkVersion::parse`
-                // accepts the same prerelease/non-canonical version spellings
-                // `SdkFeatureBand` does, so a parse failure is exactly the
-                // throwing case: degrade rather than guess.
+                // result for a layout MSBuild rejects; a name the resolver
+                // parses and `FeatureBand` does not certify degrades too.
                 return Err(unsupported(format!(
-                    "non-version directory under sdk-manifests would fail \
-                     feature-band enumeration: {name}"
+                    "directory under sdk-manifests whose feature band we do not \
+                     certify: {name}"
                 )));
             };
-            if version < band.1 {
-                fallback_bands.push((version, entry.path));
+            if candidate < *band || candidate == release_band {
+                let path = manifests_dir.join(candidate.to_string());
+                fallback_bands.push((candidate, path));
             }
         }
         fallback_bands.sort_by(|a, b| b.0.cmp(&a.0));
@@ -653,13 +683,13 @@ const BASELINE_WORKLOAD_SET_BAND: &str = "8.0.100";
 /// held to [`check_loadable_workload_sets`]. Every other band's sets are
 /// never read.
 fn check_workload_sets(
-    band: &(String, SdkVersion),
+    band: &FeatureBand,
     roots: &WorkloadRoots,
     observer: &Observer,
 ) -> Result<(), SdkResolveError> {
     for root in roots.all() {
         let manifests = root.join("sdk-manifests");
-        let host_sets = manifests.join(&band.0).join("workloadsets");
+        let host_sets = manifests.join(band.to_string()).join("workloadsets");
         if observed::is_dir(observer, &host_sets) {
             return Err(unsupported(format!(
                 "workload set present for the host feature band: {}",
