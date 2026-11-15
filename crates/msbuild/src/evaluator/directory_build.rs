@@ -8,33 +8,42 @@
 //! exists. So the walk follows those imports, at their own positions and
 //! under their own conditions, and a project no SDK reaches gets neither file.
 //!
-//! **The predicate.** An import point is *decided* when the walk reached it
-//! along a route of import gates it decided ([`Bookkeeping::route_undecided`]),
-//! its condition is decided from certain inputs, and its `Project` reads only
-//! certain inputs. "Certain" is [`Trust::is_certain`](super::Trust::is_certain) on the entry the read
+//! **The domain.** An import point is *decided*, and followed as an ordinary
+//! import, exactly when [`is_decided_point`] holds, which is all of:
+//!
+//! - the walk is not opaque there ([`State::walk_opaque`]): content it could
+//!   not see may have imported the file already, which would make this import
+//!   a duplicate MSBuild skips;
+//! - the walk reached it along a route of import gates it decided
+//!   ([`Bookkeeping::route_undecided`]);
+//! - its condition is a conjunction each of whose conjuncts is either decided
+//!   from certain inputs on its own, or exactly `Exists` of the point's own
+//!   `Project` path ([`condition::decided_conjunctwise`]);
+//! - the path property is certain, and names one literal file: no `;` list and
+//!   no wildcard ([`names_one_file`]).
+//!
+//! "Certain" is [`Trust::is_certain`](super::Trust::is_certain) on the entry the read
 //! consults, which joins every channel, [`Trust::stale`](super::Trust::stale) included; a name with
 //! no binding is certain only when [`State::undefined_read_is_exact`] says the
-//! real build has none either. A decided point is an ordinary import.
+//! real build has none either. Nothing else is decided, however precise a
+//! special case could be: a shape that deserves precision declines until it is
+//! added here.
 //!
-//! **The fallback.** A point reached but not decided, or never reached once
-//! the walk has passed something it could not decide (which may hold the
-//! point), is settled by [`fallback`]. What it marks depends on whether the
-//! *identity* of the file is certain: at a point the walk reached, the path
-//! input's certainty there; at one it never reached, never, since the path
-//! the point reads is the one wherever the point is:
-//!
-//! - identity certain: only whether (and where) the file is imported is in
-//!   doubt. The walk walks it with every property it writes unpinned, and
-//!   withdraws every item facet and the define set. A file that writes
-//!   nothing ([`contributes_nothing`]) changes nothing whether imported or
-//!   not, and is not walked.
-//! - identity uncertain: any file may be imported, so the whole evaluation
-//!   from this point is uncertain: every property bound so far is unpinned,
-//!   the walk latches opacity, and every item facet and the define set are
-//!   withdrawn. When nothing would be imported by default (no write touched
-//!   the path and no `Directory.Build.*` file exists above the project) the
-//!   walk's doubt is about a file only content it could not see would name,
-//!   which is that content's doubt like any other, and nothing is charged.
+//! **The fallback.** Every other point the walk reaches, and every point it
+//! never reaches once it has passed something it could not decide (which may
+//! hold the point), is settled by [`fallback`]: any file may be imported, so
+//! the whole evaluation from there is uncertain. Every property bound so far is
+//! unpinned, the walk latches opacity, and every item facet and the define set
+//! are withdrawn; the file the path names (or the one discovered by default) is
+//! then walked doubted, so that what it writes is doubted too. When nothing
+//! would be imported by default (no write touched the path and no
+//! `Directory.Build.*` file exists above the project), and the point's
+//! condition is false whenever `Exists` of its path is (or the walk never
+//! reached the point), the walk's doubt is about a file only content it could
+//! not see would name, which is that content's doubt like any other, and
+//! nothing is charged. A reached point whose condition can hold without the
+//! file (`X Or Exists(…)`) imports the path regardless, which MSBuild rejects
+//! when it names nothing, so it is charged.
 //!
 //! **What a doubted walk may leave behind.** A fallback walk follows the file
 //! as an ordinary import, but MSBuild may not make that import, so nothing it
@@ -350,27 +359,58 @@ pub(super) fn visit_point(
     current_file_dir: &Path,
     state: &mut State<'_>,
 ) -> Visit {
-    let condition = attribute(node, "Condition").unwrap_or_default();
-    let project = attribute(node, "Project").unwrap_or_default();
-    let path_name = kind.path_name();
-    let decided = state.directory_build.route_undecided == 0
-        && decided_from_certain_inputs(state, &condition, current_file_dir)
-        && properties::property_references(&project).all(|name| is_certain(state, name));
-    if names_the_default(kind, current_file_dir, state) {
-        state.directory_build.accounted[kind.index()] = true;
-    }
-    if decided {
+    if is_decided_point(node, kind, current_file_dir, state) {
+        if names_the_default(kind, current_file_dir, state) {
+            state.directory_build.accounted[kind.index()] = true;
+        }
         return Visit::Follow;
     }
-    let identity_certain = is_certain(state, path_name) && names_one_file(state, path_name);
-    if !identity_certain {
-        // The whole evaluation is uncertain from here: nothing a later point
-        // could import adds to that.
-        state.directory_build.accounted[kind.index()] = true;
-    }
-    let named = named_file(state, path_name, current_file_dir);
-    fallback(kind, identity_certain, named, state);
+    // The whole evaluation is uncertain from here: nothing a later point could
+    // import adds to that.
+    state.directory_build.accounted[kind.index()] = true;
+    let named = named_file(state, kind.path_name(), current_file_dir);
+    let condition = attribute(node, "Condition").unwrap_or_default();
+    let guarded = condition::requires_exists(&condition, &|arg| is_the_path(arg, kind));
+    fallback(kind, named, guarded, state);
     Visit::Settled
+}
+
+/// Whether `arg`, an `Exists` argument, is exactly the point's own path.
+fn is_the_path(arg: &str, kind: DirectoryBuildFile) -> bool {
+    simple_property_reference(arg).is_some_and(|name| name.eq_ignore_ascii_case(kind.path_name()))
+}
+
+/// The domain of a decided import point (see the module docs): the one place
+/// it is stated.
+fn is_decided_point(
+    node: Node<'_, '_>,
+    kind: DirectoryBuildFile,
+    current_file_dir: &Path,
+    state: &State<'_>,
+) -> bool {
+    let path_name = kind.path_name();
+    let condition = attribute(node, "Condition").unwrap_or_default();
+    let project = attribute(node, "Project").unwrap_or_default();
+    let observer = state.observer;
+    let exists = |path: &str| condition_exists(observer, path, current_file_dir);
+    let probes = state.follow_imports.then_some(condition::Probes {
+        exists: &exists,
+        observer,
+    });
+    let unknown = |name: &str| !is_certain(state, name);
+    let is_the_exists = |arg: &str| is_the_path(arg, kind);
+    state.walk_opaque.is_none()
+        && state.directory_build.route_undecided == 0
+        && condition::decided_conjunctwise(
+            &condition,
+            &state.lookup,
+            probes,
+            &unknown,
+            &is_the_exists,
+        )
+        && properties::property_references(&project).all(|name| is_certain(state, name))
+        && is_certain(state, path_name)
+        && names_one_file(state, path_name)
 }
 
 /// Whether the import point here names the file the SDK's discovery names by
@@ -430,36 +470,33 @@ pub(super) fn settle_unaccounted(state: &mut State<'_>) {
             // the walk did not.
             continue;
         }
-        // The identity is never certain here. The point, wherever it is, is
-        // somewhere the walk did not go, and reads the path as it is there:
+        // The point, wherever it is, is somewhere the walk did not go, and
+        // reads the path as it is there:
         // bound by the SDK's own discovery just before it, or by a write the
         // walk never saw, or left as some write earlier than the last the walk
         // holds. The file the path names now is only the likeliest.
         let project_dir = state.entry_project_dir.clone();
         let named = named_file(state, kind.path_name(), &project_dir);
-        fallback(kind, false, named, state);
+        // A point the walk never reached is in content it could not see, and
+        // whatever that point's condition does is that content's doubt.
+        fallback(kind, named, true, state);
     }
 }
 
-/// See the module docs.
+/// See the module docs. `guarded`: the point's condition is false whenever
+/// `Exists` of its path is ([`condition::requires_exists`]).
 fn fallback(
     kind: DirectoryBuildFile,
-    identity_certain: bool,
     named: Option<PathBuf>,
+    guarded: bool,
     state: &mut State<'_>,
 ) {
-    if identity_certain {
-        if let Some(file) = named {
-            walk_doubted(kind, &file, state);
-        }
-        return;
-    }
     // A path some write touched (bound, or left doubted by a write the walk
     // skipped or refused) may name a file the walk cannot see from here.
     let path_name = kind.path_name();
     let path_touched = state.lookup.is_bound(path_name) || !state.trust_of(path_name).is_certain();
     let file = named.or_else(|| state.directory_build.discovered[kind.index()].clone());
-    if !path_touched && file.is_none() {
+    if guarded && !path_touched && file.is_none() {
         return;
     }
     whole_evaluation_uncertain(kind, state);
@@ -588,8 +625,7 @@ fn point_path(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf>
 
 /// Whether the path property names at most one file: a value that is no list
 /// and no wildcard, classified in the escaped domain as an import's `Project`
-/// is. A list or a wildcard imports every file it names or matches, which the
-/// fallback's walk of one file does not model, so its identity is in doubt.
+/// is. A list or a wildcard imports every file it names or matches.
 fn names_one_file(state: &State<'_>, path_name: &str) -> bool {
     state
         .lookup

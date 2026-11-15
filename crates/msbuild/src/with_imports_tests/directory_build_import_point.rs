@@ -168,38 +168,10 @@ fn an_import_the_walk_cannot_decide_charges_nothing_without_a_directory_build_fi
 /// the path is certain whatever the gate holds.
 const NAMES_THE_FILE: &str = "    <DirectoryBuildTargetsPath>$(MSBuildProjectDirectory)/Directory.Build.targets</DirectoryBuildTargetsPath>\n";
 
-/// An import point reached under a gate the walk cannot decide, over a file
-/// whose identity is certain and which writes nothing: whether MSBuild imports
-/// it changes nothing, so nothing is withdrawn.
-#[test]
-fn an_undecided_gate_over_an_empty_file_marks_nothing() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_at(tmp.path(), "Directory.Build.targets", EMPTY);
-    let project = write_at(
-        tmp.path(),
-        "p.fsproj",
-        &format!(
-            "<Project Sdk=\"Std\">\n  <PropertyGroup>\n{NAMES_THE_FILE}    \
-             <ImportDirectoryBuildTargets Condition=\"{UNDECIDABLE}\">false</ImportDirectoryBuildTargets>\n  \
-             </PropertyGroup>\n  <ItemGroup>\n    <Compile Include=\"A.fs\" />\n  </ItemGroup>\n</Project>\n"
-        ),
-    );
-    let parsed = parse_file_std(&project);
-    assert!(
-        !parsed.items_uncertain,
-        "{:?}",
-        parsed.compile_item_uncertainties
-    );
-    assert_eq!(
-        paths_of(&parsed.items),
-        vec![canon(tmp.path()).join("A.fs")]
-    );
-    assert!(!parsed.project_references_uncertain);
-}
-
-/// #781: the same gate over a file that contributes. MSBuild writes the gate
-/// `false` and never imports the file; the walk cannot tell, so every product
-/// of the file is uncertain — its items and its property writes alike.
+/// #781: an import point reached under a gate the walk cannot decide. MSBuild
+/// writes the gate `false` and never imports the file; the walk cannot tell,
+/// so the whole evaluation is uncertain from the point: the file's items and
+/// property writes, and every value bound before it.
 #[test]
 fn an_undecided_gate_over_a_contributing_file_withdraws_what_it_contributes() {
     let tmp = tempfile::tempdir().unwrap();
@@ -221,65 +193,7 @@ fn an_undecided_gate_over_a_contributing_file_withdraws_what_it_contributes() {
         "{:?}",
         property(&parsed, "FromDbt")
     );
-    // The file's identity is certain, so what it does not write stands.
-    assert!(!untrusted(&parsed, "Before"));
-    assert_eq!(property(&parsed, "Before"), Some("1"));
-}
-
-/// A doubted file changes the `<ProjectReference>` list only through its own
-/// items: one that declares none leaves the body's list certain, unless a body
-/// item reads what the file writes, which is a doubted value.
-#[test]
-fn a_doubted_file_without_references_leaves_the_reference_list_alone() {
-    let tmp = tempfile::tempdir().unwrap();
-    write_at(
-        tmp.path(),
-        "Directory.Build.targets",
-        "<Project>\n  <PropertyGroup><FromDbt>1</FromDbt></PropertyGroup>\n  \
-         <ItemGroup><Compile Include=\"Dbt.fs\" /></ItemGroup>\n</Project>\n",
-    );
-    let body = |reference: &str| {
-        format!(
-            "<Project Sdk=\"Std\">\n  <PropertyGroup>\n{NAMES_THE_FILE}    \
-             <ImportDirectoryBuildTargets Condition=\"{UNDECIDABLE}\">false</ImportDirectoryBuildTargets>\n  \
-             </PropertyGroup>\n  <ItemGroup>\n    {reference}\n  </ItemGroup>\n</Project>\n"
-        )
-    };
-    let plain = write_at(
-        tmp.path(),
-        "plain/p.fsproj",
-        &body("<ProjectReference Include=\"B.fsproj\" />"),
-    );
-    write_at(
-        tmp.path(),
-        "plain/Directory.Build.targets",
-        "<Project>\n  <PropertyGroup><FromDbt>1</FromDbt></PropertyGroup>\n  \
-         <ItemGroup><Compile Include=\"Dbt.fs\" /></ItemGroup>\n</Project>\n",
-    );
-    let parsed = parse_file_std(&plain);
-    assert!(parsed.items_uncertain);
-    assert!(
-        !parsed.project_references_uncertain,
-        "the doubted file declares no reference"
-    );
-    assert_eq!(parsed.project_references.len(), 1);
-
-    let reading = write_at(
-        tmp.path(),
-        "reading/p.fsproj",
-        &body("<ProjectReference Include=\"B.fsproj\" Condition=\"'$(FromDbt)' == ''\" />"),
-    );
-    write_at(
-        tmp.path(),
-        "reading/Directory.Build.targets",
-        "<Project>\n  <PropertyGroup><FromDbt>1</FromDbt></PropertyGroup>\n</Project>\n",
-    );
-    let parsed = parse_file_std(&reading);
-    assert!(
-        parsed.project_references_uncertain || parsed.project_references.is_empty(),
-        "the reference reads a value the doubted file writes: {:?}",
-        parsed.project_references
-    );
+    assert!(untrusted(&parsed, "Before"));
 }
 
 /// What a doubted file imports is doubted too: here the file names its child
@@ -319,7 +233,10 @@ fn a_doubted_file_s_own_imports_are_doubted_with_it() {
 
 /// A doubted file is one MSBuild may not have imported, so a later import of
 /// it is not certainly a duplicate: here MSBuild skips the point and makes
-/// the later import, whose write lands after the SDK's own.
+/// the later import, whose write lands after the SDK's own. The later import
+/// names the file by a literal path: the path property is unpinned by the
+/// fallback, and an import through it is skipped as hidden content (whose
+/// stale values the property reader trusts, #792).
 #[test]
 fn a_later_import_of_a_doubted_file_is_doubted_too() {
     let tmp = tempfile::tempdir().unwrap();
@@ -334,7 +251,7 @@ fn a_later_import_of_a_doubted_file_is_doubted_too() {
         "<Project />\n",
         &format!(
             "<Project>\n{block}  <PropertyGroup><LangVersion>8.0</LangVersion></PropertyGroup>\n  \
-             <Import Project=\"$(DirectoryBuildTargetsPath)\" />\n</Project>\n"
+             <Import Project=\"$(MSBuildProjectDirectory)/Directory.Build.targets\" />\n</Project>\n"
         ),
         &[],
     );
@@ -367,7 +284,7 @@ fn a_later_import_of_a_doubted_file_doubts_its_children_again() {
         "<Project />\n",
         &format!(
             "<Project>\n{block}  <PropertyGroup><LangVersion>8.0</LangVersion></PropertyGroup>\n  \
-             <Import Project=\"$(DirectoryBuildTargetsPath)\" />\n</Project>\n"
+             <Import Project=\"$(MSBuildProjectDirectory)/Directory.Build.targets\" />\n</Project>\n"
         ),
         &[],
     );
@@ -406,7 +323,7 @@ fn walking_a_doubted_cycle_again_ends() {
         tmp.path(),
         "<Project />\n",
         &format!(
-            "<Project>\n{block}  <Import Project=\"$(DirectoryBuildTargetsPath)\" />\n</Project>\n"
+            "<Project>\n{block}  <Import Project=\"$(MSBuildProjectDirectory)/Directory.Build.targets\" />\n</Project>\n"
         ),
         &[],
     );
@@ -682,5 +599,91 @@ fn an_undecided_point_over_a_path_list_declines_what_its_files_write() {
     a_point_over_a_spec_of(
         "$(MSBuildProjectDirectory)/imports/a.targets;$(MSBuildProjectDirectory)/imports/b.targets",
         &["a.targets", "b.targets"],
+    );
+}
+
+/// The SDK's props import `Directory.Build.props` behind a condition MSBuild
+/// takes and the walk cannot decide, and its targets import the file again
+/// through a point the walk could decide (import-graph soak seed 112233, case
+/// 9706). MSBuild skips the second import as a duplicate, so the file's
+/// Compile item comes before the body's. The walk cannot see the first import,
+/// so it must not commit the order its own import of the file would give.
+#[test]
+fn a_point_after_a_hidden_import_of_its_file_commits_no_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolver = custom_sdk(
+        tmp.path(),
+        &format!(
+            "<Project>\n  <Import Project=\"$(MSBuildProjectDirectory)/Directory.Build.props\" \
+             Condition=\"{UNDECIDABLE}\" />\n</Project>\n"
+        ),
+        "<Project>\n  <PropertyGroup>\n    \
+         <DirectoryBuildPropsPath>$(MSBuildProjectDirectory)/Directory.Build.props</DirectoryBuildPropsPath>\n  \
+         </PropertyGroup>\n  <Import Project=\"$(DirectoryBuildPropsPath)\" \
+         Condition=\"exists('$(DirectoryBuildPropsPath)')\" />\n</Project>\n",
+        &[],
+    );
+    write_at(
+        tmp.path(),
+        "Directory.Build.props",
+        "<Project><ItemGroup><Compile Include=\"before.fs\" /></ItemGroup></Project>",
+    );
+    let project = write_at(
+        tmp.path(),
+        "p.fsproj",
+        "<Project Sdk=\"Custom\">\n  <ItemGroup>\n    <Compile Include=\"body.fs\" />\n  </ItemGroup>\n</Project>\n",
+    );
+    let parsed = parse_file_with_sdk_resolution(&project, resolver);
+    assert!(
+        parsed.items_uncertain
+            || paths_of(&parsed.items)
+                == [tmp.path().join("before.fs"), tmp.path().join("body.fs")],
+        "MSBuild orders the file's item first; the walk published {:?}",
+        paths_of(&parsed.items)
+    );
+}
+
+/// The same shape through a plain `<Import>` rather than a `Directory.Build`
+/// point: once the walk has passed content it could not see, any import may
+/// be a duplicate of one that content made.
+#[test]
+#[ignore = "#819: a certain import after opacity may be a duplicate MSBuild skips"]
+fn a_plain_import_after_a_hidden_import_of_its_file_commits_no_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolver = custom_sdk(
+        tmp.path(),
+        &format!(
+            "<Project>\n  <Import Project=\"$(MSBuildProjectDirectory)/shared.props\" \
+             Condition=\"{UNDECIDABLE}\" />\n</Project>\n"
+        ),
+        "<Project />\n",
+        &[],
+    );
+    write_at(
+        tmp.path(),
+        "shared.props",
+        "<Project><PropertyGroup><Order>$(Order);shared</Order></PropertyGroup>\
+         <ItemGroup><Compile Include=\"before.fs\" /></ItemGroup></Project>",
+    );
+    let project = write_at(
+        tmp.path(),
+        "p.fsproj",
+        "<Project Sdk=\"Custom\">\n  <PropertyGroup>\n    <Order>$(Order);body</Order>\n  </PropertyGroup>\n  \
+         <ItemGroup>\n    <Compile Include=\"body.fs\" />\n  </ItemGroup>\n  \
+         <Import Project=\"$(MSBuildProjectDirectory)/shared.props\" />\n</Project>\n",
+    );
+    let parsed = parse_file_with_sdk_resolution(&project, resolver);
+    assert!(
+        parsed.items_uncertain
+            || paths_of(&parsed.items)
+                == [tmp.path().join("before.fs"), tmp.path().join("body.fs")],
+        "MSBuild orders the file's item first; the walk published {:?}",
+        paths_of(&parsed.items)
+    );
+    assert!(
+        !parsed.property("Order").is_exact()
+            || parsed.property("Order").value() == Some(";shared;body"),
+        "MSBuild runs `shared.props` once, first; the walk read {:?}",
+        parsed.property("Order")
     );
 }
