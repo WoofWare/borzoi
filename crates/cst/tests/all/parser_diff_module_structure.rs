@@ -5691,3 +5691,81 @@ fn diff_leading_bom_keeps_top_level_statements_separate() {
 fn diff_leading_bom_then_module() {
     assert_asts_match("\u{FEFF}module M\nlet a = 1\nlet b = 2\n");
 }
+
+/// A `#:` line at column 0 (a file-based app's `#:package` directive) is
+/// whitespace to FCS's lexer at every version; anywhere else it is FS3909,
+/// and still whitespace.
+#[test]
+fn diff_colon_directive_lines() {
+    assert_asts_match("#:package Foo@1.0\n#:property X=Y\nmodule M\nlet x = 1\n");
+    assert_asts_match_with_diagnostic(
+        "module M\nlet x = 1 #: trailing\n  #: indented\nlet y = 2\n",
+        3909,
+    );
+}
+
+/// A lone carriage return does not start a line for FCS's lexer, so a `#:`
+/// after one is FS3909 (the trees are not compared: FCS reads a lone CR
+/// otherwise than we do); a tab inside a `#:` line is part of the line, not
+/// FS1161.
+#[test]
+fn diff_colon_directive_line_starts() {
+    let lone_cr = "module M\nlet x = 1\r#:property X=Y\nlet y = 2\n";
+    assert!(
+        !assert_parse_verdicts_match(lone_cr),
+        "FCS rejects {lone_cr:?}"
+    );
+    let directive = lone_cr.find("#:").expect("the directive");
+    assert!(
+        borzoi_cst::parser::parse(lone_cr)
+            .errors
+            .iter()
+            .any(|e| e.span.start == directive
+                && e.message == "#: directives must start at the beginning of a line"),
+        "we report FS3909 at the directive in {lone_cr:?}"
+    );
+    assert_asts_match_with_diagnostic("module M\nlet x = 1 #: a\tb\nlet y = 2\n", 3909);
+    assert_asts_match("#:property\tX=Y\nmodule M\nlet x = 1\n");
+    // FCS counts columns past a file-start BOM.
+    assert_asts_match("\u{FEFF}#:package Foo@1.0\nmodule M\nlet x = 1\n");
+}
+
+/// Every place a `#:` line may stand against what precedes it on its line —
+/// nothing, a file-start BOM, an LF, a CRLF, a lone CR, indentation, code, a
+/// comment — and what it holds: FCS's FS3909 spans must be ours, exactly.
+#[test]
+fn diff_colon_directive_position_grid() {
+    let befores = [
+        "",
+        "\u{FEFF}",
+        "module M\n",
+        "module M\r\n",
+        "module M\nlet x = 1\r",
+        "module M\n  ",
+        "module M\n\t",
+        "module M\nlet x = 1 ",
+        "module M\nlet x = 1\n(* c *)",
+        "module M\nlet x = 1\n(* c\n*) ",
+    ];
+    let lines = ["#:p", "#:package Foo@1.0", "#: a\tb", "#:"];
+    let mut failures = Vec::new();
+    for before in befores {
+        for line in lines {
+            let source = format!("{before}{line}\nlet y = 2\n");
+            let mut tmp = tempfile::NamedTempFile::with_suffix(".fs").expect("create tempfile");
+            std::io::Write::write_all(&mut tmp, source.as_bytes()).expect("write source");
+            let json = crate::common::fcs_ast_batch(tmp.path());
+            let fcs = crate::common::fcs_diagnostic_spans(&json, &source, 3909);
+            let ours: Vec<_> = borzoi_cst::parser::parse(&source)
+                .errors
+                .into_iter()
+                .filter(|e| e.message == "#: directives must start at the beginning of a line")
+                .map(|e| e.span)
+                .collect();
+            if fcs != ours {
+                failures.push(format!("{source:?}: fcs {fcs:?}, ours {ours:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

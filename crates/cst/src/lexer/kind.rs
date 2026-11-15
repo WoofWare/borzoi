@@ -168,7 +168,7 @@ token_kinds! {
         LParenStarRParen, LParen, RParen, LBrack, RBrack, LBrackBar, BarRBrack, LBrackLess,
         GreaterRBrack, LQuote, LQuoteRaw, RQuote, RQuoteRaw, RQuoteDot, RQuoteRawDot,
         RQuoteBarRBrace, RQuoteRawBarRBrace, LBrace, RBrace, LBraceBar, BarRBrace, Comma,
-        SemiSemi, Semi, DotDotHat, DotDot, Dot, ColonColon, ColonQMarkGreater, ColonQMark,
+        SemiSemi, Semi, DotDotHat, DotDotDot, DotDot, Dot, ColonColon, ColonQMarkGreater, ColonQMark,
         ColonGreater, ColonEquals, Colon, RArrow, LArrow, Equals, AmpAmp, Amp, BarBar, Bar,
         QMarkQMark, QMark, Hash, Dollar, Tilde, Quote,
     ],

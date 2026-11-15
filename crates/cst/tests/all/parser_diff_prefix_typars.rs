@@ -19,6 +19,7 @@ use crate::common::{
     assert_sig_asts_match,
 };
 use borzoi_oracle_harness::panic_silence::{catch_unwind_silent, take_silenced_panic};
+use std::io::Write;
 
 /// Two parameters.
 #[test]
@@ -151,7 +152,6 @@ fn diff_prefix_list_rejections() {
         "type ('a, ) T = int\n",
         "type ('a 'b) T = int\n",
         "type ('a, 'b T = int\n",
-        "type ('a * 'b) with\n    member _.M = 1\n",
         "type ('a, 'b) T<'c> = int\n",
         "exception ('a) E of 'a\n",
         "type struct ('a, 'b) T = int\n",
@@ -161,6 +161,26 @@ fn diff_prefix_list_rejections() {
             "FCS was expected to reject {source:?}",
         );
     }
+}
+
+/// A tuple-type extension head, `type ('a * 'b) with`, which FCS accepts at
+/// every version (the `ExtensionConstraintSolutions` syntax, gated in its
+/// checker) and we do not parse yet: the feature table's `Unmodelled(unparsed
+/// syntax)` row. Pinned so the row's modelling flips it.
+#[test]
+fn diff_tuple_type_extension_head_is_unparsed() {
+    let source = "type ('a * 'b) with\n    member _.M = 1\n";
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".fs").expect("create tempfile");
+    tmp.write_all(source.as_bytes()).expect("write source");
+    let json = crate::common::fcs_ast_batch(tmp.path());
+    assert!(
+        !crate::common::fcs_parse_had_errors(&json),
+        "FCS accepts {source:?}"
+    );
+    assert!(
+        !borzoi_cst::parser::parse(source).errors.is_empty(),
+        "we parse {source:?}: model the tuple-type extension head and grade it"
+    );
 }
 
 /// Typar declarations a list element may be. Each is a whole `typarDecl`.

@@ -115,11 +115,32 @@ fn diff_op_colon_then_plus() {
     assert_streams_match("let x = a:+b\n");
 }
 
-/// `...` — pure dots: `DOT_DOT` + `DOT`, never a general operator.
-/// (Was `Op("...")`.)
+/// `...` — FCS's `DOT_DOT_DOT`, never a general operator; four dots are
+/// `...` then `.`.
 #[test]
 fn diff_op_triple_dot() {
     assert_streams_match("let x = a...b\n");
+    assert_streams_match("let x = a....b\n");
+    assert_streams_match("let x = { ...r }\n");
+}
+
+/// A `#:` line is whitespace to FCS's lexer wherever it stands; at column 0
+/// it is a file-based app's directive (`#:package`), elsewhere an error the
+/// parser reports.
+#[test]
+fn diff_colon_directive_lines() {
+    assert_streams_match("#:package Foo@1.0\n#:property X=Y\nlet x = 1\n");
+    assert_streams_match("let x = 1 #: trailing\n  #: indented\nlet y = 2\n");
+}
+
+/// An `=` glued to an interpolated-string opener is `EQUALS` and the string,
+/// in each of the opener's spellings; `==$"` stays an operator.
+#[test]
+fn diff_equals_before_interpolated_string() {
+    assert_streams_match("let x = C(Name=$\"v{1}\")\n");
+    assert_streams_match("let x = C(Name=$$\"\"\"v{{1}}\"\"\")\n");
+    assert_streams_match("let x = C(Name=$@\"v\", B=@$\"w\")\n");
+    assert_streams_match("let x = a ==$\"v\"\n");
 }
 
 /// Regression guard: an `ignored_op_char` (`.`) *prefixing* a significant char

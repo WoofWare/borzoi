@@ -20,6 +20,7 @@ pub mod accessor_coverage;
 pub mod corpus_manifest;
 pub mod fcs_record;
 pub mod normalised_ast;
+pub mod oracle;
 mod range_audit;
 pub mod recovery;
 
@@ -27,13 +28,11 @@ pub mod recovery;
 pub use range_audit::{assert_ast_ranges_match, assert_sig_ast_ranges_match, ast_ranges_match};
 
 use std::collections::{BTreeSet, HashSet};
-use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 use borzoi_cst::language_version::LanguageVersion;
 use borzoi_cst::lexer::Token;
@@ -43,6 +42,8 @@ use borzoi_cst::parser::{
 };
 use borzoi_cst::tokens::lex_full_trivia_at;
 use borzoi_oracle_harness::{BatchChild, BoundedCommand};
+
+pub use oracle::Oracle;
 
 /// The sweeps here silence their *expected* panics; the implementation is shared
 /// with sema's and the LSP's sweeps, because a hook swap races once a crate's
@@ -98,7 +99,7 @@ use tempfile::NamedTempFile;
 // ============================================================================
 
 /// The workspace root, two `..` jumps above the CST crate's `CARGO_MANIFEST_DIR`.
-/// `tools/fcs-dump` lives there.
+/// `tools/fcs-dump` and `tools/fcs-dump-legacy` live there.
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -114,10 +115,11 @@ fn workspace_root() -> PathBuf {
 
 /// Run `fcs-dump <subcommand> <source>` and return its stdout as a UTF-8 string.
 ///
-/// Honours `BORZOI_FCS_DUMP` (path to a pre-built framework-dependent binary)
-/// when set; otherwise builds `tools/fcs-dump` via [`ensure_fcs_dump_built`]
-/// (sentinel-gated, so the build runs at most once per source change across the
-/// whole `cargo test`) and execs the resulting apphost on every call.
+/// Runs the current oracle ([`Oracle::Current`]): `BORZOI_FCS_DUMP` (path to a
+/// pre-built framework-dependent binary) when set; otherwise `tools/fcs-dump`,
+/// built by [`Oracle::bin`] (sentinel-gated, so the build runs at most once per
+/// source change across the whole `cargo test`), and execs the resulting
+/// apphost on every call.
 ///
 /// Building then exec-ing the binary directly — rather than `dotnet run` per
 /// call — avoids a race: `dotnet run` does an MSBuild incremental-build check on
@@ -141,16 +143,7 @@ pub fn invoke_fcs_dump(subcommand: &str, source: &Path) -> String {
 /// `ast-batch` corpus sweep) can configure the pipes. Honours the same
 /// `BORZOI_FCS_DUMP` / build-once strategy as [`invoke_fcs_dump`].
 pub fn fcs_dump_command(subcommand: &str) -> Command {
-    let mut c = Command::new(fcs_dump_bin());
-    c.arg(subcommand);
-    c
-}
-
-/// The `fcs-dump` executable: the prebuilt one named by `BORZOI_FCS_DUMP`,
-/// else the apphost [`ensure_fcs_dump_built`] produces.
-fn fcs_dump_bin() -> OsString {
-    std::env::var_os("BORZOI_FCS_DUMP")
-        .unwrap_or_else(|| ensure_fcs_dump_built().as_os_str().to_os_string())
+    Oracle::Current.command(subcommand)
 }
 
 pub fn invoke_fcs_dump_with_defines(subcommand: &str, source: &Path, defines: &[&str]) -> String {
@@ -195,6 +188,7 @@ pub fn invoke_fcs_dump_with_defines(subcommand: &str, source: &Path, defines: &[
 /// slot, so the pool converges on roughly as many children as there is real
 /// concurrency, rather than eagerly paying `n` .NET startups.
 struct BatchPool {
+    oracle: Oracle,
     subcommand: &'static str,
     slots: Vec<Mutex<Option<BatchChild>>>,
 }
@@ -212,7 +206,9 @@ struct BatchPool {
 /// The gain is steeply diminishing — the children are CPU-hungry, so a handful
 /// already saturates the cores — while the cost is not: a dev box often has
 /// sibling worktrees running their own suites, and a pool sized to *this*
-/// process's core count is antisocial about a machine it doesn't own.
+/// process's core count is antisocial about a machine it doesn't own. The
+/// default allows two children per pool; the legacy oracle's pools spawn only
+/// for requests below the support floor, so most runs hold six.
 ///
 /// The budget is divided evenly among the [`FCS_POOLS`] pools, so it is clamped
 /// *up* to that many: the pools serve different `fcs-dump` subcommands and are
@@ -225,7 +221,7 @@ fn requested_fcs_children() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(6)
+        .unwrap_or(2 * FCS_POOLS)
 }
 
 /// The budget actually in force: `requested`, raised to one child per pool.
@@ -243,15 +239,17 @@ pub fn fcs_slots_per_pool(requested: usize) -> usize {
     effective_fcs_children(requested) / FCS_POOLS
 }
 
-/// The number of [`BatchPool`]s in this process; the child budget is split evenly
-/// between them. Asserted in [`BatchPool::new`], so adding a pool without updating
-/// this fails loudly rather than quietly overrunning the budget.
-const FCS_POOLS: usize = 3;
+/// The number of [`BatchPool`]s in this process: the current oracle's `ast`,
+/// parser-stream and raw-token pools, and the legacy oracle's `ast` and
+/// parser-stream pools. The child budget is split evenly between them.
+/// Asserted in [`BatchPool::new`], so adding a pool without updating this fails
+/// loudly rather than quietly overrunning the budget.
+const FCS_POOLS: usize = 5;
 
 impl BatchPool {
     /// Size the pool to libtest's own default thread count, capped at this pool's
-    /// share of the process-wide [`max_fcs_children`] budget.
-    fn new(subcommand: &'static str) -> Self {
+    /// share of the process-wide [`requested_fcs_children`] budget.
+    fn new(oracle: Oracle, subcommand: &'static str) -> Self {
         static LIVE_POOLS: AtomicUsize = AtomicUsize::new(0);
         let nth = LIVE_POOLS.fetch_add(1, Ordering::Relaxed) + 1;
         assert!(
@@ -263,6 +261,7 @@ impl BatchPool {
         let share = fcs_slots_per_pool(requested_fcs_children());
         let n = std::thread::available_parallelism().map_or(4, |n| n.get());
         Self {
+            oracle,
             subcommand,
             slots: (0..n.min(share)).map(|_| Mutex::new(None)).collect(),
         }
@@ -297,7 +296,7 @@ impl BatchPool {
     /// field over the one-shot dump; the JSON consumers read by field name and
     /// ignore it.)
     fn round_trip(&self, slot: &mut Option<BatchChild>, line: &str) -> String {
-        slot.get_or_insert_with(|| BatchChild::spawn(fcs_dump_bin(), &[self.subcommand]))
+        slot.get_or_insert_with(|| BatchChild::spawn(self.oracle.bin(), &[self.subcommand]))
             .request(line)
     }
 }
@@ -308,165 +307,71 @@ impl BatchPool {
 /// `ConditionalDefines` empty, so callers that need `#if` symbols must stay on
 /// [`invoke_fcs_dump_with_defines`].
 pub fn fcs_ast_batch(source: &Path) -> String {
-    ast_pool().request(source)
+    ast_pool(Oracle::Current).request(source)
 }
 
-fn ast_pool() -> &'static BatchPool {
-    static P: OnceLock<BatchPool> = OnceLock::new();
-    P.get_or_init(|| BatchPool::new("ast-batch"))
+/// `oracle`'s `ast-batch` pool.
+fn ast_pool(oracle: Oracle) -> &'static BatchPool {
+    static CURRENT: OnceLock<BatchPool> = OnceLock::new();
+    static LEGACY: OnceLock<BatchPool> = OnceLock::new();
+    match oracle {
+        Oracle::Current => &CURRENT,
+        Oracle::Legacy => &LEGACY,
+    }
+    .get_or_init(|| BatchPool::new(oracle, "ast-batch"))
 }
 
 /// Run `source` through the shared `tokens-lexfilter-internal-batch` pool: the
 /// parser-facing stream including the tokens FCS's public tokenizer drops
 /// (block ends). Read it with [`parse_fcs_parser_stream`].
 pub fn fcs_tokens_parser_stream_batch(source: &Path) -> String {
-    parser_stream_pool().request(source)
+    parser_stream_pool(Oracle::Current).request(source)
 }
 
 /// [`fcs_tokens_parser_stream_batch`] at the `<LangVersion>` `lang_text` (a
 /// token FCS reads, such as `4.6` or `preview`), which the request line
-/// carries after a tab.
+/// carries after a tab. The oracle is the one that grades `lang_text`
+/// ([`Oracle::for_lang_text`]).
 pub fn fcs_tokens_parser_stream_batch_at(source: &Path, lang_text: &str) -> String {
-    parser_stream_pool().request_line(&format!("{}\t{lang_text}", source.display()))
+    parser_stream_pool(Oracle::for_lang_text(lang_text))
+        .request_line(&format!("{}\t{lang_text}", source.display()))
 }
 
 /// [`fcs_ast_batch`] at the `<LangVersion>` `lang_text`, which the request
-/// line carries after a tab.
+/// line carries after a tab. The oracle is the one that grades `lang_text`
+/// ([`Oracle::for_lang_text`]); a legacy record is returned in the current
+/// shapes ([`oracle::upgrade_legacy_record`]).
 pub fn fcs_ast_batch_at(source: &Path, lang_text: &str) -> String {
-    ast_pool().request_line(&format!("{}\t{lang_text}", source.display()))
+    let oracle = Oracle::for_lang_text(lang_text);
+    let json = ast_pool(oracle).request_line(&format!("{}\t{lang_text}", source.display()));
+    match oracle {
+        Oracle::Current => json,
+        Oracle::Legacy => oracle::upgrade_legacy_record(&json),
+    }
 }
 
-fn parser_stream_pool() -> &'static BatchPool {
-    static P: OnceLock<BatchPool> = OnceLock::new();
-    P.get_or_init(|| BatchPool::new("tokens-lexfilter-internal-batch"))
+/// `oracle`'s `tokens-lexfilter-internal-batch` pool.
+fn parser_stream_pool(oracle: Oracle) -> &'static BatchPool {
+    static CURRENT: OnceLock<BatchPool> = OnceLock::new();
+    static LEGACY: OnceLock<BatchPool> = OnceLock::new();
+    match oracle {
+        Oracle::Current => &CURRENT,
+        Oracle::Legacy => &LEGACY,
+    }
+    .get_or_init(|| BatchPool::new(oracle, "tokens-lexfilter-internal-batch"))
 }
 
 /// Run `source` through the shared `tokens-raw-batch` pool. Drop-in for
 /// one-shot `invoke_fcs_dump("tokens-raw", source)`.
 pub fn fcs_tokens_raw_batch(source: &Path) -> String {
     static P: OnceLock<BatchPool> = OnceLock::new();
-    P.get_or_init(|| BatchPool::new("tokens-raw-batch"))
+    P.get_or_init(|| BatchPool::new(Oracle::Current, "tokens-raw-batch"))
         .request(source)
 }
 
-/// Build `tools/fcs-dump` (when no prebuilt `BORZOI_FCS_DUMP` is set) and
-/// return the path to the produced **apphost** — the directly-executable native
-/// launcher sitting next to `fcs-dump.dll` — so callers exec it without the
-/// `dotnet` front-end.
-///
-/// A per-process `OnceLock` alone would re-run `dotnet build` once per test
-/// binary (~2 s apiece). This crate is now a single binary (`tests/all/`), but
-/// the *other* crates' harnesses build the same oracle, and a plain `cargo test`
-/// runs their binaries back to back — so the gate still earns its keep. To avoid
-/// the rebuild while staying correct, it is a **single** marker file
-/// (`bin/.fcs-dump-built`) whose *contents* are the source hash
-/// ([`fcs_dump_source_fingerprint`]) of the apphost currently on disk. The
-/// build runs only when that recorded hash doesn't match the current sources
-/// (or the apphost is missing); otherwise the binary skips straight to exec.
-///
-/// The marker records the *built output's* hash rather than merely "some build
-/// with this hash once happened" — because the apphost is one mutable file, so
-/// a per-hash marker would be unsound: after building hash A then hash B (which
-/// overwrites the apphost), reverting/branch-switching back to A would find a
-/// stale `built-A` marker and skip the build, running the B binary as the
-/// oracle for A's sources. One content-bearing marker makes a revert mismatch
-/// (recorded B ≠ wanted A) and correctly rebuild. The oracle is thus always
-/// fresh, unlike pinning a binary path in the devshell.
-///
-/// Cargo runs test binaries serially, so the first-builds / rest-skip handoff
-/// needs no inter-process lock; the marker write is atomic (temp + rename) so a
-/// partially-written hash can never read as a match.
-fn ensure_fcs_dump_built() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            let project = project_dir();
-            let bin = project.join("bin");
-            let apphost = bin.join("Release").join("net10.0").join("fcs-dump");
-            let marker = bin.join(".fcs-dump-built");
-            let want = format!("{:016x}", fcs_dump_source_fingerprint(&project));
-
-            let fresh = apphost.exists()
-                && std::fs::read_to_string(&marker)
-                    .map(|recorded| recorded.trim() == want)
-                    .unwrap_or(false);
-            if !fresh {
-                let mut cmd = Command::new("dotnet");
-                cmd.args(["build", "-c", "Release", "--nologo"])
-                    .arg(&project);
-                // Generous, but bounded: a cold build (restore + compile against
-                // FCS) is legitimately minutes, while a *stalled* one — say,
-                // blocked on a NuGet lock held by a concurrent run in a sibling
-                // worktree — would otherwise hang the suite forever.
-                BoundedCommand::new(cmd)
-                    .timeout(Duration::from_secs(1800))
-                    .run_ok("dotnet build fcs-dump");
-                assert!(
-                    apphost.exists(),
-                    "dotnet build fcs-dump produced no apphost at {apphost:?}"
-                );
-                // Write the marker only after a successful build, so it always
-                // names the hash of the apphost actually on disk.
-                write_marker_atomically(&marker, &want);
-            }
-            apphost
-        })
-        .as_path()
-}
-
-/// Hash the inputs whose change should force an `fcs-dump` rebuild: the tool's
-/// own sources (`*.fs` / `*.fsproj`) and the flake lock (which pins the SDK and
-/// thus the FCS package set). A plain non-cryptographic content hash — just a
-/// freshness key for the build marker — so editing the oracle reliably
-/// invalidates a prior build. Missing files hash as empty, keeping the
-/// fingerprint defined when run outside a Nix checkout.
-fn fcs_dump_source_fingerprint(project: &Path) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut sources: Vec<PathBuf> = std::fs::read_dir(project)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|s| s.to_str()),
-                Some("fs" | "fsproj")
-            )
-        })
-        .collect();
-    sources.sort();
-    sources.push(workspace_root().join("flake.lock"));
-
-    let mut h = DefaultHasher::new();
-    for p in &sources {
-        // File name first so a rename can't alias two contents to one hash.
-        p.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .hash(&mut h);
-        std::fs::read(p).unwrap_or_default().hash(&mut h);
-    }
-    h.finish()
-}
-
-/// Write `contents` to `marker` atomically: write a pid-tagged sibling temp
-/// file and rename it into place, so a reader never observes a half-written
-/// hash. Best-effort — any failure just means the next test binary rebuilds
-/// (still correct, only slower).
-fn write_marker_atomically(marker: &Path, contents: &str) {
-    let Some(dir) = marker.parent() else {
-        return;
-    };
-    let tmp = dir.join(format!(".fcs-dump-built.tmp-{}", std::process::id()));
-    if std::fs::write(&tmp, contents).is_ok() && std::fs::rename(&tmp, marker).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-}
-
+/// The current oracle's project directory, `tools/fcs-dump`.
 pub fn project_dir() -> PathBuf {
-    workspace_root().join("tools").join("fcs-dump")
+    Oracle::Current.project_dir()
 }
 
 /// Root of the F# corpus the differential tests walk, taken from the
@@ -1075,6 +980,7 @@ pub fn rust_kind_name(tok: &Token<'_>) -> String {
         SemiSemi => "SemicolonSemicolon",
         Semi => "Semicolon",
         DotDotHat => "DotDotHat",
+        DotDotDot => "DotDotDot",
         DotDot => "DotDot",
         Dot => "Dot",
         ColonColon => "ColonColon",
@@ -1423,14 +1329,11 @@ pub fn assert_parse_verdicts_match(source: &str) -> bool {
 /// `BORZOI_FCS_LANGVERSION` set to `lang_text` (a canonical token such as
 /// `"7.0"`), so FCS parses at that `<LangVersion>`. The batched child can't carry
 /// a per-request version (it reads the env once at spawn), so this pays a fresh
-/// process — fine for the handful of version-sensitive fixtures.
+/// process — fine for the handful of version-sensitive fixtures. The oracle is
+/// the one that grades `lang_text` ([`Oracle::for_lang_text`]); a legacy record
+/// is returned in the current shapes ([`oracle::upgrade_legacy_record`]).
 fn fcs_ast_at_langversion(source: &Path, lang_text: &str) -> String {
-    let mut cmd = fcs_dump_command("ast");
-    cmd.arg(source);
-    cmd.env("BORZOI_FCS_LANGVERSION", lang_text);
-    let out =
-        BoundedCommand::new(cmd).run_ok(format_args!("fcs-dump ast (langversion {lang_text})"));
-    String::from_utf8(out.stdout).expect("fcs-dump stdout is UTF-8")
+    Oracle::for_lang_text(lang_text).ast_at(source, lang_text)
 }
 
 /// Like [`assert_asts_match`], but parses **both sides at `lang`** (FCS via
@@ -1904,6 +1807,47 @@ pub enum ParserFs0058 {
 pub fn assert_filtered_streams_match_with_parser_fs0058(source: &str, parser: ParserFs0058) {
     assert!(parser != ParserFs0058::None);
     filtered_streams_match(source, parser);
+}
+
+/// [`assert_filtered_streams_match`] at the bands at or above
+/// [`oracle::ORACLE_SUPPORT_FLOOR`] only, for a fixture whose stream depends on
+/// lex-filter or lexer behaviour the current compiler changed with no gate
+/// (the closing `>` of a type application continuing a sequence block, say).
+/// We follow that behaviour at every version, so below the floor our stream
+/// is the legacy compiler's gates over the current compiler's ungated
+/// filtering, which no compiler ever produced and no oracle grades (the
+/// unclaimed residue of `docs/ast-versioning-plan.md`, D12). The fixture must
+/// still diverge from the legacy oracle at some band below the floor, so one
+/// that no longer needs the exemption is moved back to
+/// [`assert_filtered_streams_match`].
+pub fn assert_filtered_streams_match_from_floor(source: &str) {
+    let mut tmp = NamedTempFile::with_suffix(".fs").expect("create temp .fs file");
+    tmp.write_all(source.as_bytes()).expect("write source");
+    let mut legacy_diverges = false;
+    for &(lang, lang_text) in LEXFILTER_VERSION_BANDS {
+        let (rust, fcs) = filtered_streams_at(tmp.path(), source, lang, lang_text);
+        if lang < oracle::ORACLE_SUPPORT_FLOOR {
+            legacy_diverges |= rust != fcs;
+            continue;
+        }
+        if rust.0 != fcs.0 {
+            report_divergence_at(
+                &format!("<LangVersion> {lang_text}"),
+                source,
+                &rust.0,
+                &fcs.0,
+            );
+        }
+        assert_eq!(
+            rust.1, fcs.1,
+            "FS0058 diagnostics diverge at <LangVersion> {lang_text} for {source:?}",
+        );
+    }
+    assert!(
+        legacy_diverges,
+        "{source:?} matches the legacy oracle at every band below the support floor: use \
+         assert_filtered_streams_match",
+    );
 }
 
 /// Offside diagnostics as `(start, end, severity, message)`, the shape both

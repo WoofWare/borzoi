@@ -63,6 +63,15 @@ use std::time::{Duration, Instant};
 
 pub use borzoi_spawn::{BoundedCommand, ChildFailure, default_timeout};
 
+/// The lowest `<LangVersion>` the current `tools/fcs-dump` FCS supports: the
+/// version its `LanguageVersion.IsVersionSupported` compares against. Below it
+/// that compiler no longer behaves as the older ones did, having deleted the
+/// features introduced there (`docs/ast-versioning-plan.md`, D12), so a
+/// harness sends a request pinned below it to the frozen legacy oracle,
+/// `tools/fcs-dump-legacy`. `borzoi-cst`'s `language_features` holds this to
+/// the compiler's source, and each harness's routing constant to this.
+pub const FCS_SUPPORT_FLOOR: &str = "8.0";
+
 /// How a resident oracle failed to answer a request. Distinct from the oracle
 /// answering *unsuccessfully* (an `{"error": …}` payload, a parse failure the
 /// caller expects): those are results. This is the conversation itself breaking.

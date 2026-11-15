@@ -23,8 +23,8 @@
 //!   is one the walk knows, so a row cannot hide a second construct.
 //!
 //! A row is FCS-graded, so its expectation cannot be backwards: what the table
-//! asserts about the oracle (silent or not, in scope or not) is checked against
-//! the oracle, and what it asserts about us is checked against us.
+//! asserts about the oracle (silent or not) is checked against the oracle, and
+//! what it asserts about us is checked against us.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -33,8 +33,7 @@ use borzoi_cst::parser::parse;
 use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{AstNode, ImplFile, SyntaxNode};
 use borzoi_sema::test_support::binder_completeness::{
-    BinderVerdict, OracleUse, UNSCOPED_BINDER_LEAVES, binder_site, binder_verdict, is_unscoped,
-    unmodelled_binders,
+    BinderVerdict, OracleUse, binder_site, binder_verdict, unmodelled_binders,
 };
 use borzoi_sema::{
     AssemblyEnv, ProjectItems, Resolution, ResolvedFile, SyntaxRecovery, resolve_file,
@@ -61,11 +60,6 @@ enum Status {
     /// cannot see this construct. The reason names what the oracle does
     /// instead.
     FcsSilent(&'static str),
-    /// FCS reports a definition, but no bare lookup reaches the name: the
-    /// row's planted uses are bound elsewhere, which the grid checks, and the
-    /// binder's leaf is on
-    /// [`UNSCOPED_BINDER_LEAVES`](borzoi_sema::test_support::binder_completeness::UNSCOPED_BINDER_LEAVES).
-    NotInScope,
 }
 
 /// One binding construct.
@@ -765,7 +759,10 @@ const CONSTRUCTS: &[Construct] = &[
         id: "auto_property",
         fcs: "SynMemberDefn.AutoProperty",
         template: "type C() =\n    member val «X» = 1 with get, set\n    member _.M = ‹X›\n",
-        status: Status::NotInScope,
+        status: Status::FcsSilent(
+            "FCS reports the property and its accessors, members no bare lookup reaches, and \
+             no value: a bare `X` in the type's body reaches the enclosing scope",
+        ),
     },
 ];
 
@@ -887,7 +884,6 @@ fn pinned(status: Status) -> &'static str {
         Status::Interned => "Interned",
         Status::Opaque => "Opaque",
         Status::FcsSilent(_) => "FcsSilent",
-        Status::NotInScope => "NotInScope",
     }
 }
 
@@ -928,30 +924,20 @@ fn every_binding_construct_is_known_to_the_walk() {
             let bound = uses
                 .iter()
                 .any(|o| o.range == u && o.decl == Some(cell.binder));
-            match cell.row.status {
-                Status::NotInScope if bound => fail(
-                    "fcs",
-                    format!(
-                        "FCS binds the planted use at {u:?} to the binder, which the row says no bare lookup reaches"
-                    ),
-                ),
-                Status::NotInScope => {}
-                _ if reported && !bound => fail(
+            if reported && !bound {
+                fail(
                     "fcs",
                     format!(
                         "FCS does not bind the planted use at {u:?} to the binder {:?}",
                         cell.binder_name
                     ),
-                ),
-                _ => {}
+                );
             }
         }
         for (env_name, env) in environments() {
             let (root, rf) = resolve(&cell.src, env);
             let observed_status = if !reported {
                 "FcsSilent"
-            } else if is_unscoped(&root, cell.binder) {
-                "NotInScope"
             } else {
                 let oracle = binders
                     .iter()
@@ -1022,28 +1008,6 @@ fn every_binding_construct_is_known_to_the_walk() {
         CONSTRUCTS.len(),
         rendered.join("\n")
     );
-}
-
-/// The table and the exemption list agree: a row says no bare lookup reaches
-/// its binder exactly when its binder's leaf is exempt. The grid checks each
-/// such row's claim against FCS, so an exemption no row checks is one nobody
-/// does.
-#[test]
-fn every_unscoped_leaf_has_a_row() {
-    for (kind, _) in UNSCOPED_BINDER_LEAVES {
-        let held = cells().iter().any(|c| {
-            c.row.status == Status::NotInScope && {
-                let (root, _) = resolve(&c.src, &AssemblyEnv::default());
-                is_unscoped(&root, c.binder)
-                    && root
-                        .token_at_offset(c.binder.start())
-                        .right_biased()
-                        .and_then(|t| t.parent())
-                        .is_some_and(|n| n.kind() == *kind)
-            }
-        });
-        assert!(held, "no NotInScope row holds the exemption of {kind:?}");
-    }
 }
 
 /// Every commit of ours at a use FCS binds in-file that names another binder.

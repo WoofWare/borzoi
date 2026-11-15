@@ -829,3 +829,14 @@ fn diff_ast_fun_lambda_string_const_arg() {
 fn diff_ast_typed_ident_with_with_null_string() {
     assert_asts_match("(x : string | null)\n");
 }
+
+/// An `=` glued to an interpolated string's opener is an `=` and the string,
+/// at every version and in every opener spelling (`lex.fsl`'s `'=' '$' '"'`
+/// rules).
+#[test]
+fn diff_equals_glued_to_interpolated_string() {
+    assert_asts_match("let x = C(Name=$\"v{1}\")\n");
+    assert_asts_match("let x = C(Name=$$\"\"\"v{{1}}\"\"\")\n");
+    assert_asts_match("let x = C(Name=$@\"v\", B=@$\"w\")\n");
+    assert_asts_match("let f a = a =$\"v\"\n");
+}

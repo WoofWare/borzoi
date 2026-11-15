@@ -83,7 +83,7 @@ exists.
   "operator should not normally be redefined", a *semantic* diagnostic) under
   FsAutoComplete, so an LSP serving real source must read it (D7 "incomplete,
   never wrong"). `(&)` (`Token::Amp`) was already accepted and still parses under
-  the differential oracle (FCS 43.12.204), so it is not a divergence today. No
+  the differential oracle (FCS 43.13.101), so it is not a divergence today. No
   differential coverage — FCS errors on `(or)`. (`is_paren_operator_name`,
   `crates/cst/src/parser/classify.rs`)
 - **The glued `(*)` operator name is ranged as its `*`** — `let (*) x y = …`,

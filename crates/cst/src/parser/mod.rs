@@ -668,8 +668,12 @@ fn parse_inner_stopping_at(
     // directive and production errors); the reserved-identifier warnings
     // leave `ParseHadErrors` false, so they never affect the parse-error
     // parity the differential harness checks.
-    let [tab_errors, reserved_warnings, operator_char_errors] =
-        lexical_diagnostics(source, &raw_tokens);
+    let [
+        tab_errors,
+        reserved_warnings,
+        operator_char_errors,
+        colon_directive_errors,
+    ] = lexical_diagnostics(source, &raw_tokens);
 
     // Language-version legality gate. The version never threads into the
     // preprocessor — the driver records the gated `#elif` spans, and we turn
@@ -762,6 +766,7 @@ fn parse_inner_stopping_at(
         .collect();
     errors.extend(tab_errors);
     errors.extend(operator_char_errors);
+    errors.extend(colon_directive_errors);
     errors.extend(langversion_errors);
     errors.extend(gates);
     errors.extend(filter_gates);
@@ -887,16 +892,47 @@ fn extended_interpolation_diagnostics(
 
 /// The lexer-level diagnostics a parse reports beside its tree, scanned off
 /// the raw table: the FS1161 tab errors (`tab_diagnostics`), the FS0046
-/// reserved-identifier warnings (`reserved_ident_diagnostics`) and the
-/// operator-character errors (`operator_char_diagnostics`), in that order. All
+/// reserved-identifier warnings (`reserved_ident_diagnostics`), the
+/// operator-character errors (`operator_char_diagnostics`) and the FS3909
+/// misplaced-`#:` errors (`colon_directive_diagnostics`), in that order. All
 /// are [`DiagnosticClass::Recovery`] diagnostics.
-pub fn lexical_diagnostics(source: &str, raw_tokens: &RawTokens<'_>) -> [Vec<ParseDiagnostic>; 3] {
+pub fn lexical_diagnostics(source: &str, raw_tokens: &RawTokens<'_>) -> [Vec<ParseDiagnostic>; 4] {
     [
         tab_diagnostics(source, raw_tokens),
         reserved_ident_diagnostics(raw_tokens),
         operator_char_diagnostics(raw_tokens),
+        colon_directive_diagnostics(source, raw_tokens),
     ]
     .map(|found| found.into_iter().map(ParseError::recovery).collect())
+}
+
+/// FS3909: a `#:` line (a [`Token::Whitespace`], as FCS lexes it) that does not
+/// start at column 0. FCS's `"#:" anystring` rule matches anywhere and reports
+/// the error over the whole lexeme (`shouldStartLine`, `lex.fsl`). Column 0 is
+/// a line start of [`LineStarts`](crate::tokens::LineStarts): after an LF (a
+/// CRLF ends in one, a lone CR starts no line), or past a file-start BOM.
+fn colon_directive_diagnostics(source: &str, raw_tokens: &RawTokens<'_>) -> Vec<ParseError> {
+    let mut out = Vec::new();
+    if !source.contains("#:") {
+        return out;
+    }
+    let lines = crate::tokens::LineStarts::new(source);
+    let mut cursor = lines.cursor();
+    for i in 0..raw_tokens.len() {
+        if raw_tokens.kind(i) != RawKind::Lexed(TokenKind::Whitespace)
+            || !raw_tokens.text(i).starts_with("#:")
+        {
+            continue;
+        }
+        let span = raw_tokens.span(i);
+        if cursor.advance_to(span.start).col != 0 {
+            out.push(ParseError {
+                message: "#: directives must start at the beginning of a line".to_string(),
+                span,
+            });
+        }
+    }
+    out
 }
 
 /// FS1161 "TABs are not allowed in F# code". FCS's lexer splits whitespace
@@ -944,8 +980,11 @@ fn tab_diagnostics(source: &str, raw_tokens: &RawTokens<'_>) -> Vec<ParseError> 
         // The directive-line test scans back to the start of the line, so it
         // runs only for whitespace that holds a tab; run for every whitespace
         // token, it would make a long line quadratic.
+        // A `#:` line is a whitespace token whose text FCS's `anystring`
+        // swallows, tabs and all.
         if raw_tokens.kind(i) != RawKind::Lexed(TokenKind::Whitespace)
             || !bytes[span.clone()].contains(&b'\t')
+            || bytes[span.start] == b'#'
             || whitespace_on_directive_line(bytes, span.start)
         {
             continue;

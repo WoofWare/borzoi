@@ -167,7 +167,7 @@ src/Compiler/AbstractIL/ILDeltaHandles.fs:78:3 "Struct"	assembly-gap
 src/Compiler/AbstractIL/ILDeltaHandles.fs:84:3 "Struct"	assembly-gap
 src/Compiler/AbstractIL/ILDeltaHandles.fs:90:3 "Struct"	assembly-gap
 src/Compiler/AbstractIL/ILDeltaHandles.fs:96:3 "Struct"	assembly-gap
-src/Compiler/AbstractIL/ilwrite.fs	compared fcs-check-errors b1=5424 assembly=1996 external=48
+src/Compiler/AbstractIL/ilwrite.fs	compared fcs-check-errors b1=5422 assembly=1996 external=48
 src/Compiler/AbstractIL/ilwrite.fs:1000:20 "System.Text.Encoding.UTF8.GetBytes"	assembly-gap
 src/Compiler/AbstractIL/ilwrite.fs:1001:20 "System.Text.Encoding.UTF8.GetBytes"	assembly-gap
 src/Compiler/AbstractIL/ilwrite.fs:1111:21 "MethodDefKey"	gap
@@ -461,13 +461,11 @@ src/Compiler/AbstractIL/ilwrite.fs:3198:24 "MetadataTable<_>"	gap
 src/Compiler/AbstractIL/ilwrite.fs:3198:24 "MetadataTable<_>.New"	gap
 src/Compiler/AbstractIL/ilwrite.fs:3202:24 "Dictionary"	assembly-gap
 src/Compiler/AbstractIL/ilwrite.fs:3233:68 "System.Text.Encoding.Unicode.GetBytes"	assembly-gap
-src/Compiler/AbstractIL/ilwrite.fs:323:10 "haredRow"	gap
 src/Compiler/AbstractIL/ilwrite.fs:3256:16 "cenv.data.AsMemory"	assembly-gap
 src/Compiler/AbstractIL/ilwrite.fs:3257:21 "cenv.resources.AsMemory"	assembly-gap
 src/Compiler/AbstractIL/ilwrite.fs:3272:24 "Environment.GetEnvironmentVariable"	assembly-gap
 src/Compiler/AbstractIL/ilwrite.fs:3275:3 "Literal"	assembly-gap
 src/Compiler/AbstractIL/ilwrite.fs:3278:3 "Literal"	assembly-gap
-src/Compiler/AbstractIL/ilwrite.fs:329:10 "haredRow"	gap
 src/Compiler/AbstractIL/ilwrite.fs:3324:41 "codePadding.Length"	assembly-gap
 src/Compiler/AbstractIL/ilwrite.fs:3334:7 "System.Text.Encoding.UTF8.GetBytes"	assembly-gap
 src/Compiler/AbstractIL/ilwrite.fs:3344:66 "\"#~\".Length"	assembly-gap
@@ -764,7 +762,7 @@ src/Compiler/Checking/OverloadResolutionRules.fs:95:13 "::"	assembly-gap
 src/Compiler/Checking/OverloadResolutionRules.fs:95:22 "::"	assembly-gap
 src/Compiler/Checking/OverloadResolutionRules.fs:97:33 "||"	assembly-gap
 src/Compiler/Checking/OverloadResolutionRules.fs:98:33 "||"	assembly-gap
-src/Compiler/Checking/infos.fs	compared fcs-check-errors b1=1973 assembly=500 external=25
+src/Compiler/Checking/infos.fs	compared fcs-check-errors b1=1970 assembly=500 external=25
 src/Compiler/Checking/infos.fs:1015:25 "||"	assembly-gap
 src/Compiler/Checking/infos.fs:1035:82 "||"	assembly-gap
 src/Compiler/Checking/infos.fs:1044:22 "&&"	assembly-gap
@@ -1076,7 +1074,7 @@ src/Compiler/Service/ServiceAnalysis.fs:74:52 "revealedSymbols.Force"	assembly-g
 src/Compiler/Service/ServiceAnalysis.fs:74:52 "revealedSymbols.Force().Contains"	assembly-gap
 src/Compiler/Service/ServiceAnalysis.fs:84:27 "OpenedModule"	gap
 src/Compiler/Service/ServiceAnalysis.fs:86:47 "&&"	assembly-gap
-src/Compiler/Service/ServiceXmlDocParser.fs	compared fcs-check-errors b1=150 assembly=109 external=5
+src/Compiler/Service/ServiceXmlDocParser.fs	compared fcs-check-errors b1=146 assembly=109 external=5
 src/Compiler/Service/ServiceXmlDocParser.fs:19:64 "_"	gap
 src/Compiler/Service/ServiceXmlDocParser.fs:221:19 "s.TrimStart"	assembly-gap
 src/Compiler/Service/ServiceXmlDocParser.fs:222:26 "s.Length"	assembly-gap
@@ -2101,7 +2099,7 @@ src/Compiler/Utilities/illib.fs:98:33 "StringComparison"	assembly-gap
 src/Compiler/Utilities/illib.fs:98:33 "StringComparison.Ordinal"	assembly-gap
 src/Compiler/Utilities/illib.fs:992:24 "'T"	gap
 src/Compiler/Utilities/illib.fs:992:31 "x.Force"	assembly-gap
-src/FSharp.Build/Fsi.fs	compared fcs-check-errors b1=189 assembly=135 external=18
+src/FSharp.Build/Fsi.fs	compared fcs-check-errors b1=188 assembly=135 external=18
 src/FSharp.Build/Fsi.fs:106:15 "Null"	assembly-gap
 src/FSharp.Build/Fsi.fs:107:15 "NonNull"	assembly-gap
 src/FSharp.Build/Fsi.fs:107:43 "(warningsAsErrors + \" 76 \").Split"	assembly-gap
@@ -2115,7 +2113,6 @@ src/FSharp.Build/Fsi.fs:164:42 "Value"	assembly-gap
 src/FSharp.Build/Fsi.fs:164:65 "textOutput.Value.Dequeue"	assembly-gap
 src/FSharp.Build/Fsi.fs:164:76 "Value"	assembly-gap
 src/FSharp.Build/Fsi.fs:167:9 "base"	gap
-src/FSharp.Build/Fsi.fs:173:16 "CaptureTextOutput"	gap
 src/FSharp.Build/Fsi.fs:178:13 "textOutput.Value"	assembly-gap
 src/FSharp.Build/Fsi.fs:274:53 "defaultToolPath.Value"	assembly-gap
 src/FSharp.Build/Fsi.fs:311:13 "base"	gap
@@ -2139,9 +2136,8 @@ src/FSharp.Build/Fsi.fs:407:11 "NonNull"	assembly-gap
 src/FSharp.Build/Fsi.fs:409:9 "builder.ToString"	assembly-gap
 src/FSharp.Build/Fsi.fs:90:11 "Null"	assembly-gap
 src/FSharp.Build/Fsi.fs:91:11 "NonNull"	assembly-gap
-src/FSharp.Compiler.LanguageServer/FSharpLanguageServer.fs	compared fcs-check-errors b1=42 assembly=21 external=14
+src/FSharp.Compiler.LanguageServer/FSharpLanguageServer.fs	compared fcs-check-errors b1=41 assembly=21 external=14
 src/FSharp.Compiler.LanguageServer/FSharpLanguageServer.fs:112:112 "config"	gap
-src/FSharp.Compiler.LanguageServer/FSharpLanguageServer.fs:112:18 "SharpLanguageServer"	gap
 src/FSharp.Compiler.LanguageServer/FSharpLanguageServer.fs:112:74 "addExtraHandlers"	gap
 src/FSharp.Compiler.LanguageServer/FSharpLanguageServer.fs:20:3 "AutoOpen"	assembly-gap
 src/FSharp.Compiler.LanguageServer/FSharpLanguageServer.fs:22:7 "Literal"	assembly-gap
@@ -2184,14 +2180,13 @@ src/FSharp.Core/array2.fs:7:28 "LanguagePrimitives"	assembly-gap
 src/FSharp.Core/array2.fs:7:47 "IntrinsicOperators"	assembly-gap
 src/FSharp.Core/array2.fs:8:28 "Operators"	assembly-gap
 src/FSharp.Core/array2.fs:8:38 "Checked"	assembly-gap
-src/FSharp.Core/observable.fs	compared fcs-clean b1=158 assembly=122 external=13
+src/FSharp.Core/observable.fs	compared fcs-clean b1=154 assembly=122 external=13
 src/FSharp.Core/observable.fs:100:7 "CompiledName"	assembly-gap
 src/FSharp.Core/observable.fs:101:51 "'T"	gap
 src/FSharp.Core/observable.fs:102:27 "'U"	gap
 src/FSharp.Core/observable.fs:103:22 "Subscribe"	assembly-gap
 src/FSharp.Core/observable.fs:106:17 "source.Subscribe"	assembly-gap
 src/FSharp.Core/observable.fs:107:27 "BasicObserver<'T>"	gap
-src/FSharp.Core/observable.fs:107:28 "asicObserver<'T>"	gap
 src/FSharp.Core/observable.fs:107:41 "'T"	gap
 src/FSharp.Core/observable.fs:10:29 "CompilationRepresentationFlags"	assembly-gap
 src/FSharp.Core/observable.fs:10:29 "CompilationRepresentationFlags.ModuleSuffix"	assembly-gap
@@ -2215,7 +2210,6 @@ src/FSharp.Core/observable.fs:136:63 "'T"	gap
 src/FSharp.Core/observable.fs:138:22 "Subscribe"	assembly-gap
 src/FSharp.Core/observable.fs:141:17 "source.Subscribe"	assembly-gap
 src/FSharp.Core/observable.fs:142:27 "BasicObserver<'T>"	gap
-src/FSharp.Core/observable.fs:142:28 "asicObserver<'T>"	gap
 src/FSharp.Core/observable.fs:142:41 "'T"	gap
 src/FSharp.Core/observable.fs:147:45 "observer.OnNext"	assembly-gap
 src/FSharp.Core/observable.fs:14:27 "InlineIfLambda"	assembly-gap
@@ -2258,7 +2252,6 @@ src/FSharp.Core/observable.fs:53:27 "'U"	gap
 src/FSharp.Core/observable.fs:54:22 "Subscribe"	assembly-gap
 src/FSharp.Core/observable.fs:55:17 "source.Subscribe"	assembly-gap
 src/FSharp.Core/observable.fs:56:27 "BasicObserver<'T>"	gap
-src/FSharp.Core/observable.fs:56:28 "asicObserver<'T>"	gap
 src/FSharp.Core/observable.fs:56:41 "'T"	gap
 src/FSharp.Core/observable.fs:59:59 "observer.OnNext"	assembly-gap
 src/FSharp.Core/observable.fs:59:75 "observer.OnError"	assembly-gap
@@ -2270,7 +2263,6 @@ src/FSharp.Core/observable.fs:71:27 "'U"	gap
 src/FSharp.Core/observable.fs:72:22 "Subscribe"	assembly-gap
 src/FSharp.Core/observable.fs:73:17 "source.Subscribe"	assembly-gap
 src/FSharp.Core/observable.fs:74:27 "BasicObserver<'T>"	gap
-src/FSharp.Core/observable.fs:74:28 "asicObserver<'T>"	gap
 src/FSharp.Core/observable.fs:74:41 "'T"	gap
 src/FSharp.Core/observable.fs:7:28 "LanguagePrimitives"	assembly-gap
 src/FSharp.Core/observable.fs:7:47 "IntrinsicOperators"	assembly-gap
@@ -2282,9 +2274,8 @@ src/FSharp.Core/observable.fs:92:7 "CompiledName"	assembly-gap
 src/FSharp.Core/observable.fs:93:47 "'T"	gap
 src/FSharp.Core/observable.fs:96:7 "CompiledName"	assembly-gap
 src/FSharp.Core/observable.fs:97:50 "'T"	gap
-src/FSharp.Core/tasks.fs	compared fcs-check-errors b1=1122 assembly=448 external=49
+src/FSharp.Core/tasks.fs	compared fcs-check-errors b1=1168 assembly=531 external=49
 src/FSharp.Core/tasks.fs:144:13 "TaskBuilderBase"	gap x4
-src/FSharp.Core/tasks.fs:144:14 "askBuilderBase"	gap
 src/FSharp.Core/tasks.fs:152:45 "'T"	gap x2
 src/FSharp.Core/tasks.fs:152:49 "'T"	gap x2
 src/FSharp.Core/tasks.fs:152:61 "'T"	gap x2
@@ -2296,7 +2287,6 @@ src/FSharp.Core/tasks.fs:154:56 "'T"	gap
 src/FSharp.Core/tasks.fs:154:70 "code.Invoke"	assembly-gap
 src/FSharp.Core/tasks.fs:154:82 "&"	assembly-gap
 src/FSharp.Core/tasks.fs:157:19 "TaskResumptionDynamicInfo<'T>"	assembly-gap
-src/FSharp.Core/tasks.fs:157:20 "askResumptionDynamicInfo<'T>"	assembly-gap
 src/FSharp.Core/tasks.fs:157:45 "'T"	gap
 src/FSharp.Core/tasks.fs:158:29 "MoveNext"	assembly-gap
 src/FSharp.Core/tasks.fs:162:25 "sm.ResumptionDynamicInfo.ResumptionData"	assembly-gap
@@ -2332,10 +2322,37 @@ src/FSharp.Core/tasks.fs:188:9 "sm.Data.MethodBuilder.Task"	assembly-gap
 src/FSharp.Core/tasks.fs:190:40 "'T"	gap x2
 src/FSharp.Core/tasks.fs:190:44 "'T"	gap x2
 src/FSharp.Core/tasks.fs:190:56 "'T"	gap x2
+src/FSharp.Core/tasks.fs:192:49 "'T"	gap
+src/FSharp.Core/tasks.fs:192:59 "'T"	gap
+src/FSharp.Core/tasks.fs:193:18 "MoveNextMethodImpl"	assembly-gap
+src/FSharp.Core/tasks.fs:193:18 "MoveNextMethodImpl<_>"	assembly-gap
+src/FSharp.Core/tasks.fs:195:32 "sm.ResumptionPoint"	assembly-gap
+src/FSharp.Core/tasks.fs:199:48 "code.Invoke"	assembly-gap
+src/FSharp.Core/tasks.fs:199:60 "&"	assembly-gap
+src/FSharp.Core/tasks.fs:202:29 "sm.Data.MethodBuilder.SetResult"	assembly-gap
+src/FSharp.Core/tasks.fs:202:32 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:202:64 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:208:30 "sm.Data.MethodBuilder.SetException"	assembly-gap
+src/FSharp.Core/tasks.fs:208:33 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:211:18 "SetStateMachineMethodImpl"	assembly-gap
+src/FSharp.Core/tasks.fs:211:18 "SetStateMachineMethodImpl<_>"	assembly-gap
+src/FSharp.Core/tasks.fs:211:63 "sm.Data.MethodBuilder.SetStateMachine"	assembly-gap
+src/FSharp.Core/tasks.fs:211:66 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:212:18 "AfterCode"	assembly-gap
+src/FSharp.Core/tasks.fs:212:18 "AfterCode<_, _>"	assembly-gap
+src/FSharp.Core/tasks.fs:213:24 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:213:46 "AsyncTaskMethodBuilder"	assembly-gap
+src/FSharp.Core/tasks.fs:213:46 "AsyncTaskMethodBuilder<'T>"	assembly-gap
+src/FSharp.Core/tasks.fs:213:46 "AsyncTaskMethodBuilder<'T>.Create"	assembly-gap
+src/FSharp.Core/tasks.fs:213:69 "'T"	gap
+src/FSharp.Core/tasks.fs:214:21 "sm.Data.MethodBuilder.Start"	assembly-gap
+src/FSharp.Core/tasks.fs:214:24 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:214:49 "&"	assembly-gap
+src/FSharp.Core/tasks.fs:215:21 "sm.Data.MethodBuilder.Task"	assembly-gap
+src/FSharp.Core/tasks.fs:215:24 "Data"	assembly-gap
 src/FSharp.Core/tasks.fs:217:13 "TaskBuilder"	gap
 src/FSharp.Core/tasks.fs:217:13 "TaskBuilder.RunDynamic"	gap
 src/FSharp.Core/tasks.fs:221:13 "TaskBuilderBase"	gap x4
-src/FSharp.Core/tasks.fs:221:14 "askBuilderBase"	gap
 src/FSharp.Core/tasks.fs:223:45 "'T"	gap x2
 src/FSharp.Core/tasks.fs:223:49 "'T"	gap x2
 src/FSharp.Core/tasks.fs:223:61 "'T"	gap x2
@@ -2352,6 +2369,49 @@ src/FSharp.Core/tasks.fs:232:36 "TaskBuilder.RunDynamic"	gap
 src/FSharp.Core/tasks.fs:235:40 "'T"	gap x2
 src/FSharp.Core/tasks.fs:235:44 "'T"	gap x2
 src/FSharp.Core/tasks.fs:235:56 "'T"	gap x2
+src/FSharp.Core/tasks.fs:237:49 "'T"	gap
+src/FSharp.Core/tasks.fs:237:59 "'T"	gap
+src/FSharp.Core/tasks.fs:238:18 "MoveNextMethodImpl"	assembly-gap
+src/FSharp.Core/tasks.fs:238:18 "MoveNextMethodImpl<_>"	assembly-gap
+src/FSharp.Core/tasks.fs:240:32 "sm.ResumptionPoint"	assembly-gap
+src/FSharp.Core/tasks.fs:243:48 "code.Invoke"	assembly-gap
+src/FSharp.Core/tasks.fs:243:60 "&"	assembly-gap
+src/FSharp.Core/tasks.fs:246:29 "sm.Data.MethodBuilder.SetResult"	assembly-gap
+src/FSharp.Core/tasks.fs:246:32 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:246:64 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:248:25 "sm.Data.MethodBuilder.SetException"	assembly-gap
+src/FSharp.Core/tasks.fs:248:28 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:251:18 "SetStateMachineMethodImpl"	assembly-gap
+src/FSharp.Core/tasks.fs:251:18 "SetStateMachineMethodImpl<_>"	assembly-gap
+src/FSharp.Core/tasks.fs:251:63 "sm.Data.MethodBuilder.SetStateMachine"	assembly-gap
+src/FSharp.Core/tasks.fs:251:66 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:252:18 "AfterCode"	assembly-gap
+src/FSharp.Core/tasks.fs:252:18 "AfterCode<_, Task<'T>>"	assembly-gap
+src/FSharp.Core/tasks.fs:252:36 "'T"	gap
+src/FSharp.Core/tasks.fs:259:28 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:259:50 "AsyncTaskMethodBuilder"	assembly-gap
+src/FSharp.Core/tasks.fs:259:50 "AsyncTaskMethodBuilder<'T>"	assembly-gap
+src/FSharp.Core/tasks.fs:259:50 "AsyncTaskMethodBuilder<'T>.Create"	assembly-gap
+src/FSharp.Core/tasks.fs:259:73 "'T"	gap
+src/FSharp.Core/tasks.fs:260:25 "sm.Data.MethodBuilder.Start"	assembly-gap
+src/FSharp.Core/tasks.fs:260:28 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:260:53 "&"	assembly-gap
+src/FSharp.Core/tasks.fs:261:25 "sm.Data.MethodBuilder.Task"	assembly-gap
+src/FSharp.Core/tasks.fs:261:28 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:265:25 "Task"	assembly-gap
+src/FSharp.Core/tasks.fs:265:25 "Task.Run"	assembly-gap
+src/FSharp.Core/tasks.fs:265:25 "Task.Run<'T>"	assembly-gap
+src/FSharp.Core/tasks.fs:265:34 "'T"	gap
+src/FSharp.Core/tasks.fs:267:32 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:267:54 "AsyncTaskMethodBuilder"	assembly-gap
+src/FSharp.Core/tasks.fs:267:54 "AsyncTaskMethodBuilder<'T>"	assembly-gap
+src/FSharp.Core/tasks.fs:267:54 "AsyncTaskMethodBuilder<'T>.Create"	assembly-gap
+src/FSharp.Core/tasks.fs:267:77 "'T"	gap
+src/FSharp.Core/tasks.fs:268:29 "sm.Data.MethodBuilder.Start"	assembly-gap
+src/FSharp.Core/tasks.fs:268:32 "Data"	assembly-gap
+src/FSharp.Core/tasks.fs:268:57 "&"	assembly-gap
+src/FSharp.Core/tasks.fs:269:29 "sm.Data.MethodBuilder.Task"	assembly-gap
+src/FSharp.Core/tasks.fs:269:32 "Data"	assembly-gap
 src/FSharp.Core/tasks.fs:26:11 "NoComparison"	assembly-gap
 src/FSharp.Core/tasks.fs:26:25 "NoEquality"	assembly-gap
 src/FSharp.Core/tasks.fs:26:3 "Struct"	assembly-gap
@@ -2468,6 +2528,7 @@ src/FSharp.Core/tasks.fs:323:35 "'TResult2"	gap x2
 src/FSharp.Core/tasks.fs:325:13 "TaskCode"	gap
 src/FSharp.Core/tasks.fs:325:13 "TaskCode<'TOverall, _>"	gap
 src/FSharp.Core/tasks.fs:325:22 "'TOverall"	gap
+src/FSharp.Core/tasks.fs:326:20 "__useResumableCode"	assembly-gap
 src/FSharp.Core/tasks.fs:329:44 "^TaskLike"	gap
 src/FSharp.Core/tasks.fs:329:63 "GetAwaiter"	gap
 src/FSharp.Core/tasks.fs:329:75 "unit"	assembly-gap
@@ -2703,6 +2764,7 @@ src/FSharp.Core/tasks.fs:435:35 "'TResult2"	gap x2
 src/FSharp.Core/tasks.fs:437:13 "TaskCode"	gap
 src/FSharp.Core/tasks.fs:437:13 "TaskCode<'TOverall, _>"	gap
 src/FSharp.Core/tasks.fs:437:22 "'TOverall"	gap
+src/FSharp.Core/tasks.fs:438:20 "__useResumableCode"	assembly-gap
 src/FSharp.Core/tasks.fs:43:18 "'TOverall"	gap
 src/FSharp.Core/tasks.fs:43:29 "'T"	gap
 src/FSharp.Core/tasks.fs:43:43 "(generator ()).Invoke"	assembly-gap
@@ -3436,15 +3498,11 @@ src/FSharp.Core/tasks.fs:88:65 "'TOverall"	gap x2
 src/FSharp.Core/tasks.fs:88:94 "'TOverall"	gap x2
 tests/EndToEndBuildTests/BasicProvider/BasicProvider/BasicProvider.Runtime.fs	compared fcs-clean b1=0 assembly=1 external=1
 tests/EndToEndBuildTests/BasicProvider/BasicProvider/BasicProvider.Runtime.fs:12:12 "CompilerServices.TypeProviderAssembly"	assembly-gap
-tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs	compared fcs-check-errors b1=42 assembly=35 external=13
+tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs	compared fcs-check-errors b1=38 assembly=35 external=13
 tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:100:33 "task.Result"	assembly-gap
-tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:15:16 "Errors"	gap
 tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:15:25 "ResizeArray"	assembly-gap
-tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:16:16 "Warnings"	gap
 tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:16:27 "ResizeArray"	assembly-gap
-tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:17:16 "Custom"	gap
 tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:17:25 "ResizeArray"	assembly-gap
-tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:18:16 "Messages"	gap
 tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:18:27 "ResizeArray"	assembly-gap
 tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:22:102 "System.Collections.IDictionary"	assembly-gap
 tests/FSharp.Build.UnitTests/BuildTaskTestHelpers.fs:22:149 "System.Collections.IDictionary"	assembly-gap
@@ -3491,86 +3549,62 @@ tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/warnon/warnon01.fs	comp
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/warnon/warnon01.fs:18:18 "::"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/E_BaseIFaceLessAccessible01.fs	compared fcs-check-errors b1=2 assembly=2 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/E_BaseIFaceLessAccessible01.fs:12:13 "I1"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/InternalMethodsWorkCorrectly.fs	compared fcs-clean b1=18 assembly=5 external=0
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/InternalMethodsWorkCorrectly.fs	compared fcs-clean b1=17 assembly=5 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/InternalMethodsWorkCorrectly.fs:15:25 "InternalModule"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/InternalMethodsWorkCorrectly.fs:15:25 "InternalModule.initialString"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/InternalMethodsWorkCorrectly.fs:18:26 "InternalModule"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/InternalMethodsWorkCorrectly.fs:18:26 "InternalModule.InternalClass"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/InternalMethodsWorkCorrectly.fs:18:27 "nternalModule.InternalClass"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/InternalMethodsWorkCorrectly.fs:22:18 "InternalModule"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/Basic/InternalMethodsWorkCorrectly.fs:22:18 "InternalModule.deVowelStr"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/OnTypeMembers/E_AccessPrivateMember01.fs	compared fcs-check-errors b1=3 assembly=0 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_accessibilityOnRecords.fs	our-parse-errors
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs	compared fcs-clean b1=5 assembly=6 external=2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs:12:3 "Author"	gap x4
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs:12:4 "uthor"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs	compared fcs-clean b1=2 assembly=6 external=2
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs:12:3 "Author"	gap x2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs:9:18 "AttributeTargets"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs:9:18 "AttributeTargets.All"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs:9:3 "AttributeUsage"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs:9:40 "Inherited"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeInheritance/InheritedAttribute_002.fs:9:57 "AllowMultiple"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs	compared fcs-clean b1=6 assembly=4 external=1
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs:10:10 "ropertyLevel"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs	compared fcs-clean b1=4 assembly=4 external=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs:10:9 "PropertyLevel"	gap x2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs:4:18 "AttributeTargets"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs:4:18 "AttributeTargets.Property"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs:4:3 "AttributeUsage"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs:6:13 "Attribute"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs:9:10 "ropertyLevel"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsProperty.fs:9:9 "PropertyLevel"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs	compared fcs-clean b1=69 assembly=25 external=1
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs	compared fcs-clean b1=52 assembly=25 external=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:12:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:12:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:15:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:15:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:18:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:18:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:21:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:21:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:24:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:24:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:27:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:27:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:30:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:30:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:33:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:33:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:36:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:36:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:39:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:39:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:42:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:42:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:45:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:45:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:46:11 "Struct"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:49:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:49:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:56:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:56:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:57:11 "Struct"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:5:18 "AttributeTargets"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:5:18 "AttributeTargets.Field"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:5:3 "AttributeUsage"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:64:3 "FieldOnly"	gap x4
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:64:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:66:7 "FieldOnly"	gap x4
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:66:8 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:7:12 "Attribute"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:9:3 "FieldOnly"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsField01.fs:9:4 "ieldOnly"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_RequiresExplicitTypeArguments01.fs	compared fcs-check-errors b1=24 assembly=14 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_RequiresExplicitTypeArguments01.fs:20:7 "RequiresExplicitTypeArgumentsAttribute"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_RequiresExplicitTypeArguments01.fs:22:7 "RequiresExplicitTypeArgumentsAttribute"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_RequiresExplicitTypeArguments01.fs:9:7 "RequiresExplicitTypeArgumentsAttribute"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs	compared fcs-clean b1=25 assembly=14 external=1
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs	compared fcs-clean b1=20 assembly=14 external=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:10:13 "Attribute"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:14:3 "TestAttribute"	gap x4
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:14:4 "estAttribute"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:14:3 "TestAttribute"	gap x2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:16:7 "TestAttribute"	gap x4
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:16:8 "estAttribute"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:19:12 "TestAttribute"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:19:13 "estAttribute"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:23:32 "t.GetCustomAttributes"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:8:18 "AttributeTargets"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/ArrayParam.fs:8:18 "AttributeTargets.All"	assembly-gap
@@ -3579,16 +3613,16 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttr
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_StructLayoutSequentialNeg_DU1.fs:8:51 "System.Runtime.InteropServices.LayoutKind.Sequential"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_StructLayoutSequentialNeg_DU1.fs:8:7 "System.Runtime.InteropServices.StructLayout"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_StructLayoutSequentialNeg_DU1.fs:8:82 "LayoutKind"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs	compared fcs-clean b1=132 assembly=88 external=4
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:102:3 "SByte"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:105:3 "Int16"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:108:3 "Int64"	gap x2
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs	compared fcs-clean b1=118 assembly=88 external=4
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:102:3 "SByte"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:105:3 "Int16"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:108:3 "Int64"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:10:13 "Attribute"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:111:3 "UInt16"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:114:3 "UInt32"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:117:3 "UInt64"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:120:3 "EnumInt"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:123:3 "EnumByte"	gap x2
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:111:3 "UInt16"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:114:3 "UInt32"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:117:3 "UInt64"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:120:3 "EnumInt"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:123:3 "EnumByte"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:127:28 "'a"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:127:34 "Attribute"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:127:57 "t.GetCustomAttributes"	assembly-gap
@@ -3622,12 +3656,12 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttr
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:77:11 "Optional"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:80:13 "Attribute"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:82:11 "Optional"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:84:3 "Bool"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:87:3 "Int"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:90:3 "Byte"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:93:3 "Float"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:96:3 "Single"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:99:3 "Char"	gap x2
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:84:3 "Bool"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:87:3 "Int"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:90:3 "Byte"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:93:3 "Float"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:96:3 "Single"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/OptionalAttributeArgs.fs:99:3 "Char"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/W_StructLayoutSequentialPos_AbstractClass.fs	compared fcs-clean b1=1 assembly=5 external=6
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/W_StructLayoutSequentialPos_AbstractClass.fs:10:30 "'a"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/W_StructLayoutSequentialPos_AbstractClass.fs:7:51 "System.Runtime.InteropServices.LayoutKind.Sequential"	assembly-gap
@@ -3651,19 +3685,16 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ExceptionD
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImplicitObjectConstructors/WithAttribute.fs	compared fcs-clean b1=1 assembly=1 external=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImplicitObjectConstructors/WithAttribute.fs:6:13 "System.Obsolete"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImplicitObjectConstructors/WithAttribute.fs:9:9 "Foo1"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/GenericMethodsOnInterface02.fs	compared fcs-clean b1=19 assembly=15 external=0
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/GenericMethodsOnInterface02.fs:16:18 "erived"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/InterfaceSpecificationsAndImplementations/GenericMethodsOnInterface02.fs	compared fcs-clean b1=18 assembly=15 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/LetBindings/Basic/E_GenericTypeAnnotations01.fs	our-parse-errors
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/LetBindings/Basic/Pathological04.fs	compared fcs-clean b1=1 assembly=0 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/LetBindings/TypeFunctions/TypeFunctions.fs	compared fcs-check-errors b1=24 assembly=41 external=2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/AutoPropsWithModifierBeforeGetSet.fs	compared fcs-check-errors b1=3 assembly=32 external=2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/E_OutscopeThisPtr01.fs	compared fcs-check-errors b1=7 assembly=3 external=0
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/E_OutscopeThisPtr01.fs:10:14 "oo"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/Indexer02.fs	compared fcs-clean b1=27 assembly=17 external=0
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/E_OutscopeThisPtr01.fs	compared fcs-check-errors b1=6 assembly=3 external=0
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/Indexer02.fs	compared fcs-clean b1=26 assembly=17 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/Indexer02.fs:13:49 "Unchecked"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/Indexer02.fs:13:49 "Unchecked.defaultof"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/Indexer02.fs:18:14 "GenericIndexer<int * int, float, decimal * unit>"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/Indexer02.fs:18:15 "enericIndexer<int * int, float, decimal * unit>"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/Indexer02.fs:5:31 "Unchecked"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/Indexer02.fs:5:31 "Unchecked.defaultof"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/Indexer02.fs:6:31 "Unchecked"	assembly-gap
@@ -3699,9 +3730,8 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefi
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/E_OperatorOverloading01.fs	compared fcs-check-errors b1=24 assembly=9 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/E_OperatorOverloading01.fs:17:75 "MyPoint"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/E_OperatorOverloading01.fs:20:10 "MyPoint"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/NoWarningWhenOverloadingInSubClass01.fs	compared fcs-clean b1=10 assembly=9 external=0
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/NoWarningWhenOverloadingInSubClass01.fs	compared fcs-clean b1=9 assembly=9 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/NoWarningWhenOverloadingInSubClass01.fs:14:13 "Root"	gap x4
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/NoWarningWhenOverloadingInSubClass01.fs:14:14 "oot"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/NoWarningWhenOverloadingInSubClass01.fs:16:31 "s.Length"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/NoWarningWhenOverloadingInSubClass01.fs:18:12 "Deriva"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/OverloadingMembers/TieBreakerRule03.fs	compared fcs-clean b1=18 assembly=4 external=0
@@ -3745,17 +3775,12 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/StaticLet/
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/StaticLet/UnionOrderOfExecution.fs	compared fcs-clean b1=8 assembly=6 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/StaticLet/UnionOrderOfExecution.fs:21:1 "InnerModule"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/StaticLet/UnionOrderOfExecution.fs:22:1 "InnerModule"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs	compared fcs-clean b1=61 assembly=53 external=1
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs	compared fcs-clean b1=56 assembly=53 external=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:32:48 "async.Bind"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:32:59 "async.Return"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:33:26 "async.Return"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:35:30 "async.Bind"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:37:25 "DisposableBuilder"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:43:25 "isposable"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:44:24 "isposable"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:45:28 "isposable"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:46:23 "isposable"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:47:25 "isposable"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:57:12 "undisposed.IsEmpty"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:65:12 "multipleDisposed.IsEmpty"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/UseBindings/UseBang03.fs:69:31 "constructed.Count"	assembly-gap
@@ -3771,16 +3796,12 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ControlFlowExpressi
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ControlFlowExpressions/Type-relatedExpressions/staticcoercion01.fs	compared fcs-clean b1=0 assembly=6 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ControlFlowExpressions/Type-relatedExpressions/staticcoercion01.fs:6:1 "([1;2;3] :> seq<int>).GetEnumerator"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ComputationExpressions/E_MissingFor.fs	compared fcs-check-errors b1=13 assembly=2 external=0
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ComputationExpressions/MutateBuilders.fs	compared fcs-clean b1=27 assembly=16 external=0
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ComputationExpressions/MutateBuilders.fs:14:30 "impleWorkflow"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ComputationExpressions/MutateBuilders.fs	compared fcs-clean b1=26 assembly=16 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ComputationExpressions/MutateBuilders.fs:21:19 "+"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ComputationExpressions/MutateBuilders.fs:21:25 "+"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ComputationExpressions/MutateBuilders.fs:7:69 "'a"	gap x2
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ObjectExpressions/ObjExprWithOverride01.fs	compared fcs-clean b1=15 assembly=11 external=1
+tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ObjectExpressions/ObjExprWithOverride01.fs	compared fcs-clean b1=12 assembly=11 external=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ObjectExpressions/ObjExprWithOverride01.fs:12:13 "Class1"	gap x4
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ObjectExpressions/ObjExprWithOverride01.fs:12:14 "lass1"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ObjectExpressions/ObjExprWithOverride01.fs:15:17 "lass1"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ObjectExpressions/ObjExprWithOverride01.fs:18:17 "lass2"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/ObjectExpressions/ObjExprWithOverride01.fs:8:15 "System.IComparable"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_MatchInQuery02.fs	compared fcs-check-errors b1=5 assembly=9 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_MatchInQuery02.fs:12:9 "select"	assembly-gap
@@ -3964,18 +3985,16 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotation
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/E_DecomposeArray01.fs	compared fcs-check-errors b1=9 assembly=6 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/E_DecomposeArray01.fs:16:17 "'a"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/EnumQuote01.fs	compared fcs-clean b1=2 assembly=1 external=0
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/QuotationRegressions09.fs	compared fcs-clean b1=11 assembly=12 external=4
+tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/QuotationRegressions09.fs	compared fcs-clean b1=10 assembly=12 external=4
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/QuotationRegressions09.fs:17:9 "Test"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/QuotationRegressions09.fs:25:10 "Test2"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/QuotationRegressions09.fs:34:15 "est3"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/SpecificCall_Instance.fs	compared fcs-clean b1=8 assembly=10 external=3
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/SpecificCall_Instance.fs:15:12 "\"a\".Contains"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/SpecificCall_Instance.fs:6:34 "DerivedPatterns"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/SpecificCall_Instance.fs:8:32 "|SpecificCall|_|"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/SpecificCall_Instance.fs:8:85 "s1.Contains"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/SyntacticSugar/E_GetSliceNotDef02.fs	compared fcs-check-errors b1=21 assembly=10 external=0
+tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/SyntacticSugar/E_GetSliceNotDef02.fs	compared fcs-check-errors b1=20 assembly=10 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/SyntacticSugar/E_GetSliceNotDef02.fs:29:13 "Foo<char>"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/SyntacticSugar/E_GetSliceNotDef02.fs:29:14 "oo<char>"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/GeneratedEqualityHashingComparison/Attributes/Diags/E_AdjustUses01a.fs	compared fcs-check-errors b1=0 assembly=5 external=1
 tests/FSharp.Compiler.ComponentTests/Conformance/GeneratedEqualityHashingComparison/Attributes/Diags/E_AdjustUses01a.fs:10:15 "System.IComparable"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/GeneratedEqualityHashingComparison/Attributes/Diags/E_AdjustUses01a.fs:6:3 "StructuralEquality"	assembly-gap
@@ -4047,12 +4066,10 @@ tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/ByrefSafety
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/ByrefSafetyAnalysis/InRefParamOverload_ImplicitAddressOfAtCallSite2.fs:8:64 "x.AddDays"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/ByrefSafetyAnalysis/Prelude.fs	compared fcs-clean b1=15 assembly=8 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/ConstraintSolving/E_TypeFuncDeclaredExplicit01.fs	compared fcs-check-errors b1=3 assembly=4 external=0
-tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/FunctionApplicationResolution/InferGenericArgAsTuple02.fs	compared fcs-clean b1=16 assembly=16 external=0
+tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/FunctionApplicationResolution/InferGenericArgAsTuple02.fs	compared fcs-clean b1=15 assembly=15 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/FunctionApplicationResolution/InferGenericArgAsTuple02.fs:10:28 "Event<int * int>"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/FunctionApplicationResolution/InferGenericArgAsTuple02.fs:10:29 "vent<int * int>"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/FunctionApplicationResolution/InferGenericArgAsTuple02.fs:20:15 "expireEvent.Trigger"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/FunctionApplicationResolution/InferGenericArgAsTuple02.fs:22:29 "expireEvent.Publish"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/FunctionApplicationResolution/InferGenericArgAsTuple02.fs:24:18 "ruit"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/FunctionApplicationResolution/InferGenericArgAsTuple02.fs:26:1 "apple.OnExpire.Add"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/FunctionApplicationResolution/InferGenericArgAsTuple02.fs:26:57 "&&"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/MethodApplicationResolution/E_OverloadedGenericArgs.fs	compared fcs-check-errors b1=12 assembly=5 external=0
@@ -4071,13 +4088,10 @@ tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/NameResolut
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/NameResolution/RequireQualifiedAccess/OnRecordVsUnion2.fs:6:6 "Module"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/NameResolution/RequireQualifiedAccess/OnRecordVsUnion2.fs:8:15 "R"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/NameResolution/RequireQualifiedAccess/OnRecordVsUnion2.fs:8:15 "R.New"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/RecursiveSafetyAnalysis/RecursiveTypeDeclarations01.fs	compared fcs-clean b1=53 assembly=20 external=0
+tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/RecursiveSafetyAnalysis/RecursiveTypeDeclarations01.fs	compared fcs-clean b1=50 assembly=20 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/RecursiveSafetyAnalysis/RecursiveTypeDeclarations01.fs:31:17 "ClassType<int>"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/RecursiveSafetyAnalysis/RecursiveTypeDeclarations01.fs:31:18 "lassType<int>"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/RecursiveSafetyAnalysis/RecursiveTypeDeclarations01.fs:38:29 "AbbrevType1"	alt-binder fcs=6:6 ours=19:5 fcs-clean
-tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/RecursiveSafetyAnalysis/RecursiveTypeDeclarations01.fs:38:30 "bbrevType1"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/RecursiveSafetyAnalysis/RecursiveTypeDeclarations01.fs:40:17 "AnotherClassType<float>"	gap
-tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/RecursiveSafetyAnalysis/RecursiveTypeDeclarations01.fs:40:18 "notherClassType<float>"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/TypeInference/E_TwoDifferentTypeVariables01.fs	compared fcs-check-errors b1=150 assembly=6 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/TypeInference/E_TwoDifferentTypeVariables01.fs:65:20 "'a"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/TypeInference/E_TwoDifferentTypeVariables01.fs:65:27 "'b"	gap
@@ -4146,8 +4160,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/A
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/AbstractMembers/CallToVirtualMember03.fs:16:55 "base"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/AbstractMembers/CallToVirtualMember03.fs:17:58 "base"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/AbstractMembers/CallToVirtualMember03.fs:6:3 "AbstractClass"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/AutoProperties/Array01.fs	compared fcs-clean b1=4 assembly=3 external=0
-tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/AutoProperties/Array01.fs:3:16 "P"	gap
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/AutoProperties/Array01.fs	compared fcs-clean b1=3 assembly=3 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/AutoProperties/Array01.fs:5:9 "T"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/AutoProperties/E_PrivateProperty04.fs	compared fcs-check-errors b1=1 assembly=0 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/ImplicitObjectConstructors/ImplicitObjectConstructors.fs	compared fcs-check-errors b1=1 assembly=5 external=2
@@ -4203,7 +4216,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/ConsList/ConsLi
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/E_DynamicTest03.fs	compared fcs-clean b1=7 assembly=1 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/DynamicTypeTest/E_DynamicTest03.fs:3:13 "A"	gap x4
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Expression/E_CounterExample01.fs	compared fcs-clean b1=1 assembly=0 external=0
-tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/ActivePatternInLetBindingBindsValue.fs	compared fcs-check-errors b1=2 assembly=3 external=0
+tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/ActivePatternInLetBindingBindsValue.fs	compared fcs-clean b1=3 assembly=3 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/E_ActivePatterns01.fs	our-parse-errors
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/E_Error_Param03.fs	compared fcs-check-errors b1=0 assembly=1 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/PatternMatchRegressions02.fs	compared fcs-clean b1=8 assembly=24 external=15
@@ -4276,9 +4289,8 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Types/RecordTypes/StructRecordC
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/RecordTypes/StructRecordCloning01.fs:23:16 "||"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/RecordTypes/StructRecordCloning01.fs:24:17 "||"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/RecordTypes/StructRecordCloning01.fs:6:3 "Struct"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/CheckingSyntacticTypes/E_CannotInlineVirtualMethod2.fs	compared fcs-check-errors b1=13 assembly=8 external=0
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/CheckingSyntacticTypes/E_CannotInlineVirtualMethod2.fs	compared fcs-check-errors b1=12 assembly=8 external=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/CheckingSyntacticTypes/E_CannotInlineVirtualMethod2.fs:23:12 "Ellipse"	gap x4
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/CheckingSyntacticTypes/E_CannotInlineVirtualMethod2.fs:23:13 "llipse"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/CheckingSyntacticTypes/E_CannotInlineVirtualMethod2.fs:23:20 "radius"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/CheckingSyntacticTypes/E_CannotInlineVirtualMethod2.fs:23:28 "radius"	gap
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ExtensionPrecedence.fs	compared fcs-check-errors b1=58 assembly=30 external=5
@@ -4490,14 +4502,30 @@ tests/FSharp.Compiler.ComponentTests/Language/Nullness/positive-defaultValue-bug
 tests/FSharp.Compiler.ComponentTests/Language/Nullness/positive-defaultValue-bug.fs:13:26 "FSharp.Collections.List"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/Nullness/positive-defaultValue-bug.fs:5:16 "'T"	gap
 tests/FSharp.Compiler.ComponentTests/Language/Nullness/positive-defaultValue-bug.fs:5:24 "'T"	gap
-tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs	compared fcs-check-errors b1=23 assembly=62 external=21
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs	compared fcs-check-errors b1=40 assembly=98 external=21
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:17:13 "AsyncHelpers.Await"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:17:32 "Task"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:17:32 "Task.Delay"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:25:35 "ValueTask"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:30:13 "CounterEnumerator"	gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:34:18 "GetAsyncEnumerator"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:38:26 "Current"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:40:26 "MoveNextAsync"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:42:25 "AsyncHelpers.Await"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:42:44 "Task"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:42:44 "Task.Delay"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:47:26 "DisposeAsync"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:47:43 "ValueTask"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:53:26 "enumerable.GetAsyncEnumerator"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:54:22 "ResizeArray"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:55:31 "AsyncHelpers.Await"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:55:50 "enumerator.MoveNextAsync"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:58:13 "values.Add"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:58:24 "enumerator.Current"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:59:24 "AsyncHelpers.Await"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:59:43 "enumerator.MoveNextAsync"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:61:28 "enumerator.DisposeAsync"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:61:9 "AsyncHelpers.Await"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:67:26 "enumerable.GetAsyncEnumerator"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:68:22 "ResizeArray"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs:71:16 "enumerator.MoveNextAsync"	assembly-gap
@@ -4571,27 +4599,22 @@ tests/FSharp.Compiler.ComponentTests/TypeChecks/Graph/QueryTrieTests.fs:617:34 "
 tests/FSharp.Compiler.ComponentTests/TypeChecks/Graph/QueryTrieTests.fs:619:16 "KeyValuePair"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/TypeChecks/Graph/QueryTrieTests.fs:620:8 "ImmutableDictionary.CreateRange"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/CompilerOptions/fsc/optimize/E_optimizeOMinus.fs	compared fcs-clean b1=0 assembly=1 external=0
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs	compared fcs-clean b1=47 assembly=12 external=1
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:10:16 "T"	gap
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs	compared fcs-clean b1=42 assembly=12 external=1
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:17:17 "Parent"	gap x4
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:17:18 "arent"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:17:24 "bself"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:21:17 "Parent"	gap x3
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:21:17 "Parent<unit->Ok>"	gap
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:21:18 "arent<unit->Ok>"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:21:24 "unit"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:21:30 "Ok"	gap x3
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:21:44 "self"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:27:17 "Parent"	gap x2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:28:36 "Parent"	gap x2
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:28:37 "arent"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:28:43 "gself"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:32:17 "Parent"	gap x2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:32:24 "unit"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:32:30 "Ok"	gap x2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:33:35 "Parent"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:33:35 "Parent<unit->Ok>"	gap
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:33:36 "arent<unit->Ok>"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:33:42 "unit"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:33:48 "Ok"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:33:62 "self"	gap
@@ -4603,7 +4626,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElem
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:53:11 "Implicit.Ok"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:57:11 "Explicit"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/ImplicitCtorsCallingBaseclassPassingSelf.fs:57:11 "Explicit.Ok"	gap
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs	compared fcs-clean b1=45 assembly=54 external=3
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs	compared fcs-clean b1=41 assembly=54 external=3
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:10:16 "LayoutKind"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:10:16 "LayoutKind.Sequential"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:10:3 "StructLayout"	assembly-gap
@@ -4638,13 +4661,9 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElem
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:58:65 "SequentialPoint"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:58:8 "bool"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:76:16 "SequentialPoint"	alt-binder fcs=12:5 ours=11:6 fcs-clean
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:76:17 "equentialPoint"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:77:16 "SequentialPoint"	alt-binder fcs=12:5 ours=11:6 fcs-clean
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:77:17 "equentialPoint"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:80:16 "ExplicitPoint"	alt-binder fcs=22:5 ours=19:6 fcs-clean
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:80:17 "xplicitPoint"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:81:16 "ExplicitPoint"	alt-binder fcs=22:5 ours=19:6 fcs-clean
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:81:17 "xplicitPoint"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:84:23 "ExplicitRect"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:87:18 "PointInRect_Explicit_Sequential"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:87:50 "&"	assembly-gap
@@ -4654,8 +4673,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElem
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:90:50 "&"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:91:18 "PointInRect_Explicit_Explicit"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/P-invokeDeclarations/MarshalStruct01.fs:91:48 "&"	assembly-gap
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/CheckingOfImplementationFiles/PublicPrivateInternal01.fs	compared fcs-clean b1=6 assembly=9 external=0
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/CheckingOfImplementationFiles/PublicPrivateInternal01.fs:22:10 "et<InternalBuilding>"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/CheckingOfImplementationFiles/PublicPrivateInternal01.fs	compared fcs-clean b1=6 assembly=8 external=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/CheckingOfImplementationFiles/PublicPrivateInternal01.fs:22:9 "Set<InternalBuilding>"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/basic/E_NamespaceCollision01.fs	compared fcs-check-errors b1=3 assembly=4 external=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/basic/E_NamespaceCollision01.fs:11:11 "A"	gap
@@ -4738,10 +4756,9 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/quoteEx
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/for_in01.fs	our-parse-errors
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/MissingIgnore.fs	compared fcs-clean b1=0 assembly=3 external=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/UsingReturnInAWhileLoop.fs	compared fcs-check-errors b1=0 assembly=3 external=0
-tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/Regressions02.fs	compared fcs-clean b1=19 assembly=8 external=0
+tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/Regressions02.fs	compared fcs-clean b1=18 assembly=8 external=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/Regressions02.fs:11:16 "'a"	gap x2
 tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/Regressions02.fs:11:22 "IB"	gap x2
-tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/Regressions02.fs:21:33 "ester"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/Regressions02.fs:21:4 "C"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/Regressions02.fs:21:4 "C<Tester>"	gap
 tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/Regressions02.fs:21:4 "C<Tester>.StaticMember"	gap
@@ -4753,7 +4770,7 @@ tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.LetBindings.fs	co
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.Properties.fs	compared fcs-check-errors b1=0 assembly=1 external=2
 tests/FSharp.Compiler.Service.Tests/ConsoleOnlyOptionsTests.fs	compared fcs-check-errors b1=4 assembly=2 external=6
 tests/FSharp.Compiler.Service.Tests/ConsoleOnlyOptionsTests.fs:20:25 "File.ReadAllText"	assembly-gap
-tests/FSharp.Compiler.Service.Tests/FileSystemTests.fs	compared fcs-check-errors b1=27 assembly=35 external=11
+tests/FSharp.Compiler.Service.Tests/FileSystemTests.fs	compared fcs-check-errors b1=27 assembly=37 external=11
 tests/FSharp.Compiler.Service.Tests/FileSystemTests.fs:101:5 "GC.Collect"	assembly-gap
 tests/FSharp.Compiler.Service.Tests/FileSystemTests.fs:37:19 "MyFileSystem"	gap
 tests/FSharp.Compiler.Service.Tests/FileSystemTests.fs:37:19 "MyFileSystem.FilesCache"	gap
@@ -4769,7 +4786,7 @@ tests/FSharp.Compiler.Service.Tests/FileSystemTests.fs:46:37 "Dispose"	assembly-
 tests/FSharp.Compiler.Service.Tests/FileSystemTests.fs:51:6 "Environment.OSVersion.Platform"	assembly-gap
 tests/FSharp.Compiler.Service.Tests/FileSystemTests.fs:52:43 "MyFileSystem"	gap
 tests/FSharp.Compiler.Service.Tests/GotoDefinition/GotoDefinitionTests.PatternMatching.fs	compared fcs-check-errors b1=2 assembly=16 external=1
-tests/FSharp.Compiler.Service.Tests/MultiProjectAnalysisTests.fs	compared fcs-check-errors b1=395 assembly=340 external=16
+tests/FSharp.Compiler.Service.Tests/MultiProjectAnalysisTests.fs	compared fcs-check-errors b1=395 assembly=404 external=16
 tests/FSharp.Compiler.Service.Tests/MultiProjectAnalysisTests.fs:172:58 "MultiProject1"	gap
 tests/FSharp.Compiler.Service.Tests/MultiProjectAnalysisTests.fs:176:58 "MultiProject1"	gap
 tests/FSharp.Compiler.Service.Tests/MultiProjectAnalysisTests.fs:263:22 ".."	assembly-gap
@@ -4823,111 +4840,73 @@ tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/HashIdentit
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/HashIdentityModule.fs:72:27 "Dictionary<string,int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/HashIdentityModule.fs:74:9 "refDict.Add"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/HashIdentityModule.fs:79:27 "Dictionary<int,int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs	compared fcs-check-errors b1=198 assembly=703 external=11
+tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs	compared fcs-check-errors b1=208 assembly=692 external=11
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:116:22 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:116:23 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:117:21 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:117:22 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:143:28 "Set<char>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:143:29 "et<char>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:143:43 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:144:28 "Set<char>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:144:29 "et<char>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:163:31 "Set<string * int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:163:32 "et<string * int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:164:56 "&&"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:176:12 "nullSet.Count"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:178:12 "filteredNull.Count"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:180:26 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:180:27 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:180:38 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:181:26 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:181:27 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:194:28 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:194:29 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:194:40 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:195:40 "Char.ToUpper"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:197:37 "Char.ToLower"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:208:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:208:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:211:65 "::"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:226:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:226:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:229:65 "::"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:243:24 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:243:25 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:243:35 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:243:64 "i.ToString"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:244:53 "str.Length"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:247:24 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:247:25 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:247:36 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:247:66 "i.ToString"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:248:53 "str.Length"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:271:21 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:271:22 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:272:21 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:272:22 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:275:34 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:275:35 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:291:31 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:291:32 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:291:43 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:303:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:303:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:303:35 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:304:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:304:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:305:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:305:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:312:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:312:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:312:35 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:342:21 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:342:22 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:343:21 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:343:22 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:346:34 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:346:35 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:346:46 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:361:25 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:361:26 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:362:25 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:362:26 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:364:25 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:364:26 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:364:38 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:378:25 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:378:26 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:380:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:380:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:380:36 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:397:23 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:397:24 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:397:35 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:413:69 "str.Length"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:416:69 "str.Length"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:420:40 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:479:18 "System.InvalidOperationException"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:503:21 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:503:22 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:503:33 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:529:28 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:529:29 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:544:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:544:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:562:28 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:562:29 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:577:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:577:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:58:26 "Set<string * int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:58:27 "et<string * int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:596:28 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:596:29 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:613:25 "Set<_>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:613:26 "et<_>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:61:24 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:61:25 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:671:25 "System.Collections.Generic.List"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:671:72 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:674:41 "System.Collections.Generic.List"	assembly-gap
@@ -4941,18 +4920,13 @@ tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.f
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:681:13 "randomPermutation.ToArray"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:683:19 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:73:25 "Set<char>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:73:26 "et<char>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:73:42 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:80:28 "Set<char>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:80:29 "et<char>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:80:45 ".."	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:90:26 "Set<char>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:90:27 "et<char>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:92:12 "noVowels.Count"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:95:25 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:95:26 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:96:25 "Set<int>"	assembly-gap
-tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Collections/SetModule.fs:96:26 "et<int>"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/NestedTaskFailures.fs	compared fcs-check-errors b1=85 assembly=145 external=16
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/NestedTaskFailures.fs:106:32 "Task"	assembly-gap
 tests/FSharp.Core.UnitTests/FSharp.Core/Microsoft.FSharp.Control/NestedTaskFailures.fs:106:9 "System.Threading.Tasks.Task.WaitAll"	assembly-gap
@@ -5042,33 +5016,22 @@ tests/benchmarks/CompiledCodeBenchmarks/MicroPerf/Equality/ExactEquals.fs:66:24 
 tests/benchmarks/CompiledCodeBenchmarks/MicroPerf/Equality/ExactEquals.fs:66:9 "TinyStruct"	gap
 tests/benchmarks/CompiledCodeBenchmarks/MicroPerf/Equality/ExactEquals.fs:98:43 "Struct"	gap
 tests/benchmarks/CompiledCodeBenchmarks/MicroPerf/Equality/ExactEquals.fs:99:27 "Struct"	gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs	compared fcs-check-errors b1=73 assembly=42 external=9
+tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs	compared fcs-check-errors b1=60 assembly=42 external=9
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:106:42 "Unchecked"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:106:42 "Unchecked.defaultof"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:107:56 "Unchecked"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:107:56 "Unchecked.defaultof"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:110:18 "File.ReadAllText"	assembly-gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:113:16 "IdentCapture"	gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:138:30 "File.ReadAllText"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:149:54 "Unchecked"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:149:54 "Unchecked.defaultof"	assembly-gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:152:16 "UseInMemoryDocuments"	gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:155:16 "EmptyCache"	gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:18:30 "File.ReadAllText"	assembly-gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:21:16 "FastFindReferences"	gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:236:30 "File.ReadAllText"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:238:20 "Map"	assembly-gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:24:16 "EmptyCache"	gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:269:54 "Unchecked"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:269:54 "Unchecked.defaultof"	assembly-gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:26:16 "Benchmark"	gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:26:28 "Unchecked"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:26:28 "Unchecked.defaultof"	assembly-gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:271:16 "UseGetSource"	gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:273:16 "UseChangeNotifications"	gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:276:16 "EmptyCache"	gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:279:16 "UseTransparentCompiler"	gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:282:16 "ProjectType"	gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:284:27 "projects[this.ProjectType]"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:336:54 "Unchecked"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:336:54 "Unchecked.defaultof"	assembly-gap
@@ -5076,8 +5039,6 @@ tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBench
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:340:35 "rng.NextDouble"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:340:35 "rng.NextDouble().ToString"	assembly-gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:341:38 "rng.NextDouble"	assembly-gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:353:16 "UseTransparentCompiler"	gap
-tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/BackgroundCompilerBenchmarks.fs:356:16 "SignatureFiles"	gap
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/ce/CE100xnest10.fs	compared fcs-clean b1=2007 assembly=2 external=0
 tests/benchmarks/FCSBenchmarks/CompilerServiceBenchmarks/ce/CE100xnest10.fs:9:20 "StrChainBuilder"	gap
 tests/fsharp/Compiler/CodeGen/EmittedIL/ComputedListExpressions.fs	compared fcs-check-errors b1=0 assembly=0 external=2
@@ -5118,14 +5079,13 @@ tests/fsharp/core/topinit/test5.fs:29:83 "System.InvalidOperationException"	asse
 tests/fsharp/core/topinit/test5.fs:33:5 "CheckStatic5"	gap
 tests/fsharp/core/versionAttributes/Warn2003_3.fs	compared fcs-clean b1=0 assembly=1 external=3
 tests/fsharp/core/versionAttributes/Warn2003_3.fs:4:13 "AssemblyVersionAttribute"	assembly-gap
-tests/fsharp/regression/5531/test.fs	compared fcs-clean b1=31 assembly=8 external=0
+tests/fsharp/regression/5531/test.fs	compared fcs-clean b1=30 assembly=8 external=0
 tests/fsharp/regression/5531/test.fs:10:19 "Foo"	gap
 tests/fsharp/regression/5531/test.fs:10:24 "unit"	assembly-gap
 tests/fsharp/regression/5531/test.fs:10:32 "unit"	assembly-gap
 tests/fsharp/regression/5531/test.fs:12:9 "Base"	gap
 tests/fsharp/regression/5531/test.fs:13:9 "Derived"	gap
 tests/fsharp/regression/5531/test.fs:6:13 "Base"	gap x4
-tests/fsharp/regression/5531/test.fs:6:14 "ase"	gap
 tests/fsharp/regression/5531/test.fs:9:28 "^T"	gap
 tests/fsharp/regression/5531/test.fs:9:41 "Foo"	gap
 tests/fsharp/regression/5531/test.fs:9:46 "unit"	assembly-gap
@@ -5553,8 +5513,7 @@ tests/service/data/SyntaxTree/Measure/Constant - 02.fs	compared fcs-check-errors
 tests/service/data/SyntaxTree/Measure/SynTypeTupleInMeasureTypeWithStartAndSlash.fs	compared fcs-check-errors b1=0 assembly=1 external=0
 tests/service/data/SyntaxTree/Measure/SynTypeTupleInMeasureTypeWithStartAndSlash.fs:2:3 "Measure"	assembly-gap
 tests/service/data/SyntaxTree/Member/Auto property 02.fs	our-parse-errors
-tests/service/data/SyntaxTree/Member/Auto property 15.fs	compared fcs-check-errors b1=1 assembly=1 external=0
-tests/service/data/SyntaxTree/Member/Auto property 15.fs:4:25 "Y"	gap
+tests/service/data/SyntaxTree/Member/Auto property 15.fs	compared fcs-check-errors b1=0 assembly=1 external=0
 tests/service/data/SyntaxTree/Member/Field 09.fs	our-parse-errors
 tests/service/data/SyntaxTree/Member/Implicit ctor - Type - Fun 01.fs	compared fcs-check-errors b1=0 assembly=0 external=0
 tests/service/data/SyntaxTree/Member/Inherit 02.fs	compared fcs-check-errors b1=0 assembly=0 external=0
@@ -5580,7 +5539,7 @@ tests/service/data/SyntaxTree/Pattern/Named field 04.fs	compared fcs-check-error
 tests/service/data/SyntaxTree/Pattern/Record 05.fs	our-parse-errors
 tests/service/data/SyntaxTree/Pattern/Typed - Missing type 02.fs	our-parse-errors
 tests/service/data/SyntaxTree/SimplePats/SimplePats 02.fs	compared fcs-check-errors b1=0 assembly=1 external=0
-tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEqualsTripleQuote.fs	our-parse-errors
+tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEqualsTripleQuote.fs	compared fcs-clean b1=0 assembly=0 external=0
 tests/service/data/SyntaxTree/SynTyparDecl/Constraint - Unknown identifier 02.fs	our-parse-errors
 tests/service/data/SyntaxTree/SynType/Fun 02.fs	compared fcs-check-errors b1=0 assembly=0 external=0
 tests/service/data/SyntaxTree/SynType/Named 05.fs	compared fcs-clean b1=0 assembly=0 external=0
@@ -5801,7 +5760,7 @@ vsintegration/src/FSharp.Editor/Completion/PathCompletionUtilities.fs:23:13 "pat
 vsintegration/src/FSharp.Editor/Completion/PathCompletionUtilities.fs:28:32 "&&"	assembly-gap
 vsintegration/src/FSharp.Editor/Completion/PathCompletionUtilities.fs:28:47 "quotedPath.Length"	assembly-gap
 vsintegration/src/FSharp.Editor/Completion/PathCompletionUtilities.fs:28:9 "quotedPath.Length"	assembly-gap
-vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs	compared fcs-check-errors b1=55 assembly=52 external=17
+vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs	compared fcs-check-errors b1=51 assembly=52 external=17
 vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:188:75 "Async.AwaitTask"	assembly-gap
 vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:189:75 "Async.AwaitTask"	assembly-gap
 vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:213:75 "Async.AwaitTask"	assembly-gap
@@ -5809,10 +5768,6 @@ vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:214:75 "As
 vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:22:29 "'a"	gap
 vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:22:39 "ResizeArray"	assembly-gap
 vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:22:64 "'a"	gap
-vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:237:20 "SupportsFormatDocument"	gap
-vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:238:20 "SupportsFormatSelection"	gap
-vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:239:20 "SupportsFormatOnPaste"	gap
-vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:240:20 "SupportsFormatOnReturn"	gap
 vsintegration/src/FSharp.Editor/Formatting/EditorFormattingService.fs:255:28 "ResizeArray"	assembly-gap
 vsintegration/src/FSharp.Editor/LanguageService/FSharpEditorFactory.fs	compared fcs-check-errors b1=47 assembly=63 external=13
 vsintegration/src/FSharp.Editor/LanguageService/FSharpEditorFactory.fs:126:71 "&"	assembly-gap
@@ -5838,11 +5793,10 @@ vsintegration/src/FSharp.Editor/LanguageService/FSharpEditorFactory.fs:54:24 "by
 vsintegration/src/FSharp.Editor/LanguageService/FSharpEditorFactory.fs:55:30 "byref"	assembly-gap
 vsintegration/src/FSharp.Editor/LanguageService/FSharpEditorFactory.fs:69:18 "&&"	assembly-gap
 vsintegration/src/FSharp.Editor/LanguageService/TextViewCreationListener.fs	compared fcs-check-errors b1=4 assembly=0 external=16
-vsintegration/src/FSharp.Editor/QuickInfo/QuickInfoProvider.fs	compared fcs-check-errors b1=9 assembly=4 external=19
+vsintegration/src/FSharp.Editor/QuickInfo/QuickInfoProvider.fs	compared fcs-check-errors b1=8 assembly=4 external=19
 vsintegration/src/FSharp.Editor/QuickInfo/QuickInfoProvider.fs:151:65 "System.IServiceProvider"	assembly-gap
-vsintegration/src/FSharp.Editor/QuickInfo/QuickInfoProvider.fs:159:18 "SharpAsyncQuickInfoSource"	gap
 vsintegration/src/FSharp.Editor/QuickInfo/QuickInfoProvider.fs:26:90 "ToolTipText elements"	gap
-vsintegration/src/FSharp.LanguageService/FSharpSource.fs	compared fcs-check-errors b1=343 assembly=257 external=48
+vsintegration/src/FSharp.LanguageService/FSharpSource.fs	compared fcs-check-errors b1=336 assembly=259 external=48
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:144:39 "System.Collections.Generic.HashSet"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:144:39 "System.Collections.Generic.HashSet<string>"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:145:28 "lastDependencies.Keys"	assembly-gap
@@ -5859,22 +5813,17 @@ vsintegration/src/FSharp.LanguageService/FSharpSource.fs:214:3 "AllowNullLiteral
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:216:33 "System.IServiceProvider"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:219:41 "site.GetService"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:248:40 "System.IServiceProvider"	assembly-gap
-vsintegration/src/FSharp.LanguageService/FSharpSource.fs:250:37 "SFontsAndColorsHelper"	gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:251:31 "site.GetService"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:269:116 "System.IServiceProvider"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:330:40 "&&"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:334:40 "&&"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:334:59 "&&"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:334:72 "&&"	assembly-gap
-vsintegration/src/FSharp.LanguageService/FSharpSource.fs:337:28 "SharpSourceTestable_DEPRECATED"	gap
-vsintegration/src/FSharp.LanguageService/FSharpSource.fs:386:20 "FSharpIntelliSenseToAppearAdornment_DEPRECATED"	gap
-vsintegration/src/FSharp.LanguageService/FSharpSource.fs:387:20 "CancellationTokenSource"	gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:391:55 "&&"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:391:62 "source.CancellationTokenSource.IsCancellationRequested"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:392:17 "source.CancellationTokenSource.Cancel"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:411:25 "Async.Sleep"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:413:24 "source.FSharpIntelliSenseToAppearAdornment_DEPRECATED.IsNone"	assembly-gap
-vsintegration/src/FSharp.LanguageService/FSharpSource.fs:414:95 "SharpIntelliSenseToAppearAdornment_DEPRECATED"	gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:421:25 "Debug.Assert"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:423:78 "source.CancellationTokenSource.Token"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:443:21 "||"	assembly-gap
@@ -5892,8 +5841,6 @@ vsintegration/src/FSharp.LanguageService/FSharpSource.fs:538:13 "base"	gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:555:17 "base"	gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:557:17 "((box iSource):?>IDisposable).Dispose"	assembly-gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:563:21 "String.Equals"	assembly-gap
-vsintegration/src/FSharp.LanguageService/FSharpSource.fs:590:18 "SharpSourceTestable_DEPRECATED"	gap
-vsintegration/src/FSharp.LanguageService/FSharpSource.fs:593:18 "SharpSource_DEPRECATED"	gap
 vsintegration/src/FSharp.LanguageService/FSharpSource.fs:94:36 "Dictionary<string,uint32>"	assembly-gap
 vsintegration/src/FSharp.ProjectSystem.FSharp/WaitDialog.fs	compared fcs-check-errors b1=5 assembly=27 external=6
 vsintegration/src/FSharp.ProjectSystem.FSharp/WaitDialog.fs:24:33 "sp.GetService"	assembly-gap
@@ -5912,7 +5859,7 @@ vsintegration/tests/FSharp.Editor.Tests/CodeFixes/AddMissingAttributeToSignature
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/AddMissingAttributeToSignatureTests.fs:440:9 "System.Action"	assembly-gap
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/AddMissingAttributeToSignatureTests.fs:48:13 "System.Action"	assembly-gap
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/AddMissingAttributeToSignatureTests.fs:68:18 "(newFsi.GetTextAsync().Result).ToString"	assembly-gap
-vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs	compared fcs-check-errors b1=56 assembly=68 external=18
+vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs	compared fcs-check-errors b1=55 assembly=68 external=18
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:110:46 "'T"	gap
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:110:54 "'T"	gap
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:110:87 "'T"	gap
@@ -5932,7 +5879,6 @@ vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:190:48
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:204:30 "string"	assembly-gap
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:230:28 "string"	assembly-gap
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:248:7 "Sealed"	assembly-gap
-vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:250:27 "Instance"	gap
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:250:38 "MemberDataBuilder"	gap
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:251:36 "Seq"	assembly-gap
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:251:36 "Seq.append"	assembly-gap
@@ -6009,10 +5955,9 @@ vsintegration/tests/FSharp.Editor.Tests/SignatureHelpProviderTests.fs:530:16 "As
 vsintegration/tests/FSharp.Editor.Tests/SignatureHelpProviderTests.fs:530:16 "Async.RunSynchronously"	assembly-gap
 vsintegration/tests/FSharp.Editor.Tests/SignatureHelpProviderTests.fs:90:29 "fileContents.IndexOf"	assembly-gap
 vsintegration/tests/FSharp.Editor.Tests/SignatureHelpProviderTests.fs:90:60 "marker.Length"	assembly-gap
-vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorList.fs	compared fcs-check-errors b1=64 assembly=74 external=10
+vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorList.fs	compared fcs-check-errors b1=63 assembly=74 external=10
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorList.fs:114:28 "error.ToString"	assembly-gap
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorList.fs:129:13 "UsingMSBuild"	gap x4
-vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorList.fs:129:14 "singMSBuild"	gap
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorList.fs:20:42 "s.Replace"	assembly-gap
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorList.fs:20:42 "s.Replace(\"\\r\\n\", \" \").Replace"	assembly-gap
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorList.fs:26:52 "convertNewlines(errorMessage).Contains"	assembly-gap

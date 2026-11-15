@@ -217,10 +217,10 @@ fn classify(token: &Token<'_>) -> Option<Hl> {
         | LParen | RParen | LBrack | RBrack | LBrackBar | BarRBrack | LBrackLess
         | GreaterRBrack | LQuote | LQuoteRaw | RQuote | RQuoteRaw | RQuoteDot | RQuoteRawDot
         | RQuoteBarRBrace | RQuoteRawBarRBrace | LBrace | RBrace | LBraceBar | BarRBrace
-        | Comma | SemiSemi | Semi | DotDotHat | DotDot | FunkyOpName(_) | Dot | ColonColon
-        | ColonQMarkGreater | ColonQMark | ColonGreater | ColonEquals | Colon | RArrow | LArrow
-        | Equals | AmpAmp | Amp | BarBar | Bar | QMarkQMark | QMark | Hash | Dollar | Tilde
-        | Quote | Less(_) | Greater(_) => {
+        | Comma | SemiSemi | Semi | DotDotHat | DotDotDot | DotDot | FunkyOpName(_) | Dot
+        | ColonColon | ColonQMarkGreater | ColonQMark | ColonGreater | ColonEquals | Colon
+        | RArrow | LArrow | Equals | AmpAmp | Amp | BarBar | Bar | QMarkQMark | QMark | Hash
+        | Dollar | Tilde | Quote | Less(_) | Greater(_) => {
             return None;
         }
     })

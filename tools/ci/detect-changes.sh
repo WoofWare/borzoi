@@ -51,7 +51,7 @@ filter_prefixes() {
     nuget)     echo "crates/nuget tools/nuget-oracle" ;;
     astgen)    echo "tools/astgen" ;;
     stats)     echo "tools/stats" ;;
-    fcs)       echo "tools/fcs-dump" ;;
+    fcs)       echo "tools/fcs-dump tools/fcs-dump-legacy" ;;
     sidecar)   echo "tools/csharp-sidecar tools/csharp-sidecar.tests" ;;
     # crates/spawn (every test harness shells out through it) and
     # crates/oracle-harness (drives every resident oracle) underpin the whole

@@ -3,14 +3,63 @@
 //! `netstandard` facade.
 //!
 //! The references are taken from the projected metadata itself wherever the
-//! shape occurs there (FSharp.Core's bases name `[netstandard]System.Object`,
-//! a forwarder away from its definition), and built by hand only for the
-//! shapes nothing in these three DLLs writes.
+//! shape occurs there (the `netstandard2.1` FSharp.Core's bases name
+//! `[netstandard]System.Object`, a forwarder away from its definition), and
+//! built by hand only for the shapes nothing in these DLLs writes.
 
 use borzoi_assembly::{AssemblyIdentity, TypeRef, Version};
 use borzoi_sema::{AssemblyEnv, EntityHandle, IlTypeDefinition};
 
+use std::path::PathBuf;
+
 use crate::common::full_bcl_env;
+
+/// The `netstandard2.1` build of the FSharp.Core package `tools/fcs-dump`
+/// references, from the NuGet packages folder its build restored into.
+/// [`full_bcl_env`]'s FSharp.Core is the `net10.0` build beside fcs-dump, which
+/// references System.Runtime directly, so only this one reaches the BCL
+/// through the `netstandard` facade.
+fn netstandard_fsharp_core() -> PathBuf {
+    crate::common::ensure_fsharp_core_dll();
+    let fsproj = std::fs::read_to_string(crate::common::project_dir().join("fcs-dump.fsproj"))
+        .expect("read fcs-dump.fsproj");
+    let version = fsproj
+        .split("Include=\"FSharp.Core\" Version=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("fcs-dump.fsproj pins an FSharp.Core version");
+    let packages = std::env::var_os("NUGET_PACKAGES")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".nuget/packages")))
+        .expect("a NuGet packages folder");
+    packages
+        .join("fsharp.core")
+        .join(version)
+        .join("lib/netstandard2.1/FSharp.Core.dll")
+}
+
+/// [`full_bcl_env`] with [`netstandard_fsharp_core`] for its FSharp.Core.
+fn netstandard_env() -> &'static AssemblyEnv {
+    use borzoi_assembly::Ecma335Assembly;
+    use std::sync::OnceLock;
+    static ENV: OnceLock<AssemblyEnv> = OnceLock::new();
+    ENV.get_or_init(|| {
+        let sysrt_path = crate::common::ensure_system_runtime_dll();
+        let netstd_path = sysrt_path
+            .parent()
+            .expect("ref dir")
+            .join("netstandard.dll");
+        let bytes: Vec<Vec<u8>> = [netstandard_fsharp_core(), sysrt_path, netstd_path]
+            .iter()
+            .map(|p| std::fs::read(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display())))
+            .collect();
+        let views: Vec<_> = bytes
+            .iter()
+            .map(|b| Ecma335Assembly::parse(b).expect("parse an assembly"))
+            .collect();
+        AssemblyEnv::from_views(&views).expect("build AssemblyEnv")
+    })
+}
 
 fn top(env: &AssemblyEnv, ns: &str, name: &str, arity: usize, assembly: &str) -> EntityHandle {
     let ns: Vec<String> = ns.split('.').map(str::to_string).collect();
@@ -71,11 +120,12 @@ fn named(assembly: Option<AssemblyIdentity>, ns: &str, metadata_name: &str) -> T
     }
 }
 
-/// FSharp.Core is compiled against `netstandard`, whose `System.Object` is a
-/// forwarder: the base binds to System.Runtime's definition.
+/// The `netstandard2.1` FSharp.Core is compiled against `netstandard`, whose
+/// `System.Object` is a forwarder: the base binds to System.Runtime's
+/// definition.
 #[test]
 fn a_reference_through_a_facade_follows_its_forwarder() {
-    let env = full_bcl_env();
+    let env = netstandard_env();
     let object = top(env, "System", "Object", 0, "System.Runtime");
     let func = top(env, "Microsoft.FSharp.Core", "FSharpFunc", 2, "FSharp.Core");
     let base = env
@@ -98,7 +148,7 @@ fn a_reference_through_a_facade_follows_its_forwarder() {
 /// spells as a bare name and an arity.
 #[test]
 fn a_generic_reference_through_a_facade_follows_its_forwarder() {
-    let env = full_bcl_env();
+    let env = netstandard_env();
     let enumerable = top(
         env,
         "System.Collections.Generic",

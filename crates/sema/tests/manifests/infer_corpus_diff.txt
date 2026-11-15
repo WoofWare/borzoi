@@ -1623,7 +1623,7 @@ tests/service/data/SyntaxTree/Pattern/Named field 04.fs:3:7-3:8 unconverted-decl
 tests/service/data/SyntaxTree/Pattern/Record 05.fs	our-parse-errors
 tests/service/data/SyntaxTree/Pattern/Typed - Missing type 02.fs	our-parse-errors
 tests/service/data/SyntaxTree/SimplePats/SimplePats 02.fs	compared
-tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEqualsTripleQuote.fs	our-parse-errors
+tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEqualsTripleQuote.fs	compared
 tests/service/data/SyntaxTree/SynTyparDecl/Constraint - Unknown identifier 02.fs	our-parse-errors
 tests/service/data/SyntaxTree/SynType/Fun 02.fs	compared
 tests/service/data/SyntaxTree/SynType/Named 05.fs	compared

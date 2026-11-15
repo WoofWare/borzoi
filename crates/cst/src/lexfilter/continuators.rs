@@ -72,14 +72,16 @@ impl<'a> Filter<'a> {
     /// first DU arm shouldn't be popped by `|` aligned with the type-level
     /// SeqBlock column. Used by the BAR grace=2 (L1813) and the grace=-1
     /// special case (L1823) — both gate on this predicate to keep the
-    /// SeqBlock alive across leading-bar arms.
+    /// SeqBlock alive across leading-bar arms. A `|}` closing an anonymous
+    /// record type (`type T =\n    {| Id: int\n    |} list`) is one too, so the
+    /// postfix type after it does not start a new element.
     pub(super) fn is_type_seq_block_element_continuator(token: &TokenContent) -> bool {
         if let TokenContent::Dummy { inner, .. } = token {
             return Self::is_type_seq_block_element_continuator(&inner.content());
         }
         matches!(
             token,
-            TokenContent::Real(TokenKind::Bar)
+            TokenContent::Real(TokenKind::Bar | TokenKind::BarRBrace)
                 | TokenContent::Virtual(
                     Virtual::BlockBegin
                         | Virtual::BlockEnd
@@ -303,6 +305,10 @@ impl<'a> Filter<'a> {
                     | TokenKind::RQuote
                     | TokenKind::RQuoteRaw
             ),
+            // The closing `>` of a type application, like `)` or `]`: it may
+            // align with a sequence block's column without starting an
+            // element (dotnet/fsharp#15171).
+            TokenContent::TyparGreater => true,
             // Virtual reprocessed endings (LexFilter.fs:378-381):
             // ORIGHT_BLOCK_END / OBLOCKEND / ODECLEND arriving from a
             // prior alignment-driven pop (e.g. DONE→ODECLEND via the

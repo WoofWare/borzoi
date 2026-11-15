@@ -25,8 +25,8 @@
   <ItemGroup>
     <!-- FSharp.Compiler.Service depends on exactly one FSharp.Core version
          (an `[x, x]` range); this must be it. -->
-    <PackageReference Include="FSharp.Core" Version="10.1.204" />
-    <PackageReference Include="FSharp.Compiler.Service" Version="43.12.204" />
+    <PackageReference Include="FSharp.Core" Version="11.0.101" />
+    <PackageReference Include="FSharp.Compiler.Service" Version="43.13.101" />
     <PackageReference Include="FSharp.SystemTextJson" Version="1.4.36" />
   </ItemGroup>
 

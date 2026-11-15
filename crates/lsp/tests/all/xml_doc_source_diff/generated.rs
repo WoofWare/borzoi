@@ -63,6 +63,8 @@ enum Piece {
     TabDoc(usize),
     /// `#light "on"`, which FCS's lexer consumes without a grab point.
     Light,
+    /// A `#:` line at column 0, whitespace to FCS's lexer (RFC FS-1337).
+    ColonDirective,
 }
 
 impl Piece {
@@ -111,6 +113,7 @@ impl Piece {
             }
             Piece::Nowarn => out.push_str("#nowarn \"40\"\n"),
             Piece::Light => out.push_str("#light \"on\"\n"),
+            Piece::ColonDirective => out.push_str("#:property X=Y\n"),
             Piece::TabDoc(i) => {
                 out.push_str(indent);
                 out.push('\t');
@@ -618,6 +621,8 @@ fn hazards() -> Vec<Vec<Piece>> {
         vec![Doc(0), Block, Doc(3)],
         vec![Doc(0), BlockMultiline, Doc(9)],
         vec![Doc(0), BlockGrab],
+        vec![Doc(0), ColonDirective, Doc(3)],
+        vec![ColonDirective, Doc(0)],
         vec![Doc(1)],
         vec![Doc(2)],
         vec![Doc(2), Doc(0)],
@@ -811,6 +816,7 @@ fn piece() -> impl Strategy<Value = Piece> {
         1 => Just(Piece::Nowarn),
         1 => (0..DOC_TEXTS.len()).prop_map(Piece::TabDoc),
         1 => Just(Piece::Light),
+        1 => Just(Piece::ColonDirective),
         1 => (any::<bool>(), proptest::collection::vec(doc.clone(), 0..3))
             .prop_map(|(live, inner)| Piece::IfDef { live, inner }),
         1 => (

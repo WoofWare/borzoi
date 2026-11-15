@@ -1049,12 +1049,12 @@ impl<'a> Filter<'a> {
         // or CtxtWithAsAugment fallback. The body of the arm dispatches
         // on the lookahead:
         //
-        //   * `RBRACE | IDENT | PUBLIC | PRIVATE | INTERNAL | INLINE`
-        //     (binding-head class — record-update field, anon-record
-        //     field, or property accessor with access modifier) →
-        //     push `CtxtWithAsLet(offside)`, optionally an inner
+        //   * `RBRACE | IDENT | DOT_DOT_DOT | PUBLIC | PRIVATE | INTERNAL |
+        //     INLINE` (binding-head class — record-update field or spread,
+        //     anon-record field, or property accessor with access modifier)
+        //     → push `CtxtWithAsLet(offside)`, optionally an inner
         //     `SeqBlock(NoAddBlockEnd)` if the binding is a long-ident
-        //     equals, emit OWITH.
+        //     equals or a spread, emit OWITH.
         //   * Same-line `LBRACK_LESS` → property accessor with
         //     attributes (`member x.P with [<Foo>] get() = …`): push
         //     `CtxtWithAsLet(with.start)`, emit OWITH.
@@ -1104,6 +1104,7 @@ impl<'a> Filter<'a> {
                         TokenKind::RBrace
                             | TokenKind::Ident
                             | TokenKind::QuotedIdent
+                            | TokenKind::DotDotDot
                             | TokenKind::Public
                             | TokenKind::Private
                             | TokenKind::Internal
@@ -1122,12 +1123,13 @@ impl<'a> Filter<'a> {
 
                     // FCS L2414-2421: peek the candidate token, ask
                     // `isLongIdentEquals` whether the upcoming stream forms
-                    // `IDENT (DOT IDENT)* EQUALS`, and if so open an inner
-                    // SeqBlock(NoAddBlockEnd) so each binding's RHS gets its
-                    // own offside scope.
+                    // `IDENT (DOT IDENT)* EQUALS`, or is a spread's `...`, and
+                    // if so open an inner SeqBlock(NoAddBlockEnd) so each
+                    // binding's RHS gets its own offside scope.
                     let is_followed_by_long_ident_equals =
                         if let Some(candidate) = self.pop_next_token_tup() {
-                            let res = self.is_long_ident_equals(candidate.token);
+                            let res = self.is_long_ident_equals(candidate.token)
+                                || candidate.token == TokenContent::Real(TokenKind::DotDotDot);
                             self.delay_token(candidate);
                             res
                         } else {

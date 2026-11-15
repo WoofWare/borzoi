@@ -936,11 +936,22 @@ fn member_of_a_nested_type_names_its_enclosing_chain() {
 
 #[test]
 fn rqa_attribute_renders_on_non_module_kinds() {
-    // FSharp.Core ships its own `DynamicallyAccessedMemberTypes` enum carrying
-    // `[<RequireQualifiedAccess>]`. The attribute is valid well beyond
-    // modules/unions, so the declaration head must surface it here — the
-    // regression a P2 review flagged when the prefix was gated to `Module`/`Union`.
-    let env = fsharp_core_env();
+    // FSharp.Core's `netstandard` builds ship their own
+    // `DynamicallyAccessedMemberTypes` enum, a polyfill the `net10.0` build
+    // beside fcs-dump leaves out, carrying `[<RequireQualifiedAccess>]`. The
+    // attribute is valid well beyond modules/unions, so the declaration head must
+    // surface it here — the regression a P2 review flagged when the prefix was
+    // gated to `Module`/`Union`.
+    let env = {
+        let dll = crate::common::ensure_netstandard_fsharp_core_dll();
+        let bytes =
+            crate::common::host_fs::read(&dll).unwrap_or_else(|e| panic!("read {dll:?}: {e}"));
+        let entities = Ecma335Assembly::parse(&bytes)
+            .expect("parse FSharp.Core")
+            .enumerate_type_defs()
+            .expect("enumerate FSharp.Core");
+        AssemblyEnv::from_entities(entities)
+    };
     let enum_handle = env
         .lookup_type(
             &ns(&["System", "Diagnostics", "CodeAnalysis"]),

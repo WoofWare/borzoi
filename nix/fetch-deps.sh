@@ -47,6 +47,11 @@ mkdir -p "$HOME"
 export DOTNET_CLI_TELEMETRY_OPTOUT=1
 export DOTNET_NOLOGO=1
 export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+# NuGet's audit reads nuget.org's live advisory feed, so under the projects'
+# TreatWarningsAsErrors an advisory published since the last regeneration
+# fails the restore. An advisory does not change the closure the offline store
+# must hold, and the offline restores have no feed to audit.
+export NuGetAudit=false
 
 config="$work/nuget.config"
 packages="$work/packages"
@@ -67,6 +72,7 @@ project_list="$work/projects.txt"
   echo tools/csharp-sidecar/csharp-sidecar.csproj
   echo tools/csharp-sidecar.tests/csharp-sidecar.tests.csproj
   echo tools/fcs-dump/fcs-dump.fsproj
+  echo tools/fcs-dump-legacy/fcs-dump-legacy.fsproj
   echo tools/nuget-oracle/nuget-oracle.fsproj
   echo tools/msbuild-condition-oracle/msbuild-condition-oracle.fsproj
   echo tools/inheritdoc-oracle/inheritdoc-oracle.csproj

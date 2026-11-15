@@ -167,6 +167,20 @@ type SynInterpolatedStringPartConverter() =
             options
             (fun caseName fieldIndex -> caseName = "String" && fieldIndex = 0)
 
+/// JSON shape for `SynInterpolationFormatting.Printf`, preserving the raw UTF-16
+/// units of the specifier FCS peels off the literal before a hole (`%d{x}`).
+type SynInterpolationFormattingConverter() =
+    inherit JsonConverter<SynInterpolationFormatting>()
+    override _.Read(_, _, _) =
+        failwith "fcs-dump: SynInterpolationFormatting read not supported"
+    override _.Write(writer, value, options) =
+        writeAdjacentTagWithStringUnits
+            writer
+            value
+            typeof<SynInterpolationFormatting>
+            options
+            (fun caseName fieldIndex -> caseName = "Printf" && fieldIndex = 0)
+
 /// JSON shape for hash-directive string arguments (`#I`, `#load`, ...),
 /// preserving their raw UTF-16 payload.
 type ParsedHashDirectiveArgumentConverter() =
@@ -219,6 +233,7 @@ let private buildOptionsCore (indented: bool) =
     o.Converters.Add(CharConverter())
     o.Converters.Add(SynConstConverter())
     o.Converters.Add(SynInterpolatedStringPartConverter())
+    o.Converters.Add(SynInterpolationFormattingConverter())
     o.Converters.Add(ParsedHashDirectiveArgumentConverter())
     o.Converters.Add(JsonFSharpConverter(JsonUnionEncoding.AdjacentTag))
     o
@@ -5694,7 +5709,7 @@ let private dumpTooltips (absolute: string) =
                match element with
                | FSharp.Compiler.EditorServices.ToolTipElement.Group items ->
                    for item in items do
-                       yield item.MainDescription |> Array.map (fun t -> t.Text) |> String.concat ""
+                       yield item.MainDescription.Parts |> Array.map (fun t -> t.Text) |> String.concat ""
                | FSharp.Compiler.EditorServices.ToolTipElement.CompositionError message -> yield "<error> " + message
                | FSharp.Compiler.EditorServices.ToolTipElement.None -> () |]
 

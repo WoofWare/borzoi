@@ -538,3 +538,11 @@ fn a_parenthesised_tuple_postfix_argument_is_one_type_argument() {
     assert_eq!(fcs, &[" one"]);
     assert_eq!(verdict, &Verdict::Agree { attached: true });
 }
+
+/// A `#:` line is whitespace to FCS's lexer, so it neither breaks a `///`
+/// block nor starts one.
+#[test]
+fn a_colon_directive_line_does_not_break_the_block() {
+    let src = "module M\n/// first\n#:property X=Y\n/// second\nlet x = 1\n";
+    assert_attached(src, "x", &[" first", " second"]);
+}

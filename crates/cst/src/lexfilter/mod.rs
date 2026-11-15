@@ -2084,16 +2084,26 @@ impl<'a> Filter<'a> {
         // 1-based line, 0-based column printed 1-based — in UTF-16 code units
         // (FCS's lexbuf column scale), hence `utf16_col` rather than the raw
         // byte column. The embedded position is the limiting context's anchor,
-        // so users can see which earlier construct imposed the limit.
+        // so users can see which earlier construct imposed the limit. Below the
+        // retired `StrictIndentation` gate the text is the one the compilers
+        // that still had the gate wrote, which goes on to name the way back to
+        // non-conforming indentation; the current compiler has no such way and
+        // stops after the first sentence.
+        let mut message = format!(
+            "Unexpected syntax or possible incorrect indentation: this token is offside of \
+             context started at position ({}:{}). Try indenting this further.",
+            limit.pos.line,
+            self.utf16_col(limit.pos) + 1,
+        );
+        if !self.strict_indentation_is_error {
+            message.push_str(
+                "\nTo continue using non-conforming indentation, pass the \
+                 '--strict-indentation-' flag to the compiler, or set the language version to \
+                 F# 7.",
+            );
+        }
         self.diagnostics.push(OffsideDiagnostic {
-            message: format!(
-                "Unexpected syntax or possible incorrect indentation: this token is offside of \
-                 context started at position ({}:{}). Try indenting this further.\nTo continue \
-                 using non-conforming indentation, pass the '--strict-indentation-' flag to the \
-                 compiler, or set the language version to F# 7.",
-                limit.pos.line,
-                self.utf16_col(limit.pos) + 1,
-            ),
+            message,
             span: trigger.range(),
             severity,
         });

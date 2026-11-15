@@ -116,6 +116,10 @@ pub enum SourceDocDecline {
     /// an immediate grab point in FCS's comment lexer, whose interior rules
     /// (strings and characters inside comments) are not re-lexed here.
     BlockCommentGrabPoint,
+    /// The `///` block holds an `<inheritdoc`, which FCS expands when it hands
+    /// the symbol its doc (`SymbolHelpers`), resolving the reference it names or
+    /// implies; the expansion is not modelled.
+    InheritDoc,
     /// A `///` line ended by a lone carriage return, which FCS's comment lexer
     /// drops the line at (`singleLineComment`'s catch-all rule).
     LoneCarriageReturn,
@@ -202,6 +206,17 @@ pub struct SourceDocIndex {
     tokens: Vec<SyntaxToken>,
 }
 
+/// The doc FCS attaches for the `///` `lines` a declaration grabs, unless
+/// they hold an `<inheritdoc`: FCS then expands it when it hands the symbol
+/// its doc (`SymbolHelpers`), which is not modelled here.
+fn attached(lines: Vec<String>) -> SourceDoc {
+    if lines.iter().any(|l| l.contains("<inheritdoc")) {
+        SourceDoc::Declined(SourceDocDecline::InheritDoc)
+    } else {
+        SourceDoc::Attached(lines)
+    }
+}
+
 impl SourceDocIndex {
     pub fn new(root: &SyntaxNode) -> Self {
         let tokens = root
@@ -220,15 +235,15 @@ impl SourceDocIndex {
         match self.grab_rule(def) {
             Ok(None) => SourceDoc::Attached(Vec::new()),
             Ok(Some(GrabRule::At(token))) => match self.block_before(&token) {
-                Ok(lines) => SourceDoc::Attached(lines),
+                Ok(lines) => attached(lines),
                 Err(why) => SourceDoc::Declined(why),
             },
             Ok(Some(GrabRule::AndOrInner { and, inner })) => {
                 match self.block_before(&and) {
                     // `HasComments`: any saved line, blank or not, wins.
-                    Ok(lines) if !lines.is_empty() => SourceDoc::Attached(lines),
+                    Ok(lines) if !lines.is_empty() => attached(lines),
                     Ok(_) => match self.block_before(&inner) {
-                        Ok(lines) => SourceDoc::Attached(lines),
+                        Ok(lines) => attached(lines),
                         Err(why) => SourceDoc::Declined(why),
                     },
                     Err(why) => SourceDoc::Declined(why),

@@ -470,9 +470,7 @@ Two checks hold this:
   feature's error. FCS's check of `StringInterpolation` abandons the string
   (`checkLanguageFeatureError` raises), typing it and what binds it as `obj`,
   so there our inference is held to FCS at 5.0 instead (`CHECK_ABANDONS`).
-  The oracle's FCS (the `FSharp.Compiler.Service` package `tools/fcs-dump`
-  references) predates the `#elif` check, so for `PreprocessorElif` it shows
-  the types only (`ORACLE_PREDATES`). FCS refuses a version below 8.0
+  FCS refuses a version below 8.0
   (FS3880) unless `SKIP_VERSION_SUPPORTED_CHECK` is set, so every
   `tools/fcs-dump` oracle that pins a version sets it (the LSP crate's
   `fcs_dump_langversion_pin` holds each one to checking at 7.0).
@@ -532,19 +530,35 @@ The runbook is [When the compiler deletes a feature](#when-the-compiler-deletes-
 **Two oracles.** Every borzoi oracle sets `SKIP_VERSION_SUPPORTED_CHECK`. A
 compiler that deleted a case behaves below the floor as if the feature were
 always on, so a retired gate needs an oracle from before the deletion. The
-plan lands with the FCS bump (PR 8, step 3). The current FCS grades every
-version at or above the floor. A frozen `tools/fcs-dump-legacy` on FCS
-43.12.204 grades the retired gates below the floor, and is never edited. It
-runs on fixtures and grids only, not on corpus sweeps. `from_fcs` is keyed by
-oracle for the few AST shapes that changed between the two.
+current FCS (`tools/fcs-dump`, 43.13.101) grades every version at or above
+the floor. A frozen `tools/fcs-dump-legacy` on FCS 43.12.204 grades every
+request below it, and is never edited: below the floor every parse reaches a
+retired gate, since the retired `RelaxWhitespace`, `RelaxWhitespace2` and
+`StrictIndentation` rows decide the offside rule of every file. The cst
+harness routes a request by its version (`tests/all/common/oracle.rs`), as
+sema's does a check pinned below the floor (`infer_legality_pin_diff`), at
+`borzoi_oracle_harness::FCS_SUPPORT_FLOOR`, which `language_features` holds
+to `IsVersionSupported`; each spawns the legacy oracle only when a request
+below the floor arrives. The
+two packages write a few AST shapes differently (`SynComponentInfo`'s name,
+record fields, interpolated-string holes), so a legacy record is rewritten
+into the current shapes before `from_fcs` reads it (`upgrade_legacy_record`),
+and `oracle_legacy_shapes` holds the rewrite to the current oracle on
+fixtures both compilers read alike. The legacy oracle runs on fixtures and
+grids only, not on corpus sweeps: the feature-gate corpus sweep grades at the
+floor.
 
-**Unclaimed residue.** The F# 11 compiler also changes some lexing with no
-feature gate at any version: `=$"` splits into `=` and the string, `...` is a
-token, and a `#:` line is whitespace. borzoi follows that lexing at every
-version from the FCS bump on. Below the floor, borzoi's parse is then the
-legacy compiler's gates over the current compiler's ungated lexing, which no
-compiler ever was. borzoi makes no claim about that combination, and no
-oracle grades it.
+**Unclaimed residue.** The F# 11 compiler also changes some lexing and
+lex-filtering with no feature gate at any version: `=$"` splits into `=` and
+the string, `...` is a token, a `#:` line is whitespace, and a `|}` closing an
+anonymous record type or the `>` closing a type application continues a
+sequence block. borzoi follows all of it at every version. Below the floor,
+borzoi's parse is then the legacy compiler's gates over the current
+compiler's ungated lexing, which no compiler ever was. borzoi makes no claim
+about that combination, and no oracle grades it: a fixture that reaches it is
+graded from the floor up (`assert_filtered_streams_match_from_floor`, which
+also requires the legacy oracle to disagree somewhere below, and the gate
+differential's `IMPL_FROM_FLOOR`).
 
 ## The feature table
 
@@ -752,6 +766,11 @@ diagnostic for its feature" rather than "under a `Legality` one".
   projects ask for SDK 11, so the devshell builds a second dotnet root with
   it (`BORZOI_DOTNET_ROOT_SDK11`), never the default, which only
   `fsproj_msbuild_corpus_diff` uses.
+- **PR 8, step 3a — the oracle bump**: `tools/fcs-dump` on FCS 43.13.101 and
+  FSharp.Core 11.0.101, the frozen `tools/fcs-dump-legacy` on 43.12.204 for
+  every request below the floor (D12), the FCS projection read in the new
+  AST shapes, and the ungated lexing and lex-filtering (`...`, `#:`, `=$"`,
+  the `|}` and closing-`>` continuators, the reworded FS0058).
 
 ## PR sequence
 
@@ -786,8 +805,8 @@ diagnostic for its feature" rather than "under a `Legality` one".
       `LanguageVersion::DEFAULT` 11.0. *Landed.* The LSP's default follows
       the project's SDK in #777.
    3. The FCS oracle bump, with the legacy oracle split out (D12), the
-      projection rework, the ungated lexer and parser changes, and the
-      recovery ports.
+      projection rework and the ungated lexer and parser changes. *Landed*
+      (3a). The recovery ports follow (3b).
    4. New syntax: record spreads and tuple-type extensions, each a kind and a
       gate.
    5. `v11` published ([Publishing a facade](#publishing-a-facade)).
@@ -808,18 +827,11 @@ Everything in PR 8 above. Beyond them:
   features that is the FS3350 text the differentials check; for a
   checker-only row it is checked only against that reading of FSComp.txt
   until the row is gated.
-- **The oracle's FCS is older than the table's.** `tools/fcs-dump` references
-  `FSharp.Compiler.Service` 43.12.204 (SDK 10's compiler) until step 3; the
-  table and the corpus are SDK 11.0.100's. So the corpus differentials grade
-  the new corpus against the old parser, and both reject the files that use
-  new syntax (record spreads); and the oracle's default language version is
-  10.0, not `LanguageVersion::DEFAULT`, so a differential that parses at the
-  default passes that version to the oracle. 43.12.204 also reports nothing
-  for `#elif` below 11.0, where the table's compiler reports FS3350, so no
-  differential holds the `#elif` gate to FCS until the package moves. It also
-  starts an indented `#nowarn`'s directive range at the start of the line,
-  where the table's compiler starts it at the `#`, which we follow
-  (`an_indented_directive_range_starts_at_its_hash`).
+- **The new syntax FCS accepts and we do not parse yet** (step 4): record
+  spreads and tuple-type extension heads. The corpus files that use them are
+  `fcs-normaliser-unmodelled` in `parser_corpus_diff` (FCS accepts them, and
+  the FCS projection does not model a spread or a tuple-type head), and
+  `diff_tuple_type_extension_head_is_unparsed` pins the head.
 
 ## Open questions
 

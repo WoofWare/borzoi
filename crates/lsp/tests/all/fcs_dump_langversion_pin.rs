@@ -5,9 +5,11 @@
 //! `SKIP_VERSION_SUPPORTED_CHECK` is set: a single-file check then reports
 //! FS3880 and checks at FCS's default, and a project check fails in script
 //! resolution. A differential pinned to such a version would be graded against
-//! the default instead, or not at all. The fixture uses `_.Length`, which F# 8.0
-//! introduced and FCS's checker gates (FS3350 below 8.0), so a check at 7.0
-//! reports it and a check at the default does not.
+//! the default instead, or not at all. The fixture intersects two flexible
+//! types (`#seq<int> & #System.IDisposable`), which F# 8.0 introduced and FCS
+//! still gates (FS3350 below 8.0, `ConstraintIntersectionOnFlexibleTypes`), so a
+//! check at 7.0 reports it and a check at the default does not. (A feature the
+//! current FCS has retired, such as `_.Length`, draws nothing at any version.)
 //!
 //! Each oracle runs in a fresh process, its first request pinned at 7.0, so no
 //! earlier request's state can stand in for the pin's own.
@@ -30,7 +32,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     let file = dir.path().join("Lib.fs");
     std::fs::write(
         &file,
-        "module M\nlet lengths (xs: string list) = xs |> List.map _.Length\n",
+        "module M\nlet f (x: #seq<int> & #System.IDisposable) = x.Dispose()\n",
     )
     .expect("write fixture");
     (dir, file)
@@ -84,7 +86,7 @@ fn assert_checked_at_the_pin(oracle: &str, at_7: &[i64], at_8: &[i64]) {
     );
     assert!(
         !at_8.contains(&FEATURE_UNAVAILABLE) && !at_8.contains(&OUT_OF_SUPPORT),
-        "{oracle} pinned at 8.0 must accept `_.Length`, but reported {at_8:?}"
+        "{oracle} pinned at 8.0 must accept the intersection, but reported {at_8:?}"
     );
 }
 

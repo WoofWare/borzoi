@@ -330,7 +330,7 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/StaticOptimizations/String_Signed
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch05.fs@150 token	outside-damage 2/2/3
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch09.fs@946 token	exact 5/5/6
 tests/FSharp.Compiler.ComponentTests/EmittedIL/StringEncoding/NormalizationFormKC.fs@1110 member	exact 10/10/11
-tests/FSharp.Compiler.ComponentTests/EmittedIL/StringEncoding/NormalizationFormKC.fs@764 token	divergent 9/16/19 at:module[0]/Let@977,module[0]/Let@1025,module[0]/Let@1073,module[0]/Let@1121,module[0]/Expr@1170,module[0]/Expr@1206,module[0]/Expr@1243,module[0]/Expr@1376
+tests/FSharp.Compiler.ComponentTests/EmittedIL/StringEncoding/NormalizationFormKC.fs@764 token	outside-damage 8/8/10 beyond-fcs:1
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/Extensions02.fs@1317 token	exact 10/10/10
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/Extensions02.fs@219 member	exact 9/9/10
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/FunctionArity01.fs@423 token	outside-damage 7/7/9
@@ -387,7 +387,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/Directives/dummy2.fsx@87 token	outside-damage 1/1/1
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/Directives/multiple_nowarn02.fsx@115 token	divergent 0/0/3 beyond-fcs:2 at:module[0]/Attributes@113
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/IdentifiersAndKeywords/E_QuotedTypeModuleNames01.fs@3051 token	outside-damage 18/18/19 beyond-fcs:2
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/StringsAndCharacters/ByteString02.fs@147 token	outside-damage 3/3/4
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/StringsAndCharacters/ByteString02.fs@147 token	divergent 1/8/11 beyond-fcs:1 at:module[0]/Expr@149,module[0]/Expr@155,module[0]/Expr@161,module[0]/Expr@167,module[0]/Expr@173,module[0]/Expr@179,module[0]/Expr@185,module[0]/Expr@191
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/StringsAndCharacters/CharLiterals03.fs@113 token	exact 5/5/6
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/StringsAndCharacters/UnicodeString01.fs@161 token	exact 8/8/9
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/SymbolicKeywords/GreaterThanClosedParenthesis01.fs@236 token	exact 4/4/4
@@ -629,4 +629,4 @@ vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.ErrorR
 vsintegration/tests/UnitTests/UnusedOpensTests.fs@1635 member	exact 81/81/82
 vsintegration/tests/UnitTests/UnusedOpensTests.fs@2085 token	outside-damage 81/81/82
 vsintegration/tests/UnitTests/Workspace/WorkspaceTests.fs@3659 member	exact 40/40/41
-vsintegration/tests/UnitTests/Workspace/WorkspaceTests.fs@5087 token	divergent 32/32/34 at:module[0]/Let@5760,module[0]/Let@5911,module[0]/Let@6048,module[0]/Let@6256,module[0]/Let@6466,module[0]/Let@6863
+vsintegration/tests/UnitTests/Workspace/WorkspaceTests.fs@5087 token	divergent 33/40/41 at:module[0]/Let@5760,module[0]/Let@5911,module[0]/Let@6048,module[0]/Let@6256,module[0]/Let@6466,module[0]/Let@6863,module[0]/Types@7259,module[0]/nested@689/Let@5760,+6#0bdf02be
