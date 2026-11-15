@@ -11,6 +11,7 @@ pub(super) struct Walked {
     pub(super) member_resolutions: HashMap<TextRange, Resolution>,
     pub(super) incompleteness: Vec<Vec<Incomplete>>,
     pub(super) receiver_types: HashMap<TextRange, Ty>,
+    pub(super) annotated_params: HashSet<DefId>,
     pub(super) module_values: HashMap<DefId, ModuleValue>,
     pub(super) deepest_expr_depth: usize,
     pub(super) type_budget_exceeded: Option<TypeBudgetExceeded>,
@@ -125,12 +126,14 @@ impl<'a> Gen<'a> {
         // A generic parameter is not published: FCS renders a parameter's type
         // renumbered on its own (`'a` for the second of `'a -> 'b -> 'a`),
         // where hover would name it as its function does.
+        let mut annotated_params = HashSet::default();
         for def in binders.params() {
             if binders.is_withheld(def) {
                 continue;
             }
             if let Some(ann) = binders.param_annotation(def) {
                 def_types.insert(def, ann);
+                annotated_params.insert(def);
                 continue;
             }
             let (Some(owner), Some(slot)) = (binders.param_owner(def), binders.param_slot(def))
@@ -242,6 +245,7 @@ impl<'a> Gen<'a> {
             member_resolutions,
             incompleteness: emitted.incompleteness,
             receiver_types,
+            annotated_params,
             module_values,
             deepest_expr_depth: emitted.deepest_expr_depth,
             type_budget_exceeded: None,
@@ -303,6 +307,7 @@ impl<'a> Gen<'a> {
             member_resolutions: HashMap::default(),
             incompleteness,
             receiver_types: HashMap::default(),
+            annotated_params: HashSet::default(),
             module_values,
             deepest_expr_depth,
             type_budget_exceeded: Some(why),
@@ -320,9 +325,11 @@ fn record_receiver(
     receiver_types: &mut HashMap<TextRange, Ty>,
     receiver: Receiver,
 ) {
-    debug_assert_eq!(
-        solver.table.resolve(solver.tys.var(receiver.var)),
-        receiver.ty,
+    // Past the budget the table's answers are not answers, and the caller
+    // publishes nothing.
+    debug_assert!(
+        solver.table.over_budget().is_some()
+            || solver.table.resolve(solver.tys.var(receiver.var)) == receiver.ty,
         "a receiver's type at its access is its final one"
     );
     let previous = receiver_types.insert(receiver.dot, receiver.ty);

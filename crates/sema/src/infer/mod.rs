@@ -581,6 +581,9 @@ pub struct InferredFile {
     /// range of the dot after the receiver — recorded whether or not the
     /// access resolves. See [`Self::receiver_type_at`].
     receiver_types: HashMap<TextRange, Ty>,
+    /// The parameters whose published type is their annotation. See
+    /// [`Self::parameter_annotation`].
+    annotated_params: HashSet<DefId>,
     /// What this file publishes for each binder a module-level `let` binds:
     /// its certain type, or why it has none — read for the binders the file
     /// exports by [`FileContribution::of`], like every field below.
@@ -621,6 +624,7 @@ impl InferredFile {
             member_resolutions,
             incompleteness,
             receiver_types,
+            annotated_params,
             module_values,
             project_types,
             project_cases,
@@ -645,6 +649,7 @@ impl InferredFile {
             member_resolutions: member_resolutions.clone(),
             incompleteness: incompleteness.clone(),
             receiver_types: tys(receiver_types),
+            annotated_params: annotated_params.clone(),
             module_values: module_values
                 .iter()
                 .map(|(def, value)| (*def, value.rekey(from, to)))
@@ -770,6 +775,19 @@ impl InferredFile {
     /// type is its type either way.
     pub fn receiver_type_at(&self, dot: TextRange) -> Option<&Ty> {
         self.receiver_types.get(&dot)
+    }
+
+    /// The type of the parameter `def` when it is its annotation, which FCS
+    /// knows at every use in the function's body, whatever the body does:
+    /// it checks the parameters' patterns before the body. `None` for a
+    /// parameter with no annotation, whose published type is its slot in
+    /// the function's type at the binding's end.
+    pub fn parameter_annotation(&self, def: DefId) -> Option<&Ty> {
+        if self.annotated_params.contains(&def) {
+            self.def_types.get(&def)
+        } else {
+            None
+        }
     }
 
     /// Every `(dot range, receiver type)` pair of [`Self::receiver_type_at`].

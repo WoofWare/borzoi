@@ -60,6 +60,16 @@ const PROBE_STACK_BYTES: usize = WALK_STACK_BYTES / 2;
 /// budget well before this; without one, each would need exabytes here.
 const LINES: usize = 40;
 
+/// The line every family's program opens with: a member access whose
+/// receiver type inference records at the access
+/// ([`InferredFile::receiver_type_at`]), so that a file past the budget is
+/// seen to publish no receiver either, and the read-off's check that a
+/// receiver's type at its access is its final one meets a table past the
+/// budget.
+///
+/// [`InferredFile::receiver_type_at`]: borzoi_sema::InferredFile::receiver_type_at
+const RECEIVER: &str = "let receiver = \"s\".Length\n";
+
 /// A program shape whose inferred type grows faster than its text, by the
 /// line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,8 +130,14 @@ impl Family {
             .unwrap_or_else(|| panic!("no family {name:?}"))
     }
 
-    /// The family's program, `lines` steps long.
+    /// The family's program, `lines` steps long, after a member access
+    /// whose receiver inference records ([`RECEIVER`]).
     fn source(self, lines: usize) -> String {
+        format!("{RECEIVER}{}", self.steps(lines))
+    }
+
+    /// The family's own lines.
+    fn steps(self, lines: usize) -> String {
         let doubling = |g0: &str| {
             let mut src = format!("{g0}\n");
             for k in 1..lines {
@@ -170,7 +186,7 @@ struct Facts {
     /// The bound the file's inference reached, if any.
     exceeded: Option<TypeBudgetExceeded>,
     /// The node count and depth of the largest type the file published (an
-    /// expression's or a binder's), `0 0` for none.
+    /// expression's, a binder's or a receiver's), `0 0` for none.
     published_nodes: usize,
     published_depth: usize,
     /// The most nodes one resolution built, and the deepest type walk
@@ -264,6 +280,7 @@ fn infer_facts(src: &str, env: &AssemblyEnv) -> Facts {
         .types()
         .values()
         .chain(inferred.def_types().values())
+        .chain(inferred.receiver_types().map(|(_, ty)| ty))
         .map(|ty| ty.size(env))
         .max_by_key(|size| (size.nodes, size.depth))
         .unwrap_or_default();

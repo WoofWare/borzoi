@@ -287,9 +287,11 @@ fn binder_of_expr(mut expr: Expr) -> Option<SyntaxToken> {
 ///   type, but only where it was published before the access's declaration
 ///   group began ([`group_start`]): an earlier file's value, or an earlier
 ///   declaration's binder, whose type FCS had fixed before it began checking
-///   the access's group. A binder of the same group (a `let rec` sibling, a
-///   `module rec`'s other declarations) has a published type that is its
-///   type at the group's end, which FCS may not know at the access (FS0072).
+///   the access's group, or a parameter's annotation, fixed before the
+///   function's body is checked. Any other binder of the same group (a
+///   local, an unannotated parameter, a `let rec` sibling, a `module rec`'s
+///   other declarations) has a published type that is its type at the
+///   group's end, which FCS may not know at the access (FS0072).
 fn receiver_type(
     access: &Access,
     file: &ResolvedFile,
@@ -305,7 +307,8 @@ fn receiver_type(
         (Some(def), _) if file.def(def).range.end() <= group_start(head) => {
             inferred.def_type(def).copied()
         }
-        (Some(_), _) => None,
+        // A parameter's annotation, fixed before its body is checked.
+        (Some(def), _) => inferred.parameter_annotation(def).copied(),
         // An earlier file's top-level value: the type that file published.
         (None, Resolution::Item(id)) if !file.owns_item(id) => project.item_type(id).ok().copied(),
         (None, _) => None,

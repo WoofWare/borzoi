@@ -295,6 +295,17 @@ fn a_binder_of_an_earlier_declaration_offers_its_members_where_the_access_is_not
 }
 
 #[test]
+fn an_annotated_parameter_offers_its_members_where_the_access_is_not_inferred() {
+    // Inference does not walk a `try` body, so nothing is recorded at `s.Le`;
+    // `s`'s annotation is its type at every use in the body, fixed before
+    // the body is checked.
+    let src = "module M\nlet f (s: System.String) = try s.Le with _ -> 0\n";
+    let (mut state, uri) = runtime_project_state(src);
+    // `try s.Le` — `Le` at columns 33..35 on line 1; cursor at 34.
+    offers_length(labels(&mut state, &uri, 1, 34), "an annotated parameter");
+}
+
+#[test]
 fn a_binder_of_the_same_recursive_group_is_not_read_for_its_type() {
     // In a `module rec`, `s` is a sibling of the access's declaration, so
     // its published type is its type at the group's end, not at the access.

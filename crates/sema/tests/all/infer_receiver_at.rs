@@ -213,6 +213,28 @@ fn a_clean_declaration_before_a_damaged_one_publishes_as_before() {
 }
 
 #[test]
+fn a_file_past_the_type_budget_records_no_receiver() {
+    // The receiver is ground at its access, but the read-off of the
+    // doubling tuples after it passes the budget: the file publishes
+    // nothing, receivers included, rather than reading a table whose answers
+    // are no longer answers.
+    let mut src = "module M\nlet n = \"hi\".Length\nlet a0 = 0\n".to_string();
+    for k in 1..=12 {
+        src.push_str(&format!("let a{k} = (a{p}, a{p})\n", p = k - 1));
+    }
+    let (_, inferred) = infer(&src);
+    assert!(
+        inferred.type_budget_exceeded().is_some(),
+        "the family reaches the budget"
+    );
+    assert!(
+        receivers(&inferred).is_empty(),
+        "{:?}",
+        receivers(&inferred)
+    );
+}
+
+#[test]
 fn a_declaration_after_a_recovery_records_nothing() {
     // The first recovery is not a trailing dot, so no declaration from it on
     // is walked at all.

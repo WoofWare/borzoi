@@ -113,6 +113,7 @@ impl<'a> FileFacts<'a> {
             member_resolutions,
             incompleteness,
             receiver_types,
+            annotated_params,
             module_values,
             deepest_expr_depth,
             type_budget_exceeded,
@@ -125,6 +126,7 @@ impl<'a> FileFacts<'a> {
             member_resolutions,
             incompleteness,
             receiver_types,
+            annotated_params,
             module_values,
             project_types: self.project_types,
             // A case named by its definition has no handle a later file could
