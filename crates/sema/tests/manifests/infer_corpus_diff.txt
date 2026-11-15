@@ -754,9 +754,11 @@ tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/E_ValueC
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/E_ValueCapture01.fs:9:13-9:14 expr	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/E_ValueCapture01.fs:9:9-9:10 binder	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/simplePatterns04.fs	compared
+tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/simplePatterns04.fs:10:7-10:19 binder	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/simplePatterns04.fs:6:13-6:15 expr	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/simplePatterns04.fs:6:9-6:10 binder	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/simplePatterns04.fs:8:7-8:11 binder	agree
+tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/simplePatterns04.fs:9:7-9:10 binder	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/simplePatterns17.fs	compared
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/simplePatterns17.fs:6:17-6:57 expr	agree
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/simplePatterns17.fs:6:5-6:14 binder	agree
@@ -1836,6 +1838,8 @@ vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs	compar
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:110:13-110:17 binder	agree
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:134:15-134:19 binder	agree
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:36:16-36:22 binder	agree
+vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:47:22-47:28 binder	agree
+vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:48:25-48:32 binder	agree
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:60:18-60:26 binder	agree
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/CodeFixTestFramework.fs:60:28-60:38 binder	agree
 vsintegration/tests/FSharp.Editor.Tests/CodeFixes/ProposeUppercaseLabelTests.fs	compared
