@@ -285,6 +285,10 @@ enum	RationalConst	Integer	RationalConstInteger
 enum	RationalConst	Negate	RationalConstNegate
 enum	RationalConst	Paren	RationalConstParen
 enum	RationalConst	Rational	RationalConstRational
+enum	RecordExprItem	Field	RecordField
+enum	RecordExprItem	Spread	RecordSpread
+enum	RecordReprItem	Field	RecordFieldDecl
+enum	RecordReprItem	Spread	RecordSpreadDecl
 enum	SigDecl	Exception	ExceptionDefnDecl
 enum	SigDecl	HashDirective	HashDirectiveDecl
 enum	SigDecl	ModuleAbbrev	ModuleAbbrevDecl
@@ -426,7 +430,7 @@ accessor	AndsPat	operands	iter enum Pat
 accessor	AnonRecdExpr	copy_source	option enum Expr
 accessor	AnonRecdExpr	fields	iter node RecordField
 accessor	AnonRecdExpr	is_struct	bool
-accessor	AnonRecdExpr	spreads	iter (usize, node RecordSpread)
+accessor	AnonRecdExpr	items	iter enum RecordExprItem
 accessor	AnonRecdType	fields	iter node AnonRecdTypeField
 accessor	AnonRecdType	is_struct	bool
 accessor	AnonRecdTypeField	ident	option token
@@ -696,7 +700,7 @@ accessor	RationalConstRational	numerator	option token
 accessor	RecordExpr	copy_source	option enum Expr
 accessor	RecordExpr	fields	iter node RecordField
 accessor	RecordExpr	inherit	option node InheritMember
-accessor	RecordExpr	spreads	iter (usize, node RecordSpread)
+accessor	RecordExpr	items	iter enum RecordExprItem
 accessor	RecordField	field_name	option node LongIdent
 accessor	RecordField	value	option enum Expr
 accessor	RecordFieldDecl	attributes	iter node AttributeList
@@ -707,7 +711,7 @@ accessor	RecordPat	fields	iter node RecordPatField
 accessor	RecordPatField	name	option node LongIdent
 accessor	RecordPatField	pat	option enum Pat
 accessor	RecordRepr	fields	iter node RecordFieldDecl
-accessor	RecordRepr	spreads	iter (usize, node RecordSpreadDecl)
+accessor	RecordRepr	items	iter enum RecordReprItem
 accessor	RecordSpread	expr	option enum Expr
 accessor	RecordSpreadDecl	ty	option enum Type
 accessor	SequentialExpr	statements	iter enum Expr

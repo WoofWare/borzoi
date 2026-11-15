@@ -14,7 +14,7 @@ use borzoi_cst::syntax::{
     MatchLambdaExpr, Measure, MeasureLitExpr, MeasureLitPat, MeasurePowerType, MemberDefn,
     MemberLeading, MemberSig, MemberSigLeading, ModuleDecl, ModuleOrNamespace,
     ModuleOrNamespaceKind, NamedPat, NewExpr, ObjExpr, OpenDecl, ParenExpr, ParenPat, Pat,
-    RationalConst, RecordField, RecordFieldDecl, RecordSpread, SigDecl, SigFile,
+    RationalConst, RecordExprItem, RecordField, RecordFieldDecl, RecordReprItem, SigDecl, SigFile,
     StaticOptCondition, StaticOptimizationExpr, SyntaxKind, SyntaxToken, TraitCallExpr, TupleExpr,
     TuplePat, TupleSegment, TupleType, TupleTypeExtensionHead, TyparConstraint,
     TyparConstraintKind, TyparDecl, TyparDeclsForm, Type, TypeAppExpr, TypeDefn, TypeDefnRepr,
@@ -1169,16 +1169,19 @@ fn normalise_type_repr(r: &TypeDefnRepr) -> NormalisedTypeRepr {
         )),
         TypeDefnRepr::Record(rec) => NormalisedTypeRepr::Record {
             access: cst_access(rec.syntax()),
-            fields: interleave(rec.fields(), rec.spreads())
-                .into_iter()
-                .map(|item| match item {
-                    RecordBinding::Field(f) => NormalisedRecordDeclItem::Field(normalise_field(&f)),
-                    RecordBinding::Spread(s) => NormalisedRecordDeclItem::Spread(
-                        s.ty()
-                            .map_or(NormalisedType::FromParseError, |t| normalise_type(&t)),
-                    ),
-                })
-                .collect(),
+            fields: record_items(rec.items(), rec.fields(), |item| match item {
+                RecordReprItem::Field(f) => Some(f.clone()),
+                RecordReprItem::Spread(_) => None,
+            })
+            .into_iter()
+            .map(|item| match item {
+                RecordReprItem::Field(f) => NormalisedRecordDeclItem::Field(normalise_field(&f)),
+                RecordReprItem::Spread(s) => NormalisedRecordDeclItem::Spread(
+                    s.ty()
+                        .map_or(NormalisedType::FromParseError, |t| normalise_type(&t)),
+                ),
+            })
+            .collect(),
         },
         TypeDefnRepr::Union(u) => NormalisedTypeRepr::Union {
             access: u.access().map(|t| cst_access_from_token(&t)),
@@ -2397,7 +2400,7 @@ fn normalise_expr(e: &Expr, counter: &mut u32) -> NormalisedExpr {
             let copy = r
                 .copy_source()
                 .map(|src| Box::new(normalise_expr(&src, counter)));
-            let fields = normalise_record_fields(r.fields(), r.spreads(), counter);
+            let fields = normalise_record_fields(r.items(), r.fields(), counter);
             NormalisedExpr::Record {
                 inherit_info,
                 copy,
@@ -2411,7 +2414,7 @@ fn normalise_expr(e: &Expr, counter: &mut u32) -> NormalisedExpr {
             let copy = r
                 .copy_source()
                 .map(|src| Box::new(normalise_expr(&src, counter)));
-            let fields = normalise_record_fields(r.fields(), r.spreads(), counter);
+            let fields = normalise_record_fields(r.items(), r.fields(), counter);
             NormalisedExpr::AnonRecd {
                 is_struct: r.is_struct(),
                 copy,
@@ -3758,29 +3761,22 @@ fn normalise_assign(a: &AssignExpr, counter: &mut u32) -> NormalisedExpr {
     }
 }
 
-/// A record's field or spread, back in source order ([`interleave`]).
-enum RecordBinding<F, S> {
-    Field(F),
-    Spread(S),
-}
-
-/// A record's `fields` and its `spreads`, each spread with its index among
-/// the two (`RecordExpr::spreads`, `RecordRepr::spreads`), interleaved back
-/// into source order.
-fn interleave<F, S>(
-    mut fields: impl Iterator<Item = F>,
-    spreads: impl Iterator<Item = (usize, S)>,
-) -> Vec<RecordBinding<F, S>> {
-    let mut out = Vec::new();
-    for (index, spread) in spreads {
-        while out.len() < index {
-            let Some(field) = fields.next() else { break };
-            out.push(RecordBinding::Field(field));
-        }
-        out.push(RecordBinding::Spread(spread));
-    }
-    out.extend(fields.map(RecordBinding::Field));
-    out
+/// A record's `items` (`RecordExpr::items`, `RecordRepr::items`), held to its
+/// `fields`, which must be the items `field_of` keeps, in order. The
+/// projection compares `items` with FCS, so `fields` is compared through
+/// them.
+fn record_items<I, F: PartialEq + std::fmt::Debug>(
+    items: impl Iterator<Item = I>,
+    fields: impl Iterator<Item = F>,
+    field_of: impl Fn(&I) -> Option<F>,
+) -> Vec<I> {
+    let items: Vec<I> = items.collect();
+    assert_eq!(
+        fields.collect::<Vec<F>>(),
+        items.iter().filter_map(field_of).collect::<Vec<F>>(),
+        "a record's fields are the fields among its items"
+    );
+    items
 }
 
 /// Project the bindings of a `SynExpr.Record` or `SynExpr.AnonRecd`: each
@@ -3789,31 +3785,34 @@ fn interleave<F, S>(
 /// `ArbitraryAfterError`), in source order so the shared `_argN` lambda
 /// counter advances left-to-right.
 fn normalise_record_fields(
+    items: impl Iterator<Item = RecordExprItem>,
     fields: impl Iterator<Item = RecordField>,
-    spreads: impl Iterator<Item = (usize, RecordSpread)>,
     counter: &mut u32,
 ) -> Vec<NormalisedRecordItem> {
-    interleave(fields, spreads)
-        .into_iter()
-        .map(|item| match item {
-            RecordBinding::Spread(s) => NormalisedRecordItem::Spread(Box::new(
-                s.expr()
-                    .map_or(NormalisedExpr::Error, |e| normalise_expr(&e, counter)),
-            )),
-            RecordBinding::Field(f) => {
-                let name = f
-                    .field_name()
-                    .map(|li| {
-                        li.idents()
-                            .map(|tok| strip_backticks(tok.text()).to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let value = f.value().map(|v| Box::new(normalise_expr(&v, counter)));
-                NormalisedRecordItem::Field(NormalisedRecordField { name, value })
-            }
-        })
-        .collect()
+    record_items(items, fields, |item| match item {
+        RecordExprItem::Field(f) => Some(f.clone()),
+        RecordExprItem::Spread(_) => None,
+    })
+    .into_iter()
+    .map(|item| match item {
+        RecordExprItem::Spread(s) => NormalisedRecordItem::Spread(Box::new(
+            s.expr()
+                .map_or(NormalisedExpr::Error, |e| normalise_expr(&e, counter)),
+        )),
+        RecordExprItem::Field(f) => {
+            let name = f
+                .field_name()
+                .map(|li| {
+                    li.idents()
+                        .map(|tok| strip_backticks(tok.text()).to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let value = f.value().map(|v| Box::new(normalise_expr(&v, counter)));
+            NormalisedRecordItem::Field(NormalisedRecordField { name, value })
+        }
+    })
+    .collect()
 }
 
 /// Project `SynExpr.DotGet` (postfix `expr.Member`, phase 10.16a): the LHS

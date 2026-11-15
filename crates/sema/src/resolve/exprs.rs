@@ -2,8 +2,8 @@
 
 use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{
-    AppExpr, AstNode, Expr, InterpStringPart, MatchClause, Pat, RecordField, RecordSpread,
-    SyntaxToken, TypeAppExpr,
+    AppExpr, AstNode, Expr, InterpStringPart, MatchClause, Pat, RecordExprItem, SyntaxToken,
+    TypeAppExpr,
 };
 
 use crate::binders::{BinderRole, PatternName, pattern_names};
@@ -462,7 +462,7 @@ impl<'a> Resolver<'a> {
                 if let Some(src) = e.copy_source() {
                     self.resolve_expr(&src);
                 }
-                for value in record_binding_exprs(e.fields(), e.spreads()) {
+                for value in record_binding_exprs(e.items()) {
                     self.resolve_expr(&value);
                 }
             }
@@ -475,7 +475,7 @@ impl<'a> Resolver<'a> {
                 if let Some(src) = e.copy_source() {
                     self.resolve_expr(&src);
                 }
-                for value in record_binding_exprs(e.fields(), e.spreads()) {
+                for value in record_binding_exprs(e.items()) {
                     self.resolve_expr(&value);
                 }
             }
@@ -1674,26 +1674,14 @@ fn is_named_arg_label(ident: &borzoi_cst::syntax::IdentExpr) -> bool {
 }
 
 /// The expressions a record or anonymous record binds, in source order: each
-/// spread's source and each field's value. `spreads` carries each spread's
-/// index among the bindings (`RecordExpr::spreads`).
-fn record_binding_exprs(
-    fields: impl Iterator<Item = RecordField>,
-    spreads: impl Iterator<Item = (usize, RecordSpread)>,
-) -> Vec<Expr> {
-    let mut fields = fields;
-    let mut out = Vec::new();
-    let mut bindings = 0;
-    for (index, spread) in spreads {
-        while bindings < index {
-            let Some(field) = fields.next() else { break };
-            out.extend(field.value());
-            bindings += 1;
-        }
-        out.extend(spread.expr());
-        bindings += 1;
-    }
-    out.extend(fields.filter_map(|f| f.value()));
-    out
+/// spread's source and each field's value.
+fn record_binding_exprs(items: impl Iterator<Item = RecordExprItem>) -> Vec<Expr> {
+    items
+        .filter_map(|item| match item {
+            RecordExprItem::Field(field) => field.value(),
+            RecordExprItem::Spread(spread) => spread.expr(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

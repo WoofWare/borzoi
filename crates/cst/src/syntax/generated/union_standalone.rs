@@ -643,6 +643,59 @@ impl AstNode for ParsedInput {
         }
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RecordExprItem {
+    Field(RecordField),
+    Spread(RecordSpread),
+}
+
+impl AstNode for RecordExprItem {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(kind, SyntaxKind::RECORD_FIELD | SyntaxKind::RECORD_SPREAD)
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::RECORD_FIELD => RecordField::cast(node).map(RecordExprItem::Field),
+            SyntaxKind::RECORD_SPREAD => RecordSpread::cast(node).map(RecordExprItem::Spread),
+            _ => None,
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            RecordExprItem::Field(n) => n.syntax(),
+            RecordExprItem::Spread(n) => n.syntax(),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RecordReprItem {
+    Field(RecordFieldDecl),
+    Spread(RecordSpreadDecl),
+}
+
+impl AstNode for RecordReprItem {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::RECORD_FIELD_DECL | SyntaxKind::RECORD_SPREAD_DECL
+        )
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::RECORD_FIELD_DECL => RecordFieldDecl::cast(node).map(RecordReprItem::Field),
+            SyntaxKind::RECORD_SPREAD_DECL => {
+                RecordSpreadDecl::cast(node).map(RecordReprItem::Spread)
+            }
+            _ => None,
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            RecordReprItem::Field(n) => n.syntax(),
+            RecordReprItem::Spread(n) => n.syntax(),
+        }
+    }
+}
 /// `SynModuleOrNamespaceKind` — the four shapes a top-level
 /// [`ModuleOrNamespace`] can take. [`Anon`](ModuleOrNamespaceKind::Anon) is
 /// the implicit module wrapping a script-style body (no header keyword);

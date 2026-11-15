@@ -2,8 +2,8 @@
 
 use borzoi_cst::syntax::{
     ActivePatName, AstNode, Binding, GetSetMember, LongIdentPat, MemberDefn, MemberLeading,
-    MemberLetBindings, ObjExpr, Pat, SyntaxKind, SyntaxNode, SyntaxToken, TupleSegment, TyparDecls,
-    Type, TypeDefn, TypeDefnRepr, ValSig, VarType,
+    MemberLetBindings, ObjExpr, Pat, RecordReprItem, SyntaxKind, SyntaxNode, SyntaxToken,
+    TupleSegment, TyparDecls, Type, TypeDefn, TypeDefnRepr, ValSig, VarType,
 };
 
 use super::state::Frame;
@@ -923,13 +923,12 @@ impl<'a> Resolver<'a> {
                 }
             }
             Some(TypeDefnRepr::Record(r)) => {
-                for field in r.fields() {
-                    if let Some(ty) = field.ty() {
-                        self.resolve_type(&ty);
-                    }
-                }
-                for (_, spread) in r.spreads() {
-                    if let Some(ty) = spread.ty() {
+                for item in r.items() {
+                    let ty = match item {
+                        RecordReprItem::Field(field) => field.ty(),
+                        RecordReprItem::Spread(spread) => spread.ty(),
+                    };
+                    if let Some(ty) = ty {
                         self.resolve_type(&ty);
                     }
                 }

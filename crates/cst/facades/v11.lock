@@ -282,6 +282,10 @@ enum	RationalConst	Integer	RationalConstInteger
 enum	RationalConst	Negate	RationalConstNegate
 enum	RationalConst	Paren	RationalConstParen
 enum	RationalConst	Rational	RationalConstRational
+enum	RecordExprItem	Field	RecordField
+enum	RecordExprItem	Spread	RecordSpread
+enum	RecordReprItem	Field	RecordFieldDecl
+enum	RecordReprItem	Spread	RecordSpreadDecl
 enum	SigDecl	Exception	ExceptionDefnDecl
 enum	SigDecl	HashDirective	HashDirectiveDecl
 enum	SigDecl	ModuleAbbrev	ModuleAbbrevDecl
@@ -423,7 +427,7 @@ accessor	AndsPat	operands	iter enum Pat	union.operands
 accessor	AnonRecdExpr	copy_source	option enum Expr	union.copy_source
 accessor	AnonRecdExpr	fields	iter node RecordField	union.fields
 accessor	AnonRecdExpr	is_struct	bool	union.is_struct
-accessor	AnonRecdExpr	spreads	iter (usize, node RecordSpread)	union.spreads
+accessor	AnonRecdExpr	items	iter enum RecordExprItem	union.items
 accessor	AnonRecdType	fields	iter node AnonRecdTypeField	union.fields
 accessor	AnonRecdType	is_struct	bool	union.is_struct
 accessor	AnonRecdTypeField	ident	option token	union.ident
@@ -692,7 +696,7 @@ accessor	RationalConstRational	numerator	option token	union.numerator
 accessor	RecordExpr	copy_source	option enum Expr	union.copy_source
 accessor	RecordExpr	fields	iter node RecordField	union.fields
 accessor	RecordExpr	inherit	option node InheritMember	union.inherit
-accessor	RecordExpr	spreads	iter (usize, node RecordSpread)	union.spreads
+accessor	RecordExpr	items	iter enum RecordExprItem	union.items
 accessor	RecordField	field_name	option node LongIdent	union.field_name
 accessor	RecordField	value	option enum Expr	union.value
 accessor	RecordFieldDecl	attributes	iter node AttributeList	union.attributes
@@ -703,7 +707,7 @@ accessor	RecordPat	fields	iter node RecordPatField	union.fields
 accessor	RecordPatField	name	option node LongIdent	union.name
 accessor	RecordPatField	pat	option enum Pat	union.pat
 accessor	RecordRepr	fields	iter node RecordFieldDecl	union.fields
-accessor	RecordRepr	spreads	iter (usize, node RecordSpreadDecl)	union.spreads
+accessor	RecordRepr	items	iter enum RecordReprItem	union.items
 accessor	RecordSpread	expr	option enum Expr	union.expr
 accessor	RecordSpreadDecl	ty	option enum Type	union.ty
 accessor	SequentialExpr	statements	iter enum Expr	union.statements
