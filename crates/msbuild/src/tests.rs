@@ -2329,16 +2329,26 @@ fn substitution_applies_to_a_metadata_child_element() {
     );
 }
 
-/// Metadata spellings MSBuild reads apart from the XML reader's value or from
-/// its own text (#642) read as `Unknown` on a reference: an attribute holding
-/// a tab (MSBuild keeps it) or an entity, a value holding a backslash (its Unix
+/// Metadata spellings MSBuild reads apart from its text (#642) read as
+/// `Unknown` on a reference: an attribute MSBuild parses as XML (holding a
+/// `<`, here an encoded CDATA section), a value holding a backslash (its Unix
 /// path fixup may rewrite it), and a body holding an element (MSBuild reads the
-/// inner XML) or a carriage return (MSBuild keeps it).
+/// inner XML) or a carriage return (MSBuild keeps it). An attribute holding a
+/// tab or an entity reads exactly, as MSBuild reads it.
 #[test]
 fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
+    for (metadata, value) in [("all\tx", "all\tx"), ("a&amp;b", "a&b")] {
+        let src = format!(
+            "<Project><ItemGroup><ProjectReference Include=\"../Lib/Lib.fsproj\" ExcludeAssets=\"{metadata}\" /></ItemGroup></Project>"
+        );
+        assert_eq!(
+            parse(&src).project_references[0].exclude_assets,
+            ItemMetadataValue::known(value),
+            "{src:?}"
+        );
+    }
     for metadata in [
-        "ExcludeAssets=\"all\tx\"",
-        "ExcludeAssets=\"a&amp;b\"",
+        "ExcludeAssets=\"&lt;![CDATA[all]]&gt;\"",
         "ExcludeAssets=\"\\tmp\\all\"",
         "><ExcludeAssets>a<x/>b</ExcludeAssets></ProjectReference",
         "><ExcludeAssets>a<?p q?>b</ExcludeAssets></ProjectReference",
@@ -2376,8 +2386,11 @@ fn package_metadata_msbuild_reads_its_own_way_is_uncertain() {
         ("Version=\"1.0\"", true),
         ("Version=\" 1.0 \"", false),
         ("Version=\"\\tmp\\1.0\"", false),
+        // A trailing tab is padding; one inside, and an entity, read exactly.
         ("Version=\"1.0\t\"", false),
-        ("Version=\"1&amp;0\"", false),
+        ("Version=\"1\t0\"", true),
+        ("Version=\"1&amp;0\"", true),
+        ("Version=\"&lt;![CDATA[1.0]]&gt;\"", false),
         ("><Version>1.0</Version></X", true),
         ("><Version>1<x/>0</Version></X", false),
         ("><Version>1<?p q?>0</Version></X", false),
@@ -2386,7 +2399,8 @@ fn package_metadata_msbuild_reads_its_own_way_is_uncertain() {
         ("Version=\"1.0\" PrivateAssets=\"all\"", true),
         ("Version=\"1.0\" PrivateAssets=\" all \"", false),
         ("Version=\"1.0\" PrivateAssets=\"\\tmp\\all\"", false),
-        ("Version=\"1.0\" PrivateAssets=\"a\tll\"", false),
+        ("Version=\"1.0\" PrivateAssets=\"a\tll\"", true),
+        ("Version=\"1.0\" PrivateAssets=\"a&lt;ll\"", false),
         (
             "Version=\"1.0\"><PrivateAssets>a<x/>ll</PrivateAssets></X",
             false,
@@ -2438,11 +2452,12 @@ fn a_copy_records_its_unreadable_metadata_in_one_order() {
 }
 
 /// A `CompileOrder` MSBuild reads its own way (#642) declines the compile
-/// order: an attribute holding a tab, a backslash, a body holding an element.
+/// order: an attribute MSBuild parses as XML, a backslash, a body holding an
+/// element.
 #[test]
 fn compile_order_msbuild_reads_its_own_way_declines() {
     for order in [
-        "CompileOrder=\"Compile\tFirst\" />",
+        "CompileOrder=\"&lt;![CDATA[CompileFirst]]&gt;\" />",
         "CompileOrder=\"\\tmp\\CompileFirst\" />",
         "><CompileOrder>Compile<x/>First</CompileOrder></Compile>",
     ] {

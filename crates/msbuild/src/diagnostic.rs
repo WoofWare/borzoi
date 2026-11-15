@@ -483,8 +483,8 @@ pub enum PackageReferenceUncertaintyCauseKind {
     UnevaluableMetadata { name: String, value: String },
     /// A metadatum is spelt so that MSBuild may read it apart from the
     /// capture, which trims it: padded, holding a backslash MSBuild's Unix path
-    /// fixup may rewrite, or written as an attribute that XML's normalisation
-    /// or entity decoding touched. The item tables read such a value as MSBuild
+    /// fixup may rewrite, or written as an attribute holding a `<`, which
+    /// MSBuild parses as XML. The item tables read such a value as MSBuild
     /// does or mark it inexact themselves, so this cause says nothing about
     /// them.
     UnreadableMetadata { name: String, value: String },

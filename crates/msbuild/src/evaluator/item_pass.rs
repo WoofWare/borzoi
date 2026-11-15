@@ -1689,20 +1689,19 @@ fn read_compile_order_metadata_write(
         .attributes()
         .rfind(|attr| attr.name().eq_ignore_ascii_case("CompileOrder"))
     {
-        Some(attr) if !attribute_is_plain(node, &attr) => {
-            state.push(
-                DiagnosticKind::UnsupportedItemOperation {
-                    operation: "CompileOrder with an unmodellable attribute".to_string(),
-                },
-                node.range(),
-            );
-            return None;
+        Some(attr) => {
+            let Some(reading) = metadata_attribute(node, &attr) else {
+                state.push(
+                    DiagnosticKind::UnsupportedItemOperation {
+                        operation: "CompileOrder with an attribute MSBuild reads as XML"
+                            .to_string(),
+                    },
+                    node.range(),
+                );
+                return None;
+            };
+            Some(expand_compile_order_value(&reading, node.range(), state)?)
         }
-        Some(attr) => Some(expand_compile_order_value(
-            attr.value(),
-            node.range(),
-            state,
-        )?),
         None => None,
     };
     for child in node
@@ -3132,11 +3131,10 @@ fn read_item_metadata(node: Node<'_, '_>, name: &str, state: &mut State<'_>) -> 
         .attributes()
         .rfind(|attr| attr.name().eq_ignore_ascii_case(name))
         .map_or(MetadataValue::Inherit, |attr| {
-            if attribute_is_plain(node, &attr) {
-                expand_trimmed(attr.value(), name, node.range(), state)
+            if let Some(reading) = metadata_attribute(node, &attr) {
+                expand_trimmed(&reading, name, node.range(), state)
             } else {
-                // XML's attribute-value normalisation or entity decoding
-                // touched the value, which MSBuild reads its own way.
+                // MSBuild reads the value as XML.
                 state.note_package_uncertain(
                     PackageReferenceUncertaintyCauseKind::UnreadableMetadata {
                         name: name.to_string(),
@@ -3577,11 +3575,14 @@ fn read_generic_item_metadata(node: Node<'_, '_>, state: &mut State<'_>) -> Gene
     for attr in node.attributes() {
         if is_item_metadata_attribute(attr.name()) {
             let previous = quieten(attr.name(), state);
+            // A value MSBuild reads as XML is held inexact, read as roxmltree
+            // reads it.
+            let reading = metadata_attribute(node, &attr);
             set_generic_metadata_value(
                 attr.name(),
-                attr.value(),
+                reading.as_deref().unwrap_or(attr.value()),
                 false,
-                attribute_is_plain(node, &attr),
+                reading.is_some(),
                 state,
                 &mut metadata,
             );
@@ -3621,6 +3622,23 @@ pub(super) fn body_is_plain(element: Node<'_, '_>) -> bool {
 pub(super) fn attribute_is_plain(node: Node<'_, '_>, attr: &roxmltree::Attribute<'_, '_>) -> bool {
     crate::document::attribute_source(node, attr) == attr.value()
         && !attr.value().contains(['\t', '\n', '\r', '&'])
+}
+
+/// A metadatum written as the attribute `attr` of `node`, as MSBuild reads
+/// it: the attribute as MSBuild reads any ([`crate::document::attribute`]: a
+/// tab or line break kept, an entity decoded), which MSBuild then stores as
+/// the metadatum's element content and reads back
+/// (`Utilities.SetXmlNodeInnerContents`, `GetXmlNodeInnerContents`). Without
+/// a `<` that round trip leaves the value as it is (probed: tabs, CR, LF,
+/// CRLF, `&amp;`, padding and whitespace alone all survive). With one,
+/// MSBuild parses the value as XML where it is well formed, so an encoded
+/// CDATA section reads as its content and a comment as nothing, which this
+/// crate does not model: `None`.
+fn metadata_attribute<'a>(
+    node: Node<'a, '_>,
+    attr: &roxmltree::Attribute<'a, '_>,
+) -> Option<std::borrow::Cow<'a, str>> {
+    crate::document::attribute(node, attr.name()).filter(|value| !value.contains('<'))
 }
 
 /// Set [`State::quiet_target_framework_reads`] for a metadatum named `name`
@@ -3712,9 +3730,9 @@ fn set_generic_metadata_value(
     let exact = (body_exact && !rewritable).then_some(exact);
     // The dependency capture reads a copied item's package metadata from
     // `values`, trimmed. Where that is not MSBuild's value (padding, a value
-    // its path fixup may rewrite, a body or attribute the XML layer reads
-    // apart), it holds `None`, which a copy's capture reads as uncertain
-    // (#642).
+    // its path fixup may rewrite, a body it reads as inner XML or with its
+    // carriage returns, an attribute it parses as XML), it holds `None`, which
+    // a copy's capture reads as uncertain (#642).
     if package {
         let readable = exact.as_deref() == Some(normalised.as_str());
         metadata
@@ -4576,13 +4594,14 @@ fn resolve_string_metadata(
         .attributes()
         .rfind(|a| a.name().eq_ignore_ascii_case(name))
     {
-        let expansion = state.expand(attr.value(), node.range());
-        // XML's attribute-value normalisation or entity decoding touched the
-        // value, which MSBuild reads its own way.
-        resolved = if !attribute_is_plain(node, &attr)
+        // A value MSBuild reads as XML is `Unknown`.
+        let reading = metadata_attribute(node, &attr);
+        let raw = reading.as_deref().unwrap_or(attr.value());
+        let expansion = state.expand(raw, node.range());
+        resolved = if reading.is_none()
             || expansion.had_issue()
             || expansion.unpinned_root.is_some()
-            || state.raw_uses_sdk_package_taint(attr.value())
+            || state.raw_uses_sdk_package_taint(raw)
         {
             // A value leaning on an unpinned/SDK-tainted read expands
             // cleanly but may differ in the real build — Unknown, same as

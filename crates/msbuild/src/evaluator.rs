@@ -1884,9 +1884,9 @@ struct EvaluatedItem {
     escaped_identity: Option<String>,
     /// NuGet's package metadata names only, each value trimmed as the
     /// dependency capture reads it; `None` where that reading is not MSBuild's
-    /// value (padded, a value MSBuild's Unix path fixup may rewrite, a body or
-    /// attribute the XML layer reads apart), which a capture copying the item
-    /// must treat as uncertain.
+    /// value (padded, a value MSBuild's Unix path fixup may rewrite, a body it
+    /// reads as inner XML or with its carriage returns, an attribute it parses
+    /// as XML), which a capture copying the item must treat as uncertain.
     metadata: HashMap<String, Option<String>>,
     /// Every metadatum, exactly as MSBuild evaluates it (untrimmed), for a
     /// reader of the item table itself ([`reads`]). `None` where that value

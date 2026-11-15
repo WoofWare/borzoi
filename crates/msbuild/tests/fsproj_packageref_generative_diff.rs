@@ -66,8 +66,9 @@ const LITERALS: [&str; 3] = ["1.0", "2.0", "3.0-pre"];
 /// XML reader's value or from its own text, each of which the capture must
 /// read as MSBuild does or decline (#642): a backslash, which MSBuild's Unix
 /// path fixup may rewrite (`/tmp` exists wherever the oracle runs); padding,
-/// which MSBuild keeps; what attribute-value normalisation and entity decoding
-/// touch (a literal tab survives, an encoded CDATA section is decoded).
+/// which MSBuild keeps; a tab, line break or entity, which MSBuild reads as
+/// written where XML's attribute normalisation would not; and a `<` (an
+/// encoded CDATA section), which makes MSBuild parse the value as XML.
 const ODD_ATTRIBUTES: [&str; 9] = [
     "\\tmp\\1.0",
     "1.0\\x",
