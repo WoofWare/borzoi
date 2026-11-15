@@ -1,0 +1,80 @@
+{
+  "observation_schema_version": 1,
+  "series": "v1-142fe4e6a0b1-9a9f264695aa",
+  "repository": "WoofWare/borzoi",
+  "commit": "3567a548c49affd3f7cdecad126180a0dd04f166",
+  "measured_at": "2026-11-15T23:17:16Z",
+  "workflow": {
+    "run_id": 43772609912,
+    "run_number": 447,
+    "run_attempt": 1,
+    "url": "https://github.com/WoofWare/borzoi/actions/runs/43772609912"
+  },
+  "corpus": {
+    "source": "dotnet/fsharp",
+    "revision": "142fe4e6a0b1cbef6f8e18e473e03b9137644cc0"
+  },
+  "flake_lock_hash": "1d8fecb61977dd5f76129f28d2eaeb8d9adb5eaf6e494ffcb42283bd56035227",
+  "generator": {
+    "schema_version": 1,
+    "measurement": "resolution-divergence",
+    "configuration": {
+      "corpus": "fsharp-src",
+      "file_extensions": [
+        "fs"
+      ],
+      "limit": null,
+      "scope": "in-file",
+      "stride": 13
+    },
+    "statistics": {
+      "alt_binders": 7,
+      "b1_coverage": {
+        "basis_points": 8914,
+        "matched": 22661,
+        "seen": 25419
+      },
+      "divergences": 0,
+      "files_compared": 384,
+      "gap_b1_by_tag": {
+        "active-pattern-case": 4,
+        "active-pattern-fn": 0,
+        "constructor": 214,
+        "entity:module": 133,
+        "entity:namespace": 37,
+        "entity:type": 279,
+        "parameter": 98,
+        "static-member": 101,
+        "static-member:overloaded(group)": 37,
+        "type-parameter": 1112,
+        "union-case": 19,
+        "value:local-or-param": 627,
+        "value:module-or-import": 97
+      },
+      "gaps": {
+        "b1": 2758,
+        "b2": 2001,
+        "b3": 127,
+        "other": 0,
+        "total": 4886
+      },
+      "infrastructure": {
+        "fcs_not_ok": 0,
+        "our_panics": 0,
+        "our_parser_errors": 47,
+        "unreadable": 1
+      },
+      "matches": {
+        "by_bucket": {
+          "B1": 22661,
+          "B2": 51,
+          "B3": 0,
+          "other": 0
+        },
+        "total": 22712
+      },
+      "out_of_file": 20520,
+      "uses_adjudicated": 27605
+    }
+  }
+}
