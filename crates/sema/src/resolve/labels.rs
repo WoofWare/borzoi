@@ -35,8 +35,15 @@
 //! - an entry that may or may not be there: a record whose
 //!   `[<RequireQualifiedAccess>]` is uncertain, a label it declares twice, an
 //!   `[<AutoOpen>]` close that is uncertain or of a `rec` module;
+//! - a use inside a type's member bodies, where FCS puts the enclosing
+//!   record's own labels ahead of the table;
 //! - recovered syntax anywhere before the use, which the published accessor
 //!   checks: the walk reads nothing of the recovery reading.
+//!
+//! An `[<AutoOpen>]` module's close adds only the records accessible from
+//! the enclosing scope: a `private` record stays behind. A record whose
+//! representation is `private` goes along, and FCS resolves its labels there
+//! too (and then reports the field inaccessible).
 //!
 //! FCS consults the table only once its member lookup on the receiver has
 //! found nothing. A type variable's type hierarchy is `obj`, so a label named
@@ -51,6 +58,7 @@ use borzoi_cst::syntax::{
 };
 
 use super::contributors::RequireQualifiedAccess;
+use super::decls::header_is_private;
 use super::model::{FieldLabel, FieldLabelEntry};
 use super::state::Resolver;
 use crate::def::{DefId, id_text};
@@ -81,6 +89,9 @@ struct LabelEntry {
     /// Whether an `[<AutoOpen>]` module's close copied the entry here,
     /// rather than a declaration in this container adding it.
     copied: bool,
+    /// Whether the record's type is `private`: no `[<AutoOpen>]` close
+    /// carries it out of its module.
+    private_type: bool,
 }
 
 /// The file's additions to FCS's record-label table, by the container each
@@ -91,6 +102,8 @@ pub(super) struct LabelTable {
     /// Every label any entry carries: a use of any other label has no
     /// answer to look for.
     names: HashSet<String>,
+    /// How many type definitions' member bodies the walk is inside.
+    in_type_bodies: usize,
 }
 
 impl LabelTable {
@@ -124,6 +137,7 @@ impl Resolver<'_> {
             .filter_map(|f| f.ident())
             .map(|tok| (id_text(&tok).to_string(), tok.text_range()))
             .collect();
+        let private_type = header_is_private(defn.syntax());
         let container = self.lexical.container_path.id();
         for (name, field) in &fields {
             let twice = fields.iter().filter(|(n, _)| n == name).count() > 1;
@@ -139,6 +153,7 @@ impl Resolver<'_> {
                     pos: group_pos,
                     certain: certain && !twice,
                     copied: false,
+                    private_type,
                 },
             );
         }
@@ -164,7 +179,13 @@ impl Resolver<'_> {
             && !nm.is_rec()
             && !self.scope.recursive_module_active;
         let pos = u32::from(nm.syntax().text_range().end());
-        let entries = self.labels.by_container.get(&inner).into_iter().flatten();
+        let entries = self
+            .labels
+            .by_container
+            .get(&inner)
+            .into_iter()
+            .flatten()
+            .filter(|e| !e.private_type);
         let (own, submodules): (Vec<&LabelEntry>, Vec<&LabelEntry>) =
             entries.partition(|e| !e.copied);
         let copies: Vec<LabelEntry> = own
@@ -180,6 +201,14 @@ impl Resolver<'_> {
         for entry in copies {
             self.labels.push(outer, entry);
         }
+    }
+
+    /// Walk a type definition's member bodies (`walk`), where FCS reads the
+    /// enclosing record's labels ahead of the table, so nothing answers.
+    pub(super) fn in_type_bodies(&mut self, walk: impl FnOnce(&mut Self)) {
+        self.labels.in_type_bodies += 1;
+        walk(self);
+        self.labels.in_type_bodies -= 1;
     }
 
     /// Record what the table answers, here, at each of `segments`: labels
@@ -205,7 +234,10 @@ impl Resolver<'_> {
     /// The record field the table's head names for `name` here, when the
     /// file's own additions decide it.
     fn field_label(&self, name: &str) -> Option<FieldLabel> {
-        if self.scope.recursive_module_active || OBJECT_MEMBERS.contains(&name) {
+        if self.scope.recursive_module_active
+            || self.labels.in_type_bodies > 0
+            || OBJECT_MEMBERS.contains(&name)
+        {
             return None;
         }
         let block_start = self.index.block_starts.last().copied().unwrap_or(0);

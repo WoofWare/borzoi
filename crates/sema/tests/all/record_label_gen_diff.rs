@@ -171,13 +171,53 @@ struct FieldId {
     label: &'static str,
 }
 
+/// Who may read a record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Access {
+    Public,
+    /// `type private R`: only its module, which no `open` or
+    /// `[<AutoOpen>]` close leaves.
+    PrivateType,
+    /// `type internal R`: the whole project.
+    InternalType,
+    /// `type R = private { … }`: the type is public, its fields are its
+    /// module's.
+    PrivateRepr,
+}
+
+impl Access {
+    /// Whether a public record may name the type in a field, or a public
+    /// abbreviation abbreviate it.
+    fn nameable(self) -> bool {
+        matches!(self, Access::Public | Access::PrivateRepr)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RecordSpec {
     name: String,
     generic: bool,
     rqa: bool,
     is_struct: bool,
+    access: Access,
     labels: Vec<&'static str>,
+    /// Whether the first field of a non-generic record has the type of the
+    /// latest nameable record in scope, if any, for a chain to read through.
+    linked: bool,
+    /// A member whose body is a probe of this label: FCS reads the record's
+    /// own labels there ahead of the table.
+    member_probe: Option<&'static str>,
+}
+
+/// A field's type, as a chain through it reads it.
+#[derive(Clone, Debug)]
+enum FieldTy {
+    Prim,
+    /// The record's type parameter: FCS freshens it, so a label after it is
+    /// on an unknown receiver again.
+    Param,
+    /// Another generated record, by its file and name.
+    Record(usize, String),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -206,6 +246,7 @@ enum Item {
         name: String,
         auto_open: bool,
         rec: bool,
+        private: bool,
         items: Vec<Item>,
     },
     Open(OpenTarget),
@@ -215,6 +256,11 @@ enum Item {
     Probe {
         label: &'static str,
         dot_get: bool,
+        /// A second label after the first, `p.L1.L2`, chosen at emission
+        /// by this seed: one of the first field's record's labels, where the
+        /// model's first field has a record type, so the chain reads through
+        /// it.
+        chain: Option<u64>,
     },
 }
 
@@ -237,7 +283,29 @@ fn gen_record(rng: &mut Rng, names: &mut Names, attributes: bool) -> RecordSpec 
         generic: rng.chance(1, 4),
         rqa: attributes && rng.chance(1, 5),
         is_struct: attributes && rng.chance(1, 7),
+        access: match rng.below(8) {
+            0 => Access::PrivateType,
+            1 => Access::InternalType,
+            2 => Access::PrivateRepr,
+            _ => Access::Public,
+        },
         labels: rng.labels(),
+        linked: rng.chance(1, 2),
+        member_probe: rng.chance(1, 6).then(|| rng.label()),
+    }
+}
+
+/// A probe, with a second label after the first now and then.
+///
+/// No chain follows `ToString`: a label after a method value is one on a
+/// function type, which FCS reads off its table too, and which the model
+/// leaves alone.
+fn gen_probe(rng: &mut Rng, dot_get: bool) -> Item {
+    let label = rng.label();
+    Item::Probe {
+        label,
+        dot_get,
+        chain: (label != OBJECT_MEMBER && rng.chance(1, 3)).then(|| rng.next()),
     }
 }
 
@@ -264,26 +332,21 @@ fn gen_items(
             // An attribute in a `rec` module is one the resolver does not
             // pin, which shuts the extension gate on the whole file.
             0..=4 => gen_records(rng, names, !in_rec || kind == FileKind::Opens),
-            5..=8 => Item::Probe {
-                label: rng.label(),
-                dot_get: rng.chance(1, 4),
-            },
+            5..=8 => {
+                let dot_get = rng.chance(1, 4);
+                gen_probe(rng, dot_get)
+            }
             9..=10 if depth < 2 && !in_rec => {
                 let rec = kind != FileKind::Ext && rng.chance(1, 3);
                 let auto_open = rng.chance(1, 2);
+                let private = rng.chance(1, 5);
                 let name = names.next("Mod");
                 let mut inner_siblings = Vec::new();
                 let mut body = gen_items(rng, names, kind, depth + 1, rec, &mut inner_siblings);
                 if rec {
                     // A `rec` module's records are in scope from its start: a
                     // probe ahead of them is where that shows.
-                    body.insert(
-                        0,
-                        Item::Probe {
-                            label: rng.label(),
-                            dot_get: false,
-                        },
-                    );
+                    body.insert(0, gen_probe(rng, false));
                     body.push(gen_records(rng, names, kind == FileKind::Opens));
                 }
                 let opens_ok =
@@ -295,6 +358,7 @@ fn gen_items(
                     name,
                     auto_open,
                     rec,
+                    private,
                     items: body,
                 }
             }
@@ -321,10 +385,7 @@ fn gen_items(
                 };
                 Item::NonRecord(nr, rng.label())
             }
-            _ => Item::Probe {
-                label: rng.label(),
-                dot_get: false,
-            },
+            _ => gen_probe(rng, false),
         };
         items.push(item);
     }
@@ -360,6 +421,7 @@ struct Event {
     and_second: bool,
     /// An `[<AutoOpen>]` module's close brought it here.
     copied: bool,
+    access: Access,
 }
 
 #[derive(Default)]
@@ -395,15 +457,29 @@ struct Probe {
     /// The model's scan passed a skipped declaration of the label after the
     /// winner.
     passed_skipped: bool,
+    /// The second label of a chain, `p.L1.L2`: its range, label and what
+    /// FCS reports there, and whether FCS reads it off its label table (the
+    /// first field's type is a type parameter, freshened) or off a known
+    /// type.
+    chain: Option<(TextRange, &'static str, Prediction, bool)>,
+    /// A probe in a record's member body.
+    in_member: bool,
 }
 
 /// A record's non-`[<RequireQualifiedAccess>]` labels, as the events an
-/// addition of it brings.
-fn record_events(file: usize, specs: &[RecordSpec], origin: Origin, pos: usize) -> Vec<Event> {
+/// addition of it brings. An addition from outside the record's module
+/// (`foreign`) leaves a `private` record out.
+fn record_events(
+    file: usize,
+    specs: &[RecordSpec],
+    origin: Origin,
+    pos: usize,
+    foreign: bool,
+) -> Vec<Event> {
     specs
         .iter()
         .enumerate()
-        .filter(|(_, r)| !r.rqa)
+        .filter(|(_, r)| !r.rqa && !(foreign && r.access == Access::PrivateType))
         .flat_map(|(i, r)| {
             r.labels.iter().map(move |&label| Event {
                 label,
@@ -417,6 +493,7 @@ fn record_events(file: usize, specs: &[RecordSpec], origin: Origin, pos: usize) 
                 generic: r.generic,
                 and_second: i == 1,
                 copied: false,
+                access: r.access,
             })
         })
         .collect()
@@ -432,6 +509,7 @@ fn core_event(origin: Origin, pos: usize) -> Event {
         generic: true,
         and_second: false,
         copied: false,
+        access: Access::Public,
     }
 }
 
@@ -448,9 +526,23 @@ struct Emitter {
     file_extensions: Vec<&'static str>,
     /// Each sibling module's records, as an `open` of it adds them.
     module_records: Vec<(String, Vec<RecordSpec>)>,
-    /// The records declared so far in the block, with their visibility depth,
-    /// for an abbreviation to name.
+    /// The nameable records declared so far and in scope, for an
+    /// abbreviation or a field to name.
     abbreviable: Vec<(String, usize)>,
+    /// Every generated field's type, the earlier files' included.
+    field_types: std::collections::HashMap<FieldId, FieldTy>,
+    /// Every generated record's labels, the earlier files' included.
+    record_labels: std::collections::HashMap<(usize, String), Vec<&'static str>>,
+    /// Member probes emitted with a `type` group, waiting for the group's
+    /// labels to enter the table: `(binder, range, label, own record)`.
+    pending_members: Vec<(String, TextRange, &'static str, RecordSpec)>,
+}
+
+fn range(start: usize, end: usize) -> TextRange {
+    TextRange::new(
+        u32::try_from(start).unwrap().into(),
+        u32::try_from(end).unwrap().into(),
+    )
 }
 
 impl Emitter {
@@ -461,8 +553,10 @@ impl Emitter {
     }
 
     /// Emit a `type` group, returning the position its labels enter at.
+    /// Its member probes wait in [`Self::pending_members`].
     fn emit_records(&mut self, indent: usize, specs: &[RecordSpec]) -> usize {
         let pos = self.src.len();
+        let pad = " ".repeat(indent * 4);
         for (i, r) in specs.iter().enumerate() {
             let mut attrs = Vec::new();
             if r.rqa {
@@ -476,20 +570,29 @@ impl Emitter {
             } else {
                 format!("[<{}>] ", attrs.join("; "))
             };
-            let keyword = if i == 0 { "type" } else { "and" };
-            let typars = if r.generic { "<'a>" } else { "" };
-            self.src.push_str(&" ".repeat(indent * 4));
-            if i == 0 && !attrs.is_empty() {
-                self.src.push_str(&attrs);
-                self.src.push('\n');
-                self.src.push_str(&" ".repeat(indent * 4));
-                self.src
-                    .push_str(&format!("{keyword} {}{typars} = {{ ", r.name));
+            let access = match r.access {
+                Access::PrivateType => "private ",
+                Access::InternalType => "internal ",
+                Access::Public | Access::PrivateRepr => "",
+            };
+            let repr_access = if r.access == Access::PrivateRepr {
+                "private "
             } else {
-                let attrs = if i == 0 { String::new() } else { attrs };
-                self.src
-                    .push_str(&format!("{keyword} {attrs}{}{typars} = {{ ", r.name));
+                ""
+            };
+            let typars = if r.generic { "<'a>" } else { "" };
+            if i == 0 {
+                if !attrs.is_empty() {
+                    self.line(indent, &attrs);
+                }
+                self.line(indent, &format!("type {access}{}{typars} =", r.name));
+            } else {
+                self.line(indent, &format!("and {attrs}{access}{}{typars} =", r.name));
             }
+            self.src.push_str(&format!("{pad}    {repr_access}{{ "));
+            let link = (r.linked && !r.generic)
+                .then(|| self.abbreviable.last().map(|(n, _)| n.clone()))
+                .flatten();
             for (k, &label) in r.labels.iter().enumerate() {
                 if k > 0 {
                     self.src.push_str("; ");
@@ -497,26 +600,144 @@ impl Emitter {
                 let start = self.src.len();
                 self.src.push_str(label);
                 let end = self.src.len();
-                let ty = if k == 0 && r.generic {
-                    "'a"
-                } else if k == 0 {
-                    "int"
-                } else {
-                    "string"
+                let (ty, field_ty) = match (k, r.generic, &link) {
+                    (0, true, _) => ("'a".to_string(), FieldTy::Param),
+                    (0, false, Some(target)) => {
+                        (target.clone(), FieldTy::Record(self.file, target.clone()))
+                    }
+                    (0, false, None) => ("int".to_string(), FieldTy::Prim),
+                    _ => ("string".to_string(), FieldTy::Prim),
                 };
                 self.src.push_str(&format!(": {ty}"));
-                self.fields.push((
-                    FieldId {
-                        file: self.file,
-                        record: r.name.clone(),
-                        label,
-                    },
-                    start..end,
-                ));
+                let id = FieldId {
+                    file: self.file,
+                    record: r.name.clone(),
+                    label,
+                };
+                self.field_types.insert(id.clone(), field_ty);
+                self.fields.push((id, start..end));
             }
             self.src.push_str(" }\n");
+            self.record_labels
+                .insert((self.file, r.name.clone()), r.labels.clone());
+            if let Some(label) = r.member_probe {
+                let m = self.names.next("M");
+                self.src.push_str(&format!("{pad}    member _.{m} p = p."));
+                let start = self.src.len();
+                self.src.push_str(label);
+                let end = self.src.len();
+                self.src.push('\n');
+                self.pending_members
+                    .push((m, range(start, end), label, r.clone()));
+            }
         }
         pos
+    }
+
+    /// The second label of a chain whose first FCS reports as `first`: one
+    /// of its record's labels where its field has a record type, any label
+    /// otherwise.
+    fn chain_label(&self, first: &Prediction, seed: u64) -> &'static str {
+        let pick = |labels: &[&'static str]| {
+            labels[usize::try_from(seed % u64::try_from(labels.len()).unwrap()).unwrap()]
+        };
+        if let Prediction::Field(f) = first
+            && let Some(FieldTy::Record(file, name)) = self.field_types.get(f)
+        {
+            let labels: Vec<&'static str> = self.record_labels[&(*file, name.clone())]
+                .iter()
+                .copied()
+                .filter(|l| *l != OBJECT_MEMBER)
+                .collect();
+            if !labels.is_empty() {
+                return pick(&labels);
+            }
+        }
+        pick(&LABELS)
+    }
+
+    /// The second label of a chain, after a first FCS reported as `first`.
+    fn predict_chain(
+        &self,
+        stack: &[Frame],
+        first: &Prediction,
+        label: &'static str,
+    ) -> Option<(Prediction, bool)> {
+        let Prediction::Field(f) = first else {
+            return Some((Prediction::Nothing, false));
+        };
+        // A `rec` module's record ahead of its declaration: its field types
+        // are not settled yet, and the chain is left unpredicted.
+        let ty = if *f == core_contents() {
+            FieldTy::Param
+        } else {
+            self.field_types.get(f).cloned()?
+        };
+        // On a known type an intrinsic field wins, then an extension of
+        // `obj` in scope, which every type has.
+        let extended = || {
+            if stack.iter().any(|f| f.extensions.contains(&label)) {
+                Prediction::NotAField
+            } else {
+                Prediction::Nothing
+            }
+        };
+        Some(match ty {
+            FieldTy::Prim => (extended(), false),
+            FieldTy::Param => (self.predict(stack, label).0, true),
+            FieldTy::Record(file, name) => {
+                let has = self.record_labels[&(file, name.clone())].contains(&label);
+                let p = if has {
+                    Prediction::Field(FieldId {
+                        file,
+                        record: name,
+                        label,
+                    })
+                } else {
+                    extended()
+                };
+                (p, false)
+            }
+        })
+    }
+
+    /// Settle the member probes of the group just entered: FCS reads the
+    /// record's own labels there ahead of the table (a
+    /// `[<RequireQualifiedAccess>]` record's too), which by then holds the
+    /// whole group.
+    fn settle_members(&mut self, stack: &[Frame]) {
+        for (binder, at, label, own) in std::mem::take(&mut self.pending_members) {
+            // FCS's member lookup (`obj`'s members, extensions) comes first
+            // there too.
+            let looked_up =
+                label == OBJECT_MEMBER || stack.iter().any(|f| f.extensions.contains(&label));
+            let (prediction, winner, passed_skipped) = if !looked_up && own.labels.contains(&label)
+            {
+                (
+                    Prediction::Field(FieldId {
+                        file: self.file,
+                        record: own.name.clone(),
+                        label,
+                    }),
+                    None,
+                    false,
+                )
+            } else {
+                self.predict(stack, label)
+            };
+            self.probes.push(Probe {
+                file: self.file,
+                binder,
+                range: at,
+                label,
+                prediction,
+                winner,
+                must_commit: false,
+                passed_skipped,
+                chain: None,
+                in_member: true,
+            });
+        }
     }
 
     fn predict(&self, stack: &[Frame], label: &'static str) -> (Prediction, Option<Event>, bool) {
@@ -551,10 +772,11 @@ impl Emitter {
                         }
                     }
                     if !frame.rec {
-                        let events = record_events(self.file, specs, Origin::InFile, pos);
+                        let events = record_events(self.file, specs, Origin::InFile, pos, false);
                         frame.events.extend(events);
                     }
-                    for r in specs.iter().filter(|r| !r.generic) {
+                    self.settle_members(stack);
+                    for r in specs.iter().filter(|r| !r.generic && r.access.nameable()) {
                         self.abbreviable.push((r.name.clone(), stack.len()));
                     }
                 }
@@ -562,6 +784,7 @@ impl Emitter {
                     name,
                     auto_open,
                     rec,
+                    private,
                     items,
                 } => {
                     if *auto_open {
@@ -569,7 +792,8 @@ impl Emitter {
                     }
                     let start = self.src.len();
                     let rec_kw = if *rec { "rec " } else { "" };
-                    self.line(indent, &format!("module {rec_kw}{name} ="));
+                    let private_kw = if *private { "private " } else { "" };
+                    self.line(indent, &format!("module {private_kw}{rec_kw}{name} ="));
                     let mut frame = Frame {
                         rec: *rec,
                         ..Frame::default()
@@ -582,6 +806,7 @@ impl Emitter {
                                     specs,
                                     Origin::RecUpfront,
                                     start,
+                                    false,
                                 ));
                             }
                         }
@@ -616,7 +841,7 @@ impl Emitter {
                                 matches!(
                                     e.origin,
                                     Origin::InFile | Origin::Copied | Origin::RecUpfront
-                                )
+                                ) && e.access != Access::PrivateType
                             })
                             .partition(|e| !e.copied);
                         parent
@@ -641,7 +866,7 @@ impl Emitter {
                     let (path, events) = match target {
                         OpenTarget::Lib => (
                             format!("L{}.M", lib.scenario),
-                            record_events(0, &lib.module_records, Origin::Opened, pos),
+                            record_events(0, &lib.module_records, Origin::Opened, pos, true),
                         ),
                         OpenTarget::Core => (
                             "Microsoft.FSharp.Core".to_string(),
@@ -661,7 +886,7 @@ impl Emitter {
                             // namespace by its full name inside it (FS0039).
                             (
                                 m.clone(),
-                                record_events(self.file, &specs, Origin::Opened, pos),
+                                record_events(self.file, &specs, Origin::Opened, pos, true),
                             )
                         }
                     };
@@ -701,7 +926,11 @@ impl Emitter {
                     stack.last_mut().unwrap().extensions.push(label);
                     self.file_extensions.push(label);
                 }
-                Item::Probe { label, dot_get } => {
+                Item::Probe {
+                    label,
+                    dot_get,
+                    chain,
+                } => {
                     // A namespace holds no `let`: a probe there sits in a
                     // module of its own, which adds nothing to the table.
                     let indent = if indent == 0 {
@@ -717,13 +946,49 @@ impl Emitter {
                     } else {
                         format!("let {f} p = p.")
                     };
+                    // A chain starts, where it can, at a label whose winner
+                    // has a record-typed field, so it reads through it.
+                    let label: &'static str = chain
+                        .and_then(|seed| {
+                            let through: Vec<&'static str> = LABELS
+                                .iter()
+                                .copied()
+                                .filter(|l| match self.predict(stack, l).0 {
+                                    Prediction::Field(f) => {
+                                        matches!(
+                                            self.field_types.get(&f),
+                                            Some(FieldTy::Record(..))
+                                        )
+                                    }
+                                    _ => false,
+                                })
+                                .collect();
+                            (!through.is_empty()).then(|| {
+                                through[usize::try_from(
+                                    (seed >> 32) % u64::try_from(through.len()).unwrap(),
+                                )
+                                .unwrap()]
+                            })
+                        })
+                        .unwrap_or(label);
                     self.src.push_str(&" ".repeat(indent * 4));
                     self.src.push_str(&head);
                     let start = self.src.len();
                     self.src.push_str(label);
                     let end = self.src.len();
-                    self.src.push('\n');
                     let (prediction, winner, passed_skipped) = self.predict(stack, label);
+                    let chain_at = chain.map(|seed| {
+                        let second = self.chain_label(&prediction, seed);
+                        self.src.push('.');
+                        let start = self.src.len();
+                        self.src.push_str(second);
+                        (range(start, self.src.len()), second)
+                    });
+                    self.src.push('\n');
+                    let chain = chain_at.and_then(|(at, second)| {
+                        let (p, unknown) = self.predict_chain(stack, &prediction, second)?;
+                        Some((at, second, p, unknown))
+                    });
                     let must_commit = winner.as_ref().is_some_and(|w| {
                         matches!(w.origin, Origin::InFile | Origin::Copied)
                             && !stack.iter().any(|f| f.rec)
@@ -735,15 +1000,14 @@ impl Emitter {
                     self.probes.push(Probe {
                         file: self.file,
                         binder: f.clone(),
-                        range: TextRange::new(
-                            u32::try_from(start).unwrap().into(),
-                            u32::try_from(end).unwrap().into(),
-                        ),
+                        range: range(start, end),
                         label,
                         prediction,
                         winner,
                         must_commit,
                         passed_skipped,
+                        chain,
+                        in_member: false,
                     });
                 }
             }
@@ -782,6 +1046,9 @@ fn build_project(seed: u64, blocks_per_file: usize) -> Project {
         file_extensions: Vec::new(),
         module_records: Vec::new(),
         abbreviable: Vec::new(),
+        field_types: std::collections::HashMap::new(),
+        record_labels: std::collections::HashMap::new(),
+        pending_members: Vec::new(),
     };
     for scenario in 0..scenarios {
         let module_records: Vec<RecordSpec> = (0..1 + rng.below(3))
@@ -789,8 +1056,12 @@ fn build_project(seed: u64, blocks_per_file: usize) -> Project {
             .collect();
         lib.line(0, &format!("namespace L{scenario}"));
         lib.line(0, "module M =");
+        lib.abbreviable.clear();
         for r in &module_records {
             lib.emit_records(1, std::slice::from_ref(r));
+            if !r.generic && r.access.nameable() {
+                lib.abbreviable.push((r.name.clone(), 0));
+            }
         }
         let fragment: Vec<RecordSpec> = if rng.chance(2, 5) {
             (0..1 + rng.below(2))
@@ -801,8 +1072,12 @@ fn build_project(seed: u64, blocks_per_file: usize) -> Project {
         };
         if !fragment.is_empty() {
             lib.line(0, &format!("namespace P{scenario}"));
+            lib.abbreviable.clear();
             for r in &fragment {
                 lib.emit_records(0, std::slice::from_ref(r));
+                if !r.generic && r.access.nameable() {
+                    lib.abbreviable.push((r.name.clone(), 0));
+                }
             }
         }
         libs.push(Lib {
@@ -812,8 +1087,12 @@ fn build_project(seed: u64, blocks_per_file: usize) -> Project {
         });
     }
 
+    // The earlier file's member probes are not graded: nothing types them.
+    lib.pending_members.clear();
     let mut sources = vec![lib.src];
     let mut fields = lib.fields;
+    let field_types = lib.field_types;
+    let record_labels = lib.record_labels;
     let mut probes = Vec::new();
     for (k, &kind) in probe_kinds.iter().enumerate() {
         let file = k + 1;
@@ -827,15 +1106,15 @@ fn build_project(seed: u64, blocks_per_file: usize) -> Project {
             file_extensions: Vec::new(),
             module_records: Vec::new(),
             abbreviable: Vec::new(),
+            field_types: field_types.clone(),
+            record_labels: record_labels.clone(),
+            pending_members: Vec::new(),
         };
         for b in 0..blocks_per_file {
             let l = &libs[k * blocks_per_file + b];
             let mut siblings = Vec::new();
             let mut items = gen_items(&mut rng, &mut names, kind, 0, false, &mut siblings);
-            items.push(Item::Probe {
-                label: rng.label(),
-                dot_get: false,
-            });
+            items.push(gen_probe(&mut rng, false));
             e.line(0, &format!("namespace P{}", l.scenario));
             e.module_records.clear();
             e.abbreviable.clear();
@@ -843,7 +1122,9 @@ fn build_project(seed: u64, blocks_per_file: usize) -> Project {
             // then the earlier files', then, entering the namespace, its
             // fragments.
             let mut events = vec![core_event(Origin::Assembly, 0)];
-            events.extend(record_events(0, &l.fragment, Origin::Implicit, 0));
+            // A namespace-level `private` record is the namespace's, in every
+            // file of it.
+            events.extend(record_events(0, &l.fragment, Origin::Implicit, 0, false));
             let mut stack = vec![Frame {
                 events,
                 ..Frame::default()
@@ -922,6 +1203,16 @@ struct Tally {
     and_second_winners: usize,
     passed_skipped: usize,
     dot_get_commits: usize,
+    /// Chains whose second label FCS resolves through a known record.
+    chain_known_fields: usize,
+    /// Chains whose second label FCS resolves through its table again.
+    chain_table_fields: usize,
+    /// Member probes FCS resolves to their own record's field.
+    member_own_fields: usize,
+    /// Member probes FCS resolves through the table.
+    member_table_fields: usize,
+    /// Winners whose record is not plain public.
+    restricted_winners: usize,
 }
 
 fn origin_index(o: Origin) -> usize {
@@ -1028,6 +1319,52 @@ fn run(seed: u64, blocks_per_file: usize) -> Tally {
             t.and_second_winners += usize::from(w.and_second);
         }
         t.passed_skipped += usize::from(probe.passed_skipped);
+        if let Some(w) = &probe.winner {
+            t.restricted_winners += usize::from(w.access != Access::Public);
+        }
+        if probe.in_member && matches!(fcs, Prediction::Field(_)) {
+            if probe.winner.is_none() {
+                t.member_own_fields += 1;
+            } else {
+                t.member_table_fields += 1;
+            }
+        }
+        if let Some((at, second, predicted, unknown)) = &probe.chain {
+            let fcs2 = fcs_report(&fu.uses, *at, &written, &project.fields);
+            assert_eq!(
+                predicted, &fcs2,
+                "{ctx}: the model disagrees with FCS at the chain's second label `{second}`"
+            );
+            if matches!(fcs2, Prediction::Field(_)) {
+                if *unknown {
+                    t.chain_table_fields += 1;
+                } else {
+                    t.chain_known_fields += 1;
+                }
+            }
+            // On a receiver FCS knows nothing about, the table's answer is
+            // FCS's; on one it knows, the answer makes no claim.
+            if *unknown
+                && let Some(label) = proj
+                    .file(probe.file)
+                    .field_label_on_unknown_receiver(*at, env)
+            {
+                let ours = project
+                    .fields
+                    .iter()
+                    .find(|(f, r)| {
+                        f.file == probe.file
+                            && r.start == usize::from(label.field.start())
+                            && r.end == usize::from(label.field.end())
+                    })
+                    .map(|(f, _)| f.clone());
+                assert_eq!(
+                    ours.map(Prediction::Field),
+                    Some(fcs2),
+                    "{ctx}: we resolved the chain's second label `{second}` to {label:?}"
+                );
+            }
+        }
 
         let ours = proj
             .file(probe.file)
@@ -1097,6 +1434,19 @@ fn assert_floors(t: &Tally, blocks: usize) {
             t.dot_get_commits,
             7,
         ),
+        (
+            "chains read through a known record",
+            t.chain_known_fields,
+            20,
+        ),
+        (
+            "chains read through the table again",
+            t.chain_table_fields,
+            15,
+        ),
+        ("member probes on their own record", t.member_own_fields, 15),
+        ("member probes through the table", t.member_table_fields, 5),
+        ("winners not plain public", t.restricted_winners, 60),
     ] {
         let floor = floor * blocks / 100;
         assert!(n >= floor, "only {n} {what} (floor {floor}): {t:?}");
@@ -1135,7 +1485,7 @@ fn deep_record_labels_agree_with_fcs() {
 /// file is checked after the earlier file alone, which is all it reads.
 #[test]
 fn record_labels_type_receivers_as_fcs_does() {
-    let project = build_project(0x5EED_0707, 40);
+    let project = build_project(0x5EED_0707, 100);
     if let Ok(dir) = std::env::var("BORZOI_RECORD_LABEL_DUMP") {
         for (src, kind) in project.sources.iter().zip(FILES) {
             std::fs::write(format!("{dir}/{kind:?}.fs"), src).expect("dump a generated file");
@@ -1158,7 +1508,15 @@ fn record_labels_type_receivers_as_fcs_does() {
                 // A member access on a receiver whose type has open
                 // arguments publishes nothing yet, whatever typed the
                 // receiver: so a generic record obligates nothing here.
-                let must = p.must_commit && p.winner.as_ref().is_some_and(|w| !w.generic);
+                // Inference reads a field off a record only where it bridges
+                // the field's type and may read the representation, which a
+                // chain's first field and a `private` representation do not
+                // always allow: those are graded for agreement alone.
+                let must = p.must_commit
+                    && p.chain.is_none()
+                    && p.winner
+                        .as_ref()
+                        .is_some_and(|w| !w.generic && w.access != Access::PrivateRepr);
                 obligated += usize::from(must);
                 (
                     u32::try_from(line).unwrap(),
@@ -1174,6 +1532,6 @@ fn record_labels_type_receivers_as_fcs_does() {
         tally.committed_erroring, 0,
         "cells committed on lines FCS rejects: {tally:?}"
     );
-    assert!(obligated >= 25, "only {obligated} obligated probes");
     assert_clean(&tally, obligated);
+    assert!(obligated >= 30, "only {obligated} obligated probes");
 }

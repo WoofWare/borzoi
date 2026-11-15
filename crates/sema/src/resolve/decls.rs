@@ -783,7 +783,7 @@ impl<'a> Resolver<'a> {
                     // Descend into the type's member bodies (self-id, params,
                     // ctor params, class fields) — the value-resolution slice
                     // that `resolve_type_defn` (type uses only) does not cover.
-                    self.resolve_type_member_bodies(defn, &scope);
+                    self.in_type_bodies(|r| r.resolve_type_member_bodies(defn, &scope));
                     self.leave_typars(pushed_typars);
                     self.decline_abbreviation_case(defn);
                 }

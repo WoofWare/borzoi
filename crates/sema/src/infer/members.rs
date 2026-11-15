@@ -140,8 +140,10 @@ impl<'a> Gen<'a> {
         ) else {
             return;
         };
-        // FCS resolved the segments before this one at their dots.
-        self.settle(scope);
+        // FCS resolved the segments before this one at their dots: one it
+        // did not resolve there is declined, which ends the prefix, so the
+        // receiver is not mistaken for one FCS knows nothing about.
+        self.settle_access(scope);
         let tys = self.solver.tys;
         if !matches!(
             tys.kind(self.solver.table.resolve(tys.var(recv))),
