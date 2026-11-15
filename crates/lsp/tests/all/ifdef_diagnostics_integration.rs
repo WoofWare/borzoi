@@ -149,7 +149,7 @@ fn sdk_supplied_define_constants_suppress_dead_branch_diagnostics() {
         dotnet_root: Some(dotnet),
         ..SdkDiscoveryEnv::default()
     };
-    let mut ws = Workspace::with_env(env);
+    let mut ws = crate::common::workspace(env);
     let symbols = ws.symbols_for(&file);
     assert!(
         symbols.contains("FOO"),
@@ -237,7 +237,7 @@ fn sdk_paths_resolves_repo_local_sdk_for_defines() {
     let tmp = TempDir::new().unwrap();
     let (file, env) = build_paths_fixture(&tmp, r#"["./dotnet-local", "$host$"]"#);
 
-    let mut ws = Workspace::with_env(env);
+    let mut ws = crate::common::workspace(env);
     let symbols = ws.symbols_for(&file);
     assert!(
         symbols.contains("FROM_LOCAL"),
@@ -264,7 +264,7 @@ fn sdk_paths_empty_list_drops_repo_local_define() {
     let tmp = TempDir::new().unwrap();
     let (file, env) = build_paths_fixture(&tmp, "[]");
 
-    let mut ws = Workspace::with_env(env);
+    let mut ws = crate::common::workspace(env);
     let symbols = ws.symbols_for(&file);
     assert!(
         !symbols.contains("FROM_LOCAL"),

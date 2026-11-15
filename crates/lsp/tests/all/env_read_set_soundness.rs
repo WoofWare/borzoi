@@ -481,7 +481,7 @@ fn link_up(root: &Path, world: &World, entry: PathBuf) -> Laid {
 
 /// A workspace that finds no SDK of the host's.
 fn workspace(root: &Path) -> Workspace {
-    Workspace::with_env(SdkDiscoveryEnv {
+    crate::common::workspace(SdkDiscoveryEnv {
         dotnet_root: Some(root.join("no-dotnet")),
         ..SdkDiscoveryEnv::default()
     })
@@ -633,7 +633,7 @@ fn check_confirmed(world: &World, confirmed: &mut Confirmed) {
     }
     let dotnet = root.join("dotnet");
     let resolve = || {
-        let mut ws = Workspace::with_env(SdkDiscoveryEnv {
+        let mut ws = crate::common::workspace(SdkDiscoveryEnv {
             dotnet_root: Some(root.join("no-dotnet")),
             nuget_packages_dir: Some(nuget.clone()),
             home_dir: Some(root.join("home")),

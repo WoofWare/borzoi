@@ -37,7 +37,6 @@ use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::server::{SERVER_STACK_BYTES, State, run_with_fetcher};
 use borzoi::uri::UriExt as _;
 use borzoi::vfs::{Clock, RACY_WINDOW};
-use borzoi::workspace::Workspace;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::{ClientCapabilities, Uri};
 use proptest::prelude::*;
@@ -73,7 +72,7 @@ impl Client {
                 // Hermetic: no `dotnet` is found, so no env is built from the
                 // host's packs. The project is SDK-less, so it evaluates and
                 // folds all the same.
-                state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+                state.workspace = crate::common::workspace(SdkDiscoveryEnv {
                     dotnet_root: Some(root.join("no-dotnet")),
                     ..SdkDiscoveryEnv::default()
                 });

@@ -20,7 +20,6 @@ use borzoi::handlers::hover::{
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::SemanticState;
 use borzoi::server::State;
-use borzoi::workspace::Workspace;
 use borzoi_assembly::{Ecma335Assembly, EcmaView};
 use borzoi_sema::{AssemblyEnv, SemanticClass};
 use lsp_types::{
@@ -1044,7 +1043,7 @@ fn member_access_hover_shows_int_via_project_assembly_env() {
         ..SdkDiscoveryEnv::default()
     };
     let mut state = State::default();
-    state.workspace = Workspace::with_env(env);
+    state.workspace = crate::common::workspace(env);
     let uri = Uri::from_file_path(&src_path).unwrap();
     state.docs.insert(uri.clone(), src.to_string());
 

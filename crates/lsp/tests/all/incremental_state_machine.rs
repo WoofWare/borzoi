@@ -93,7 +93,6 @@ use std::time::Duration;
 use borzoi::inbox::{CHECKPOINT_EVENT, InboxSender, STOPPED_EVENT};
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::server::{State, run_inbox};
-use borzoi::workspace::Workspace;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
     ClientCapabilities, DiagnosticClientCapabilities, DiagnosticWorkspaceClientCapabilities,
@@ -1323,7 +1322,7 @@ impl Client {
             // host's `dotnet` must not leak into either session. `$DOTNET_ROOT`
             // is the stub framework pack inside the world, so a restored
             // project's assembly env is a function of files the model controls.
-            state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+            state.workspace = crate::common::workspace(SdkDiscoveryEnv {
                 dotnet_root: Some(root.join("dotnet")),
                 ..SdkDiscoveryEnv::default()
             });

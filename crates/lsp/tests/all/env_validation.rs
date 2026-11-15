@@ -17,7 +17,6 @@ use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::server::State;
 use borzoi::uri::UriExt as _;
 use borzoi::vfs::{Clock, RACY_WINDOW};
-use borzoi::workspace::Workspace;
 use borzoi_sema::AssemblyEnv;
 use lsp_types::{FileChangeType, FileEvent, Uri};
 use tempfile::TempDir;
@@ -163,7 +162,7 @@ fn fixture() -> Fixture {
 /// project file is racy.
 fn state(fixture: &Fixture) -> State {
     let mut state = State::new();
-    state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+    state.workspace = crate::common::workspace(SdkDiscoveryEnv {
         dotnet_root: Some(fixture.root.join("dotnet")),
         nuget_packages_dir: Some(fixture.root.join("global-packages")),
         // NuGet's settings are read from the home directory; without one
@@ -416,7 +415,7 @@ fn an_env_made_under_another_workspace_is_built_again() {
     // will be.
     let other = generation(&mut state);
     assert!(Arc::ptr_eq(&other, &env_of(&mut state, &fixture.other)));
-    state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+    state.workspace = crate::common::workspace(SdkDiscoveryEnv {
         dotnet_root: Some(fixture.root.join("dotnet")),
         ..SdkDiscoveryEnv::default()
     });

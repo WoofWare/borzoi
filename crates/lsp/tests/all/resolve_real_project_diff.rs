@@ -100,7 +100,6 @@ use crate::common::{
 };
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::SemanticState;
-use borzoi::workspace::Workspace;
 use borzoi_cst::syntax::TextRange;
 use borzoi_sema::test_support::{assembly_full_name_agrees, certified_expected};
 use borzoi_sema::{AssemblyEnv, Resolution, resolve_project_files};
@@ -277,7 +276,7 @@ fn project_resolution_matches_fcs() {
     let project_dir = project.parent().expect("fsproj has a parent dir");
 
     // 1. Compile order + defines, via the real workspace evaluation.
-    let mut workspace = Workspace::with_env(SdkDiscoveryEnv::from_process_env());
+    let mut workspace = crate::common::workspace(SdkDiscoveryEnv::from_process_env());
     let mut sema = SemanticState::new();
     // A restored-and-built project the caller chose: resolve it as a host that
     // trusts the workspace would, C# project references included.
