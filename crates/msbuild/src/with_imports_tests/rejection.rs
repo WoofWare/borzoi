@@ -688,3 +688,21 @@ fn a_certain_rejection_outranks_an_earlier_possible_one() {
         }
     );
 }
+
+#[test]
+fn a_missing_import_through_a_path_msbuild_collapses_is_not_claimed() {
+    // MSBuild collapses `missing/..` as text and loads `there.props`, while
+    // the walk opens the path as joined, through a directory that is not
+    // there.
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(
+        &tmp,
+        "  <Import Project=\"missing/../there.props\" />",
+        &[("proj/there.props", "<Project />")],
+    );
+    let parsed = parse_file(&project_path);
+    assert_ne!(
+        parsed.rejection.map(|r| r.certainty),
+        Some(RejectionCertainty::Certain)
+    );
+}

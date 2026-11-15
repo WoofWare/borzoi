@@ -48,8 +48,9 @@
 //!   path ([`State::note_unloadable_import`]) must name its path from certain
 //!   values ([`import_path_is_certain`]) and not be a duplicate MSBuild skips,
 //!   which the walk's own skip settles before it tries the file. Only a
-//!   missing file and an empty path are claimed: what the walk's XML reader
-//!   and file system call malformed or unreadable, MSBuild may read;
+//!   missing file at a path with nothing to collapse and an empty path are
+//!   claimed: what the walk's XML reader and file system call malformed or
+//!   unreadable, MSBuild may read;
 //! - an illegal condition whose verdict depends on the values it reads
 //!   (MSB4086, a non-boolean scalar) must read only certain values, the
 //!   stale channel included ([`operands_are_certain`]); a syntax error
@@ -185,15 +186,21 @@ pub(super) fn import_path_is_certain(node: Node<'_, '_>, state: &State<'_>) -> b
     !expand_silent(&project, state).had_unsupported && operands_are_certain(state, &project)
 }
 
-/// How sure the walk is that a failed load of the import it is taking, for
-/// `reason`, makes MSBuild reject the project. Asked as the failure is pushed,
-/// before it latches the walk opaque.
+/// How sure the walk is that a failed load of `path`, the import it is taking,
+/// for `reason`, makes MSBuild reject the project. Asked as the failure is
+/// pushed, before it latches the walk opaque. MSBuild collapses `..` and `.` in
+/// an import's path as text before it opens the file, and the walk opens the
+/// path as joined, so a path that does not collapse to itself may name a file
+/// MSBuild loads.
 pub(super) fn import_failure_certainty(
     state: &State<'_>,
+    path: &Path,
     reason: &ImportFailReason,
 ) -> RejectionCertainty {
     certain_if(
         matches!(reason, ImportFailReason::NotFound)
+            && path.is_absolute()
+            && normalise(path) == path
             && state.taken_import_path_certain
             && reach_is_certain(state),
     )
@@ -320,8 +327,9 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
         "Choose" => judge_whens(node, 0, dir, reached, state),
         "ItemGroup" => judge_item_group(node, reached, state),
         "ItemDefinitionGroup" => judge_item_definition_group(node, reached, state),
+        // A `<UsingTask>` resolves `Exists` against its own file's directory.
         "UsingTask" => {
-            judge_condition(node, &entry_dir, reached, state);
+            judge_condition(node, dir, reached, state);
         }
         _ => {}
     }

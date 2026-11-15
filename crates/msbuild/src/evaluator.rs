@@ -2419,7 +2419,7 @@ impl<'r> State<'r> {
             DiagnosticKind::ImportFailed { path, reason }
                 if !matches!(reason, ImportFailReason::DepthLimit { .. }) =>
             {
-                let certainty = rejection::import_failure_certainty(self, reason);
+                let certainty = rejection::import_failure_certainty(self, path, reason);
                 Some((
                     path.display().to_string(),
                     reason.clone(),

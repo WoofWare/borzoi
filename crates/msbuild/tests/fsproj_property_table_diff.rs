@@ -1327,6 +1327,11 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     // Ill typed on the values written: `Word` holds `abc` for certain,
     // `Maybe` under a gate the walk cannot decide.
     let by_value = ["1 &lt; abc", "$(Word) &gt; 1", "$(Word)", "$(Maybe) &gt; 1"];
+    // Ill typed exactly where `Exists` resolves against the project's
+    // directory, which holds `flag`, or exactly where it resolves against the
+    // imported file's, which does not: each position's `Exists` directory,
+    // graded in the imported context.
+    let by_directory = ["Exists('flag') And 1 &lt; abc", "!Exists('flag') And 1 &lt; abc"];
     let legal = [
         "'a' == 'a'",
         "'a' == 'b'",
@@ -1447,17 +1452,27 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
     let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
-    std::fs::write(
-        dir.join("there.props"),
-        "<Project><PropertyGroup><Delta>d</Delta></PropertyGroup></Project>",
-    )
-    .unwrap();
+    // The imported context's file sits in `sub`, beside its own `there.props`,
+    // and `flag` beside the project alone.
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    for there in [dir.join("there.props"), dir.join("sub/there.props")] {
+        std::fs::write(
+            there,
+            "<Project><PropertyGroup><Delta>d</Delta></PropertyGroup></Project>",
+        )
+        .unwrap();
+    }
+    std::fs::write(dir.join("flag"), "").unwrap();
     let project_path = dir.join("Demo.fsproj");
     let names: Vec<String> = ["Alpha", "Beta", "Gamma", "Delta"]
         .map(String::from)
         .to_vec();
     let (mut rejected, mut committed, mut certain, mut possible) = (0usize, 0, 0, 0);
-    let conditions = by_syntax.iter().chain(&by_value).chain(&legal);
+    let conditions = by_syntax
+        .iter()
+        .chain(&by_value)
+        .chain(&by_directory)
+        .chain(&legal);
     for (condition, &(template, never)) in
         conditions.flat_map(|c| positions.iter().map(move |p| (c, p)))
     {
@@ -1479,10 +1494,10 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
                 ),
                 Context::Imported => {
                     inner = format!("<Project>{position}</Project>");
-                    std::fs::write(dir.join("inner.props"), &inner).unwrap();
+                    std::fs::write(dir.join("sub/inner.props"), &inner).unwrap();
                     (
                         String::new(),
-                        "<Import Project=\"inner.props\" />".to_owned(),
+                        "<Import Project=\"sub/inner.props\" />".to_owned(),
                     )
                 }
             };
@@ -1510,7 +1525,7 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
                 .collect();
             let describe = || {
                 format!(
-                    "--- xml ---\n{xml}--- inner.props ---\n{inner}\n{:#?}",
+                    "--- xml ---\n{xml}--- sub/inner.props ---\n{inner}\n{:#?}",
                     parsed.rejection
                 )
             };
