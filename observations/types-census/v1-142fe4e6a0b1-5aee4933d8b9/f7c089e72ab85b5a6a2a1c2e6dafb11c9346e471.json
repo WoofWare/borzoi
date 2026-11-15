@@ -1,0 +1,146 @@
+{
+  "observation_schema_version": 1,
+  "series": "v1-142fe4e6a0b1-5aee4933d8b9",
+  "repository": "WoofWare/borzoi",
+  "commit": "f7c089e72ab85b5a6a2a1c2e6dafb11c9346e471",
+  "measured_at": "2026-11-15T18:35:13Z",
+  "workflow": {
+    "run_id": 43746513131,
+    "run_number": 435,
+    "run_attempt": 1,
+    "url": "https://github.com/WoofWare/borzoi/actions/runs/43746513131"
+  },
+  "corpus": {
+    "source": "dotnet/fsharp",
+    "revision": "142fe4e6a0b1cbef6f8e18e473e03b9137644cc0"
+  },
+  "flake_lock_hash": "1d8fecb61977dd5f76129f28d2eaeb8d9adb5eaf6e494ffcb42283bd56035227",
+  "generator": {
+    "schema_version": 1,
+    "measurement": "types-census",
+    "configuration": {
+      "corpus": "fsharp-src",
+      "file_extensions": [
+        ".fs"
+      ],
+      "limit": null,
+      "scope": "file-isolated",
+      "stride": 13
+    },
+    "statistics": {
+      "buckets": {
+        "hard": 569,
+        "lit": 7568,
+        "member": 3015,
+        "other": 0,
+        "spine": 38569
+      },
+      "by_area": {
+        "other": {
+          "buckets": {
+            "hard": 13,
+            "lit": 76,
+            "member": 16,
+            "other": 0,
+            "spine": 443
+          },
+          "expressions": 548,
+          "files": 3,
+          "needs_inference": {
+            "basis_points": 529,
+            "denominator": 548,
+            "numerator": 29
+          },
+          "unground": {
+            "basis_points": 711,
+            "denominator": 548,
+            "numerator": 39
+          }
+        },
+        "src": {
+          "buckets": {
+            "hard": 193,
+            "lit": 1471,
+            "member": 1263,
+            "other": 0,
+            "spine": 12806
+          },
+          "expressions": 15733,
+          "files": 32,
+          "needs_inference": {
+            "basis_points": 925,
+            "denominator": 15733,
+            "numerator": 1456
+          },
+          "unground": {
+            "basis_points": 1416,
+            "denominator": 15733,
+            "numerator": 2229
+          }
+        },
+        "tests": {
+          "buckets": {
+            "hard": 363,
+            "lit": 6021,
+            "member": 1736,
+            "other": 0,
+            "spine": 25320
+          },
+          "expressions": 33440,
+          "files": 394,
+          "needs_inference": {
+            "basis_points": 627,
+            "denominator": 33440,
+            "numerator": 2099
+          },
+          "unground": {
+            "basis_points": 1031,
+            "denominator": 33440,
+            "numerator": 3448
+          }
+        },
+        "vsintegration": {
+          "buckets": {
+            "hard": 0,
+            "lit": 0,
+            "member": 0,
+            "other": 0,
+            "spine": 0
+          },
+          "expressions": 0,
+          "files": 0,
+          "needs_inference": {
+            "basis_points": 0,
+            "denominator": 0,
+            "numerator": 0
+          },
+          "unground": {
+            "basis_points": 0,
+            "denominator": 0,
+            "numerator": 0
+          }
+        }
+      },
+      "expressions": 49721,
+      "files": {
+        "sampled": 432,
+        "type_checked_ok": 429
+      },
+      "hard_pile_share": {
+        "basis_points": 1587,
+        "denominator": 3584,
+        "numerator": 569
+      },
+      "needs_inference": {
+        "basis_points": 720,
+        "denominator": 49721,
+        "numerator": 3584
+      },
+      "unground": {
+        "basis_points": 1149,
+        "denominator": 49721,
+        "numerator": 5716
+      }
+    }
+  }
+}
