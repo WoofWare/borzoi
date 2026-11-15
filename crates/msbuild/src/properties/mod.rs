@@ -161,7 +161,7 @@ impl PropertyMap {
     /// toolset, the `MSBuildThisFile*` frame — are ones the walk computes or is
     /// handed, and an overridable toolset seed into a name a refused write left
     /// unbound must keep that refusal (see `seed_toolset_properties`). A write
-    /// the walk evaluated goes through [`Self::write`], which names its
+    /// the walk evaluated goes through `PropertyMap::write`, which names its
     /// verdict.
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.insert_escaped(key, Escaped::from_xml(value.into()));

@@ -199,8 +199,9 @@ pub(crate) struct TrustShape {
 
 /// The three forward-uncertainty channels for one property name.
 ///
-/// [`Trust::CERTAIN`] is the identity of [`Trust::join`] and means every
-/// channel is clean — the walk's value for the name is the real build's.
+/// [`Trust::CERTAIN`] is the identity of the join ([`Trust::join_all`],
+/// [`Trust::join_in`]) and means every channel is clean — the walk's value
+/// for the name is the real build's.
 /// Deliberately **not** `Default`: a derived `Trust::default()` would be
 /// `pub(crate)`, handing every module an all-clean value without going through
 /// [`Trust::CERTAIN`], which is the one entry point the seal rests on.
@@ -212,7 +213,7 @@ pub(crate) struct Trust {
 }
 
 impl Trust {
-    /// Every channel clean. The identity of [`Trust::join`], and the only
+    /// Every channel clean. The identity of the join, and the only
     /// certainty this module hands out — to the property module alone.
     pub(in crate::properties) const CERTAIN: Self = Trust {
         unpinned: None,
@@ -265,8 +266,9 @@ impl Trust {
             && (sdk_package.is_none() || stored.sdk_package.is_some())
     }
 
-    /// [`Trust::join`] in place, cloning only a witness this trust lacks — so
-    /// the clean case, nearly every read, allocates nothing.
+    /// The join in place (`Trust::join` is the test-only reference form),
+    /// cloning only a witness this trust lacks — so the clean case, nearly
+    /// every read, allocates nothing.
     pub(crate) fn join_in(&mut self, other: &Trust) {
         let Trust {
             unpinned,
