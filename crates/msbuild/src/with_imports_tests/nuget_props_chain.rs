@@ -882,7 +882,7 @@ const OVERRIDABLE_TOOLSET_NAMES: [&str; 4] = [
 /// the walk committed it.
 fn committed_probe(result: &ParsedProject) -> Option<&str> {
     let value = result.properties.get("Probe")?;
-    (!result.property_provenance_untrusted("Probe")).then_some(value.as_str())
+    (!result.property("Probe").untrusted_cause().is_some()).then_some(value.as_str())
 }
 
 /// The ways a body reads a toolset name, each a different route through the
@@ -1044,7 +1044,10 @@ fn an_undecided_import_before_the_sdk_withholds_the_overridable_seeds() {
                 // decoy's `Microsoft.Common.props` was skipped.
                 if hidden_writes && name == "MSBuildExtensionsPath" {
                     assert!(
-                        result.property_provenance_untrusted("ProbeCommonPropsFrom")
+                        result
+                            .property("ProbeCommonPropsFrom")
+                            .untrusted_cause()
+                            .is_some()
                             || result
                                 .properties
                                 .get("ProbeCommonPropsFrom")

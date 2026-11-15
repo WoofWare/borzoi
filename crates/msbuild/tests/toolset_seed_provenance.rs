@@ -114,7 +114,7 @@ fn an_overridable_toolset_seed_keeps_a_refused_writes_uncertainty() {
     for name in ["MSBuildSDKsPath", "MSBuildExtensionsPath32"] {
         let parsed = parse_with_real_sdk(&refused_write_before_the_sdk(name));
         assert!(
-            parsed.property_provenance_untrusted(name),
+            parsed.property(name).untrusted_cause().is_some(),
             "{name} takes a project write in the real build, so a refused write \
              to it must leave the toolset seed untrusted",
         );
@@ -129,7 +129,10 @@ fn a_reserved_toolset_seed_discards_a_refused_writes_uncertainty() {
     // for no risk at all.
     let parsed = parse_with_real_sdk(&refused_write_before_the_sdk("MSBuildToolsPath"));
     assert!(
-        !parsed.property_provenance_untrusted("MSBuildToolsPath"),
+        !parsed
+            .property("MSBuildToolsPath")
+            .untrusted_cause()
+            .is_some(),
         "MSBuildToolsPath is reserved (MSB4004), so a refused project write to \
          it says nothing about the real build's value and must not taint the \
          toolset seed",
@@ -223,7 +226,7 @@ fn an_overridable_toolset_seed_is_withheld_behind_an_undecided_import() {
                 }
                 let ours = parsed.properties.get("Probe").map(String::as_str);
                 assert!(
-                    parsed.property_provenance_untrusted("Probe") || ours == theirs,
+                    parsed.property("Probe").untrusted_cause().is_some() || ours == theirs,
                     "certain-implies-exact violated for {case}: we committed {ours:?}, \
                      MSBuild reads {theirs:?}",
                 );

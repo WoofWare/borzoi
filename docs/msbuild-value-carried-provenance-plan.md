@@ -28,18 +28,22 @@
 > reader still trusts a held value under opacity (#792, a measured trade-off
 > the metamorphic gate's opacity tier counts).
 >
-> **Open, in order:** P4; #792 per reader, measured; the three P2″ precision
-> items; P1′.
+> **P4 step 1 has landed** (see "P4 step 1: one read per name"): the
+> property table is published as one `PropertyRead` per name, and a refused
+> write reads as a name the real build may define, not as one never written
+> (#780).
 >
-> **Known wrong commits, reproducible, not fixed:** #780 (a refused write
-> reads as never written), #781 (a file spliced on an undecided gate publishes
-> trusted values), #782 (a single-witness root lets the `DefineConstants`
-> self-append exemption drop a cause), #792 (a stale value published as
-> trusted by a reader other than the splice and the Compile items) and #811
-> (the fallback splice reads an unbound gate or path that hidden content may
-> have defined). #780–#782 and #811 are pinned by ignored tests that assert
-> the right answer; #780, #781, #792 and #811 are set aside by the metamorphic
-> gate with their counts pinned.
+> **Open, in order:** the rest of P4; #792 per reader, measured; the three
+> P2″ precision items; P1′.
+>
+> **Known wrong commits, reproducible, not fixed:** #781 (a file spliced on
+> an undecided gate publishes trusted values), #782 (a single-witness root
+> lets the `DefineConstants` self-append exemption drop a cause), #792 (a
+> stale value published as trusted by a reader other than the splice and the
+> Compile items) and #811 (the fallback splice reads an unbound gate or path
+> that hidden content may have defined). #781, #782 and #811 are pinned by
+> ignored tests that assert the right answer; #781, #792 and #811 are set
+> aside by the metamorphic gate with their counts pinned.
 
 ## The rule
 
@@ -440,8 +444,8 @@ next reader does not re-derive them.
 | 3 | `evaluator.rs` | `DirectoryPackagesPropsPath` | **no consumer to protect** — probed on a real SDK chain, CPM references are uncertain under an undecidable redirect *and* both cleanly-decided controls, because the inline discharge never fires there |
 | 4–5 | `evaluator.rs` | `ManagePackageVersionsCentrally`, `CentralPackageVersionsFileImported` | **defect, fixed** (#266); trust already covered at the write site by `package_context`, pinned by `inline_cpm_tainted_{manage_flag,import_marker}_stays_uncertain` |
 | 6 | `evaluator.rs` | `CentralPackageVersionOverrideEnabled` | **conservative by construction** — the SDK forwards it to the restore task rather than comparing it, so its vocabulary is NuGet's C# and this crate cannot ground-truth it; widened to treat either reading's `false` as opting out, which retains uncertainty under both |
-| 7 | `evaluator.rs` | the `written` loop building `ParsedProject::properties` | **already discharged** — published beside `untrusted_properties`, and both real consumers (`workspace.rs`, reading `TargetFramework`) compute `property_provenance_untrusted` and thread it |
-| 8 | `evaluator.rs` | `LangVersion` | **already discharged** — `semantic.rs` reads `property_provenance_untrusted("LangVersion")` into the fold's cache key, alongside the bespoke consequence-side `shape_depends_on_language_version` the `msbuild-trust-audit` skill describes |
+| 7 | `evaluator.rs` | the `written` loop building `ParsedProject::properties` | **already discharged** — trust-blind by contract since P4 step 1; consumers read `ParsedProject::property` |
+| 8 | `evaluator.rs` | `LangVersion` | **already discharged** — the LSP reads `property("LangVersion")` into the fold's cache key, alongside the bespoke consequence-side `shape_depends_on_language_version` the `msbuild-trust-audit` skill describes |
 | 12 | `properties/expr.rs` | `MSBuildDisableFeaturesFromVersion` | **fail-safe by construction** — evaluates only when the table holds exactly the `999.999` sentinel, and returns `Unsupported` for every other reading including an untrusted one |
 | — | `evaluator.rs` | `seed_toolset_properties` | **not a gap** — see above; the omitted call is required |
 
@@ -1320,7 +1324,7 @@ coexist with it?** Each site now says so at the read, in a comment beside a
 | `into_project`: CPM flags | `ManagePackageVersionsCentrally`, `CentralPackageVersionsFileImported` | `package_context` at the write | coexists: the write already left the package set uncertain |
 | `into_project`: CPM override | `CentralPackageVersionOverrideEnabled` | conservative by construction | coexists |
 | `into_project`: `DirectoryPackagesPropsPath` | — | none needed | no consumer to protect (P2′) |
-| `into_project`: `properties`, `LangVersion`, `OtherFlags` | published values | `untrusted_properties` beside them; for `LangVersion`, also `shape_depends_on_language_version` in the LSP | **coexists** — the case question 1 anticipated |
+| `into_project`: `properties`, `LangVersion`, `OtherFlags` | published values | `property_reads` beside them (P4 step 1); for `LangVersion`, also `shape_depends_on_language_version` in the LSP | **coexists** — the case question 1 anticipated |
 | `into_project`: `DefineConstants` | published list | `define_constants_uncertain` | coexists (consequence-side, user-authored only) |
 | `into_project`: `TargetFrameworks` | published list | none: the TFM-invariant intersection trusts no branch | coexists |
 | `expr.rs`: `MSBuildDisableFeaturesFromVersion`, `MSBuildThisFileDirectory` | inside an expansion | `Reads` | **replaces**: carried with no code at the site |
@@ -1349,6 +1353,46 @@ read is `grep ignoring_trust`, and each carries the comment that says where
 its trust question is answered.
 
 ### P4 — the same treatment for items and metadata
+
+#### P4 step 1: one read per name
+
+`ParsedProject::property_reads` publishes what a read of each property name
+sees at the end of the walk, read through `ParsedProject::property(name)`:
+
+| `PropertyRead` | meaning |
+| --- | --- |
+| `Value(v)` | a value the walk trusts |
+| `Unset` | undefined, and undefined in the real build too |
+| `UnsetInexact(why)` | undefined in the walk, but the real build may define it: a refused write, the environment, the toolset, content the walk could not see, or a consumer carve-out (`DefineConstants`, a multi-TFM `TargetFramework`) |
+| `Untrusted(cause)` | a value the walk holds and may have wrong |
+
+It replaces `untrusted_properties`, whose name-keyed set left a refused write
+out (a refusal holds no value) while `properties` left it out too, so the
+name read as never written (#780). The table names every entry the walk holds
+(bound, or given a verdict), the environment's names and the carve-outs; any
+other name reads as a toolset name or as `otherwise` (`Unset`, or `Opaque`
+once the walk passed unseen content). They are the restore-cone probe's reads
+(`State::read_property`), and every probed read is asserted equal to the
+published one, so the census's real SDK cones hold the table to the probe.
+
+The other two #780 readers read the refusal as well: `target_name` declines
+on a refused (or unpromoted environment) `TargetName` or `AssemblyName`, and a
+reference, package or metadata gate that rests on a refused name is untrusted
+(`condition_reads_untrusted_value`). Every consumer in `crates/lsp` reads
+`property`; the motivating one, `tfm_untrusted`, now leaves a node whose body
+`TargetFramework` was refused with an unresolved TFM rather than an
+undeclared one. An unset name after unseen content (`Opaque`) stays trusted by
+those consumers, the #792 trade-off.
+
+`properties` remains, documented as trust-blind: a display map of what the
+project wrote, which no consumer outside the crate's tests reads.
+
+The metamorphic gate's #780 set-aside is gone: its property facts read
+`property` (a `Value` or `Unset` read is a claim; the other two decline), and
+both #780 witnesses pass. Plants: `read_property` reading a refusal as `Unset`
+(527 and 203 violations, and the `TargetName` witness), `target_name`
+ignoring a refusal (60 and 18, and the witness), the gate predicate ignoring
+one (5, and the `ProjectReference` witness).
 
 `tainted_item_lists`, `untracked_item_lists`, `HelperMetadataUncertainty`, and
 the `*_uncertain: bool` fields. Turn every *absent vs unread* boolean into a
@@ -1435,8 +1479,8 @@ machinery under test:
 > published, certain and identical, by every world that publishes it, and
 > by at least one.
 
-The facts are the consumer surface: each property not in
-`untrusted_properties`, the Compile items while `items_uncertain` is clear,
+The facts are the consumer surface: each property read as a value or as
+unset (`ParsedProject::property`), the Compile items while `items_uncertain` is clear,
 `define_constants` while `define_constants_uncertain` is clear, the
 `ProjectReference` list while `project_references_uncertain` is clear
 (graded as "no phantom edge", the contract that list has), and a known
@@ -1474,13 +1518,17 @@ The miss is an equivalent mutant: nothing reads the `refused` channel of a
 name, never of the join `trust_for_raw` builds, because a refused name is
 unbound and its readers see an undefined read, which the unpinned channel
 then carries. So `join`'s refused arm is dead today, which is worth knowing
-before P3 makes the join the thing every value carries.
+before P3 makes the join the thing every value carries. P4 step 1's gate
+reader (`condition_reads_untrusted_value`) asks each unbound name it reads,
+not the join, since a refused name a later clean write bound holds an exact
+value.
 
 **What it found on `main`,** none of it the plants':
 
-- #780: a refused write reads as never written. `properties` and
-  `untrusted_properties` both omit it, `target_name` falls through it, and a
-  `ProjectReference` gate reading it captures a phantom edge. The
+- #780 (fixed by P4 step 1): a refused write read as never written.
+  `properties` and `untrusted_properties` both omitted it, `target_name` fell
+  through it, and a `ProjectReference` gate reading it captured a phantom
+  edge. The
   `refused` channel's own docs explain why `reference_is_untrusted` excludes
   it, and the explanation holds only for readers that go through the
   undefined-read guard.
@@ -1490,9 +1538,9 @@ before P3 makes the join the thing every value carries.
   witness, and the `DefineConstants` self-append exemption, keyed on the
   witness's name, then drops the other.
 
-The first two are set aside by the gate, each counted and the count pinned
-for the fixed seeds, so a fix must move the pin; the third is pinned as an
-ignored witness.
+#781 is set aside by the gate, counted and the count pinned for the fixed
+seeds, so a fix must move the pin (#780 was too, until P4 step 1 removed the
+set-aside); #782 is pinned as an ignored witness.
 
 **The opacity tier** wraps an import rather than a write: a synthetic SDK
 writes properties, then imports a file behind an undecidable gate that may

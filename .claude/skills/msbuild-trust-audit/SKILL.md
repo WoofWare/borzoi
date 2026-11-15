@@ -8,8 +8,11 @@ description: How to decide whether an MSBuild-evaluated value may be trusted, an
 Two distinct jobs, often confused:
 
 - **Reference semantics** — "this value locates a file / names an edge". The
-  generic seam `ParsedProject::property_provenance_untrusted` is the right
-  signal.
+  generic seam `ParsedProject::property(name)` is the right signal: it returns
+  a `PropertyRead`, and only `Value` (a trusted value) and `Unset` (undefined
+  in the real build too) are the real build's answer. Match all four variants:
+  `UnsetInexact(Refused)` is a write the walk could not compute, which a
+  consumer reading a missing key as "never written" gets wrong (#780).
 - **Fold gates** — "refuse to analyse this project at all". The generic seam is
   **unusable** here alone. See §2.
 
@@ -101,8 +104,9 @@ ever consumes staleness, the per-value mark is where it reads it. On a
 real SDK an untrusted `TargetFramework` therefore still taints `LangVersion`. Ask a
 condition's trust through those, never through `trust_for_raw` /
 `unpinned_root_for_raw` on its text — that reintroduces the over-taint
-WoofWare/borzoi#499 hit. To tell a user *why* a value is untrusted, read
-`ParsedProject::property_untrusted_cause`.
+WoofWare/borzoi#499 hit. To tell a user *why* a value is untrusted, read the
+`UntrustedCause` in `PropertyRead::Untrusted`, or `InexactUnset::cause` for a
+name the real build may define.
 
 ### Inside the evaluator: the trust is on the value
 
@@ -132,7 +136,7 @@ tidy-up.
 
 ## 2. Never gate a fold on the generic provenance seam
 
-`ParsedProject::property_provenance_untrusted` fires for **dozens of
+An untrusted `ParsedProject::property` read happens for **dozens of
 properties on every real SDK project**: a plain `net10.0` library marks 84,
 `DefineConstants`, `OutputPath`, `OutDir`, `TargetFrameworkMoniker` and
 `IntermediateOutputPath` among them (dotnet 10.0.301). SDK-file uncertainty is

@@ -22,9 +22,10 @@ use super::item_pass::{
     PackageItemKind, helper_item_definition_default_uncertainties, is_package_id_shape,
     item_list_view,
 };
+pub use super::property_reads::{InexactUnset, PropertyRead};
 use super::{EvaluatedItem, HelperMetadataUncertainty, HelperMetadataUncertaintyKind};
-use super::{State, is_toolset_initial_property_name, item_key};
-use crate::{PackageReferenceUncertaintyCauseKind, UntrustedCause};
+use super::{State, item_key};
+use crate::PackageReferenceUncertaintyCauseKind;
 
 /// The names a [`ReadProbe`]'s caller wants read at the end of the walk.
 #[derive(Debug, Clone, Default)]
@@ -89,38 +90,6 @@ pub struct TargetDefinition {
     pub range: Range<usize>,
     /// The element's text, as the file spells it.
     pub xml: String,
-}
-
-/// A read of one property at the end of the walk.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PropertyRead {
-    /// A value the walk trusts, unescaped as a target's read sees it.
-    Value(String),
-    /// Undefined, and undefined in the real build too.
-    Unset,
-    /// Undefined in the walk, but the real build may define it.
-    UnsetInexact(InexactUnset),
-    /// A value the walk holds but may have wrong.
-    Untrusted(UntrustedCause),
-}
-
-/// Why an undefined name might be defined in the real build.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InexactUnset {
-    /// The walk refused a write of it (a value it could not evaluate), so the
-    /// real build holds a value where the walk holds none.
-    Refused,
-    /// The environment may define it.
-    Environment,
-    /// MSBuild's toolset defines it before evaluation starts, and the walk
-    /// does not model that one.
-    Toolset,
-    /// The walk passed content it could not see, which may define it.
-    Opaque(UntrustedCause),
-    /// A name the walk keeps inexact for its own consumers (`DefineConstants`,
-    /// and `TargetFramework` in a build that may be a cross-targeting
-    /// dispatch).
-    ConsumerCarveOut,
 }
 
 /// A read of one item type at the end of the walk.
@@ -229,36 +198,6 @@ impl State<'_> {
             definition,
             exact: comparable && graph_is_msbuilds,
         }
-    }
-
-    pub(super) fn read_property(&self, name: &str) -> PropertyRead {
-        let trust = self.trust_of(name);
-        if trust.reference_is_untrusted() {
-            let cause = trust
-                .untrusted_cause()
-                .expect("an untrusted reference has a cause");
-            return PropertyRead::Untrusted(cause);
-        }
-        // The entry's trust is the question answered just above.
-        if let Some(value) = self.lookup.get_unescaped_ignoring_trust(name) {
-            return PropertyRead::Value(value);
-        }
-        if self.undefined_read_is_exact(name) {
-            return PropertyRead::Unset;
-        }
-        let lower = name.to_ascii_lowercase();
-        let why = if trust.refused() {
-            InexactUnset::Refused
-        } else if self.env_property_names.contains(&lower) {
-            InexactUnset::Environment
-        } else if is_toolset_initial_property_name(&lower) {
-            InexactUnset::Toolset
-        } else if let Some(cause) = &self.walk_opaque {
-            InexactUnset::Opaque(UntrustedCause::of_opacity(cause))
-        } else {
-            InexactUnset::ConsumerCarveOut
-        };
-        PropertyRead::UnsetInexact(why)
     }
 
     /// Whether the package set's causes leave the central-package list of

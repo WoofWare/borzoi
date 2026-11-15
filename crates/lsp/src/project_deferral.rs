@@ -413,6 +413,9 @@ fn untrusted_cause_phrase(cause: &UntrustedCause) -> String {
             "a value the SDK computes from package inputs I don't model".to_string()
         }
         UntrustedCause::Unentered(what) => format!("content I couldn't read: {what}"),
+        UntrustedCause::Refused { name } => {
+            format!("`$({name})`, which the project sets to a value I can't compute")
+        }
     }
 }
 

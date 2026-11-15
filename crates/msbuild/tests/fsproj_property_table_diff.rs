@@ -176,7 +176,7 @@ fn check_names_at_path(
     // A name whose write leaned on an undefined reference, or on a body we
     // declined to model, is still stored (MSBuild's unset-is-empty rule means
     // we have *a* value), but the walker marks its provenance untrusted and
-    // consumers degrade on it (`ParsedProject::property_provenance_untrusted`).
+    // consumers degrade on it (`ParsedProject::property` reads it untrusted).
     // Those names make no claim.
     //
     // Everything *else* in the same document still does. Skipping the whole
@@ -185,7 +185,7 @@ fn check_names_at_path(
     // wrongly-evaluated `Beta` was never compared at all.
     let ours: Vec<(String, String)> = names
         .iter()
-        .filter(|n| !parsed.property_provenance_untrusted(n))
+        .filter(|n| !parsed.property(n).untrusted_cause().is_some())
         .filter_map(|n| parsed.properties.get(n).map(|v| (n.clone(), v.clone())))
         .collect();
 
@@ -909,7 +909,7 @@ fn an_import_path_holding_a_tab_is_read_as_written() {
             .project(&xml, &names, Some(&project_path), &[])
             .expect("MSBuild evaluates the document");
         assert_eq!(theirs["Alpha"], "tab", "MSBuild's import moved\n{xml}");
-        if !parsed.property_provenance_untrusted("Alpha") {
+        if !parsed.property("Alpha").untrusted_cause().is_some() {
             assert_eq!(
                 parsed.properties.get("Alpha").map(String::as_str),
                 Some("tab"),

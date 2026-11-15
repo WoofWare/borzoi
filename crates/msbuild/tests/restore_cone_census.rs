@@ -752,6 +752,7 @@ fn cause(cause: &borzoi_msbuild::UntrustedCause) -> String {
         Unmodelled(_) => "unmodelled text".to_owned(),
         SdkPackageInput => "an SDK package input".to_owned(),
         Unentered(_) => "content not entered".to_owned(),
+        Refused { name } => format!("$({name}) refused"),
     }
 }
 
