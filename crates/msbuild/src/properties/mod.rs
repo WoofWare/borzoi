@@ -295,6 +295,22 @@ impl PropertyMap {
             .map_or(Trust::certain_ref(), |entry| &entry.trust)
     }
 
+    /// Mark every bound name not in `protected` (lowercase) stale under
+    /// `cause`: the walk has passed content it cannot see, which may have
+    /// rewritten any value it holds — any but a reserved name or a caller
+    /// global, which no file can write.
+    pub(crate) fn go_stale(
+        &mut self,
+        cause: &trust::OpacityCause,
+        protected: &std::collections::HashSet<String>,
+    ) {
+        for (lower, entry) in &mut self.inner {
+            if entry.value.is_some() && !protected.contains(lower) {
+                entry.trust.go_stale(cause);
+            }
+        }
+    }
+
     /// Every name whose trust is not certain, lowercase, with that trust.
     pub(crate) fn uncertain(&self) -> impl Iterator<Item = (&str, &Trust)> {
         self.inner

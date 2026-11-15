@@ -1,6 +1,6 @@
 //! What the walk knows — or does not — about a property's stored value.
 //!
-//! Three forward-uncertainty channels ride alongside the property table, and
+//! Four forward-uncertainty channels ride alongside the property table, and
 //! they are genuinely different downstream, so they are a *product*, not a
 //! collapsed flag:
 //!
@@ -12,8 +12,14 @@
 //!   `items_uncertain` — Compile evaluation tolerates SDK property machinery.
 //! * **refused** records that we stored *no* value where the real build stored
 //!   one. It is read where a name's current value decides something.
+//! * **stale** records that the value was bound before content the walk could
+//!   not see ([`OpacityCause`]), or computed from such a value, so the real
+//!   build may have rewritten it there. It is read only where a value decides a
+//!   `Directory.Build.*` splice; every other reader trusts a held value under
+//!   opacity, a measured trade-off (`docs/msbuild-value-carried-provenance-plan.md`,
+//!   "#614: what each rule costs").
 //!
-//! [`Trust`] holds all three at once, which is the point: the channels are
+//! [`Trust`] holds all four at once, which is the point: the channels are
 //! updated together at a write ([`PropertyProvenance`]) and consulted together
 //! at a read, so a code path cannot service one and silently forget the rest.
 //! Where a reader wants a *subset* — and two of them legitimately do — it says
@@ -195,9 +201,10 @@ pub(crate) struct TrustShape {
     unpinned: bool,
     sdk_package: bool,
     refused: bool,
+    stale: bool,
 }
 
-/// The three forward-uncertainty channels for one property name.
+/// The four forward-uncertainty channels for one property name.
 ///
 /// [`Trust::CERTAIN`] is the identity of the join ([`Trust::join_all`],
 /// [`Trust::join_in`]) and means every channel is clean — the walk's value
@@ -210,6 +217,7 @@ pub(crate) struct Trust {
     unpinned: Option<UnpinnedRoot>,
     sdk_package: Option<SdkPackagePropertyTaint>,
     refused: bool,
+    stale: Option<OpacityCause>,
 }
 
 impl Trust {
@@ -219,6 +227,7 @@ impl Trust {
         unpinned: None,
         sdk_package: None,
         refused: false,
+        stale: None,
     };
 
     /// [`Trust::CERTAIN`], borrowed — what a lookup that finds no entry should
@@ -250,20 +259,22 @@ impl Trust {
     /// Whether `stored` — the trust a write recorded for a value — holds every
     /// value-describing doubt this trust, the one the value's expansion
     /// carried, names: the two channels [`Trust::reference_is_untrusted`]
-    /// reads. A carried refusal is not required to be held. A read of an
+    /// reads, and staleness. A carried refusal is not required to be held. A read of an
     /// *unbound* refused name is an undefined read, which the write already
     /// records as an unpinned root; a read of a *bound* one (a refusal a clean
     /// overwrite kept, [`RefusedOutcome::Keep`]) reads a value computed exactly,
-    /// and the mark it carries is about the splice reader's tolerance of
-    /// opacity, which a copy does not inherit today.
+    /// and the mark it carries is kept for the splice reader alone (a copy
+    /// that may rest on hidden content carries staleness instead).
     pub(crate) fn is_held_by(&self, stored: &Trust) -> bool {
         let Trust {
             unpinned,
             sdk_package,
             refused: _,
+            stale,
         } = self;
         (unpinned.is_none() || stored.unpinned.is_some())
             && (sdk_package.is_none() || stored.sdk_package.is_some())
+            && (stale.is_none() || stored.stale.is_some())
     }
 
     /// The join in place (`Trust::join` is the test-only reference form),
@@ -274,6 +285,7 @@ impl Trust {
             unpinned,
             sdk_package,
             refused,
+            stale,
         } = other;
         if self.unpinned.is_none() {
             self.unpinned.clone_from(unpinned);
@@ -282,6 +294,9 @@ impl Trust {
             self.sdk_package.clone_from(sdk_package);
         }
         self.refused |= *refused;
+        if self.stale.is_none() {
+            self.stale.clone_from(stale);
+        }
     }
 
     /// Nothing to declare on any channel.
@@ -296,8 +311,9 @@ impl Trust {
             unpinned,
             sdk_package,
             refused,
+            stale,
         } = self;
-        unpinned.is_none() && sdk_package.is_none() && !refused
+        unpinned.is_none() && sdk_package.is_none() && !refused && stale.is_none()
     }
 
     #[cfg(test)]
@@ -306,11 +322,13 @@ impl Trust {
             unpinned,
             sdk_package,
             refused,
+            stale,
         } = self;
         TrustShape {
             unpinned: unpinned.is_some(),
             sdk_package: sdk_package.is_some(),
             refused: *refused,
+            stale: stale.is_some(),
         }
     }
 
@@ -319,10 +337,12 @@ impl Trust {
     /// unpinned root comes first: it names the property or condition to look
     /// at, where the package taint names only the SDK.
     pub(crate) fn untrusted_cause(&self) -> Option<UntrustedCause> {
+        // Staleness is not a published cause: see [`Trust::stale`].
         let Trust {
             unpinned,
             sdk_package,
             refused: _,
+            stale: _,
         } = self;
         match (unpinned, sdk_package) {
             (Some(root), _) => Some(UntrustedCause::of_root(root)),
@@ -349,6 +369,7 @@ impl Trust {
             unpinned: self.unpinned.or(other.unpinned),
             sdk_package: self.sdk_package.or(other.sdk_package),
             refused: self.refused || other.refused,
+            stale: self.stale.or(other.stale),
         }
     }
 
@@ -386,14 +407,28 @@ impl Trust {
     /// The real build stores that value, so a later undefined read of the name
     /// is not exact, and neither is a splice decision resting on it. The mark
     /// then stands for the rest of the walk: a later clean write does *not*
-    /// discharge it, because its reader consumes it mid-walk and tolerates
-    /// SDK-subtree opacity, under which a cleanly-computed value can still rest
-    /// on a property that hidden content redefined (see [`RefusedOutcome::Keep`]
-    /// at the clean-write site). The one clear is the reserved-toolset seed,
+    /// discharge it (see [`RefusedOutcome::Keep`] at the clean-write site).
+    /// The one clear is the reserved-toolset seed,
     /// which re-establishes a name the real build refuses to let the document
     /// write at all.
     pub(crate) fn refused(&self) -> bool {
         self.refused
+    }
+
+    /// Why the value may be stale, if it may: it was bound when the walk
+    /// passed content it could not see, which may have rewritten it, or it was
+    /// computed from such a value (the cause is the opacity's).
+    ///
+    /// Consumed only where a value decides whether a `Directory.Build.*` file
+    /// joins the walk (`State::gate_value_is_exact`, through
+    /// [`Trust::is_certain`]). Every other reader trusts a held value under
+    /// opacity, and the projections that serve them — [`Trust::reference_is_untrusted`]
+    /// and [`Trust::untrusted_cause`] — leave this channel out on purpose: on
+    /// the real SDK chain most values are bound before some opacity, so those
+    /// readers would decline wholesale. That trade-off, and what it costs, is
+    /// measured in the plan.
+    pub(crate) fn stale(&self) -> Option<&OpacityCause> {
+        self.stale.as_ref()
     }
 
     /// Whether a *reference* to this name is untrustworthy — the two channels
@@ -404,13 +439,15 @@ impl Trust {
     /// is judged there ([`Trust::refused`], consulted by the undefined-read
     /// guard). It also outlives a later clean overwrite ([`RefusedOutcome::Keep`]
     /// at that site), so a *bound* name can carry it; then the value is one we
-    /// computed exactly from ordinary text, and the mark stands only for the
-    /// splice reader's tolerance of opacity, which a reference does not share.
+    /// computed exactly from ordinary text, and the mark is kept for the splice
+    /// reader alone.
+    /// The stale channel is absent too ([`Trust::stale`] says why).
     pub(crate) fn reference_is_untrusted(&self) -> bool {
         let Trust {
             unpinned,
             sdk_package,
             refused: _,
+            stale: _,
         } = self;
         unpinned.is_some() || sdk_package.is_some()
     }
@@ -428,6 +465,7 @@ impl Trust {
             taint,
             unpinned,
             refused,
+            stale,
         } = provenance;
         match taint {
             TaintOutcome::Set(taint) => self.sdk_package = Some(taint),
@@ -444,7 +482,20 @@ impl Trust {
             RefusedOutcome::Clear => self.refused = false,
             RefusedOutcome::Keep => {}
         }
+        match stale {
+            StaleOutcome::Set(cause) => self.stale = Some(cause),
+            StaleOutcome::Clear => self.stale = None,
+            StaleOutcome::Keep => {}
+        }
         self
+    }
+
+    /// Mark this trust stale under `cause` unless it already is: what passing
+    /// content the walk cannot see does to a value already bound.
+    pub(in crate::properties) fn go_stale(&mut self, cause: &OpacityCause) {
+        if self.stale.is_none() {
+            self.stale = Some(cause.clone());
+        }
     }
 }
 
@@ -481,8 +532,37 @@ pub(crate) enum RefusedOutcome {
     Keep,
 }
 
+/// What a single property write does to the stale channel.
+pub(crate) enum StaleOutcome {
+    /// The new value rests on a stale one: record the opacity behind it.
+    Set(OpacityCause),
+    /// The new value rests on nothing stale, under a gate that decided — it is
+    /// the real build's value as of this write.
+    Clear,
+    /// Leave the existing mark: the write may not have happened.
+    Keep,
+}
+
+impl StaleOutcome {
+    /// The stale outcome of a write the property pass performed, from what the
+    /// new value and its own condition read (`stale_by`): a value computed from
+    /// a stale one is stale; a fresh value under a decided gate is fresh; a
+    /// fresh value under a gate that may be wrong leaves the old mark, since
+    /// the old value may stand.
+    pub(crate) fn after_write(
+        stale_by: Option<OpacityCause>,
+        write_condition_maybe_wrong: bool,
+    ) -> Self {
+        match stale_by {
+            Some(cause) => StaleOutcome::Set(cause),
+            None if !write_condition_maybe_wrong => StaleOutcome::Clear,
+            None => StaleOutcome::Keep,
+        }
+    }
+}
+
 /// The provenance verdict for a single property write: what happens to **all
-/// three** channels. Because a write must name an outcome for each, a new
+/// four** channels. Because a write must name an outcome for each, a new
 /// write path cannot update one channel and silently forget the others.
 ///
 /// A write site spells the taint outcome with the raw span it has to hand; the
@@ -493,6 +573,7 @@ pub(crate) struct PropertyProvenance<T = Range<usize>> {
     pub(crate) taint: TaintOutcome<T>,
     pub(crate) unpinned: UnpinnedOutcome,
     pub(crate) refused: RefusedOutcome,
+    pub(crate) stale: StaleOutcome,
 }
 
 /// A [`PropertyProvenance`] whose taint payload has been resolved against the
@@ -507,6 +588,7 @@ impl<T> PropertyProvenance<T> {
             taint: self.taint.map(f),
             unpinned: self.unpinned,
             refused: self.refused,
+            stale: self.stale,
         }
     }
 }
@@ -581,6 +663,10 @@ mod tests {
             })
     }
 
+    fn opacity_strategy() -> impl Strategy<Value = OpacityCause> {
+        "[ab]".prop_map(OpacityCause::Unentered)
+    }
+
     /// A deliberately tiny alphabet: the interesting cases are the ones where
     /// two operands both carry a witness and the join has to pick, so the
     /// witnesses must collide often.
@@ -589,11 +675,13 @@ mod tests {
             proptest::option::of(unpinned_root_strategy()),
             proptest::option::of(taint_strategy()),
             any::<bool>(),
+            proptest::option::of(opacity_strategy()),
         )
-            .prop_map(|(unpinned, sdk_package, refused)| Trust {
+            .prop_map(|(unpinned, sdk_package, refused, stale)| Trust {
                 unpinned,
                 sdk_package,
                 refused,
+                stale,
             })
     }
 
@@ -697,6 +785,11 @@ mod tests {
             } else {
                 prop_assert_eq!(joined.sdk_package(), b.sdk_package());
             }
+            if a.stale().is_some() {
+                prop_assert_eq!(joined.stale(), a.stale());
+            } else {
+                prop_assert_eq!(joined.stale(), b.stale());
+            }
         }
 
         /// `reference_is_untrusted` is a *subset* projection, and the subset is
@@ -712,14 +805,24 @@ mod tests {
                 unpinned: None,
                 sdk_package: None,
                 refused: true,
+                stale: None,
             };
             prop_assert!(!refusal_alone.reference_is_untrusted());
             prop_assert!(!refusal_alone.is_certain());
+            let staleness_alone = Trust {
+                unpinned: None,
+                sdk_package: None,
+                refused: false,
+                stale: Some(OpacityCause::Unentered("x".into())),
+            };
+            prop_assert!(!staleness_alone.reference_is_untrusted());
+            prop_assert!(staleness_alone.untrusted_cause().is_none());
+            prop_assert!(!staleness_alone.is_certain());
         }
     }
 
     /// Every channel must be reachable from a certain start, or a test suite
-    /// that only ever exercises two of three would look complete.
+    /// that only ever exercises three of four would look complete.
     #[test]
     fn each_channel_alone_defeats_certainty() {
         for provenance in [
@@ -730,16 +833,25 @@ mod tests {
                 }),
                 unpinned: UnpinnedOutcome::Keep,
                 refused: RefusedOutcome::Keep,
+                stale: StaleOutcome::Keep,
             },
             ResolvedProvenance {
                 taint: TaintOutcome::Keep,
                 unpinned: UnpinnedOutcome::Set(UnpinnedRoot::undefined("X", None)),
                 refused: RefusedOutcome::Keep,
+                stale: StaleOutcome::Keep,
             },
             ResolvedProvenance {
                 taint: TaintOutcome::Keep,
                 unpinned: UnpinnedOutcome::Keep,
                 refused: RefusedOutcome::Set,
+                stale: StaleOutcome::Keep,
+            },
+            ResolvedProvenance {
+                taint: TaintOutcome::Keep,
+                unpinned: UnpinnedOutcome::Keep,
+                refused: RefusedOutcome::Keep,
+                stale: StaleOutcome::Set(OpacityCause::Unentered("x".into())),
             },
         ] {
             assert!(
@@ -761,19 +873,22 @@ mod tests {
             }),
             unpinned: UnpinnedOutcome::Set(UnpinnedRoot::undefined("X", None)),
             refused: RefusedOutcome::Set,
+            stale: StaleOutcome::Set(OpacityCause::Unentered("x".into())),
         });
         assert_eq!(
             dirty.shape(),
             TrustShape {
                 unpinned: true,
                 sdk_package: true,
-                refused: true
+                refused: true,
+                stale: true,
             }
         );
         let cleared = dirty.after(ResolvedProvenance {
             taint: TaintOutcome::Clear,
             unpinned: UnpinnedOutcome::Clear,
             refused: RefusedOutcome::Clear,
+            stale: StaleOutcome::Clear,
         });
         assert_eq!(cleared, Trust::CERTAIN);
     }

@@ -60,6 +60,9 @@ const REPLACEMENTS: &[&str] = &["", "a", "true", "false", "net8.0", "1.2.3", "De
 /// records.
 const SPLICE_WRITTEN: &[&str] = &["FromDirBuild", "DirectoryBuildTargetsPath"];
 
+/// The Compile item the `Directory.Build.targets` fixture contributes.
+const SPLICED_FILE: &str = "FromDirBuild.fs";
+
 /// The two inputs the `Directory.Build.targets` splice decides on.
 const SPLICE_GATES: [&str; 2] = ["ImportDirectoryBuildTargets", "DirectoryBuildTargetsPath"];
 
@@ -408,6 +411,9 @@ struct Census {
     refused_absent: usize,
     /// Cases set aside as the known splice-value defect (see [`check`]).
     spliced_values: usize,
+    /// Cases set aside as a stale value read outside the splice (see
+    /// [`check`]).
+    stale_reads: usize,
     /// Certain facts some world declined while the rest agreed.
     world_declined: usize,
 }
@@ -415,9 +421,13 @@ struct Census {
 impl Census {
     fn print(&self, label: &str) {
         println!(
-            "{label}: {} cases, {} refused-write absences and {} splice values set aside, \
-             {} commits a world declined",
-            self.cases, self.refused_absent, self.spliced_values, self.world_declined
+            "{label}: {} cases, {} refused-write absences, {} splice values and {} stale reads \
+             set aside, {} commits a world declined",
+            self.cases,
+            self.refused_absent,
+            self.spliced_values,
+            self.stale_reads,
+            self.world_declined
         );
         for (kind, owed) in &self.owed {
             println!(
@@ -444,6 +454,7 @@ fn check(
     worlds: &[(String, Facts)],
     absent_but_written: &[&str],
     wrapped: &str,
+    under_opacity: bool,
     label: &str,
 ) {
     census.cases += 1;
@@ -514,6 +525,27 @@ fn check(
             census.spliced_values += 1;
             continue;
         }
+        // Under opacity, every reader but the `Directory.Build.*` splice
+        // trusts a value it holds, though hidden content may have rewritten
+        // it: the stale channel is consumed by the splice alone, a measured
+        // trade-off (`docs/msbuild-value-carried-provenance-plan.md`, "#614:
+        // what each rule costs"), tracked as #792. So a stale read
+        // reaching any other fact is counted, not failed — and a Compile set
+        // that differs in whether the spliced file joined is the splice's own
+        // decision, which must hold.
+        let a_stale_read_outside_the_splice = under_opacity
+            && match (fact, disagreeing.as_ref()) {
+                (Fact::CompileItems, Some((_, Some(world)))) => {
+                    let spliced = |set: &[String]| set.iter().any(|s| s.contains(SPLICED_FILE));
+                    spliced(claim) == spliced(world)
+                }
+                (Fact::CompileItems, _) => false,
+                _ => true,
+            };
+        if a_stale_read_outside_the_splice {
+            census.stale_reads += 1;
+            continue;
+        }
         census.violation_count += 1;
         *census.violated.entry(fact_kind(fact)).or_default() += 1;
         if census.violated[fact_kind(fact)] <= 2 {
@@ -578,6 +610,7 @@ fn sweep(
                 &world_facts,
                 &absent_but_written,
                 doc.writes[target].name,
+                false,
                 &format!("{label} {wrap:?}"),
             );
         }
@@ -609,7 +642,9 @@ impl DirectoryBuildFixture {
         let root = host_fs::canonicalize(dir.path()).unwrap();
         std::fs::write(
             root.join("Directory.Build.targets"),
-            r#"<Project><PropertyGroup><FromDirBuild>set</FromDirBuild></PropertyGroup><ItemGroup><Compile Include="FromDirBuild.fs" /></ItemGroup></Project>"#,
+            format!(
+                r#"<Project><PropertyGroup><FromDirBuild>set</FromDirBuild></PropertyGroup><ItemGroup><Compile Include="{SPLICED_FILE}" /></ItemGroup></Project>"#
+            ),
         )
         .unwrap();
         Self {
@@ -651,14 +686,16 @@ struct OpacityDoc {
 }
 
 fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
-    const LITERALS: &[&str] = &["", "a", "true", "false", "net8.0", "Debug", "1.2.3"];
+    const LITERALS: &[&str] = &[
+        "", "true", "false", "true", "false", "net8.0", "Debug", "1.2.3",
+    ];
     let literal_write = |rng: &mut SplitMix64, name: &'static str| Write {
         name,
         group_condition: None,
         condition: None,
         body: (*rng.pick(LITERALS)).to_string(),
     };
-    let body = gen_doc(rng, names);
+    let mut body = gen_doc(rng, names);
     let before: Vec<Write> = (0..1 + rng.below(4))
         .map(|_| {
             let name = *rng.pick(names);
@@ -677,6 +714,27 @@ fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
             literal_write(rng, name)
         })
         .collect();
+    // Most cases copy a value the SDK wrote before the opacity into the
+    // splice's gate or path, as #614's witness does; the rest leave the
+    // splice to whatever the generated body reads.
+    if rng.below(10) < 7 {
+        let gate = if rng.below(5) == 0 {
+            SPLICE_GATES[1]
+        } else {
+            SPLICE_GATES[0]
+        };
+        let source = rng.pick(&before).name;
+        let at = rng.below(body.writes.len() + 1);
+        body.writes.insert(
+            at,
+            Write {
+                name: gate,
+                group_condition: None,
+                condition: None,
+                body: format!("$({source})"),
+            },
+        );
+    }
     OpacityDoc {
         before,
         hidden,
@@ -812,6 +870,7 @@ fn sweep_opacity(seed: u64, cases: usize, names: &[&'static str]) -> Census {
             &world_facts,
             &absent_but_written,
             "",
+            true,
             "opacity",
         );
     }
@@ -896,9 +955,14 @@ fn an_undecided_directory_build_gate_write_claims_no_more_than_its_worlds_agree_
 /// cannot see, read by the body after it.
 #[test]
 fn a_value_written_before_hidden_content_claims_no_more_than_its_worlds_agree_on() {
-    let census = sweep_opacity(0x0bac_17e5, 300, &written_names(true));
+    let census = sweep_opacity(0x0bac_17e5, 800, &written_names(true));
     census.print("with an undecided SDK import");
-    assert_sound(&census, &[]);
+    assert_sound(&census, &[("Compile items", 30)]);
+    assert_set_asides(&census, 16, 165);
+    assert_eq!(
+        census.stale_reads, 1199,
+        "the #792 set-aside count (a stale value read outside the splice) moved"
+    );
 }
 
 /// The fresh-seed twin of the two sweeps above. Seed 1 at 4 000 cases finds
