@@ -680,6 +680,12 @@ const OPACITY_SDK: &str = "OpacitySdk";
 struct OpacityDoc {
     /// Written in `Sdk.props` before the undecided import.
     before: Vec<Write>,
+    /// Where an earlier undecided import of an empty file sits among
+    /// `before`, if anywhere: a second opacity, behaviourally inert (the file
+    /// writes nothing, so every world imports it unconditionally) but one the
+    /// walk latches. A value bound between the two latches is stale only if
+    /// the *second* latch marks it too.
+    earlier_opacity: Option<usize>,
     /// Written by the hidden file, when it is imported.
     hidden: Vec<Write>,
     body: Doc,
@@ -735,8 +741,10 @@ fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
             },
         );
     }
+    let earlier_opacity = (rng.below(2) == 0).then(|| rng.below(before.len() + 1));
     OpacityDoc {
         before,
+        earlier_opacity,
         hidden,
         body,
     }
@@ -767,9 +775,21 @@ fn render_opacity(doc: &OpacityDoc, variant: &Variant) -> (String, String, Strin
         ),
         _ => "  <Import Project=\"Hidden.props\" />\n".to_string(),
     };
+    let (early, late) = doc
+        .before
+        .split_at(doc.earlier_opacity.unwrap_or(0).min(doc.before.len()));
+    let earlier = match (doc.earlier_opacity, variant) {
+        (None, _) => String::new(),
+        (Some(_), Variant::Undecided(_)) => format!(
+            "  <Import Project=\"Empty.props\" Condition=\"{}\" />\n",
+            xml_escape(UNDECIDABLE)
+        ),
+        (Some(_), _) => "  <Import Project=\"Empty.props\" />\n".to_string(),
+    };
     let sdk_props = format!(
-        "<Project>\n{}{import}</Project>\n",
-        render_writes(&doc.before)
+        "<Project>\n{}{earlier}{}{import}</Project>\n",
+        render_writes(early),
+        render_writes(late)
     );
     let hidden = format!("<Project>\n{}</Project>\n", render_writes(&doc.hidden));
     let body = render(&doc.body, usize::MAX, &Variant::Taken).replacen(
@@ -798,6 +818,7 @@ impl OpacityFixture {
             .join(OPACITY_SDK);
         std::fs::create_dir_all(&sdk).unwrap();
         std::fs::write(sdk.join("Sdk.targets"), "<Project />").unwrap();
+        std::fs::write(sdk.join("Empty.props"), "<Project />").unwrap();
         Self { inner, sdk }
     }
 
@@ -958,9 +979,9 @@ fn a_value_written_before_hidden_content_claims_no_more_than_its_worlds_agree_on
     let census = sweep_opacity(0x0bac_17e5, 800, &written_names(true));
     census.print("with an undecided SDK import");
     assert_sound(&census, &[("Compile items", 30)]);
-    assert_set_asides(&census, 16, 165);
+    assert_set_asides(&census, 7, 177);
     assert_eq!(
-        census.stale_reads, 1199,
+        census.stale_reads, 1129,
         "the #792 set-aside count (a stale value read outside the splice) moved"
     );
 }

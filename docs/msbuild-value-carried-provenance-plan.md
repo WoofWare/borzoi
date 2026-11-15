@@ -16,28 +16,27 @@
 > (see "As landed: the world-bracketing gate"). On `main` it found three
 > wrong-answer classes nothing else saw (#780, #781, #782).
 >
-> **P3 is scheduled** (2026-11). The census argument for deferring it was
-> that the committed surface is small; the A₁.3c executor has since grown it,
-> and #614 is a wrong commit whose sound fix is a per-value fact. P3 is
-> taken as a representation change with every differential, census and
-> manifest unmoved, and the #614 fix as the stage after it.
->
 > **P3 landed:** the trust lives on the property table's entry beside the
 > value, the name-keyed map is gone, an expansion carries the trust of what it
 > read, certainty is sealed to the property module, and every trust-discarding
 > read says so by name (see "P3 … As landed").
 >
-> **Open, in order:** the #614 staleness channel on the carried trust
-> (measured under "#614: what each rule costs"); P4; the three P2″ precision
+> **#614 is closed by a fourth channel, `stale`** (see "#614: as landed"): a
+> value bound before content the walk could not see, or computed from one,
+> carries the opacity behind it, and the `Directory.Build.*` splice declines
+> on it. Every other reader still trusts a held value under opacity (#792, a
+> measured trade-off the metamorphic gate's opacity tier counts).
+>
+> **Open, in order:** P4; #792 per reader, measured; the three P2″ precision
 > items; P1′.
 >
-> **Known wrong commits, reproducible, not fixed:** #614 (a
-> `Directory.Build.*` gate written from a property an opaque *SDK-subtree*
-> import may have redefined — see "A third round produced the witness"),
-> #780 (a refused write reads as never written), #781 (a file spliced on an
-> undecided gate publishes trusted values) and #782 (a single-witness root
-> lets the `DefineConstants` self-append exemption drop a cause). Each is
-> pinned by an ignored test that asserts the right answer.
+> **Known wrong commits, reproducible, not fixed:** #780 (a refused write
+> reads as never written), #781 (a file spliced on an undecided gate publishes
+> trusted values), #782 (a single-witness root lets the `DefineConstants`
+> self-append exemption drop a cause) and #792 (a stale value published as
+> trusted by a reader other than the splice). #780–#782 are pinned by ignored
+> tests that assert the right answer; #780, #781 and #792 are set aside by the
+> metamorphic gate with their counts pinned.
 
 ## The rule
 
@@ -1005,6 +1004,42 @@ closes the witness at no measured cost; blunt and stale_any cost five
 committed Compile sets on the F# corpus. The residual it leaves — an
 *unbound* gate that hidden content may have defined — is the default-fill
 trade-off above, already documented where it is made.
+
+#### #614: as landed
+
+`Trust` has a fourth channel, `stale: Option<OpacityCause>`, implemented as
+measured:
+
+- **set** at every `latch_walk_opaque` (not only the first) over each bound
+  entry outside `State::protected` — reserved names and caller globals, which
+  no file can write (`PropertyMap::go_stale`);
+- **joined** through `Reads` like the other channels, so a value read from a
+  stale binding carries it with no code at the read;
+- **stored** by the clean-write verdict (`StaleOutcome::after_write`) from what
+  the value carried and what its own condition's scan reads, kept by every
+  write that stores nothing, and cleared with the rest by the reserved-toolset
+  scrub;
+- **consumed** by `gate_value_is_exact` alone, through `Trust::is_certain`.
+  `reference_is_untrusted` and `untrusted_cause` leave it out, so
+  `untrusted_properties` and every condition decision are unchanged.
+
+The metamorphic gate gained the dimension that generates the class: an
+opacity tier (`a_value_written_before_hidden_content_claims_no_more_than_its_worlds_agree_on`)
+in which a synthetic SDK writes properties, then imports a file behind an
+undecidable gate that may redefine them, and the body copies one into the
+splice's gate or path. On the parent it reports **13** splice decisions
+committed wrongly over 800 cases; with the channel, **0**. #614's witness is
+un-ignored and passes. The tier counts, and pins, the stale reads that reach
+other facts (1,199 over 800 cases, nearly all properties) as #792.
+
+**Re-measured with the implementation:** RESULTS2
+
+What the channel does *not* decide, deliberately: the SDK chain's own
+`Directory.Build.props` import point (`props_import_point`) asks
+`reference_is_untrusted` of `DirectoryBuildPropsPath`, which leaves staleness
+out. No generated case reaches that reader (the synthetic SDKs have no
+`Microsoft.Common.props` import point), so it was not widened; it is the first
+candidate if #792 is taken reader by reader.
 
 ### The census, re-run — and what it says about P3's priority
 
