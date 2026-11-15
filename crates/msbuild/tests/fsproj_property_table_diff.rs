@@ -34,7 +34,10 @@ use std::path::Path;
 
 use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::parse_fsproj;
-use common::{Oracle, SplitMix64};
+use common::{
+    CONTROLLED_PROPERTY_NAMES, Oracle, SplitMix64, breaks_inside_quote, gen_bool_expr, gen_props,
+    respell_whitespace,
+};
 use tempfile::TempDir;
 
 /// Property names the generator may define. Disjoint from MSBuild reserved
@@ -139,6 +142,18 @@ fn check_property_table_at_path(oracle: &mut Oracle, xml: &str, dir: &Path) -> u
 }
 
 fn check_at_path(oracle: &mut Oracle, xml: &str, dir: Option<&Path>) -> usize {
+    let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
+    check_names_at_path(oracle, xml, &names, dir).len()
+}
+
+/// [`check_at_path`] over a caller's set of names, returning those we
+/// committed.
+fn check_names_at_path(
+    oracle: &mut Oracle,
+    xml: &str,
+    names: &[String],
+    dir: Option<&Path>,
+) -> Vec<String> {
     let owned;
     let project_path: &Path = match dir {
         Some(dir) => {
@@ -154,9 +169,8 @@ fn check_at_path(oracle: &mut Oracle, xml: &str, dir: Option<&Path>) -> usize {
         &common::oracle_environment(),
     ) else {
         // Malformed XML: both sides reject, nothing to compare.
-        return 0;
+        return Vec::new();
     };
-    let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
 
     // The walker's contract, not a stricter one — and it is **per property**.
     // A name whose write leaned on an undefined reference, or on a body we
@@ -175,13 +189,13 @@ fn check_at_path(oracle: &mut Oracle, xml: &str, dir: Option<&Path>) -> usize {
         .filter_map(|n| parsed.properties.get(n).map(|v| (n.clone(), v.clone())))
         .collect();
 
-    let Some(theirs) = oracle.project(xml, &names, dir.map(|_| project_path), &[]) else {
+    let Some(theirs) = oracle.project(xml, names, dir.map(|_| project_path), &[]) else {
         assert!(
             ours.is_empty(),
             "certain-implies-exact violated: MSBuild rejects this project, but we \
              committed {ours:?}\n--- xml ---\n{xml}"
         );
-        return 0;
+        return Vec::new();
     };
 
     for (name, our_value) in &ours {
@@ -194,7 +208,7 @@ fn check_at_path(oracle: &mut Oracle, xml: &str, dir: Option<&Path>) -> usize {
              {our_value:?}, MSBuild to {their_value:?}\n--- xml ---\n{xml}"
         );
     }
-    ours.len()
+    ours.into_iter().map(|(name, _)| name).collect()
 }
 
 /// Every body in the alphabet, on its own — the corner list. A failure here
@@ -604,6 +618,273 @@ fn duplicate_imports_are_skipped_exactly() {
             "{cluster}: certain-implies-exact violated (diagnostics: {:?})",
             parsed.diagnostics
         );
+    }
+}
+
+/// `text` escaped as an attribute value, its whitespace left as written: a tab,
+/// line feed or carriage return reaches MSBuild as itself (#750).
+fn raw_attribute(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// An attribute value from [`raw_attribute`] with, now and then, a tab, line
+/// feed or carriage return spelt as a character reference (decimal or hex) and
+/// a `'` as `&apos;`. Both readers decode each to the character it names, and
+/// neither normalises a character a reference spells.
+fn entity_spelt(rng: &mut SplitMix64, attribute: &str) -> String {
+    let mut out = String::with_capacity(attribute.len());
+    for c in attribute.chars() {
+        match c {
+            '\t' | '\n' | '\r' if rng.below(2) == 0 => {
+                let code = u32::from(c);
+                if rng.below(2) == 0 {
+                    out.push_str(&format!("&#{code};"));
+                } else {
+                    out.push_str(&format!("&#x{code:X};"));
+                }
+            }
+            '\'' if rng.below(4) == 0 => out.push_str("&apos;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// How many places [`conditioned_document`] can put a condition.
+const CONDITION_SITES: usize = 3;
+
+/// A document that sets `props`, then writes `R` as `TRUE` exactly when the
+/// condition attribute `attribute` holds, read at site `site` (below
+/// [`CONDITION_SITES`]): on the write, on its group, or on a `<When>`.
+fn conditioned_document(props: &[(String, String)], attribute: &str, site: usize) -> String {
+    let mut xml = String::from("<Project>\n  <PropertyGroup>\n");
+    for (name, value) in props {
+        xml.push_str(&format!("    <{name}>{value}</{name}>\n"));
+    }
+    xml.push_str("  </PropertyGroup>\n");
+    xml.push_str(&match site {
+        0 => format!(
+            "  <PropertyGroup>\n    <R>FALSE</R>\n    \
+             <R Condition=\"{attribute}\">TRUE</R>\n  </PropertyGroup>\n"
+        ),
+        1 => format!(
+            "  <PropertyGroup>\n    <R>FALSE</R>\n  </PropertyGroup>\n  \
+             <PropertyGroup Condition=\"{attribute}\">\n    <R>TRUE</R>\n  </PropertyGroup>\n"
+        ),
+        _ => format!(
+            "  <Choose>\n    <When Condition=\"{attribute}\">\n      \
+             <PropertyGroup><R>TRUE</R></PropertyGroup>\n    </When>\n    <Otherwise>\n      \
+             <PropertyGroup><R>FALSE</R></PropertyGroup>\n    </Otherwise>\n  </Choose>\n"
+        ),
+    });
+    xml.push_str("</Project>\n");
+    xml
+}
+
+/// The probe of #750: a line break inside a quoted string of a condition is a
+/// character, and outside one it is whitespace, because MSBuild reads a
+/// project's attributes without XML's attribute-value normalisation. Each
+/// verdict is pinned as well as diffed, since a document both sides misread
+/// alike would pass the differential alone, and so is whether we commit. (The
+/// property-function evaluator declines a line break in a string argument.)
+#[test]
+fn a_line_break_in_a_condition_is_read_as_written() {
+    let mut oracle = Oracle::spawn();
+    let props = [("Foo".to_string(), "x y".to_string())];
+    let names = ["R".to_string()];
+    for (attribute, msbuild, commits) in [
+        ("'$(Foo)' == 'x\ny'", "FALSE", true),
+        ("'$(Foo)' ==\n 'x y'", "TRUE", true),
+        ("'$(Foo)' == 'x\ty'", "FALSE", true),
+        ("'$(Foo)' == 'x\r\ny'", "FALSE", true),
+        ("'$(Foo)' == 'x\ry'", "FALSE", true),
+        ("'$(Foo)'\r==\t'x y'", "TRUE", true),
+        ("'$(Foo)' == 'x&#10;y'", "FALSE", true),
+        ("'$(Foo)' == 'x&#x9;y'", "FALSE", true),
+        ("'$(Foo)' == 'x&#32;y'", "TRUE", true),
+        ("&apos;$(Foo)&apos; == 'x y'", "TRUE", true),
+        ("$(Foo.Contains('x\ny'))", "FALSE", false),
+        ("$(Foo.Contains('x\r\ny'))", "FALSE", false),
+        ("$(Foo.Contains('x\ry'))", "FALSE", false),
+        ("$(Foo.Contains('x y'))", "TRUE", true),
+    ] {
+        for site in 0..CONDITION_SITES {
+            let xml = conditioned_document(&props, attribute, site);
+            let theirs = oracle
+                .project(&xml, &names, None, &[])
+                .expect("MSBuild evaluates the document");
+            assert_eq!(theirs["R"], msbuild, "MSBuild's verdict moved\n{xml:?}");
+            let ours = check_names_at_path(&mut oracle, &xml, &names, None);
+            assert_eq!(
+                !ours.is_empty(),
+                commits,
+                "whether we commit R moved\n{xml:?}"
+            );
+        }
+    }
+}
+
+/// `text` with each space respelt as a space, tab, line feed, carriage return
+/// or CRLF. Unlike [`respell_whitespace`] it inserts none, so a bare token
+/// stays whole and the condition stays legal.
+fn respell_spaces(rng: &mut SplitMix64, text: &str) -> String {
+    const WHITESPACE: [&str; 5] = [" ", "\t", "\n", "\r", "\r\n"];
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == ' ' {
+            out.push_str(rng.pick(&WHITESPACE));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The value of `$(Spaced)`, which [`gen_spaced_condition`] compares against
+/// quoted strings holding spaces: where a respelt space inside a quote decides
+/// the verdict.
+const SPACED_VALUES: &[&str] = &["a b", " a b ", "a  b", "ab", ""];
+
+/// Comparisons whose quoted strings hold spaces, joined by `And`/`Or`.
+fn gen_spaced_condition(rng: &mut SplitMix64) -> String {
+    const OPERANDS: &[&str] = &[
+        "'$(Spaced)'",
+        "'a b'",
+        "' a b '",
+        "'a  b'",
+        "'ab'",
+        "''",
+        "'$(Spaced) '",
+        "'$([System.String]::Copy(' a b ').Trim())'",
+        "$([System.String]::Copy('a b').Length)",
+        "3",
+    ];
+    let mut condition = String::new();
+    for i in 0..1 + rng.below(2) {
+        if i > 0 {
+            condition.push_str(if rng.below(2) == 0 { " And " } else { " Or " });
+        }
+        let op = if rng.below(2) == 0 { "==" } else { "!=" };
+        condition.push_str(&format!(
+            "{} {op} {}",
+            rng.pick(OPERANDS),
+            rng.pick(OPERANDS)
+        ));
+    }
+    condition
+}
+
+/// The whitespace axis at the XML layer (#750): conditions, generated and
+/// built around quoted strings holding spaces, with their spaces respelt as
+/// raw tabs, line feeds, carriage returns and CRLFs (and, now and then,
+/// whitespace inserted), half of them with some of those spelt as character
+/// references, read from a document at each condition site.
+/// `condition_diff`'s whitespace axis grades the evaluator on such text; this
+/// grades the walk's reading of it from the attribute.
+#[test]
+fn conditions_with_raw_whitespace_are_exact_or_declined() {
+    let mut oracle = Oracle::spawn();
+    let mut rng = SplitMix64(0x0750_a771_b0de);
+    let names: Vec<String> = ["R", "Spaced"]
+        .into_iter()
+        .chain(CONTROLLED_PROPERTY_NAMES.iter().copied())
+        .map(str::to_string)
+        .collect();
+    const CASES: usize = 1500;
+    let mut decided = 0usize;
+    let mut decided_inside_quote = 0usize;
+    let mut rejected = 0usize;
+    for _ in 0..CASES {
+        let mut props = gen_props(&mut rng);
+        props.push(("Spaced".to_string(), rng.pick(SPACED_VALUES).to_string()));
+        let condition = if rng.below(2) == 0 {
+            gen_spaced_condition(&mut rng)
+        } else {
+            let depth = rng.below(3) as u32;
+            gen_bool_expr(&mut rng, depth)
+        };
+        let condition = if rng.below(4) == 0 {
+            respell_whitespace(&mut rng, &condition)
+        } else {
+            respell_spaces(&mut rng, &condition)
+        };
+        let mut attribute = raw_attribute(&condition);
+        if rng.below(2) == 0 {
+            attribute = entity_spelt(&mut rng, &attribute);
+        }
+        let site = rng.below(CONDITION_SITES);
+        let xml = conditioned_document(&props, &attribute, site);
+        // A condition MSBuild finds illegal (whitespace inserted inside a bare
+        // token makes many) rejects the whole project, while the walk, which
+        // cannot tell an illegal condition from an unmodelled one, keeps the
+        // writes around it: #783. Such a document grades nothing here.
+        if oracle.project(&xml, &names, None, &[]).is_none() {
+            rejected += 1;
+            continue;
+        }
+        if check_names_at_path(&mut oracle, &xml, &names, None).contains(&names[0]) {
+            decided += 1;
+            decided_inside_quote += usize::from(breaks_inside_quote(&condition));
+        }
+    }
+    eprintln!(
+        "raw-whitespace conditions: {decided} of {CASES} decided, \
+         {decided_inside_quote} with a break inside a quote, {rejected} rejected by MSBuild"
+    );
+    assert!(decided >= 500, "only {decided} of {CASES} decided");
+    assert!(
+        decided_inside_quote >= 100,
+        "only {decided_inside_quote} decided with a break inside a quote"
+    );
+}
+
+/// An `<Import>`'s `Project`, and the `Exists` its condition probes, read with
+/// a tab as written (#750): the file named with a tab is the one MSBuild
+/// imports, not its neighbour named with a space.
+#[test]
+fn an_import_path_holding_a_tab_is_read_as_written() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    for (name, value) in [("a b.props", "space"), ("a\tb.props", "tab")] {
+        std::fs::write(
+            dir.join(name),
+            format!("<Project><PropertyGroup><Alpha>{value}</Alpha></PropertyGroup></Project>"),
+        )
+        .unwrap();
+    }
+    let project_path = dir.join("Demo.fsproj");
+    let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
+    for import in [
+        "<Import Project=\"a\tb.props\" />",
+        "<Import Project=\"$(MSBuildProjectDirectory)/a\tb.props\" Condition=\"Exists('a\tb.props')\" />",
+        "<Import Project=\"a&#9;b.props\" />",
+    ] {
+        let xml = format!("<Project>\n  {import}\n</Project>\n");
+        std::fs::write(&project_path, &xml).unwrap();
+        let parsed = parse_fsproj_with_imports(
+            &xml,
+            &project_path,
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed");
+        let theirs = oracle
+            .project(&xml, &names, Some(&project_path), &[])
+            .expect("MSBuild evaluates the document");
+        assert_eq!(theirs["Alpha"], "tab", "MSBuild's import moved\n{xml}");
+        if !parsed.property_provenance_untrusted("Alpha") {
+            assert_eq!(
+                parsed.properties.get("Alpha").map(String::as_str),
+                Some("tab"),
+                "certain-implies-exact violated\n{xml}"
+            );
+        }
     }
 }
 

@@ -178,7 +178,7 @@ fn an_sdk_outside_the_canonical_layout_is_foreign_throughout() {
 #[test]
 fn the_queries_match_computed_names_and_short_task_names() {
     let parse = |text: &str| {
-        let doc = roxmltree::Document::parse(text).unwrap();
+        let doc = crate::document::parse(text).unwrap();
         let mut foreign = ForeignDefinitions::default();
         foreign.record_document(doc.root_element(), Path::new("/w/x.targets"));
         foreign
@@ -205,7 +205,7 @@ fn the_queries_match_computed_names_and_short_task_names() {
 /// name; and it does not read inside `<ProjectExtensions>`.
 #[test]
 fn an_escaped_name_matches_every_query_and_extensions_define_nothing() {
-    let doc = roxmltree::Document::parse(
+    let doc = crate::document::parse(
         r#"<Project>
   <Target Name="T"><CreateProperty Value="8.0"><Output TaskParameter="Value" PropertyName="Lang%56ersion" /></CreateProperty></Target>
   <ProjectExtensions><PropertyGroup><FscToolPath>x</FscToolPath></PropertyGroup><Target Name="CoreCompile" /></ProjectExtensions>
@@ -280,7 +280,7 @@ fn an_sdk_file_the_project_imports_itself_is_recorded() {
 /// A project's choice of the targets a build runs is recorded.
 #[test]
 fn a_target_selection_is_recorded() {
-    let doc = roxmltree::Document::parse(
+    let doc = crate::document::parse(
         r#"<Project Sdk="Microsoft.NET.Sdk" DefaultTargets="Clean" InitialTargets=" "><PropertyGroup /></Project>"#,
     )
     .unwrap();

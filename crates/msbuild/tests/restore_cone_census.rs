@@ -71,6 +71,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use borzoi_msbuild::document::attribute;
 use borzoi_oracle_harness::corpus_key::corpus_relative;
 use borzoi_oracle_harness::manifest::{Manifest, UPDATE_ENV, check};
 use borzoi_oracle_harness::restore_globals::{
@@ -604,15 +605,14 @@ fn cone_text(cone: &Cone, key: &str) -> ConeText {
             host_fs::read_to_string(file)
                 .unwrap_or_else(|e| panic!("{key}: read {}: {e}", file.display()))
         });
-        let doc = roxmltree::Document::parse(source)
+        let doc = borzoi_msbuild::document::parse(source)
             .unwrap_or_else(|e| panic!("{key}: parse {}: {e}", file.display()));
         let target = doc
             .descendants()
             .rfind(|n| {
                 n.is_element()
                     && n.tag_name().name() == "Target"
-                    && n.attribute("Name")
-                        .is_some_and(|n| n.trim().eq_ignore_ascii_case(name))
+                    && attribute(*n, "Name").is_some_and(|n| n.trim().eq_ignore_ascii_case(name))
             })
             .unwrap_or_else(|| {
                 panic!(
@@ -650,11 +650,11 @@ fn cone_text(cone: &Cone, key: &str) -> ConeText {
                 _ => {}
             }
             if element == "Output" {
-                if let Some(name) = node.attribute("PropertyName") {
+                if let Some(name) = attribute(node, "PropertyName") {
                     text.written_properties
                         .insert(name.trim().to_ascii_lowercase());
                 }
-                if let Some(name) = node.attribute("ItemName") {
+                if let Some(name) = attribute(node, "ItemName") {
                     text.written_items.insert(name.trim().to_ascii_lowercase());
                 }
             }
