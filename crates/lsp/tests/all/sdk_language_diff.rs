@@ -39,8 +39,9 @@ use std::time::Duration;
 
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::sdk_language::{
-    COMPILER_ENVIRONMENT, COMPILER_SELECTORS, LangVersionReading, LangVersionSelection,
-    ProjectCompiler, RefusalKind, SdkLanguageFacts,
+    COMPILER_ENVIRONMENT, COMPILER_SELECTORS, FEATURE_SWITCH_CARRIERS, FEATURE_SWITCH_ITEMS,
+    FEATURE_SWITCHES, LangVersionReading, LangVersionSelection, ProjectCompiler, RefusalKind,
+    SdkLanguageFacts,
 };
 use borzoi::workspace::Workspace;
 use borzoi_cst::language_version::LanguageVersion;
@@ -1298,7 +1299,9 @@ fn a_global_carrier_reports_no_refusal() {
 /// keeps only where the compiler refuses every version below 8.0, and a
 /// closer whose tree moves across F# 6 (a shape band), which refuses the fold
 /// everywhere else. So a 10.0.1xx compiler, which checks at F# 4.6, keeps the
-/// whole ladder, and so does `SKIP_VERSION_SUPPORTED_CHECK=1`.
+/// whole ladder, and so do `SKIP_VERSION_SUPPORTED_CHECK=1` and an
+/// `$(OtherFlags)` holding `--strict-indentation-`, which restores the
+/// indentation rules of the versions below 8.0.
 #[test]
 fn a_guessed_version_is_held_to_the_versions_its_compiler_checks_at() {
     const SELF_ID: &str = "module M\ntype T() =\n    member _.M = 1\n";
@@ -1308,15 +1311,23 @@ fn a_guessed_version_is_held_to_the_versions_its_compiler_checks_at() {
         if compiler.sdk.is_prerelease() {
             continue;
         }
-        for (route, env, skipped) in environments() {
+        for ((route, env, skipped), switch) in environments()
+            .into_iter()
+            .flat_map(|env| [None, Some("--strict-indentation-")].map(|s| (env.clone(), s)))
+        {
             let fold = |source: &str| {
                 let dir = tempfile::tempdir().unwrap();
                 let fsproj = pinned_project(dir.path(), &compiler.sdk, None, source);
+                let flags = switch
+                    .map(|s| format!("<OtherFlags>{s}</OtherFlags>"))
+                    .unwrap_or_default();
                 // A second write under a gate the evaluation cannot decide: the
                 // version is a guess, the compiler's default.
                 let text = host_fs::read_to_string(&fsproj).unwrap().replace(
                     "</PropertyGroup>",
-                    r#"</PropertyGroup><PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''"><LangVersion>9.0</LangVersion></PropertyGroup>"#,
+                    &format!(
+                        r#"{flags}</PropertyGroup><PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''"><LangVersion>9.0</LangVersion></PropertyGroup>"#
+                    ),
                 );
                 std::fs::write(&fsproj, &text).unwrap();
                 let mut workspace = Workspace::with_env(env.clone());
@@ -1338,7 +1349,7 @@ fn a_guessed_version_is_held_to_the_versions_its_compiler_checks_at() {
             };
             let facts = SdkLanguageFacts::for_sdk(&compiler.sdk);
             let expected_floor = match facts {
-                Some(facts) if !skipped => facts.floor,
+                Some(facts) if !skipped && switch.is_none() => facts.floor,
                 _ => LanguageVersion::MIN,
             };
             let enforced = expected_floor >= LanguageVersion::V8_0;
@@ -1348,7 +1359,7 @@ fn a_guessed_version_is_held_to_the_versions_its_compiler_checks_at() {
                 lifted += 1;
             }
             let (floor, self_id) = fold(SELF_ID);
-            let at = format!("SDK {} ({route})", compiler.sdk);
+            let at = format!("SDK {} ({route}, OtherFlags {switch:?})", compiler.sdk);
             assert_eq!(floor, expected_floor, "{at}");
             let self_id = self_id.unwrap_or_else(|| panic!("{at}: `member _.M` folds"));
             assert_eq!(
@@ -1402,4 +1413,285 @@ fn the_compile_task_hands_the_compiler_no_environment_of_its_own() {
             );
         }
     }
+}
+
+/// The `fsc` switches known not to turn a language feature on or off apart
+/// from the language version. `--langversion` names the version itself, which
+/// the compiler refuses below its floor whatever spells it. `--define` sets
+/// `#if` symbols, at every version alike.
+const VERSION_NEUTRAL_SWITCHES: &[&str] = &[
+    "allsigs",
+    "always-inline",
+    "baseaddress",
+    "checked",
+    "checknulls",
+    "checksumalgorithm",
+    "codepage",
+    "compilertool",
+    "compressmetadata",
+    "consolecolors",
+    "crossoptimize",
+    "debug",
+    "define",
+    "delaysign",
+    "deterministic",
+    "doc",
+    "embed",
+    "fullpaths",
+    "help",
+    "highentropyva",
+    "keyfile",
+    "langversion",
+    "lib",
+    "linkresource",
+    "mlcompatibility",
+    "nocopyfsharpcore",
+    "noframework",
+    "nointerfacedata",
+    "nologo",
+    "nooptimizationdata",
+    "nowarn",
+    "nowin32manifest",
+    "optimize",
+    "out",
+    "pathmap",
+    "pdb",
+    "platform",
+    "preferreduilang",
+    "publicsign",
+    "quotations-debug",
+    "realsig",
+    "reference",
+    "reflectionfree",
+    "refonly",
+    "refout",
+    "resource",
+    "sig",
+    "simpleresolution",
+    "sourcelink",
+    "standalone",
+    "staticlink",
+    "subsystemversion",
+    "tailcalls",
+    "target",
+    "targetprofile",
+    "utf8output",
+    "version",
+    "warn",
+    "warnaserror",
+    "warnon",
+    "win32icon",
+    "win32manifest",
+    "win32res",
+];
+
+/// The switch names `fsc --help` lists: each line's leading switch, its dashes
+/// and argument syntax dropped (`--strict-indentation[+|-]` is
+/// `strict-indentation`, `--@<file>` is `@`).
+fn listed_switches(compiler: &Compiler) -> BTreeSet<String> {
+    let help = run(compiler, &["--help".into()], false);
+    help.lines()
+        .filter_map(|line| {
+            let switch = line.strip_prefix('-')?.trim_start_matches('-');
+            let end = switch
+                .find(|c: char| c.is_whitespace() || matches!(c, ':' | '<' | '[' | '+'))
+                .unwrap_or(switch.len());
+            (end > 0).then(|| switch[..end].to_string())
+        })
+        .collect()
+}
+
+/// Every switch each graded SDK's compiler lists is either one of
+/// [`FEATURE_SWITCHES`] (or the `@` response file), which hold a guessed
+/// version to the whole ladder, or known not to switch a feature apart from
+/// the version. A compiler that adds a switch fails here until it is placed.
+#[test]
+fn every_compiler_switch_is_classified_for_the_floor() {
+    let mut failures = Vec::new();
+    for compiler in graded_compilers() {
+        let listed = listed_switches(&compiler);
+        assert!(
+            listed.contains("langversion") && listed.len() > 30,
+            "SDK {}: the help listing was not read: {listed:?}",
+            compiler.sdk
+        );
+        for switch in listed {
+            let classified = switch == "@"
+                || FEATURE_SWITCHES.contains(&switch.as_str())
+                || VERSION_NEUTRAL_SWITCHES.contains(&switch.as_str());
+            if !classified {
+                failures.push(format!(
+                    "SDK {}: `--{switch}` is unclassified: add it to `FEATURE_SWITCHES` if it \
+                     can turn a language feature on or off apart from the version, else to \
+                     `VERSION_NEUTRAL_SWITCHES`",
+                    compiler.sdk
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The `Fsc` task parameters known not to carry a feature switch: everything
+/// `CoreCompile` hands the task but the language version itself,
+/// [`FEATURE_SWITCH_CARRIERS`] and [`FEATURE_SWITCH_ITEMS`].
+const VERSION_NEUTRAL_PARAMETERS: &[&str] = &[
+    "AlwaysInline",
+    "BaseAddress",
+    "ChecksumAlgorithm",
+    "CodePage",
+    "CompilerTools",
+    "CompressMetadata",
+    "DebugSymbols",
+    "DebugType",
+    "DefineConstants",
+    "DelaySign",
+    "Deterministic",
+    "DisabledWarnings",
+    "DocumentationFile",
+    "DotnetFscCompilerPath",
+    "Embed",
+    "EmbedAllSources",
+    "GenerateInterfaceFile",
+    "HighEntropyVA",
+    "KeyFile",
+    "LCID",
+    "NoFramework",
+    "NoInterfaceData",
+    "NoOptimizationData",
+    "Nullable",
+    "Optimize",
+    "OutputAssembly",
+    "OutputRefAssembly",
+    "ParallelCompilation",
+    "PathMap",
+    "PdbFile",
+    "Platform",
+    "Prefer32Bit",
+    "PreferredUILang",
+    "ProvideCommandLineArgs",
+    "PublicSign",
+    "RealSig",
+    "RefOnly",
+    "ReferencePath",
+    "References",
+    "ReflectionFree",
+    "Resources",
+    "SkipCompilerExecution",
+    "SourceLink",
+    "Sources",
+    "SubsystemVersion",
+    "Tailcalls",
+    "TargetProfile",
+    "TargetType",
+    "ToolExe",
+    "ToolPath",
+    "TreatWarningsAsErrors",
+    "UseStandardResourceNames",
+    "Utf8Output",
+    "VersionFile",
+    "VisualStudioStyleErrors",
+    "WarnOn",
+    "WarningLevel",
+    "WarningsAsErrors",
+    "WarningsNotAsErrors",
+    "Win32IconFile",
+    "Win32ManifestFile",
+    "Win32ResourceFile",
+];
+
+/// Every parameter each graded SDK's `CoreCompile` hands its `Fsc` task is the
+/// language version, one of [`FEATURE_SWITCH_CARRIERS`] or
+/// [`FEATURE_SWITCH_ITEMS`], or known not to carry a feature switch; each
+/// carrier is read from the property or item type of its name, and no file of
+/// the SDK defines an item of a type in `FEATURE_SWITCH_ITEMS`. A parameter an
+/// SDK adds fails here until it is placed.
+#[test]
+fn every_compile_task_parameter_is_classified_for_the_floor() {
+    let mut failures = Vec::new();
+    for compiler in graded_compilers() {
+        let targets = compiler.fsc.with_file_name("Microsoft.FSharp.Targets");
+        let text = host_fs::read_to_string(&targets)
+            .unwrap_or_else(|e| panic!("read {}: {e}", targets.display()));
+        let doc = roxmltree::Document::parse(&text)
+            .unwrap_or_else(|e| panic!("parse {}: {e}", targets.display()));
+        let tasks: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("Fsc") && n.ancestors().any(|a| a.has_tag_name("Target")))
+            .collect();
+        assert_eq!(tasks.len(), 1, "SDK {}: one `Fsc` task", compiler.sdk);
+        for attribute in tasks[0].attributes() {
+            let name = attribute.name();
+            if name == "Condition" || name == "LangVersion" {
+                continue;
+            }
+            let carrier = FEATURE_SWITCH_CARRIERS.contains(&name);
+            if carrier || FEATURE_SWITCH_ITEMS.contains(&name) {
+                // `OtherFlags` is handed `$(FscOtherFlags)`, which `CoreCompile`
+                // copies from `$(OtherFlags)` just before.
+                let read = match (name, carrier) {
+                    ("OtherFlags", _) => "$(FscOtherFlags)".to_string(),
+                    (_, true) => format!("$({name})"),
+                    (_, false) => format!("@({name})"),
+                };
+                if attribute.value().trim() != read {
+                    failures.push(format!(
+                        "SDK {}: `{name}` is handed {:?}, not {read}",
+                        compiler.sdk,
+                        attribute.value()
+                    ));
+                }
+                continue;
+            }
+            if !VERSION_NEUTRAL_PARAMETERS.contains(&name) {
+                failures.push(format!(
+                    "SDK {}: `Fsc` parameter `{name}` is unclassified: add it to \
+                     `FEATURE_SWITCH_CARRIERS` if it can pass a switch that turns a language \
+                     feature on or off apart from the version, else to \
+                     `VERSION_NEUTRAL_PARAMETERS`",
+                    compiler.sdk
+                ));
+            }
+        }
+        let sdk_dir = compiler.fsc.parent().unwrap().parent().unwrap();
+        for file in msbuild_files_under(sdk_dir) {
+            let text = host_fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+            for item in FEATURE_SWITCH_ITEMS {
+                if text.contains(&format!("<{item}"))
+                    || text.contains(&format!("ItemName=\"{item}\""))
+                {
+                    failures.push(format!(
+                        "SDK {}: {} defines `{item}` items: `feature_switch_doubt` must read \
+                         the SDK's own",
+                        compiler.sdk,
+                        file.display()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every MSBuild props and targets file under `dir`, at any depth.
+fn msbuild_files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in
+            host_fs::read_dir(&dir).unwrap_or_else(|e| panic!("list {}: {e}", dir.display()))
+        {
+            let path = entry.unwrap().path();
+            if path.host_is_dir() {
+                pending.push(path);
+            } else {
+                let lower = path.to_string_lossy().to_ascii_lowercase();
+                if lower.ends_with(".props") || lower.ends_with(".targets") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    files
 }

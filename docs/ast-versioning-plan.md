@@ -503,6 +503,21 @@ doubt, and whatever version the build hands the compiler, it refuses each one
 below its floor; the compiler reads nothing but the variable to lift it, and
 the SDK's `Fsc` task passes it no environment of its own
 (`sdk_language_diff::the_compile_task_hands_the_compiler_no_environment_of_its_own`).
+A switch that turns a feature on or off apart from the version does reach
+below the floor (`sdk_language::feature_switch_doubt`): `--strict-indentation-`
+restores the indentation rules of the versions below 8.0 at any version, and
+`--disableLanguageFeature` takes a feature away. A build that may pass one, in
+`$(OtherFlags)` (a switch, or a response file that may hold one), in an
+`@(DisabledLanguageFeatures)` item defined outside the SDK, or through a
+carrier the walk does not hold exactly, keeps the whole ladder. Every switch
+each graded SDK's compiler lists, and every parameter its `CoreCompile` hands
+the `Fsc` task, is classified as such a carrier or not
+(`sdk_language_diff::every_compiler_switch_is_classified_for_the_floor`,
+`every_compile_task_parameter_is_classified_for_the_floor`), so an SDK that adds
+one fails until it is placed. The same switches are otherwise unmodelled: a
+project whose version is trusted is parsed by the version's rules whatever
+they say.
+
 The project fold's shape gate checks the same range: a band wholly below the
 floor is no build's, so a file whose tree moves only there does not refuse the
 fold.
@@ -546,10 +561,12 @@ Four checks hold this:
   `sdk_language_diff::a_guessed_version_is_held_to_the_versions_its_compiler_checks_at`):
   a project pinned to each installed SDK by `global.json`, with a
   `<LangVersion>` the evaluation cannot pin, evaluated with and without
-  `SKIP_VERSION_SUPPORTED_CHECK=1`. A `member _.M` file keeps its reading,
-  and a file whose tree moves only across F# 6 folds, exactly where the
-  compiler's graded floor is 8.0 and the variable is unset; under 10.0.1xx's
-  compiler and under the variable both are held to the whole ladder.
+  `SKIP_VERSION_SUPPORTED_CHECK=1`, and with and without
+  `--strict-indentation-` in `$(OtherFlags)`. A `member _.M` file keeps its
+  reading, and a file whose tree moves only across F# 6 folds, exactly where
+  the compiler's graded floor is 8.0, the variable is unset and no switch is
+  passed; under 10.0.1xx's compiler, the variable or the switch both are held
+  to the whole ladder.
 
 ### D11. Feature flags and the remaining issue decisions
 

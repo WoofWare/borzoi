@@ -55,7 +55,11 @@ fn scratch_dir(tag: &str) -> std::path::PathBuf {
 }
 
 fn folds(fsproj: &std::path::Path) -> bool {
-    let mut workspace = Workspace::with_env(SdkDiscoveryEnv::from_process_env());
+    folds_under(fsproj, SdkDiscoveryEnv::from_process_env())
+}
+
+fn folds_under(fsproj: &std::path::Path, env: SdkDiscoveryEnv) -> bool {
+    let mut workspace = Workspace::with_env(env);
     let mut sema = SemanticState::new();
     let docs = borzoi::vfs::Vfs::new();
     sema.parses_for_project(fsproj, &mut workspace, &docs)
@@ -268,11 +272,25 @@ fn ordinary_sdk_projects_have_trusted_langversion_provenance() {
     );
 }
 
+/// An environment whose compiler checks at every version: with
+/// `SKIP_VERSION_SUPPORTED_CHECK=1` a compiler that otherwise refuses the
+/// versions below 8.0 checks there too, so a file whose tree moves across F# 8
+/// straddles a version the build may use whatever SDK the test resolves.
+/// Without it, a guess under such a compiler need only be right from 8.0 up,
+/// and the same file folds (`sdk_language_diff::a_guessed_version_is_held_to_the_versions_its_compiler_checks_at`).
+fn every_version_checked() -> SdkDiscoveryEnv {
+    let mut env = SdkDiscoveryEnv::from_process_env();
+    env.build_environment
+        .insert("SKIP_VERSION_SUPPORTED_CHECK".to_string(), "1".to_string());
+    env
+}
+
 /// The narrow counterpart: the same shape-dependent file, but `LangVersion` is
 /// written under an *unpinnable* gate (an item reference in a condition —
 /// permanently unsupported by design), so its provenance is genuinely
-/// untrusted. The version we'd fold at could mis-shape the tree, so the fold
-/// must refuse. Together with the two folding cases this pins the intersection
+/// untrusted. The version we'd fold at could mis-shape the tree, and the
+/// compiler may check on either side of F# 8 ([`every_version_checked`]), so
+/// the fold must refuse. Together with the two folding cases this pins the intersection
 /// gate exactly: untrusted provenance × version-dependent shape does not fold;
 /// drop either and it does.
 #[test]
@@ -296,7 +314,7 @@ fn sdk_project_with_version_straddling_file_refuses_the_fold() {
     std::fs::write(root.join("A.fs"), "match x with\n").unwrap();
 
     assert!(
-        !folds(&fsproj),
+        !folds_under(&fsproj, every_version_checked()),
         "an unknowable LangVersion (written under an unpinnable gate) with a \
          version-shape-dependent file must refuse the fold"
     );
@@ -332,7 +350,7 @@ fn a_language_version_refusal_names_the_condition_it_rests_on() {
     .unwrap();
     std::fs::write(root.join("A.fs"), "match x with\n").unwrap();
 
-    let mut workspace = Workspace::with_env(SdkDiscoveryEnv::from_process_env());
+    let mut workspace = Workspace::with_env(every_version_checked());
     let mut sema = SemanticState::new();
     let docs = borzoi::vfs::Vfs::new();
     assert!(

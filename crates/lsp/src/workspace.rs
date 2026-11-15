@@ -1610,13 +1610,14 @@ impl Workspace {
     /// `project_path` checks a file at
     /// ([`checked_floor`](crate::sdk_language::checked_floor)):
     /// [`LanguageVersion::MIN`] unless that compiler is known, has a graded row
-    /// and keeps its floor in the build's environment. A project that failed
-    /// to evaluate has no known compiler.
+    /// and keeps its floor in the build's environment, and the build switches
+    /// no language feature apart from the version. A project that failed to
+    /// evaluate has no known compiler.
     pub fn compiler_floor_for_project(&mut self, project_path: &Path) -> LanguageVersion {
-        crate::sdk_language::checked_floor(
-            self.evaluated(project_path)
-                .and_then(|evaluated| evaluated.compiler.as_ref()),
-        )
+        self.evaluated(project_path)
+            .map_or(LanguageVersion::MIN, |evaluated| {
+                crate::sdk_language::checked_floor(&evaluated.parsed, evaluated.compiler.as_ref())
+            })
     }
 
     /// The language version the project at `project_path` parses at, and
