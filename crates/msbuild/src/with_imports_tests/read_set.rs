@@ -426,6 +426,42 @@ fn a_dangling_symlink_is_swept() {
     sweep_symlinked_exists(false);
 }
 
+/// Two links in different directories whose relative targets are spelt
+/// alike name different files, so the sweep retargets each to the other's
+/// file: it compares, and hands over, targets resolved against their own
+/// link's directory. Each retarget must lead where the other link leads.
+#[cfg(unix)]
+#[test]
+fn a_relative_target_is_retargeted_by_the_file_it_names() {
+    let tmp = TempDir::new().unwrap();
+    let root = canon(tmp.path());
+    for dir in ["a", "b"] {
+        write_at(&root, &format!("{dir}/target"), dir);
+        std::os::unix::fs::symlink("target", root.join(dir).join("link")).unwrap();
+    }
+    let planned = crate::observed::soundness::perturbations(&root, &ReadSet::default());
+    for (from, to) in [("a", "b"), ("b", "a")] {
+        let link = root.join(from).join("link");
+        let retargets: Vec<&Path> = planned
+            .iter()
+            .filter(|p| p.why == Why::Relink)
+            .flat_map(|p| &p.edits)
+            .filter_map(|edit| match edit {
+                Edit::Link(path, target) if *path == link => Some(target.as_path()),
+                _ => None,
+            })
+            .collect();
+        let leads_to_other = retargets.iter().any(|target| {
+            host_fs::read_to_string(link.parent().unwrap().join(target)).ok()
+                == Some(to.to_string())
+        });
+        assert!(
+            leads_to_other,
+            "{from}/link is never retargeted to {to}/target: {retargets:?}"
+        );
+    }
+}
+
 /// A query that climbs out of the swept root (`Exists('../outside/…')`) is
 /// recorded, but the sweep plans no change outside its root.
 #[test]

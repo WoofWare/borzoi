@@ -379,12 +379,20 @@ pub fn perturbations(root: &Path, read_set: &ReadSet) -> Vec<Perturbation> {
         let path = lexical(path);
         (under_root(&path) && !through_a_link(root, &path)).then_some(path)
     };
-    let targets: Vec<PathBuf> = links
-        .iter()
-        .filter_map(|link| host_fs::read_link(link).ok())
-        .collect();
+    // Each link's target as its own directory resolves it: a relative target
+    // names a different file from a link in another directory, so targets
+    // are compared, and handed to another link, resolved. The walk follows
+    // no symlink, so no directory between the root and a link is one, and
+    // resolving lexically is resolving as the file system does.
+    let resolved_target = |link: &Path| {
+        let target = host_fs::read_link(link).ok()?;
+        Some(lexical(&link.parent()?.join(target)))
+    };
+    let mut targets: Vec<PathBuf> = links.iter().filter_map(|link| resolved_target(link)).collect();
+    targets.sort();
+    targets.dedup();
     for link in &links {
-        let Ok(target) = host_fs::read_link(link) else {
+        let Some(resolved) = resolved_target(link) else {
             continue;
         };
         let mut relinks = vec![
@@ -394,13 +402,12 @@ pub fn perturbations(root: &Path, read_set: &ReadSet) -> Vec<Perturbation> {
         relinks.extend(
             targets
                 .iter()
-                .filter(|other| **other != target)
+                .filter(|other| **other != resolved)
                 .map(|other| Edit::Link(link.clone(), other.clone())),
         );
-        // The target as the link's directory resolves it, created when it is
-        // missing and lies physically under the root.
-        let resolved = link.parent().map(|dir| dir.join(&target));
-        if let Some(resolved) = resolved.as_deref().and_then(inside)
+        // The target, created when it is missing and lies physically under
+        // the root.
+        if let Some(resolved) = inside(&resolved)
             && host_fs::metadata(link).is_err()
             && host_fs::symlink_metadata(&resolved).is_err()
         {
