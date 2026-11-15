@@ -4752,16 +4752,23 @@ mod tests {
     }
 
     /// Inside generations the answer is remembered: the generation that
-    /// walks lists each directory once (stamping it first), and a later one
-    /// confirms the answer by one `stat` of each directory, however often it
-    /// asks.
+    /// walks lists each directory once (looking at the path to it first),
+    /// and a later one confirms the answer by one `lstat` of each directory
+    /// on the paths, however often it asks. The temporary directory's
+    /// ancestors are on them, and concurrent tests make entries there,
+    /// which would keep the witnesses wide; so they are held still
+    /// ([`crate::observed::host_fs::hold_ancestors_still`]).
     #[test]
     fn an_owner_is_walked_once_and_confirmed_by_stamps() {
         let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("Root.fsproj");
-        let file = tmp.path().join("sub").join("Foo.fs");
+        let dir = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+        let _still = crate::observed::host_fs::hold_ancestors_still(&dir);
+        let root = dir.join("Root.fsproj");
+        let file = dir.join("sub").join("Foo.fs");
         write_file(&root, &fsproj_with_compile("sub/Foo.fs"));
         write_file(&file, "let x = 1");
+        // `/` and every directory down to `sub`, each looked at once.
+        let looked_at = dir.join("sub").ancestors().count() as u64;
 
         let mut ws = Workspace::default();
         let old = Nanos(i128::MAX / 2);
@@ -4773,12 +4780,16 @@ mod tests {
             ws.end_generation().ownership
         };
         let walked = generation(&mut ws, 1);
-        assert_eq!((walked.listings, walked.stats), (2, 2), "{walked:?}");
+        assert_eq!(
+            (walked.listings, walked.stats),
+            (2, looked_at),
+            "{walked:?}"
+        );
         for asks in [1, 3] {
             let confirmed = generation(&mut ws, asks);
             assert_eq!(
                 (confirmed.listings, confirmed.stats),
-                (0, 2),
+                (0, looked_at),
                 "{confirmed:?}"
             );
         }
@@ -4821,12 +4832,19 @@ mod tests {
     /// ownership walk and the evaluation read there, whatever the stamps say.
     /// A hint naming an entry of `sub/` lists `sub/` again and leaves the
     /// project's directory to its stamp; a hint naming the project file
-    /// reads it again.
+    /// reads it again. A listing asked again is witnessed anew, wide until a
+    /// quiet generation narrows it (holding its parent's stamp until then,
+    /// which a hint naming a sibling distrusts), so one runs between the
+    /// hints; the temporary directory's ancestors, which concurrent tests
+    /// change, are held still so that it narrows
+    /// ([`crate::observed::host_fs::hold_ancestors_still`]).
     #[test]
     fn a_hint_asks_again_what_was_read_at_the_paths_it_names() {
         let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("Root.fsproj");
-        let file = tmp.path().join("sub").join("Foo.fs");
+        let dir = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+        let _still = crate::observed::host_fs::hold_ancestors_still(&dir);
+        let root = dir.join("Root.fsproj");
+        let file = dir.join("sub").join("Foo.fs");
         write_file(&root, &fsproj_with_compile("sub/Foo.fs"));
         write_file(&file, "let x = 1");
 
@@ -4843,10 +4861,11 @@ mod tests {
         assert_eq!(settled.ownership.listings, 0, "{settled:?}");
         assert_eq!(settled.evaluations.validation.opens, 0, "{settled:?}");
 
-        ws.hint([tmp.path().join("sub").join("New.fs").as_path()]);
+        ws.hint([dir.join("sub").join("New.fs").as_path()]);
         let hinted = generation(&mut ws);
         assert_eq!(hinted.ownership.listings, 1, "{hinted:?}");
         assert_eq!(hinted.evaluations.validation.opens, 0, "{hinted:?}");
+        assert_eq!(generation(&mut ws).ownership.listings, 0);
 
         ws.hint([root.as_path()]);
         let hinted = generation(&mut ws);
@@ -8108,11 +8127,13 @@ mod tests {
         /// walking each one's path. The project file is rewritten in place,
         /// so no directory's stamp moves.
         ///
-        /// Every witness names the directories its read's path is resolved
-        /// through, the temporary directory's ancestors among them, where
-        /// concurrent tests make and remove entries; so the test holds those
-        /// still ([`crate::observed::host_fs::hold_ancestors_still`]), and
-        /// the counts depend only on what it does to its own tree.
+        /// SDK discovery looks for a `global.json`, and MSBuild for its
+        /// `Directory.Build` files, in every directory above the project, the
+        /// temporary directory's ancestors among them, so those directories'
+        /// entries decide some of the reads, and concurrent tests make and
+        /// remove entries there; so the test holds them still
+        /// ([`crate::observed::host_fs::hold_ancestors_still`]), and the
+        /// counts depend only on what it does to its own tree.
         #[test]
         fn a_project_evaluated_again_starts_with_the_dropped_ones_witnesses() {
             let tmp = TempDir::new().unwrap();
@@ -8130,8 +8151,10 @@ mod tests {
                 ws.end_generation().evaluations
             };
             assert_eq!(generation(&mut ws).evaluated, 1);
-            // The first confirmation takes the witnesses; the second is what
-            // confirming an unchanged evaluation costs.
+            // The first confirmation takes the witnesses and the second
+            // narrows them; the third is what confirming an unchanged
+            // evaluation costs.
+            generation(&mut ws);
             generation(&mut ws);
             let steady = generation(&mut ws);
             assert_eq!(steady.evaluated, 0, "{steady:?}");

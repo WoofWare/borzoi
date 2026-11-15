@@ -189,6 +189,24 @@ fn stamp_of(meta: &std::fs::Metadata) -> Stamp {
     }
 }
 
+/// The mode and owners of the entry whose metadata is `meta`.
+#[cfg(unix)]
+fn access_of(meta: &std::fs::Metadata) -> crate::read_checks::Access {
+    use std::os::unix::fs::MetadataExt as _;
+    crate::read_checks::Access {
+        mode: meta.mode(),
+        uid: meta.uid(),
+        gid: meta.gid(),
+    }
+}
+
+/// The mode and owners of the entry whose metadata is `meta`: `std`
+/// exposes none here.
+#[cfg(not(unix))]
+fn access_of(_meta: &std::fs::Metadata) -> crate::read_checks::Access {
+    crate::read_checks::Access::default()
+}
+
 /// The stamp of a file whose metadata is `meta`. `std` exposes no inode or
 /// change time here, so the stamp is the size and the mtime, and having no
 /// ctime it is always racy: a timestamp-preserving rewrite of the same size
@@ -230,16 +248,33 @@ impl Disk for HostDisk {
 // The project evaluations' reads are confirmed through the same host.
 #[allow(clippy::disallowed_methods)]
 impl crate::read_checks::Probe for HostDisk {
-    fn entry(&self, path: &Path) -> std::io::Result<crate::read_checks::EntryAt> {
-        use crate::read_checks::EntryAt;
-        let kind = std::fs::symlink_metadata(path)?.file_type();
-        Ok(if kind.is_symlink() {
-            EntryAt::Link(std::fs::read_link(path)?)
-        } else if kind.is_dir() {
-            EntryAt::Dir
-        } else {
-            EntryAt::Other
+    fn lstat(&self, path: &Path) -> std::io::Result<crate::read_checks::Lstat> {
+        use crate::read_checks::{Kind, Lstat};
+        let meta = std::fs::symlink_metadata(path)?;
+        #[cfg(test)]
+        if let Some(stamp) = host_fs::held_stamp(path) {
+            return Ok(Lstat {
+                stamp,
+                kind: Kind::Dir,
+                access: access_of(&meta),
+            });
+        }
+        let kind = meta.file_type();
+        Ok(Lstat {
+            stamp: stamp_of(&meta),
+            access: access_of(&meta),
+            kind: if kind.is_symlink() {
+                Kind::Link
+            } else if kind.is_dir() {
+                Kind::Dir
+            } else {
+                Kind::Other
+            },
         })
+    }
+
+    fn read_link(&self, path: &Path) -> std::io::Result<std::path::PathBuf> {
+        std::fs::read_link(path)
     }
 
     fn answer(
@@ -398,6 +433,10 @@ pub(crate) mod host_fs {
         std::fs::read_dir(path)
     }
 
+    pub fn read_link(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+        std::fs::read_link(path)
+    }
+
     pub fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
         std::fs::canonicalize(path)
     }
@@ -440,8 +479,8 @@ pub(crate) mod host_fs {
             const { std::cell::RefCell::new(Vec::new()) };
     }
 
-    /// The stamp [`super::HostDisk`]'s `stat` answers for `path` on this
-    /// thread, when a [`HeldStill`] holds it.
+    /// The stamp [`super::HostDisk`]'s `stat` and `lstat` answer for `path`
+    /// on this thread, when a [`HeldStill`] holds it.
     pub(super) fn held_stamp(path: &Path) -> Option<crate::vfs::Stamp> {
         HELD.with_borrow(|held| {
             held.iter()
@@ -451,18 +490,21 @@ pub(crate) mod host_fs {
     }
 
     /// Hold every directory above `root` still on the calling thread while
-    /// the guard lives: a [`super::HostDisk`] `stat` of one, spelt as
-    /// `root`'s ancestor, answers the stamp it has now.
+    /// the guard lives: a [`super::HostDisk`] `stat` or `lstat` of one, spelt
+    /// as `root`'s ancestor, answers the stamp it has now.
     ///
-    /// A witness names every directory its read's path is resolved through
-    /// ([`crate::read_checks`]), so the reads of a tree in a temporary
-    /// directory are witnessed by the temporary directory's ancestors too.
-    /// Concurrent tests, and other processes, make and remove entries
-    /// there, which moves those directories' stamps and makes every witness
-    /// ask its read again, as it must. A test that counts what confirming
-    /// its tree costs holds them still, so that the count depends only on
-    /// what the test does to its own tree. Only these stamps are held: every
-    /// query is still answered by the disk.
+    /// A read that looks a name up in one of them (an absence probe up the
+    /// ancestors, as SDK discovery makes for `global.json` and MSBuild for
+    /// its `Directory.Build` files) is witnessed by that directory's stamp
+    /// ([`crate::read_checks`]). Concurrent tests, and other processes, make
+    /// and remove entries there, which moves those directories' stamps and
+    /// makes each such witness ask its read again, as it must. A test that
+    /// counts what confirming its tree costs holds them still, so that the
+    /// count depends only on what the test does to its own tree. (A read
+    /// that only passes through them is spared once its witness has
+    /// narrowed to their identities, which entries made beside them do not
+    /// move; until then their stamps hold it too.) Only these stamps are
+    /// held: every query is still answered by the disk.
     pub fn hold_ancestors_still(root: &Path) -> HeldStill {
         let held: Vec<(PathBuf, crate::vfs::Stamp)> = root
             .ancestors()

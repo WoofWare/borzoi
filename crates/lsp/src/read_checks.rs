@@ -7,29 +7,79 @@
 //! the answer recorded. Asking every query again costs a `realpath` or a
 //! directory listing apiece, which on a real project is most of a keystroke;
 //! so a [`Check`] remembers, the first time it is confirmed, a **witness**:
-//! the stamps of the directories whose entries decide the answer, taken
-//! before the query was asked. While every one of those directories' stamps
-//! is unchanged, the answer is too, and confirming it costs the `stat`s,
-//! which reads that share a directory share within a generation.
+//! what the entries that decide the answer were, taken before the query was
+//! asked. While every one of them is unchanged, the answer is too, and
+//! confirming it costs an `lstat` per entry, which reads that share an entry
+//! share within a generation.
 //!
-//! Why a directory's stamp decides these answers: creating, removing or
-//! renaming an entry moves its directory's mtime and ctime, and so does
-//! replacing a symlink (its target cannot be changed in place). `stat`ing a
-//! directory resolves its path, so the stamp also says which directory the
-//! path leads to now: a symlink re-pointed anywhere above it changes the
-//! inode the stamp names. So, while the stamp of `d` holds,
+//! Why a directory's stamp decides what its entries are: creating, removing
+//! or renaming an entry moves its directory's mtime and ctime, and so does
+//! replacing a symlink (its target cannot be changed in place), and a `chmod`
+//! moves its ctime. So, while the stamp of `d` holds, **a listing** of `d`
+//! holds (its entries and their types), when it read every entry: a listing
+//! that failed at some entry can recover with no entry changing. A listing's
+//! witness is its directory's stamp, following every symlink in its path, and
+//! the walk to the directory (below), which enters it as any other: the walk's
+//! items are spelt as where the path leads, so a watch event above the
+//! directory distrusts them however the listing spells it, and the walk is
+//! born wide as every other.
 //!
-//! - **a listing** of `d` holds (its entries and their types), when it read
-//!   every entry: a listing that failed at some entry can recover with no
-//!   entry changing;
-//! - **what a path names**, following symlinks or not, whether it is there,
-//!   and **its canonical spelling** hold while the stamp of every directory
-//!   its resolution looks an entry up in holds: each step of the resolution
-//!   is an entry of the directory it is looked up in, and none can change
-//!   without moving that directory's stamp. `ReadChecks::resolution` walks
-//!   it as the kernel does (following symlinks, a link's target component by
-//!   component, and taking each `..` from the directory reached), and a
-//!   listing that found its directory absent is witnessed the same way.
+//! **What a path names**, following symlinks or not, whether it is there, and
+//! **its canonical spelling** are decided by the steps of its resolution,
+//! which `ReadChecks::resolution` walks as the kernel does (following
+//! symlinks, a link's target component by component, and taking each `..`
+//! from the directory reached). Each step looks one name up in the directory
+//! reached, and while every step finds what it found, the answer is the one
+//! recorded. A witness holds each step by
+//!
+//! - **the identity of a directory the path goes on below** (and of the
+//!   root, which every walk enters): what the name names now, not following
+//!   it (`lstat`), is a directory of the same device and inode, mode and
+//!   owners ([`Access`]: whether the walk may search it, and follow a symlink
+//!   in it). The directory the name is looked up in may gain, lose and
+//!   rename other entries without moving it, so a dotfile made in `$HOME`
+//!   asks nothing below `$HOME` again (#776). An identity has no timestamp,
+//!   so it is never racy. A watch event that names the directory, or one
+//!   above it, distrusts it ([`ReadChecks::hint`]): on a file system whose
+//!   stamps do not move, a directory moved into its place, with inodes
+//!   reused below it, is seen by nothing else.
+//! - **the stamp of a symlink it follows** (`lstat`): a link replaced is a
+//!   new link, whose ctime is new even where its inode is reused.
+//! - **the stamp of the directory the last name is looked up in**: its
+//!   entries (and its search permission) decide the last lookup.
+//! - **the identity of `d/..` for a `.` or `..` looked up in `d`**: an
+//!   `lstat` finds it only with search permission in `d`, which the lookup
+//!   takes, and it is the directory a `..` returns to.
+//!
+//! These suffice by induction along the walk: while each identity holds, the
+//! path walked so far names, now, the directory the kernel's walk of the
+//! read's path is in, by the same steps (a directory where there was a
+//! directory, never a symlink to one, which would change the canonical
+//! spelling and the count of links followed), and the lookup of the name had
+//! search permission; a `..` leaves a directory its identity places under
+//! the one the walk returns to; and the last directory's stamp says the last
+//! lookup finds what it found. An absence stops the walk at the directory it
+//! was looked up in, and a listing that found its directory absent is
+//! witnessed the same way.
+//!
+//! **A witness is born wide, and narrows once confirmed.** An identity says
+//! what an entry is when it is looked at, and nothing about the time between:
+//! a directory renamed away and back has its identity again. A stamp moves
+//! for good. A witness must say what the disk held when the query was asked,
+//! which is after the walk took the witness, so it is born **wide**: it also
+//! holds the stamp of every directory the walk looked a name up in, each
+//! taken before the lookup. The first later generation that finds every one
+//! unchanged (and none racy) shows that no step changed from before the walk
+//! until then, so the walk is what the query saw; the witness then
+//! **narrows** to the identities and stamps above, and only those decide it.
+//!
+//! A canonicalisation narrows only where it spells each name as the read's
+//! path does ([`Probe::canonical_spells_as_asked`]). Where it spells a name
+//! as the directory holding it does (macOS's `realpath`, which reads each
+//! name back from the volume; Windows's final path name), a case-only
+//! rename of a directory the path enters moves the answer and leaves every
+//! identity on the walk unchanged, and only the stamp of the directory the
+//! name was looked up in sees it, so the witness stays wide.
 //!
 //! A relative path has no witness, and neither has an `lstat` of a path not
 //! spelt as its components: a trailing separator makes it follow a final
@@ -45,10 +95,10 @@
 //! absence is asked again in every generation, as is one whose resolution
 //! met anything but an answer the walk understands.
 //!
-//! **Within a generation** a directory is `stat`ed once, so a check holds as
-//! of the moment its directories were stamped in that generation, as a
+//! **Within a generation** an entry is `lstat`ed once, so a check holds as of
+//! the moment its entries were looked at in that generation, as a
 //! [`DiskCache`] read holds as of its file's stamp; a change after that
-//! moment moves a stamp, and the next generation asks again.
+//! moment moves a stamp or an identity, and the next generation asks again.
 //!
 //! **Racy stamps.** A witness any of whose stamps lies within
 //! [`crate::vfs::RACY_WINDOW`] of the generation that took it is not
@@ -58,9 +108,9 @@
 //! at timestamp granularities the host does not have.
 //!
 //! **A witness belongs to a read, not to the reader that recorded it.** It
-//! says that while its directories keep their stamps, the query gets the
-//! answer it got when the witness was taken, and the witness is kept only if
-//! that answer was the recorded one. Nothing in that names the evaluation or
+//! says that while its entries are unchanged, the query gets the answer it
+//! got when the witness was taken, and the witness is kept only if that
+//! answer was the recorded one. Nothing in that names the evaluation or
 //! the env that recorded the read: any read with the same path, spelt the
 //! same, and the same recorded answer is confirmed by it exactly as far as
 //! the read it was taken for. So a checker hands out one [`Check`] per
@@ -73,10 +123,11 @@
 //! generation that took them and the watch events it had seen, so the racy
 //! rule and the hints judge it as they would have judged it for the read
 //! it was taken for; and it names its checker, so no other checker's
-//! directories can confirm it.
+//! entries can confirm it.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::hash::{Hash as _, Hasher as _};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -119,20 +170,42 @@ pub fn a_fact(observation: &Observation) -> bool {
 const MAX_LINKS: usize = 40;
 
 /// What one directory entry is, not following it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EntryAt {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
     Dir,
-    /// A symlink, and its target as written.
-    Link(PathBuf),
+    Link,
     /// Anything else (a file, a socket).
     Other,
 }
 
+/// What an `lstat` of a path finds: the stamp of the entry it names, not
+/// following a final symlink, what kind of entry that is, and who may do
+/// what with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lstat {
+    pub stamp: Stamp,
+    pub kind: Kind,
+    pub access: Access,
+}
+
+/// An entry's mode and owners: what decides, beside its entries, whether a
+/// walk may search it and follow a symlink in it (Linux's
+/// `fs.protected_symlinks` refuses one in a sticky, world-writable directory
+/// owned by neither the follower nor the link's owner). None of them moves
+/// with the entries, so an identity holds them too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Access {
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// The file-system calls a [`ReadChecks`] makes beyond a [`Disk`]'s.
 pub trait Probe: Disk {
-    /// What the entry at `path` is, not following it (`lstat`, and
-    /// `readlink` for a symlink).
-    fn entry(&self, path: &Path) -> io::Result<EntryAt>;
+    /// What the entry at `path` is, not following it (`lstat`).
+    fn lstat(&self, path: &Path) -> io::Result<Lstat>;
+    /// The target of the symlink at `path`, as written (`readlink`).
+    fn read_link(&self, path: &Path) -> io::Result<PathBuf>;
     /// `query`'s query asked at `path` now, with its answer, as
     /// `borzoi_msbuild::observed` would record it.
     fn answer(&self, path: &Path, query: &Observation) -> Observation;
@@ -148,6 +221,14 @@ pub trait Probe: Disk {
     /// read answers as a `stat` would.
     fn read_stamped(&self, path: &Path, query: &Observation) -> Observation {
         self.answer(path, query)
+    }
+    /// Whether a canonicalisation spells each name it keeps as the path
+    /// asked spells it: the identities of the directories a path enters
+    /// then decide its answer with the last lookup. Where the volume may be
+    /// case-insensitive and the canonical path reads each name back from it
+    /// (macOS, Windows), a case-only rename moves the answer and no identity.
+    fn canonical_spells_as_asked(&self) -> bool {
+        !cfg!(any(target_os = "macos", windows))
     }
 }
 
@@ -200,34 +281,119 @@ impl Check {
     pub fn shares(&self, other: &Check) -> bool {
         Rc::ptr_eq(&self.shared, &other.shared)
     }
+
+    /// Whether the check's witness is still wide (see the module docs).
+    #[cfg(test)]
+    pub fn wide(&self) -> Option<bool> {
+        self.shared.witness.borrow().as_ref().map(|w| w.wide)
+    }
 }
 
-/// The stamps of the directories that decide a read's answer, and the time
-/// of the generation that took them, before the query was asked.
+/// What a witness says about one path, as an entry of
+/// [`ReadChecks::entries`] saw it when the witness was taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    /// The path names, not following it, a directory of this device, inode
+    /// and access: a step of a resolution that went on below it.
+    Identity(Identity),
+    /// The path names, not following it, an entry with this stamp: a
+    /// directory whose entries decide a lookup, or a symlink followed.
+    Entry(Lstat),
+    /// The path, following every symlink, has this stamp: a directory
+    /// listed.
+    Followed(Stamp),
+}
+
+/// What an identity holds of a directory: everything an `lstat` finds of
+/// it but what its entries move (its times and size).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+    access: Access,
+}
+
+impl Identity {
+    fn of(lstat: &Lstat) -> Self {
+        Identity {
+            dev: lstat.stamp.dev,
+            ino: lstat.stamp.ino,
+            access: lstat.access,
+        }
+    }
+}
+
+impl Seen {
+    /// The stamp a witness must not trust while it is racy, if any.
+    fn stamp(&self) -> Option<&Stamp> {
+        match self {
+            Seen::Identity(_) => None,
+            Seen::Entry(lstat) => Some(&lstat.stamp),
+            Seen::Followed(stamp) => Some(stamp),
+        }
+    }
+}
+
+/// One thing a witness holds about one path.
+#[derive(Clone, Copy, Debug)]
+struct Item {
+    /// The path, as its index in [`ReadChecks::entries`].
+    id: usize,
+    seen: Seen,
+    /// Held only while the witness is wide: the stamp of a directory the
+    /// walk looked a name up in that decides nothing once the walk is shown
+    /// to be what the query saw (see the module docs).
+    wide: bool,
+}
+
+/// What decides a read's answer, as it was before the query was asked, and
+/// the time of the generation that took it.
 #[derive(Clone, Debug)]
 struct Witness {
-    /// The checker that took it ([`ReadChecks::id`]), whose directories
-    /// `dirs` indexes.
+    /// The checker that took it ([`ReadChecks::id`]), whose entries
+    /// `items` indexes.
     checker: u64,
-    /// Each directory as its index in [`ReadChecks::dirs`], and its stamp.
-    dirs: Vec<(usize, Stamp)>,
+    items: Vec<Item>,
+    /// Whether some item is still [`Item::wide`].
+    wide: bool,
+    /// The generation that took it: only a later one, which looks at its
+    /// entries again, can show that the walk is what the query saw.
+    born: u64,
     taken: Nanos,
-    /// The checker's [`ReadChecks::hints`] when it was taken: a directory
-    /// hinted since ([`Dir::hinted`]) speaks for nothing it witnessed.
+    /// The checker's [`ReadChecks::hints`] when it was taken: a path hinted
+    /// since ([`Entry::hinted`]) speaks for nothing it witnessed.
     hints: u64,
 }
 
-/// One directory a witness names: its path, and its stamp (or `None` where
-/// it has none: it is absent, or cannot be `stat`ed) as the generation that
-/// last `stat`ed it saw it.
+/// One path a witness names, and what the generation that last looked at it
+/// saw there.
 #[derive(Debug)]
-struct Dir {
+struct Entry {
     path: PathBuf,
-    stamp: Option<Stamp>,
+    /// What an `lstat` of it found, or why it found nothing.
+    lstat: Result<Lstat, Missing>,
     checked: u64,
+    /// The stamp of the path following a final symlink, in generation
+    /// `followed_checked`: the `lstat`'s, unless that found a symlink.
+    followed: Option<Stamp>,
+    followed_checked: u64,
+    /// The target of the symlink there, in generation `target_checked`.
+    target: Option<PathBuf>,
+    target_checked: u64,
     /// The [`ReadChecks::hints`] count of the last watch event that named
-    /// this directory or an entry of it, 0 if none has.
+    /// this path, 0 if none has.
     hinted: u64,
+    /// The same, for the last that named an entry of the directory here.
+    hinted_entries: u64,
+}
+
+/// Why an `lstat` found no entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Missing {
+    /// Nothing is there: a walk stops at the directory it looked in.
+    Absent,
+    /// Anything else: no witness.
+    Failed,
 }
 
 /// The identity the next [`ReadChecks`] gets.
@@ -236,20 +402,24 @@ static NEXT_READ_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// Confirms [`Check`]s for the open generation.
 #[derive(Debug)]
 pub struct ReadChecks<D: Probe = HostDisk> {
-    /// No two checkers share one: a [`Check`]'s witness names directories
-    /// by their index in the checker that took it, so a holder of checks
+    /// No two checkers share one: a [`Check`]'s witness names paths by
+    /// their index in the checker that took it, so a holder of checks
     /// confirms them only through that checker ([`Self::id`]).
     id: u64,
     /// Whole-file reads, confirmed by the file's stamp.
     files: DiskCache<D>,
-    /// Every directory a witness has named, `stat`ed at most once per
+    /// Every path a witness has named, `lstat`ed at most once per
     /// generation; witnesses name them by index, so confirming one looks
     /// nothing up by path.
-    dirs: RefCell<Vec<Dir>>,
-    /// The index of each directory in `dirs`.
-    dir_ids: RefCell<HashMap<PathBuf, usize>>,
+    entries: RefCell<Vec<Entry>>,
+    /// The index of each path in `entries`, by its spelling: `Path`'s
+    /// equality ignores a trailing separator, which makes an `lstat` follow
+    /// a final symlink.
+    entry_ids: RefCell<HashMap<OsString, usize>>,
     /// The queries asked this generation beyond `files`' reads.
     counts: Cell<ReadCounts>,
+    /// How many queries [`Self::ask`] has asked, ever.
+    asked: Cell<u64>,
     /// How many watch events have hinted the checker ([`Self::hint`]).
     hints: Cell<u64>,
     /// The checks this checker has handed out ([`Self::check`]), by a hash
@@ -274,9 +444,10 @@ impl<D: Probe> ReadChecks<D> {
         ReadChecks {
             id: NEXT_READ_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             files: DiskCache::with_disk(disk),
-            dirs: RefCell::new(Vec::new()),
-            dir_ids: RefCell::new(HashMap::new()),
+            entries: RefCell::new(Vec::new()),
+            entry_ids: RefCell::new(HashMap::new()),
             counts: Cell::new(ReadCounts::default()),
+            asked: Cell::new(0),
             hints: Cell::new(0),
             shared: RefCell::new(HashMap::new()),
             shared_entries: Cell::new(0),
@@ -348,7 +519,7 @@ impl<D: Probe> ReadChecks<D> {
     }
 
     /// Which checker this is: the witnesses of the checks it confirms name
-    /// its directories, and only its.
+    /// its entries, and only its.
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -365,6 +536,13 @@ impl<D: Probe> ReadChecks<D> {
         }
     }
 
+    /// How many recorded queries the checker has asked again, ever: each a
+    /// read no witness confirmed.
+    #[cfg(test)]
+    pub fn asked(&self) -> u64 {
+        self.asked.get()
+    }
+
     /// The open generation's time, or `None` between generations.
     pub fn now(&self) -> Option<Nanos> {
         self.files.now()
@@ -373,64 +551,108 @@ impl<D: Probe> ReadChecks<D> {
     /// The stamp of the file at `path` now (a counted `stat`), or `None`
     /// when it has none.
     pub fn stamp(&self, path: &Path) -> Option<Stamp> {
+        self.count_stat();
+        self.files.disk().stat(path).ok()
+    }
+
+    fn count_stat(&self) {
         let mut counts = self.counts.get();
         counts.stats += 1;
         self.counts.set(counts);
-        self.files.disk().stat(path).ok()
     }
 
     /// Watch events named `paths`: forget what the files there held, so the
     /// next check reads them again whatever their stamps say, and stop
-    /// trusting every witness taken before now that names one of the paths
-    /// or the directory holding it, so the next check of each such read asks
-    /// its query again.
+    /// trusting every witness taken before now that holds anything of one of
+    /// the paths or a path below one (a directory moved into place moves
+    /// everything below it), or the stamp of a directory holding one, so the
+    /// next check of each such read asks its query again. The identity of a
+    /// directory, or the stamp of a symlink, is not distrusted by an event
+    /// that names a sibling: the directory holding them does not decide what
+    /// they say.
     ///
     /// That is what covers a file system whose stamps do not move (D1's "not
     /// covered") for the paths an event names: a file there is read again
     /// and compared, and what a path names, whether it is there, its
     /// canonical spelling and its directory's listing are asked again. A
-    /// witness names a directory by the spelling its read used, which may
-    /// lead through a symlink, so a named directory is matched by spelling
+    /// witness names a path by the spelling its walk reached it by, and a
+    /// listing's by the spelling its read used, which may lead through a
+    /// symlink, so a named path is matched by spelling
     /// ([`crate::paths::path_dedup_key`]) and by identity: the device and
-    /// inode a `stat` of it finds now, against those its last stamp held. A
-    /// directory that can no longer be `stat`ed under a witness's spelling
-    /// fails that witness anyway.
+    /// inode an `lstat` of it finds now (a `stat`, for the directory holding
+    /// it), against those its last look found there or, through a final
+    /// symlink, where it leads. A path that can no longer be
+    /// looked at under a witness's spelling fails that witness anyway.
     pub fn hint<'a>(&self, paths: impl IntoIterator<Item = &'a Path>) {
         let paths: Vec<&Path> = paths.into_iter().collect();
         self.files.hint(paths.iter().copied());
-        let named: Vec<PathBuf> = paths
-            .iter()
-            .flat_map(|path| {
-                let path = lexically_normalize(path);
-                let parent = path.parent().map(Path::to_path_buf);
-                std::iter::once(path).chain(parent)
-            })
-            .collect();
+        let named: Vec<PathBuf> = paths.iter().map(|path| lexically_normalize(path)).collect();
         if named.is_empty() {
             return;
         }
-        let spellings: std::collections::HashSet<String> = named
+        let holding: Vec<PathBuf> = named
             .iter()
-            .map(|path| crate::paths::path_dedup_key(path))
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
             .collect();
-        let identities: std::collections::HashSet<(u64, u64)> = named
+        let spellings = |paths: &[PathBuf]| -> std::collections::HashSet<String> {
+            paths
+                .iter()
+                .map(|path| crate::paths::path_dedup_key(path))
+                .collect()
+        };
+        let (named_spellings, holding_spellings) = (spellings(&named), spellings(&holding));
+        let named_keys: std::collections::HashSet<&Path> =
+            named_spellings.iter().map(Path::new).collect();
+        // What a named path names, not following it: an event names what
+        // changed, a symlink and not its target.
+        let named_identities: std::collections::HashSet<(u64, u64)> = named
             .iter()
             .filter_map(|path| {
-                let mut counts = self.counts.get();
-                counts.stats += 1;
-                self.counts.set(counts);
+                self.count_stat();
+                self.files.disk().lstat(path).ok()
+            })
+            .map(|lstat| (lstat.stamp.dev, lstat.stamp.ino))
+            .collect();
+        let holding_identities: std::collections::HashSet<(u64, u64)> = holding
+            .iter()
+            .filter_map(|path| {
+                self.count_stat();
                 self.files.disk().stat(path).ok()
             })
             .map(|stamp| (stamp.dev, stamp.ino))
             .collect();
         let hints = self.hints.get() + 1;
         self.hints.set(hints);
-        for dir in self.dirs.borrow_mut().iter_mut() {
-            let by_identity = dir
-                .stamp
-                .is_some_and(|stamp| identities.contains(&(stamp.dev, stamp.ino)));
-            if by_identity || spellings.contains(&crate::paths::path_dedup_key(&dir.path)) {
-                dir.hinted = hints;
+        for entry in self.entries.borrow_mut().iter_mut() {
+            let lstat = entry.lstat.ok();
+            let itself = lstat.map(|lstat| (lstat.stamp.dev, lstat.stamp.ino));
+            let followed = match lstat {
+                Some(Lstat {
+                    kind: Kind::Link, ..
+                }) => entry.followed,
+                _ => lstat.map(|lstat| lstat.stamp),
+            }
+            .map(|stamp| (stamp.dev, stamp.ino));
+            let key = crate::paths::path_dedup_key(&entry.path);
+            // A path named, or below one: a directory moved into place moves
+            // everything below it, which no other event may name. A path
+            // that leads to a named one through a final symlink (a listing's
+            // spelling) is matched by where it leads. Each of the path's
+            // ancestors is looked up, so a batch of events costs the cached
+            // paths' depth, not their count times the batch's.
+            let below_named = Path::new(&key)
+                .ancestors()
+                .any(|ancestor| named_keys.contains(ancestor));
+            if below_named
+                || itself.is_some_and(|id| named_identities.contains(&id))
+                || followed.is_some_and(|id| named_identities.contains(&id))
+            {
+                entry.hinted = hints;
+            }
+            if holding_spellings.contains(&key)
+                || followed.is_some_and(|id| holding_identities.contains(&id))
+            {
+                entry.hinted_entries = hints;
             }
         }
     }
@@ -471,21 +693,15 @@ impl<D: Probe> ReadChecks<D> {
         if self.witnessed(check, generation) {
             return true;
         }
-        // Stamp, then ask: a change after the stamps moves them, so the next
-        // generation asks again.
-        let witness = self.deciders(read).and_then(|dirs| {
-            dirs.into_iter()
-                .map(|dir| {
-                    let id = self.dir_id(dir);
-                    self.dir_stamp(id, generation).map(|stamp| (id, stamp))
-                })
-                .collect::<Option<Vec<_>>>()
-                .map(|dirs| Witness {
-                    checker: self.id,
-                    dirs,
-                    taken: now,
-                    hints: self.hints.get(),
-                })
+        // Look, then ask: a change after the look moves a stamp or an
+        // identity, so the next generation asks again.
+        let witness = self.deciders(read, generation).map(|items| Witness {
+            checker: self.id,
+            wide: items.iter().any(|item| item.wide),
+            items,
+            born: generation,
+            taken: now,
+            hints: self.hints.get(),
         });
         let holds = self.ask(read) == read.observation;
         *check.shared.witness.borrow_mut() = witness.filter(|_| holds);
@@ -504,10 +720,8 @@ impl<D: Probe> ReadChecks<D> {
             return false;
         };
         let path = &check.shared.read.path;
-        let mut counts = self.counts.get();
         if let Some(confirmed) = check.shared.confirmed.get() {
-            counts.stats += 1;
-            self.counts.set(counts);
+            self.count_stat();
             let now = self
                 .files
                 .disk()
@@ -533,34 +747,37 @@ impl<D: Probe> ReadChecks<D> {
 
     /// List `dir` now, as a reader that will depend on the listing does,
     /// and return the read as a check (counted as a listing). Inside a
-    /// generation the directory is stamped first (a `stat`, shared with
-    /// every check that names it this generation), and when the listing is
-    /// one that stamp decides (a fact, and an answer: see the module docs)
-    /// the check is born with that stamp as its witness, so the next
-    /// generation confirms it by the `stat` alone. A change after the stamp
-    /// moves it, so the witness is never newer than what the listing saw.
+    /// generation the directory and the walk to it are looked at first (an
+    /// `lstat` each, shared with every check that names the path this
+    /// generation, and a `stat` of a symlink listed through), and when the
+    /// listing is one they decide (a fact, and an answer: see the module
+    /// docs) the check is born with them as its witness, so a later
+    /// generation confirms it by them alone. A change after the look moves
+    /// a stamp or an identity, so the witness is never newer than what the
+    /// listing saw.
     pub fn list(&self, dir: &Path) -> Check {
         let query = Read {
             path: dir.to_path_buf(),
             observation: Observation::Listing(Ok(Vec::new())),
         };
-        let stamped = match (self.files.generation(), self.files.now()) {
-            (Some(generation), Some(now)) if dir.is_absolute() => {
-                let id = self.dir_id(dir.to_path_buf());
-                self.dir_stamp(id, generation).map(|stamp| (id, stamp, now))
-            }
+        let looked = match (self.files.generation(), self.files.now()) {
+            (Some(generation), Some(now)) => self
+                .deciders(&query, generation)
+                .map(|items| (items, generation, now)),
             _ => None,
         };
         let read = Read {
             observation: self.ask(&query),
             ..query
         };
-        let witness = stamped
+        let witness = looked
             .filter(|_| matches!(read.observation, Observation::Listing(Ok(_))))
             .filter(|_| a_fact(&read.observation))
-            .map(|(id, stamp, taken)| Witness {
+            .map(|(items, generation, taken)| Witness {
                 checker: self.id,
-                dirs: vec![(id, stamp)],
+                wide: items.iter().any(|item| item.wide),
+                items,
+                born: generation,
                 taken,
                 hints: self.hints.get(),
             });
@@ -575,38 +792,72 @@ impl<D: Probe> ReadChecks<D> {
 
     /// Whether `check`'s witness, taken in an earlier generation, still holds:
     /// this checker took it, none of its stamps is racy, no watch event has
-    /// named one of its directories or an entry of one since it was taken
-    /// ([`Self::hint`]), and every directory's stamp is unchanged.
+    /// named the path of one, or an entry of a directory whose entries one
+    /// decides, since it was taken ([`Self::hint`]), and every item finds
+    /// what it found. A wide witness that holds narrows (see the module
+    /// docs).
     fn witnessed(&self, check: &Check, generation: u64) -> bool {
-        let witness = check.shared.witness.borrow();
-        let Some(witness) = &*witness else {
+        let mut witness = check.shared.witness.borrow_mut();
+        let Some(witness) = &mut *witness else {
             return false;
         };
         if witness.checker != self.id {
             return false;
         }
         let hinted = {
-            let dirs = self.dirs.borrow();
-            witness
-                .dirs
-                .iter()
-                .any(|(id, _)| dirs[*id].hinted > witness.hints)
+            let entries = self.entries.borrow();
+            witness.items.iter().any(|item| {
+                let entry = &entries[item.id];
+                // What an identity or a symlink says is decided by the path
+                // itself; a directory's stamp, by its entries too.
+                match item.seen {
+                    Seen::Identity(_)
+                    | Seen::Entry(Lstat {
+                        kind: Kind::Link, ..
+                    }) => entry.hinted > witness.hints,
+                    Seen::Entry(_) | Seen::Followed(_) => {
+                        entry.hinted.max(entry.hinted_entries) > witness.hints
+                    }
+                }
+            })
         };
-        !hinted
+        let holds = !hinted
             && !witness
-                .dirs
+                .items
                 .iter()
-                .any(|(_, stamp)| stamp.is_racy(witness.taken))
+                .filter_map(|item| item.seen.stamp())
+                .any(|stamp| stamp.is_racy(witness.taken))
             && witness
-                .dirs
+                .items
                 .iter()
-                .all(|(id, stamp)| self.dir_stamp(*id, generation) == Some(*stamp))
+                .all(|item| self.finds(item, generation));
+        // The generation that took it finds its entries as the walk found
+        // them, which says nothing of when the query was asked.
+        let narrows = !matches!(check.shared.read.observation, Observation::Canonical(_))
+            || self.files.disk().canonical_spells_as_asked();
+        if holds && witness.wide && generation > witness.born && narrows {
+            witness.items.retain(|item| !item.wide);
+            witness.wide = false;
+        }
+        holds
     }
 
-    /// The directories whose stamps decide `read`'s answer (see the module
-    /// docs), for a read about to be asked; `None` when no directory does,
-    /// and the read is asked in every generation.
-    fn deciders(&self, read: &Read) -> Option<Vec<PathBuf>> {
+    /// Whether `item`'s path holds, in `generation`, what it saw.
+    fn finds(&self, item: &Item, generation: u64) -> bool {
+        match item.seen {
+            Seen::Identity(seen) => matches!(
+                self.lstat(item.id, generation),
+                Ok(lstat @ Lstat { kind: Kind::Dir, .. }) if Identity::of(&lstat) == seen
+            ),
+            Seen::Entry(seen) => self.lstat(item.id, generation) == Ok(seen),
+            Seen::Followed(seen) => self.followed(item.id, generation) == Some(seen),
+        }
+    }
+
+    /// What decides `read`'s answer (see the module docs), for a read about
+    /// to be asked, as `generation` sees it; `None` when nothing does, and
+    /// the read is asked in every generation.
+    fn deciders(&self, read: &Read, generation: u64) -> Option<Vec<Item>> {
         let path = &read.path;
         // A relative path is resolved from the working directory, and has
         // no witness. `lstat` follows a final symlink when the path ends
@@ -621,30 +872,62 @@ impl<D: Probe> ReadChecks<D> {
             return None;
         }
         match &read.observation {
-            Observation::Listing(Ok(_)) => Some(vec![path.clone()]),
-            Observation::Listing(Err(_)) | Observation::Kind(_) | Observation::Canonical(_) => {
-                self.resolution(path, true)
+            // The directory's entries decide a listing, by its stamp; the
+            // walk to it, entering it as any other, decides which directory
+            // that is, by items spelt as where the path leads, so a watch
+            // event above the directory distrusts them however the listing
+            // spells it.
+            Observation::Listing(Ok(_)) => {
+                let mut items = self.resolution(path, true, true, generation)?;
+                let id = self.entry_id(path);
+                items.push(Item {
+                    id,
+                    seen: Seen::Followed(self.followed(id, generation)?),
+                    wide: false,
+                });
+                Some(items)
             }
-            Observation::LinkKind(_) => self.resolution(path, false),
+            Observation::Listing(Err(_)) | Observation::Kind(_) | Observation::Canonical(_) => {
+                self.resolution(path, true, false, generation)
+            }
+            Observation::LinkKind(_) => self.resolution(path, false, false, generation),
             // A file's stamp, like its text, moves with no directory's
             // stamp moving.
             Observation::Text(_) | Observation::Stamp(_) => None,
         }
     }
 
-    /// The directories resolving `path` looks an entry up in, following
-    /// every symlink (the final component's too, if `follow_last`) as the
-    /// kernel resolves it: a link's target is taken component by component,
-    /// so a separator it ends with is no different from none, and each `..`
-    /// from the directory reached. `None` if `path` is relative, or the walk
-    /// follows more symlinks than the kernel does or meets anything but a
+    /// The witness of resolving `path`, following every symlink (the final
+    /// component's too, if `follow_last`) as the kernel resolves it: a
+    /// link's target is taken component by component, so a separator it ends
+    /// with is no different from none, and each `..` from the directory
+    /// reached. Each directory is looked at before any name is looked up in
+    /// it. With `enter_last`, the last directory is entered as every other
+    /// is, held by its identity, and the walk meeting anything else there
+    /// has no witness. `None` if `path` is relative, or the walk follows
+    /// more symlinks than the kernel does or meets anything but a
     /// directory, a symlink, or the absence or final entry it stops at.
-    fn resolution(&self, path: &Path, follow_last: bool) -> Option<Vec<PathBuf>> {
+    fn resolution(
+        &self,
+        path: &Path,
+        follow_last: bool,
+        enter_last: bool,
+        generation: u64,
+    ) -> Option<Vec<Item>> {
         if !path.is_absolute() {
             return None;
         }
         let mut current = PathBuf::from("/");
-        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut here = self.entry_id(&current);
+        let mut items: Vec<Item> = Vec::new();
+        // Each item once, kept after narrowing if any step needs it then.
+        let push = |items: &mut Vec<Item>, item: Item| match items
+            .iter_mut()
+            .find(|held| held.id == item.id && held.seen == item.seen)
+        {
+            Some(held) => held.wide &= item.wide,
+            None => items.push(item),
+        };
         let mut links = 0;
         // Segments still to resolve, last first, split on separators as the
         // kernel splits them (`Path::components` would drop a `.`, which
@@ -662,46 +945,138 @@ impl<D: Probe> ReadChecks<D> {
         };
         push_all(&mut rest, path)?;
         while let Some(name) = rest.pop() {
-            // Every segment, `.` and `..` included, is looked up in the
-            // directory reached, which takes search permission there: a
-            // `chmod` moves its stamp.
-            if !dirs.contains(&current) {
-                dirs.push(current.clone());
+            // The directory reached, looked at before the name is looked up
+            // in it: its stamp holds whatever the lookup finds while the
+            // witness is wide, and after, where the lookup decides the
+            // answer.
+            let Ok(
+                directory @ Lstat {
+                    kind: Kind::Dir, ..
+                },
+            ) = self.lstat(here, generation)
+            else {
+                return None;
+            };
+            let looked_up_in = move |wide: bool| Item {
+                id: here,
+                seen: Seen::Entry(directory),
+                wide,
+            };
+            // The root is entered with no name looked up for it, so no step
+            // holds its identity: it does here, for its mode and owners
+            // decide whether a symlink in it is followed.
+            if current == Path::new("/") {
+                push(
+                    &mut items,
+                    Item {
+                        id: here,
+                        seen: Seen::Identity(Identity::of(&directory)),
+                        wide: false,
+                    },
+                );
             }
             match name.as_str() {
-                "." => continue,
-                ".." => {
-                    current.pop();
+                // Every segment, `.` and `..` included, is looked up in the
+                // directory reached, which takes search permission there. A
+                // `chmod` moves its stamp, which holds while the witness is
+                // wide; after, an `lstat` of its `..`, which finds the
+                // directory the walk returns to only with that permission.
+                // (`Path` drops a trailing `.`, so a `.` is held the same
+                // way.)
+                "." | ".." => {
+                    push(&mut items, looked_up_in(true));
+                    let up = current.join("..");
+                    let up_id = self.entry_id(&up);
+                    let Ok(
+                        up @ Lstat {
+                            kind: Kind::Dir, ..
+                        },
+                    ) = self.lstat(up_id, generation)
+                    else {
+                        return None;
+                    };
+                    push(
+                        &mut items,
+                        Item {
+                            id: up_id,
+                            seen: Seen::Identity(Identity::of(&up)),
+                            wide: false,
+                        },
+                    );
+                    if name == ".." {
+                        current.pop();
+                        here = self.entry_id(&current);
+                    }
                     continue;
                 }
                 _ => {}
             }
             let child = current.join(&name);
+            let child_id = self.entry_id(&child);
             let last = rest.is_empty();
-            let mut counts = self.counts.get();
-            counts.stats += 1;
-            self.counts.set(counts);
-            match self.files.disk().entry(&child) {
-                Ok(EntryAt::Dir) => current = child,
-                Ok(EntryAt::Link(target)) if !last || follow_last => {
+            match self.lstat(child_id, generation) {
+                Ok(
+                    entered @ Lstat {
+                        kind: Kind::Dir, ..
+                    },
+                ) if !last || enter_last => {
+                    push(&mut items, looked_up_in(true));
+                    push(
+                        &mut items,
+                        Item {
+                            id: child_id,
+                            seen: Seen::Identity(Identity::of(&entered)),
+                            wide: false,
+                        },
+                    );
+                    current = child;
+                    here = child_id;
+                }
+                Ok(
+                    link @ Lstat {
+                        kind: Kind::Link, ..
+                    },
+                ) if !last || follow_last => {
+                    push(&mut items, looked_up_in(true));
+                    push(
+                        &mut items,
+                        Item {
+                            id: child_id,
+                            seen: Seen::Entry(link),
+                            wide: false,
+                        },
+                    );
                     links += 1;
                     if links > MAX_LINKS {
                         return None;
                     }
+                    let target = self.target(child_id, generation)?;
                     if target.is_absolute() {
                         current = PathBuf::from("/");
+                        here = self.entry_id(&current);
                     }
                     push_all(&mut rest, &target)?;
                 }
-                Ok(_) if last => return Some(dirs),
+                // What a listing lists is no directory: what it found was
+                // there after the walk, which says nothing of it.
+                Ok(_) | Err(Missing::Absent) if enter_last => return None,
+                // The last name decides the answer by what its directory
+                // holds.
+                Ok(_) if last => {
+                    push(&mut items, looked_up_in(false));
+                    return Some(items);
+                }
                 // A file in the middle of the path: the query fails, as no
                 // answer a witness keeps does.
                 Ok(_) => return None,
-                Err(err) if err.kind() == io::ErrorKind::NotFound => return Some(dirs),
-                Err(_) => return None,
+                Err(Missing::Absent) => {
+                    push(&mut items, looked_up_in(false));
+                    return Some(items);
+                }
+                Err(Missing::Failed) => return None,
             }
         }
-        Some(dirs)
+        Some(items)
     }
 
     /// `read`'s query asked now, counted.
@@ -716,40 +1091,82 @@ impl<D: Probe> ReadChecks<D> {
             Observation::Canonical(_) => counts.canonicalizations += 1,
         }
         self.counts.set(counts);
+        self.asked.set(self.asked.get() + 1);
         self.files.disk().answer(&read.path, &read.observation)
     }
 
-    /// The index of `dir` in [`Self::dirs`], added unstamped if new.
-    fn dir_id(&self, dir: PathBuf) -> usize {
-        let mut ids = self.dir_ids.borrow_mut();
-        if let Some(&id) = ids.get(&dir) {
+    /// The index of `path` in [`Self::entries`], added unlooked-at if new.
+    fn entry_id(&self, path: &Path) -> usize {
+        let mut ids = self.entry_ids.borrow_mut();
+        if let Some(&id) = ids.get(path.as_os_str()) {
             return id;
         }
-        let mut dirs = self.dirs.borrow_mut();
-        let id = dirs.len();
-        ids.insert(dir.clone(), id);
-        dirs.push(Dir {
-            path: dir,
-            stamp: None,
+        let mut entries = self.entries.borrow_mut();
+        let id = entries.len();
+        ids.insert(path.as_os_str().to_owned(), id);
+        entries.push(Entry {
+            path: path.to_path_buf(),
+            lstat: Err(Missing::Failed),
             checked: 0,
+            followed: None,
+            followed_checked: 0,
+            target: None,
+            target_checked: 0,
             hinted: 0,
+            hinted_entries: 0,
         });
         id
     }
 
-    /// The stamp in `generation` of the directory `id` names, `stat`ed once
-    /// per generation; `None` when it has none.
-    fn dir_stamp(&self, id: usize, generation: u64) -> Option<Stamp> {
-        let mut dirs = self.dirs.borrow_mut();
-        let dir = &mut dirs[id];
-        if dir.checked != generation {
-            let mut counts = self.counts.get();
-            counts.stats += 1;
-            self.counts.set(counts);
-            dir.stamp = self.files.disk().stat(&dir.path).ok();
-            dir.checked = generation;
+    /// What an `lstat` in `generation` of the path `id` names finds, asked
+    /// once per generation.
+    fn lstat(&self, id: usize, generation: u64) -> Result<Lstat, Missing> {
+        let mut entries = self.entries.borrow_mut();
+        let entry = &mut entries[id];
+        if entry.checked != generation {
+            self.count_stat();
+            entry.lstat = self
+                .files
+                .disk()
+                .lstat(&entry.path)
+                .map_err(|err| match err.kind() {
+                    io::ErrorKind::NotFound => Missing::Absent,
+                    _ => Missing::Failed,
+                });
+            entry.checked = generation;
         }
-        dir.stamp
+        entry.lstat
+    }
+
+    /// The stamp in `generation` of the path `id` names, following every
+    /// symlink: its `lstat`'s, unless that found a symlink, which is then
+    /// `stat`ed, once per generation. `None` when it has none.
+    fn followed(&self, id: usize, generation: u64) -> Option<Stamp> {
+        let lstat = self.lstat(id, generation).ok()?;
+        if lstat.kind != Kind::Link {
+            return Some(lstat.stamp);
+        }
+        let mut entries = self.entries.borrow_mut();
+        let entry = &mut entries[id];
+        if entry.followed_checked != generation {
+            self.count_stat();
+            entry.followed = self.files.disk().stat(&entry.path).ok();
+            entry.followed_checked = generation;
+        }
+        entry.followed
+    }
+
+    /// The target of the symlink at the path `id` names, in `generation`,
+    /// read once per generation, after the `lstat` that found it.
+    fn target(&self, id: usize, generation: u64) -> Option<PathBuf> {
+        let mut entries = self.entries.borrow_mut();
+        let entry = &mut entries[id];
+        if entry.target_checked != generation {
+            self.count_stat();
+            entry.target = self.files.disk().read_link(&entry.path).ok();
+            entry.target_checked = generation;
+        }
+        entry.target.clone()
     }
 }
 
@@ -780,14 +1197,45 @@ mod host_tests {
         Rename(Vec<usize>, Vec<usize>),
         /// Take away, or give back, a directory's search permission.
         Search(Vec<usize>, bool),
+        /// Exchange two entries by three renames.
+        Swap(Vec<usize>, Vec<usize>),
+        /// Replace a directory with a copy of it, less the second path: a
+        /// directory moved into its place.
+        Replace(Vec<usize>, Vec<usize>),
+        /// Replace an entry with a symlink, by renaming one over it.
+        Relink(Vec<usize>, usize),
     }
 
     fn rel(names: &[usize]) -> PathBuf {
         names.iter().map(|&i| NAMES[i]).collect()
     }
 
+    /// Copy the tree at `from` to `to`, symlinks as symlinks, leaving out
+    /// `without` and what is below it.
+    fn copy_tree(from: &Path, to: &Path, without: &Path) -> io::Result<()> {
+        std::fs::create_dir(to)?;
+        for entry in host_fs::read_dir(from)? {
+            let entry = entry?;
+            let (source, copy) = (entry.path(), to.join(entry.file_name()));
+            if source.starts_with(without) {
+                continue;
+            }
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                std::os::unix::fs::symlink(host_fs::read_link(&source)?, &copy)?;
+            } else if kind.is_dir() {
+                copy_tree(&source, &copy, without)?;
+            } else {
+                std::fs::write(&copy, host_fs::read(&source)?)?;
+            }
+        }
+        Ok(())
+    }
+
     fn apply(root: &Path, change: &Change) {
         let at = |names: &[usize]| root.join(rel(names));
+        // Where a change puts an entry for a moment: in no generated path.
+        let aside = root.join(".aside");
         // Failures (a missing parent, an existing entry) leave the tree as
         // it was, which is a change like any other for the property.
         let _ = match change {
@@ -806,6 +1254,27 @@ mod host_tests {
                 use std::os::unix::fs::PermissionsExt as _;
                 let mode = if *allowed { 0o755 } else { 0o644 };
                 std::fs::set_permissions(at(p), std::fs::Permissions::from_mode(mode))
+            }
+            Change::Swap(a, b) => std::fs::rename(at(a), &aside).and_then(|()| {
+                let moved = std::fs::rename(at(b), at(a));
+                std::fs::rename(&aside, at(b)).and(moved)
+            }),
+            Change::Replace(p, without) => {
+                let copy = root.join(".copy");
+                let replaced = copy_tree(&at(p), &copy, &at(without))
+                    .and_then(|()| std::fs::rename(at(p), &aside))
+                    .and_then(|()| std::fs::rename(&copy, at(p)));
+                let _ = std::fs::remove_dir_all(&copy);
+                let _ = std::fs::remove_dir_all(&aside);
+                replaced
+            }
+            Change::Relink(p, t) => {
+                let target = TARGETS[*t].replace("ROOT", &root.display().to_string());
+                std::os::unix::fs::symlink(target, &aside)
+                    .and_then(|()| std::fs::rename(&aside, at(p)))
+                    .inspect_err(|_| {
+                        let _ = std::fs::remove_file(&aside);
+                    })
             }
         };
     }
@@ -834,6 +1303,9 @@ mod host_tests {
             names().prop_map(Change::Remove),
             (names(), names()).prop_map(|(a, b)| Change::Rename(a, b)),
             (names(), any::<bool>()).prop_map(|(p, allowed)| Change::Search(p, allowed)),
+            (names(), names()).prop_map(|(a, b)| Change::Swap(a, b)),
+            (names(), names()).prop_map(|(p, without)| Change::Replace(p, without)),
+            (names(), 0..TARGETS.len()).prop_map(|(p, t)| Change::Relink(p, t)),
         ]
     }
 
@@ -958,6 +1430,123 @@ mod host_tests {
             // temporary directory can be removed.
             restore_search(&root);
         }
+    }
+
+    /// On the host (#776): once its witness has narrowed, a read is asked
+    /// nothing again when entries are made, removed and renamed in the
+    /// directories its path only passes through, the temporary directory
+    /// among them (as `$HOME` is in the server), whose ancestors other tests
+    /// and processes change as they please. A change in the directory whose
+    /// entries decide a read asks it again. Each path is read through
+    /// symlinks too, relative and absolute.
+    #[test]
+    fn sibling_changes_above_a_read_ask_it_nothing_on_the_host() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = host_fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("a/b/c/d")).unwrap();
+        std::fs::write(root.join("a/b/c/f"), b"x").unwrap();
+        std::os::unix::fs::symlink("a/b", root.join("l")).unwrap();
+        std::os::unix::fs::symlink("../a/b/c", root.join("a/m")).unwrap();
+        std::os::unix::fs::symlink(root.join("a/b/c"), root.join("a/b/n")).unwrap();
+        let deciding = root.join("a/b/c");
+        let paths = [
+            "a/b/c/f",
+            "a/b/c/g",
+            "a/b/c/d",
+            "a/b/c/d/",
+            "l/c/f",
+            "a/m/f",
+            "a/m/g",
+            "a/b/n/f",
+            "a/b/../b/c/f",
+        ];
+        let queries = [
+            Observation::Kind(Ok(EntryKind::File)),
+            Observation::LinkKind(Ok(EntryKind::File)),
+            Observation::Canonical(Ok(PathBuf::new())),
+        ];
+        let mut checks: Vec<Check> = paths
+            .iter()
+            .flat_map(|rel| {
+                let path = PathBuf::from(format!("{}/{rel}", root.display()));
+                queries.iter().map(move |query| {
+                    Check::new(Read {
+                        observation: HostDisk.answer(&path, query),
+                        path: path.clone(),
+                    })
+                })
+            })
+            .collect();
+        for listed in ["a/b/c", "a/b/c/d", "l/c", "a/m"] {
+            let path = root.join(listed);
+            checks.push(Check::new(Read {
+                observation: HostDisk.answer(&path, &Observation::Listing(Ok(Vec::new()))),
+                path,
+            }));
+        }
+        let mut checker = ReadChecks::<HostDisk>::default();
+        let mut at = Nanos(i128::MAX / 2);
+        let mut generation = |checker: &mut ReadChecks<HostDisk>| {
+            checker.begin_generation(at);
+            let asked = checker.asked();
+            for check in &checks {
+                if checker.holds(check) {
+                    let truth = HostDisk.answer(&check.read().path, &check.read().observation);
+                    assert_eq!(truth, check.read().observation, "{:?}", check.read().path);
+                }
+            }
+            let asked = checker.asked() - asked;
+            checker.end_generation();
+            at = Nanos(at.0 + 1);
+            asked
+        };
+        // A witness narrows in the first later generation that finds the
+        // stamps it was born with, unless it is a canonicalisation's and the
+        // host spells its answer as the disk does. Other tests and processes
+        // make entries in the temporary directory's ancestors, which would
+        // keep it wide, so their stamps are held still until it narrows;
+        // their identities, which narrowed witnesses keep, are their own.
+        let stays_wide = |check: &Check| {
+            matches!(check.read().observation, Observation::Canonical(_))
+                && !HostDisk.canonical_spells_as_asked()
+        };
+        {
+            let _still = host_fs::hold_ancestors_still(&root);
+            generation(&mut checker);
+            generation(&mut checker);
+        }
+        assert!(
+            checks
+                .iter()
+                .all(|check| check.wide() != Some(true) || stays_wide(check)),
+            "a quiet generation left a witness wide"
+        );
+        // An `lstat` of a path ending in a separator, or spelt with a `..`,
+        // has none.
+        let unwitnessed = checks.iter().filter(|check| check.wide().is_none()).count();
+        assert_eq!(unwitnessed, 2, "precondition");
+        let wide = checks
+            .iter()
+            .filter(|check| check.wide() == Some(true))
+            .count();
+        for dir in [root.clone(), root.join("a"), root.join("a/b")] {
+            std::fs::write(dir.join("s"), b"x").unwrap();
+            std::fs::create_dir(dir.join("t")).unwrap();
+            std::os::unix::fs::symlink("s", dir.join("u")).unwrap();
+            std::fs::rename(dir.join("s"), dir.join("s2")).unwrap();
+            std::fs::remove_dir(dir.join("t")).unwrap();
+        }
+        assert_eq!(
+            generation(&mut checker),
+            (unwitnessed + wide) as u64,
+            "a sibling change asked a narrowed read again"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::fs::write(deciding.join("s"), b"x").unwrap();
+        assert!(
+            generation(&mut checker) > 0,
+            "a change in the deciding directory asked nothing"
+        );
     }
 
     /// A path the kernel resolves differently from its components (a

@@ -32,6 +32,11 @@ struct Entry {
     ino: u64,
     mtime: i128,
     ctime: i128,
+    /// A sticky, world-writable directory ([`Op::Protect`]): every symlink
+    /// in the model belongs to neither the follower nor the directory's
+    /// owner, so with Linux's `fs.protected_symlinks` none in it is
+    /// followed.
+    protected: bool,
 }
 
 /// A file system whose clock the test moves.
@@ -41,16 +46,25 @@ struct Model {
     clock: i128,
     granularity: i128,
     next_ino: u64,
-    /// A change made at the next query: one that lands between a check's
-    /// stamps and its question.
-    interleaved: Option<Op>,
-    /// A change made at the next `stat`, just before it takes its stamp:
-    /// one that lands between a query and a stamp taken after it, which
-    /// the stamp sees and the query did not.
-    interleaved_at_stat: Option<Op>,
+    /// Whether a new entry takes an inode a removal freed, as ext4 does:
+    /// the most recently removed first, in the order they were removed, so
+    /// that a link replaced, or a tree removed and made again in the same
+    /// order, gets back the inodes it had ([`Op::ReuseInodes`]).
+    reuse: bool,
+    /// The inodes removals freed, a batch per removal.
+    freed: Vec<std::collections::VecDeque<u64>>,
+    /// A change made at a later query or `stat` ([`Op::Interleave`],
+    /// [`Op::InterleaveAtStat`]). One at most is pending, so a generation
+    /// passes through two states at most: the disk as it began, and as it
+    /// ends.
+    interleaved: Option<Interleaved>,
     /// Every listing also reports an entry it could not read, as a
     /// transient I/O error during iteration does.
     unreadable_entry: bool,
+    /// Whether a canonicalisation spells each name as the path asked does
+    /// ([`Probe::canonical_spells_as_asked`]); the model's does, wherever it
+    /// runs.
+    canonical_spells_as_asked: bool,
 }
 
 fn failure(kind: io::ErrorKind) -> Failure {
@@ -64,9 +78,11 @@ impl Model {
             clock: 100 * SECOND,
             granularity,
             next_ino: 1,
+            reuse: false,
+            freed: Vec::new(),
             interleaved: None,
-            interleaved_at_stat: None,
             unreadable_entry: false,
+            canonical_spells_as_asked: true,
         };
         model.entries.insert(
             PathBuf::from("/"),
@@ -75,6 +91,7 @@ impl Model {
                 ino: 1,
                 mtime: 0,
                 ctime: 0,
+                protected: false,
             },
         );
         model
@@ -93,6 +110,47 @@ impl Model {
         }
     }
 
+    /// The inode a new entry gets: a freed one, if the model reuses them.
+    fn fresh_ino(&mut self) -> u64 {
+        while self.reuse
+            && let Some(batch) = self.freed.last_mut()
+        {
+            match batch.pop_front() {
+                Some(ino) => return ino,
+                None => {
+                    self.freed.pop();
+                }
+            }
+        }
+        self.next_ino += 1;
+        self.next_ino
+    }
+
+    /// Replace the directory at `path` with a copy of it made anew (new
+    /// stamps, and inodes new or reused), leaving out `without` and what is
+    /// below it: a directory moved into its place.
+    fn replace(&mut self, path: &Path, without: &Path) {
+        if !matches!(
+            self.entries.get(path),
+            Some(Entry {
+                node: Node::Dir,
+                ..
+            })
+        ) {
+            return;
+        }
+        let copied: Vec<(PathBuf, Node)> = self
+            .entries
+            .iter()
+            .filter(|(p, _)| p.starts_with(path) && !p.starts_with(without))
+            .map(|(p, e)| (p.clone(), e.node.clone()))
+            .collect();
+        self.remove(path);
+        for (p, node) in copied {
+            self.create(&p, node);
+        }
+    }
+
     /// Put `node` at `path`, whose parent must be a directory and which must
     /// be absent; `false` if it cannot be.
     fn create(&mut self, path: &Path, node: Node) -> bool {
@@ -107,15 +165,16 @@ impl Model {
         {
             return false;
         }
-        self.next_ino += 1;
+        let ino = self.fresh_ino();
         let now = self.tick();
         self.entries.insert(
             path.to_path_buf(),
             Entry {
                 node,
-                ino: self.next_ino,
+                ino,
                 mtime: now,
                 ctime: now,
+                protected: false,
             },
         );
         self.touch(parent);
@@ -127,6 +186,13 @@ impl Model {
         if path == Path::new("/") || !self.entries.contains_key(path) {
             return;
         }
+        let freed = self
+            .entries
+            .iter()
+            .filter(|(p, _)| p.starts_with(path))
+            .map(|(_, e)| e.ino)
+            .collect();
+        self.freed.push(freed);
         self.entries.retain(|p, _| !p.starts_with(path));
         self.touch(path.parent().expect("not the root"));
     }
@@ -198,23 +264,62 @@ impl Model {
                 self.rename(&from, &to);
                 self.create(&from, Node::Link(to));
             }
-            Op::Interleave(op) => self.interleaved = Some((**op).clone()),
-            Op::InterleaveAtStat(op) => self.interleaved_at_stat = Some((**op).clone()),
+            Op::Swap(p, q) => {
+                let (p, q, aside) = (path(*p), path(*q), PathBuf::from(SWAP));
+                self.rename(&p, &aside);
+                self.rename(&q, &p);
+                self.rename(&aside, &q);
+            }
+            Op::Protect(p, on) => {
+                let now = self.tick();
+                if let Some(entry) = self.entries.get_mut(Path::new(CHURNED[*p]))
+                    && matches!(entry.node, Node::Dir)
+                {
+                    entry.protected = *on;
+                    entry.ctime = now;
+                }
+            }
+            Op::Relink(p, target) => {
+                let p = path(*p);
+                if matches!(
+                    self.entries.get(&p),
+                    Some(Entry {
+                        node: Node::Link(_),
+                        ..
+                    })
+                ) {
+                    self.remove(&p);
+                    self.create(&p, Node::Link(path(*target)));
+                }
+            }
+            Op::Replace(p, without) => self.replace(&path(*p), &path(*without)),
+            Op::ReuseInodes => self.reuse = true,
+            Op::Interleave(after, change) | Op::InterleaveAtStat(after, change) => {
+                self.interleaved = Some(Interleaved {
+                    at_stat: matches!(op, Op::InterleaveAtStat(..)),
+                    after: *after,
+                    op: (**change).clone(),
+                });
+            }
             Op::Unreadable(on) => self.unreadable_entry = *on,
             Op::Generation => {}
-            Op::Stealth(op) => {
-                let stamps: BTreeMap<PathBuf, (i128, i128)> = self
-                    .entries
-                    .iter()
-                    .map(|(p, e)| (p.clone(), (e.mtime, e.ctime)))
-                    .collect();
-                self.apply(op);
-                for (p, entry) in &mut self.entries {
-                    if let Some(&(mtime, ctime)) = stamps.get(p) {
-                        entry.mtime = mtime;
-                        entry.ctime = ctime;
-                    }
-                }
+            Op::Stealth(op) => self.keeping_stamps(|model| model.apply(op)),
+        }
+    }
+
+    /// Make `change` as a file system whose stamps do not move does: every
+    /// entry that was there keeps its stamps.
+    fn keeping_stamps(&mut self, change: impl FnOnce(&mut Model)) {
+        let stamps: BTreeMap<PathBuf, (i128, i128)> = self
+            .entries
+            .iter()
+            .map(|(p, e)| (p.clone(), (e.mtime, e.ctime)))
+            .collect();
+        change(self);
+        for (p, entry) in &mut self.entries {
+            if let Some(&(mtime, ctime)) = stamps.get(p) {
+                entry.mtime = mtime;
+                entry.ctime = ctime;
             }
         }
     }
@@ -240,6 +345,9 @@ impl Model {
                     });
                 }
                 Some(Node::Link(target)) if follow || !rest.is_empty() => {
+                    if self.entries.get(&current).is_some_and(|e| e.protected) {
+                        return Err(io::ErrorKind::PermissionDenied);
+                    }
                     hops += 1;
                     if hops > 8 {
                         return Err(io::ErrorKind::InvalidInput);
@@ -305,24 +413,27 @@ impl Model {
 
     fn stamp(&self, path: &Path) -> io::Result<Stamp> {
         let target = self.resolve(path, true).map_err(io::Error::from)?;
-        let entry = &self.entries[&target];
+        Ok(Model::stamp_of(&self.entries[&target]))
+    }
+
+    fn stamp_of(entry: &Entry) -> Stamp {
         let size = match &entry.node {
             Node::File(bytes) => bytes.len() as u64,
             _ => 0,
         };
-        Ok(Stamp {
+        Stamp {
             dev: 1,
             ino: entry.ino,
             size,
             mtime: Nanos(entry.mtime),
             ctime: Some(Nanos(entry.ctime)),
-        })
+        }
     }
 }
 
 impl Disk for Rc<RefCell<Model>> {
     fn stat(&self, path: &Path) -> io::Result<Stamp> {
-        let pending = self.borrow_mut().interleaved_at_stat.take();
+        let pending = due(&mut self.borrow_mut().interleaved, true);
         if let Some(op) = pending {
             self.borrow_mut().apply(&op);
         }
@@ -340,19 +451,58 @@ impl Disk for Rc<RefCell<Model>> {
     }
 }
 
+/// Whether `path` ends with a separator, which makes the kernel resolve its
+/// last name as a directory: following a final symlink, and failing at a
+/// file.
+fn spelt_as_a_directory(path: &Path) -> bool {
+    path.as_os_str().len() > 1 && path.as_os_str().as_encoded_bytes().ends_with(b"/")
+}
+
 impl Probe for Rc<RefCell<Model>> {
-    fn entry(&self, path: &Path) -> io::Result<EntryAt> {
+    fn canonical_spells_as_asked(&self) -> bool {
+        self.borrow().canonical_spells_as_asked
+    }
+
+    fn lstat(&self, path: &Path) -> io::Result<Lstat> {
+        let pending = due(&mut self.borrow_mut().interleaved, true);
+        if let Some(op) = pending {
+            self.borrow_mut().apply(&op);
+        }
         let model = self.borrow();
-        let at = model.resolve(path, false).map_err(io::Error::from)?;
-        Ok(match &model.entries[&at].node {
-            Node::Dir => EntryAt::Dir,
-            Node::Link(target) => EntryAt::Link(target.clone()),
-            Node::File(_) => EntryAt::Other,
+        let as_dir = spelt_as_a_directory(path);
+        let at = model.resolve(path, as_dir).map_err(io::Error::from)?;
+        let entry = &model.entries[&at];
+        if as_dir && matches!(entry.node, Node::File(_)) {
+            return Err(io::Error::from(io::ErrorKind::NotADirectory));
+        }
+        Ok(Lstat {
+            stamp: Model::stamp_of(entry),
+            kind: match &entry.node {
+                Node::Dir => Kind::Dir,
+                Node::Link(_) => Kind::Link,
+                Node::File(_) => Kind::Other,
+            },
+            access: Access {
+                mode: if entry.protected { 0o1777 } else { 0o755 },
+                uid: 0,
+                gid: 0,
+            },
         })
     }
 
+    fn read_link(&self, path: &Path) -> io::Result<PathBuf> {
+        let model = self.borrow();
+        let at = model
+            .resolve(path, spelt_as_a_directory(path))
+            .map_err(io::Error::from)?;
+        match &model.entries[&at].node {
+            Node::Link(target) => Ok(target.clone()),
+            _ => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+        }
+    }
+
     fn answer(&self, path: &Path, query: &Observation) -> Observation {
-        let pending = self.borrow_mut().interleaved.take();
+        let pending = due(&mut self.borrow_mut().interleaved, false);
         if let Some(op) = pending {
             self.borrow_mut().apply(&op);
         }
@@ -360,7 +510,7 @@ impl Probe for Rc<RefCell<Model>> {
     }
 }
 
-const PATHS: [&str; 13] = [
+const PATHS: [&str; 15] = [
     "/w",
     "/w/a",
     "/w/a/b",
@@ -375,11 +525,18 @@ const PATHS: [&str; 13] = [
     "/w/c/a/x",
     "/w/c/a/b/x",
     "/w/z",
+    // A symlink in the root, and a path through the one the setup makes
+    // there.
+    "/l",
+    "/l/b/x",
 ];
 
 fn path(i: usize) -> PathBuf {
     PathBuf::from(PATHS[i])
 }
+
+/// Where [`Op::Swap`] puts a directory aside: in none of the [`PATHS`].
+const SWAP: &str = "/w/swap";
 
 #[derive(Clone, Debug)]
 enum Op {
@@ -396,10 +553,29 @@ enum Op {
     /// every path through it leads where it did, under another canonical
     /// spelling.
     MoveAndLink(usize),
-    /// Make this change at the next query a check asks.
-    Interleave(Box<Op>),
-    /// Make this change at the next `stat`, just before it takes its stamp.
-    InterleaveAtStat(Box<Op>),
+    /// Exchange two directories by three renames, through [`SWAP`]: each
+    /// name then leads to the other directory, its inode and its stamps.
+    Swap(usize, usize),
+    /// Replace a symlink with one to another target: a new link, whose
+    /// inode may be the old one's ([`Op::ReuseInodes`]).
+    Relink(usize, usize),
+    /// Replace the first path, a directory, with a copy of it made anew
+    /// that leaves out the second: a directory moved into its place, under
+    /// which only what was left out has moved.
+    Replace(usize, usize),
+    /// Make a directory of [`CHURNED`] (by its index there, the root among
+    /// them) sticky and world-writable, or not ([`Entry::protected`]): its
+    /// mode changes, and none of its entries.
+    Protect(usize, bool),
+    /// From now on, give a new entry an inode a removal freed
+    /// ([`Model::reuse`]).
+    ReuseInodes,
+    /// Make this change at a query a check asks, after this many more: at
+    /// the first one, or between the walk of a later check and its query.
+    Interleave(usize, Box<Op>),
+    /// Make this change at a `stat`, after this many more, just before it
+    /// takes its stamp.
+    InterleaveAtStat(usize, Box<Op>),
     /// Make every listing report an entry it could not read, or stop. The
     /// generator does not make it: a transient failure appearing is no
     /// change to the disk, and nothing stamped can see it; what the checker
@@ -425,6 +601,10 @@ impl Op {
             }
             Op::Rename(from, to) => vec![path(*from), path(*to)],
             Op::MoveAndLink(from) => vec![path(*from), PathBuf::from("/w/z")],
+            Op::Swap(p, q) => vec![path(*p), path(*q), PathBuf::from(SWAP)],
+            // A directory moved into place is one event, naming it.
+            Op::Relink(p, _) | Op::Replace(p, _) => vec![path(*p)],
+            Op::Protect(dir, _) => vec![PathBuf::from(CHURNED[*dir])],
             _ => Vec::new(),
         }
     }
@@ -438,8 +618,12 @@ fn change() -> impl Strategy<Value = Op> {
         1 => (p.clone(), p.clone()).prop_map(|(a, b)| Op::Link(a, b)),
         2 => p.clone().prop_map(Op::Remove),
         1 => p.clone().prop_map(Op::Write),
-        2 => (p.clone(), p).prop_map(|(a, b)| Op::Rename(a, b)),
+        2 => (p.clone(), p.clone()).prop_map(|(a, b)| Op::Rename(a, b)),
         2 => (1usize..4).prop_map(Op::MoveAndLink),
+        1 => (p.clone(), p.clone()).prop_map(|(a, b)| Op::Swap(a, b)),
+        1 => (p.clone(), p.clone()).prop_map(|(a, b)| Op::Relink(a, b)),
+        1 => (0..CHURNED.len(), any::<bool>()).prop_map(|(dir, on)| Op::Protect(dir, on)),
+        1 => (p.clone(), p).prop_map(|(a, b)| Op::Replace(a, b)),
     ]
 }
 
@@ -447,11 +631,38 @@ fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         3 => prop_oneof![1u32..50, 50u32..1_500, 1_500u32..4_000].prop_map(Op::Advance),
         6 => change(),
-        1 => change().prop_map(|op| Op::Interleave(Box::new(op))),
-        1 => change().prop_map(|op| Op::InterleaveAtStat(Box::new(op))),
+        1 => (after(), change()).prop_map(|(after, op)| Op::Interleave(after, Box::new(op))),
+        1 => (after(), change()).prop_map(|(after, op)| Op::InterleaveAtStat(after, Box::new(op))),
         2 => change().prop_map(|op| Op::Stealth(Box::new(op))),
         4 => Just(Op::Generation),
     ]
+}
+
+/// How many queries or `stat`s an interleaved change waits for: none, so
+/// that it lands at the first, or any up to about a generation's worth, so
+/// that it lands inside a later check, between its walk and its query.
+fn after() -> impl Strategy<Value = usize> {
+    prop_oneof![Just(0), 0usize..64]
+}
+
+/// A change [`Model::interleaved`] makes at a later query (or `stat`).
+#[derive(Debug)]
+struct Interleaved {
+    at_stat: bool,
+    /// How many more queries (or `stat`s) it waits for.
+    after: usize,
+    op: Op,
+}
+
+/// Take the interleaved change in `slot` if it is due at a query (or, if
+/// `at_stat`, a `stat`), counting down to it otherwise.
+fn due(slot: &mut Option<Interleaved>, at_stat: bool) -> Option<Op> {
+    let pending = slot.as_mut().filter(|pending| pending.at_stat == at_stat)?;
+    if pending.after > 0 {
+        pending.after -= 1;
+        return None;
+    }
+    slot.take().map(|pending| pending.op)
 }
 
 fn granularity() -> impl Strategy<Value = i128> {
@@ -475,6 +686,9 @@ struct Seen {
     /// Checks that found their answer moved in the first generation after a
     /// change no stamp saw ([`Op::Stealth`]): only the hint can have told.
     hinted_moved: usize,
+    /// Checks that came into a generation with a narrowed witness and found
+    /// the disk moved.
+    narrow_moved: usize,
 }
 
 /// Every non-text query at every path, recorded against the model as it is.
@@ -541,11 +755,20 @@ fn run(granularity: i128, setup: &[Op], ops: &[Op], seen: &mut Seen) -> Result<(
             })
             .collect();
         checker.begin_generation(Nanos(now));
-        // First in the generation, so that a pending interleaved change
-        // lands around its stamp and its listing.
-        let listed = checker.list(&path(born.len() % PATHS.len()));
+        // First in the generation, so that an interleaved change due at once
+        // lands around its stamp and its listing. Every other one is spelt
+        // with a trailing separator, whose `lstat` follows a final symlink
+        // as one of the same path spelt as its components does not.
+        let mut listing = path(born.len() % PATHS.len()).into_os_string();
+        if born.len() % 2 == 1 {
+            listing.push("/");
+        }
+        let listed = checker.list(Path::new(&listing));
         for (check, before) in checks.iter().zip(&before) {
-            let holds = checker.holds(check);
+            let narrow = check.wide() == Some(false);
+            // Confirmed twice, as a check shared by two evaluations is: the
+            // second finds its entries as the generation's first look did.
+            let holds = checker.holds(check) && checker.holds(check);
             let truth = model
                 .borrow()
                 .answer(&check.read().path, &check.read().observation);
@@ -558,6 +781,9 @@ fn run(granularity: i128, setup: &[Op], ops: &[Op], seen: &mut Seen) -> Result<(
                 );
             } else {
                 seen.moved += 1;
+                if narrow {
+                    seen.narrow_moved += 1;
+                }
                 if after_stealth {
                     seen.hinted_moved += 1;
                 }
@@ -599,8 +825,20 @@ fn run(granularity: i128, setup: &[Op], ops: &[Op], seen: &mut Seen) -> Result<(
 }
 
 fn setup() -> impl Strategy<Value = Vec<Op>> {
-    // Most of the vocabulary exists, so most reads start answered.
-    Just(vec![
+    // Most of the vocabulary exists, so most reads start answered; in half
+    // the runs, a removal's inodes are given out again.
+    any::<bool>().prop_map(|reuse| {
+        reuse
+            .then_some(Op::ReuseInodes)
+            .into_iter()
+            .chain(base_tree())
+            .collect()
+    })
+}
+
+/// The tree every run starts from, old enough that no stamp in it is racy.
+fn base_tree() -> Vec<Op> {
+    vec![
         Op::Dir(0),
         Op::Dir(1),
         Op::Dir(2),
@@ -608,8 +846,9 @@ fn setup() -> impl Strategy<Value = Vec<Op>> {
         Op::File(4),
         Op::File(6),
         Op::Link(9, 1),
+        Op::Link(13, 1),
         Op::Advance(10_000),
-    ])
+    ]
 }
 
 proptest! {
@@ -780,7 +1019,7 @@ fn run_recording_again(
                 let now = model.borrow().clock;
                 let inside = {
                     let model = model.borrow();
-                    model.interleaved.is_some() || model.interleaved_at_stat.is_some()
+                    model.interleaved.is_some()
                 };
                 let truth = |check: &Check| {
                     model
@@ -902,13 +1141,14 @@ fn the_generator_reaches_witnessed_and_moved_checks() {
             && seen.moved > 50
             && seen.born_witnessed > 50
             && seen.born_moved > 50
-            && seen.hinted_moved > 50,
+            && seen.hinted_moved > 50
+            && seen.narrow_moved > 50,
         "{seen:?}"
     );
 }
 
-/// A listing confirmed by its directory's stamp alone costs one `stat`, and
-/// an entry created in the same tick as the stamp is not missed: the stamp is
+/// A listing confirmed by its witness alone costs an `lstat` of each directory
+/// on its path, and an entry created in the same tick as the stamp is not missed: the stamp is
 /// racy, so the listing is asked again until it is old.
 #[test]
 fn a_change_within_the_tick_of_the_stamp_is_not_missed() {
@@ -945,8 +1185,8 @@ fn a_change_within_the_tick_of_the_stamp_is_not_missed() {
     model.borrow_mut().apply(&Op::Advance(5_000));
     let (holds, counts) = generation(&mut checker);
     assert!(holds);
-    // The stamp of `/w`, listed.
-    assert_eq!((counts.listings, counts.stats), (0, 1), "{counts:?}");
+    // The identity of `/`, and the identity and stamp of `/w`, listed.
+    assert_eq!((counts.listings, counts.stats), (0, 2), "{counts:?}");
 }
 
 /// A listing that failed at some entry is asked again in every generation:
@@ -1145,4 +1385,526 @@ fn a_racy_stamp_never_holds() {
     assert!(!checker.holds(&check));
     checker.end_generation();
     assert!(!crate::read_checks::a_fact(&check.read().observation));
+}
+
+/// A witness must say what the disk held when its query was asked, which is
+/// after its walk took it. Here the walk sees `/w/a` and `/w/c` swapped, a
+/// state whose answer is not the one recorded, and the query, asked after the
+/// swap is undone, sees the recorded answer. The swap is then made again:
+/// every identity and stamp of the swapped state is back, so a witness
+/// narrowed from the walk alone would hold. Born wide, it holds the stamp of
+/// `/w`, which the swaps moved, and stays wide when it is confirmed again in
+/// the generation that took it (as a check shared by two evaluations is),
+/// which finds the walk's own `lstat`s.
+#[test]
+fn a_directory_swapped_back_while_a_witness_is_taken_is_not_trusted() {
+    for confirmations in [1, 2] {
+        let model = Rc::new(RefCell::new(Model::new(1)));
+        for op in base_tree() {
+            model.borrow_mut().apply(&op);
+        }
+        let kind = Observation::Kind(Ok(EntryKind::File));
+        let check = Check::new(Read {
+            path: path(6),
+            observation: model.borrow().answer(&path(6), &kind),
+        });
+        assert_eq!(check.read().observation, kind, "precondition");
+        let mut checker = ReadChecks::with_disk(Rc::clone(&model));
+        let generation = |checker: &mut ReadChecks<_>| {
+            let now = model.borrow().clock;
+            checker.begin_generation(Nanos(now));
+            let holds = (0..confirmations).all(|_| checker.holds(&check));
+            checker.end_generation();
+            model.borrow_mut().apply(&Op::Advance(10_000));
+            holds
+        };
+        model.borrow_mut().apply(&Op::Swap(1, 3));
+        model.borrow_mut().apply(&Op::Advance(10_000));
+        model
+            .borrow_mut()
+            .apply(&Op::Interleave(0, Box::new(Op::Swap(1, 3))));
+        assert!(generation(&mut checker), "the query saw the swap undone");
+        model.borrow_mut().apply(&Op::Swap(1, 3));
+        model.borrow_mut().apply(&Op::Advance(10_000));
+        let truth = model.borrow().answer(&path(6), &kind);
+        assert_ne!(truth, kind, "precondition");
+        assert!(
+            !generation(&mut checker),
+            "a witness of the swapped state held, confirmed {confirmations} time(s)"
+        );
+    }
+}
+
+/// An `lstat` of `/w/c/a/` follows the symlink there, and one of `/w/c/a`
+/// does not, so a listing spelt with the separator shares no entry with a
+/// walk through the link: the walk's witness holds the link's own stamp.
+/// Here the link's target is moved and the link pointed at it anew, which
+/// leaves every directory the walk enters where it was, and moves only the
+/// link and the canonical answer.
+#[test]
+fn a_listing_through_a_trailing_separator_leaves_a_walk_its_symlink() {
+    let model = Rc::new(RefCell::new(Model::new(1)));
+    for op in base_tree() {
+        model.borrow_mut().apply(&op);
+    }
+    let canonical = Observation::Canonical(Ok(PathBuf::new()));
+    let check = Check::new(Read {
+        path: path(11),
+        observation: model.borrow().answer(&path(11), &canonical),
+    });
+    assert_eq!(
+        check.read().observation,
+        Observation::Canonical(Ok(path(6))),
+        "precondition"
+    );
+    let mut checker = ReadChecks::with_disk(Rc::clone(&model));
+    let generation = |checker: &mut ReadChecks<_>| {
+        let now = model.borrow().clock;
+        checker.begin_generation(Nanos(now));
+        checker.list(Path::new("/w/c/a/"));
+        let holds = checker.holds(&check);
+        checker.end_generation();
+        model.borrow_mut().apply(&Op::Advance(10_000));
+        holds
+    };
+    assert!(generation(&mut checker), "the read is unchanged");
+    assert!(generation(&mut checker), "the read is unchanged");
+    assert_eq!(check.wide(), Some(false), "precondition: narrowed");
+    model.borrow_mut().apply(&Op::Rename(1, 12));
+    model.borrow_mut().apply(&Op::Relink(9, 12));
+    model.borrow_mut().apply(&Op::Advance(10_000));
+    assert_ne!(
+        model.borrow().answer(&path(11), &canonical),
+        check.read().observation,
+        "precondition"
+    );
+    assert!(
+        !generation(&mut checker),
+        "a witness missing the relinked symlink held"
+    );
+}
+
+/// Where a canonicalisation spells each name as the directory holding it
+/// does, a case-only rename of a directory the path enters moves the answer
+/// and no identity on the walk, so a canonicalisation's witness keeps the
+/// stamp of every directory a name was looked up in: an entry made beside
+/// the path asks it again. Where it spells each name as asked, the witness
+/// narrows, and the same entry asks nothing.
+#[test]
+fn a_canonicalisation_spelt_by_the_disk_keeps_its_lookups() {
+    for spells_as_asked in [true, false] {
+        let model = Rc::new(RefCell::new(Model::new(1)));
+        for op in base_tree() {
+            model.borrow_mut().apply(&op);
+        }
+        model.borrow_mut().canonical_spells_as_asked = spells_as_asked;
+        let canonical = Observation::Canonical(Ok(PathBuf::new()));
+        let check = Check::new(Read {
+            path: path(6),
+            observation: model.borrow().answer(&path(6), &canonical),
+        });
+        let mut checker = ReadChecks::with_disk(Rc::clone(&model));
+        let generation = |checker: &mut ReadChecks<_>| {
+            let now = model.borrow().clock;
+            checker.begin_generation(Nanos(now));
+            let holds = checker.holds(&check);
+            let asked = checker.end_generation().canonicalizations;
+            model.borrow_mut().apply(&Op::Advance(10_000));
+            (holds, asked)
+        };
+        assert_eq!(generation(&mut checker), (true, 1), "taken");
+        assert_eq!(generation(&mut checker), (true, 0), "confirmed");
+        assert_eq!(check.wide(), Some(!spells_as_asked));
+        model
+            .borrow_mut()
+            .create(Path::new("/w/s"), Node::File(b"x".to_vec()));
+        model.borrow_mut().apply(&Op::Advance(10_000));
+        assert_eq!(
+            generation(&mut checker),
+            (true, u64::from(!spells_as_asked)),
+            "after an entry made in `/w`, spelling as asked: {spells_as_asked}"
+        );
+    }
+}
+
+/// The directories a sibling change lands in ([`run_ancestor_changes`]): the
+/// base tree's.
+const CHURNED: [&str; 5] = ["/", "/w", "/w/a", "/w/a/b", "/w/c"];
+/// The names a sibling change uses: in no path of [`PATHS`], nor [`SWAP`].
+const SIBLINGS: [&str; 2] = ["s", "t"];
+
+/// A change to an entry no read's path names, in one of [`CHURNED`], made on
+/// a file system whose stamps move or (`stealthy`) do not, then hinted.
+#[derive(Clone, Debug)]
+struct Churn {
+    dir: usize,
+    change: Sibling,
+    stealthy: bool,
+}
+
+#[derive(Clone, Debug)]
+enum Sibling {
+    File(usize),
+    Dir(usize),
+    /// A symlink, to the path of [`PATHS`] given.
+    Link(usize, usize),
+    Remove(usize),
+    Write(usize),
+    /// Rename the first sibling to the second.
+    Rename(usize, usize),
+}
+
+impl Churn {
+    fn at(&self, name: usize) -> PathBuf {
+        Path::new(CHURNED[self.dir]).join(SIBLINGS[name])
+    }
+
+    /// Make the change, returning the paths a watch event for it names.
+    fn apply(&self, model: &mut Model) -> Vec<PathBuf> {
+        let change = |model: &mut Model| match self.change {
+            Sibling::File(n) => {
+                model.create(&self.at(n), Node::File(b"x".to_vec()));
+                vec![self.at(n)]
+            }
+            Sibling::Dir(n) => {
+                model.create(&self.at(n), Node::Dir);
+                vec![self.at(n)]
+            }
+            Sibling::Link(n, target) => {
+                model.create(&self.at(n), Node::Link(path(target)));
+                vec![self.at(n)]
+            }
+            Sibling::Remove(n) => {
+                model.remove(&self.at(n));
+                vec![self.at(n)]
+            }
+            Sibling::Write(n) => {
+                model.write(&self.at(n), b"yy");
+                vec![self.at(n)]
+            }
+            Sibling::Rename(from, to) => {
+                model.rename(&self.at(from), &self.at(to));
+                vec![self.at(from), self.at(to)]
+            }
+        };
+        if self.stealthy {
+            let mut named = Vec::new();
+            model.keeping_stamps(|model| named = change(model));
+            named
+        } else {
+            change(model)
+        }
+    }
+}
+
+fn churn() -> impl Strategy<Value = Churn> {
+    let n = 0..SIBLINGS.len();
+    let sibling = prop_oneof![
+        n.clone().prop_map(Sibling::File),
+        n.clone().prop_map(Sibling::Dir),
+        (n.clone(), 0..PATHS.len()).prop_map(|(n, t)| Sibling::Link(n, t)),
+        n.clone().prop_map(Sibling::Remove),
+        n.clone().prop_map(Sibling::Write),
+        (n.clone(), n).prop_map(|(a, b)| Sibling::Rename(a, b)),
+    ];
+    (0..CHURNED.len(), sibling, any::<bool>()).prop_map(|(dir, change, stealthy)| Churn {
+        dir,
+        change,
+        stealthy,
+    })
+}
+
+impl Model {
+    /// The directory the last lookup of resolving `path` (following a final
+    /// symlink if `follow`) is made in: where it found its last entry, or
+    /// found none.
+    fn last_lookup(&self, path: &Path, follow: bool) -> PathBuf {
+        let mut current = PathBuf::from("/");
+        let mut looked_in = current.clone();
+        let mut rest: Vec<std::ffi::OsString> = path
+            .components()
+            .skip(1)
+            .map(|c| c.as_os_str().to_os_string())
+            .collect();
+        rest.reverse();
+        let mut hops = 0;
+        while let Some(name) = rest.pop() {
+            looked_in = current.clone();
+            let next = current.join(&name);
+            match self.entries.get(&next).map(|e| &e.node) {
+                Some(Node::Link(target)) if (follow || !rest.is_empty()) && hops < 8 => {
+                    hops += 1;
+                    let mut target: Vec<std::ffi::OsString> = target
+                        .components()
+                        .skip(1)
+                        .map(|c| c.as_os_str().to_os_string())
+                        .collect();
+                    target.reverse();
+                    rest.extend(target);
+                    current = PathBuf::from("/");
+                }
+                Some(Node::Dir) => current = next,
+                _ => return looked_in,
+            }
+        }
+        looked_in
+    }
+
+    /// The directory whose entries decide `read`'s answer: the one listed,
+    /// or the one its path's last lookup is made in.
+    fn deciding(&self, read: &Read) -> Option<PathBuf> {
+        match &read.observation {
+            Observation::Listing(Ok(_)) => self.resolve(&read.path, true).ok(),
+            Observation::LinkKind(_) => Some(self.last_lookup(&read.path, false)),
+            _ => Some(self.last_lookup(&read.path, true)),
+        }
+    }
+}
+
+/// A change to a directory some reads' paths pass through, or to a symlink
+/// they follow, that moves where those paths lead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Component {
+    /// A directory moved away, and a symlink to it left in its place
+    /// ([`Op::MoveAndLink`]).
+    Linked,
+    /// Two directories exchanged ([`Op::Swap`]).
+    Swapped,
+    /// A directory replaced by a copy of it, less one entry ([`Op::Replace`]).
+    Replaced,
+    /// A symlink replaced by one to another target ([`Op::Relink`]).
+    Relinked,
+    /// A directory renamed away, and an empty one made in its place.
+    Recreated,
+    /// A directory made sticky and world-writable ([`Op::Protect`]): no
+    /// symlink in it is followed.
+    Protected,
+}
+
+impl Component {
+    const ALL: [Component; 6] = [
+        Component::Linked,
+        Component::Swapped,
+        Component::Replaced,
+        Component::Relinked,
+        Component::Recreated,
+        Component::Protected,
+    ];
+}
+
+/// One change [`run_ancestor_changes`] makes.
+#[derive(Clone, Debug)]
+enum Change {
+    Sibling(Churn),
+    /// A [`Component`] change, as these model operations, made on a file
+    /// system whose stamps move or (`stealthy`) do not, then hinted.
+    Component {
+        kind: Component,
+        ops: Vec<Op>,
+        stealthy: bool,
+    },
+}
+
+fn component() -> impl Strategy<Value = Change> {
+    // The base tree's directories, and its symlink.
+    let dir = prop::sample::select(vec![0usize, 1, 2, 3]);
+    let ops = prop_oneof![
+        (1usize..4).prop_map(|p| (Component::Linked, vec![Op::MoveAndLink(p)])),
+        (dir.clone(), dir.clone()).prop_map(|(p, q)| (Component::Swapped, vec![Op::Swap(p, q)])),
+        (dir.clone(), 0..PATHS.len())
+            .prop_map(|(p, without)| (Component::Replaced, vec![Op::Replace(p, without)])),
+        (0..PATHS.len()).prop_map(|t| (Component::Relinked, vec![Op::Relink(9, t)])),
+        dir.prop_map(|p| (Component::Recreated, vec![Op::Rename(p, 12), Op::Dir(p)])),
+        (0..CHURNED.len()).prop_map(|dir| (Component::Protected, vec![Op::Protect(dir, true)])),
+    ];
+    (ops, any::<bool>()).prop_map(|((kind, ops), stealthy)| Change::Component {
+        kind,
+        ops,
+        stealthy,
+    })
+}
+
+fn ancestor_change() -> impl Strategy<Value = Change> {
+    prop_oneof![
+        3 => churn().prop_map(Change::Sibling),
+        1 => component(),
+    ]
+}
+
+/// What [`run_ancestor_changes`] saw, for the non-vacuity check.
+#[derive(Default, Debug)]
+struct Changed {
+    /// Checks held with nothing asked, though a directory their path's
+    /// resolution passes through had changed.
+    spared: usize,
+    /// Checks that asked again, their deciding directory having changed.
+    asked: usize,
+    /// For each [`Component`] change, checks with a narrowed witness whose
+    /// answer it moved (and which did not hold), in runs that made only
+    /// that kind of change.
+    caught: BTreeMap<Component, usize>,
+}
+
+/// The claim of #776, beside soundness, over a narrowed witness: after
+/// changes to entries no read's path names (a sibling made, removed,
+/// renamed or rewritten, in a directory some paths pass through), a check
+/// holds with nothing asked again unless the directory whose entries decide
+/// its answer is one a change landed in; and after any changes, among them
+/// those that move where a path leads (a directory linked, swapped,
+/// replaced or made anew, a symlink re-pointed), a check that holds is
+/// right.
+fn run_ancestor_changes(
+    granularity: i128,
+    setup: &[Op],
+    changes: &[Change],
+    advance: u32,
+    seen: &mut Changed,
+) -> Result<(), TestCaseError> {
+    let model = Rc::new(RefCell::new(Model::new(granularity)));
+    for op in setup {
+        model.borrow_mut().apply(op);
+    }
+    let checks = checks(&model.borrow());
+    let deciding: Vec<Option<PathBuf>> = checks
+        .iter()
+        .map(|check| model.borrow().deciding(check.read()))
+        .collect();
+    let mut checker = ReadChecks::with_disk(Rc::clone(&model));
+    let mut at = model.borrow().clock;
+    // The first generation takes the witnesses, the second narrows them:
+    // nothing in the base tree is racy.
+    for _ in 0..2 {
+        checker.begin_generation(Nanos(at));
+        for check in &checks {
+            prop_assert!(checker.holds(check), "{:?}", check.read());
+        }
+        checker.end_generation();
+        at += 1;
+    }
+    for check in &checks {
+        prop_assert!(
+            check.wide() != Some(true),
+            "{:?}: a quiet generation left its witness wide",
+            check.read()
+        );
+    }
+    let narrowed: Vec<bool> = checks.iter().map(|c| c.wide() == Some(false)).collect();
+    let mut churned: Vec<PathBuf> = Vec::new();
+    let mut kinds: Vec<Component> = Vec::new();
+    for change in changes {
+        match change {
+            Change::Sibling(churn) => {
+                let named = churn.apply(&mut model.borrow_mut());
+                if churn.stealthy {
+                    checker.hint(named.iter().map(PathBuf::as_path));
+                }
+                churned.push(PathBuf::from(CHURNED[churn.dir]));
+            }
+            Change::Component {
+                kind,
+                ops,
+                stealthy,
+            } => {
+                kinds.push(*kind);
+                let named: Vec<PathBuf> = ops.iter().flat_map(Op::named).collect();
+                if *stealthy {
+                    model.borrow_mut().keeping_stamps(|model| {
+                        for op in ops {
+                            model.apply(op);
+                        }
+                    });
+                    checker.hint(named.iter().map(PathBuf::as_path));
+                } else {
+                    for op in ops {
+                        model.borrow_mut().apply(op);
+                    }
+                }
+            }
+        }
+    }
+    model.borrow_mut().apply(&Op::Advance(advance));
+    checker.begin_generation(Nanos(model.borrow().clock.max(at)));
+    for ((check, deciding), narrowed) in checks.iter().zip(&deciding).zip(&narrowed) {
+        let asked = checker.asked();
+        let holds = checker.holds(check);
+        let truth = model
+            .borrow()
+            .answer(&check.read().path, &check.read().observation);
+        prop_assert!(
+            !holds || truth == check.read().observation,
+            "{:?} held, but the disk moved: {:?}",
+            check.read(),
+            truth
+        );
+        if !narrowed {
+            continue;
+        }
+        if let [kind, rest @ ..] = &kinds[..]
+            && rest.iter().all(|other| other == kind)
+            && truth != check.read().observation
+        {
+            *seen.caught.entry(*kind).or_default() += 1;
+        }
+        let Some(deciding) = deciding else { continue };
+        if !kinds.is_empty() {
+            continue;
+        }
+        if churned.contains(deciding) {
+            seen.asked += usize::from(checker.asked() > asked);
+            continue;
+        }
+        prop_assert!(
+            holds && checker.asked() == asked,
+            "{:?}, decided by {:?}, was asked again after changes in {:?}",
+            check.read(),
+            deciding,
+            churned
+        );
+        if churned.iter().any(|dir| deciding.starts_with(dir)) {
+            seen.spared += 1;
+        }
+    }
+    checker.end_generation();
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// For all changes above the reads ([`run_ancestor_changes`]).
+    #[test]
+    fn a_narrowed_witness_is_right_and_spared_by_siblings(
+        granularity in granularity(),
+        setup in setup(),
+        changes in prop::collection::vec(ancestor_change(), 1..6),
+        advance in prop_oneof![Just(0u32), 1u32..4_000],
+    ) {
+        run_ancestor_changes(granularity, &setup, &changes, advance, &mut Changed::default())?;
+    }
+}
+
+/// The generator reaches what [`run_ancestor_changes`] is about: checks
+/// spared below a changed directory, checks a sibling change asked again,
+/// and, for every kind of [`Component`] change, narrowed witnesses whose
+/// answer it moved.
+#[test]
+fn the_ancestor_generator_reaches_spared_asked_and_caught_checks() {
+    let mut runner = proptest::test_runner::TestRunner::deterministic();
+    let mut seen = Changed::default();
+    for _ in 0..512 {
+        let granularity = granularity().new_tree(&mut runner).unwrap().current();
+        let setup = setup().new_tree(&mut runner).unwrap().current();
+        let changes = prop::collection::vec(ancestor_change(), 1..6)
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+        run_ancestor_changes(granularity, &setup, &changes, 0, &mut seen).unwrap();
+    }
+    assert!(seen.spared > 500 && seen.asked > 100, "{seen:?}");
+    for kind in Component::ALL {
+        assert!(
+            seen.caught.get(&kind).copied().unwrap_or(0) > 10,
+            "{seen:?}"
+        );
+    }
 }

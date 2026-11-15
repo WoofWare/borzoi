@@ -7400,11 +7400,12 @@ mod tests {
     /// confirming an unchanged env does, and asks nothing again (#733). The
     /// project file is rewritten in place, so no directory's stamp moves.
     ///
-    /// Every witness names the directories its read's path is resolved
-    /// through, the temporary directory's ancestors among them, where
-    /// concurrent tests make and remove entries; so the test holds those
-    /// still ([`crate::observed::host_fs::hold_ancestors_still`]), and the
-    /// counts depend only on what it does to its own tree.
+    /// SDK discovery looks for a `global.json` in every directory above the
+    /// project, the temporary directory's ancestors among them, so those
+    /// directories' entries decide some of the reads, and concurrent tests
+    /// make and remove entries there; so the test holds them still
+    /// ([`crate::observed::host_fs::hold_ancestors_still`]), and the counts
+    /// depend only on what it does to its own tree.
     #[test]
     fn an_env_resolved_again_starts_with_the_witnesses_it_shares() {
         let tmp = TempDir::new().unwrap();
@@ -7436,8 +7437,9 @@ mod tests {
             (env, counts, ws.end_generation())
         };
         let (built, _, _) = generation(&mut ws, &mut sema);
-        // The first confirmation takes the witnesses; the second is what
-        // confirming an unchanged env costs.
+        // The first confirmation takes the witnesses and the second narrows
+        // them; the third is what confirming an unchanged env costs.
+        generation(&mut ws, &mut sema);
         generation(&mut ws, &mut sema);
         let (_, _, steady) = generation(&mut ws, &mut sema);
         assert!(steady.envs.stats > 0, "{steady:?}");
