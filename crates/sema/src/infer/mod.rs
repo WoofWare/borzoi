@@ -536,6 +536,7 @@ mod emissions;
 mod expr;
 mod extension_scope;
 pub(crate) use extension_scope::ExtensionScope;
+pub use extension_scope::GateInput;
 mod facts;
 mod finish;
 mod generalise;

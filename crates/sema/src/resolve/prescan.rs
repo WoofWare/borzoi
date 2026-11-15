@@ -149,8 +149,6 @@ pub(super) struct Prescan {
     /// [`FileContributions::extension_statics`](crate::resolve::contributors::FileContributions::extension_statics),
     /// in later ones.
     pub(super) extension_statics: BTreeSet<String>,
-    /// See [`abbreviation_attributes`].
-    pub(super) abbreviation_attributes: Vec<Option<TextRange>>,
 }
 
 impl Prescan {
@@ -178,7 +176,6 @@ impl Prescan {
             own_abbrev_type_simple_names: HashSet::default(),
             own_auto_open_type_names: HashSet::default(),
             extension_statics: BTreeSet::new(),
-            abbreviation_attributes: abbreviation_attributes(file.syntax()),
         };
         // EX-3 §2(d): pre-scan every type definition's simple name for the
         // attribute resolution's project-type guard. Whole-file and up front (not
@@ -429,8 +426,7 @@ pub(super) fn declares_core_attribute_alias(root: &SyntaxNode) -> bool {
 /// An abbreviation carrying `[<AutoOpen>]` or `[<Extension>]` brings the
 /// extension members of the type it abbreviates into scope (#831): FCS reads
 /// either attribute off the abbreviation's own type and then works on its
-/// target. The extension gate reads these through
-/// [`ResolvedFile::attributes_may_declare_extension`](super::model::ResolvedFile::attributes_may_declare_extension).
+/// target. [`super::extension_names::file_extension_names`] reads these.
 pub(super) fn abbreviation_attributes(root: &SyntaxNode) -> Vec<Option<TextRange>> {
     root.descendants_of::<TypeDefn>()
         .filter(|defn| matches!(defn.repr(), Some(TypeDefnRepr::Abbrev(_))))

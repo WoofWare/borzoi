@@ -1287,7 +1287,7 @@ Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj File.fs:16:13-25
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj File.fs:16:27-50 "FullName"	assembly-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj File.fs:16:32-41 "Directory"	assembly-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj File.fs:16:52-61 "Name"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj File.fs:16:70-93 "ToString"	assembly-deferral unrecorded member_access_on_expression
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj File.fs:16:70-93 "ToString"	assembly-match member
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj File.fs:19:13-31 "WriteAllLines"	assembly-deferral qualified-access assembly_type_member
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj File.fs:1:11-19 "WoofWare"	project-deferral unrecorded declaration_path
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj File.fs:1:20-26 "Expect"	project-deferral unrecorded declaration_path
@@ -1308,13 +1308,16 @@ Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.f
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:121:13-15 "(||)"	assembly-deferral unbound-name operator
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:122:13-15 "(||)"	assembly-deferral unbound-name operator
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:127:28-40 "IndexOf"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:132:31-45 "Substring"	assembly-deferral qualified-access member_access_on_value
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:132:31-45 "Substring"	assembly-match member
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:132:31-45 "Substring" handlers plain definition last	declined expected served-assembly-member
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:132:31-45 "Substring" handlers plain definition middle	declined expected served-assembly-member
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:139:24-36 "Length"	assembly-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:144:28-40 "Length"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:151:17-28 "Match"	assembly-deferral qualified-access assembly_type_member
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:151:17-28 "Match"	assembly-match member
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:151:17-28 "Match" handlers plain definition last	declined expected served-assembly-member
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:153:20-41 "Success"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:157:35-54 "Index"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:157:57-77 "Length"	assembly-deferral qualified-access member_access_on_value
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:157:35-54 "Index"	assembly-match member
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:157:57-77 "Length"	assembly-match member
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:15:19-27 "ToString"	assembly-deferral unrecorded member_definition_name
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:162:39-56 "Length"	assembly-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:168:51-68 "Length"	assembly-deferral qualified-access member_access_on_value
@@ -1365,8 +1368,8 @@ Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.f
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:240:25-53 "Substring"	assembly-deferral unrecorded member_access_on_expression
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:240:54-68 "EndColumn"	project-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:243:20-38 "IndexOf"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:244:33-51 "Replace"	assembly-deferral qualified-access member_access_on_value
-Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:244:33-71 "Split"	assembly-deferral unrecorded member_access_on_expression
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:244:33-51 "Replace"	assembly-match member
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:244:33-71 "Split"	assembly-match member
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:248:75-80 "after" hover-type plain	local withheld-in-file-value at first,middle,last
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:249:48-54 "before" hover-type plain	local withheld-in-file-value at first,middle,last
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:253:48-53 "split" hover-type plain	local withheld-in-file-pattern-local at first,middle,last
@@ -1400,7 +1403,7 @@ Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.f
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:327:36-59 "FilePath"	project-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:327:40-50 "CallerInfo"	project-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:329:28-34 "System"	assembly-deferral qualified-access qualifier
-Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:329:28-55 "ReadAllLines"	assembly-deferral qualified-access assembly_type_member
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:329:28-55 "ReadAllLines"	assembly-match member
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:329:35-37 "IO"	assembly-deferral qualified-access qualifier
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:333:40-65 "LineNumber"	project-deferral qualified-access member_access_on_value
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj SnapshotUpdate.fs:333:44-54 "CallerInfo"	project-deferral qualified-access member_access_on_value
@@ -1445,7 +1448,7 @@ Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj Text.fs handlers
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj Text.fs:1:11-19 "WoofWare"	project-deferral unrecorded declaration_path
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj Text.fs:1:20-26 "Expect"	project-deferral unrecorded declaration_path
 Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj Text.fs:3:3-25 "RequireQualifiedAccessAttribute"	assembly-deferral shadowable-type attribute_unrulable@pre_walk	shadowed-constructor
-Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj Text.fs:6:9-16 "Split"	assembly-deferral qualified-access member_access_on_value
+Smaug123/WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj Text.fs:6:9-16 "Split"	assembly-match member
 Smaug123/WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj	comparable assets=resolved packages=5 frameworks=152 project-refs=0
 Smaug123/WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj AdjustHeightsHeap.fs	compared records=532 definitions=76
 Smaug123/WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj AdjustHeightsHeap.fs handlers perturbed	selected=11

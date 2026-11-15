@@ -80,6 +80,7 @@ use unknowables::Unknowable;
 use windows::Windows;
 mod decls;
 mod exprs;
+mod extension_names;
 mod indexes;
 mod labels;
 mod lexical;
@@ -94,6 +95,8 @@ mod types;
 mod unknowables;
 mod windows;
 
+pub(crate) use extension_names::{Damage, damage};
+pub use extension_names::{ExtensionNames, NamesUnknowable};
 pub use model::{
     CaseKind, DeclineCause, DeclineSite, DeclineTier, DeferredReason, ExportedItem, ExportedItems,
     FieldLabel, ItemId, OpaqueRegion, OpenOpacity, OpenTrace, ProjectItems, Resolution,
@@ -383,7 +386,9 @@ pub fn resolve_file(
     #[cfg(feature = "otel")]
     let _phase = tracing::info_span!("resolve_finish").entered();
     let item_base = r.item_base;
-    r.finish().into_resolved_file(prescan, item_base, recovery)
+    let mut rf = r.finish().into_resolved_file(prescan, item_base, recovery);
+    rf.extension_names = rf.syntactic_extension_names(file.syntax(), assemblies);
+    rf
 }
 
 /// One Compile item as the project fold consumes it: an implementation file
@@ -1422,17 +1427,13 @@ fn resolve_project_files_impl(
         ..ProjectItems::default()
     };
     let mut resolved: Vec<Arc<ResolvedFile>> = Vec::with_capacity(files.len());
-    // Accumulate the OV-6 cross-file **extension-source** signal in **Compile
-    // order**: F# is order-sensitive, so a project extension source (a
-    // `[<Extension>]` class or a `type … with` augmentation, which a
-    // same-namespace later file sees with no `open`) is in scope only in files
-    // that come *after* the one declaring it. Each file's gate signal is
-    // therefore "a **preceding** file declares a project extension source"; a
-    // file's *own* sources are covered separately (the gate's own file-walk).
-    // Conservative: namespace-blind (a preceding source in an unrelated
-    // namespace defers too) — the honest cost of soundness, with
-    // namespace-scoping the OV-9 refinement.
-    let mut ext = ExtThreading::default();
+    // Accumulate the project's extension-member names in **Compile order**: a
+    // later file sees an earlier file's extension (in a shared namespace, with
+    // no `open`; or through one), never the reverse. Each file is stamped with
+    // the union over the files before it; its own names are its own. Scope-
+    // blind: a preceding extension in an unrelated namespace still names its
+    // call, which only declines more.
+    let mut ext = ExtensionNames::default();
     for (index, pf) in files.iter().take(horizon).enumerate() {
         let mut rf = match &pf.file {
             // A signature file owns no `ItemId` range and records nothing at
@@ -1461,9 +1462,7 @@ fn resolve_project_files_impl(
                     .entered()
                 };
                 let mut rf = resolve_file(file, &preceding, assemblies, &pf.recovery);
-                rf.preceding_declares_extension_source = ext.wholesale;
-                rf.preceding_augmentation_instance_names = ext.instance_names.clone();
-                rf.preceding_augmentation_static_names = ext.static_names.clone();
+                rf.preceding_extension_names = ext.clone();
                 rf
             }
         };
@@ -1487,6 +1486,7 @@ fn resolve_project_files_impl(
             &mut preceding,
             &mut ext,
             &rf,
+            pf.file.syntax(),
             assemblies,
             screen.as_deref(),
             partners[index],
@@ -1510,23 +1510,9 @@ fn resolve_project_files_impl(
     ResolvedProject { files: resolved }
 }
 
-/// The Compile-order **extension-source** state threaded through the fold
-/// (EX-3 §2(b)): the wholesale presence bit for sources that stay
-/// presence-based (an un-nameable augmentation member, an attribute that may
-/// declare an extension), plus the accumulated **augmentation member names**
-/// by call shape — a preceding file's `type … with` member joins its own
-/// name's group only, so later files defer exactly those names
-/// (namespace-blind and `private`-blind, like the bit: over-deferral only).
-#[derive(Default)]
-struct ExtThreading {
-    wholesale: bool,
-    instance_names: HashSet<String>,
-    static_names: HashSet<String>,
-}
-
 /// Advance the Compile-order threaded state past `rf` (the resolution of
 /// `file`), exactly as the fold does: fold this file's exports into `preceding`
-/// and its own extension-source contribution into `ext`. The single writer
+/// and its extension-member names into `ext`. The single writer
 /// of the forward threading — shared by the cold ([`resolve_project_files_impl`]) and
 /// incremental ([`resolve_project_incremental`]) folds so the two can never
 /// disagree on what a file contributes downstream.
@@ -1545,18 +1531,28 @@ struct ExtThreading {
 /// materialisation rank.
 fn thread_forward(
     preceding: &mut ProjectItems,
-    ext: &mut ExtThreading,
+    ext: &mut ExtensionNames,
     rf: &ResolvedFile,
+    root: &SyntaxNode,
     assemblies: &AssemblyEnv,
     paired_screen: Option<&model::SigScreen>,
     partner: Option<usize>,
 ) {
     preceding.extend_with(rf, assemblies.names(), paired_screen, partner);
-    ext.wholesale |= wholesale_extension_contribution(rf, assemblies);
-    ext.instance_names
-        .extend(rf.augmentation_instance_names.iter().cloned());
-    ext.static_names
-        .extend(rf.augmentation_static_names.iter().cloned());
+    ext.absorb(&extension_names_for_later_files(rf, root));
+}
+
+/// The extension-member names a file declares as later files see them: what
+/// its tree declares, and what its damaged tail may add if the parser
+/// recovered from it ([`extension_names::damage`]). One function so the
+/// fold's threading and the incremental fold's in-sync comparison read the
+/// same thing.
+fn extension_names_for_later_files(rf: &ResolvedFile, root: &SyntaxNode) -> ExtensionNames {
+    let mut names = rf.extension_names().clone();
+    if let Some(damage) = extension_names::damage(root, rf.recovery()) {
+        names.absorb(&damage.names);
+    }
+    names
 }
 
 /// The [`ResolvedFile`] a signature file's Compile slot holds, as both the
@@ -1579,9 +1575,11 @@ fn signature_slot(
     );
     contributors::signature_contributions(sig, preceding, assemblies, &mut rf);
     (rf.unplaced_types, rf.unplaced_type_places) = signature_type_decls(sig);
-    // The walk resolves no attribute of a signature, so each of these has no
-    // verdict and counts as possibly `[<AutoOpen>]` or `[<Extension>]`.
-    rf.abbreviation_attributes = prescan::abbreviation_attributes(sig.syntax());
+    // The walk resolves no attribute of a signature, so every attribute counts
+    // as possibly `[<Extension>]` or `[<AutoOpen>]`. Later files see the
+    // signature's declarations, so its extension names are what they read.
+    rf.extension_names = extension_names::file_extension_names(sig.syntax(), false, &|_, _| true);
+    rf.recovery = pf.recovery.clone();
     rf
 }
 
@@ -1679,27 +1677,6 @@ fn signature_type_places_under(
             container.truncate(depth);
         }
     }
-}
-
-/// The **wholesale** extension-source signal one file threads to later
-/// Compile-order files: an augmentation member whose *name* was not walkable
-/// (EX-3 §2(a) — the walkable names thread as sets, [`ExtThreading`]), or an
-/// attribute that **may declare an extension** — EX-3 §2(d) stage 5: the
-/// attribute half is no longer "any attribute" but the resolver's
-/// per-attribute verdicts, exactly as the gate's own-file trigger reads them
-/// (an attribute resolving to a concrete non-`ExtensionAttribute` type
-/// provably marks nothing for later files either). An `[<AutoOpen>]` module
-/// *as such* contributes nothing (AO-1): the only extension-capable contents
-/// it can carry are exactly these two signals — a `type … with` augmentation
-/// (collected file-globally by the §2(a) walk, nested modules included) or a
-/// `[<Extension>]` attribute (resolved file-globally by the §2(d) walk) —
-/// while a module-level `[<Extension>] let` folds through *vals*, where the
-/// C#-style extension predicate never runs (fsi-verified; pinned by the
-/// `CoreExtAttrLets` fixture). One function so the fold's threading
-/// ([`thread_forward`]) and the incremental fold's in-sync comparison can
-/// never disagree about what a file contributes.
-fn wholesale_extension_contribution(rf: &ResolvedFile, assemblies: &AssemblyEnv) -> bool {
-    rf.augmentation_names_unknowable() || rf.attributes_may_declare_extension(assemblies)
 }
 
 /// Whether two Compile items are the **same file**: equal kind and
@@ -1898,7 +1875,7 @@ fn resolve_project_files_incremental_impl(
         assembly_core_attribute_aliases: Arc::new(assemblies.core_attribute_aliases().clone()),
         ..ProjectItems::default()
     };
-    let mut ext = ExtThreading::default();
+    let mut ext = ExtensionNames::default();
     let mut resolved: Vec<Arc<ResolvedFile>> = Vec::with_capacity(horizon);
     let mut reused = Vec::with_capacity(horizon);
     // True while the threaded state (`preceding`, `ext`) entering this file still
@@ -1951,17 +1928,15 @@ fn resolve_project_files_incremental_impl(
             // deep clone of the resolution map / arena / exports, so a keystroke's
             // reuse is O(1) per file rather than O(occurrences). `in_sync` stays
             // true (its contribution is prev's own); the shared
-            // `preceding_declares_extension_source` already equals `ext`, since
-            // `ext` matches prev's entering value while `in_sync`.
+            // `preceding_extension_names` already equals `ext`, since `ext`
+            // matches prev's entering value while `in_sync`.
             Arc::clone(&prev.files[i])
         } else {
             let mut rf = match &pf.file {
                 SourceFile::Sig(sig) => signature_slot(sig, pf, &preceding, assemblies),
                 SourceFile::Impl(file) => {
                     let mut rf = resolve_file(file, &preceding, assemblies, &pf.recovery);
-                    rf.preceding_declares_extension_source = ext.wholesale;
-                    rf.preceding_augmentation_instance_names = ext.instance_names.clone();
-                    rf.preceding_augmentation_static_names = ext.static_names.clone();
+                    rf.preceding_extension_names = ext.clone();
                     rf
                 }
             };
@@ -1977,18 +1952,19 @@ fn resolve_project_files_incremental_impl(
                 // Entering state matched prev's, so the item base matched and the
                 // exports are comparable. Does the recompute leave the threaded
                 // state unchanged (all halves: the export contribution — a
-                // signature's screen included — the pairing, the wholesale
-                // extension-source signal, and the augmentation name sets)?
+                // signature's screen included — the pairing, and the
+                // extension-member names)?
                 // If so, the tail stays reusable. The quantities compared are
                 // exactly what `thread_forward` folds, so the incremental
                 // fold can never disagree with the cold one about a file's
                 // downstream contribution.
                 in_sync = same_pairing
                     && rf.same_export_contribution(&prev.files[i], assemblies.names())
-                    && wholesale_extension_contribution(&rf, assemblies)
-                        == wholesale_extension_contribution(&prev.files[i], assemblies)
-                    && rf.augmentation_instance_names == prev.files[i].augmentation_instance_names
-                    && rf.augmentation_static_names == prev.files[i].augmentation_static_names;
+                    && extension_names_for_later_files(&rf, pf.file.syntax())
+                        == extension_names_for_later_files(
+                            &prev.files[i],
+                            prev_files[i].file.syntax(),
+                        );
             }
             Arc::new(rf)
         };
@@ -1999,6 +1975,7 @@ fn resolve_project_files_incremental_impl(
             &mut preceding,
             &mut ext,
             &rf,
+            pf.file.syntax(),
             assemblies,
             screen.as_deref(),
             partners_new[i],

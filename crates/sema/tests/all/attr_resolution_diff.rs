@@ -1034,14 +1034,21 @@ fn file_module_attribute_is_reported_once() {
     );
 }
 
-/// The stage-5 gate bit, derived from the per-attribute verdicts: concrete
-/// non-extension commits (assembly or in-file class) contribute nothing;
-/// an in-file abbreviation (unchased target) or any deferral keeps the
-/// presence defer.
+/// Whether some attribute of the file resolved to (or may be) the
+/// `[<Extension>]` marker, by the per-attribute verdicts.
+fn some_attribute_may_mark(rf: &borzoi_sema::ResolvedFile, env: &AssemblyEnv) -> bool {
+    rf.attribute_resolutions()
+        .keys()
+        .any(|&range| rf.attribute_may_be(range, env, |h| env.is_extension_attribute(h)))
+}
+
+/// Whether an attribute may be the marker, derived from the per-attribute
+/// verdicts: concrete non-extension commits (assembly or in-file class) are
+/// not; an in-file abbreviation (unchased target) or any deferral may be.
 #[test]
 fn gate_bit_derivation_from_the_verdicts() {
     let env = fsharp_core_env();
-    let bit = |src: &str| resolve(src, &env).attributes_may_declare_extension(&env);
+    let bit = |src: &str| some_attribute_may_mark(&resolve(src, &env), &env);
     assert!(
         !bit("module Test\n\n[<Literal>]\nlet X = 5\n"),
         "a committed non-extension assembly type contributes nothing"
@@ -1104,7 +1111,7 @@ fn an_assembly_abbreviation_of_an_attribute_may_be_its_target() {
         let rf = resolve(&src, &env);
         if extension {
             assert!(
-                rf.attributes_may_declare_extension(&env),
+                some_attribute_may_mark(&rf, &env),
                 "`[<{written}>]` may mark an extension"
             );
         }

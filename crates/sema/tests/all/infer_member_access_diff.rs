@@ -991,10 +991,11 @@ fn same_file_extension_declaration_defers_the_overload_gate() {
     // OV-6 review (GPT-5.6): a same-file C#-style `[<Extension>]` declaration with a
     // FULLY-QUALIFIED attribute (so there is no `open` node, and it is not a
     // `type … with` augmentation) is in scope and can beat a less-specific
-    // intrinsic overload — so any `[<Extension>]` in the file forces a defer.
+    // intrinsic overload — so an `[<Extension>]` member of the call's name defers.
     let src = "module M\n\
                [<System.Runtime.CompilerServices.Extension>]\n\
-               type Exts =\n    static member Foo(x: int) : int = x\n\
+               type Exts =\n    [<System.Runtime.CompilerServices.Extension>]\n    \
+               static member Substring(s: string, x: int) : string = s\n\
                let s = \"hi\"\nlet n = s.Substring(1)\n";
     let parsed = parse(src);
     assert!(
@@ -1006,8 +1007,21 @@ fn same_file_extension_declaration_defers_the_overload_gate() {
     assert_eq!(
         def_types.get("n"),
         None,
-        "a same-file [<Extension>] declaration makes the extension scope unknowable"
+        "a same-file [<Extension>] member named `Substring` defers `s.Substring`"
     );
+    // A marker on the type alone makes nothing an extension (FCS needs the
+    // method's own), so a type holding only `Foo` lets the overload commit.
+    let type_only = "module M\n\
+                     [<System.Runtime.CompilerServices.Extension>]\n\
+                     type Exts =\n    static member Foo(x: int) : int = x\n\
+                     let s = \"hi\"\nlet n = s.Substring(1)\n";
+    let (_, type_only_types) = infer_bcl(type_only);
+    assert_eq!(
+        type_only_types.get("n").map(String::as_str),
+        Some("System.String"),
+        "a type-only [<Extension>] declares no extension"
+    );
+    assert_sound(type_only);
     // Control: drop the `[<Extension>]` attribute (a plain type) → the overload
     // commits again, so the deferral is attributable to the extension attribute.
     let control = "module M\n\
@@ -1664,12 +1678,14 @@ fn aliased_extension_attribute_defers_the_overload_gate() {
     // type abbreviation (`type ExtAttr = System.Runtime.CompilerServices.ExtensionAttribute`
     // then `[<ExtAttr>]`) — FCS honours it as an extension declaration, and the alias
     // may even shadow an innocuous name. Matching the *written* name is therefore
-    // unsound; the gate defers on **any** attribute. `s.Substring(1)` (otherwise
-    // committable) defers here even though no `Extension` token appears.
+    // unsound; an attribute that may be the marker names the member it marks.
+    // `s.Substring(1)` (otherwise committable) defers here even though no
+    // `Extension` token appears.
     let src = "module M\n\
                type ExtAttr = System.Runtime.CompilerServices.ExtensionAttribute\n\
                [<ExtAttr>]\n\
-               type Exts =\n    static member Foo(x: int) : int = x\n\
+               type Exts =\n    [<ExtAttr>]\n    \
+               static member Substring(s: string, x: int) : string = s\n\
                let s = \"hi\"\nlet n = s.Substring(1)\n";
     let parsed = parse(src);
     assert!(
@@ -1681,7 +1697,7 @@ fn aliased_extension_attribute_defers_the_overload_gate() {
     assert_eq!(
         def_types.get("n"),
         None,
-        "an aliased [<Extension>] attribute makes the extension scope unknowable"
+        "an aliased [<Extension>] on a member named `Substring` defers `s.Substring`"
     );
     // Control: the abbreviation alone (no attribute *use*) still commits.
     let control = "module M\n\
@@ -2059,12 +2075,14 @@ fn root_namespace_extension_defers_the_overload_gate() {
 fn cross_file_extension_class_defers_the_overload_gate() {
     // OV-6 review (GPT-5.6): a preceding file's C#-style `[<Extension>]` class (not
     // an auto-open module) is a project extension source a later same-namespace file
-    // sees with no `open`. The compile-order cross-file signal defers the later
-    // file; the reversed order (call file first) commits.
+    // sees with no `open`. The compile-order cross-file names defer the later
+    // file's call of the member's name; the reversed order (call file first)
+    // commits.
     let env = bcl_env();
     let f1 = "module M1\n\
               [<System.Runtime.CompilerServices.Extension>]\n\
-              type Exts =\n    static member Foo(x: int) : int = x\n";
+              type Exts =\n    [<System.Runtime.CompilerServices.Extension>]\n    \
+              static member Substring(s: string, x: int) : string = s\n";
     let f2 = "module M2\nlet s = \"hi\"\nlet n = s.Substring(1)\n";
     let (files, project) = clean_project(&[f1, f2], &env);
     let f2_resolved = project.file(1);
@@ -2986,13 +3004,12 @@ fn non_extension_attribute_no_longer_defers_the_overload() {
     }
 }
 
-/// A real C#-style `[<Extension>]` (the `open` brings SRCS into scope, so the
-/// suffixed candidate resolves to the genuine `ExtensionAttribute`) still
-/// defers the overloaded call — resolving *to* the marker keeps the presence
-/// defer; name-keying its members is (a)–(c) work.
+/// A real C#-style `[<Extension>]` member (the `open` brings SRCS into scope,
+/// so the suffixed candidate resolves to the genuine `ExtensionAttribute`)
+/// named like the call still defers the overloaded call.
 #[test]
 fn a_real_extension_attribute_still_defers_the_overload() {
-    let src = "module M\nopen System.Runtime.CompilerServices\n[<Extension>]\ntype Helpers =\n    static member Twice (s: string) = s + s\nlet s = \"hi\"\nlet a = s.Substring(1)\n";
+    let src = "module M\nopen System.Runtime.CompilerServices\n[<Extension>]\ntype Helpers =\n    [<Extension>]\n    static member Substring (s: string, i: int) = s + s\nlet s = \"hi\"\nlet a = s.Substring(1)\n";
     let env = bcl_and_fsharp_core_env();
     let parsed = parse(src);
     assert!(
@@ -3022,7 +3039,7 @@ fn a_real_extension_attribute_still_defers_the_overload() {
     assert_ne!(
         def_types.get("a").map(String::as_str),
         Some("System.String"),
-        "a file declaring a genuine [<Extension>] must keep deferring the call"
+        "a file declaring a genuine [<Extension>] member of the name must keep deferring the call"
     );
 }
 
@@ -3145,8 +3162,9 @@ fn augmentation_operator_member_defers_only_its_compiled_name() {
             )
         })
         .collect();
-    assert!(!resolved.augmentation_names_unknowable());
-    assert!(resolved.augmentation_static_names().contains("op_PlusDot"));
+    let names = resolved.extension_names();
+    assert!(names.unknowable().is_none(), "{names:?}");
+    assert!(names.may_have("op_PlusDot", true), "{names:?}");
     assert_eq!(
         def_types.get("a").map(String::as_str),
         Some("System.String"),
@@ -3410,13 +3428,13 @@ fn auto_open_module_augmentation_defers_only_its_member_names() {
     );
 }
 
-/// AO-1 content kind 2: a `[<Extension>]` type *inside* an auto-open module is
-/// seen by the §2(d) attribute walk (nested-module bodies resolve inside the
-/// recursion), resolves to the genuine marker, and keeps the wholesale defer —
-/// own-file and threaded to later Compile-order files alike.
+/// AO-1 content kind 2: a `[<Extension>]` member *inside* an auto-open module
+/// is read by the extension-name pass (which walks the whole tree), resolves to
+/// the genuine marker, and defers its name — own-file and threaded to later
+/// Compile-order files alike.
 #[test]
 fn auto_open_module_with_extension_attribute_still_defers_wholesale() {
-    let src = "module M\nopen System.Runtime.CompilerServices\n[<AutoOpen>]\nmodule Helpers =\n    [<Extension>]\n    type H =\n        static member Twice (s: string) = s + s\nlet s = \"hi\"\nlet a = s.Substring(1)\n";
+    let src = "module M\nopen System.Runtime.CompilerServices\n[<AutoOpen>]\nmodule Helpers =\n    [<Extension>]\n    type H =\n        [<Extension>]\n        static member Substring (s: string, i: int) = s + s\nlet s = \"hi\"\nlet a = s.Substring(1)\n";
     let env = bcl_and_fsharp_core_env();
     let parsed = parse(src);
     assert!(
@@ -3446,11 +3464,11 @@ fn auto_open_module_with_extension_attribute_still_defers_wholesale() {
     assert_ne!(
         def_types.get("a").map(String::as_str),
         Some("System.String"),
-        "a [<Extension>] type inside an auto-open module must defer wholesale"
+        "a [<Extension>] member of the name inside an auto-open module must defer"
     );
 
-    // Cross-file: the marker resolution threads through the wholesale bit.
-    let f1 = "module M1\nopen System.Runtime.CompilerServices\n[<AutoOpen>]\nmodule Helpers =\n    [<Extension>]\n    type H =\n        static member Twice (s: string) = s + s\n";
+    // Cross-file: the marked member's name threads to later files.
+    let f1 = "module M1\nopen System.Runtime.CompilerServices\n[<AutoOpen>]\nmodule Helpers =\n    [<Extension>]\n    type H =\n        [<Extension>]\n        static member Substring (s: string, i: int) = s + s\n";
     let f2 = "module M2\nlet s = \"hi\"\nlet n = s.Substring(1)\n";
     let (files, project) = clean_project(&[f1, f2], &env);
     let rf2 = &project.files()[1];

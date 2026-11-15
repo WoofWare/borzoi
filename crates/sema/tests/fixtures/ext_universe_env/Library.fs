@@ -114,3 +114,10 @@ type Ext = System.Runtime.CompilerServices.ExtensionAttribute
 /// An abbreviation of `StrExts` under the aliased `[<Extension>]`.
 [<Ext>]
 type Alias = ExtUniverse.Str.StrExts
+
+namespace ExtUniverse.Recv
+
+/// A type with a plain method named like an event's generated `add` accessor,
+/// which a project's `[<CLIEvent>]` extension member `Changed` competes with.
+type Receiver() =
+    member _.add_Changed(o: obj) = true

@@ -65,7 +65,8 @@ pub use def::{Def, DefId, DefKind, SemanticClass};
 pub use diagnostics::{SemaDiagnostic, SemaDiagnosticKind};
 pub use function_ty::FunctionTyGap;
 pub use infer::{
-    BuiltinGap, ConstraintGap, Incomplete, InferredFile, OperatorGap, infer_file, infer_named_file,
+    BuiltinGap, ConstraintGap, GateInput, Incomplete, InferredFile, OperatorGap, infer_file,
+    infer_named_file,
 };
 pub use infer_project::{
     InferredProject, PrecedingGap, PrecedingTypes, infer_project, infer_project_reusing,
@@ -76,9 +77,9 @@ pub use qnof::{QualifiedNameOfFile, qualified_names};
 pub use recovery::SyntaxRecovery;
 pub use resolve::{
     ActivePatternShape, CaseKind, DeclineCause, DeclineSite, DeclineTier, DeferredReason,
-    ExportedItem, ExportedItems, FieldLabel, ItemId, OpaqueRegion, OpenOpacity, OpenTrace,
-    ProjectFile, ProjectItems, Resolution, ResolutionTrace, ResolvedFile, ResolvedProject,
-    SourceFile, resolve_file, resolve_project, resolve_project_files,
+    ExportedItem, ExportedItems, ExtensionNames, FieldLabel, ItemId, NamesUnknowable, OpaqueRegion,
+    OpenOpacity, OpenTrace, ProjectFile, ProjectItems, Resolution, ResolutionTrace, ResolvedFile,
+    ResolvedProject, SourceFile, resolve_file, resolve_project, resolve_project_files,
     resolve_project_files_incremental, resolve_project_files_prefix,
     resolve_project_files_prefix_incremental, resolve_project_incremental,
     resolve_project_incremental_with_reuse, signature_partners,

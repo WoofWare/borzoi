@@ -304,7 +304,7 @@ fn a_resolved_static_member_defers_too() {
 }
 
 /// An attribute resolution lives in its own map. Pinned separately because that
-/// map also feeds `attributes_may_declare_extension`, whose `Deferred(_)` arm
+/// map also feeds `ResolvedFile::attribute_may_be`, whose `Deferred(_)` arm
 /// makes the demote *increase* deferral there — the safe direction, and worth a
 /// regression pin.
 #[test]
