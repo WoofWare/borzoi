@@ -15,7 +15,8 @@
 //! found by an earlier run of this sweep. Each seed is perturbed three ways at
 //! each of its tokens: the token deleted, a junk token ([`JUNK`]) inserted
 //! before it, or its line truncated from it. FCS checks every case alone
-//! (the census oracle).
+//! (the census oracle). The gate reads an env of exactly the references the
+//! census checked against ([`oracle_env`]).
 //!
 //! # The properties
 //!
@@ -38,19 +39,21 @@
 //! them all.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::OnceLock;
 
+use borzoi_assembly::Ecma335Assembly;
 use borzoi_assembly::op_name::compile_op_name;
 use borzoi_cst::parser::parse;
 use borzoi_cst::syntax::{AstNode, ImplFile, TextRange};
 use borzoi_oracle_harness::fcs_position::LineIndex;
 use borzoi_oracle_harness::par_map::par_map;
 use borzoi_sema::{
-    ExtensionNames, ProjectFile, ResolvedProject, SourceFile, SyntaxRecovery, qualified_names,
-    resolve_project_files,
+    AssemblyEnv, ExtensionNames, ProjectFile, ResolvedProject, SourceFile, SyntaxRecovery,
+    qualified_names, resolve_project_files,
 };
 
 use crate::common::{
-    CensusUse, full_bcl_env, invoke_fcs_dump_census, parse_census_jsonl, temp_fs_tree,
+    CensusUse, FileCensus, full_bcl_env, invoke_fcs_dump_census, parse_census_jsonl, temp_fs_tree,
 };
 
 /// How many perturbed cases the ordinary suite checks, about.
@@ -211,14 +214,58 @@ fn fnv(text: &str) -> u64 {
     })
 }
 
+/// The env built from exactly the references the census checked every case
+/// against, so the gate cannot miss an extension FCS reads in an assembly
+/// the env lacks, nor see one FCS cannot.
+fn oracle_env(census: &[FileCensus]) -> &'static AssemblyEnv {
+    static ENV: OnceLock<(Vec<String>, AssemblyEnv)> = OnceLock::new();
+    let sets: BTreeSet<&Vec<String>> = census
+        .iter()
+        .filter(|f| f.ok)
+        .map(|f| {
+            f.references
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} reports no reference set", f.path))
+        })
+        .collect();
+    assert_eq!(
+        sets.len(),
+        1,
+        "the census checked against {} reference sets",
+        sets.len()
+    );
+    let paths = (*sets.first().expect("one set")).clone();
+    let (built_for, env) = ENV.get_or_init(|| {
+        let bytes: Vec<Vec<u8>> = paths
+            .iter()
+            .map(|p| std::fs::read(p).unwrap_or_else(|e| panic!("read reference {p}: {e}")))
+            .collect();
+        let views: Vec<Ecma335Assembly> = bytes
+            .iter()
+            .zip(&paths)
+            .map(|(b, p)| {
+                Ecma335Assembly::parse(b).unwrap_or_else(|e| panic!("parse reference {p}: {e:?}"))
+            })
+            .collect();
+        let env = AssemblyEnv::from_views(&views).expect("an env of the census's references");
+        (paths.clone(), env)
+    });
+    assert_eq!(
+        *built_for, paths,
+        "the census's reference set moved within a run"
+    );
+    env
+}
+
 /// One file resolved alone, as the gate sees it.
 struct Resolved {
     project: ResolvedProject,
+    env: &'static AssemblyEnv,
     recovered: bool,
 }
 
 impl Resolved {
-    fn of(source: &str) -> Resolved {
+    fn of(source: &str, env: &'static AssemblyEnv) -> Resolved {
         let parsed = parse(source);
         let recovered = !parsed.errors.is_empty();
         let recovery = SyntaxRecovery::of(&parsed);
@@ -231,7 +278,8 @@ impl Resolved {
             .map(|(f, q)| ProjectFile::new(f, q, recovery.clone()))
             .collect();
         Resolved {
-            project: resolve_project_files(&project, full_bcl_env()),
+            project: resolve_project_files(&project, env),
+            env,
             recovered,
         }
     }
@@ -240,7 +288,7 @@ impl Resolved {
     fn declines(&self, name: &str, is_static: bool) -> bool {
         borzoi_sema::test_support::extension_gate_decline(
             self.project.file(0),
-            full_bcl_env(),
+            self.env,
             name,
             is_static,
         )
@@ -308,8 +356,8 @@ struct Graded {
 }
 
 /// Grade `case` against FCS's census `uses` of it.
-fn grade(case: &Case, uses: &[CensusUse]) -> Graded {
-    let resolved = Resolved::of(&case.source);
+fn grade(case: &Case, uses: &[CensusUse], env: &'static AssemblyEnv) -> Graded {
+    let resolved = Resolved::of(&case.source, env);
     let declared = resolved.declared();
     let index = LineIndex::new(&case.source);
     let mut graded = Graded {
@@ -367,6 +415,7 @@ fn check(cases: &[Case]) {
     let paths: Vec<_> = written.iter().map(|(p, _)| p.clone()).collect();
     let census = parse_census_jsonl(&invoke_fcs_dump_census(&paths));
     let _ = std::fs::remove_dir_all(&root);
+    let env = oracle_env(&census);
     let by_path: HashMap<String, _> = census
         .iter()
         .map(|c| {
@@ -387,7 +436,7 @@ fn check(cases: &[Case]) {
                 ..Graded::default()
             };
         };
-        let mut graded = grade(case, &file.uses);
+        let mut graded = grade(case, &file.uses, env);
         if let Some(seed) = case.label.strip_suffix("/clean") {
             let control = CONTROLS.contains(&seed);
             let graded_any = graded.calls + graded.declarations > 0;
@@ -475,7 +524,7 @@ fn deleting_a_token_keeps_every_decline() {
     let mut violations = Vec::new();
     let mut checked = 0usize;
     for seed in seeds() {
-        let clean = Resolved::of(&seed.source);
+        let clean = Resolved::of(&seed.source, full_bcl_env());
         if clean.recovered {
             eprintln!(
                 "{}: our parser recovers from the seed itself: {:?}",
@@ -499,7 +548,7 @@ fn deleting_a_token_keeps_every_decline() {
                 continue;
             }
             let damaged = Perturbation::Delete.apply(&seed.source, *range);
-            let resolved = Resolved::of(&damaged);
+            let resolved = Resolved::of(&damaged, full_bcl_env());
             if !resolved.recovered {
                 // A different program, not a damaged one.
                 continue;
