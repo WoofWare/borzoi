@@ -519,6 +519,7 @@ fn item_uncertainty_diagnostic(kind: &DiagnosticKind) -> bool {
             | DiagnosticKind::SdkVersionNotSatisfied { .. }
             | DiagnosticKind::SdkResolutionUnsupported { .. }
             | DiagnosticKind::ImplicitImportPresent { .. }
+            | DiagnosticKind::MayBeRejected { .. }
     )
 }
 
@@ -530,6 +531,7 @@ fn define_constants_uncertainty_diagnostic(kind: &DiagnosticKind) -> bool {
             | DiagnosticKind::UnresolvedItemReference { .. }
             | DiagnosticKind::UnresolvedMetadataReference { .. }
             | DiagnosticKind::UnsupportedCondition { .. }
+            | DiagnosticKind::MayBeRejected { .. }
     )
 }
 
@@ -675,6 +677,9 @@ fn msbuild_diagnostic_message(kind: &DiagnosticKind) -> String {
         }
         DiagnosticKind::ImplicitImportPresent { path, kind } => {
             format!("implicit import discovered: {kind:?} at {}", path.display())
+        }
+        DiagnosticKind::MayBeRejected { cause } => {
+            format!("MSBuild may reject the project: {cause:?}")
         }
     }
 }

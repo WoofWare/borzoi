@@ -51,9 +51,16 @@
 > undecided SDK import of a user file, hidden by the SDK Compile tolerance) are
 > fixed by withdrawing the Compile set wherever the walk passes content it
 > could not see, SDK file or not: `items_uncertain` holds whenever
-> `hidden_content` is `Some`. The import-graph harness carries one more as a
-> known family: #820 (an undecided import of a missing file, which MSBuild
-> rejects).
+> `hidden_content` is `Some`. #820 (an undecided import of a missing file)
+> and #845 (a taken import of a file that does not load) are fixed by a
+> whole-evaluation withdrawal, `ParsedProject::rejection`: MSBuild rejects
+> such a project outright, so no value bound before or after the import is
+> the build's, and a positional mark (opacity, staleness) would leave the
+> earlier ones committed. Every site is `Possible` for now; grading a
+> `Certain` rejection against the oracle, which needs certain reachability,
+> lands with #783's illegal conditions. What remains is a failing import in
+> content the walk cannot see, which the import-graph harness carries in
+> `UndecidedImportHidesWrites`.
 >
 > **#677 replaced the `Directory.Build.*` splice with the SDK's own import
 > points** (see "#677: the import points, as landed"). Sections written before

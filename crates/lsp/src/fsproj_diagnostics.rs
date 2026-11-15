@@ -40,8 +40,9 @@ use std::path::{Path, PathBuf};
 use lsp_types::{Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, Range};
 
 use borzoi_msbuild::{
-    DiagnosticKind, DiagnosticOrigin, GlobResolver, ImportFailReason, ParseError, ResolvedItem,
-    SdkResolver, SdkVersion, VersionSpec, parse_fsproj_with_imports,
+    DiagnosticKind, DiagnosticOrigin, GlobResolver, ImportFailReason, ParseError, RejectionCause,
+    ResolvedItem, SdkResolver, SdkVersion, UnloadableImport, VersionSpec,
+    parse_fsproj_with_imports,
 };
 
 use crate::paths::lexically_normalize;
@@ -98,7 +99,7 @@ pub fn diagnostics_for(
                 //
                 // Meta-import diagnostics (`ImportFailed`, `SdkNotFound`,
                 // `SdkVersionNotSatisfied`, `SdkResolverAbsent`,
-                // `UnresolvedImport`) describe
+                // `UnresolvedImport`, `MayBeRejected`) describe
                 // the *integrity of the import chain*. Top-level ones are
                 // already `Buffer`-origin because the walker pushes them
                 // before descending. But a *nested* import that itself
@@ -117,6 +118,7 @@ pub fn diagnostics_for(
                                 | DiagnosticKind::SdkResolutionUnsupported { .. }
                                 | DiagnosticKind::SdkResolverAbsent { .. }
                                 | DiagnosticKind::UnresolvedImport { .. }
+                                | DiagnosticKind::MayBeRejected { .. }
                         )
                 })
                 .map(|d| to_lsp_diagnostic(text, &d.kind, &d.span, discovery_failure))
@@ -837,6 +839,29 @@ fn message(kind: &DiagnosticKind, discovery_failure: Option<&DiscoveryError>) ->
                 "implicit import discovered: {:?} at {}",
                 kind,
                 path.display()
+            )
+        }
+        DiagnosticKind::MayBeRejected {
+            cause:
+                RejectionCause::Import {
+                    project,
+                    gate_undecided,
+                    why,
+                },
+        } => {
+            let gate = if *gate_undecided {
+                ", under a condition I can't evaluate,"
+            } else {
+                ""
+            };
+            let why = match why {
+                UnloadableImport::PathUndecided => "a path I can't compute".to_string(),
+                UnloadableImport::NoPath => "no path".to_string(),
+                UnloadableImport::Failed(reason) => import_fail_message(reason),
+            };
+            format!(
+                "MSBuild may reject this project: it may import `{project}`{gate} which loads \
+                 nothing ({why}) — no evaluated value is trusted"
             )
         }
     }

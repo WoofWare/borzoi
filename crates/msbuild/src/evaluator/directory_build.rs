@@ -103,6 +103,8 @@ use roxmltree::Node;
 
 use crate::document::attribute;
 
+use crate::RejectionCause;
+
 use super::condition;
 use super::dotnet_io;
 use super::observed;
@@ -111,6 +113,7 @@ use super::properties::trust::{
     OpacityCause, PropertyProvenance, RefusedOutcome, StaleOutcome, TaintOutcome, UnpinnedOutcome,
     UnpinnedRoot,
 };
+use super::rejection;
 use super::{
     CurrentFile, State, StructuralCompileItemUncertainty, canonicalise_or_normalise,
     condition_exists, condition_has_exists_for_property, import_dedup_key,
@@ -376,6 +379,25 @@ pub(super) fn visit_point(
     let named = named_file(state, kind.path_name(), current_file_dir);
     let condition = attribute(node, "Condition").unwrap_or_default();
     let guarded = condition::requires_exists(&condition, &|arg| is_the_path(arg, kind));
+    // MSBuild may make the import, and fails the evaluation if what the path
+    // names does not load (#820). What the walk's opacity alone leaves in
+    // doubt is the doubt of the content it could not see (`rejection`).
+    let path_name = kind.path_name();
+    let certain =
+        rejection::certain_but_for_opacity(state, path_name) && names_one_file(state, path_name);
+    let path = point_path(state, path_name, current_file_dir);
+    if !rejection::ruled_out_but_for_opacity(node, current_file_dir, state)
+        && let Some(why) = rejection::may_load_nothing_at(state, path.as_deref(), certain, guarded)
+    {
+        state.note_possible_rejection(
+            RejectionCause::Import {
+                project: kind.project(),
+                gate_undecided: true,
+                why,
+            },
+            node.range(),
+        );
+    }
     fallback(kind, named, guarded, state);
     Visit::Settled
 }

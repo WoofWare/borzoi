@@ -157,6 +157,9 @@ pub enum UntrustedCause {
     /// The project writes `name` with a value the walk could not compute, so
     /// the real build holds a value where the walk holds none.
     Refused { name: String },
+    /// MSBuild may reject the whole project, so it holds no value at all
+    /// ([`crate::ParsedProject::rejection`]).
+    Rejected(Box<crate::Rejection>),
 }
 
 impl UntrustedCause {

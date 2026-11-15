@@ -1,6 +1,6 @@
 ---
 name: msbuild-trust-audit
-description: How to decide whether an MSBuild-evaluated value may be trusted, and the complete eleven-entry checklist an item capture must consult before committing to a value. Use when adding or changing a consumer of a `borzoi-msbuild` evaluated item or property (ProjectReference edges, TargetFramework, output-file names, DefineConstants), when adding a `*_uncertain` flag or any trust gate, and when a reviewer flags one untrusted gate or value flow — audit all eleven entries in that one round instead of patching the one.
+description: How to decide whether an MSBuild-evaluated value may be trusted, and the complete twelve-entry checklist an item capture must consult before committing to a value. Use when adding or changing a consumer of a `borzoi-msbuild` evaluated item or property (ProjectReference edges, TargetFramework, output-file names, DefineConstants), when adding a `*_uncertain` flag or any trust gate, and when a reviewer flags one untrusted gate or value flow — audit all twelve entries in that one round instead of patching the one.
 ---
 
 # Trusting an MSBuild-evaluated value
@@ -16,11 +16,11 @@ Two distinct jobs, often confused:
 - **Fold gates** — "refuse to analyse this project at all". The generic seam is
   **unusable** here alone. See §2.
 
-## 1. The eleven-entry item-trust checklist
+## 1. The twelve-entry item-trust checklist
 
 When making a captured MSBuild item list trustworthy, *every* one of these must
 consult trust state. A reviewer finds exactly one missing entry per round; each
-looks like a one-off and is the same family. Sweep all eleven at once.
+looks like a one-off and is the same family. Sweep all twelve at once.
 
 1. The element's own `Condition` — **both directions**: an untrusted-false may
    skip a mutation that really runs; an untrusted-true may capture a phantom
@@ -69,6 +69,17 @@ looks like a one-off and is the same family. Sweep all eleven at once.
     `NodeTfm::Known` — but the outer-gated **plural** (the arcade idiom) is
     unpinned by construction and must stay trusted, because the TFM-invariant
     intersection never believes a single branch anyway.
+12. **A project MSBuild may reject** (`ParsedProject::rejection`, #820, #845).
+    MSBuild rejection is total: nothing the walk bound, before the failing
+    import or after it, is the build's. The evaluator withdraws what has a
+    trust channel (every `property()` read, the four `*_uncertain` flags,
+    `target_name`, `hidden_content`), but the trust-blind fields
+    (`properties`, `target_frameworks`, `lang_version`, `other_flags`,
+    `define_constants`, `items`) keep the walk's values. A consumer that
+    commits to one of those must gate on `rejection`, or on the flag or read
+    the withdrawal sets; one that serves a best guess (the single-file
+    `LangVersion`) may read it. A field added to `ParsedProject` joins one
+    list or the other, in `rejection`'s docs and in `State::into_project`.
 
 **Rule of thumb:** if a consumer starts reading a new evaluated property with
 reference semantics, give it the same Known/Unknown verdict, or the next review

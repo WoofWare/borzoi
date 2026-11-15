@@ -756,6 +756,7 @@ fn cause(cause: &borzoi_msbuild::UntrustedCause) -> String {
         SdkPackageInput => "an SDK package input".to_owned(),
         Unentered(_) => "content not entered".to_owned(),
         Refused { name } => format!("$({name}) refused"),
+        Rejected(_) => "MSBuild may reject the project".to_owned(),
     }
 }
 
@@ -915,6 +916,7 @@ fn reads(
                     InexactUnset::Toolset => "the toolset".to_owned(),
                     InexactUnset::Opaque(c) => format!("opacity: {}", cause(c)),
                     InexactUnset::ConsumerCarveOut => "a consumer carve-out".to_owned(),
+                    InexactUnset::Rejected(_) => "MSBuild may reject the project".to_owned(),
                 };
                 format!("unset, inexact ({why}); {set_word} in MSBuild")
             }

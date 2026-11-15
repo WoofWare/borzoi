@@ -40,8 +40,8 @@ pub use diagnostic::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
     CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause, Diagnostic, DiagnosticKind,
     DiagnosticOrigin, ImplicitImportKind, ImportFailReason, PackageReferenceUncertaintyCause,
-    PackageReferenceUncertaintyCauseKind, StructuralCompileItemUncertainty,
-    StructuralPackageReferenceUncertainty,
+    PackageReferenceUncertaintyCauseKind, Rejection, RejectionCause, RejectionCertainty,
+    StructuralCompileItemUncertainty, StructuralPackageReferenceUncertainty, UnloadableImport,
 };
 pub use evaluator::property_reads::{InexactUnset, PropertyRead, PropertyReads};
 pub use glob::{GlobDecline, SpecFragment, Unmodelled};
@@ -620,6 +620,49 @@ pub struct ParsedProject {
     /// `None`, and [`Self::items_uncertain`] and
     /// [`Self::project_references_uncertain`] are `true` whenever it is `Some`.
     pub hidden_content: Option<UntrustedCause>,
+    /// Why MSBuild may reject the whole project, or `None` when nothing the
+    /// walk passed could make it. MSBuild's rejection is total: the build has
+    /// no value for any property, and no item. So the walk publishes nothing
+    /// as the build's once this is `Some`, whatever it bound before or after
+    /// the construct: every [`Self::property`] read is inexact
+    /// ([`UntrustedCause::Rejected`], [`InexactUnset::Rejected`]),
+    /// [`Self::items_uncertain`], [`Self::define_constants_uncertain`],
+    /// [`Self::project_references_uncertain`] and
+    /// [`Self::package_references_uncertain`] are set (each naming a
+    /// [`DiagnosticKind::MayBeRejected`] cause where the axis records causes),
+    /// [`Self::target_name`] is unknown and [`Self::hidden_content`] is
+    /// `Some`. The trust-blind fields ([`Self::properties`],
+    /// [`Self::target_frameworks`], [`Self::lang_version`],
+    /// [`Self::other_flags`], …) keep the walk's values as best guesses, for a
+    /// consumer that already serves one; a consumer committing to one checks
+    /// this, or reads the value through [`Self::property`].
+    ///
+    /// The evaluation is still `Ok`: its [`Self::read_set`] says when it
+    /// changes, and its diagnostics say why.
+    ///
+    /// The constructs, each [`RejectionCertainty::Possible`]:
+    ///
+    /// - an `<Import>` whose condition the walk could not decide, whose path
+    ///   names no file MSBuild can load: missing, a directory, a dangling link,
+    ///   malformed XML, empty, or one the walk could not compute (#820). A
+    ///   condition that requires the file (`Exists` of the `Project` text, as a
+    ///   conjunct) excuses a path naming nothing at all. The `Directory.Build.*`
+    ///   import points' fallback is one of these;
+    /// - an `<Import>` the walk took whose path names no file MSBuild can load:
+    ///   it failed to load (missing, a dangling link, malformed XML), the path
+    ///   is empty or absent, or the walk could not compute it (#845).
+    ///
+    /// Not among them, each a doubt the walk cannot resolve from what it saw:
+    /// an import in content the walk did not see, or one a value that content
+    /// may have rewritten steers (a doubt that is only the walk's opacity is
+    /// that content's, as for every reader but the import points and the
+    /// Compile items, #792); one whose condition requires its file while its
+    /// path is one the walk could not compute, which may name a dangling link
+    /// MSBuild's `Exists` accepts; an SDK the walk's resolver cannot resolve,
+    /// which MSBuild's may; and every import the pure [`parse_fsproj`] meets,
+    /// since it reads no file. The import-graph and property-table
+    /// differentials grade the rest against MSBuild.
+    pub rejection: Option<Rejection>,
     pub diagnostics: Vec<Diagnostic>,
     /// `true` if any diagnostic was emitted — i.e. the result may diverge
     /// from what MSBuild itself would produce, including in ways that don't

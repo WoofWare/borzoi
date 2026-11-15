@@ -208,6 +208,62 @@ pub enum DiagnosticKind {
         path: PathBuf,
         kind: ImplicitImportKind,
     },
+    /// MSBuild may reject the whole project, for `cause`; see
+    /// [`crate::ParsedProject::rejection`], which holds the first one. The
+    /// diagnostic sits at the construct, and the item and define axes name it
+    /// as their cause.
+    MayBeRejected { cause: RejectionCause },
+}
+
+/// Why MSBuild may reject the whole project, and how sure the walk is of it:
+/// [`crate::ParsedProject::rejection`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejection {
+    pub certainty: RejectionCertainty,
+    pub cause: RejectionCause,
+    /// Byte span of the construct in the entry project's source, remapped to
+    /// the `<Import>` site for imported files (as [`Diagnostic::span`]).
+    pub span: Range<usize>,
+    /// Whether the construct lives in the entry project or an imported file.
+    pub origin: DiagnosticOrigin,
+}
+
+/// How sure the walk is that MSBuild rejects the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectionCertainty {
+    /// MSBuild may reject it: the walk cannot rule the rejection out, and
+    /// claims nothing about it. What is graded is the withdrawal alone: no
+    /// value is published as the build's, whichever way MSBuild goes.
+    Possible,
+}
+
+/// What may make MSBuild reject the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RejectionCause {
+    /// An `<Import>` MSBuild may make names no file it can load, and MSBuild
+    /// fails the evaluation when it makes one (MSB4019 for a missing file,
+    /// MSB4025 for malformed XML, MSB4020/MSB4035 for an empty path).
+    /// `project` names the import: its `Project` text as written, or the path
+    /// of a file that failed to load. `gate_undecided`:
+    /// the walk could not decide the import's condition, which does not
+    /// require the file to exist (#820); otherwise the walk took the import
+    /// (#845).
+    Import {
+        project: String,
+        gate_undecided: bool,
+        why: UnloadableImport,
+    },
+}
+
+/// Why an import may load no file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnloadableImport {
+    /// The walk could not compute the path, so the build's may name no file.
+    PathUndecided,
+    /// The path is empty, or the import has no `Project` at all.
+    NoPath,
+    /// The path names no file the walk could load.
+    Failed(ImportFailReason),
 }
 
 impl DiagnosticKind {

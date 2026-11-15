@@ -39,6 +39,7 @@ mod pass_ordering;
 mod project_reference_remove;
 mod read_set;
 mod references_uncertain;
+mod rejection;
 mod resolved_sdk_root;
 mod sdk_custom_entry;
 mod sdk_resolution;

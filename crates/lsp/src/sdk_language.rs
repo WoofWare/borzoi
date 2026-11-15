@@ -617,9 +617,9 @@ pub fn lang_version_value_doubt(parsed: &ParsedProject) -> Option<UntrustedCause
 fn evaluated_value_doubt(parsed: &ParsedProject, name: &str) -> Option<UntrustedCause> {
     match parsed.property(name) {
         PropertyRead::Untrusted(cause) => Some(cause),
-        PropertyRead::UnsetInexact(why @ (InexactUnset::Refused | InexactUnset::Environment)) => {
-            Some(why.cause(name))
-        }
+        PropertyRead::UnsetInexact(
+            why @ (InexactUnset::Refused | InexactUnset::Environment | InexactUnset::Rejected(_)),
+        ) => Some(why.cause(name)),
         PropertyRead::Value(_)
         | PropertyRead::Unset
         | PropertyRead::UnsetInexact(
