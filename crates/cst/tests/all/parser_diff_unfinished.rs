@@ -522,6 +522,13 @@ fn recover_followers_of_unfinished_constructs_grid() {
         "if a * then 1 else 2",
         "match a with | b when -> ()",
         "f (a *) b",
+        "(a *)",
+        "(a *) in",
+        "a * in",
+        "if a * then",
+        "function | _ when | y -> ()",
+        "function | _ when | y -> () then",
+        "match a with | b. -> ()",
     ];
     let mut cells = Vec::new();
     let mut members = Vec::new();
@@ -534,7 +541,7 @@ fn recover_followers_of_unfinished_constructs_grid() {
             }
         }
         for next in DECL_FOLLOWERS {
-            for sep in ["\n", "\n "] {
+            for sep in [" ", "\n", "\n ", "\n    ", "\n        "] {
                 cells.push((
                     format!("module M\ntype T() =\n    {slot}{sep}{next}\nlet x = 1\n"),
                     Want::Agree,
@@ -544,7 +551,7 @@ fn recover_followers_of_unfinished_constructs_grid() {
     }
     for rhs in RHS {
         for next in DECL_FOLLOWERS {
-            for sep in ["\n", "\n ", "\n    "] {
+            for sep in [" ", "\n", "\n ", "\n  ", "\n    "] {
                 cells.push((
                     format!("module M\nlet x = {rhs}{sep}{next}\nlet z = 2\n"),
                     Want::Agree,
@@ -587,5 +594,41 @@ fn recover_followers_of_unfinished_constructs_grid() {
             "{UPDATE_ENV}=1 nix develop -c cargo test -p borzoi-cst --test all parser_diff_unfinished::recover_followers"
         ),
     );
-    crate::common::corpus_manifest::check_no_worse_than_base("unfinished_followers", &keys, &[]);
+    // Cells this branch is knowingly worse on than `main`: `main` kept the
+    // declaration only because its recovery failed earlier, and the faithful
+    // recovery now parses on into an older gap that `main` has on the clean
+    // shape too.
+    // - A slot with no name (`abstract`, `abstract (x)`), then a `type` or
+    //   `module` at the member column: `main` refused the slot, while a
+    //   recovered one leaves the keyword inside the type body, where a `type`
+    //   or `module` after any member is lost (`member _.P = 1⏎    type S`),
+    //   the "`module` or `open` inside a type body" class of
+    //   `docs/parser-recovery-oracle.md`.
+    // - A guardless `when` before the next clause, whose result is followed by
+    //   a stray `then`: `main` stopped the clause list at the `when`, while the
+    //   continued list meets the `then`, after which a declaration is lost
+    //   (`function | y -> () then⏎ type S`) as on `main`.
+    let knowingly_worse = |key: &str| {
+        let slot_then_keyword = ["abstract", "abstract (x)"].iter().any(|slot| {
+            ["type S = int", "module N = let n = 1"].iter().any(|next| {
+                let cell = format!(
+                    "{:?}",
+                    format!("module M\ntype T() =\n    {slot}\n    {next}\n")
+                );
+                key.starts_with(cell.trim_end_matches('"'))
+            })
+        });
+        let when_then = key.starts_with("\"module M\\nlet x = function | _ when | y -> () then\\n");
+        slot_then_keyword || when_then
+    };
+    let accepted: Vec<&str> = keys
+        .iter()
+        .map(String::as_str)
+        .filter(|k| knowingly_worse(k))
+        .collect();
+    crate::common::corpus_manifest::check_no_worse_than_base(
+        "unfinished_followers",
+        &keys,
+        &accepted,
+    );
 }

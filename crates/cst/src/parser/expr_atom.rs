@@ -1125,13 +1125,53 @@ impl<'src> Parser<'src> {
             self.builder.start_node_at(cp, SyntaxKind::LET_DECL);
             self.builder.finish_node();
             self.close_binder_binding();
-            return false;
+            // A declaration straight after the `in` (`let x = 1 in exception
+            // E`) needs no separator: FCS shifts its keyword as the next one.
+            // An `extern`, or attribute lists before anything but a `let`,
+            // `type` or `module` (`in [<assembly: A>] ()`), is not one, so the
+            // loop decides.
+            return match self.peek() {
+                Some((Ok(FilteredToken::Raw(Token::Extern)), _)) => false,
+                Some((Ok(FilteredToken::Raw(Token::LBrackLess)), _)) => {
+                    let mut sig = self.significant_raw_from_cursor().peekable();
+                    while matches!(sig.peek(), Some(Token::LBrackLess)) {
+                        sig.next();
+                        // A targeted list (`[<assembly: A>]`) is a declaration
+                        // of its own, which the loop decides on.
+                        let head: Vec<_> = sig.by_ref().take(2).collect();
+                        if matches!(head.as_slice(), [Token::Ident(_), Token::Colon]) {
+                            return false;
+                        }
+                        if !matches!(head.as_slice(), [.., Token::GreaterRBrack]) {
+                            sig.by_ref().find(|t| matches!(t, Token::GreaterRBrack));
+                        }
+                    }
+                    matches!(
+                        sig.next(),
+                        Some(Token::Let | Token::Use | Token::Type | Token::Module)
+                    )
+                }
+                _ => self.at_module_decl_keyword(),
+            };
         }
         // Plain `let x = e` (no explicit `in`) or a recovered RHS: a flat
         // `SynModuleDecl.Let`.
         self.builder.start_node_at(cp, SyntaxKind::LET_DECL);
         self.builder.finish_node();
         clean && owns_block && self.close_module_let_block(block_let)
+    }
+
+    /// Whether the cursor is at a module-level declaration's keyword: one on
+    /// the filtered stream, or a `type` or `module` keyword LexFilter
+    /// swallows, which the declaration loop reads off the raw stream.
+    fn at_module_decl_keyword(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some((Ok(FilteredToken::Raw(t)), _)) if super::decls::begins_module_decl(t)
+        ) || matches!(
+            self.next_non_trivia_raw_at_pos(),
+            Some(Token::Type | Token::Module)
+        )
     }
 
     /// Take a cleanly parsed module-level `let`'s RHS-close `BlockEnd`, the
@@ -1152,8 +1192,8 @@ impl<'src> Parser<'src> {
     /// error list does not say. Each virtual is bumped as the loop bumps
     /// layout, after the trivia before it, so the tree is the loop's.
     ///
-    /// Returns whether the token it stopped at is a raw `let` that FCS shifts
-    /// as the next declaration with no separator before it.
+    /// Returns whether the token it stopped at is a declaration keyword that
+    /// FCS shifts as the next declaration with no separator before it.
     fn close_module_let_block(&mut self, block_let: bool) -> bool {
         if !matches!(
             self.peek(),
@@ -1181,14 +1221,7 @@ impl<'src> Parser<'src> {
         // is a token FCS's parser can shift after `recover`, as the start of a
         // module-level declaration, so panic mode discards nothing: the loop
         // parses it.
-        // LexFilter swallows a `type` or `module` keyword, which the loop reads
-        // off the raw stream.
-        if matches!(self.peek(), Some((Ok(FilteredToken::Raw(t)), _)) if super::decls::begins_module_decl(t))
-            || matches!(
-                self.next_non_trivia_raw_at_pos(),
-                Some(Token::Type | Token::Module)
-            )
-        {
+        if self.at_module_decl_keyword() {
             return true;
         }
         while let Some((res, _)) = self.peek().cloned() {

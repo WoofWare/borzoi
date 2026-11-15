@@ -206,7 +206,12 @@ before each member or declaration a buffer may hold next, and pins every
 cell where a unit FCS keeps is lost (or a type keeps fewer members than
 FCS's) in `tests/manifests/unfinished_followers.txt`. Each must be a cell
 where `main`'s parser fails too (`unfinished_followers.base.txt`); most
-predate the ports.
+predate the ports. Two shapes are knowingly worse than `main`, which kept
+their declaration only because its recovery failed earlier: a slot with no
+name followed by a `type` or `module` at the member column (which then
+meets the "`module` or `open` inside a type body" gap below), and a
+guardless `when` whose next clause ends in a stray `then` (after which a
+declaration is lost, as on `main` without the `when`).
 
 Two placement families in the recovery grids stay pinned, since FCS's
 placement follows from its error states rather than from the layout:
