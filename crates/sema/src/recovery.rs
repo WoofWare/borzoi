@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::collections::HashSet;
 
 use borzoi_cst::parser::{FileKind, Parse};
-use borzoi_cst::syntax::{SyntaxKind, SyntaxNode};
+use borzoi_cst::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use borzoi_cst::syntax::{TextRange, TextSize};
 
 /// The parse errors reported for a file — or the fact that whoever built this
@@ -154,6 +154,58 @@ impl SyntaxRecovery {
                 spans.iter().all(|span| span.start() >= end)
             }
         }
+    }
+
+    /// The dot of a member access whose member is not written (`s.`), when
+    /// that is the file's **first** recovery; `None` when the first recovery
+    /// is anything else, when there is none, and when the errors were not
+    /// kept.
+    ///
+    /// Everything before such a dot parsed as it would with any member after
+    /// it, so the receiver's type there is what it would be in any completion
+    /// of the text: dot-completion's question, asked while the member is
+    /// still unwritten.
+    pub fn first_is_trailing_dot(&self, root: &SyntaxNode) -> Option<SyntaxToken> {
+        let SyntaxRecovery::Reported(spans) = self else {
+            return None;
+        };
+        let first = spans.iter().min_by_key(|s| (s.start(), s.end()))?;
+        let dot = match root.token_at_offset(first.start()) {
+            borzoi_cst::syntax::TokenAtOffset::None => return None,
+            borzoi_cst::syntax::TokenAtOffset::Single(t) => t,
+            borzoi_cst::syntax::TokenAtOffset::Between(_, right) => right,
+        };
+        let path = dot.parent()?;
+        let is_trailing_dot = dot.kind() == SyntaxKind::DOT_TOK
+            && dot.text_range() == *first
+            && path.kind() == SyntaxKind::LONG_IDENT
+            && path.last_token().is_some_and(|last| last == dot)
+            && path.parent().is_some_and(|access| {
+                matches!(
+                    access.kind(),
+                    SyntaxKind::LONG_IDENT_EXPR | SyntaxKind::DOT_GET_EXPR
+                )
+            });
+        is_trailing_dot.then_some(dot)
+    }
+
+    /// Whether `node` parsed as FCS parses it, for a reading taken from its
+    /// syntax: its declaration is intact ([`Self::declaration_is_intact`]),
+    /// or `node` ends before the file's first recovery and that recovery is a
+    /// member access's unwritten member ([`Self::first_is_trailing_dot`]).
+    /// That recovery drops no text and reshapes nothing before the dot, so
+    /// the parameters, annotations and patterns before it are the ones
+    /// written. Only the declaration holding that dot can tell the two
+    /// apart: every other declaration is intact or wholly after it.
+    pub fn node_is_intact(&self, node: &SyntaxNode) -> bool {
+        if self.declaration_is_intact(node) {
+            return true;
+        }
+        let Some(root) = node.ancestors().last() else {
+            return false;
+        };
+        self.first_is_trailing_dot(&root)
+            .is_some_and(|dot| node.text_range().end() <= dot.text_range().start())
     }
 
     /// Whether the declaration enclosing `node` parsed with no recovery — the

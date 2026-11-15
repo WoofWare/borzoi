@@ -169,6 +169,152 @@ fn untyped_receiver_offers_nothing() {
     );
 }
 
+/// The labels at the end of line `line` of `src`, the cursor right after its
+/// last character: where `s.` puts it.
+///
+/// The project references `System.Runtime` and no `FSharp.Core`, so an
+/// annotation names `System.String`: `string` is an abbreviation `FSharp.Core`
+/// declares.
+fn labels_at_end_of_line(src: &str, line: usize) -> Option<Vec<String>> {
+    let (mut state, uri) = runtime_project_state(src);
+    let text = src.lines().nth(line).expect("the line exists");
+    let column = u32::try_from(text.encode_utf16().count()).expect("a short line");
+    labels(&mut state, &uri, u32::try_from(line).unwrap(), column)
+}
+
+fn offers_length(labels: Option<Vec<String>>, why: &str) {
+    let labels = labels.unwrap_or_else(|| panic!("member completions: {why}"));
+    assert!(
+        labels.iter().any(|l| l == "Length"),
+        "expected `Length` among {labels:?}: {why}"
+    );
+}
+
+#[test]
+fn an_annotated_parameter_offers_its_members_at_a_trailing_dot() {
+    // The binding holding `s.` does not parse, so nothing of it is published,
+    // and `s`'s own type never is; the receiver's type at the dot is.
+    offers_length(
+        labels_at_end_of_line("module M\nlet f (s: System.String) = s.\n", 1),
+        "an annotated parameter",
+    );
+}
+
+#[test]
+fn a_parameter_known_at_the_access_offers_its_members() {
+    // `g x` fixes `x : string` before the access, so FCS knows the receiver
+    // at `x.Le`, and completion offers its members: the receiver's type at
+    // the access, which inference records there (#662 L3). The parameter's
+    // own type is never published (the function's type is not ground: `Le`
+    // is no member), so the binder's type has nothing to offer.
+    let src = "module M\nlet g (t: System.String) = 0\nlet f x = (g x, x.Le)\n";
+    let (mut state, uri) = runtime_project_state(src);
+    // `let f x = (g x, x.Le)` — `Le` at columns 18..20 on line 2; cursor at 19.
+    offers_length(
+        labels(&mut state, &uri, 2, 19),
+        "a receiver known at the access",
+    );
+    // And at a trailing dot, where the binding does not parse.
+    offers_length(
+        labels_at_end_of_line(
+            "module M\nlet g (t: System.String) = 0\nlet f x = (g x, x.\n",
+            2,
+        ),
+        "a receiver known at a trailing dot",
+    );
+}
+
+#[test]
+fn a_parameter_fixed_only_after_the_access_offers_nothing() {
+    // `x` is open at `x.Le` and fixed by `g x` only after it: FCS does not
+    // know the receiver at the access (FS0072), so completion offers nothing,
+    // never the members of the type a later use gives it.
+    let src = "module M\nlet g (t: System.String) = 0\nlet f x = (x.Le, g x)\n";
+    let (mut state, uri) = runtime_project_state(src);
+    // `let f x = (x.Le, g x)` — `Le` at columns 13..15 on line 2; cursor at 14.
+    assert_eq!(
+        labels(&mut state, &uri, 2, 14),
+        None,
+        "a receiver unknown at the access offers no completions"
+    );
+}
+
+#[test]
+fn a_local_offers_its_members_at_a_trailing_dot() {
+    offers_length(
+        labels_at_end_of_line("module M\nlet f () = let s = \"hi\" in s.\n", 1),
+        "a local value",
+    );
+}
+
+#[test]
+fn a_forward_reference_in_a_recursive_group_offers_nothing() {
+    // Each is FS0072 in FCS: the receiver's declaration comes later in its
+    // recursive group, so its type is not known at the access, whatever it
+    // turns out to be.
+    for (src, line) in [
+        ("module rec M\nlet a () = b.\nlet b = \"hi\"\n", 1),
+        ("module M\nlet rec a () = b.\nand b = \"hi\"\n", 1),
+        (
+            "module M\ntype C() =\n    member this.P = this.Q.\n    member this.Q = \"hi\"\n",
+            2,
+        ),
+    ] {
+        assert_eq!(labels_at_end_of_line(src, line), None, "{src}");
+    }
+    // With the member written the file parses, so the later declaration is
+    // inferred and publishes its type: still not the receiver's at the access.
+    for (src, line, column) in [
+        ("module rec M\nlet a () = b.Le\nlet b = \"hi\"\n", 1, 14),
+        ("module M\nlet rec a () = b.Le\nand b = \"hi\"\n", 1, 18),
+        (
+            "module M\ntype C() =\n    member this.P = this.Q.Le\n    member this.Q = \"hi\"\n",
+            2,
+            28,
+        ),
+    ] {
+        let (mut state, uri) = runtime_project_state(src);
+        assert_eq!(labels(&mut state, &uri, line, column), None, "{src}");
+    }
+}
+
+#[test]
+fn a_binder_of_an_earlier_declaration_offers_its_members_where_the_access_is_not_inferred() {
+    // Inference walks no member body, so nothing is recorded at `s.`; `s` is
+    // declared, and its type published, before the type's declaration began.
+    let src = "module M\nlet s = \"hi\"\ntype C() =\n    member _.M = s.\n";
+    offers_length(
+        labels_at_end_of_line(src, 3),
+        "an earlier declaration's value",
+    );
+    let src = "module M\nlet s = \"hi\"\ntype C() =\n    member _.M = s.Le\n";
+    offers_length(
+        labels_at_end_of_line(src, 3),
+        "an earlier declaration's value",
+    );
+}
+
+#[test]
+fn an_annotated_parameter_offers_its_members_where_the_access_is_not_inferred() {
+    // Inference does not walk a `try` body, so nothing is recorded at `s.Le`;
+    // `s`'s annotation is its type at every use in the body, fixed before
+    // the body is checked.
+    let src = "module M\nlet f (s: System.String) = try s.Le with _ -> 0\n";
+    let (mut state, uri) = runtime_project_state(src);
+    // `try s.Le` — `Le` at columns 33..35 on line 1; cursor at 34.
+    offers_length(labels(&mut state, &uri, 1, 34), "an annotated parameter");
+}
+
+#[test]
+fn a_binder_of_the_same_recursive_group_is_not_read_for_its_type() {
+    // In a `module rec`, `s` is a sibling of the access's declaration, so
+    // its published type is its type at the group's end, not at the access.
+    // Nothing is recorded at the access (a member body is not inferred), so
+    // nothing is offered.
+    let src = "module rec M\nlet s = \"hi\"\ntype C() =\n    member _.M = s.\n";
+    assert_eq!(labels_at_end_of_line(src, 3), None);
+}
+
 #[test]
 fn non_member_position_offers_nothing() {
     // A cursor not after a member dot (on a plain binder) is not a member-access
@@ -235,22 +381,29 @@ fn literal_trailing_dot_is_scoped_out() {
     );
 }
 
+/// `Int32`'s members and not `String`'s: the receiver of a later dot.
+fn offers_int32_not_string(labels: Option<Vec<String>>, why: &str) {
+    let labels = labels.unwrap_or_else(|| panic!("member completions: {why}"));
+    assert!(
+        labels.iter().any(|l| l == "CompareTo"),
+        "expected `Int32`'s `CompareTo` among {labels:?}: {why}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "Length"),
+        "`String`'s `Length` is not the receiver's member: {labels:?}: {why}"
+    );
+}
+
 #[test]
-fn deeper_dot_declines_rather_than_offering_the_head_members() {
+fn deeper_dot_offers_the_members_of_its_own_receiver() {
     // Soundness (D5): a completion after a *later* dot (`s.Length.`) has receiver
-    // `s.Length` (an `int`), not the head `s` (a `string`). This handler does not
-    // chain the receiver's type through the intervening member, so it must
-    // **decline** rather than wrongly offer `System.String`'s members — a bogus
-    // list would be worse than none.
+    // `s.Length` (an `int`), not the head `s` (a `string`): inference records
+    // the receiver before each dot, so the list is `int`'s, never the head's.
     let src = "module M\nlet s = \"hi\"\nlet n = s.Length.\n";
     let (mut state, uri) = runtime_project_state(src);
     // The trailing dot after `Length` on line 2: `let n = s.Length.`, that `.` is
     // at column 16; cursor right after it, at 17.
-    let result = labels(&mut state, &uri, 2, 17);
-    assert_eq!(
-        result, None,
-        "a deeper-dot completion must not offer the head receiver's members"
-    );
+    offers_int32_not_string(labels(&mut state, &uri, 2, 17), "`s.Length.`");
 }
 
 #[test]
@@ -284,17 +437,12 @@ fn parenthesized_binder_receiver_offers_instance_members() {
 }
 
 #[test]
-fn deeper_dot_in_dot_get_chain_declines() {
-    // The `DOT_GET_EXPR` analogue (codex finding): `"hi".Length.To` — the dot
-    // before `To` is inside the same member-path `LONG_IDENT`, but the real
-    // receiver is `"hi".Length` (`int`), not `"hi"` (`string`). Must decline, not
-    // offer `System.String`'s members.
+fn deeper_dot_in_dot_get_chain_offers_the_members_of_its_own_receiver() {
+    // The `DOT_GET_EXPR` analogue: `"hi".Length.To` — the dot before `To` is
+    // inside the same member-path `LONG_IDENT`, but the real receiver is
+    // `"hi".Length` (`int`), not `"hi"` (`string`).
     let src = "module M\nlet n = \"hi\".Length.To\n";
     let (mut state, uri) = runtime_project_state(src);
     // `"hi".Length.To` on line 1: `To` at columns 20..22; cursor inside, at 21.
-    let result = labels(&mut state, &uri, 1, 21);
-    assert_eq!(
-        result, None,
-        "a deeper dot in a DotGet chain must not offer the inner receiver's members"
-    );
+    offers_int32_not_string(labels(&mut state, &uri, 1, 21), "a `DOT_GET_EXPR` chain");
 }

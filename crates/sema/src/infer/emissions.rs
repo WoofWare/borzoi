@@ -5,7 +5,7 @@ use super::Incomplete;
 use crate::def::DefId;
 use crate::hash::{HashMap, HashSet};
 use crate::resolve::Resolution;
-use crate::ty::TyVid;
+use crate::ty::{Ty, TyVid};
 use borzoi_cst::syntax::{SyntaxToken, TextRange};
 
 /// An index into [`Emissions::guards`].
@@ -23,6 +23,18 @@ pub(super) struct Guard {
     parent: Option<GuardId>,
     /// Whether the construct was accepted: set by the event that proves it.
     confirmed: bool,
+}
+
+/// A member access's receiver whose type was known at the access
+/// ([`Emissions::receiver`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Receiver {
+    /// The dot after the receiver.
+    pub(super) dot: TextRange,
+    /// The receiver's variable.
+    pub(super) var: TyVid,
+    /// Its type at the access: ground, so no later unification moves it.
+    pub(super) ty: Ty,
 }
 
 /// The length of both emission lists, the nodes and the local binders, for
@@ -51,10 +63,10 @@ pub(super) struct Emissions {
     /// [`Self::exprs`], and discarded with it by an emission barrier
     /// ([`Self::discard_since`]).
     local_emits: Vec<(DefId, Option<GuardId>)>,
-    /// Each `(expr).Member` receiver's variable, keyed by the `DOT_GET_EXPR`'s
-    /// range — unguarded and never discarded, for
-    /// [`InferredFile::dot_get_receiver_type`](super::InferredFile::dot_get_receiver_type).
-    dot_get_receivers: Vec<(TextRange, TyVid)>,
+    /// Each member access's receiver whose type was known at the access —
+    /// unguarded and never discarded, for
+    /// [`InferredFile::receiver_type_at`](super::InferredFile::receiver_type_at).
+    receivers: Vec<Receiver>,
     /// Each begun binding's incompleteness reasons, for
     /// [`InferredFile::incompleteness`](super::InferredFile::incompleteness).
     incompleteness: Vec<Vec<Incomplete>>,
@@ -95,7 +107,7 @@ pub(super) struct Emitted {
     pub(super) local_defs: HashSet<DefId>,
     /// The local binders no barrier discarded and whose guards held.
     pub(super) published_locals: HashSet<DefId>,
-    pub(super) dot_get_receivers: Vec<(TextRange, TyVid)>,
+    pub(super) receivers: Vec<Receiver>,
     pub(super) incompleteness: Vec<Vec<Incomplete>>,
     pub(super) member_resolutions: HashMap<TextRange, Resolution>,
     pub(super) deepest_expr_depth: usize,
@@ -107,7 +119,7 @@ impl Emissions {
             exprs: Vec::new(),
             local_defs: HashSet::default(),
             local_emits: Vec::new(),
-            dot_get_receivers: Vec::new(),
+            receivers: Vec::new(),
             incompleteness: Vec::new(),
             ungraded_ranges: HashSet::default(),
             guards: Vec::new(),
@@ -134,10 +146,10 @@ impl Emissions {
             .push((def, self.guard_stack.last().copied()));
     }
 
-    /// Record the receiver of the `DOT_GET_EXPR` at `range`, whose type is
-    /// `v`'s.
-    pub(super) fn dot_get_receiver(&mut self, range: TextRange, v: TyVid) {
-        self.dot_get_receivers.push((range, v));
+    /// Record the receiver before the dot at `dot`: its variable `var` stood
+    /// for `ty`, a ground type, at the access.
+    pub(super) fn receiver(&mut self, dot: TextRange, var: TyVid, ty: Ty) {
+        self.receivers.push(Receiver { dot, var, ty });
     }
 
     /// Record a walked binding's census entry: why it is incomplete, empty
@@ -258,7 +270,7 @@ impl Emissions {
             exprs,
             local_defs: self.local_defs,
             published_locals,
-            dot_get_receivers: self.dot_get_receivers,
+            receivers: self.receivers,
             incompleteness: self.incompleteness,
             member_resolutions: self.member_resolutions,
             deepest_expr_depth: self.deepest_expr_depth,

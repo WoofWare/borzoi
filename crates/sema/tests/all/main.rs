@@ -72,6 +72,7 @@ mod infer_preceding_type_diff;
 mod infer_project_record_diff;
 mod infer_project_type_annotation_diff;
 mod infer_project_union_diff;
+mod infer_receiver_at;
 mod infer_recovered_annotation_diff;
 mod infer_static_call_diff;
 mod infer_suffix_irrelevance;
