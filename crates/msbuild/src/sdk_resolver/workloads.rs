@@ -25,7 +25,7 @@
 //!   `packs` tree is consulted whenever the marker is present and the
 //!   directory exists, with or without manifests
 //!   (`WorkloadResolver.Create` vs the manifest provider).
-//! * The host band is the host SDK version's [`FeatureBand`]: a
+//! * The host band is the host SDK version's `SdkFeatureBand` (`feature_band.rs`): a
 //!   prerelease SDK has its own (`11.0.100-rc.1.26425.128` is band
 //!   `11.0.100-rc.1`, whose directory is `sdk-manifests/11.0.100-rc.1`).
 //! * Ids from `KnownWorkloadManifests.txt` (fallback filename
@@ -66,7 +66,8 @@
 //! missing), a `userlocal` marker when the caller supplied no
 //! user-local root (we cannot see what a real build would), a host
 //! SDK version or band directory name outside the spellings
-//! [`FeatureBand`] certifies, workload environment overrides, any manifest
+//! `SdkFeatureBand` (`feature_band.rs`) certifies, a host SDK version with
+//! build metadata, workload environment overrides, any manifest
 //! version directory name `SdkVersion` cannot parse (we cannot
 //! reproduce MSBuild's comparison for those), and any directory or
 //! known-list file that exists but cannot be enumerated/read (the
