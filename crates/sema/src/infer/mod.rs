@@ -34,7 +34,8 @@
 //! relation to its expected type, a condition, a pattern of structure — at the
 //! point in FCS's checking order where FCS takes it ([`Gen::decide`]), while
 //! the binding's prefix is faithful (*The faithful prefix and taint*, below).
-//! A member access is settled where it is generated ([`Gen::settle_access`]).
+//! A member access is decided at its dot ([`Gen::decide_data_access`],
+//! [`Gen::infer_method_call`]).
 //! Each expression's type is read back by resolving its variable — emitted
 //! only when it is fully [`ground`](TyTable::is_ground) (D5: silence
 //! otherwise).
@@ -135,12 +136,11 @@
 //! A function binding whose type is still *open* after solving may be
 //! **generalised** — `let f x = x` ⇒ `f : 'a -> 'a` — with each use instantiating
 //! the scheme afresh. This is the genuinely hard HM part, and its soundness is
-//! **asymmetric** with everything above: every constraint generation emits is a
-//! *true equality in FCS's derivation too*, so our constraint set is a **subset**
-//! of FCS's. Grounding under a subset stays sound (a superset of consistent
-//! equalities cannot change a *determined* value). But *openness* under our subset
-//! is **not** a subset property: a variable open for us may be ground for FCS
-//! through a constraint we do not model (`let f x = x + 1` has `x` open only
+//! **asymmetric** with everything above. By the invariants of *The faithful
+//! prefix and taint* (below), every term the table gains is one FCS's derivation
+//! gives the same variable, so a **ground** type read off the final table is
+//! FCS's. But *openness* is not: a variable open for us may be ground for FCS
+//! through a relation we do not model (`let f x = x + 1` has `x` open only
 //! because `+` is unmodelled — FCS grounds it to `int`). Emitting `'a -> 'b` there
 //! would be a wrong published type (a D5 violation). So a variable may be
 //! quantified only when we can prove **every constraint FCS has on it is one we
@@ -153,7 +153,8 @@
 //!   `if` with no final `else`, an unmodelled parameter pattern, and a condition shape
 //!   [`Gen::constrain_bool`] does not fully model — a compound `x && y` drops FCS
 //!   constraints on `x`/`y`). Incomplete ⇒ **no generalisation** (ground emission
-//!   is unaffected — the subset argument needs no completeness).
+//!   is unaffected: a ground type is FCS's whether or not the binding is
+//!   complete).
 //! - **Poisoned variables** ([`Scope::poison`]). Check mode deliberately drops the
 //!   relation between a checked expression and its expected type (there is no
 //!   subtype relation); that dropped relation could ground *either* endpoint in FCS
@@ -161,8 +162,8 @@
 //!   else-relation we drop). So [`Gen::infer_expr`] poisons the expected and
 //!   returned variables of every check-mode call; at generalisation the set is
 //!   closed one step (resolve each, poison every variable in the resolved term). A
-//!   poisoned variable is never generalised (but *poisoned-and-ground* is fine —
-//!   the subset argument again).
+//!   poisoned variable is never generalised (but *poisoned-and-ground* is fine,
+//!   for the same reason).
 //!
 //! On a **complete** function binding the private-slot decoupling is undone:
 //! [`Gen::slot_binder_reunify`] emits `Eq(slot, binder_var)` per simple parameter
@@ -204,7 +205,7 @@
 //! lowers to a member lookup, not an application), `TypeApp`, and applied
 //! `DotGet` stay unmodelled ⇒ incomplete.
 //!
-//! **The suspended `HasMember` worklist (fields and properties).** A
+//! **Member accesses decided at the access (fields and properties).** A
 //! member access `recv.Name` where `Name` is a **field or non-indexer instance
 //! property** on a **non-generic [`TyKind::Named`]** receiver resolved through the
 //! [`AssemblyEnv`] types: `let s = "hi"` then `let n = s.Length` ⇒ `n : int`,
@@ -219,18 +220,17 @@
 //!   result) **and** at the receiver (its own value), never at the bare `.Name` —
 //!   so generation emits the receiver at its own range (synth: a member access
 //!   never coerces its receiver) and the whole access at the node range.
-//! - **Settled at the access.** `Constraint` holds a suspended
-//!   [`Constraint::HasMember`] `{ recv, name, result }`, and the access
-//!   settles it where it is generated ([`Gen::settle_access`]): each member
-//!   whose `recv` resolves to a concrete head wakes ([`Gen::wake_member`]),
-//!   unifying `result` with the member's type (a chain wakes segment by
-//!   segment). FCS decides an access at the access, so one still suspended
-//!   there — a variable receiver (FS0072), a generic one, an overload whose
-//!   arguments are not known — is **declined**: it records nothing, its
-//!   result is tainted, and the prefix ends ([`Incomplete::IndeterminateReceiver`]
-//!   and the other reasons an access is declined).
-//!   So is an `Array`/`Tuple`/`Fun`/`Param` head (arrays' `.Length` is
-//!   intrinsic, out of scope), and a `Named` one no member answers.
+//! - **Decided at the dot.** FCS looks a member up on what it knows of the
+//!   receiver's type at the dot, and so does the walk
+//!   ([`Gen::decide_data_access`], segment by segment for a chain): a member of
+//!   a non-generic named type binds the access's result to the member's type
+//!   ([`Gen::wake_member`]); a field of a record the project declares, to the
+//!   field's ([`Gen::wake_record_field`]). Anything else — a variable receiver
+//!   (FS0072, or a lookup on `obj` after FCS solves what it can), a generic one,
+//!   an array, tuple, function or type parameter, a name no member answers — is
+//!   **declined**: it records nothing, its result is tainted, and the prefix
+//!   ends, each with its census reason ([`Incomplete::IndeterminateReceiver`]
+//!   and its siblings). Arrays' `.Length` is intrinsic, out of scope.
 //! - **Lookup + bridge.** [`AssemblyEnv::lookup_type`] (the receiver type, arity 0)
 //!   then `AssemblyEnv::instance_data_member_ty` (a *single unambiguous* public
 //!   instance field / non-indexer property, resolved across the receiver's base
@@ -238,23 +238,20 @@
 //!   event, or a static all defer), bridged to a [`Ty`] by [`crate::member_ty`] (primitives,
 //!   non-generic non-nested named types, plain vectors; everything else, incl.
 //!   generic member types, defers). Any miss is silence (D5), never an error.
-//! - **Poison.** As a *modelled* construct `HasMember` does **not** clear
-//!   walk-completeness; instead [`Gen::gen_member_access`] poisons `recv` **and**
-//!   `result` unconditionally (application's `r`-poison pattern) — an unwoken
-//!   member relation must never let either var generalise (`let f x = (x.Foo, x)`
-//!   defers, not a bogus `'a -> 'b * 'a`), while a ground emission is unaffected.
+//! - **Poison.** Every receiver and result variable of an access is poisoned
+//!   ([`Gen::gen_member_access`]) — an undecided access must never let either
+//!   generalise (`let f x = (x.Foo, x)` defers, not a bogus `'a -> 'b * 'a`),
+//!   while a ground emission is unaffected.
 //!
-//! **The member-resolution side-table.** On a successful `HasMember`
-//! wake ([`Gen::wake_member`]) the resolved member's identity is recorded at the
-//! member-name use range in [`InferredFile::member_resolutions`], in the
-//! resolver's own [`Resolution::Member`] `{ parent, idx }` shape (so every LSP
-//! rendering / navigation path is uniform). The `use_range` is threaded onto
-//! [`Constraint::HasMember`] at generation ([`Gen::gen_member_access`], one per
-//! member segment) and is inert until a wake succeeds — recorded only from a
-//! single-candidate discharge, never a guess (D5). The LSP layers this over the
-//! resolver's `Deferred(QualifiedAccess)` at a member-name range for hover /
-//! go-to-definition; dot-completion is served from the receiver's type at the
-//! access, recorded before each dot where it is ground there
+//! **The member-resolution side-table.** An access decided to a member records
+//! the member's identity at the member-name use range in
+//! [`InferredFile::member_resolutions`], in the resolver's own
+//! [`Resolution::Member`] `{ parent, idx }` shape, so every LSP rendering /
+//! navigation path is uniform ([`Gen::record_member`]) — recorded only for a
+//! member identified at the access, never a guess (D5). The LSP layers this
+//! over the resolver's `Deferred(QualifiedAccess)` at a member-name range for
+//! hover / go-to-definition; dot-completion is served from the receiver's type
+//! at the access, recorded before each dot where it is ground there
 //! ([`InferredFile::receiver_type_at`], `receivers.rs`).
 //!
 //! **Argument checks at the argument's entry.** FCS relates an expression to
@@ -303,6 +300,30 @@
 //!   site has just made ([`Gen::eq`], [`Own`]), so every term the table gains
 //!   then is one FCS gives those variables too.
 //!
+//! Reading the final table is sound by these alone: every term the table gains
+//! is one FCS's derivation gives the same variable, so a ground type read off
+//! it is FCS's whether or not the binding is complete.
+//!
+//! **A member lookup is not a decision.** An access whose receiver is ground
+//! at its dot, and a call whose arguments are ground when it resolves, are
+//! decided after the prefix has ended too: the lookup is a function of types
+//! FCS has, and binds only the access's own result ([`Own`]). What a method
+//! call relates before its arguments — its one candidate's return to the
+//! call's expected type, each argument to its parameter — is a decision, so
+//! declines once the prefix has ended. A method call's arguments are checked
+//! under the regime FCS chooses from the call's shape before any argument is
+//! checked ([`CallRegime`](members::CallRegime)):
+//!
+//! | candidates of the call's shape | the arguments | the resolution |
+//! |---|---|---|
+//! | one | against its parameters, related first with its return | that candidate |
+//! | several | against fresh types | on ground argument types, else declined |
+//! | none, or not read | after the prefix ends, against an unknown type | declined |
+//!
+//! FCS checks a call's arguments in source order: a lambda among them is
+//! checked where it stands, with only the overloads the arguments before it
+//! leave to give its parameters types, not after the others.
+//!
 //! Generalisation still needs the whole binding complete, and a binding that
 //! declares type variables is still held to them at its close
 //! ([`Gen::withhold_if_not_rigid`]): a later construct can make FCS reject the
@@ -328,7 +349,7 @@
 //! - **FCS's order.** The receiver and any data member before the method are
 //!   decided at their dots; the method group is looked up on the receiver's
 //!   type at the dot; the regime the arguments are checked under
-//!   ([`CallRegime`]) is chosen from how many candidates of the group have the
+//!   ([`CallRegime`](members::CallRegime)) is chosen from how many candidates of the group have the
 //!   call's shape ([`call_forms`]: a `[<ParamArray>]` method is two at
 //!   exactly its declared count), before any argument is checked; then the
 //!   arguments, in source order; then the resolution. With **one** candidate
@@ -348,7 +369,7 @@
 //!   of these declines fully (no type, no recorded resolution): a wrong
 //!   **arity** (`s.ToLowerInvariant(1)`, `s.Insert()`), a **parenthesized
 //!   unit** (`s.ToLowerInvariant(())` is one unit argument, not zero), a
-//!   **named argument** (`s.Insert(foo = 0, …)` — [`is_named_arg`], names
+//!   **named argument** (`s.Insert(foo = 0, …)` — [`is_named_arg`](members::is_named_arg), names
 //!   unvalidated here), and an extra-parenthesized tuple (`s.Insert((0,
 //!   "z"))`, which FCS elaborates as a method-value `application`, so only the
 //!   one call-parenthesis layer is peeled and it counts as a single argument).
@@ -379,7 +400,7 @@
 //! - **A local is typed only when its RHS is ground on its own.** F# generalises
 //!   an eligible local, so a variable shared by every use is wrong for it (see
 //!   [`Gen::local_binding`]). After the RHS is walked, the constraints so far are
-//!   [settled](Gen::settle) — the relations FCS has applied by then — and a
+//!   walked — the relations FCS has applied by then are in the table — and a
 //!   binder still open marks the binding incomplete, which ends its prefix, so
 //!   no later decision can ground the local.
 //! - **A statement is a check position whose unit relation is dropped.** FCS
@@ -398,7 +419,7 @@
 //!   ([`Emissions::discard_since`], [`Gen::infer_expr_inner`]) — a local's
 //!   RHS is a synth position that can sit inside a check position, which is
 //!   where FCS rejects an application; and a member access's receiver is
-//!   **guarded** on the access resolving ([`emissions::Guard`]), since FCS drops the
+//!   kept only where the access resolves ([`Gen::gen_member_access`]), since FCS drops the
 //!   receiver of `(1).Length` or `s.Length.Foo` too.
 //! - **A condition is a decision on the parameter.** While the prefix is
 //!   faithful a condition on a parameter is FCS's equality at that point, on
@@ -530,12 +551,10 @@ use emissions::{EmissionMark, Emissions, Receiver};
 use facts::*;
 use finish::*;
 use literals::*;
-use members::*;
 use patterns::*;
 use project_types::*;
 use receivers::*;
 use scope::*;
-use solve::*;
 use solver::*;
 use subsumption::*;
 use syntax::*;
@@ -967,8 +986,8 @@ pub enum Incomplete {
     /// off its maker, and why (`function_ty::union_case_scheme`).
     AssemblyCase(FunctionTyGap),
     /// A `match` pattern that would get ahead of a relation FCS applied before
-    /// it in source order which inference has not (a pending argument check,
-    /// a dropped check-mode relation, a suspended member lookup), or that
+    /// it in source order which inference has not (a dropped check-mode
+    /// relation, a parameter's slot and binder), or that
     /// would refine an open scrutinee after an unmodelled construct.
     PatternAfterCheck,
     /// A `match` pattern that does not fit its scrutinee's type.
@@ -1084,11 +1103,10 @@ struct ModuleBinder {
 /// in — the env is read, never mutated).
 ///
 /// Structured per the plan's D8: the `walk` unifies each equality where it
-/// generates it and suspends what it cannot decide there, `solve` decides the
-/// suspensions — a worklist waking each suspended `HasMember` once its
-/// receiver's head is concrete — and each recorded expression's type is read back
-/// from its variable, emitted only when fully ground (no inference variable
-/// left in it).
+/// generates it and takes each decision, member accesses among them, where
+/// FCS takes it; each binding's `solve` checks the solution at the binding's
+/// end; and each recorded expression's type is read back from its variable,
+/// emitted only when fully ground (no inference variable left in it).
 ///
 /// `preceding` is what the files before this one in Compile order published
 /// for their top-level values ([`crate::infer_project()`] folds it): a use the

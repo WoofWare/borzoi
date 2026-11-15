@@ -6,24 +6,7 @@ use crate::def::DefId;
 use crate::hash::{HashMap, HashSet};
 use crate::resolve::Resolution;
 use crate::ty::{Ty, TyVid};
-use borzoi_cst::syntax::{SyntaxToken, TextRange};
-
-/// An index into [`Emissions::guards`].
-type GuardId = usize;
-
-/// A construct FCS may **reject**, recorded so that what we emit inside its
-/// operand can wait on its acceptance. FCS keeps no node and no binder inside
-/// the operand of a construct it rejects — a member access on a receiver
-/// without that member keeps only the whole access, typed `'a` — so an emission
-/// inside one is published only if this guard, and every guard enclosing it,
-/// was confirmed ([`Emissions::guard_holds`]).
-#[derive(Debug)]
-pub(super) struct Guard {
-    /// The guard the construct itself sat under.
-    parent: Option<GuardId>,
-    /// Whether the construct was accepted: set by the event that proves it.
-    confirmed: bool,
-}
+use borzoi_cst::syntax::TextRange;
 
 /// A member access's receiver whose type was known at the access
 /// ([`Emissions::receiver`]).
@@ -46,14 +29,14 @@ pub(super) struct EmissionMark {
 }
 
 /// What the walk emits, for [`super::Gen::finish`] to read: FCS's
-/// `tcSink`. The walk only writes it — it appends, discards back to a
-/// mark, and opens and confirms guards — and nothing it decides reads it:
+/// `tcSink`. The walk only writes it — it appends and discards back to a
+/// mark — and nothing it decides reads it:
 /// no method here answers a question about what was emitted.
 /// [`Self::into_emitted`] gives `finish` what stands.
 pub(super) struct Emissions {
     /// `(range, var)` per expression whose type to emit; `range` is the read-off
     /// key (and the same range the resolver keyed the occurrence under).
-    exprs: Vec<(TextRange, TyVid, Option<GuardId>)>,
+    exprs: Vec<(TextRange, TyVid)>,
     /// Every expression-level `let` binder [`super::Gen::local_binding`] bound (CE-1).
     /// Unlike a declaration's binder, a local sits *inside* an expression, so
     /// its publication is an emission like a node's: [`super::Gen::finish`] publishes
@@ -62,9 +45,9 @@ pub(super) struct Emissions {
     /// The local binders to publish, in walk order — the binder-side twin of
     /// [`Self::exprs`], and discarded with it by an emission barrier
     /// ([`Self::discard_since`]).
-    local_emits: Vec<(DefId, Option<GuardId>)>,
+    local_emits: Vec<DefId>,
     /// Each member access's receiver whose type was known at the access —
-    /// unguarded and never discarded, for
+    /// never discarded, for
     /// [`InferredFile::receiver_type_at`](super::InferredFile::receiver_type_at).
     receivers: Vec<Receiver>,
     /// Each begun binding's incompleteness reasons, for
@@ -75,16 +58,6 @@ pub(super) struct Emissions {
     /// match. Filtered at read-off rather than cut from [`Self::exprs`], whose
     /// positions emission marks record.
     ungraded_ranges: HashSet<TextRange>,
-    /// Every [`Guard`] the walk opened, indexed by [`GuardId`].
-    guards: Vec<Guard>,
-    /// The guards enclosing the current walk position, innermost last; an
-    /// emission is tagged with the top one.
-    guard_stack: Vec<GuardId>,
-    /// The guard each member-name token's wake confirms: segment *i* of an
-    /// access confirms the *i*-th guard around its receiver
-    /// ([`Self::open_receiver_guards`]). Keyed by the token's range, which is
-    /// the member constraint's `use_range`.
-    guard_on_member: HashMap<TextRange, GuardId>,
     /// Each successfully-woken member access → its resolved identity, keyed by the
     /// member-name use range (Stage 3.3b). Filled by [`super::Gen::wake_member`] on a
     /// single-candidate discharge; read out in [`super::Gen::finish`] into
@@ -100,12 +73,12 @@ pub(super) struct Emissions {
 /// What stands of a file's [`Emissions`] once its walk is over
 /// ([`Emissions::into_emitted`]).
 pub(super) struct Emitted {
-    /// The nodes to read back, in walk order: every node whose guards
-    /// held, but for the ungraded ones.
+    /// The nodes to read back, in walk order: every node no barrier
+    /// discarded, but for the ungraded ones.
     pub(super) exprs: Vec<(TextRange, TyVid)>,
     /// Every local binder the walk bound.
     pub(super) local_defs: HashSet<DefId>,
-    /// The local binders no barrier discarded and whose guards held.
+    /// The local binders no barrier discarded.
     pub(super) published_locals: HashSet<DefId>,
     pub(super) receivers: Vec<Receiver>,
     pub(super) incompleteness: Vec<Vec<Incomplete>>,
@@ -122,28 +95,21 @@ impl Emissions {
             receivers: Vec::new(),
             incompleteness: Vec::new(),
             ungraded_ranges: HashSet::default(),
-            guards: Vec::new(),
-            guard_stack: Vec::new(),
-            guard_on_member: HashMap::default(),
             member_resolutions: HashMap::default(),
             expr_depth: 0,
             deepest_expr_depth: 0,
         }
     }
 
-    /// Record the node at `range`, whose type is `v`'s, for read-off,
-    /// under the current guard.
+    /// Record the node at `range`, whose type is `v`'s, for read-off.
     pub(super) fn node(&mut self, range: TextRange, v: TyVid) {
-        self.exprs
-            .push((range, v, self.guard_stack.last().copied()));
+        self.exprs.push((range, v));
     }
 
-    /// Record the local binder `def` for publication, under the current
-    /// guard.
+    /// Record the local binder `def` for publication.
     pub(super) fn local(&mut self, def: DefId) {
         self.local_defs.insert(def);
-        self.local_emits
-            .push((def, self.guard_stack.last().copied()));
+        self.local_emits.push(def);
     }
 
     /// Record the receiver before the dot at `dot`: its variable `var` stood
@@ -160,7 +126,7 @@ impl Emissions {
 
     /// Leave ungraded the last node recorded since `mark`, if any.
     pub(super) fn ungrade_last_since(&mut self, mark: EmissionMark) {
-        if let Some(&(range, _, _)) = self.exprs[mark.exprs..].last() {
+        if let Some(&(range, _)) = self.exprs[mark.exprs..].last() {
             self.ungraded_ranges.insert(range);
         }
     }
@@ -184,53 +150,6 @@ impl Emissions {
         self.local_emits.truncate(mark.locals);
     }
 
-    /// Open one [`Guard`] per member segment around a member access's receiver,
-    /// nested so the innermost — the one the receiver's emissions are tagged
-    /// with — holds only if every segment resolves: FCS drops the receiver of
-    /// `s.Length.Foo` because `Foo` is rejected, though `Length` is not.
-    /// Segment *i*'s wake confirms guard *i* ([`Self::confirm_guard`]). The
-    /// caller walks the receiver, then [`Self::close_guards`].
-    pub(super) fn open_receiver_guards(&mut self, segments: &[SyntaxToken]) {
-        for seg in segments {
-            let g = self.guards.len();
-            self.guards.push(Guard {
-                parent: self.guard_stack.last().copied(),
-                confirmed: false,
-            });
-            self.guard_stack.push(g);
-            self.guard_on_member.insert(seg.text_range(), g);
-        }
-    }
-
-    /// Close the `n` guards [`Self::open_receiver_guards`] opened.
-    pub(super) fn close_guards(&mut self, n: usize) {
-        let keep = self.guard_stack.len() - n;
-        self.guard_stack.truncate(keep);
-    }
-
-    /// Confirm the guard the member-name token at `use_range` confirms,
-    /// if it has one.
-    pub(super) fn confirm_guard(&mut self, use_range: TextRange) {
-        if let Some(&g) = self.guard_on_member.get(&use_range)
-            && !self.guards[g].confirmed
-        {
-            self.guards[g].confirmed = true;
-        }
-    }
-
-    /// Whether an emission tagged with `guard` may be published: the guard and
-    /// every guard enclosing it were confirmed.
-    fn guard_holds(&self, guard: Option<GuardId>) -> bool {
-        let mut cur = guard;
-        while let Some(g) = cur {
-            if !self.guards[g].confirmed {
-                return false;
-            }
-            cur = self.guards[g].parent;
-        }
-        true
-    }
-
     /// Record that the member-name token at `use_range` resolves to `res`.
     pub(super) fn member_resolution(&mut self, use_range: TextRange, res: Resolution) {
         self.member_resolutions.insert(use_range, res);
@@ -249,22 +168,15 @@ impl Emissions {
         self.expr_depth -= 1;
     }
 
-    /// What stands of the walk's emissions: what a guard that never held,
-    /// a barrier or an ungraded range dropped is gone.
+    /// What stands of the walk's emissions: what a barrier or an ungraded
+    /// range dropped is gone.
     pub(super) fn into_emitted(self) -> Emitted {
-        let published_locals = self
-            .local_emits
-            .iter()
-            .filter(|(_, guard)| self.guard_holds(*guard))
-            .map(|&(def, _)| def)
-            .collect();
+        let published_locals = self.local_emits.iter().copied().collect();
         let exprs = self
             .exprs
             .iter()
-            .filter(|&&(range, _, guard)| {
-                self.guard_holds(guard) && !self.ungraded_ranges.contains(&range)
-            })
-            .map(|&(range, var, _)| (range, var))
+            .filter(|&&(range, _)| !self.ungraded_ranges.contains(&range))
+            .copied()
             .collect();
         Emitted {
             exprs,

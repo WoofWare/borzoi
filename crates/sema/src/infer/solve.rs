@@ -1,31 +1,17 @@
-//! The solve of a binding's suspended member accesses, where each is
-//! generated ([`Gen::settle_access`]) and at the binding's end
-//! ([`Gen::solve`]): the worklist, and the checks a solve is held to.
+//! The checks a binding's solution is held to at its end ([`Gen::solve`]),
+//! and the opacity test its decisions read ([`Gen::touches_opaque`]).
 
 use super::*;
-
-/// A pending member access inside [`Gen::solve`] — the suspended form of
-/// [`Constraint::HasMember`], threaded through the solver's fixpoint.
-#[derive(Debug, Clone)]
-pub(super) struct SuspendedMember {
-    recv: TyVid,
-    pub(super) name: String,
-    pub(super) result: TyVid,
-    pub(super) use_range: TextRange,
-}
 
 impl<'a> Gen<'a> {
     /// Close the binding's solve at its end. Every equality the binding
     /// generated is already in the table ([`Self::eq`]), and every relation
     /// to an expected type was decided where FCS decides it
-    /// ([`Self::decide`]); what is left is the member accesses still
-    /// suspended, which a settle wakes to a fixpoint ([`Self::settle`]) and
-    /// which, never woken, are dropped. Then the checks the solution is held
-    /// to: the declared variables' rigidity, the loosening, and the
-    /// constrained instantiations.
+    /// ([`Self::decide`]), and every member access at its dot
+    /// ([`Self::decide_data_access`]). What is left is the checks the
+    /// solution is held to: the declared variables' rigidity, the loosening,
+    /// and the constrained instantiations.
     pub(super) fn solve(&mut self, scope: &mut Scope) {
-        // Members that never woke are dropped.
-        self.run_worklist(scope);
         if !scope.rigid_typars.is_empty() {
             scope.rigid_rejected |= !self.rigid_stays_rigid(scope);
         }
@@ -97,160 +83,6 @@ impl<'a> Gen<'a> {
                 TyKind::Var(_)
             )
         })
-    }
-
-    /// Settle the constraints generated **so far** in the current binding,
-    /// mid-walk (CE-1): wake members to a fixpoint, then put every suspension
-    /// still pending back on the constraint list. Used to ask whether a local
-    /// binder or a statement is ground *at that point in the walk*.
-    ///
-    /// A member wake reads nothing but its receiver's type (and a method's
-    /// argument types), so waking it early is what the final solve would do
-    /// anyway.
-    pub(super) fn settle(&mut self, scope: &mut Scope) {
-        for m in self.run_worklist(scope) {
-            self.solver.constraints.push(Constraint::HasMember {
-                recv: m.recv,
-                name: m.name,
-                result: m.result,
-                use_range: m.use_range,
-            });
-        }
-    }
-
-    /// Settle at a data-member access, where FCS decides it: wake what can
-    /// wake, and **decline** every access still suspended — its receiver is not
-    /// known at the access (a variable, or a generic receiver), which FCS
-    /// rejects or decides by what inference does not see. A declined access
-    /// records nothing, its result is [tainted](Self::taint), and the binding's
-    /// prefix ends ([`Incomplete::IndeterminateReceiver`],
-    /// [`Incomplete::GenericReceiver`]); it never wakes later, since a later
-    /// wake is one FCS did not make at the access.
-    ///
-    /// Every access settles where it is generated, so what is still suspended
-    /// after the settle is this access's.
-    pub(super) fn settle_access(&mut self, scope: &mut Scope) {
-        self.settle(scope);
-        let mut declined = Vec::new();
-        for c in std::mem::take(&mut self.solver.constraints) {
-            let Constraint::HasMember { recv, result, .. } = c;
-            let head = self.solver.table.resolve(self.solver.tys.var(recv));
-            // A worklist that never woke the access left a variable, or a
-            // generic receiver it does not look up: every other head wakes.
-            declined.push(match self.solver.tys.kind(head) {
-                TyKind::Named { .. } => Incomplete::GenericReceiver,
-                _ => Incomplete::IndeterminateReceiver,
-            });
-            self.taint(scope, self.solver.tys.var(result));
-        }
-        for why in declined {
-            scope.mark_incomplete(why);
-        }
-    }
-
-    /// The worklist behind [`Self::solve`] and [`Self::settle`]: wake every
-    /// pending member access to a fixpoint, and return those that never woke.
-    fn run_worklist(&mut self, scope: &mut Scope) -> Vec<SuspendedMember> {
-        let mut suspended: Vec<SuspendedMember> = std::mem::take(&mut self.solver.constraints)
-            .into_iter()
-            .map(|c| {
-                let Constraint::HasMember {
-                    recv,
-                    name,
-                    result,
-                    use_range,
-                } = c;
-                SuspendedMember {
-                    recv,
-                    name,
-                    result,
-                    use_range,
-                }
-            })
-            .collect();
-
-        // Fixpoint: scan the parked members; wake each whose receiver is now
-        // concrete; a wake unifies at once, which may make a later member's
-        // receiver concrete (a chained member `s.A.B`). Repeat while anything
-        // fires. Each suspension fires at most once (a woken one is not
-        // re-parked), so the loop runs at most `suspended.len()` times.
-        loop {
-            let mut still_pending: Vec<SuspendedMember> = Vec::new();
-            let mut woke = false;
-            for m in std::mem::take(&mut suspended) {
-                let head = self.solver.table.resolve(self.solver.tys.var(m.recv));
-                match self.solver.tys.kind(head) {
-                    // Unresolved receiver — keep it parked for a later wake.
-                    TyKind::Var(_) => still_pending.push(m),
-                    // A concrete named receiver — attempt the data-member lookup,
-                    // which may unify `result` with the member's type and record
-                    // the resolved member's identity at `use_range` (Stage 3.3b).
-                    // `wake_member` looks the head up at arity 0, so a GENERIC
-                    // receiver must not reach it: with both `N.C` and `N.C<'T>`
-                    // in the env it would resolve the nullary one and commit a
-                    // member of a type the receiver is not. Making the lookup
-                    // arity-aware is what lets these wake; until then they stay
-                    // parked.
-                    TyKind::Named { args, .. } if !args.is_empty() => {
-                        still_pending.push(m);
-                    }
-                    TyKind::Named { path, .. } => {
-                        let path = path.spelled(self.facts.env.names());
-                        let wake = self.wake_member(scope, &path, &m.name, m.result, m.use_range);
-                        woke = true;
-                        // A result the wake did not bind (a type the bridge
-                        // does not carry) is one FCS knows; an access no member
-                        // answers is declined.
-                        if !self
-                            .solver
-                            .tys
-                            .is_ground(self.solver.table.resolve(self.solver.tys.var(m.result)))
-                        {
-                            self.taint(scope, self.solver.tys.var(m.result));
-                        }
-                        if let Wake::Declined(why) = wake {
-                            scope.mark_incomplete(why);
-                        }
-                    }
-                    // A field of a project record, read off its declaration.
-                    TyKind::Project { .. } if self.wake_record_field(scope, head, &m) => {
-                        woke = true;
-                    }
-                    // Any other concrete head (array / tuple / function / a
-                    // quantified param) has no assembly entity to look a member up
-                    // on: the access is declined where FCS decides it, so its
-                    // result is tainted and the prefix ends. Arrays' `.Length` is
-                    // an intrinsic, out of scope.
-                    TyKind::Array { .. }
-                    | TyKind::Tuple(_)
-                    | TyKind::Fun { .. }
-                    | TyKind::Param(_) => {
-                        woke = true;
-                        self.taint(scope, self.solver.tys.var(m.result));
-                        scope.mark_incomplete(Incomplete::ReceiverShape);
-                    }
-                    // Any other member of a project type is not modelled: drop
-                    // the constraint, leaving the access's (poisoned) result
-                    // open and tainted, and say so in the census.
-                    TyKind::Project { .. } => {
-                        woke = true;
-                        self.taint(scope, self.solver.tys.var(m.result));
-                        scope.mark_incomplete(Incomplete::ProjectTypeMember);
-                    }
-                }
-            }
-            suspended = still_pending;
-            debug_assert!(
-                self.solver.constraints.is_empty(),
-                "a wake suspends nothing"
-            );
-            // Nothing fired this pass ⇒ no receiver can become more concrete ⇒
-            // fixpoint.
-            if !woke {
-                break;
-            }
-        }
-        suspended
     }
 
     /// Whether relating `a` to `b` could bind a variable whose type FCS

@@ -60,13 +60,6 @@ impl<'a> Gen<'a> {
     /// types up to its recovered dot are kept: nothing it binds, emits or
     /// counts can reach what was read before it.
     pub(super) fn finish(mut self, damaged: Option<Damaged>) -> Walked {
-        // Every constraint belongs to a binding, and each binding's solve
-        // ([`Self::solve`]) leaves none behind: nothing is left for a solve
-        // outside one.
-        debug_assert!(
-            self.solver.constraints.is_empty(),
-            "a constraint outlived its binding's solve"
-        );
         let emitted = std::mem::replace(&mut self.out, Emissions::new()).into_emitted();
         // Past the budget the table's answers are not answers, so nothing is
         // read from it. The check repeats below, after the last read: the

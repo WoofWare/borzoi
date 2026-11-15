@@ -412,7 +412,6 @@ impl<'a> Gen<'a> {
                     // Every equality the pattern generates — its fields'
                     // included — counts toward its fit, so the count is taken
                     // before it is generated, once what came before settled.
-                    self.settle(scope);
                     let failures = scope.eq_failures;
                     let pat_from = self.solver.table.mark();
                     let pt = self.gen_pattern(scope, &shape, BinderSite::Local);
@@ -427,7 +426,6 @@ impl<'a> Gen<'a> {
                     // (`let g = idf in match g ho with Some 1 -> …` keeps
                     // `idf : 'a -> 'a`) — the variables an argument check
                     // refuses to bind too ([`Self::touches_opaque`]).
-                    self.settle(scope);
                     if !matches!(self.solver.tys.kind(pt), TyKind::Var(_))
                         && (self.mentions_inherited_open(scope, sv)
                             || self.touches_opaque(scope, sv, sv))
@@ -458,7 +456,6 @@ impl<'a> Gen<'a> {
                     // The pattern's names are typed before the clause's uses
                     // of them are walked, so a use reads a known type
                     // ([`Self::value_use`]).
-                    self.settle(scope);
                     // A pattern that does not fit the scrutinee fails whole
                     // (atomically), leaving its names untyped where FCS typed
                     // the part that fit before rejecting the rest (`(x, 1)`
@@ -670,8 +667,8 @@ impl<'a> Gen<'a> {
     ///
     /// So a local types only when it is **ground on its own**, before the
     /// continuation is walked: the pattern is typed ([`Self::pattern_ty`]), the
-    /// RHS is inferred and linked to it, and the constraints so far are
-    /// [settled](Self::settle). A ground binder can then only be *confirmed* by
+    /// RHS is inferred and linked to it, every relation so far already in the
+    /// table. A ground binder can then only be *confirmed* by
     /// the continuation — a conflicting use fails and rolls back, exactly as
     /// FCS reports the use rather than retyping the binder. A binder still open
     /// at that point is one FCS may have generalised, or grounded through
@@ -714,8 +711,8 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Walk the RHS of a pattern binding against the pattern's type `pat_ty`
-    /// and [settle](Self::settle), for a binding at `site`.
+    /// Walk the RHS of a pattern binding against the pattern's type `pat_ty`,
+    /// for a binding at `site`.
     ///
     /// FCS checks the RHS *against* the pattern's type. What that relation is
     /// depends on whether the pattern holds an annotation.
@@ -769,7 +766,6 @@ impl<'a> Gen<'a> {
             // prefix ends before the RHS is walked.
             scope.mark_incomplete(Incomplete::CoercedPattern);
             let _ = self.infer_expr(scope, rhs, Expected::Unknown).var();
-            self.settle(scope);
             return;
         }
         let bound_directly = site == BinderSite::Local
@@ -799,7 +795,6 @@ impl<'a> Gen<'a> {
         // The expected type is this function's own: the walk's proof that it
         // was discharged is the equality's, taken inside the walk or below.
         let rhs_var = self.infer_expr(scope, rhs, expected).var();
-        self.settle(scope);
         if structural
             && rhs_var.is_some_and(|v| {
                 self.mentions_inherited_open(scope, v)
@@ -836,7 +831,6 @@ impl<'a> Gen<'a> {
                 return;
             }
         }
-        self.settle(scope);
         let agrees = rhs_var.is_some_and(|v| {
             self.solver.table.resolve(pat_ty) == self.solver.table.resolve(self.solver.tys.var(v))
         });
@@ -870,8 +864,8 @@ impl<'a> Gen<'a> {
     /// in a synthetic `unit` node at the statement's own range — which is why the
     /// statement's root is never recorded here. The unit relation is not
     /// modelled, so it is dropped: the check-mode poison covers generalisation,
-    /// and a statement whose type is not ground once the constraints so far are
-    /// [settled](Self::settle) also marks the binding **incomplete**, since FCS's
+    /// and a statement whose type is not ground once it is walked also marks
+    /// the binding **incomplete**, since FCS's
     /// unification would ground it to `unit` and a later argument check could
     /// otherwise ground it to something else (`let h x = x; mono x` has
     /// `x : unit` in FCS, not `bool`). A ground statement type is untouched by
@@ -897,15 +891,13 @@ impl<'a> Gen<'a> {
             // A statement that does not synthesize a variable has already marked
             // the binding incomplete in its own arm.
             let recorded = scope.reasons_recorded();
-            if let Some(v) = self.infer_expr(scope, stmt, fresh).var() {
-                self.settle(scope);
-                if !self
+            if let Some(v) = self.infer_expr(scope, stmt, fresh).var()
+                && !self
                     .solver
                     .tys
                     .is_ground(self.solver.table.resolve(self.solver.tys.var(v)))
-                {
-                    scope.mark_consequence(recorded, Incomplete::OpenStatement);
-                }
+            {
+                scope.mark_consequence(recorded, Incomplete::OpenStatement);
             }
         }
         let walked = self.infer_expr(scope, last, expected);

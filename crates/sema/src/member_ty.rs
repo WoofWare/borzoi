@@ -1,6 +1,6 @@
 //! The `TypeRef → Ty` bridge for member-access typing (Stage 3.3a).
 //!
-//! When a suspended [`HasMember`](crate::infer) constraint wakes — its receiver
+//! When a member access is decided ([`crate::infer`]) — its receiver
 //! resolves to a concrete [`TyKind::Named`](crate::TyKind::Named) whose entity has a single unambiguous
 //! public instance field / non-indexer property named as accessed — the member's
 //! signature ([`TypeRef`], the assembly crate's owned type model) must be brought

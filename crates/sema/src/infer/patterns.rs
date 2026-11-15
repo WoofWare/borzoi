@@ -279,32 +279,21 @@ impl<'a> Gen<'a> {
 
     /// Whether relating the pattern type `pt` to the scrutinee `sv` would get
     /// ahead of a relation FCS, which checks in source order, applied before
-    /// the pattern and inference has not: every constraint still pending was
-    /// walked before the pattern. Each kind is decided here, so a new kind of
-    /// suspended constraint must be:
+    /// the pattern and inference has not:
     ///
     /// - an equality is already in the table ([`Self::eq`]), and so is every
     ///   relation to an expected type, decided where FCS decides it
-    ///   ([`Self::decide`]);
+    ///   ([`Self::decide`]), and every member access, decided at its dot
+    ///   (`(o.Length, match o with "a" -> …)` declined `o.Length` there);
     /// - a parameter's slot and its binder variable, one variable in FCS, are
     ///   related under a snapshot, rolled back after, and the pattern
-    ///   contradicts them if that, or relating `pt` after it, fails;
-    /// - a suspended member lookup whose receiver the pattern could make
-    ///   known is one FCS made on a receiver it did not yet know, an error
-    ///   (FS0072), so the pattern must not wake it
-    ///   (`(o.Length, match o with "a" -> …)`).
+    ///   contradicts them if that, or relating `pt` after it, fails.
     pub(super) fn pattern_preempts_earlier_relation(
         &mut self,
         scope: &Scope,
         sv: TyVid,
         pt: Ty,
     ) -> bool {
-        let receivers: Vec<TyVid> = self
-            .solver
-            .constraints
-            .iter()
-            .map(|Constraint::HasMember { recv, .. }| *recv)
-            .collect();
         // A parameter's private slot and its binder variable are one variable
         // in FCS ([`Self::slot_binder_reunify`]), so what a condition fixed on
         // the slot (`if x then (match x with 1 -> …)`) FCS applied before the
@@ -325,21 +314,6 @@ impl<'a> Gen<'a> {
             self.solver.table.resolve(self.solver.tys.var(sv)),
             &mut scrutinee_roots,
         );
-        for recv in receivers {
-            let mut recv_roots: HashSet<TyVid> = HashSet::default();
-            collect_var_roots(
-                self.solver.tys,
-                self.solver.table.resolve(self.solver.tys.var(recv)),
-                &mut recv_roots,
-            );
-            if recv_roots.iter().any(|&r| {
-                scrutinee_roots
-                    .iter()
-                    .any(|&v| self.solver.table.unioned(r, v))
-            }) {
-                return true;
-            }
-        }
         if eqs.is_empty() {
             return false;
         }
