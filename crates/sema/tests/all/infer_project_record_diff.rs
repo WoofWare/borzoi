@@ -15,7 +15,8 @@
 //! file, the using file with no header, an earlier file reached by an
 //! `open`, by module-qualified paths, behind a signature) and with how the
 //! receiver is typed (an annotated
-//! parameter, an earlier annotated value, a case's payload). Every node and
+//! parameter, an earlier annotated value, a case's payload, nothing at all —
+//! the label alone, through FCS's record-label table). Every node and
 //! binder inference types in any file must be FCS's; each modelled cell FCS
 //! checks cleanly must commit, and nothing may commit on a line FCS rejects.
 
@@ -235,6 +236,9 @@ const CONTEXTS: &[(&str, &str, bool)] = &[
         "let f{i} w = match w with {L}W r -> r{a} | _ -> failwith \"d\"\n",
         false,
     ),
+    // Nothing types the receiver: FCS reads the label's record off its
+    // record-label table.
+    ("label", "let f{i} r = r{a}\n", false),
 ];
 
 /// The declarations the record's file adds: an annotated value of the
@@ -279,7 +283,13 @@ impl Placement {
     /// resolve a case pattern across files (`| Lib.W r ->`), and inference
     /// does not split a module value from the members after it in one path
     /// (`Lib.r0.A`).
-    fn obligates(self, cid: &str, annotated: bool) -> bool {
+    fn obligates(self, cid: &str, annotated: bool, record: &Record) -> bool {
+        // The resolver answers a label only from the file's own records,
+        // and a receiver whose type has open arguments publishes nothing.
+        if cid == "label" {
+            return matches!(self, Placement::InFile | Placement::Headerless)
+                && !record.decl.contains('<');
+        }
         match self {
             Placement::InFile | Placement::Headerless => true,
             Placement::EarlierSignatured => false,
@@ -350,7 +360,7 @@ fn program(record: &Record, placement: Placement) -> (Vec<(String, String)>, Vec
             cells.push((
                 line,
                 format!("f{n}"),
-                *modelled && placement.obligates(cid, *annotated),
+                *modelled && placement.obligates(cid, *annotated, record),
                 format!("{}/{placement:?}/{cid}/{access}", record.id),
             ));
         }

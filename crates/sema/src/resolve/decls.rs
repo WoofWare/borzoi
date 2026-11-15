@@ -615,6 +615,12 @@ impl<'a> Resolver<'a> {
                                 });
                             }
                             self.lexical.block_type_defs.insert(own);
+                            self.define_record_labels(
+                                defn,
+                                own,
+                                arity,
+                                u32::from(types.syntax().text_range().start()),
+                            );
                             let covered_kind = match defn.repr() {
                                 Some(TypeDefnRepr::Union(_) | TypeDefnRepr::Record(_)) => true,
                                 Some(TypeDefnRepr::ObjectModel(om)) => {
@@ -1821,6 +1827,7 @@ impl<'a> Resolver<'a> {
         for segment in segs {
             self.lexical.container_path.push(segment);
         }
+        let inner_container = self.lexical.container_path.id();
         self.scope.in_exporting_module = !self.lexical.anonymous_root;
         // A `module private Sub` scopes its contents to its parent (this module's
         // container); stacked private modules take the deepest floor (see
@@ -1861,6 +1868,8 @@ impl<'a> Resolver<'a> {
         self.lexical.module_frames.pop();
 
         self.lexical.container_path.leave_to(saved_container);
+        let outer_container = self.lexical.container_path.id();
+        self.auto_open_record_labels(nm, inner_container, outer_container);
         // An `[<AutoOpen>]` nested module opens into the remainder of its
         // container's scope; a plain module's imports stay inside it.
         let exit = if attrs_auto_open(nm.attributes()) {

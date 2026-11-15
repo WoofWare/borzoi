@@ -81,6 +81,7 @@ use windows::Windows;
 mod decls;
 mod exprs;
 mod indexes;
+mod labels;
 mod lexical;
 mod lookup;
 mod model;
@@ -95,8 +96,8 @@ mod windows;
 
 pub use model::{
     CaseKind, DeclineCause, DeclineSite, DeclineTier, DeferredReason, ExportedItem, ExportedItems,
-    ItemId, OpaqueRegion, OpenOpacity, OpenTrace, ProjectItems, Resolution, ResolutionTrace,
-    ResolvedFile, ResolvedProject,
+    FieldLabel, ItemId, OpaqueRegion, OpenOpacity, OpenTrace, ProjectItems, Resolution,
+    ResolutionTrace, ResolvedFile, ResolvedProject,
 };
 pub use state::ActivePatternShape;
 use state::{
@@ -2068,6 +2069,7 @@ impl<'a> Resolver<'a> {
             windows: Windows::default(),
             lexical: lexical::Lexical::new(assemblies.names()),
             index: indexes::Indexes::default(),
+            labels: labels::LabelTable::default(),
             out: output::Output::default(),
         }
     }

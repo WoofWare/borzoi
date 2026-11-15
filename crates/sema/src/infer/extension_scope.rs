@@ -47,7 +47,7 @@ use super::*;
 /// namespace, nothing unknowable) is used by in-crate unit tests that drive [`Gen`]
 /// without a file.
 #[derive(Default)]
-pub(super) struct ExtensionScope {
+pub(crate) struct ExtensionScope {
     /// A **project** extension source we could not name-key is in scope: an
     /// augmentation member with an un-walkable name (own-file or preceding —
     /// EX-3 §2(a)/(b) thread the walkable ones as the sets below), or an
@@ -80,7 +80,7 @@ pub(super) struct ExtensionScope {
 }
 
 impl ExtensionScope {
-    pub(super) fn of(resolved: &ResolvedFile, env: &AssemblyEnv) -> ExtensionScope {
+    pub(crate) fn of(resolved: &ResolvedFile, env: &AssemblyEnv) -> ExtensionScope {
         // The root must be included explicitly — `namespace_paths` omits it, and it
         // is always in scope (so `module M` sees a global `[<Extension>]`). The
         // file's explicit `open <namespace>` targets (EX-2) join it: opening a
@@ -151,7 +151,7 @@ impl ExtensionScope {
     /// FSharp.Core-referencing project defer every overloaded call. The remaining
     /// name-blind triggers ([`Self::project_source_present`],
     /// [`Self::opens_unknowable`]) still defer wholesale — sound.
-    pub(super) fn absent(&self, env: &AssemblyEnv, name: &str, is_static: bool) -> bool {
+    pub(crate) fn absent(&self, env: &AssemblyEnv, name: &str, is_static: bool) -> bool {
         !self.project_source_present
             && !self.opens_unknowable
             // EX-3 §2(a): a same-file augmentation member joins its own

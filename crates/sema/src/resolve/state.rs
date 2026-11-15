@@ -14,6 +14,7 @@ use crate::assembly_env::{AssemblyEnv, EntityHandle};
 use crate::def::DefId;
 
 use super::indexes::Indexes;
+use super::labels::LabelTable;
 use super::lexical::Lexical;
 use super::model::{
     DeclineCause, DeclineSite, DeclineTier, DeferredReason, ItemId, ProjectItems, Resolution,
@@ -1102,6 +1103,9 @@ pub(super) struct Resolver<'a> {
     /// What the walk has recorded about the file's declarations so far, for
     /// its own lookups, kept for the rest of the file ([`Indexes`]).
     pub(super) index: Indexes,
+    /// The file's additions to FCS's record-label table so far
+    /// ([`LabelTable`]).
+    pub(super) labels: LabelTable,
     /// What the walk publishes, moved into the [`ResolvedFile`](super::ResolvedFile)
     /// in one piece ([`Output`]).
     pub(super) out: Output,
