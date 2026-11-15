@@ -40,8 +40,8 @@ pub(crate) enum TfmChoice {
     /// MSBuild inner build does) for the served answer.
     Reseed(String),
     /// Case 3, declined — `TargetFramework`'s provenance is untrusted, so no
-    /// seed can be validated. `may_dispatch`: the plural declares TFMs or
-    /// cannot be read, so the real build may leave the singular empty and
+    /// seed can be validated. `may_dispatch`: the plural declares TFMs or is
+    /// untrusted, so the real build may leave the singular empty and
     /// cross-target, and pass 1 may be the outer dispatch build (a read before
     /// the untrusted write is exactly unset); it is then served with every
     /// TFM-derived conclusion withheld. Without a plural there is one build,
@@ -51,8 +51,8 @@ pub(crate) enum TfmChoice {
     /// Case 4 — the project declares no TFM anywhere.
     NoneDeclared,
     /// Case 4, declined — no TFM the evaluator could read is declared, but
-    /// the plural `TargetFrameworks` is not provably unset (a write the
-    /// evaluator refused or could not pin, or content it could not see). The
+    /// the plural `TargetFrameworks` is untrusted (a write the evaluator
+    /// refused or could not pin, by [`tfm_untrusted`]'s classification). The
     /// project may be multi-targeted, and pass 1 then the outer dispatch
     /// build, whose `TargetFramework`-gated facts no inner build shares: serve
     /// it with every TFM-derived conclusion withheld.
@@ -77,8 +77,10 @@ impl TfmChoice {
     /// Whether pass 1 is the build this choice serves, so that its facts may be
     /// served as the project's: the caller's own choice of build (an empty
     /// `TargetFramework` global included, which asks for the outer build), a
-    /// TFM the body pins, a project that provably declares none, or an
-    /// untrusted singular with no plural beside it. Not where the project may
+    /// TFM the body pins, a project that declares none, or an untrusted
+    /// singular with no plural beside it — where "no plural" is read as
+    /// [`tfm_untrusted`] reads the singular, so a plural unset only because
+    /// content went unseen counts as unset. Not where the project may
     /// cross-target and pass 1 may be the outer dispatch build, exact for
     /// itself and for no inner build; nor for a reseed, which serves pass 2.
     pub(crate) fn pass1_is_the_build(&self) -> bool {
@@ -133,7 +135,7 @@ impl TfmChoice {
 ///    fallback selects (the E5 incoherence). Pass 1 is kept with every
 ///    TFM-derived conclusion withheld instead ([`TfmChoice::pass1_is_the_build`]);
 /// 4. else [`TfmChoice::NoneDeclared`] (no TFM declared anywhere): keep pass 1;
-///    or, when the plural is not provably unset, [`TfmChoice::PluralUnknown`].
+///    or, when the plural is untrusted, [`TfmChoice::PluralUnknown`].
 ///
 /// The one extra parse in case 3 happens once per multi-targeted project.
 pub(crate) fn tfm_choice(pass1: &ParsedProject, extras: &HashMap<String, String>) -> TfmChoice {
@@ -148,24 +150,20 @@ pub(crate) fn tfm_choice(pass1: &ParsedProject, extras: &HashMap<String, String>
         return TfmChoice::Untrusted {
             // The plural's own list: `target_frameworks` falls back to the
             // singular.
-            may_dispatch: !pass1.target_frameworks.is_empty() || !plural_read_is_exact(pass1),
+            may_dispatch: !pass1.target_frameworks.is_empty() || plural_untrusted(pass1),
         };
     }
     match target_frameworks(pass1).first() {
         Some(first) => TfmChoice::Reseed(first.clone()),
-        None if !plural_read_is_exact(pass1) => TfmChoice::PluralUnknown,
+        None if plural_untrusted(pass1) => TfmChoice::PluralUnknown,
         None => TfmChoice::NoneDeclared,
     }
 }
 
-/// Whether the plural `TargetFrameworks` reads as the real build's: a trusted
-/// value with nothing left unexpanded, or a name the real build leaves unset
-/// too.
-fn plural_read_is_exact(parsed: &ParsedProject) -> bool {
-    match parsed.property("TargetFrameworks") {
-        PropertyRead::Value(value) => !value.contains("$("),
-        read => read.is_exact(),
-    }
+/// Whether the plural `TargetFrameworks` is too weakly established to call
+/// unset, by the same classification [`tfm_untrusted`] gives the singular.
+fn plural_untrusted(parsed: &ParsedProject) -> bool {
+    read_untrusted(parsed.property("TargetFrameworks"))
 }
 
 /// Whether a document can be served as an inner build at all.
@@ -267,7 +265,14 @@ pub(crate) fn body_target_framework(parsed: &ParsedProject) -> Option<String> {
 /// not asked here. The body singular, by contrast, is consumed as an
 /// authoritative `NodeTfm::Known`.
 pub(crate) fn tfm_untrusted(parsed: &ParsedProject) -> bool {
-    match parsed.property("TargetFramework") {
+    read_untrusted(parsed.property("TargetFramework"))
+}
+
+/// [`tfm_untrusted`]'s classification of one read: untrusted on direct
+/// evidence that the real build holds another value, never merely because
+/// content went unseen.
+fn read_untrusted(read: PropertyRead) -> bool {
+    match read {
         PropertyRead::Untrusted(_)
         | PropertyRead::UnsetInexact(InexactUnset::Refused | InexactUnset::Environment) => true,
         PropertyRead::Value(value) => value.contains("$("),
