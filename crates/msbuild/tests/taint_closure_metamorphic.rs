@@ -375,6 +375,13 @@ impl Fact {
             _ => world == claim,
         }
     }
+
+    /// Whether `claim` holds in every world whatever the world publishes: an
+    /// empty `ProjectReference` list names no edge, so it can hold no phantom
+    /// one. Such a claim needs no world to commit it.
+    fn claim_is_vacuous(&self, claim: &[String]) -> bool {
+        matches!(self, Fact::ProjectReferences) && claim.is_empty()
+    }
 }
 
 fn fact_kind(fact: &Fact) -> &'static str {
@@ -479,7 +486,7 @@ fn check(
                     .is_some_and(|world| !fact.claim_holds_in(claim, world))
             })
             .map(|(world, facts)| (world.clone(), facts[fact].clone()));
-        let nobody_commits = world_committed.is_empty();
+        let nobody_commits = world_committed.is_empty() && !fact.claim_is_vacuous(claim);
         if disagreeing.is_none() && !nobody_commits {
             if world_committed.len() < values.len() {
                 census.world_declined += 1;
@@ -533,28 +540,41 @@ fn sweep(
     for _ in 0..cases {
         let doc = gen_doc(&mut rng, names);
         let target = rng.below(doc.writes.len());
-        for wrap in WRAPS {
-            let world_facts: Vec<(String, Facts)> = worlds_for(wrap)
-                .into_iter()
-                .map(|variant| {
-                    let text = render(&doc, target, &variant);
-                    (format!("{variant:?}"), facts(&evaluate(&text), names))
-                })
-                .collect();
-            let text = render(&doc, target, &Variant::Undecided(wrap));
-            let project = evaluate(&text);
-            let undecided = facts(&project, names);
-            check(
-                &mut census,
-                &text,
-                &undecided,
-                &world_facts,
-                Undecided::Write(doc.writes[target].name),
-                &format!("{label} {wrap:?}"),
-            );
-        }
+        check_every_wrap(&mut census, &doc, target, names, evaluate, label);
     }
     census
+}
+
+/// Make `doc`'s write `target` undecidable in each way the walker cannot see
+/// through, and check each undecided document against its worlds.
+fn check_every_wrap(
+    census: &mut Census,
+    doc: &Doc,
+    target: usize,
+    names: &[&'static str],
+    evaluate: &dyn Fn(&str) -> ParsedProject,
+    label: &str,
+) {
+    for wrap in WRAPS {
+        let world_facts: Vec<(String, Facts)> = worlds_for(wrap)
+            .into_iter()
+            .map(|variant| {
+                let text = render(doc, target, &variant);
+                (format!("{variant:?}"), facts(&evaluate(&text), names))
+            })
+            .collect();
+        let text = render(doc, target, &Variant::Undecided(wrap));
+        let project = evaluate(&text);
+        let undecided = facts(&project, names);
+        check(
+            census,
+            &text,
+            &undecided,
+            &world_facts,
+            Undecided::Write(doc.writes[target].name),
+            &format!("{label} {wrap:?}"),
+        );
+    }
 }
 
 fn pure_evaluate(text: &str) -> ParsedProject {
@@ -991,9 +1011,7 @@ fn a_value_written_before_hidden_content_claims_no_more_than_its_worlds_agree_on
     );
 }
 
-/// The fresh-seed twin of the two sweeps above. Seed 1 at 4 000 cases finds
-/// #782 (a single-witness root lets the `DefineConstants` self-append
-/// exemption drop an independent cause), which the fixed seeds do not reach.
+/// The fresh-seed twin of the two sweeps above.
 #[test]
 #[ignore = "soak: run with --ignored; BORZOI_MSBUILD_SOAK_SEED reproduces"]
 fn soak_undecided_writes_claim_no_more_than_their_worlds() {
@@ -1011,6 +1029,103 @@ fn soak_undecided_writes_claim_no_more_than_their_worlds() {
     );
     census.print("with Directory.Build.targets");
     assert_sound(&census, &[]);
+}
+
+/// #782's shape, exhaustively. A value with two reasons to be unpinned — its
+/// body read a name while undefined, and its gate read the undecided write —
+/// keeps one of them as its root, so a reader that exempts by the root's name
+/// drops the gate. The copy's body reads a name an exemption is keyed on
+/// (`DefineConstants`' self-append, `TargetFramework`'s carve-out), or one no
+/// exemption knows, or nothing; the readers copy it again or not, and read it
+/// beside a direct `$(DefineConstants)` or alone.
+///
+/// The random sweeps reach this shape only by chance (it took a soak to find
+/// #782): their wraps refuse the target's gate outright, and a refused gate
+/// evaluates no body, so the target itself never holds two doubts. Here the
+/// copy is gated on the target instead, which decides a gate untrusted.
+#[test]
+fn a_value_with_two_doubts_keeps_both_through_every_reader() {
+    const GATES: &[&str] = &["'$(Foo)' == ''", "'$(Foo)' != ''", "'$(Foo)' == 'a'"];
+    const COPY_BODIES: &[&str] = &[
+        "$(DefineConstants.Length)",
+        "a$(DefineConstants)",
+        "$(DefineConstants)",
+        "a$(TargetFramework)",
+        "a$(Bar)",
+        "a",
+    ];
+    // `{C}` is the copy a reader reads: `P0` itself, or `P1`, a copy of it.
+    const DEFINE_READERS: &[&str] = &[
+        "$({C})",
+        "x$({C}.EndsWith('0'))",
+        "$(DefineConstants);$({C})",
+        "$({C});$(DefineConstants)",
+        "$(DefineConstants.Length)$({C})",
+    ];
+    let names = [
+        "Foo",
+        "Bar",
+        "P0",
+        "P1",
+        "DefineConstants",
+        "TargetFramework",
+    ];
+    let write = |name, group_condition: Option<&str>, condition: Option<&str>, body: &str| Write {
+        name,
+        group_condition: group_condition.map(str::to_string),
+        condition: condition.map(str::to_string),
+        body: body.to_string(),
+    };
+    let mut census = Census::default();
+    for gate in GATES {
+        for gate_on_group in [false, true] {
+            for copy_body in COPY_BODIES {
+                for copies in [false, true] {
+                    for reader in DEFINE_READERS {
+                        let (group, element) = if gate_on_group {
+                            (Some(*gate), None)
+                        } else {
+                            (None, Some(*gate))
+                        };
+                        let read = if copies { "P1" } else { "P0" };
+                        let mut writes = vec![
+                            write("Foo", None, None, "a"),
+                            write("P0", group, element, copy_body),
+                        ];
+                        if copies {
+                            writes.push(write("P1", None, None, "$(P0)"));
+                        }
+                        writes.push(write(
+                            "DefineConstants",
+                            None,
+                            None,
+                            &reader.replace("{C}", read),
+                        ));
+                        let doc = Doc {
+                            writes,
+                            items: vec![Item {
+                                kind: "Compile",
+                                group_condition: None,
+                                condition: None,
+                                include: format!("$({read}).fs"),
+                            }],
+                        };
+                        check_every_wrap(&mut census, &doc, 0, &names, &pure_evaluate, "grid");
+                    }
+                }
+            }
+        }
+    }
+    census.print("two doubts");
+    // About half what the grid produces, as for the random sweeps.
+    assert_sound(
+        &census,
+        &[
+            ("property", 400),
+            ("Compile items", 240),
+            ("DefineConstants", 190),
+        ],
+    );
 }
 
 // The defects the gate found, each pinned as the answer it should give, and
@@ -1142,7 +1257,6 @@ fn a_compile_item_reading_a_stale_value_declines() {
 /// #782: a single-witness root lets the `DefineConstants` self-append
 /// exemption drop an independent cause.
 #[test]
-#[ignore = "#782: a single-witness root drops a cause the self-append exemption cannot see"]
 fn a_copied_define_constants_root_does_not_hide_a_gate() {
     let project = pure_evaluate(
         r#"<Project>
@@ -1156,6 +1270,27 @@ fn a_copied_define_constants_root_does_not_hide_a_gate() {
     assert!(
         project.define_constants_uncertain,
         "MSBuild skips `P1`'s write, so `DefineConstants` is `xFalse`; we published {:?}",
+        project.define_constants
+    );
+}
+
+/// #782 through the self-append's own read: a `<DefineConstants>` value that
+/// reads `$(DefineConstants)` directly and also reads a copy of it does not
+/// let the direct read stand for the copy's root, which hides the same gate.
+#[test]
+fn the_self_append_read_does_not_stand_for_a_copied_root() {
+    let project = pure_evaluate(
+        r#"<Project>
+  <PropertyGroup><TargetName>$(Configuration.Substring(0,1))</TargetName></PropertyGroup>
+  <PropertyGroup>
+    <P1 Condition="'$(TargetName)' == ''">$(DefineConstants.Length)</P1>
+  </PropertyGroup>
+  <PropertyGroup><DefineConstants>$(DefineConstants);x$(P1.EndsWith('0'))</DefineConstants></PropertyGroup>
+</Project>"#,
+    );
+    assert!(
+        project.define_constants_uncertain,
+        "MSBuild skips `P1`'s write, so `DefineConstants` is `;xFalse`; we published {:?}",
         project.define_constants
     );
 }
