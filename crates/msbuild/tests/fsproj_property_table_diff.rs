@@ -324,6 +324,37 @@ fn reserved_path_properties_are_exact_or_declined() {
     assert!(committed >= 10, "too few committed ({committed})");
 }
 
+/// Bodies MSBuild reads apart from their text (#642): an element or a
+/// processing instruction, which make it read the body's inner XML, and a
+/// carriage return, which it keeps where the XML reader folds it. Evaluated at
+/// a path, so the oracle reads the document from a file as MSBuild does (its
+/// pathless reader folds line ends). Each is diffed alone and read back by a
+/// later write, and each body's value is pinned to MSBuild's.
+#[test]
+fn bodies_msbuild_reads_as_inner_xml_or_unfolded_are_exact_or_declined() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
+    for (body, msbuild) in [
+        ("a<x/>b", "a<x />b"),
+        ("a<?p q?>b", "a<?p q?>b"),
+        ("a\r\nb", "a\r\nb"),
+        ("a\rb", "a\rb"),
+        ("\r\n  a;\r\n  b\r\n", "\r\n  a;\r\n  b\r\n"),
+    ] {
+        let xml = project_xml(&[("Alpha", body), ("Beta", "[$(Alpha)]")]);
+        let theirs = oracle
+            .project(&xml, &names, Some(&dir.join("Demo.fsproj")), &[])
+            .expect("MSBuild evaluates the document");
+        assert_eq!(
+            theirs["Alpha"], msbuild,
+            "MSBuild's reading moved: {body:?}"
+        );
+        check_property_table_at_path(&mut oracle, &xml, &dir);
+    }
+}
+
 /// **Anti-degradation.** Certain-implies-exact is a one-sided contract: it
 /// catches a wrong *commit*, and a diagnostic silently withdraws the claim — so
 /// a spurious *decline* passes every check above vacuously. That is a real
