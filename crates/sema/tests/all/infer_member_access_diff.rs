@@ -2762,6 +2762,36 @@ fn nested_member_call_argument_grounds_and_commits() {
 // ===== Stage R2-e — the annotated binding's RHS check-walk (coverage) =====
 
 #[test]
+fn a_later_match_clause_is_walked_after_an_untyped_first_one() {
+    // The first clause's result is a form inference does not model, which
+    // ends the binding's faithful prefix; the second clause's method call is
+    // still one FCS resolves, on a receiver whose type both know, so its member
+    // is recorded (PawPrint `MethodInfo.fs:822`, #775). The match sits under an
+    // expected type (an `else` branch) and in a synth position.
+    for src in [
+        "module M\nlet s = \"hi\"\n\
+         let f b n = if b then false else (match n with 0 -> (s : string) = \"\" | _ -> s.EndsWith(\"h\"))\n",
+        "module M\nlet s = \"hi\"\n\
+         let f n = (match n with 0 -> (s : string) | _ -> s.ToUpperInvariant())\n",
+    ] {
+        assert_sound(src);
+        let (inferred, _) = infer_bcl(src);
+        let name = if src.contains("EndsWith") {
+            "EndsWith"
+        } else {
+            "ToUpperInvariant"
+        };
+        assert!(
+            matches!(
+                inferred.member_resolution_at(ident_range(src, name)),
+                Some(Resolution::Member { .. })
+            ),
+            "the later clause's call is resolved: {src}"
+        );
+    }
+}
+
+#[test]
 fn annotated_binding_rhs_member_wakes_and_records() {
     // `let n : int = s.Length`: pre-R2-e the annotated binding skipped its RHS
     // entirely, losing the `Length` hover. The check-walk restores it — the
