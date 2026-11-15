@@ -574,6 +574,12 @@ pub struct ProjectItems {
     /// [`Resolution::Item`] as a case ([`Resolver::case_classification`](super::state::Resolver::case_classification)) — for
     /// pattern-position resolution and case/module collision soundness.
     pub(super) case_item_ids: HashSet<ItemId>,
+    /// The project-global [`ItemId`]s of earlier files' **union** cases, of
+    /// every accessibility and [`CaseKind::Union`] flavour: what tells a
+    /// [type-qualified case](Self::type_qualified_cases) that binds the
+    /// patterns applied to it from an enum case, a literal that binds none
+    /// ([`Resolver::namesake_declined_case_head_binds`](super::state::Resolver::namesake_declined_case_head_binds)).
+    pub(super) union_case_ids: HashSet<ItemId>,
     /// The project-global [`ItemId`]s of earlier files' **attributed**
     /// module-level `let` values ([`ExportedItem::attributed`]) — maybe-literal
     /// constant-pattern contestants. A `[<Literal>]` value enters FCS's pattern
@@ -1733,6 +1739,13 @@ impl ProjectItems {
         for id in idx.case_item_ids {
             self.case_item_ids.insert(id);
         }
+        self.union_case_ids.extend(
+            file.exports
+                .items
+                .iter()
+                .filter(|it| matches!(it.case, Some(CaseKind::Union { .. })))
+                .map(|it| it.id),
+        );
         for id in idx.attributed_value_ids {
             self.attributed_value_ids.insert(id);
         }
@@ -1757,6 +1770,12 @@ impl ProjectItems {
     /// [`Self::case_item_ids`]).
     pub(super) fn is_case_item(&self, id: ItemId) -> bool {
         self.case_item_ids.contains(&id)
+    }
+
+    /// Whether `id` is an earlier file's **union** case (see
+    /// [`Self::union_case_ids`]).
+    pub(super) fn is_union_case_item(&self, id: ItemId) -> bool {
+        self.union_case_ids.contains(&id)
     }
 
     /// Whether `id` is an earlier file's **attributed** module-level value

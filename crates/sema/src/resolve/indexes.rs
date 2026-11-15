@@ -296,7 +296,8 @@ pub(super) struct Indexes {
     /// parameter is never a legitimate binder elsewhere.
     pub(super) excluded_param_ranges: HashSet<TextRange>,
     /// The ident-token ranges of every name occurrence under an applied
-    /// pattern whose qualified head the walk could not resolve
+    /// pattern whose qualified head the walk could not resolve, nor show
+    /// certain to resolve to a union case
     /// ([`Resolver::mark_undecided_pattern_args`](crate::resolve::Resolver::mark_undecided_pattern_args)).
     /// FCS binds nothing under a qualified head it cannot resolve, and binds
     /// the arguments as usual under one it can, so whether each occurrence

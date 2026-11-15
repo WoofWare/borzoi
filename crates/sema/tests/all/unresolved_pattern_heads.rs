@@ -20,16 +20,29 @@
 //!
 //! A module value a deconstruction exports (`let (Q.R x) = …`) is the one
 //! exception, interned as before ([`Expect::ExportedGap`]).
+//!
+//! A qualified head the walk declines only because it cannot tell which of
+//! several same-named types FCS binds it to still binds its arguments when
+//! every other type of that name in scope finds nothing of the case's name:
+//! FCS then resolves it to the union case, whichever order it tries them
+//! in. [`NAMESAKE_CELLS`] grade that against FCS, with namesakes that do
+//! find something.
 
 use borzoi_cst::parser::parse;
 use borzoi_cst::syntax::{AstNode, ImplFile, TextRange};
 use borzoi_sema::test_support::binder_completeness::{BinderVerdict, binder_verdict};
-use borzoi_sema::{AssemblyEnv, ProjectItems, Resolution, SyntaxRecovery, resolve_file};
+use std::path::Path;
+
+use borzoi_sema::{
+    AssemblyEnv, ProjectItems, Resolution, SyntaxRecovery, resolve_file, resolve_project_files,
+};
 
 use crate::common::{
-    census_oracle_binders, census_oracle_uses, invoke_fcs_dump_census, parse_census_jsonl,
-    temp_fs_file,
+    census_oracle_binders, census_oracle_uses, full_bcl_env, invoke_fcs_dump_census,
+    invoke_fcs_dump_project_with_refs, parse_census_jsonl, parse_fcs_uses_project,
+    project_oracle_binders, temp_fs_file, temp_fs_tree, unmodelled_project_binder_failures,
 };
+use crate::resolve_signatures::project;
 
 /// What FCS and the walk do at a marked binder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +282,282 @@ fn binders_under_an_unresolved_head_follow_fcs() {
                 )),
             }
         }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An earlier file's unions whose names a referenced assembly's type also
+/// bears, at a lower arity, in a namespace the cells open: the walk's
+/// namesake guard declines each case head (`QualifierArityNamesake`), since
+/// which type FCS binds is undecided.
+const NAMESAKE_UNIONS: &str = "namespace N\n\
+type MethodBody<'a> =\n    | Il of body: 'a\n    | Jit of 'a\n    | Abstract\n\
+type String<'a> =\n    | Empty of 'a\n    | Length of 'a\n\
+type Int32<'a> =\n    | MaxValue of 'a\n    | NotMax\n\
+type Environment<'a> =\n    | SpecialFolder of 'a\n    | NotFolder\n";
+
+/// The start of a use file over [`NAMESAKE_UNIONS`]: the namesakes'
+/// namespaces opened, and a module-level `x` a use reaches when its clause
+/// binds none.
+const NAMESAKE_PRELUDE: &str =
+    "namespace N\nopen System\nopen System.Reflection\nmodule M =\n    let x = \"outer\"\n";
+
+/// The project types of [`project_namesake_cell`]: a union, and a record of
+/// its name with a field of its case's name.
+const PROJECT_NAMESAKES: &[(&str, &str)] = &[
+    (
+        "NamesakeA.fs",
+        "namespace N2\ntype T<'a> =\n    | C of 'a\n    | D\n",
+    ),
+    ("NamesakeB.fs", "namespace N1\ntype T = { C: int }\n"),
+];
+
+/// A multi-file cell: the earlier files, then the use file — its prelude,
+/// and its program marked as in [`Cell`] with one binder — and that
+/// binder's [`Expect`].
+struct ProjectCell {
+    id: &'static str,
+    earlier: &'static [(&'static str, &'static str)],
+    prelude: &'static str,
+    template: &'static str,
+    binder: Expect,
+}
+
+/// A [`ProjectCell`] over [`NAMESAKE_UNIONS`].
+const fn namesake_union_cell(
+    id: &'static str,
+    template: &'static str,
+    binder: Expect,
+) -> ProjectCell {
+    ProjectCell {
+        id,
+        earlier: &[("NamesakeUnions.fs", NAMESAKE_UNIONS)],
+        prelude: NAMESAKE_PRELUDE,
+        template,
+        binder,
+    }
+}
+
+/// Qualified case heads the namesake guard declines. Whether FCS binds the
+/// arguments turns on what the *first* type of the head's name it tries
+/// finds in itself, not on which case it is: any union case binds them,
+/// whatever its field count, and anything else the lookup finds abandons
+/// the sub-pattern. So the walk commits the binders when no type of the name
+/// but the found union could find anything of the case's name, and declines
+/// them otherwise. The `Abandoned` cells are namesakes that do find
+/// something; each would fail under a rule that committed the binders
+/// whenever the guard had found a case reading.
+const NAMESAKE_CELLS: &[ProjectCell] = &[
+    namesake_union_cell(
+        "assembly_namesake_lacks_the_case_name",
+        "    let f (b: MethodBody<int>) =\n        match b with\n        | MethodBody.Il «x» -> ‹x›\n        | _ -> 0\n",
+        Expect::Interned,
+    ),
+    namesake_union_cell(
+        // FS0725, and the argument binds regardless.
+        "nullary_case",
+        "    let f (b: MethodBody<int>) =\n        match b with\n        | MethodBody.Abstract «x» -> ‹x›\n        | _ -> 0\n",
+        Expect::Interned,
+    ),
+    namesake_union_cell(
+        "named_field",
+        "    let f (b: MethodBody<int>) =\n        match b with\n        | MethodBody.Il (body = «x») -> ‹x›\n        | _ -> 0\n",
+        Expect::Interned,
+    ),
+    namesake_union_cell(
+        "parameter",
+        "    let f (MethodBody.Il «x») = ‹x›\n",
+        Expect::Interned,
+    ),
+    namesake_union_cell(
+        // The second alternative's `x` is a use of the first's.
+        "or_pattern",
+        "    let f (b: MethodBody<int>) =\n        match b with\n        | MethodBody.Il «x»\n        | MethodBody.Jit ‹x› -> ‹x›\n        | _ -> 0\n",
+        Expect::Interned,
+    ),
+    namesake_union_cell(
+        // `System.String` is tried first and finds its field `Empty`, which
+        // is no literal: FS0729.
+        "assembly_namesake_field",
+        "    let f (b: String<int>) =\n        match b with\n        | String.Empty «x» -> ignore ‹x›\n        | _ -> ()\n",
+        Expect::Abandoned,
+    ),
+    namesake_union_cell(
+        // A literal field abandons it too: FS3191, then a type mismatch.
+        "assembly_namesake_literal_field",
+        "    let f (b: Int32<int>) =\n        match b with\n        | Int32.MaxValue «x» -> ignore ‹x›\n        | _ -> ()\n",
+        Expect::Abandoned,
+    ),
+    namesake_union_cell(
+        // `System.Environment.SpecialFolder`, a nested type: FS0730.
+        "assembly_namesake_nested_type",
+        "    let f (b: Environment<int>) =\n        match b with\n        | Environment.SpecialFolder «x» -> ignore ‹x›\n        | _ -> ()\n",
+        Expect::Abandoned,
+    ),
+    namesake_union_cell(
+        // A property finds nothing in pattern position, so FCS reaches the
+        // union and binds `x`; the walk's rule is name-only and declines it.
+        "assembly_namesake_property",
+        "    let f (b: String<int>) =\n        match b with\n        | String.Length «x» -> ‹x›\n        | _ -> 0\n",
+        Expect::Opaque,
+    ),
+    ProjectCell {
+        // The record's namespace is opened later, so FCS tries it first:
+        // FS0728, FS0729.
+        id: "project_namesake_record_field",
+        earlier: PROJECT_NAMESAKES,
+        prelude: "module P\nopen N2\nopen N1\nlet x = \"outer\"\n",
+        template: "let f (b: N2.T<int>) =\n    match b with\n    | T.C «x» -> ignore ‹x›\n    | _ -> ()\n",
+        binder: Expect::Abandoned,
+    },
+    ProjectCell {
+        // Opened the other way round, FCS tries the union first and binds
+        // `x`: it orders a pattern head's namesakes latest first, not by
+        // arity. The walk declines a head another project type may take.
+        id: "project_namesake_record_field_opened_first",
+        earlier: PROJECT_NAMESAKES,
+        prelude: "module P\nopen N1\nopen N2\nlet x = \"outer\"\n",
+        template: "let f (b: N2.T<int>) =\n    match b with\n    | T.C «x» -> ‹x›\n    | _ -> 0\n",
+        binder: Expect::Opaque,
+    },
+    ProjectCell {
+        // The union is this file's, so the guard declines it in-file.
+        id: "in_file_union_assembly_namesake_lacks_the_case_name",
+        earlier: &[],
+        prelude: "module P\nopen System.Reflection\ntype MethodBody<'a> =\n    | Il of 'a\n    | Jit of 'a\nlet x = \"outer\"\n",
+        template: "let f (b: MethodBody<int>) =\n    match b with\n    | MethodBody.Il «x» -> ‹x›\n    | _ -> 0\n",
+        binder: Expect::Interned,
+    },
+    ProjectCell {
+        // `System` is opened after the union, so FCS tries `System.String`
+        // first: FS0729.
+        id: "in_file_union_assembly_namesake_field_opened_later",
+        earlier: &[],
+        prelude: "module P\ntype String<'a> =\n    | Empty of 'a\n    | Length of 'a\nopen System\nlet x = \"outer\"\n",
+        template: "let f (b: String<int>) =\n    match b with\n    | String.Empty «x» -> ignore ‹x›\n    | _ -> ()\n",
+        binder: Expect::Abandoned,
+    },
+    ProjectCell {
+        // Opened before it, FCS tries the union first and binds `x`; the
+        // walk declines, as `System.String` finds `Empty`.
+        id: "in_file_union_assembly_namesake_field_opened_first",
+        earlier: &[],
+        prelude: "module P\nopen System\ntype String<'a> =\n    | Empty of 'a\n    | Length of 'a\nlet x = \"outer\"\n",
+        template: "let f (b: String<int>) =\n    match b with\n    | String.Empty «x» -> ‹x›\n    | _ -> 0\n",
+        binder: Expect::Opaque,
+    },
+    ProjectCell {
+        id: "in_file_namesake_record_field",
+        earlier: &[PROJECT_NAMESAKES[0]],
+        prelude: "module P\nopen N2\ntype T = { C: int }\nlet x = \"outer\"\n",
+        template: "let f (b: N2.T<int>) =\n    match b with\n    | T.C «x» -> ignore ‹x›\n    | _ -> ()\n",
+        binder: Expect::Abandoned,
+    },
+];
+
+fn range_of(start: usize, end: usize) -> TextRange {
+    TextRange::new(
+        u32::try_from(start).unwrap().into(),
+        u32::try_from(end).unwrap().into(),
+    )
+}
+
+/// Each [`NAMESAKE_CELLS`] cell checked as a project against `uses-project`,
+/// under the reference assemblies: FCS checks against the BCL, which holds
+/// the namesakes, so an environment without them would answer another
+/// question.
+#[test]
+fn binders_under_a_namesake_declined_head_follow_fcs() {
+    let env = full_bcl_env();
+    let mut failures = Vec::new();
+    for cell in NAMESAKE_CELLS {
+        let (src, binders, uses) = materialise(cell.template);
+        let src = format!("{}{}", cell.prelude, &src[PRELUDE.len()..]);
+        let shift = |r: &TextRange| {
+            let at = |o: borzoi_cst::syntax::TextSize| {
+                usize::from(o) - PRELUDE.len() + cell.prelude.len()
+            };
+            range_of(at(r.start()), at(r.end()))
+        };
+        let [binder] = binders.iter().map(shift).collect::<Vec<_>>()[..] else {
+            panic!("{}: one binder per cell", cell.id);
+        };
+        let uses: Vec<TextRange> = uses.iter().map(shift).collect();
+        let mut files: Vec<(&str, &str)> = cell.earlier.to_vec();
+        files.push(("NamesakeUse.fs", &src));
+        let (root, written) = temp_fs_tree(&format!("namesake_head_{}", cell.id), &files);
+        let paths: Vec<&Path> = written.iter().map(|(p, _)| p.as_path()).collect();
+        let fcs = parse_fcs_uses_project(&invoke_fcs_dump_project_with_refs(&paths, &[]), &written);
+        let _ = std::fs::remove_dir_all(&root);
+        let last = written.len() - 1;
+        let use_file = written[last].0.file_name();
+        let file = fcs
+            .iter()
+            .find(|f| f.path.file_name() == use_file)
+            .expect("the use file's uses");
+        let proj = resolve_project_files(&project(&files), env);
+        let rf = proj.file(last);
+
+        let oracle_binders = project_oracle_binders(file);
+        let oracle = oracle_binders
+            .iter()
+            .find(|b| b.range == binder && b.introduces_a_name());
+        match (cell.binder, oracle) {
+            (Expect::Abandoned, Some(_)) => failures.push(format!(
+                "{}: FCS binds {binder:?}, which the cell says it abandons",
+                cell.id
+            )),
+            (Expect::Abandoned, None) => {
+                if rf.defs().any(|d| d.range == binder) || !rf.opaque_binders().contains(&binder) {
+                    failures.push(format!(
+                        "{}: FCS abandons {binder:?}, but the walk does not decline it",
+                        cell.id
+                    ));
+                }
+            }
+            (_, None) => failures.push(format!(
+                "{}: FCS does not bind {binder:?}, which the cell says it does",
+                cell.id
+            )),
+            (expect, Some(oracle)) => {
+                let want = if expect == Expect::Interned {
+                    BinderVerdict::Interned
+                } else {
+                    BinderVerdict::Opaque
+                };
+                let got = binder_verdict(rf, oracle);
+                if got != want {
+                    failures.push(format!(
+                        "{}: {binder:?} pinned {want:?}, observed {got:?}",
+                        cell.id
+                    ));
+                }
+            }
+        }
+        // An interned binder's uses commit to it; no use commits to anything
+        // but what FCS declares.
+        for &u in &uses {
+            let oracle_decl = file
+                .uses
+                .iter()
+                .find(|o| range_of(o.start, o.end) == u)
+                .and_then(|o| o.decl.as_ref())
+                .filter(|d| d.file.file_name() == use_file)
+                .map(|d| range_of(d.start, d.end));
+            match rf.resolution_at(u) {
+                None | Some(Resolution::Deferred(_)) if cell.binder != Expect::Interned => {}
+                Some(res)
+                    if oracle_decl.is_some()
+                        && rf.resolved_def(res).map(|d| d.range) == oracle_decl => {}
+                other => failures.push(format!(
+                    "{}: the use at {u:?} gives {other:?}; FCS declares it at {oracle_decl:?}",
+                    cell.id
+                )),
+            }
+        }
+        failures.extend(unmodelled_project_binder_failures(
+            cell.id, &proj, &written, &fcs,
+        ));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
