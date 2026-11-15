@@ -59,10 +59,10 @@ use super::properties::escaping::Escaped;
 use super::properties::{Issue, PropertyMap, substitute, substitute_with_fs};
 
 /// The file-system queries a condition may make: `exists` answers
-/// `Exists('…')` for a decoded, trimmed path, and the property functions
-/// that probe the file system (`GetDirectoryNameOfFileAbove`) query through
-/// `observer`. A condition evaluated without them treats both as
-/// unsupported.
+/// `Exists('…')` for one decoded, trimmed entry of its argument's list,
+/// and the property functions that probe the file system
+/// (`GetDirectoryNameOfFileAbove`) query through `observer`. A condition
+/// evaluated without them treats both as unsupported.
 #[derive(Clone, Copy)]
 pub(crate) struct Probes<'a> {
     pub exists: &'a dyn Fn(&str) -> bool,
@@ -1238,11 +1238,29 @@ fn eval_bool(
             let Some(fs) = fs else {
                 return Err(());
             };
-            let path = expand_for_condition(raw, props, Some(fs.observer), undefined)?;
-            // Trim the *padding*, then decode: an escaped `%20` is part of the
-            // filename, not padding around it. `Exists('path%20')` probes the
-            // file literally named `path ` and finds it (oracle-pinned).
-            Ok((fs.exists)(&path.trimmed_unescaped()))
+            let value = expand_for_condition(raw, props, Some(fs.observer), undefined)?;
+            // MSBuild expands the argument into an item list and asks about
+            // every entry: true when each exists, false for an empty list
+            // (`ExpandArgumentAsFileList`). The split and the trim happen in
+            // the escaped domain, as for `HasTrailingSlash` below: an escaped
+            // `%3b` is filename data, not a separator, and an escaped `%20` is
+            // data, not padding. Oracle-pinned: `Exists('a;b')` is true with
+            // files `a` and `b` and none named `a;b`, `Exists('a%3bb')` asks
+            // about `a;b`, and `Exists('path%20')` about `path `.
+            let entries: Vec<Escaped> = value.split_list().collect();
+            // A `\` written as `%5c` decodes after MSBuild has asked whether
+            // the entry is rooted, and acts as a separator only after that.
+            // Oracle-pinned: `Exists('%5c<an existing absolute path>')` is
+            // false, while `Exists('d%5cg')` is true with `d/g` and
+            // `Exists('d/up%5c..%5cg')` collapses the `..` as text. Decline
+            // rather than model that order.
+            if entries
+                .iter()
+                .any(|entry| entry.as_escaped().to_ascii_lowercase().contains("%5c"))
+            {
+                return Err(());
+            }
+            Ok(!entries.is_empty() && entries.iter().all(|entry| (fs.exists)(&entry.unescape())))
         }
         BoolExpr::HasTrailingSlash(raw) => {
             let value = expand_for_condition(raw, props, fs.map(|fs| fs.observer), undefined)?;

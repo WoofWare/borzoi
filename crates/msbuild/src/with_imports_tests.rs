@@ -23,6 +23,8 @@ mod cycles_and_failures;
 mod directory_build;
 mod directory_build_import_point;
 mod directory_build_position;
+#[cfg(unix)]
+mod exists_probes;
 mod explicit_imports;
 mod foreign_definitions;
 mod fsharp_core_netsdk_props;

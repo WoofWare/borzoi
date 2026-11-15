@@ -104,6 +104,7 @@ use roxmltree::Node;
 use crate::document::attribute;
 
 use super::condition;
+use super::dotnet_io;
 use super::observed;
 use super::properties;
 use super::properties::trust::{
@@ -655,9 +656,11 @@ fn names_one_file(state: &State<'_>, path_name: &str) -> bool {
         .is_none_or(|value| !value.as_escaped().contains(';') && !value.is_filespec_wildcard())
 }
 
-/// [`point_path`], if the file exists.
+/// [`point_path`], if `Exists()` of it is true: what a point guarded by that
+/// `Exists` imports.
 fn named_file(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf> {
-    point_path(state, path_name, dir).filter(|path| observed::exists(state.observer, path))
+    point_path(state, path_name, dir)
+        .filter(|path| dotnet_io::file_or_directory_exists(state.observer, path))
 }
 
 /// Whether a read of `name` now is what the real build reads. An undefined

@@ -292,3 +292,68 @@ fn file_above_intrinsics_are_exact_or_declined() {
         "the sweep must reach both declines ({declined}) and MSBuild rejections ({msbuild_rejected})"
     );
 }
+
+/// What sits at a level under the marker's name, for
+/// [`file_above_marker_kinds_are_exact_or_declined`].
+#[derive(Debug, Clone, Copy)]
+enum MarkerKind {
+    File,
+    Directory,
+    LinkToFile,
+    LinkToDirectory,
+    /// A symlink whose target is missing: .NET's `File.Exists` counts it.
+    DanglingLink,
+    /// A symlink to itself: `stat` fails, `lstat` does not.
+    LinkLoop,
+}
+
+/// The probe both intrinsics make is .NET's `File.Exists`, not the OS's idea of
+/// a regular file: a dangling symlink stops the search, and a directory of the
+/// marker's name does not. Each kind sits at `a/b`, with a real marker at the
+/// root, so a probe that misjudges it names the wrong directory.
+#[test]
+#[cfg(unix)]
+fn file_above_marker_kinds_are_exact_or_declined() {
+    use std::os::unix::fs::symlink;
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let mut divergences = Vec::new();
+    let mut committed = 0usize;
+    for kind in [
+        MarkerKind::File,
+        MarkerKind::Directory,
+        MarkerKind::LinkToFile,
+        MarkerKind::LinkToDirectory,
+        MarkerKind::DanglingLink,
+        MarkerKind::LinkLoop,
+    ] {
+        let root = tmp.path().join(format!("{kind:?}"));
+        let project_path = build_tree(&root, 0b0001);
+        let level = root.join("a/b");
+        let marker = level.join(MARKER);
+        match kind {
+            MarkerKind::File => std::fs::write(&marker, "<Project />").unwrap(),
+            MarkerKind::Directory => std::fs::create_dir(&marker).unwrap(),
+            MarkerKind::LinkToFile => {
+                std::fs::write(level.join("real.props"), "<Project />").unwrap();
+                symlink("real.props", &marker).unwrap();
+            }
+            MarkerKind::LinkToDirectory => symlink("c", &marker).unwrap(),
+            MarkerKind::DanglingLink => symlink("missing.props", &marker).unwrap(),
+            MarkerKind::LinkLoop => symlink(MARKER, &marker).unwrap(),
+        }
+        for form in [Form::Path, Form::Dir] {
+            let xml = project_xml(&form.expression(STARTS[0].1));
+            let (ours, theirs) = evaluate(&mut oracle, &project_path, &xml);
+            match (&ours, &theirs) {
+                (Some(ours), Some(theirs)) if ours == theirs => committed += 1,
+                (Some(ours), theirs) => divergences.push(format!(
+                    "{kind:?} {form:?}: committed {ours:?}, MSBuild says {theirs:?}"
+                )),
+                (None, _) => {}
+            }
+        }
+    }
+    assert!(divergences.is_empty(), "{}", divergences.join("\n"));
+    assert_eq!(committed, 12, "every case commits");
+}

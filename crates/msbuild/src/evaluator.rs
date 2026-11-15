@@ -70,6 +70,7 @@ use super::diagnostic::{
     PackageReferenceUncertaintyCauseKind, StructuralCompileItemUncertainty,
     StructuralPackageReferenceUncertainty,
 };
+use super::dotnet_io;
 use super::imports::normalise;
 use super::observed::{self, EntryKind, Observer, ReadCounts, ReadSet};
 use super::properties::escaping::Escaped;
@@ -3666,6 +3667,11 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     let mut chosen: Option<Node<'_, '_>> = None;
     let mut undecided: Option<(usize, Option<UnpinnedRoot>)> = None;
     let mut choice_stale: Option<properties::trust::StaleCause> = None;
+    // A `<When>` resolves `Exists` against the entry project, wherever the
+    // `<Choose>` is: MSBuild's `GetCurrentDirectoryForConditionEvaluation`
+    // gives the containing file's directory only to a property group, an
+    // import and an import group.
+    let exists_dir = state.entry_project_dir.clone();
     for (index, when) in whens.iter().enumerate() {
         if choice_stale.is_none() {
             choice_stale = attribute(*when, "Condition")
@@ -3681,12 +3687,12 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             .as_deref()
             .is_some_and(|condition| {
                 state
-                    .condition_trust(condition, Some(current_file_dir))
+                    .condition_trust(condition, Some(&exists_dir))
                     .sdk_package()
                     .is_some()
             });
         let diagnostics_before = state.diagnostics.len();
-        let gate = evaluate_condition(*when, current_file_dir, state);
+        let gate = evaluate_condition(*when, &exists_dir, state);
         let maybe_wrong =
             state.diagnostics.len() != diagnostics_before || matches!(gate, CondGate::Unsupported);
         if maybe_wrong || uses_sdk_taint {
@@ -4494,18 +4500,24 @@ fn evaluate_property_condition(node: Node<'_, '_>, state: &mut State<'_>) -> Con
     evaluate_condition_with_exemptions(node, &base_dir, state, &self_name)
 }
 
-fn condition_exists(observer: &Observer, path: &str, current_file_dir: &Path) -> bool {
+/// `Exists('…')` for one entry of its argument (decoded and trimmed), resolved
+/// against `current_file_dir` as MSBuild resolves it
+/// (`FunctionCallExpressionNode.ExpandArgumentAsFileList`): a `\` is a
+/// separator, an unrooted entry is `Path.GetFullPath(Path.Combine(dir,
+/// entry))`, and existence is .NET's ([`dotnet_io::file_or_directory_exists`]),
+/// which collapses `..` as text and counts a dangling symlink.
+pub(crate) fn condition_exists(observer: &Observer, path: &str, current_file_dir: &Path) -> bool {
     if path.is_empty() {
         return false;
     }
     let normalised = path.replace('\\', "/");
     let path = Path::new(&normalised);
-    let resolved = if path.is_absolute() {
+    let resolved = if path.has_root() {
         path.to_path_buf()
     } else {
         current_file_dir.join(path)
     };
-    observed::exists(observer, &resolved)
+    dotnet_io::file_or_directory_exists(observer, &resolved)
 }
 
 fn emit_unsupported_condition(node: Node<'_, '_>, state: &mut State<'_>) {
@@ -5125,13 +5137,15 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
     // file *at this position in the body*. The two well-known stems
     // use the explicit `SdkPaths::{props, targets}` fields; any other
     // `Project` value is resolved against the SDK's directory exactly as
-    // MSBuild resolves it: `Path.Combine(sdkResult.Path, project)`, then
+    // MSBuild resolves it: `Path.Combine(sdkResult.Path, project)` of the
+    // attribute *as written*, then expanded, then
     // `FileUtilities.NormalizePath` (Evaluator.cs). So `..` may leave the
     // SDK directory — the Web SDK's `Sdk.Server.targets` imports
     // `Microsoft.NET.Sdk.Web.ProjectSystem`'s
     // `..\targets\Microsoft.NET.Sdk.Web.BeforeCommon.targets`, and the
-    // Worker SDK the same directory's `DefaultItems.props` — and an
-    // absolute `Project` names its own file. Neither confines what a
+    // Worker SDK the same directory's `DefaultItems.props` — and a
+    // `Project` written rooted names its own file, while one a property
+    // makes rooted is appended to the SDK directory. Neither confines what a
     // project can read: a plain `<Import Project=...>` reaches any path
     // already. A missing entry point surfaces as
     // `ImportFailed::NotFound` from the IO path. Without a resolver,
@@ -5274,12 +5288,26 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // `normalise` drops the separator and macOS's `realpath` accepts a
         // file spelt with one, so refuse it here rather than at the IO path.
         let names_directory = relative.ends_with('/');
+        // `Path.Combine(root, Project)` runs on the attribute as written, `\`
+        // already `/` (`ProjectImportElement.Project`'s `FixFilePath`), and
+        // the expansion comes after: only a `Project` written rooted replaces
+        // the root. One a property makes rooted is appended to it, and the
+        // separator it doubles collapses in `NormalizePath` (probed,
+        // `dotnet msbuild` 10.0.401: `Project="$(P)"` with `P=/abs/x.props`
+        // names `…/Sdk//abs/x.props`).
+        let written_rooted = project_attr_raw.replace('\\', "/").starts_with('/');
+        let under_root = if written_rooted {
+            relative.as_str()
+        } else {
+            relative.trim_start_matches('/')
+        };
         let walk_under = |root: &Path, state: &mut State<'_>| {
             // MSBuild imports `Path.Combine(root, Project)` as an escaped
-            // import expression, so the root is re-parsed too: a `;` splits it
-            // into a list, `*`/`?` glob and `%XX` decodes. A root holding one
-            // names something else to MSBuild; decline.
-            if root.to_string_lossy().contains(['%', ';', '*', '?']) {
+            // import expression, so the root is re-parsed too: a `$(` expands,
+            // a `;` splits it into a list, `*`/`?` glob and `%XX` decodes. A
+            // root holding one names something else to MSBuild; decline.
+            let root_text = root.to_string_lossy();
+            if root_text.contains(['%', ';', '*', '?']) || root_text.contains("$(") {
                 state.push(
                     DiagnosticKind::UnsupportedConstruct {
                         element: format!(
@@ -5303,12 +5331,12 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             // `NormalizePath` is `GetFullPath`: a relative root resolves
             // against the working directory *before* `..` collapses, so a
             // leading `..` that `normalise` alone could not pop still climbs.
-            let joined = match std::path::absolute(root.join(&relative)) {
+            let joined = match std::path::absolute(root.join(under_root)) {
                 Ok(joined) => joined,
                 Err(e) => {
                     state.push(
                         DiagnosticKind::ImportFailed {
-                            path: root.join(&relative),
+                            path: root.join(under_root),
                             reason: ImportFailReason::Io {
                                 message: e.to_string(),
                             },

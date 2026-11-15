@@ -42,22 +42,24 @@
 use std::path::{Component, Path, PathBuf};
 
 use super::diagnostic::{Diagnostic, DiagnosticKind, DiagnosticOrigin, ImplicitImportKind};
-use super::observed::{self, Observer};
+use super::dotnet_io;
+use super::observed::Observer;
 
 /// Walk `project_path`'s ancestor directories and return one diagnostic
 /// per implicit-import file kind that exists somewhere on the chain.
 ///
 /// `project_path` does **not** need to exist on disk — only its lexical
 /// ancestry is consulted (via [`Path::ancestors`], which is purely
-/// string-based). Each candidate ancestor *is* stat-ed, through
-/// `observer`, to confirm the discovered file actually exists
-/// and is a regular file (not e.g. a directory of the same name).
+/// string-based). Each candidate is asked about through `observer` as
+/// the SDK's `GetDirectoryNameOfFileAbove` asks, with .NET's `File.Exists`
+/// (`dotnet_io::file_exists`): a directory of the same name is not
+/// found, and a dangling symlink is.
 ///
 /// **`project_path` must be rooted**: non-rooted paths return an
 /// empty vector unconditionally. With a relative path,
 /// `Path::parent()` returns `Some("")` for a bare filename or
 /// `Some(".")` for a `./`-prefixed name; joining a well-known
-/// filename onto either yields a relative path that `is_file`
+/// filename onto either yields a relative path that a probe
 /// resolves against the *process working directory*, which is not
 /// what the caller asked us to probe. We refuse to guess. The
 /// pure-parsing entry point ([`parse_fsproj`](super::parse_fsproj))
@@ -90,7 +92,7 @@ pub fn detect_implicit_imports(project_path: &Path, observer: &Observer) -> Vec<
         // itself (`/`) or for an empty path. Nothing useful to walk.
         None => return Vec::new(),
     };
-    // Non-rooted project_dir would force every `is_file` probe to be
+    // Non-rooted project_dir would force every probe to be
     // cwd-relative. Refuse, per the doc above.
     if !project_dir.has_root() {
         return Vec::new();
@@ -104,7 +106,7 @@ pub fn detect_implicit_imports(project_path: &Path, observer: &Observer) -> Vec<
     for ancestor in project_dir.ancestors() {
         if !found_props {
             let candidate = ancestor.join("Directory.Build.props");
-            if observed::is_file(observer, &candidate) {
+            if dotnet_io::file_exists(observer, &candidate) {
                 out.push(make_diagnostic(
                     candidate,
                     ImplicitImportKind::DirectoryBuildProps,
@@ -114,7 +116,7 @@ pub fn detect_implicit_imports(project_path: &Path, observer: &Observer) -> Vec<
         }
         if !found_targets {
             let candidate = ancestor.join("Directory.Build.targets");
-            if observed::is_file(observer, &candidate) {
+            if dotnet_io::file_exists(observer, &candidate) {
                 out.push(make_diagnostic(
                     candidate,
                     ImplicitImportKind::DirectoryBuildTargets,
@@ -124,7 +126,7 @@ pub fn detect_implicit_imports(project_path: &Path, observer: &Observer) -> Vec<
         }
         if !found_packages {
             let candidate = ancestor.join("Directory.Packages.props");
-            if observed::is_file(observer, &candidate) {
+            if dotnet_io::file_exists(observer, &candidate) {
                 out.push(make_diagnostic(
                     candidate,
                     ImplicitImportKind::DirectoryPackagesProps,
