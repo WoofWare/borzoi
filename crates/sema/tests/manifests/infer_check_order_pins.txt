@@ -3,7 +3,7 @@
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all infer_check_order_pins::
 access-before-grounding binder 4-6 `r6`	ours - fcs System.String -> 'a * System.Int32
 access-before-grounding binder 7-8 `x`	ours - fcs System.String
-access-before-grounding census	[UndecidedAccess]
+access-before-grounding census	[IndeterminateReceiver]
 access-before-grounding fcs	errors FS0072
 access-before-grounding node 12-20 `x.Length`	ours - fcs 'a
 access-before-grounding node 12-29 `x.Length, monos x`	ours - fcs 'a * System.Int32
@@ -83,7 +83,7 @@ id-wrapped-access node 21-35 `(idf x).Length`	ours System.Int32 fcs System.Int32
 id-wrapped-access node 22-27 `idf x`	ours System.String fcs System.String
 id-wrapped-access node 26-27 `x`	ours - fcs System.String
 id-wrapped-lambda-access binder 4-6 `r3`	ours System.Int32 fcs System.Int32
-id-wrapped-lambda-access census	[Lambda, UndecidedAccess]
+id-wrapped-lambda-access census	[Lambda, IndeterminateReceiver]
 id-wrapped-lambda-access fcs	clean
 id-wrapped-lambda-access node 16-39 `idf (fun s -> s.Length)`	ours - fcs System.String -> System.Int32
 id-wrapped-lambda-access node 21-38 `fun s -> s.Length`	ours - fcs System.String -> System.Int32
@@ -91,7 +91,7 @@ id-wrapped-lambda-access node 30-31 `s`	ours - fcs System.String
 id-wrapped-lambda-access node 30-38 `s.Length`	ours - fcs System.Int32
 id-wrapped-lambda-access node 9-40 `apply (idf (fun s -> s.Length))`	ours System.Int32 fcs System.Int32
 lambda-access binder 4-6 `r4`	ours System.Int32 fcs System.Int32
-lambda-access census	[Lambda, UndecidedAccess]
+lambda-access census	[Lambda, IndeterminateReceiver]
 lambda-access fcs	clean
 lambda-access node 16-33 `fun s -> s.Length`	ours - fcs System.String -> System.Int32
 lambda-access node 25-26 `s`	ours - fcs System.String

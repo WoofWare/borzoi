@@ -227,7 +227,8 @@
 //!   segment). FCS decides an access at the access, so one still suspended
 //!   there — a variable receiver (FS0072), a generic one, an overload whose
 //!   arguments are not known — is **declined**: it records nothing, its
-//!   result is tainted, and the prefix ends ([`Incomplete::UndecidedAccess`]).
+//!   result is tainted, and the prefix ends ([`Incomplete::IndeterminateReceiver`]
+//!   and the other reasons an access is declined).
 //!   So is an `Array`/`Tuple`/`Fun`/`Param` head (arrays' `.Length` is
 //!   intrinsic, out of scope), and a `Named` one no member answers.
 //! - **Lookup + bridge.** [`AssemblyEnv::lookup_type`] (the receiver type, arity 0)
@@ -929,11 +930,34 @@ pub enum Incomplete {
     /// typed through that loosening: `let f (g: obj -> 'a) = g` is
     /// `(obj -> 'a) -> 'b -> 'a` in FCS. Its variables are poisoned.
     LoosenedUse,
-    /// A member access whose receiver is not known at the access, once what
-    /// came before it is settled: a variable, a generic receiver, an overload
-    /// whose arguments are not yet known. FCS decides the access there
-    /// (FS0072 on a variable), so the access is declined and records nothing.
-    UndecidedAccess,
+    /// A member access whose receiver's type is a variable at the access.
+    /// FCS decides the access there — FS0072, or a lookup on `obj` after
+    /// solving what it can of the receiver — so the access is declined and
+    /// records nothing.
+    IndeterminateReceiver,
+    /// A member access whose receiver is a generic type at the access, which
+    /// the member lookup (by name, at arity 0) cannot tell from a non-generic
+    /// one of the same name: declined.
+    GenericReceiver,
+    /// A member access whose receiver is an array, a tuple, a function or a
+    /// generalised type parameter at the access, which has no assembly entity
+    /// to look a member up on (an array's `.Length` is intrinsic): declined.
+    ReceiverShape,
+    /// A member access on an assembly type no member of whose name is
+    /// identified there: there is none, the receiver's type or its group of
+    /// that name is not provably complete, or the receiver type is not
+    /// certainly the one FCS binds. Declined.
+    NoSuchMember,
+    /// A method call whose name an extension member in scope may also have,
+    /// which would join FCS's method group: the intrinsic group is not
+    /// provably FCS's, so the call is declined.
+    ExtensionInScope,
+    /// A method call whose group is known but which no single candidate is
+    /// committed for: its arguments are not known at the call, no candidate
+    /// or more than one applies, the one candidate is of a shape not modelled
+    /// (generic, byref, curried, measured), or its arguments are not a plain
+    /// positional list. Declined.
+    OverloadUnresolved,
     /// A unification that failed with an open variable on one side: FCS's
     /// error path may bind part of it, so what FCS knows afterwards is not
     /// known here.

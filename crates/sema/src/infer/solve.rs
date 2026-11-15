@@ -126,21 +126,30 @@ impl<'a> Gen<'a> {
     /// arguments are not known), which FCS rejects or decides by what
     /// inference does not see. A declined access records nothing, its result
     /// is [tainted](Self::taint), and the binding's prefix ends
-    /// ([`Incomplete::UndecidedAccess`]); it never wakes later, since a later
+    /// ([`Incomplete::IndeterminateReceiver`], [`Incomplete::GenericReceiver`],
+    /// [`Incomplete::OverloadUnresolved`]); it never wakes later, since a later
     /// wake is one FCS did not make at the access.
     ///
     /// Every access settles where it is generated, so what is still suspended
     /// after the settle is this access's.
     pub(super) fn settle_access(&mut self, scope: &mut Scope) {
         self.settle(scope);
-        let mut declined = false;
+        let mut declined = Vec::new();
         for c in std::mem::take(&mut self.solver.constraints) {
-            let Constraint::HasMember { result, .. } = c;
+            let Constraint::HasMember { recv, result, .. } = c;
+            let head = self.solver.table.resolve(self.solver.tys.var(recv));
+            // A worklist that never woke the access left one of three heads:
+            // a variable, a generic receiver it does not look up, or a named
+            // one whose overload asked to retry on arguments not yet known.
+            declined.push(match self.solver.tys.kind(head) {
+                TyKind::Var(_) => Incomplete::IndeterminateReceiver,
+                TyKind::Named { args, .. } if !args.is_empty() => Incomplete::GenericReceiver,
+                _ => Incomplete::OverloadUnresolved,
+            });
             self.taint(scope, self.solver.tys.var(result));
-            declined = true;
         }
-        if declined {
-            scope.mark_incomplete(Incomplete::UndecidedAccess);
+        for why in declined {
+            scope.mark_incomplete(why);
         }
     }
 
@@ -220,8 +229,8 @@ impl<'a> Gen<'a> {
                                 ) {
                                     self.taint(scope, self.solver.tys.var(m.result));
                                 }
-                                if wake == Wake::Declined {
-                                    scope.mark_incomplete(Incomplete::UndecidedAccess);
+                                if let Wake::Declined(why) = wake {
+                                    scope.mark_incomplete(why);
                                 }
                             }
                         }
@@ -241,7 +250,7 @@ impl<'a> Gen<'a> {
                     | TyKind::Param(_) => {
                         woke = true;
                         self.taint(scope, self.solver.tys.var(m.result));
-                        scope.mark_incomplete(Incomplete::UndecidedAccess);
+                        scope.mark_incomplete(Incomplete::ReceiverShape);
                     }
                     // Any other member of a project type is not modelled: drop
                     // the constraint, leaving the access's (poisoned) result

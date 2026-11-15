@@ -48,8 +48,9 @@ pub(super) enum Wake {
     /// The member was identified and its resolution recorded; its result is
     /// bound to the member's type where that type is read.
     Resolved,
-    /// No member is identified: the access is declined.
-    Declined,
+    /// No member is identified: the access is declined, for the reason it
+    /// carries.
+    Declined(Incomplete),
     /// An overload whose arguments are not yet known.
     Retry,
 }
@@ -194,7 +195,7 @@ impl<'a> Gen<'a> {
                 // FS0072, so nothing after is decided against it.
                 let head = self.solver.table.resolve(self.solver.tys.var(recv));
                 if matches!(self.solver.tys.kind(head), TyKind::Var(_)) {
-                    scope.mark_incomplete(Incomplete::UndecidedAccess);
+                    scope.mark_incomplete(Incomplete::IndeterminateReceiver);
                 }
                 (recv, method_tok, false)
             };
@@ -790,7 +791,7 @@ impl<'a> Gen<'a> {
         kind: &MemberAccessKind,
     ) -> Wake {
         let Some((type_name, namespace)) = path.split_last() else {
-            return Wake::Declined;
+            return Wake::Declined(Incomplete::NoSuchMember);
         };
         // The receiver is a non-generic `TyKind::Named`, so arity 0. A missing entity is
         // silence. The member lookup below walks this entity's base chain (Stage
@@ -811,7 +812,7 @@ impl<'a> Gen<'a> {
             .env
             .lookup_type_if_certain(namespace, type_name, 0)
         else {
-            return Wake::Declined;
+            return Wake::Declined(Incomplete::NoSuchMember);
         };
         let looked_up = match kind {
             MemberAccessKind::Data => self.facts.env.instance_data_member(handle, name),
@@ -823,7 +824,7 @@ impl<'a> Gen<'a> {
                 // member resolution recorded, since an ill-formed call has no
                 // resolution FCS would agree on).
                 let Some(arg_vids) = args else {
-                    return Wake::Declined;
+                    return Wake::Declined(Incomplete::OverloadUnresolved);
                 };
                 // Resolve each argument's inference variable to its (possibly still
                 // open) ground type — the applicability matcher's input.
@@ -843,7 +844,7 @@ impl<'a> Gen<'a> {
                     .ext_scope
                     .absent(self.facts.env, name, *is_static)
                 {
-                    return Wake::Declined;
+                    return Wake::Declined(Incomplete::ExtensionInScope);
                 }
                 // The provably-complete intrinsic method group (§4.1(1)(2)(3)(5)),
                 // instance or static per the call shape (OV-7); an incomplete group
@@ -855,7 +856,7 @@ impl<'a> Gen<'a> {
                     self.facts.env.instance_method_group(handle, name)
                 };
                 let Some(group) = group else {
-                    return Wake::Declined;
+                    return Wake::Declined(Incomplete::NoSuchMember);
                 };
                 // **Curried-member gate** (OV-6.1; plan §5). An F# member with
                 // several argument groups (`member x.M a b`) compiles to a
@@ -875,7 +876,7 @@ impl<'a> Gen<'a> {
                 if group.iter().any(|(_, _, m)| {
                     m.signature.parameters.len() >= 2 && m.arg_group_count != Some(1)
                 }) {
-                    return Wake::Declined;
+                    return Wake::Declined(Incomplete::OverloadUnresolved);
                 }
                 match group.as_slice() {
                     // FCS's **single-candidate shortcut** (§2.2): one intrinsic
@@ -954,7 +955,7 @@ impl<'a> Gen<'a> {
                         if !group.iter().all(|(level, _, _)| {
                             self.facts.env.member_types_keep_their_measures(*level)
                         }) {
-                            return Wake::Declined;
+                            return Wake::Declined(Incomplete::OverloadUnresolved);
                         }
                         self.facts
                             .env
@@ -972,7 +973,10 @@ impl<'a> Gen<'a> {
         // (Stage 3.x-inh). The member resolution is recorded under it so hover /
         // go-to-def point at the declaring type.
         let Some((decl_handle, idx, member_ty_ref)) = looked_up else {
-            return Wake::Declined;
+            return Wake::Declined(match kind {
+                MemberAccessKind::Data => Incomplete::NoSuchMember,
+                MemberAccessKind::Method { .. } => Incomplete::OverloadUnresolved,
+            });
         };
         // Bridge the member type before touching `self` mutably (the borrow of
         // `member_ty_ref` from `self.facts.env` would otherwise conflict with the insert
