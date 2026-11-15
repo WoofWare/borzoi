@@ -300,22 +300,56 @@ fn impl_module_includes_trailing_trivia(module: &SyntaxNode, decls: &[ModuleDecl
     }
     match decls.last() {
         Some(ModuleDecl::Expr(expr)) => expr_decl_includes_trailing_trivia(expr.syntax()),
-        Some(ModuleDecl::NestedModule(nested)) => {
-            !(nested_module_has_own_end_token(nested)
-                && has_final_line_indent_tail(nested.syntax()))
-        }
+        Some(ModuleDecl::NestedModule(nested)) => !nested_module_end_closes_its_block(nested),
         Some(ModuleDecl::Exception(exception)) => !exception_decl_has_trailing_end_trim(exception),
         Some(ModuleDecl::Open(_) | ModuleDecl::Extern(_) | ModuleDecl::HashDirective(_)) => false,
         _ => true,
     }
 }
 
-fn nested_module_has_own_end_token(nested: &NestedModuleDecl) -> bool {
-    nested
-        .syntax()
-        .children_with_tokens()
+/// Whether a nested module's own `end` closes the block its `=` opens.
+///
+/// FCS ends the module at the `OBLOCKEND` closing that block, which the lex
+/// filter inserts at the first token offside of it: one starting left of the
+/// block's first token (`begin` or `struct`). An `end` that starts left of its
+/// `begin` is that token, so the module ends at it. Any other `end` leaves the
+/// block open until the next offside token, which for a file's last
+/// declaration is the end of the file, trailing trivia included.
+fn nested_module_end_closes_its_block(nested: &NestedModuleDecl) -> bool {
+    let node = nested.syntax();
+    let direct_tokens = || {
+        node.children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|token| !token.text_range().is_empty())
+    };
+    let Some(end) = direct_tokens().find(|token| token.kind() == SyntaxKind::END_TOK) else {
+        return false;
+    };
+    let Some(equals) = direct_tokens().find(|token| token.kind() == SyntaxKind::EQUALS_TOK) else {
+        return false;
+    };
+    let Some(block_start) = node
+        .descendants_with_tokens()
         .filter_map(|el| el.into_token())
-        .any(|token| token.kind() == SyntaxKind::END_TOK && !token.text_range().is_empty())
+        .filter(|token| !token.kind().is_trivia() && !token.text_range().is_empty())
+        .find(|token| token.text_range().start() >= equals.text_range().end())
+    else {
+        return false;
+    };
+    token_column(&end) < token_column(&block_start)
+}
+
+/// The column FCS's lexer gives `token`: UTF-16 code units from the start of
+/// its line.
+fn token_column(token: &SyntaxToken) -> usize {
+    let root = token
+        .parent_ancestors()
+        .last()
+        .expect("a token has a parent");
+    let text = root.text().to_string();
+    let start = usize::from(token.text_range().start());
+    let line_start = text[..start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
+    text[line_start..start].encode_utf16().count()
 }
 
 fn expr_decl_includes_trailing_trivia(expr_decl: &SyntaxNode) -> bool {
@@ -956,24 +990,6 @@ fn has_newline_between(node: &SyntaxNode, start: usize, end: usize) -> bool {
 fn root_text_end(node: &SyntaxNode) -> usize {
     let root = node.ancestors().last().unwrap_or_else(|| node.clone());
     usize::from(root.text_range().end())
-}
-
-fn has_final_line_indent_tail(node: &SyntaxNode) -> bool {
-    let end = node_source_range(node).end;
-    let root = node.ancestors().last().unwrap_or_else(|| node.clone());
-    let text = root.text().to_string();
-    let Some(tail) = text.get(end..) else {
-        return false;
-    };
-    let Some(after_line_break) = tail
-        .strip_prefix("\r\n")
-        .or_else(|| tail.strip_prefix('\n'))
-        .or_else(|| tail.strip_prefix('\r'))
-    else {
-        return false;
-    };
-
-    !after_line_break.is_empty() && after_line_break.chars().all(|ch| matches!(ch, ' ' | '\t'))
 }
 
 fn has_non_trivia_tokens(node: &SyntaxNode) -> bool {

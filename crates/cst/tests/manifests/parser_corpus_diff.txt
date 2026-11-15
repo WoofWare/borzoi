@@ -34,9 +34,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/Accessibil
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_orderingOfAccessibilityKeyword_member01.fs	both-reject outside-damage 2/2/3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_orderingOfAccessibilityKeyword_module01.fs	both-reject divergent 0/1/3 at:module[0]/NestedModule@87,module[0]/nested@80/Let@144,module[0]/nested@87/Let@144
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_orderingOfAccessibilityKeyword_type01.fs	both-reject exact 2/2/3
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AllowNullLiteral.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsMethod03.fs	both-reject outside-damage 5/5/7
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_VolatileField.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/EntryPoint/EntryPointAndAssemblyCulture.fs	non-utf8
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ExceptionDefinitions/E_BeginWithUppercase02.fsx	both-reject exact 1/1/2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ExceptionDefinitions/E_BeginWithUppercase03.fsx	both-reject exact 2/2/3

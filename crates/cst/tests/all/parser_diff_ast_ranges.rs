@@ -527,6 +527,28 @@ fn diff_ast_ranges_do_not_extend_anon_module_final_nested_module_to_trailing_whi
     assert_ast_ranges_match("module M = begin\n    let x = 1\nend\n           ");
 }
 
+/// An `end` left of its `begin` is offside of the block `=` opens, so the lex
+/// filter closes that block at it, whatever follows.
+#[test]
+fn diff_ast_ranges_end_anon_module_at_offside_nested_module_end() {
+    assert_ast_ranges_match("module M = begin\n    let x = 1\nend\n");
+    assert_ast_ranges_match("module M = begin\n    let x = 1\nend");
+    assert_ast_ranges_match("module M = begin\n    let x = 1\nend\n\n");
+    assert_ast_ranges_match("module M = begin\n    let x = 1\nend // c\n");
+    assert_ast_ranges_match("module M = begin\n    let x = 1\n          end\n");
+    assert_ast_ranges_match("module M =\n  begin\n    let x = 1\n end\n");
+}
+
+/// An `end` at or right of its `begin` leaves the block open to the end of the
+/// file.
+#[test]
+fn diff_ast_ranges_extend_anon_module_past_onside_nested_module_end() {
+    assert_ast_ranges_match("module M = begin let x = 1 end\n");
+    assert_ast_ranges_match("module M = begin\n    let x = 1\n           end\n");
+    assert_ast_ranges_match("module M = begin\n    let x = 1\n            end\n  ");
+    assert_ast_ranges_match("module M =\n  begin\n    let x = 1\n  end\n");
+}
+
 #[test]
 fn diff_ast_ranges_include_anon_module_final_indented_nested_module_trailing_whitespace() {
     assert_ast_ranges_match("module M =\n    let x = 1\n        ");
