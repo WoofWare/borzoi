@@ -367,7 +367,7 @@ fn triggers_cycle(xml: &str) -> bool {
         .any(|t| reaches(t, t, &edges, &mut Vec::new()))
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Tally {
     cases: usize,
     rejected: usize,
@@ -717,6 +717,39 @@ fn quoted_expressions_read_as_msbuild_reads_them() {
     for xml in CASES {
         check(&mut oracle, xml, &mut Tally::default());
     }
+}
+
+/// Element content roxmltree reads apart from MSBuild (#787): a carriage
+/// return, which MSBuild keeps where roxmltree folds it, as itself, split by
+/// a comment, spelt as a reference and beside an entity, in a property body
+/// and in a metadatum's, each read back by a later write and a condition. The
+/// executor reads each as MSBuild does, so every run commits, and must be
+/// MSBuild's.
+#[test]
+fn element_content_is_read_with_its_line_ends() {
+    const BODIES: [&str; 6] = [
+        "a\r\nb",
+        "a\rb",
+        "\r\n  x\r\n",
+        "a\r<!-- c -->\nb",
+        "a&#13;&#10;b&amp;",
+        "a&lt;b\r",
+    ];
+    let mut oracle = Oracle::spawn();
+    let mut tally = Tally::default();
+    for body in BODIES {
+        let xml = format!(
+            "<Project>
+               <Target Name=\"T0\">
+                 <PropertyGroup><A>{body}</A><B>[$(A)]</B></PropertyGroup>
+                 <PropertyGroup Condition=\"'$(A)' == 'a&#13;&#10;b'\"><C>crlf</C></PropertyGroup>
+                 <ItemGroup><I Include=\"i\"><M>{body}</M></I></ItemGroup>
+               </Target>
+             </Project>"
+        );
+        check(&mut oracle, &xml, &mut tally);
+    }
+    assert_eq!(tally.committed, BODIES.len(), "{tally:?}");
 }
 
 /// Identities an item list `J` may hold for batching: extensions of either

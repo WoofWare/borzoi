@@ -783,6 +783,8 @@ impl<'s, 'r> Engine<'s, 'r> {
                     .chain(item.children().filter(Node::is_element).flat_map(|child| {
                         let condition =
                             crate::document::attribute(child, "Condition").map(Cow::into_owned);
+                        #[allow(clippy::disallowed_methods)]
+                        // a scan for `@(` and `%(`, which no line end folds
                         let text = child
                             .descendants()
                             .filter_map(|n| n.text())
@@ -1278,16 +1280,10 @@ fn plain_references(raw: &str) -> Option<Vec<&str>> {
 }
 
 /// The text of `element` as MSBuild reads it ([`super::collect_element_text`]),
-/// or decline when MSBuild reads it otherwise than as its source spells it: a
-/// body holding more than text and comments (which MSBuild takes as inner
-/// XML), or text that line-ending normalisation or entity decoding touched.
+/// or decline where that reading does: a body holding more than text and
+/// comments (which MSBuild takes as inner XML), CDATA, or whitespace spelt as
+/// a reference.
 fn element_text(element: Node<'_, '_>) -> Result<String, Decline> {
-    if !super::item_pass::body_is_plain(element) {
-        return decline(format!(
-            "the body of {} is not plain text",
-            element.tag_name().name()
-        ));
-    }
     super::collect_element_text(element).map_or_else(
         || {
             decline(format!(
@@ -1561,6 +1557,7 @@ fn outputs<'a, 'input>(
     parameters: &[&'static str],
 ) -> Result<Vec<TaskOutput<'a, 'input>>, Decline> {
     let task_name = task.tag_name().name();
+    #[allow(clippy::disallowed_methods)] // folding a line end keeps text blank or not
     let blank =
         |node: Node<'_, '_>| !node.is_text() || node.text().is_none_or(|t| t.trim().is_empty());
     let mut found = Vec::new();
@@ -1620,6 +1617,7 @@ fn outputs<'a, 'input>(
     Ok(found)
 }
 
+#[allow(clippy::disallowed_methods)] // a scan for `%(`, which no line end folds
 fn task_batches(task: Node<'_, '_>) -> bool {
     task.descendants().any(|node| {
         node.attributes().any(|a| a.value().contains("%("))

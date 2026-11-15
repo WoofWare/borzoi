@@ -1217,9 +1217,9 @@ struct EvaluatedItem {
     escaped_identity: Option<String>,
     /// NuGet's package metadata names only, each value trimmed as the
     /// dependency capture reads it; `None` where that reading is not MSBuild's
-    /// value (padded, a value MSBuild's Unix path fixup may rewrite, a body it
-    /// reads as inner XML or with its carriage returns, an attribute it parses
-    /// as XML), which a capture copying the item must treat as uncertain.
+    /// value (padded, a value MSBuild's Unix path fixup may rewrite, an
+    /// attribute it parses as XML), which a capture copying the item must treat
+    /// as uncertain.
     metadata: HashMap<String, Option<String>>,
     /// Every metadatum, exactly as MSBuild evaluates it (untrimmed), for a
     /// reader of the item table itself ([`reads`]). `None` where that value
@@ -5987,19 +5987,25 @@ fn contains_metadata_reference(s: &str) -> bool {
 /// comment, processing instruction, or CDATA boundary intervenes, and
 /// [`Node::text`] only exposes the first text child — so a value of the
 /// form `A<!-- … -->B` would silently lose the `B` half. Iterating every
-/// text child preserves the whole value. CDATA sections are exposed by
-/// roxmltree as [`roxmltree::NodeType::Text`], so this loop captures them too.
+/// text child preserves the whole value. Each child is read as MSBuild reads
+/// it ([`crate::document::text`]): references decoded, and line ends as
+/// written, so `a<CR><LF>b` is four characters.
 ///
 /// A text child that is *literally* nothing but XML whitespace in the source is
 /// **insignificant** and contributes nothing, matching MSBuild's XML layer.
 /// This is a per-text-node rule, not a whole-value one, and all of it is pinned
 /// against `dotnet msbuild` 10.0.301 (2026-07-11):
 ///
-/// - `<P> </P>` and a tab-only body → `""` (so `'$(P)' == ''` is *true*).
-/// - `<Q>  x  </Q>` → `"  x  "`: padding around content stays verbatim.
+/// - `<P> </P>`, a tab-only body and a CRLF-only body → `""` (so
+///   `'$(P)' == ''` is *true*).
+/// - `<Q>  x  </Q>` → `"  x  "`: padding around content stays verbatim, and
+///   so does a line break in it, `<Q><CR><LF>  x<CR><LF></Q>` reading as
+///   seven characters.
 /// - `<R>  <!-- c -->x</R>` → `"x"`: a comment splits the text children, and
 ///   the whitespace-only one drops on its own — which is why the test must be
 ///   per-node (a whole-value collapse would wrongly keep `"  x"` here).
+///   Each surviving child keeps its own line ends: `a<CR><!-- c --><LF>b` is
+///   `a<CR><LF>b`.
 /// - `<P> $(Undefined) </P>` → `"  "`: the rule is pre-expansion, and is not
 ///   re-applied to an expansion result.
 ///
@@ -6007,7 +6013,7 @@ fn contains_metadata_reference(s: &str) -> bool {
 /// content (`&#160;` has length 1) — so this must not use `char::is_whitespace`,
 /// which is Unicode-wide.
 ///
-/// Returns `None` for the two shapes whose value we cannot derive, so callers
+/// Returns `None` for the shapes whose value we cannot derive, so callers
 /// degrade rather than commit a guess:
 ///
 /// - **Any CDATA in the body.** roxmltree exposes CDATA as a text node *and*
@@ -6025,9 +6031,6 @@ fn contains_metadata_reference(s: &str) -> bool {
 /// - **An element or processing instruction in the body.** MSBuild then reads
 ///   the body's inner XML (`Utilities.GetXmlNodeInnerContents`):
 ///   `<P>a<?p q?>b</P>` is `a<?p q?>b`, where the text alone is `ab`.
-/// - **A carriage return in content.** MSBuild reads a project without
-///   line-end normalisation, so `a<CR><LF>b` is four characters, where
-///   roxmltree folds the CRLF to a line feed.
 fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
     let source = node.document().input_text();
     // Element-level check: a merged text node's own range would not reveal the
@@ -6044,7 +6047,7 @@ fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
         if !child.is_text() {
             continue;
         }
-        let Some(text) = child.text() else { continue };
+        let text = crate::document::text(child)?;
         if !text.is_empty() && text.bytes().all(is_xml_ws) {
             if source[child.range()].bytes().all(is_xml_ws) {
                 // Insignificant literal whitespace: contributes nothing.
@@ -6052,10 +6055,7 @@ fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
             }
             return None;
         }
-        if source[child.range()].contains('\r') {
-            return None;
-        }
-        out.push_str(text);
+        out.push_str(&text);
     }
     Some(out)
 }

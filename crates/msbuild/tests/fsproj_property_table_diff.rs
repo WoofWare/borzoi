@@ -87,6 +87,15 @@ const BODIES: &[&str] = &[
     "<![CDATA[x]]>",
     " <![CDATA[ ]]> ",
     "<![CDATA[a<b]]>",
+    // Line ends, which MSBuild reads as written and roxmltree folds: in a
+    // node, split by a comment, spelt as references, and in CDATA.
+    "a\r\nb",
+    "a\rb",
+    "\r\n  x\r\n",
+    "a\r<!-- c -->\nb",
+    "a&#13;&#10;b",
+    "&#13;",
+    "<![CDATA[a\r\nb]]>",
     // Substitution, including into the shapes above.
     "$(Alpha)",
     "x$(Alpha)y",
@@ -324,35 +333,91 @@ fn reserved_path_properties_are_exact_or_declined() {
     assert!(committed >= 10, "too few committed ({committed})");
 }
 
-/// Bodies MSBuild reads apart from their text (#642): an element or a
-/// processing instruction, which make it read the body's inner XML, and a
-/// carriage return, which it keeps where the XML reader folds it. Evaluated at
-/// a path, so the oracle reads the document from a file as MSBuild does (its
-/// pathless reader folds line ends). Each is diffed alone and read back by a
-/// later write, and each body's value is pinned to MSBuild's.
+/// Bodies MSBuild reads apart from roxmltree's text (#642, #787): an element
+/// or a processing instruction, which make it read the body's inner XML, and
+/// a carriage return, which it keeps where roxmltree folds it. Each body's
+/// value is pinned to MSBuild's, and whether we commit it is pinned too, so
+/// that a reader which starts declining a body it reads exactly fails here
+/// rather than passing the differential vacuously. Each is diffed alone and
+/// read back by a later write, evaluated from text and from a file.
 #[test]
 fn bodies_msbuild_reads_as_inner_xml_or_unfolded_are_exact_or_declined() {
     let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
     let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
     let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
-    for (body, msbuild) in [
-        ("a<x/>b", "a<x />b"),
-        ("a<?p q?>b", "a<?p q?>b"),
-        ("a\r\nb", "a\r\nb"),
-        ("a\rb", "a\rb"),
-        ("\r\n  a;\r\n  b\r\n", "\r\n  a;\r\n  b\r\n"),
+    for (body, msbuild, committed) in [
+        ("a<x/>b", "a<x />b", false),
+        ("a<?p q?>b", "a<?p q?>b", false),
+        ("a<?p q?>\r\nb", "a<?p q?>\r\nb", false),
+        // A line end in content is read as written.
+        ("a\r\nb", "a\r\nb", true),
+        ("a\rb", "a\rb", true),
+        ("a\r\r\nb", "a\r\r\nb", true),
+        ("a\n\rb", "a\n\rb", true),
+        ("\r\n  a;\r\n  b\r\n", "\r\n  a;\r\n  b\r\n", true),
+        ("a&amp;\r\nb", "a&\r\nb", true),
+        ("a\r\u{85}\u{2028}b", "a\r\u{85}\u{2028}b", true),
+        // Spelt as references, the same.
+        ("a&#13;b", "a\rb", true),
+        ("a&#xD;&#10;b", "a\r\nb", true),
+        ("&#13;a", "\ra", true),
+        ("a&#13;\nb", "a\r\nb", true),
+        // Each text node split by a comment keeps its own; a whitespace-only
+        // one drops, line ends and all.
+        ("a\r<!-- c -->\nb", "a\r\nb", true),
+        ("a\r<!-- c -->", "a\r", true),
+        ("\r\n<!-- c -->b", "b", true),
+        ("a<!-- c\r\n -->b", "ab", true),
+        ("\r\n", "", true),
+        ("\r", "", true),
+        // Whitespace spelt as a reference, and CDATA, which MSBuild reads as
+        // inner XML beside other text.
+        ("&#13;", "\r", false),
+        ("<![CDATA[a\r\nb]]>", "a\r\nb", false),
+        (" <![CDATA[\r\n]]> ", "\r\n", false),
+        ("x<![CDATA[a\r\nb]]>y", "x<![CDATA[a\r\nb]]>y", false),
     ] {
         let xml = project_xml(&[("Alpha", body), ("Beta", "[$(Alpha)]")]);
-        let theirs = oracle
-            .project(&xml, &names, Some(&dir.join("Demo.fsproj")), &[])
-            .expect("MSBuild evaluates the document");
-        assert_eq!(
-            theirs["Alpha"], msbuild,
-            "MSBuild's reading moved: {body:?}"
-        );
-        check_property_table_at_path(&mut oracle, &xml, &dir);
+        for at in [None, Some(dir.as_path())] {
+            let path = at.map(|dir| dir.join("Demo.fsproj"));
+            let theirs = oracle
+                .project(&xml, &names, path.as_deref(), &[])
+                .expect("MSBuild evaluates the document");
+            assert_eq!(
+                theirs["Alpha"], msbuild,
+                "MSBuild's reading moved: {body:?} at {path:?}"
+            );
+            let ours = check_names_at_path(&mut oracle, &xml, &names, at);
+            assert_eq!(
+                ours.iter().any(|n| n == "Alpha"),
+                committed,
+                "the commitment moved: {body:?} at {path:?}"
+            );
+        }
     }
+}
+
+/// A project file written with CRLF line ends throughout, as on Windows: a
+/// multi-line body keeps every CRLF, and its padding, where MSBuild does.
+#[test]
+fn a_crlf_project_reads_a_multi_line_body_as_written() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
+    let xml = project_xml(&[
+        ("Alpha", "\n      a;\n      b\n    "),
+        ("Beta", "$(Alpha.Length)"),
+    ])
+    .replace('\n', "\r\n");
+    let theirs = oracle
+        .project(&xml, &names, Some(&dir.join("Demo.fsproj")), &[])
+        .expect("MSBuild evaluates the document");
+    assert_eq!(theirs["Alpha"], "\r\n      a;\r\n      b\r\n    ");
+    assert_eq!(theirs["Beta"], "25");
+    let ours = check_names_at_path(&mut oracle, &xml, &names, Some(&dir));
+    assert_eq!(ours, ["Alpha", "Beta"], "{xml:?}");
 }
 
 /// **Anti-degradation.** Certain-implies-exact is a one-sided contract: it

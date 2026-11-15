@@ -484,3 +484,55 @@ fn a_copy_takes_the_destination_definitions_beneath_the_source() {
         "every list in the fixed case must be exact"
     );
 }
+
+/// A metadatum body holding a carriage return, or a reference, is read as
+/// MSBuild reads it (#787): exact, so it reaches the comparison, where a
+/// reader that declined it would pass [`check`] without being compared.
+#[test]
+fn a_body_with_line_ends_or_references_is_compared() {
+    let mut oracle = Oracle::spawn();
+    for (body, value) in [
+        ("a\r\nb", "a\r\nb"),
+        ("a\rb&amp;", "a\rb&"),
+        ("\r\n  x\r\n", "\r\n  x\r\n"),
+        ("a\r<!-- c -->\nb", "a\r\nb"),
+        ("a&#13;&#9;b", "a\r\tb"),
+    ] {
+        let xml = format!(
+            "<Project>\n  <ItemGroup>\n    <Known Include=\"k\"><Flavor>{body}</Flavor></Known>\n  </ItemGroup>\n</Project>\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = host_fs::canonicalize(dir.path()).unwrap().join("p.fsproj");
+        let probe = ReadProbe {
+            properties: Vec::new(),
+            item_types: vec!["Known".to_owned()],
+            targets: Vec::new(),
+            execute: None,
+        };
+        let (_, reads) = parse_fsproj_reads(
+            &xml,
+            &path,
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+            &probe,
+        )
+        .unwrap();
+        let read = &reads.items["Known"];
+        assert!(read.exact, "{body:?}: {read:?}");
+        let row = &read.items.as_deref().unwrap()[0];
+        assert_eq!(
+            row.metadata.get("flavor").map(String::as_str),
+            Some(value),
+            "{body:?}"
+        );
+        assert!(
+            !row.uncertain_metadata.iter().any(|name| name == "flavor"),
+            "{body:?}: {row:?}"
+        );
+        let mut tally = Tally::default();
+        check(&mut oracle, &xml, false, &mut tally);
+        assert_eq!(tally.rejected, 0, "{body:?}");
+    }
+}
