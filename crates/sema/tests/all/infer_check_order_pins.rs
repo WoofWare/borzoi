@@ -153,6 +153,25 @@ const CASES: &[(&str, &str, &str)] = &[
         "once `applyObj x` fixes `x : obj -> int`, FCS loosens `x` at its next use, \
          so `x y` leaves `y` generic rather than fixing it to `obj`",
     ),
+    (
+        "unit-pattern-after-a-loss-over-an-applied-parameter",
+        "let x1 p = ((p : int -> string), (let z = p 1 in (let () = z in z)), p)",
+        "the annotation on an expression, which inference does not model, fixes `p : int -> \
+         string`, so `p 1` and `z` are `string`, and FCS rejects the `()` pattern; inference \
+         must not type `z` by the pattern it does not know is ill-typed (#774)",
+    ),
+    (
+        "unit-pattern-after-a-loss-over-an-application",
+        "let x2 p = ((p : string), (let z = idf p in (let () = z in z)), p)",
+        "as `x1`: `idf p` and `z` are `string` by an annotation inference does not see, and \
+         the `()` pattern is FCS's error (#774)",
+    ),
+    (
+        "unit-pattern-after-a-loss-over-a-list",
+        "let y3 (s: string) = ((s : string), (let z = [s] in (let () = z in z)), s)",
+        "a list expression, which inference does not model, is `string list`; `z` is that, \
+         and the `()` pattern is FCS's error (#774)",
+    ),
 ];
 
 /// The file every case is a `let` of.

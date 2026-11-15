@@ -43,13 +43,12 @@ impl<'a> Gen<'a> {
         // once the operands are walked.
         let fixed = match &builtin {
             Builtin::Convert { target } => {
-                let r = self.solver.table.fresh();
                 let ty = self.solver.tys.import(
                     self.facts.env.types(),
                     *target,
                     &mut HashMap::default(),
                 );
-                self.eq(scope, self.solver.tys.var(r), ty);
+                let r = self.fresh_equal(scope, ty);
                 self.relate(scope, r, expected);
                 Some(r)
             }
@@ -106,12 +105,11 @@ impl<'a> Gen<'a> {
         };
         match fixed {
             Some(r) => {
-                self.eq(scope, self.solver.tys.var(r), result);
+                self.eq(scope, self.solver.tys.var(r), result, Own::var(r));
                 Some(Some(r))
             }
             None => {
-                let r = self.solver.table.fresh();
-                self.eq(scope, self.solver.tys.var(r), result);
+                let r = self.fresh_equal(scope, result);
                 self.relate(scope, r, expected);
                 Some(Some(r))
             }

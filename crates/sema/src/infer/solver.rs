@@ -163,7 +163,7 @@ impl<'a> Solver<'a> {
         let snapshot = self.table.snapshot();
         if let Err(e) = self.table.unify(a, b) {
             self.table.rollback_to(snapshot);
-            return Err(if e == crate::unify::UnifyError::Tainted {
+            return Err(if e == crate::unify::UnifyError::Refused {
                 Refusal::Tainted
             } else {
                 Refusal::Mismatch
@@ -332,7 +332,48 @@ impl<'a> Solver<'a> {
     }
 }
 
+/// The variables an equality may give a term once the binding's prefix has
+/// ended ([`Gen::eq`]): those its site has just made, which FCS binds only
+/// through this relation — a literal's type, a pattern's own variables, the
+/// domain and result an application splits its callee into. A contiguous
+/// range of the table's variables.
+#[derive(Debug, Clone)]
+pub(super) struct Own(std::ops::Range<u32>);
+
+impl Own {
+    /// The one variable `v`.
+    pub(super) fn var(v: TyVid) -> Own {
+        Own(v.0..v.0 + 1)
+    }
+}
+
+/// What [`Gen::eq`] did with an equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Equated {
+    /// Unified.
+    Unified,
+    /// Not applied, the table unchanged: it would have bound a class to a
+    /// term that inference may not bind there.
+    Refused,
+    /// The two sides do not unify; the table is unchanged.
+    Failed,
+}
+
 impl<'a> Gen<'a> {
+    /// The variables made since the table's mark `from`, for an equality
+    /// whose site made them ([`Own`]).
+    pub(super) fn own_since(&self, from: u32) -> Own {
+        Own(from..self.solver.table.mark())
+    }
+
+    /// A fresh variable equated with `ty` ([`Self::eq`]), the variable being
+    /// the equality's own.
+    pub(super) fn fresh_equal(&mut self, scope: &mut Scope, ty: Ty) -> TyVid {
+        let v = self.solver.table.fresh();
+        self.eq(scope, self.solver.tys.var(v), ty, Own::var(v));
+        v
+    }
+
     /// Relate `a` and `b` by equality, unifying them now, where the walk
     /// generates the relation: what the walk reads of the table afterwards,
     /// mid-binding, already has it applied, as FCS has applied a relation by
@@ -346,12 +387,29 @@ impl<'a> Gen<'a> {
     /// table may hold less than FCS's. A binding with a failure keeps no
     /// declared type variable ([`Gen::rigid_stays_rigid`]), and a match clause
     /// whose pattern failed declines.
-    pub(super) fn eq(&mut self, scope: &mut Scope, a: Ty, b: Ty) {
+    ///
+    /// **Once the prefix has ended**, the table holds less than FCS's: a
+    /// variable inference left open may hold a type FCS fixed by what
+    /// inference did not model. So an equality may then give a term or a
+    /// structure only to a class made purely of `own`, the variables its site
+    /// has just made, which FCS binds through this relation alone; any other
+    /// class may be merged with another open one, but is never bound
+    /// ([`Equated::Refused`], the table unchanged). Every term the table
+    /// gains after the prefix ends is then one FCS gives the same variables:
+    /// a fresh variable's, built from what the table already held.
+    pub(super) fn eq(&mut self, scope: &mut Scope, a: Ty, b: Ty, own: Own) -> Equated {
         if !scope.complete {
-            if self.solver.table.unify_atomic(a, b).is_err() {
-                scope.eq_failures += 1;
-            }
-            return;
+            let was = self.solver.table.refusing_unowned(Some(own.0));
+            let unified = self.solver.table.unify_atomic(a, b);
+            self.solver.table.refusing_unowned(was);
+            return match unified {
+                Ok(()) => Equated::Unified,
+                Err(crate::unify::UnifyError::Refused) => Equated::Refused,
+                Err(_) => {
+                    scope.eq_failures += 1;
+                    Equated::Failed
+                }
+            };
         }
         // While the prefix is faithful, no equality may bind a tainted class
         // to a term: that would ground a variable whose type FCS may already
@@ -369,15 +427,17 @@ impl<'a> Gen<'a> {
             .unify_checked(self.facts.env, a, b, scope.constraints);
         self.solver.table.refusing_tainted(was);
         match unified {
-            Ok(()) => {}
+            Ok(()) => Equated::Unified,
             Err(Refusal::Tainted) => {
                 self.solver.refused_equalities += 1;
                 self.taint(scope, a);
                 self.taint(scope, b);
+                Equated::Refused
             }
             Err(Refusal::Constraint(gap)) => {
                 scope.eq_failures += 1;
                 scope.mark_incomplete(Incomplete::Constraint(gap));
+                Equated::Failed
             }
             Err(Refusal::Mismatch) => {
                 scope.eq_failures += 1;
@@ -386,50 +446,7 @@ impl<'a> Gen<'a> {
                 if !ground(&mut self.solver.table, a) || !ground(&mut self.solver.table, b) {
                     scope.mark_incomplete(Incomplete::OpenUnifyFailure);
                 }
-            }
-        }
-    }
-}
-
-impl<'a> Gen<'a> {
-    /// The vid mark at which the binding's prefix ended, taken the first
-    /// time the walk meets it ended ([`Scope::lost_at`]) — at the next
-    /// expression, so every variable the ending construct made counts as
-    /// older; 0 while the prefix holds.
-    pub(super) fn note_lost_prefix(&mut self, scope: &mut Scope) -> u32 {
-        if scope.complete {
-            return 0;
-        }
-        *scope
-            .lost_at
-            .get_or_insert_with(|| self.solver.table.mark())
-    }
-
-    /// Relate `a` and `b` after the prefix has ended, unless that binds a
-    /// variable made before it ended ([`Scope::lost_at`]) to a term: FCS may
-    /// have bound such a variable by the construct that ended the prefix.
-    /// A class whose oldest variable is in `own` — the relation's own fresh
-    /// variables, which FCS binds only through this relation — is spared.
-    /// `false` when refused, the table then unchanged; a relation that fails
-    /// otherwise counts as [`Gen::eq`]'s does.
-    pub(super) fn eq_sparing_older(
-        &mut self,
-        scope: &mut Scope,
-        a: Ty,
-        b: Ty,
-        own: std::ops::Range<u32>,
-    ) -> bool {
-        debug_assert!(!scope.complete, "only once the prefix has ended");
-        let lost_at = self.note_lost_prefix(scope);
-        let was = self.solver.table.refusing_older((lost_at, own));
-        let unified = self.solver.table.unify_atomic(a, b);
-        self.solver.table.refusing_older(was);
-        match unified {
-            Ok(()) => true,
-            Err(crate::unify::UnifyError::Tainted) => false,
-            Err(_) => {
-                scope.eq_failures += 1;
-                true
+                Equated::Failed
             }
         }
     }
