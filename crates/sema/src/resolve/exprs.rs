@@ -10,16 +10,20 @@ use crate::binders::{BinderRole, PatternName, pattern_names};
 use crate::def::{Def, DefId, DefKind};
 use crate::hash::HashSet;
 
-use super::id_text;
 use super::model::{DeclineCause, DeclineSite, DeferredReason, Resolution};
 use super::state::{AliasTargets, Frame, Resolver, ScopeEntry};
 use super::types::TypePathResolution;
+use super::{Walk, id_text};
 
 impl<'a> Resolver<'a> {
     /// Resolve every name in `expr`, interning its binders as local defs
     /// ([`Windows::in_expression`](super::windows::Windows::in_expression)).
+    /// A [`Walk::Surface`] walk skips it.
     #[inline(always)]
     pub(super) fn resolve_expr(&mut self, expr: &Expr) {
+        if self.walk == Walk::Surface {
+            return;
+        }
         if self.windows.in_expression() {
             self.resolve_expr_node(expr);
         } else {

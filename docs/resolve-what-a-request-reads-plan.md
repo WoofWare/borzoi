@@ -383,6 +383,17 @@ A planted body dependence must fail it: a walk that records an export from
 inside a body, for example. The mutation is checked to have applied before
 its failure is trusted.
 
+**As built.** The oracle is the `surface-reference` feature rather than a
+test of its own. Under it, every `resolve_file` also runs `surface_file` on
+the same file and entering state, and panics, naming each differing field,
+unless the surfaces are equal. Sema's tests turn it on, so the corpus
+sweeps, the generated grids and the generated projects of
+`resolve_incremental_diff` each check every file they resolve. The
+whole-project gate turns it on through `borzoi-corpus-diff`, so every file
+of every project is checked against the state the fold enters it with. The
+planted dependence (each expression adds an augmentation name) fails 76 of
+sema's lib tests.
+
 ### Stage 4: a target fold in sema
 
 **Dependencies**: Stage 3. **Implements**: D4, sema side.

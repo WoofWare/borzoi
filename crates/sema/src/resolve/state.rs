@@ -5,6 +5,7 @@
 //! parent [`resolve`](super) module; the fields here are `pub(super)` so those
 //! impl blocks (anywhere in the `resolve` module subtree) can reach them.
 
+use super::Walk;
 use crate::hash::HashMap;
 use crate::recovery::SyntaxRecovery;
 
@@ -1077,6 +1078,10 @@ pub struct ActivePatternShape {
 ///   file;
 /// - the [`Output`], which the walk publishes in one piece when it finishes.
 pub(super) struct Resolver<'a> {
+    /// Whether the walk descends into expressions. [`Walk::Surface`] skips
+    /// them all, so it publishes the file's surface and nothing a body
+    /// decides.
+    pub(super) walk: Walk,
     /// Exports of earlier Compile-order files, for cross-file qualified lookup.
     pub(super) preceding: &'a ProjectItems,
     /// Name index over referenced assemblies, for fully-qualified type/member

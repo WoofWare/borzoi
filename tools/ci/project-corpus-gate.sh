@@ -58,11 +58,14 @@ run_step() { # name
       #
       # Keys are relative to the checkouts' root, so the manifest names the
       # same project and file wherever the corpus was materialised.
+      #
+      # `surface-reference` holds every file's surface walk to its full walk,
+      # each against the state the fold enters it with.
       nix develop --command env \
         BORZOI_PROJECT_LIST="$BORZOI_PROJECT_LIST" \
         BORZOI_PROJECT_MANIFEST="$repo/crates/corpus-diff/manifests/project_corpus.txt" \
         BORZOI_PROJECT_MANIFEST_ROOT="$RUNNER_TEMP/project-corpus" \
-        cargo run --locked --profile gate -p borzoi-corpus-diff
+        cargo run --locked --profile gate -p borzoi-corpus-diff --features surface-reference
       ;;
     corpus-diff-tests)
       # No other job tests this crate. Its FCS-driven tests are the runner's
@@ -74,7 +77,7 @@ run_step() { # name
       # `project_corpus_resolution_diff` is the `resolution` step in a debug
       # build (and would read BORZOI_PROJECT_LIST), and
       # `explain_token_at_position` is a hand-run trace.
-      nix develop --command cargo test -p borzoi-corpus-diff -- \
+      nix develop --command cargo test -p borzoi-corpus-diff --features surface-reference -- \
         --include-ignored \
         --skip project_corpus_resolution_diff \
         --skip explain_token_at_position
