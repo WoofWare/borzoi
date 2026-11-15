@@ -71,7 +71,7 @@ const LEVELS: &[&str] = &["", "a", "a/b", "a/b/c"];
 
 /// The file the intrinsics search for. Deliberately *not* `Directory.Build.props`:
 /// that name has its own implicit-import machinery, which would make a failure
-/// here ambiguous between the probe and the splice.
+/// here ambiguous between the probe and the SDK's import of it.
 const MARKER: &str = "marker.props";
 
 /// How the starting directory is written, as MSBuild source. The project sits in

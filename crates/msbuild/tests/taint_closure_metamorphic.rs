@@ -57,10 +57,10 @@ const REFUSED_BODY: &str = "$(Configuration.Substring(0,1))";
 const REPLACEMENTS: &[&str] = &["", "a", "true", "false", "net8.0", "1.2.3", "Debug"];
 
 /// The Compile item the `Directory.Build.targets` fixture contributes.
-const SPLICED_FILE: &str = "FromDirBuild.fs";
+const DIR_BUILD_ITEM: &str = "FromDirBuild.fs";
 
 /// The two inputs the `Directory.Build.targets` import decides on.
-const SPLICE_GATES: [&str; 2] = ["ImportDirectoryBuildTargets", "DirectoryBuildTargetsPath"];
+const IMPORT_POINT_INPUTS: [&str; 2] = ["ImportDirectoryBuildTargets", "DirectoryBuildTargetsPath"];
 
 /// The names the generated documents write: the shared expression grammar's
 /// names, so its bodies read what the documents write, plus the names three
@@ -69,7 +69,7 @@ fn written_names(with_gates: bool) -> Vec<&'static str> {
     let mut names: Vec<&'static str> = CONTROLLED_PROPERTY_NAMES.to_vec();
     names.extend(["DefineConstants", "TargetName", "AssemblyName"]);
     if with_gates {
-        names.extend(SPLICE_GATES);
+        names.extend(IMPORT_POINT_INPUTS);
     }
     names
 }
@@ -177,7 +177,7 @@ fn gen_doc(rng: &mut SplitMix64, names: &[&'static str]) -> Doc {
     // case where trust, not the absence of a binding, is all that records the
     // doubt.
     let (gates, others): (Vec<&'static str>, Vec<&'static str>) =
-        names.iter().partition(|n| SPLICE_GATES.contains(n));
+        names.iter().partition(|n| IMPORT_POINT_INPUTS.contains(n));
     let mut pool = others;
     while pool.len() > 3 + rng.below(3) {
         pool.swap_remove(rng.below(pool.len()));
@@ -602,7 +602,7 @@ impl DirectoryBuildFixture {
         std::fs::write(
             root.join("Directory.Build.targets"),
             format!(
-                r#"<Project><PropertyGroup><FromDirBuild>set</FromDirBuild></PropertyGroup><ItemGroup><Compile Include="{SPLICED_FILE}" /></ItemGroup></Project>"#
+                r#"<Project><PropertyGroup><FromDirBuild>set</FromDirBuild></PropertyGroup><ItemGroup><Compile Include="{DIR_BUILD_ITEM}" /></ItemGroup></Project>"#
             ),
         )
         .unwrap();
@@ -705,9 +705,9 @@ fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
     // Sometimes the hidden file writes an import input that nothing else
     // writes, which is #811's shape, with a value that turns the import off.
     let mut hidden = hidden;
-    let unbound_splice_input = (rng.below(8) == 0).then(|| {
-        let name = *rng.pick(&SPLICE_GATES);
-        let off = if name == SPLICE_GATES[0] {
+    let unbound_import_input = (rng.below(8) == 0).then(|| {
+        let name = *rng.pick(&IMPORT_POINT_INPUTS);
+        let off = if name == IMPORT_POINT_INPUTS[0] {
             "false"
         } else {
             "Missing.targets"
@@ -725,9 +725,9 @@ fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
     // import to whatever the generated body reads.
     if rng.below(10) < 7 {
         let gate = if rng.below(5) == 0 {
-            SPLICE_GATES[1]
+            IMPORT_POINT_INPUTS[1]
         } else {
-            SPLICE_GATES[0]
+            IMPORT_POINT_INPUTS[0]
         };
         let source = rng.pick(&before).name;
         let at = rng.below(body.writes.len() + 1);
@@ -742,7 +742,7 @@ fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
         );
     }
     let mut before = before;
-    if let Some(name) = unbound_splice_input {
+    if let Some(name) = unbound_import_input {
         before.retain(|w| w.name != name);
         body.writes.retain(|w| w.name != name);
     }
@@ -1093,7 +1093,7 @@ fn a_file_imported_under_an_undecided_gate_publishes_no_trusted_value() {
 /// #811: a gate content the walk could not see may have written is not read
 /// as never written.
 #[test]
-fn an_unbound_splice_input_hidden_content_defined_declines() {
+fn an_unbound_import_input_hidden_content_defined_declines() {
     let fixture = OpacityFixture::new();
     let project = fixture.evaluate(&(
         format!(
@@ -1105,7 +1105,7 @@ fn an_unbound_splice_input_hidden_content_defined_declines() {
     ));
     assert!(
         project.items_uncertain,
-        "MSBuild imports `Hidden.props`, whose gate keeps `{SPLICED_FILE}` out; we published {:?}",
+        "MSBuild imports `Hidden.props`, whose gate keeps `{DIR_BUILD_ITEM}` out; we published {:?}",
         project.items
     );
 }

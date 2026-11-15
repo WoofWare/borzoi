@@ -139,9 +139,10 @@ pub enum DiagnosticKind {
     /// `<Project Sdk="X">` or `<Import Sdk="X" .../>` was encountered,
     /// the with-imports walker was given an SDK resolver, and the
     /// resolver returned `None` for this SDK identifier — i.e. the
-    /// caller could not locate `X` on disk. The walker falls back to the
-    /// no-SDK code path (so `Directory.Build.*` is still spliced) and
-    /// records this diagnostic so `is_partial` flips. `name` is the SDK
+    /// caller could not locate `X` on disk. The walker walks the body
+    /// without the SDK's files (so it reaches none of their
+    /// `Directory.Build.*` import points) and records this diagnostic so
+    /// `is_partial` flips. `name` is the SDK
     /// identifier as it appeared in the XML, *before* any `$(...)`
     /// substitution (we don't substitute SDK names — MSBuild itself
     /// reads them literally).

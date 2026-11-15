@@ -123,8 +123,9 @@ certainty. The item pass still judges its values by `Expansion`'s scan-based
 flags (entries 6 and 7 above); its `ignoring_trust` sites are P4's worklist.
 
 **Staleness has two readers.** `Trust::stale` is consumed where a value
-decides a `Directory.Build.*` splice (`gate_value_is_exact`, through
-`is_certain`), which is what closed #614, and where a Compile item's `Include`
+decides a `Directory.Build.*` import point (`is_decided_point` in
+`evaluator/directory_build.rs`, through `is_certain`), which is what closed
+#614, and where a Compile item's `Include`
 or `Condition` reads it in a Compile context (`expand_inner`,
 `evaluate_condition_with_exemptions`), which leaves the Compile set uncertain.
 `reference_is_untrusted` and `untrusted_cause` leave it out on purpose: most

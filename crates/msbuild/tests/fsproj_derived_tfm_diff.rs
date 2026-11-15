@@ -81,9 +81,8 @@ use tempfile::TempDir;
 /// Where in the import order a condition reads the framework pair.
 ///
 /// Our walker reaches `Directory.Build.targets` the way MSBuild does — through
-/// the SDK chain's own import, from inside `Microsoft.Common.targets` — rather
-/// than by splicing it after the body, so it lands on the far side of the
-/// inference point. That correspondence is a claim, and it is this axis that
+/// the SDK chain's own import, from inside `Microsoft.Common.targets` — so it
+/// lands on the far side of the inference point. That correspondence is a claim, and it is this axis that
 /// checks it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Position {

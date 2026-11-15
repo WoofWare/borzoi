@@ -8,9 +8,8 @@ use tempfile::TempDir;
 
 #[test]
 fn entry_sdk_records_its_resolved_root() {
-    // The simplest case: an entry project with its own `<Project Sdk=...>`.
-    // Only one pass runs (the entry has an SDK), so the recorded root is just
-    // that SDK's.
+    // The simplest case: an entry project with its own `<Project Sdk=...>`,
+    // whose root is the one recorded.
     let tmp = TempDir::new().unwrap();
     let (root, props, targets) =
         write_synthetic_sdk(tmp.path(), "MySdk", "<Project/>", "<Project/>");
@@ -65,7 +64,7 @@ fn no_sdk_records_no_root() {
 fn sdkless_entry_nested_body_sdk_is_not_recorded() {
     // An SDK-less *entry* whose framework SDK arrives via a body
     // `<Import Project="nested.targets"/>` where `nested.targets` is itself
-    // `<Project Sdk="BodySdk">`. The SDK *is* resolved and spliced (its body
+    // `<Project Sdk="BodySdk">`. The SDK *is* resolved and walked (its body
     // contributes `nested-body.fs`), but it is **not** recorded as
     // `resolved_sdk_root`: identifying which of a body's imports establishes
     // the framework SDK is subtle and order-dependent (and was a repeated
@@ -102,7 +101,7 @@ fn sdkless_entry_nested_body_sdk_is_not_recorded() {
         }
     });
 
-    // The nested SDK really was resolved and spliced (sanity): its body's item
+    // The nested SDK really was resolved and walked (sanity): its body's item
     // is present, so this is a resolved-but-deliberately-not-recorded case, not
     // a resolution failure.
     let dir = canon(tmp.path());

@@ -32,24 +32,18 @@
 //! evaluates the same document at the same path to the byte-identical value; we
 //! decline ⟹ no claim; MSBuild rejects ⟹ we committed nothing.
 //!
-//! ## What it found
+//! ## What it covers
 //!
-//! Written after a review round on the import-position change caught two
-//! defects this file's axes cover and the value-witness harness structurally
-//! could not:
+//! Two shapes the value-witness harness structurally cannot reach:
 //!
 //! - a hook that sets `ImportDirectoryBuildTargets=false` from inside
-//!   `Sdk.targets` — MSBuild skips the import, and both the pre- and
-//!   post-change walkers performed it anyway (a **pre-existing** wrong commit,
-//!   not a regression);
-//! - a `DirectoryBuildTargetsPath` redirect — the walker's rediscovery
-//!   suppression assumed *it* owned the import point, so once the chain owned it
-//!   instead the import was suppressed and then replayed late, past
-//!   `CustomAfterDirectoryBuildTargets`.
+//!   `Sdk.targets`, before the import point: MSBuild skips the import;
+//! - a `DirectoryBuildTargetsPath` redirect: MSBuild imports the redirect at
+//!   the chain's own import point, before `CustomAfterDirectoryBuildTargets`.
 //!
-//! Both are ordinary certain-implies-exact violations once the axis is swept.
-//! No new contract was needed, only a harness that varies what the other one
-//! holds fixed.
+//! A wrong walk of either is an ordinary certain-implies-exact violation once
+//! the axis is swept: no new contract is needed, only a harness that varies
+//! what the other one holds fixed.
 //!
 //! ## The gate's *vocabulary*
 //!

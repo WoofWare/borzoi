@@ -1,5 +1,5 @@
-//! Implicit `Directory.Build.props`/`.targets` splicing: ordering relative
-//! to the project body, opt-out gating, path overrides, and `*Path`
+//! `Directory.Build.props`/`.targets` at the SDK's import points: ordering
+//! relative to the project body, opt-out gating, path overrides, and `*Path`
 //! property seeding.
 
 use super::*;
@@ -310,10 +310,10 @@ fn implicit_directory_build_targets_runs_after_project_body() {
 
 #[test]
 fn caller_extra_disables_implicit_directory_build_props() {
-    // `ImportDirectoryBuildProps=false` supplied by the caller must
-    // suppress the implicit Directory.Build.props splice. Without
-    // this gate the walker would silently merge a file MSBuild
-    // itself would skip, producing items the oracle never emits.
+    // `ImportDirectoryBuildProps=false` supplied by the caller closes the
+    // SDK's Directory.Build.props import point. Without this gate the walker
+    // would silently merge a file MSBuild itself would skip, producing items
+    // the oracle never emits.
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
@@ -347,7 +347,7 @@ fn caller_extra_disables_implicit_directory_build_props() {
 #[test]
 fn project_property_disables_implicit_directory_build_targets() {
     // `ImportDirectoryBuildTargets=false` written *inside the
-    // project body* must suppress the targets splice. MSBuild
+    // project body* closes the targets import point. MSBuild
     // evaluates the body before deciding whether to import
     // Directory.Build.targets, so the project itself can opt out.
     let tmp = TempDir::new().unwrap();
@@ -1343,7 +1343,7 @@ type UntrustedWrite = (&'static str, fn(&str) -> String);
 fn an_untrusted_gate_write_declines_and_a_clean_overwrite_never_lies() {
     // Two claims, and the asymmetry between them is the point.
     //
-    // Left alone, an untrusted write to a name the targets splice consumes must
+    // Left alone, an untrusted write to a name the targets import point reads must
     // decline, whichever channel recorded it. That is the P2″ contract.
     //
     // Overwritten cleanly, the *value* is exact on both sides — last write
@@ -1593,7 +1593,7 @@ fn a_self_default_after_a_refused_write_cannot_certify_the_gate() {
 #[test]
 fn a_body_read_before_the_gated_import_stays_exact() {
     // The mirror of the item claim, and the reason the trust question is asked
-    // at the *splice* rather than at the write. MSBuild evaluates the body
+    // at the *import point* rather than at the write. MSBuild evaluates the body
     // before importing `Directory.Build.targets`, so a body read of a name that
     // file defines is exactly empty **whatever the gate decides** — probed
     // (dotnet 10.0.301, 2026-08-01): with the file present and defining
@@ -1808,8 +1808,8 @@ fn an_undecided_path_redirect_flags_even_when_nothing_resolves_here() {
 #[test]
 fn an_undecided_gate_withdraws_every_item_facet_not_just_compile() {
     // A `Directory.Build.*` file carries `<ProjectReference>` and
-    // `<PackageReference>` as readily as `<Compile>`, so an undecided splice
-    // has to withdraw all of them. Setting only `items_uncertain` would leave a
+    // `<PackageReference>` as readily as `<Compile>`, so an undecided import
+    // point has to withdraw all of them. Setting only `items_uncertain` would leave a
     // consumer trusting a phantom project-graph edge or a missing dependency —
     // the "one missing entry per round" shape the trust checklist exists to
     // prevent.
@@ -1855,7 +1855,7 @@ fn an_undecided_gate_withdraws_every_item_facet_not_just_compile() {
 }
 
 #[test]
-fn a_cdata_body_then_a_clean_overwrite_still_decides_the_splice() {
+fn a_cdata_body_then_a_clean_overwrite_still_decides_the_import_point() {
     // An unmodellable body (CDATA, entity-encoded whitespace) is refused: we
     // store no value and unpin the name. Both of those are dischargeable by a
     // later clean unconditional overwrite — last write wins on both sides, and
@@ -1875,8 +1875,8 @@ fn a_cdata_body_then_a_clean_overwrite_still_decides_the_splice() {
     );
     assert!(
         !p.items_uncertain,
-        "the final gate value is plain text and unconditional, so the splice is \
-         decided exactly",
+        "the final gate value is plain text and unconditional, so the import \
+         point is decided exactly",
     );
     let names: Vec<String> = paths_of(&p.items)
         .iter()
@@ -1886,6 +1886,6 @@ fn a_cdata_body_then_a_clean_overwrite_still_decides_the_splice() {
         names,
         vec!["Main.fs".to_string(), "FromDirBuild.fs".to_string()],
         "the gate ends up true, so Directory.Build.targets joins the walk — \
-         after the body, which is where it splices",
+         after the body, where the SDK imports it",
     );
 }

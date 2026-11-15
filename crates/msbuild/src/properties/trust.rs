@@ -15,7 +15,8 @@
 //! * **stale** records that the value was bound before content the walk could
 //!   not see ([`OpacityCause`]), or computed from such a value, so the real
 //!   build may have rewritten it there. It is read only where a value decides a
-//!   `Directory.Build.*` splice; every other reader trusts a held value under
+//!   `Directory.Build.*` import point or a Compile item; every other reader
+//!   trusts a held value under
 //!   opacity, a measured trade-off (`docs/msbuild-value-carried-provenance-plan.md`,
 //!   "#614: what each rule costs").
 //!
@@ -271,7 +272,7 @@ impl Trust {
     /// *unbound* refused name is an undefined read, which the write already
     /// records as an unpinned root; a read of a *bound* one (a refusal a clean
     /// overwrite kept, [`RefusedOutcome::Keep`]) reads a value computed exactly,
-    /// and the mark it carries is kept for the splice reader alone (a copy
+    /// and the mark it carries is kept for the import points alone (a copy
     /// that may rest on hidden content carries staleness instead).
     pub(crate) fn is_held_by(&self, stored: &Trust) -> bool {
         let Trust {
@@ -413,7 +414,7 @@ impl Trust {
     /// the binding was removed rather than stored.
     ///
     /// The real build stores that value, so a later undefined read of the name
-    /// is not exact, and neither is a splice decision resting on it. The mark
+    /// is not exact, and neither is an import point's decision resting on it. The mark
     /// then stands for the rest of the walk: a later clean write does *not*
     /// discharge it (see [`RefusedOutcome::Keep`] at the clean-write site).
     /// The one clear is the reserved-toolset seed,
@@ -447,8 +448,8 @@ impl Trust {
     /// is judged there ([`Trust::refused`], consulted by the undefined-read
     /// guard). It also outlives a later clean overwrite ([`RefusedOutcome::Keep`]
     /// at that site), so a *bound* name can carry it; then the value is one we
-    /// computed exactly from ordinary text, and the mark is kept for the splice
-    /// reader alone.
+    /// computed exactly from ordinary text, and the mark is kept for the import
+    /// points alone.
     /// The stale channel is absent too ([`Trust::stale`] says why).
     pub(crate) fn reference_is_untrusted(&self) -> bool {
         let Trust {

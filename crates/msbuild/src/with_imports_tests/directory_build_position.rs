@@ -1,12 +1,12 @@
 //! Where `Directory.Build.targets` lands relative to the entry SDK's
 //! `Sdk.targets`.
 //!
-//! MSBuild does not splice this file after the body: `Microsoft.Common.targets`
-//! imports it, and the SDK's `Sdk.targets` chain reaches that — *after*
+//! `Microsoft.Common.targets` imports this file, and the SDK's `Sdk.targets`
+//! chain reaches that import *after*
 //! `Microsoft.NET.TargetFrameworkInference.targets` has computed
 //! `TargetFrameworkIdentifier` / `TargetFrameworkVersion`. So the walker lets
 //! the chain place the import; a chain with no import point imports nothing,
-//! and the walk splices the file itself only as an uncertain fallback for a
+//! and the walk walks the file itself only as an uncertain fallback for a
 //! point it could not decide (`directory_build_import_point`).
 //!
 //! The tests here are about **the gate**, not about MSBuild's semantics: they
@@ -35,11 +35,10 @@ fn the_sdk_chains_own_import_places_the_file_once_after_what_sdk_targets_wrote()
     //
     // The trace **appends**, so it pins position and multiplicity in one
     // assertion, and both halves are load-bearing. Asserting only the final
-    // witness value would pass on the pre-fix walker for the wrong reason: with
-    // our copy spliced before `Sdk.targets` this fixture walks the file
-    // *twice*, and the second walk — the chain's, at the right position —
-    // overwrites the first with the right answer. Position is only really
-    // pinned once "exactly once" is pinned with it.
+    // witness value would pass for a walk that imported the file twice: the
+    // second import, at the chain's position, would overwrite the first with
+    // the right answer. Position is only really pinned once "exactly once" is
+    // pinned with it.
     let tmp = TempDir::new().unwrap();
     let (sdk_dir, props, targets) = write_synthetic_sdk(
         tmp.path(),
@@ -155,10 +154,6 @@ fn a_gate_the_sdk_flips_after_its_import_point_does_not_reopen_the_fallback() {
     // have imported the file. MSBuild never retries an import it has already
     // passed, so the file stays unimported — and the fallback must not read the
     // flipped-back value and import it.
-    //
-    // This is what makes the change purely subtractive: the gate and the path
-    // are decided at the same point as before, and walking `Sdk.targets` first
-    // only ever *removes* a splice (when the chain did it), never adds one.
     let tmp = TempDir::new().unwrap();
     let (sdk_dir, props, targets) = write_synthetic_sdk(
         tmp.path(),

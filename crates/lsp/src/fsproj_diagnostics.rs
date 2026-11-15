@@ -830,10 +830,9 @@ fn message(kind: &DiagnosticKind, discovery_failure: Option<&DiscoveryError>) ->
             }
         }
         DiagnosticKind::ImplicitImportPresent { path, kind } => {
-            // Should not appear via parse_fsproj_with_imports (it
-            // splices implicit imports itself and suppresses this
-            // diagnostic). Render conservatively in case the contract
-            // ever changes.
+            // Should not appear via parse_fsproj_with_imports, which
+            // never emits this diagnostic. Render conservatively in case
+            // the contract ever changes.
             format!(
                 "implicit import discovered: {:?} at {}",
                 kind,

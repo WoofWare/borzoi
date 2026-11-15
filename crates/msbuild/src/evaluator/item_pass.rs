@@ -3629,7 +3629,8 @@ pub(super) fn body_is_plain(element: Node<'_, '_>) -> bool {
 /// attribute-value normalisation and entity decoding touch (a tab, a line
 /// break, a `&`). Only then is the value roxmltree hands back the one MSBuild
 /// evaluates: it reads such spellings otherwise (a literal tab survives; an
-/// encoded CDATA section is decoded).
+/// encoded CDATA section is decoded). Read only by the target executor.
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn attribute_is_plain(node: Node<'_, '_>, attr: &roxmltree::Attribute<'_, '_>) -> bool {
     crate::document::attribute_source(node, attr) == attr.value()
         && !attr.value().contains(['\t', '\n', '\r', '&'])

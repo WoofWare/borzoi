@@ -742,8 +742,9 @@ mod target_tests {
     }
 }
 
+/// Target reads at the SDK's `Directory.Build.*` import points.
 #[cfg(test)]
-mod spliced_target_tests {
+mod import_point_target_tests {
     use std::collections::HashMap;
 
     use super::*;
@@ -752,7 +753,7 @@ mod spliced_target_tests {
     /// Read target `Phantom` at the end of a walk of an SDK project whose
     /// `Sdk.props` and `Sdk.targets` bodies are given, beside a
     /// `Directory.Build.props` that defines it.
-    pub(super) fn read_phantom(sdk_props: &str, sdk_targets: &str) -> TargetRead {
+    fn read_phantom(sdk_props: &str, sdk_targets: &str) -> TargetRead {
         read_phantom_beside(
             sdk_props,
             sdk_targets,
@@ -763,7 +764,7 @@ mod spliced_target_tests {
 
     /// [`read_phantom`] beside a `Directory.Build.props` of `beside`, and an
     /// `other.props` of `other` if given.
-    pub(super) fn read_phantom_beside(
+    fn read_phantom_beside(
         sdk_props: &str,
         sdk_targets: &str,
         beside: &str,
@@ -808,7 +809,7 @@ mod spliced_target_tests {
     }
 
     /// The file defining `read`'s target, by name.
-    pub(super) fn defined_in(read: &TargetRead) -> Option<String> {
+    fn defined_in(read: &TargetRead) -> Option<String> {
         read.definition.as_ref().map(|definition| {
             definition
                 .file
@@ -848,11 +849,6 @@ mod spliced_target_tests {
         assert_eq!(defined_in(&read).as_deref(), Some("Directory.Build.props"));
         assert!(read.exact, "{read:?}");
     }
-}
-
-#[cfg(test)]
-mod spliced_target_condition_tests {
-    use super::spliced_target_tests::{defined_in, read_phantom};
 
     /// The props import point is reached, but its condition is false, so
     /// MSBuild imports nothing there, and nor does the walk.
@@ -866,11 +862,6 @@ mod spliced_target_condition_tests {
         assert_eq!(defined_in(&read), None);
         assert!(read.exact, "{read:?}");
     }
-}
-
-#[cfg(test)]
-mod spliced_target_order_tests {
-    use super::spliced_target_tests::{defined_in, read_phantom_beside};
 
     /// The import's condition is false until the file it would import runs:
     /// MSBuild decides it first and imports nothing, as the walk does.
@@ -888,11 +879,6 @@ mod spliced_target_order_tests {
         assert_eq!(defined_in(&read), None);
         assert!(read.exact, "{read:?}");
     }
-}
-
-#[cfg(test)]
-mod spliced_target_redirect_tests {
-    use super::spliced_target_tests::{defined_in, read_phantom_beside};
 
     /// `Directory.Build.props` redirects the path and the SDK reaches a
     /// second props import point: MSBuild takes the redirect there, and so
@@ -915,11 +901,6 @@ mod spliced_target_redirect_tests {
         assert_eq!(defined_in(&read).as_deref(), Some("other.props"));
         assert!(read.exact, "{read:?}");
     }
-}
-
-#[cfg(test)]
-mod suppressed_props_import_tests {
-    use super::spliced_target_tests::{defined_in, read_phantom};
 
     /// `ImportDirectoryBuildProps=false`, but the SDK imports the file through
     /// a condition that does not read it: MSBuild takes it, and so does the
