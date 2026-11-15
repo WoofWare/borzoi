@@ -14,6 +14,7 @@ use borzoi::goto_source::{
 };
 use borzoi::handlers::definition::pdb_image_for;
 use borzoi_assembly::pdb::{PortablePdb, embedded_portable_pdb};
+use borzoi_msbuild::observed::Observer;
 
 use crate::common::ensure_fsharp_core_dll;
 
@@ -128,7 +129,10 @@ fn pdb_image_for_prefers_the_embedded_pdb() {
     let dll = ensure_fsharp_core_dll();
     let bytes = crate::common::host_fs::read(&dll).unwrap_or_else(|e| panic!("read {dll:?}: {e}"));
     let embedded = embedded_portable_pdb(&bytes).unwrap().unwrap();
-    assert_eq!(pdb_image_for(&dll, &bytes), Some(embedded));
+    assert_eq!(
+        pdb_image_for(&dll, &bytes, &Observer::new()),
+        Some(embedded)
+    );
 }
 
 #[test]
@@ -153,7 +157,10 @@ fn pdb_image_for_loads_a_matching_sidecar() {
     std::fs::write(dir.join(&sidecar_name), &image).unwrap();
 
     // Matching sidecar → its image; this is what feeds go-to-definition.
-    assert_eq!(pdb_image_for(&dll_path, &stripped), Some(image.clone()));
+    assert_eq!(
+        pdb_image_for(&dll_path, &stripped, &Observer::new()),
+        Some(image.clone())
+    );
 
     // A stale/foreign `.pdb` (id mismatch) is rejected: corrupt the sidecar's
     // `#Pdb` id and the loader declines rather than navigating to wrong source.
@@ -161,13 +168,93 @@ fn pdb_image_for_loads_a_matching_sidecar() {
     let id_off = pdb_id_offset(&wrong);
     wrong[id_off] ^= 0xFF;
     std::fs::write(dir.join(&sidecar_name), &wrong).unwrap();
-    assert_eq!(pdb_image_for(&dll_path, &stripped), None);
+    assert_eq!(pdb_image_for(&dll_path, &stripped, &Observer::new()), None);
 
     // A missing sidecar is likewise nothing (not an error).
     std::fs::remove_file(dir.join(&sidecar_name)).unwrap();
-    assert_eq!(pdb_image_for(&dll_path, &stripped), None);
+    assert_eq!(pdb_image_for(&dll_path, &stripped, &Observer::new()), None);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A cached PDB image rests on the sidecar probe as well as on the DLL: with
+/// no watch event, a sidecar `.pdb` written beside an unchanged DLL whose
+/// image was cached as absent is found by the next lookup, and a sidecar
+/// rewritten with another id, or deleted, is seen too.
+#[test]
+fn the_pdb_image_cache_sees_its_sidecar_move_without_an_event() {
+    let dll = ensure_fsharp_core_dll();
+    let bytes = crate::common::host_fs::read(&dll).unwrap_or_else(|e| panic!("read {dll:?}: {e}"));
+    let image = embedded_portable_pdb(&bytes).unwrap().unwrap();
+    let stripped = strip_embedded_pdb_entry(&bytes);
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = crate::common::host_fs::canonicalize(tmp.path()).unwrap();
+    let dll_path = dir.join("FSharp.Core.dll");
+    let sidecar = dir.join(sidecar_pdb_name(&stripped).expect("CodeView names a sidecar"));
+    std::fs::write(&dll_path, &stripped).unwrap();
+    let past_the_racy_window = || {
+        std::thread::sleep(
+            borzoi_msbuild::observed::STAMP_RACY_WINDOW + std::time::Duration::from_millis(200),
+        );
+    };
+    // A stamp within the racy window is never cached under.
+    past_the_racy_window();
+    let mut semantic = borzoi::semantic::SemanticState::new();
+    let computed = std::cell::Cell::new(0);
+    let lookup = |semantic: &mut borzoi::semantic::SemanticState| {
+        semantic
+            .pdb_image(&dll_path, |bytes, observer| {
+                computed.set(computed.get() + 1);
+                Some(std::sync::Arc::<[u8]>::from(pdb_image_for(
+                    &dll_path, bytes, observer,
+                )?))
+            })
+            .map(|image| image.to_vec())
+    };
+    assert_eq!(lookup(&mut semantic), None, "no sidecar yet");
+    assert_eq!(
+        lookup(&mut semantic),
+        None,
+        "no sidecar yet, from the cache"
+    );
+    assert_eq!(
+        computed.get(),
+        1,
+        "an unchanged DLL with no sidecar was not cached"
+    );
+    std::fs::write(&sidecar, &image).unwrap();
+    assert_eq!(
+        lookup(&mut semantic),
+        Some(image.clone()),
+        "a sidecar written beside the unchanged DLL was not seen"
+    );
+    past_the_racy_window();
+    assert_eq!(lookup(&mut semantic), Some(image.clone()));
+    let before = computed.get();
+    assert_eq!(lookup(&mut semantic), Some(image.clone()), "from the cache");
+    assert_eq!(
+        computed.get(),
+        before,
+        "an unchanged sidecar was not cached"
+    );
+    let mut wrong = image.clone();
+    let id_off = pdb_id_offset(&wrong);
+    wrong[id_off] ^= 0xFF;
+    std::fs::write(&sidecar, &wrong).unwrap();
+    assert_eq!(
+        lookup(&mut semantic),
+        None,
+        "a rewritten sidecar was not seen"
+    );
+    std::fs::write(&sidecar, &image).unwrap();
+    past_the_racy_window();
+    assert_eq!(lookup(&mut semantic), Some(image.clone()));
+    std::fs::remove_file(&sidecar).unwrap();
+    assert_eq!(
+        lookup(&mut semantic),
+        None,
+        "a deleted sidecar was not seen"
+    );
 }
 
 /// File offset of the 20-byte PDB id (head of the `#Pdb` stream) in a portable

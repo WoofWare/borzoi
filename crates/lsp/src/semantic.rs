@@ -739,11 +739,6 @@ impl SemanticState {
         for env in &unrecorded {
             self.drop_env(env);
         }
-        // A cached PDB image rests on the DLL's stamp and on the sidecar
-        // `.pdb` the DLL names, whose stamp it does not record: a symbol file
-        // added beside an unchanged DLL reaches the cache only through an
-        // event of this class.
-        self.pdb_images.clear();
         // An env built afresh for every request (a transient sidecar
         // failure, never cached) may answer differently now, and an open
         // buffer's tokens with it.
@@ -807,36 +802,49 @@ impl SemanticState {
     }
 
     /// The portable-PDB image for the referenced DLL at `dll`, cached for the
-    /// server lifetime (the `pdb_images` map) under the DLL's stamp. On a miss
-    /// (no entry, or the DLL's stamp moved) it runs `compute` (the IO +
-    /// embedded-or-sidecar selection the handler owns) and caches the result —
-    /// including a `None`, so a DLL with no usable PDB isn't re-read on every
-    /// go-to-definition. A stamp taken within the racy window of the DLL's
-    /// last change is not cached under: a same-size rewrite in that window
-    /// would leave it unchanged. `compute` is injected so this cache stays
-    /// unaware of the PDB-sourcing logic (which lives in the definition
-    /// handler).
+    /// server lifetime (the `pdb_images` map) under what finding it read. On a
+    /// miss (no entry, or a read whose answer moved) it reads the DLL, stamped
+    /// before the read, and runs `compute` on its bytes (the
+    /// embedded-or-sidecar selection the definition handler owns), which reads
+    /// through the observer it is handed: the sidecar `.pdb`'s stamp, its
+    /// absence included. The result is cached, a `None` too, so a DLL with no
+    /// usable PDB isn't re-read on every go-to-definition, and is served again
+    /// only while every read stands
+    /// ([`borzoi_msbuild::observed::ReadSet::first_stale`]): a sidecar that
+    /// appears, changes or disappears beside an unchanged DLL is seen with no
+    /// watch event. An image found while the DLL's or the sidecar's stamp is
+    /// within the racy window of its last change is not cached: confirming it
+    /// would read the whole file again on every lookup. A DLL that cannot be
+    /// read is not cached.
     pub fn pdb_image(
         &mut self,
         dll: &Path,
-        compute: impl FnOnce() -> Option<Arc<[u8]>>,
+        compute: impl FnOnce(&[u8], &Observer) -> Option<Arc<[u8]>>,
     ) -> Option<Arc<[u8]>> {
-        let stamp = msbuild_observed::stamp(&Unobserved::GoToDefinition.msbuild_observer(), dll);
-        if let Ok(stamp) = &stamp
-            && let Some((cached, image)) = self.pdb_images.get(dll)
-            && cached == stamp
+        if let Some((reads, image)) = self.pdb_images.get(dll)
+            && reads.first_stale().is_none()
         {
             return image.clone();
         }
-        let image = compute();
-        match stamp {
-            Ok(stamp) if !stamp.racy => {
-                self.pdb_images
-                    .insert(dll.to_path_buf(), (stamp, image.clone()));
-            }
-            _ => {
-                self.pdb_images.remove(dll);
-            }
+        let observer = Observer::new();
+        let Ok(bytes) = msbuild_observed::read_stamped(&observer, dll) else {
+            self.pdb_images.remove(dll);
+            return None;
+        };
+        let image = compute(&bytes, &observer);
+        let (reads, _) = observer.finish();
+        // A racy stamp is confirmed by reading the whole file again, for as
+        // long as the entry lives; an image found within the window is served
+        // uncached, and cached once a lookup finds every stamp settled.
+        if reads
+            .reads()
+            .iter()
+            .any(|read| read.observation.is_racy_stamp())
+        {
+            self.pdb_images.remove(dll);
+        } else {
+            self.pdb_images
+                .insert(dll.to_path_buf(), (reads, image.clone()));
         }
         image
     }
@@ -2758,9 +2766,10 @@ struct CachedAssemblyEnv {
     reads: Arc<EnvReads>,
 }
 
-/// A cached portable-PDB image ([`SemanticState::pdb_images`]): the DLL's
-/// stamp when it was read, and the image, or `None` for a DLL with none.
-type PdbImage = (msbuild_observed::FileStamp, Option<Arc<[u8]>>);
+/// A cached portable-PDB image ([`SemanticState::pdb_images`]): what finding
+/// it read (the DLL's stamp, and the sidecar `.pdb` the DLL names, absent or
+/// not), and the image, or `None` for a DLL with none.
+type PdbImage = (ReadSet, Option<Arc<[u8]>>);
 
 /// One cached env and what it depends on
 /// ([`SemanticState::assembly_envs`]): what it was built from, what
@@ -9216,11 +9225,12 @@ mod tests {
         );
     }
 
-    /// The PDB image cache computes once per DLL stamp and caches a negative
-    /// result, recomputes once the DLL is rewritten, and caches nothing for a
-    /// DLL it cannot stamp, or whose stamp is racy.
+    /// The PDB image cache computes once for what the DLL holds and caches a
+    /// negative result; recomputes once the DLL is rewritten; caches nothing
+    /// while the DLL's stamp is racy, nor for a DLL it cannot read; and needs
+    /// no watch event, so one leaves the cache as it was.
     #[test]
-    fn pdb_image_cache_computes_once_per_stamp_and_caches_the_negative() {
+    fn pdb_image_cache_computes_once_per_content_and_caches_the_negative() {
         let tmp = TempDir::new().unwrap();
         let dll = tmp.path().join("A.dll");
         let other = tmp.path().join("B.dll");
@@ -9230,7 +9240,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let img: Arc<[u8]> = Arc::from(vec![1u8, 2, 3]);
         let count = |s: &mut SemanticState, dll: &Path, image: Option<Arc<[u8]>>| {
-            s.pdb_image(dll, || {
+            s.pdb_image(dll, |_, _| {
                 calls.set(calls.get() + 1);
                 image
             })
@@ -9247,38 +9257,34 @@ mod tests {
         let first = count(&mut s, &dll, Some(img.clone()));
         assert_eq!(first.as_deref(), Some(&[1u8, 2, 3][..]));
         // A second lookup is served from the cache — `compute` must not run.
-        let second = s.pdb_image(&dll, || panic!("cache hit should not recompute"));
+        let second = s.pdb_image(&dll, |_, _| panic!("cache hit should not recompute"));
         assert_eq!(second.as_deref(), Some(&[1u8, 2, 3][..]));
         assert_eq!(calls.get(), 3);
 
         // A DLL with no PDB caches the `None` so it isn't re-read each time.
         assert!(count(&mut s, &other, None).is_none());
         assert!(
-            s.pdb_image(&other, || panic!("negative result should be cached"))
+            s.pdb_image(&other, |_, _| panic!("negative result should be cached"))
                 .is_none()
         );
         assert_eq!(calls.get(), 4);
 
-        // A rewritten DLL is a new stamp: computed again.
+        // A rewritten DLL is computed again.
         write(&dll, "a rebuilt dll");
         count(&mut s, &dll, None);
         assert_eq!(calls.get(), 5, "a rewritten DLL was served its old image");
 
-        // A DLL that cannot be stamped is never cached.
+        // A DLL that cannot be read is never computed for, nor cached.
         let missing = tmp.path().join("missing.dll");
-        count(&mut s, &missing, None);
-        count(&mut s, &missing, None);
-        assert_eq!(calls.get(), 7);
+        assert!(count(&mut s, &missing, Some(img.clone())).is_none());
+        assert_eq!(calls.get(), 5);
+        write(&missing, "m");
+        assert!(count(&mut s, &missing, Some(img.clone())).is_some());
+        assert_eq!(calls.get(), 6, "a DLL that appeared was served its absence");
 
-        // A referenced-assembly watch event clears the cache: the sidecar
-        // `.pdb` a DLL names is not in the key.
-        assert!(s.pdb_image(&other, || panic!("still cached")).is_none());
+        // A referenced-assembly watch event changes nothing the cache rests
+        // on, which it confirms itself.
         s.invalidate_assembly_state();
-        count(&mut s, &other, None);
-        assert_eq!(
-            calls.get(),
-            8,
-            "a referenced-assembly event left a cached image"
-        );
+        assert!(s.pdb_image(&other, |_, _| panic!("still cached")).is_none());
     }
 }

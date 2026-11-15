@@ -300,9 +300,14 @@ pub enum Unobserved {
     /// The `workspace/diagnostic` sweep's walk of the workspace roots for
     /// `.fsproj` files. No stage routes it.
     WorkspaceSweep,
-    /// Go-to-definition's reads of a referenced DLL, its PDB, and the
-    /// SourceLink cache. No stage routes them: the DLLs and PDBs sit under
-    /// the immutable roots of D3, and the cache is immutable by URL.
+    /// Go-to-definition's probes of its own source cache (embedded sources
+    /// and SourceLink fetches). Exempt: each is asked afresh on every plan,
+    /// with nothing held in memory, so a deleted entry is fetched or written
+    /// again (`goto_source::tests::plan_source_probes_the_cache_on_every_plan`);
+    /// and an entry is keyed by the content or URL it holds and published
+    /// atomically, so one that exists holds the bytes its key names. The
+    /// referenced DLL and its sidecar PDB are read through the read set that
+    /// confirms the cached image (`semantic::SemanticState::pdb_image`).
     GoToDefinition,
     /// Hover's `.xml` documentation files, which carry their own
     /// `(size, mtime)` witness (`xml_doc::lookup::DocFileCache`). No stage
