@@ -3718,9 +3718,10 @@ far. No CI job runs `edit_counts`, so a pin is checked when someone runs it.
 first evaluation pass of each round's re-evaluation. A multi-target project
 evaluates twice, the outer pass and the pass for the target it selects, so
 "before the edit" would be the outer pass alone and the rest would land in
-the part after the edit. Both measured projects are single-pass; when the
-cold `didOpen E` runs more than one pass, the run says so loudly and does
-not check the bands, since they would not measure what they name.
+the part after the edit, so the bands would not measure what they name.
+The two projects the bands were measured on, WoofWare.Incremental and
+WoofWare.PawPrint.Domain, are single-pass; the script does not check that
+the project it is pointed at is.
 
 **The file-system counts, for reference.** In the same runs these counts did
 not depend on load, and are recorded here as reference values, not as

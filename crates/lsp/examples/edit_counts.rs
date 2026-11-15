@@ -143,9 +143,9 @@
 //!   less its own cost, and the re-evaluation before it, each on minima
 //!   over the rounds. The pins hold on a quiet machine. The script holds the
 //!   server at the first evaluation pass of each round's re-evaluation, so
-//!   it measures what it says only for a single-pass project; when the cold
-//!   `didOpen E` ran more than one pass (a multi-target project), the run
-//!   says so loudly and does not check the bands.
+//!   it measures what it says only for a single-pass project, as the two
+//!   projects its pins were measured on are; a multi-target project
+//!   evaluates twice.
 //! * `EDIT_COUNTS_UNITS`: when set, print to stderr the instructions spent
 //!   inside each unit of work a running request cannot be stopped inside, and
 //!   each notification, as it ends ([`UNIT_SPANS`]): what an edit that arrives
@@ -325,11 +325,6 @@ static EMPTY_ENV_BUILDS: AtomicU64 = AtomicU64::new(0);
 
 /// Requests whose runs stopped at a checkpoint ([`STOPPED_EVENT`]).
 static STOPS: AtomicU64 = AtomicU64::new(0);
-
-/// MSBuild evaluations run ([`EVALUATION_EVENT`]): one per pass, so a
-/// multi-target project's evaluation counts its outer pass and the pass for
-/// the target it selects.
-static EVALUATIONS_RUN: AtomicU64 = AtomicU64::new(0);
 
 /// The span `borzoi::server::handle_request` opens around each request it
 /// runs. Identical requests answered from one run open one between them.
@@ -628,7 +623,6 @@ impl tracing::Subscriber for FoldObserver {
                     Relaxed,
                 );
             }
-            EVALUATIONS_RUN.fetch_add(1, Relaxed);
             trace_generation("evaluated", "");
             hold_if_armed(Gate::AtEvaluation);
         } else if counted() && event.metadata().name() == ENV_RESOLUTION_EVENT {
@@ -1626,11 +1620,6 @@ impl Census {
 const PAST_THE_RACY_WINDOW: Duration = Duration::from_millis(2_500);
 
 /// Stage 9's `blocked-edit` script, `rounds` times (see the module docs).
-/// `cold_passes` is how many evaluation passes the cold `didOpen E` ran:
-/// the script holds the server at the first pass of each round's
-/// re-evaluation, so its split at the edit means what it says only for a
-/// single-pass project.
-#[allow(clippy::too_many_arguments)]
 fn blocked_edit(
     client: &mut Client,
     project: &Path,
@@ -1639,7 +1628,6 @@ fn blocked_edit(
     hover_at: (u32, u32),
     rounds: usize,
     result_ids: &mut BTreeMap<String, String>,
-    cold_passes: u64,
 ) {
     let original = client_fs::read_bytes(project).expect("read the project file");
     let text = std::str::from_utf8(&original).expect("a UTF-8 project file");
@@ -1768,20 +1756,6 @@ fn blocked_edit(
         "after the edit min, less alone min",
         show(after_pinned)
     );
-    if cold_passes != 1 {
-        // Not a failure: the bands were measured on single-pass projects,
-        // and on this one they would hold different work to them, so they
-        // are not checked.
-        let warning = format!(
-            "WARNING: the cold `didOpen E` ran {cold_passes} evaluation passes. The script holds \
-             the server at the first pass of each round's re-evaluation, so \"before the edit\" \
-             is that pass alone and the rest lands after the edit: the instruction bands do not \
-             mean what they say for this project."
-        );
-        println!("{warning} The bands are not checked.");
-        eprintln!("{warning} The bands are not checked.");
-        return;
-    }
     BlockedEditPins::check(project, after_pinned, min_of(&before_edit));
 }
 
@@ -1993,9 +1967,7 @@ fn main() {
         println!("{label:<34} {}", columns(&cost));
         result
     };
-    let passes_before = EVALUATIONS_RUN.load(Relaxed);
     once(&mut client, "didOpen E", did_open(&e));
-    let cold_passes = EVALUATIONS_RUN.load(Relaxed) - passes_before;
     once(&mut client, "didOpen L", did_open(&l));
     if mode == Mode::Pull {
         let report = once(
@@ -2046,7 +2018,6 @@ fn main() {
             hover_at,
             keystrokes,
             &mut result_ids,
-            cold_passes,
         );
         client.shut_down();
         return;
