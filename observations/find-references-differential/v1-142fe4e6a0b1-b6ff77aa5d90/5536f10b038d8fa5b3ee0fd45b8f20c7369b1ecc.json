@@ -1,0 +1,76 @@
+{
+  "observation_schema_version": 1,
+  "series": "v1-142fe4e6a0b1-b6ff77aa5d90",
+  "repository": "WoofWare/borzoi",
+  "commit": "5536f10b038d8fa5b3ee0fd45b8f20c7369b1ecc",
+  "measured_at": "2026-11-15T18:02:26Z",
+  "workflow": {
+    "run_id": 43743521490,
+    "run_number": 434,
+    "run_attempt": 1,
+    "url": "https://github.com/WoofWare/borzoi/actions/runs/43743521490"
+  },
+  "corpus": {
+    "source": "dotnet/fsharp",
+    "revision": "142fe4e6a0b1cbef6f8e18e473e03b9137644cc0"
+  },
+  "flake_lock_hash": "1d8fecb61977dd5f76129f28d2eaeb8d9adb5eaf6e494ffcb42283bd56035227",
+  "generator": {
+    "schema_version": 1,
+    "measurement": "find-references-differential",
+    "configuration": {
+      "corpus": "fsharp-src",
+      "file_extensions": [
+        "fs"
+      ],
+      "include_declaration": true,
+      "limit": null,
+      "scope": "in-file-isolation",
+      "stride": 13,
+      "targets_per_file": 4
+    },
+    "statistics": {
+      "files": {
+        "answered": 364,
+        "discovered": 5607,
+        "sampled": 432,
+        "seen": 432,
+        "with_targets": 406,
+        "without_targets": 25
+      },
+      "infrastructure": {
+        "fcs_not_ok": 0,
+        "fcs_with_check_errors": 265,
+        "handler_panics": 0,
+        "unreadable": 1
+      },
+      "locations": {
+        "corroboration_rate": {
+          "basis_points": 9293,
+          "denominator": 1656,
+          "numerator": 1539
+        },
+        "definitions": 908,
+        "exact": 1539,
+        "returned": 1656,
+        "uses": 631
+      },
+      "mismatches": {
+        "alternate_binders": 2,
+        "divergences": 0,
+        "oracle_omissions": 115
+      },
+      "targets": {
+        "answer_rate": {
+          "basis_points": 6627,
+          "denominator": 1370,
+          "numerator": 908
+        },
+        "answered": 908,
+        "declined": 462,
+        "selected": 1370,
+        "source": 19635
+      }
+    }
+  }
+}
