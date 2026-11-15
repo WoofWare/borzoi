@@ -1294,7 +1294,7 @@ impl Workspace {
     /// selection on this?", and declines an untrusted TFM outright; this one
     /// answers "which inner build did we parse?", which has an answer even
     /// then, because the parse still had to pick something (the untrusted arm
-    /// keeps pass 1 and lets each read flip its own `*_uncertain` flag). The
+    /// keeps pass 1, with every TFM-derived conclusion withheld). The
     /// two agree whenever the verdict is [`ServedTfm::Tfm`].
     ///
     /// This is the currency the *parse-side* coherence invariant is stated in
@@ -2980,7 +2980,7 @@ fn select_target_framework(
         }
         // Pass 1 may be the outer dispatch build: exact for itself, and for no
         // inner build.
-        if choice == tfm_policy::TfmChoice::PluralUnknown {
+        if !choice.pass1_is_the_build() {
             return ServedEvaluation {
                 parsed: discarded_inner_build(pass1),
                 chosen_tfm: None,
@@ -3431,6 +3431,43 @@ mod tests {
   </PropertyGroup>
   <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0'"><DefineConstants>EIGHT</DefineConstants></PropertyGroup>
   <ItemGroup><Compile Include="A.fs" Condition="'$(TargetFramework)' == 'net8.0'" /></ItemGroup>
+</Project>"#,
+        );
+        let mut ws = Workspace::with_env_and_extra_build_properties(
+            SdkDiscoveryEnv::default(),
+            HashMap::new(),
+        );
+        let parsed = &ws.evaluated(&proj).expect("the project evaluates").parsed;
+        assert!(
+            parsed.items_uncertain && parsed.define_constants_uncertain,
+            "the outer build's Compile set {:?} and defines {:?} were served as the project's",
+            parsed.items,
+            parsed.define_constants
+        );
+        assert_eq!(ws.served_tfm_for_project(&proj), ServedTfm::Untrusted);
+    }
+
+    /// The same through an untrusted singular: a multi-targeted project
+    /// computes a define and a source under `'$(TargetFramework)' == ''`, then
+    /// writes `TargetFramework` by an expression the evaluator refuses (MSBuild
+    /// evaluates it to empty). The outer build's facts were read exactly, and
+    /// no inner build shares them.
+    #[test]
+    fn an_untrusted_singular_serves_no_outer_build_facts() {
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("Sample.fsproj");
+        write_file(
+            &proj,
+            r#"<Project>
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == ''"><DefineConstants>OUTER</DefineConstants></PropertyGroup>
+  <ItemGroup><Compile Include="Outer.fs" Condition="'$(TargetFramework)' == ''" /></ItemGroup>
+  <PropertyGroup>
+    <Blank></Blank>
+    <TargetFramework>$(Blank.Substring(0))</TargetFramework>
+  </PropertyGroup>
 </Project>"#,
         );
         let mut ws = Workspace::with_env_and_extra_build_properties(
