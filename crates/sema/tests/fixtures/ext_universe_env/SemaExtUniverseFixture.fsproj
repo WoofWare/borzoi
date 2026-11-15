@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A referenced assembly for the extension-scope tests (each checks its
+       projects through tests/all/common/ext_scope.rs): extension members
+       that reach a project file only through an
+       `open` of a module, a namespace or a type, or through a type
+       abbreviation carrying `[<Extension>]` or `[<AutoOpen>]`. See
+       `Library.fs`. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>SemaExtUniverseFixture</AssemblyName>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Library.fs" />
+  </ItemGroup>
+
+</Project>

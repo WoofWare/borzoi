@@ -172,6 +172,7 @@ impl Output {
             own_type_simple_names: prescan.own_type_simple_names,
             own_module_simple_names: prescan.own_module_simple_names,
             own_abbrev_type_simple_names: prescan.own_abbrev_type_simple_names,
+            abbreviation_attributes: prescan.abbreviation_attributes,
             contributions: FileContributions {
                 root,
                 extension_statics: prescan.extension_statics,
