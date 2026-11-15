@@ -6725,6 +6725,40 @@ fn define_constants_self_append_is_not_uncertain() {
 }
 
 #[test]
+fn define_constants_chained_self_appends_are_not_uncertain() {
+    // The second append reads the first's value, whose root is the first
+    // append's own read: still the idiom, so still exact.
+    let p = parse(
+        r#"<Project>
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);FOO</DefineConstants>
+    <DefineConstants>$(DefineConstants);BAR</DefineConstants>
+  </PropertyGroup>
+</Project>"#,
+    );
+    assert!(!p.define_constants_uncertain);
+    assert_eq!(p.define_constants, vec!["FOO", "BAR"]);
+}
+
+#[test]
+fn define_constants_appended_to_a_copy_is_uncertain() {
+    // `Base` copies an undefined `$(DefineConstants)`, so its root names
+    // `DefineConstants`. That root is the only one `Base` keeps, and an
+    // independent cause (a gate on `Base`'s write) could sit behind it, so a
+    // value reading `Base` declines rather than taking the root for the
+    // self-append (#782).
+    let p = parse(
+        r#"<Project>
+  <PropertyGroup>
+    <Base>$(DefineConstants)</Base>
+    <DefineConstants>$(Base);FOO</DefineConstants>
+  </PropertyGroup>
+</Project>"#,
+    );
+    assert!(p.define_constants_uncertain);
+}
+
+#[test]
 fn sibling_property_undefined_in_a_define_group_is_not_define_uncertain() {
     // A non-DefineConstants property's inexact undefined reference in the
     // same group (`TargetFramework` is carved out, so its read still

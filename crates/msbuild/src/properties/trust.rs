@@ -55,8 +55,10 @@ pub(crate) enum UnpinnedRoot {
     /// `because` says why `Name`'s absence was uncertain at the read, when
     /// the walk knew: `Name`'s own root, or an earlier construct it could not
     /// see into. It explains only. The root is still *about* `Name` — its
-    /// diagnostic, and every exemption keyed on that name (the
-    /// `DefineConstants` self-append among them), read `name` alone.
+    /// diagnostic reads `name` alone. A value keeps one root however many
+    /// reasons it has to be unpinned, so no exemption may be keyed on a
+    /// root's `name`: the `DefineConstants` self-append is decided at the read
+    /// itself, never on a root re-surfaced from a property that copied it.
     Undefined {
         name: String,
         because: Option<Box<UndefinedBecause>>,

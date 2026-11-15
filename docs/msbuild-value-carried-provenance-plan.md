@@ -36,12 +36,15 @@
 > **Open, in order:** the rest of P4; #792 per reader, measured; the three
 > P2″ precision items; P1′.
 >
-> **Known wrong commits, reproducible, not fixed:** #782 (a single-witness
-> root lets the `DefineConstants` self-append exemption drop a cause) and #792
-> (a stale value published as trusted by a reader other than the import points
-> and the Compile items). #782 is pinned by an ignored test that asserts the
-> right answer; #792 is set aside by the metamorphic gate with its count
-> pinned. #781 (a file spliced on an undecided gate publishing trusted values)
+> **Known wrong commits, reproducible, not fixed:** #792 (a stale value
+> published as trusted by a reader other than the import points and the
+> Compile items), set aside by the metamorphic gate with its count pinned, and
+> #843 (the `DefineConstants` self-append exemption reading a define a user
+> import under an undecided gate may supply as absent). #782 (a single-witness
+> root let the self-append exemption drop a cause) is fixed: the exemption is
+> decided at the value's own read, never on a re-surfaced root, and
+> `a_value_with_two_doubts_keeps_both_through_every_reader` holds every reader
+> of a doubly-unpinned value to both doubts. #781 (a file spliced on an undecided gate publishing trusted values)
 > and #811 (the fallback splice reading an unbound gate or path that hidden
 > content may have defined) are fixed by #677's import points. The import-graph
 > harness carries three more as known families: #819 (a certain import after
@@ -1596,8 +1599,14 @@ value.
   witness's name, then drops the other.
 
 #780 and #781 were set aside by the gate, each count pinned for the fixed
-seeds, until P4 step 1 and #677's import points removed the set-asides;
-#782 is pinned as an ignored witness.
+seeds, until P4 step 1 and #677's import points removed the set-asides.
+#782 is fixed by deciding the exemption at the value's own read
+(`push_undefined_read`), so no root re-surfaced from another property can
+claim it. The random sweeps reach its shape only by chance, since a wrap
+refuses the target's gate and a refused gate evaluates no body, so the target
+never holds two doubts; an exhaustive grid
+(`a_value_with_two_doubts_keeps_both_through_every_reader`) gates a copy on
+the target instead, and found 144 wrong commits before the fix.
 
 **The opacity tier** wraps an import rather than a write: a synthetic SDK
 writes properties, then imports a file behind an undecidable gate that may

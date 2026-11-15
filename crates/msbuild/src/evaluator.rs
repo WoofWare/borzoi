@@ -1228,9 +1228,10 @@ struct State<'r> {
     define_context: bool,
     /// `true` only while expanding a `<DefineConstants>` *value* (not its
     /// condition). The `$(DefineConstants)` self-reference exemption
-    /// ([`is_define_self_reference`]) applies only here — the append idiom is a
-    /// value construct; a *condition* referencing `$(DefineConstants)` is a
-    /// genuine branch decision that must still flag.
+    /// ([`is_define_self_reference`]) applies only here, and only to the value's
+    /// own read ([`Self::push_undefined_read`]) — the append idiom is a value
+    /// construct; a *condition* referencing `$(DefineConstants)` is a genuine
+    /// branch decision that must still flag.
     in_define_value: bool,
     /// Accumulates into [`ParsedProject::define_constants_uncertain`].
     define_constants_uncertain: bool,
@@ -2473,6 +2474,18 @@ impl<'r> State<'r> {
     }
 
     fn push(&mut self, kind: DiagnosticKind, span: Range<usize>) {
+        self.push_on_define_axis(kind, span, DefineAxis::Doubts);
+    }
+
+    /// [`Self::push`], with the diagnostic's effect on the define axis chosen
+    /// by the caller. Only [`Self::push_undefined_read`] chooses
+    /// [`DefineAxis::SelfAppend`], for the one read it can see is the idiom.
+    fn push_on_define_axis(
+        &mut self,
+        kind: DiagnosticKind,
+        span: Range<usize>,
+        define_axis: DefineAxis,
+    ) {
         // `import_site_span.is_some()` iff we're currently walking an
         // imported file — `walk_external_file` sets it on first
         // descent and preserves it on nested descents. That's the
@@ -2507,13 +2520,10 @@ impl<'r> State<'r> {
         // The preprocessor-symbol analogue: uncertainty while resolving a user
         // `<DefineConstants>` write (or its gating condition) means the `#if`
         // symbol set may be wrong. `define_context` is only set outside the SDK
-        // tree, so no further provenance check. The one exception is a
-        // `$(DefineConstants)` *self-reference* substituting to "" — the
-        // universal `$(DefineConstants);FOO` append idiom — but only in the
-        // value (`in_define_value`); in a *condition* it's a real branch
-        // decision, so it still flags.
-        let define_uncertain =
-            self.define_context && !(self.in_define_value && is_define_self_reference(&kind));
+        // tree, so no further provenance check. The one exception is the
+        // `$(DefineConstants);FOO` append idiom's own read, which the caller
+        // names.
+        let define_uncertain = self.define_context && define_axis == DefineAxis::Doubts;
         if define_uncertain {
             self.define_constants_uncertain = true;
         }
@@ -2950,12 +2960,28 @@ impl<'r> State<'r> {
     }
 
     /// Surface a read of `name` while undefined, remembering the root in force
-    /// now.
-    fn push_undefined_read(&mut self, name: String, span: Range<usize>) {
+    /// now. Says what the diagnostic did to the define axis.
+    fn push_undefined_read(&mut self, name: String, span: Range<usize>) -> DefineAxis {
         let root = self.root_for_undefined_read(&name);
         let index = self.diagnostics.len();
-        self.push(DiagnosticKind::UndefinedProperty { name }, span);
+        // A `<DefineConstants>` value reading `$(DefineConstants)` itself is
+        // the append idiom ([`is_define_self_reference`]). The exemption is
+        // decided here, on the name this read substituted, and nowhere else:
+        // a root re-surfaced from another property ([`Self::push_root`]) is one
+        // witness of that value's doubt, and an independent cause may have
+        // lost the race to be it.
+        let define_axis = if self.in_define_value && is_define_self_reference(&name) {
+            DefineAxis::SelfAppend
+        } else {
+            DefineAxis::Doubts
+        };
+        self.push_on_define_axis(
+            DiagnosticKind::UndefinedProperty { name },
+            span,
+            define_axis,
+        );
         self.diagnostic_roots.insert(index, root);
+        define_axis
     }
 
     fn note_package_uncertain_from_sdk_property_taint(&mut self, raw: &str) {
@@ -3027,6 +3053,10 @@ impl<'r> State<'r> {
         let mut had_undefined = false;
         let mut had_unsupported = false;
         let mut direct_undefined: Vec<String> = Vec::new();
+        // The direct reads whose diagnostic doubted on every axis: the self-
+        // append's own read did not doubt the define axis, so a root naming
+        // `DefineConstants` is not already reported by it.
+        let mut direct_doubted: Vec<String> = Vec::new();
         for issue in issues {
             let kind = match issue {
                 Issue::Undefined { name } => {
@@ -3039,7 +3069,9 @@ impl<'r> State<'r> {
                     }
                     had_undefined = true;
                     direct_undefined.push(name.clone());
-                    self.push_undefined_read(name, span.clone());
+                    if self.push_undefined_read(name.clone(), span.clone()) == DefineAxis::Doubts {
+                        direct_doubted.push(name);
+                    }
                     continue;
                 }
                 Issue::Unsupported { expression } => {
@@ -3074,11 +3106,9 @@ impl<'r> State<'r> {
                 continue;
             }
             if let Some(name) = root.undefined_name()
-                && direct_undefined
-                    .iter()
-                    .any(|n| n.eq_ignore_ascii_case(name))
+                && direct_doubted.iter().any(|n| n.eq_ignore_ascii_case(name))
             {
-                // The same root already surfaced as a direct issue above.
+                // The same diagnostic already surfaced as a direct issue above.
                 continue;
             }
             if surfaced
@@ -4068,11 +4098,13 @@ fn walk_property_child_inner(
     };
     // While `define_context` is set (a user `<DefineConstants>` write), any
     // uncertainty `state.expand`/`push` raises here flags
-    // `define_constants_uncertain` — except a bare `$(DefineConstants)` self-
-    // append (see `is_define_self_reference`), which is recognised only because
-    // `in_define_value` is set: an unsupported expression / item / metadata ref
-    // diverges (residual/refused), an undefined non-self ref may be set in the
-    // real build, and an undefined self-ref matches MSBuild.
+    // `define_constants_uncertain` — except the value's own undefined read of
+    // `$(DefineConstants)` (see `is_define_self_reference`), which is
+    // recognised only because `in_define_value` is set: an unsupported
+    // expression / item / metadata ref diverges (residual/refused), an
+    // undefined non-self ref may be set in the real build, a property that
+    // copied `$(DefineConstants)` may carry another doubt behind that root, and
+    // an undefined self-ref matches the define set's view.
     let prev_in_value = state.in_define_value;
     state.in_define_value = true;
     let value_uses_sdk_taint = state.raw_uses_sdk_package_taint(&raw);
@@ -4879,17 +4911,31 @@ fn dotnet_sdk_version_dir(root: &Path) -> Option<&Path> {
     Some(version_dir)
 }
 
-/// Whether a diagnostic is just a `$(DefineConstants)` self-reference resolving
-/// to "" — the accumulator append idiom (`$(DefineConstants);FOO`), which
-/// matches MSBuild and so must not flag [`State::define_constants_uncertain`].
+/// What a diagnostic does to [`State::define_constants_uncertain`] while in
+/// [`State::define_context`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DefineAxis {
+    /// It raises the flag.
+    Doubts,
+    /// It is a `<DefineConstants>` value's own read of `$(DefineConstants)`
+    /// while undefined, which leaves the flag alone.
+    SelfAppend,
+}
+
+/// Whether an undefined read of `name`, made by a `<DefineConstants>` value, is
+/// the accumulator append idiom (`$(DefineConstants);FOO`). The define set is
+/// the project's own view, without the defines the SDK adds in targets
+/// ([`crate::ParsedProject::define_constants_uncertain`]), so the read is ""
+/// in that view and must not flag [`State::define_constants_uncertain`].
+///
 /// Every *other* undefined/unsupported reference in a define value or condition
 /// is a genuine divergence (the referenced property may be set in the real
-/// build, or the expression evaluated).
-fn is_define_self_reference(kind: &DiagnosticKind) -> bool {
-    matches!(
-        kind,
-        DiagnosticKind::UndefinedProperty { name } if name.eq_ignore_ascii_case("DefineConstants")
-    )
+/// build, or the expression evaluated). So is a read of a property that copied
+/// `$(DefineConstants)`: the root that copy carries is a single witness, and
+/// may stand in for an independent cause it does not name (a gate on the
+/// copy's write, say).
+fn is_define_self_reference(name: &str) -> bool {
+    name.eq_ignore_ascii_case("DefineConstants")
 }
 
 /// Whether a `<PropertyGroup>` writes `<DefineConstants>` — the trigger for
