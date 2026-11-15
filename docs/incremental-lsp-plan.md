@@ -3659,73 +3659,83 @@ step.
 
 The edit's own pull needs the re-evaluation: the defines moved, so
 `diagnostic E` parses `E` under the new ones, and validation is exact. So
-the window splits into two parts, each held to its own pin.
+the window splits into two parts: what the edit waits for after it is
+sent, which the script holds to a band, and the re-evaluation before it,
+which it reports.
 
-**The pins.** `blocked-edit` fails a run unless both hold, each on minima
-over the run's rounds (`BlockedEditPins` in
-`crates/lsp/examples/edit_counts.rs`):
+**The band.** `blocked-edit` fails a run unless what the edit waits for
+after it is sent, less what `didChange E` and `diagnostic E` cost on their
+own, is at most **30 M** instructions (`BlockedEditBand` in
+`crates/lsp/examples/edit_counts.rs`). That is the rest of the unit the
+request was in when the edit arrived, the stop, and the new evaluation's
+first confirmation, which the edit's first step pays. It is the minimum of
+the window's part after the edit less the minimum of the edit and its pull
+alone, each taken over the rounds apart: the two are read at different
+moments of a round, so one round's difference can be inflated, or negative,
+by a spike in either reading.
 
-- **What the edit waits for after it is sent**, less what `didChange E` and
-  `diagnostic E` cost on their own: at most **30 M** instructions. That is
-  the rest of the unit the request was in when the edit arrived, the stop,
-  and the new evaluation's first confirmation, which the edit's first step
-  pays. It is the minimum of the window's part after the edit less the
-  minimum of the edit and its pull alone, each taken over the rounds apart:
-  the two are read at different moments of a round, so one round's
-  difference can be inflated, or negative, by a spike in either reading.
-- **The re-evaluation before the edit is sent** (the window's part before
-  it): within **15%** of its measured value, in either direction, per
-  project: **194.9 M** on WoofWare.Incremental, **195.0 M** on
-  WoofWare.PawPrint.Domain. A run that moves it either way fails until the
-  pin is measured again; `eval_counts`' `lsp.evaluate` measures the same
-  evaluation outside the dispatch loop (196.7 M and 197.5 M).
+The band was measured on 2026-11-15 at a7148ddb4, on the build box, under
+`nix develop`, on private copies of the two corpus projects. It holds on
+macOS only, where the instruction counter exists, and on a quiet machine.
+The counts include kernel instructions, which differ by machine and rise
+when other processes' file activity recycles the projects' vnodes ("Kernel
+instructions"), so the band is set from two conditions:
 
-The pins were measured on 2026-11-15 at a7148ddb4, on the build box, under
-`nix develop`, on private copies of the two corpus projects. They hold on
-macOS only, where the instruction counter exists, and on a quiet machine
-like that one. The counts include kernel instructions, which differ by
-machine and rise when other processes' file activity recycles the projects'
-vnodes ("Kernel instructions"), so the bands are set from two conditions:
-
-| `blocked-edit` minima per run (five rounds each) | quiet box (load 1 to 5), 5 runs | loaded box (load 14 to 180), 8 runs |
+| after the edit, less alone: minima per run (five rounds each) | quiet box (load 1 to 5), 5 runs | loaded box (load 14 to 180), 8 runs |
 |---|---:|---:|
-| after the edit, less alone, WoofWare.Incremental | 8.9 M* | 8.7–15.5 M |
-| after the edit, less alone, WoofWare.PawPrint.Domain | 8.6–8.7 M* | 8.5–27.7 M |
-| the re-evaluation, WoofWare.Incremental | 194.4–195.1 M | 195.0–214.0 M |
-| the re-evaluation, WoofWare.PawPrint.Domain | 194.8–195.3 M | 195.5–214.1 M |
+| WoofWare.Incremental | 8.9 M* | 8.7–15.5 M |
+| WoofWare.PawPrint.Domain | 8.6–8.7 M* | 8.5–27.7 M |
 
 \* Read as each round's own difference, the minimum over the rounds; the
-loaded runs read the pin as it is now taken.
+loaded runs read it as the band now takes it.
 
-On the quiet box the re-evaluation lay within about 1% of its pin in every
-round, and the part after the edit at 8.6 M to 9.1 M in every round. On
-the loaded box every run's fewest `stat`s in a window were a quiet run's
-(294 and 309), so the minima rose by the kernel's share, not by a
-confirmation asking the SDK's reads again (some rounds did, after another
+On the quiet box the part after the edit lay at 8.6 M to 9.1 M in every
+round. On the loaded box every run's fewest `stat`s in a window were a
+quiet run's (294 and 309), so the minima rose by the kernel's share, not by
+a confirmation asking the SDK's reads again (some rounds did, after another
 job's Nix store write; a minimum is unaffected unless every round does).
-One run's part after the edit reached 27.7 M and the re-evaluation 9.9%
-over its pin, which set the bands at 30 M and 15%. Under the heaviest load
-they still fail: a run at load about 100 waited 46 M after the edit with
-its file-system counts exactly those of a quiet run. So a band's failure on
-a loaded machine is read beside a run of the base commit on the same
-machine. On a quiet machine a regression of either kind the bands exist for
-fails them: a new evaluation's first confirmation that shares no witnesses
-adds about 45 M after the edit (with sharing planted out, 60 M and 64 M),
-and the re-evaluation moved by tens of millions with each change to it so
-far. No CI job runs `edit_counts`, so a pin is checked when someone runs it.
+One run reached 27.7 M, which set the band at 30 M. Under the heaviest load
+it still fails: a run at load about 100 waited 46 M after the edit with its
+file-system counts exactly those of a quiet run. So a failure on a loaded
+machine is read beside a run of the base commit on the same machine. On a
+quiet machine a new evaluation's first confirmation that shares no
+witnesses fails it: with sharing planted out, the part after the edit was
+60 M and 64 M. A later run on another machine (load 11 to 72) held it at
+10.1 M. No CI job runs `edit_counts`, so the band is checked when someone
+runs it.
+
+**The re-evaluation's cost, for reference.** The window's part before the
+edit is the request's re-evaluation of the project. It is reported, not
+held to a band, because it depends on the environment the project is
+evaluated in, as these two measurements of WoofWare.Incremental show:
+
+| | the build box | a second machine |
+|---|---:|---:|
+| conditions | a7148ddb4; quiet (load 1 to 5), 5 runs of 5 rounds; the copy under `~/borzoi-741-blocked-edit.projects/` | the same server code; load 11 to 72, 1 run of 3 rounds; the copy under the session's scratch directory in `/private/tmp` |
+| the re-evaluation before the edit, minimum | 194.4–195.1 M | 244.4 M |
+| its opens, `stat`s, listings, canonicalisations, distinct reads | 114, 175, 34, 153, 476 | 114, 228, 39, 153, 534 |
+
+The second machine's evaluation of the same project made 53 more `stat`s,
+5 more listings and had 58 more distinct reads; what differed between the
+two was the machine, the copy's location, and the load, and which of these
+moved the reads was not established. On the build box WoofWare.PawPrint.Domain's
+re-evaluation was 194.8–195.3 M quiet and its loaded minima 195.5–214.1 M.
+`eval_counts` (`crates/lsp/examples/eval_counts.rs`) measures the same
+evaluation outside the dispatch loop, phase by phase (196.7 M and 197.5 M on
+the build box), and is the way to measure it.
 
 **The script assumes a single-pass project.** It holds the server at the
 first evaluation pass of each round's re-evaluation. A multi-target project
 evaluates twice, the outer pass and the pass for the target it selects, so
 "before the edit" would be the outer pass alone and the rest would land in
-the part after the edit, so the bands would not measure what they name.
-The two projects the bands were measured on, WoofWare.Incremental and
+the part after the edit, so the band would not measure what it names.
+The two projects the band was measured on, WoofWare.Incremental and
 WoofWare.PawPrint.Domain, are single-pass; the script does not check that
 the project it is pointed at is.
 
 **The file-system counts, for reference.** In the same runs these counts did
-not depend on load, and are recorded here as reference values, not as
-pins:
+not depend on load, and are recorded here as reference values, not as a
+band:
 
 | | WoofWare.Incremental | WoofWare.PawPrint.Domain |
 |---|---:|---:|
@@ -3758,10 +3768,10 @@ held check), both fail, and in `blocked-edit` the new evaluation's first
 confirmation asked 2,239 and 2,280 `stat`s.
 
 **What an edit arriving inside each unit waits for.** These are measured
-worst cases, not pins. A running request stops only between units (below),
+worst cases, not a band. A running request stops only between units (below),
 and a notification always runs to completion, so an edit that arrives as a
 unit begins waits for all of it. `EDIT_COUNTS_UNITS` prints each unit's
-instructions as it ends; the same run and machine as the pins, one run of
+instructions as it ends; the same machine as the band, one run of
 each project:
 
 | unit | WoofWare.Incremental | WoofWare.PawPrint.Domain |

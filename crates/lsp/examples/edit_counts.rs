@@ -138,14 +138,13 @@
 //!   (`borzoi::inbox::STOPPED_EVENT`). Each round adds the symbol or takes it
 //!   away again, and the run puts the file back as it found it; it still
 //!   writes the project file, so point it at a copy of the project, not the
-//!   shared corpus cache. The run fails unless both of its pins hold
-//!   ([`BlockedEditPins`]): what the edit waited for after it was sent,
-//!   less its own cost, and the re-evaluation before it, each on minima
-//!   over the rounds. The pins hold on a quiet machine. The script holds the
-//!   server at the first evaluation pass of each round's re-evaluation, so
-//!   it measures what it says only for a single-pass project, as the two
-//!   projects its pins were measured on are; a multi-target project
-//!   evaluates twice.
+//!   shared corpus cache. The run fails unless its band holds
+//!   ([`BlockedEditBand`]): what the edit waited for after it was sent, less
+//!   its own cost, on minima over the rounds. The band holds on a quiet
+//!   machine. The script holds the server at the first evaluation pass of
+//!   each round's re-evaluation, so it measures what it says only for a
+//!   single-pass project, as the two projects its band was measured on are;
+//!   a multi-target project evaluates twice.
 //! * `EDIT_COUNTS_UNITS`: when set, print to stderr the instructions spent
 //!   inside each unit of work a running request cannot be stopped inside, and
 //!   each notification, as it ends ([`UNIT_SPANS`]): what an edit that arrives
@@ -1756,78 +1755,43 @@ fn blocked_edit(
         "after the edit min, less alone min",
         show(after_pinned)
     );
-    BlockedEditPins::check(project, after_pinned, min_of(&before_edit));
+    BlockedEditBand::check(after_pinned);
 }
 
-/// The measured values `blocked-edit` holds a run to
-/// (`docs/incremental-lsp-plan.md`, Stage 9, "The pins"), each on minima
-/// over the run's rounds, as the plan measures them. They hold on macOS
-/// under `nix develop`, on a machine whose file activity leaves the
-/// projects' vnodes cached: the counts include kernel instructions, which
-/// differ by machine and rise when the vnodes are recycled.
-struct BlockedEditPins;
+/// The measured value `blocked-edit` holds a run to
+/// (`docs/incremental-lsp-plan.md`, Stage 9, "The band"), on minima over
+/// the run's rounds, as the plan measures them. It holds on macOS under
+/// `nix develop`, on a quiet machine: the counts include kernel
+/// instructions, which differ by machine and rise when other processes' file
+/// activity recycles the projects' vnodes.
+struct BlockedEditBand;
 
-impl BlockedEditPins {
+impl BlockedEditBand {
     /// What the edit may wait for after it is sent, less what the edit and
     /// its pull cost on their own: the rest of the unit the stopped request
     /// was in, the stop, and the new evaluation's first confirmation.
     const AFTER_THE_EDIT_AT_MOST: i128 = 30_000_000;
 
-    /// The re-evaluation the request makes before the edit is sent (the
-    /// window's part before the edit), by the project file's name: the
-    /// measured value, which a run must come within
-    /// [`Self::RE_EVALUATION_BAND_PERCENT`] of, in either direction. A
-    /// project not named here is not held to one.
-    const RE_EVALUATION: [(&str, u64); 2] = [
-        ("WoofWare.Incremental.fsproj", 194_900_000),
-        ("WoofWare.PawPrint.Domain.fsproj", 195_000_000),
-    ];
-    const RE_EVALUATION_BAND_PERCENT: u64 = 15;
-
-    /// Fail the run unless both pins hold. `after` is the minimum over the
+    /// Fail the run unless the band holds. `after` is the minimum over the
     /// rounds of the window's part after the edit, less the minimum of the
-    /// edit and its pull alone; `before` the minimum of the part before the
-    /// edit; each `None` without an instruction counter.
-    fn check(project: &Path, after: Option<i128>, before: Option<u64>) {
-        let (Some(after), Some(before)) = (after, before) else {
-            println!("pins not checked: no instruction counter on this platform");
+    /// edit and its pull alone; `None` without an instruction counter.
+    fn check(after: Option<i128>) {
+        let Some(after) = after else {
+            println!("the band is not checked: no instruction counter on this platform");
             return;
         };
-        let mut failures = Vec::new();
-        if after > Self::AFTER_THE_EDIT_AT_MOST {
-            failures.push(format!(
-                "the edit waited {after} instructions after it was sent, less alone; the pin is at most {}",
-                Self::AFTER_THE_EDIT_AT_MOST
-            ));
-        }
-        let name = project.file_name().and_then(|name| name.to_str());
-        match Self::RE_EVALUATION
-            .iter()
-            .find(|(pinned, _)| Some(*pinned) == name)
-        {
-            Some(&(_, pinned)) => {
-                let band = pinned * Self::RE_EVALUATION_BAND_PERCENT / 100;
-                if before.abs_diff(pinned) > band {
-                    failures.push(format!(
-                        "the re-evaluation before the edit cost {before} instructions; the pin is {pinned} ± {band}"
-                    ));
-                }
-            }
-            None => println!(
-                "the re-evaluation is pinned only for {:?}",
-                Self::RE_EVALUATION.map(|(name, _)| name)
-            ),
-        }
         assert!(
-            failures.is_empty(),
-            "blocked-edit's pins (docs/incremental-lsp-plan.md, Stage 9) do not hold:\n  {}\n\
-             (the bands hold on a quiet machine: the counts include kernel instructions, so on a \
+            after <= Self::AFTER_THE_EDIT_AT_MOST,
+            "blocked-edit's band (docs/incremental-lsp-plan.md, Stage 9) does not hold: the edit \
+             waited {after} instructions after it was sent, less alone; the band is at most {}\n\
+             (it holds on a quiet machine: the counts include kernel instructions, so on a \
              loaded machine compare with a run of the base commit on the same machine before \
              reading this as a regression)",
-            failures.join("\n  ")
+            Self::AFTER_THE_EDIT_AT_MOST
         );
-        println!("blocked-edit's pins hold (they are measured to hold on a quiet machine)");
+        println!("blocked-edit's band holds (it is measured to hold on a quiet machine)");
     }
+}
 }
 
 fn main() {
