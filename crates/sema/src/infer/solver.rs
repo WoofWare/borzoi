@@ -2,35 +2,8 @@
 
 use super::*;
 
-/// A **suspended** type constraint: one that generation does not decide where
-/// it meets it, so the solver ([`Gen::settle`], [`Gen::solve`]) decides it
-/// later. An equality is never one: it is unified where it is generated
-/// ([`Gen::eq`]).
-#[derive(Debug, Clone)]
-pub(super) enum Constraint {
-    /// The receiver `recv` has an instance data member (a field or non-indexer
-    /// property, Stage 3.3a) named `name`, whose type is `result`.
-    /// **Suspended**: it discharges only once `recv` resolves to a concrete
-    /// [`TyKind::Named`] head, at which point the member is looked up against
-    /// the [`AssemblyEnv`] (`instance_data_member`) and its type bridged to a
-    /// [`Ty`] and unified with `result`. A failed or unmodelled lookup declines
-    /// the access (`result` stays open). Each fires at most once.
-    ///
-    /// `use_range` is the member-name token's source range (Stage 3.3b): on a
-    /// successful wake the resolved member's identity is recorded there in
-    /// [`InferredFile::member_resolutions`], so the LSP can surface hover /
-    /// go-to-definition on the member name. It is inert until a wake succeeds.
-    HasMember {
-        recv: TyVid,
-        name: String,
-        result: TyVid,
-        use_range: TextRange,
-    },
-}
-
 /// The inference variables and what relates them: the unification table and
-/// its snapshots, the suspended member accesses, and the per-variable
-/// constraints. Of what one file's walk accumulates, the only state a later
+/// its snapshots, and the per-variable constraints. Of what one file's walk accumulates, the only state a later
 /// answer is computed from besides [`BinderEnv`].
 ///
 /// It knows types and variables only: no binder, node or emission.
@@ -44,8 +17,6 @@ pub(super) struct Solver<'a> {
     /// The unification table. Every equality the walk generates is already
     /// in it ([`Gen::eq`]).
     pub(super) table: InferTable<'a>,
-    /// The suspended constraints still pending.
-    pub(super) constraints: Vec<Constraint>,
     /// The **per-variable constraints**: each instantiation variable whose
     /// type parameter carries `equality` or `comparison`, with which
     /// ([`Self::constrain`]), in the order they were made. FCS holds such a
@@ -97,7 +68,6 @@ impl<'a> Solver<'a> {
         Solver {
             tys,
             table: InferTable::new(tys),
-            constraints: Vec::new(),
             constrained: Vec::new(),
             refused_equalities: 0,
         }

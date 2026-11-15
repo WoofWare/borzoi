@@ -4,12 +4,13 @@
 
 use super::*;
 
-/// What a data member's wake ([`Gen::wake_member`]) made of the access.
+/// What a data member's lookup ([`Gen::wake_member`]) made of the access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Wake {
     /// The member was identified and its resolution recorded; its result is
-    /// bound to the member's type where that type is read.
-    Resolved,
+    /// bound to the member's type where that type is read. `stands` says
+    /// whether what the receiver emitted stands ([`Gen::record_member`]).
+    Resolved { stands: bool },
     /// No member is identified: the access is declined, for the reason it
     /// carries.
     Declined(Incomplete),
@@ -118,58 +119,138 @@ pub(super) enum CallRegime<'e> {
 }
 
 impl<'a> Gen<'a> {
-    /// Push a suspended member constraint: `recv` has an instance data member
-    /// named by the token `member` whose type is `result`; the token's range is
-    /// the constraint's `use_range` (Stage 3.3a; `use_range` added in 3.3b).
-    /// Both type endpoints are **poisoned** unconditionally at the point of
-    /// generation ([`Self::gen_member_access`]), so this only enqueues the
-    /// relation; the solver wakes it when `recv`'s head is concrete.
-    fn has_member(&mut self, scope: &mut Scope, recv: TyVid, member: &SyntaxToken, result: TyVid) {
-        self.solver.constraints.push(Constraint::HasMember {
-            recv,
-            name: ident_text(member),
-            result,
-            use_range: member.text_range(),
-        });
-        // Poison both endpoints: an unwoken (open) member relation must not let its
-        // receiver or result generalise. A ground endpoint is unaffected (poison
-        // bites only open vars). Shared by the data-member chain
-        // ([`Self::gen_member_access`]) and the method call ([`Self::infer_method_call`]).
-        scope.poison.push(recv);
-        scope.poison.push(result);
-        // The access is settled where it is generated ([`Self::settle_access`]):
-        // the wake binds the result to the member's type, or the access is
-        // declined and its result tainted.
-    }
-
-    /// Generate a **data-member** access chain over a receiver variable `recv`, one
-    /// [`Constraint::HasMember`] (`kind = Data`) per trailing segment (Stage 3.3a).
-    /// The `segments` are the member idents after the receiver (`["Length"]` for
-    /// `s.Length`; `["A", "B"]` for a multi-dot `s.A.B`). Returns the variable
-    /// standing for each member's type, in order: the last is the type of the
-    /// whole access, and each is the receiver of the segment after it.
+    /// Decide a **data-member** access chain over a receiver variable `recv`,
+    /// segment by segment, each where FCS decides it: at its dot, on what the
+    /// receiver's type is there ([`Self::decide_data_access`]). The `segments`
+    /// are the member idents after the receiver (`["Length"]` for `s.Length`;
+    /// `["A", "B"]` for `s.A.B`), segment *i*'s receiver the result of segment
+    /// *i − 1*. Returns the variable standing for each member's type, in order
+    /// — the last is the type of the whole access, and each is the receiver of
+    /// the segment after it — and whether what the receiver emitted stands:
+    /// only where every segment resolves to a member FCS reads as a member get
+    /// (FCS drops the receiver of `s.Length.Foo`, `Foo` rejected).
     ///
-    /// Each segment chains: segment *i*'s constraint watches the previous result
-    /// (the receiver for the first), so a multi-dot chain wakes segment by segment
-    /// as each result grounds. Every receiver and result variable is poisoned by
-    /// [`Self::has_member`] — an unwoken member relation must never let either
-    /// generalise (the same rule as application's `r`-poison).
+    /// A segment whose label the resolver answers through FCS's record-label
+    /// table ([`Self::decide_receiver_by_label`]) has its receiver decided
+    /// first, after the segments before it.
+    ///
+    /// Every receiver and result variable is poisoned: an undecided access must
+    /// never let either generalise (the same rule as application's
+    /// `r`-poison); a ground one is unaffected.
     fn gen_member_access(
         &mut self,
         scope: &mut Scope,
         recv: TyVid,
         segments: &[SyntaxToken],
-    ) -> Vec<TyVid> {
+    ) -> (Vec<TyVid>, bool) {
+        let mut results: Vec<TyVid> = Vec::with_capacity(segments.len());
+        let mut stands = true;
         let mut cur = recv;
-        let mut results = Vec::with_capacity(segments.len());
+        // The segments before `decided` have been decided.
+        let mut decided = 0;
         for seg in segments {
-            self.decide_receiver_by_label(scope, cur, seg);
+            if let Some(field) = self.facts.resolved.field_label_under(
+                seg.text_range(),
+                self.facts.env,
+                &self.facts.ext_scope,
+            ) {
+                // FCS resolved the segments before this one at their dots: one
+                // it did not resolve there is declined, which ends the prefix,
+                // so the receiver is not mistaken for one FCS knows nothing
+                // about.
+                stands &= self.decide_data_segments(scope, recv, segments, &results, decided);
+                decided = results.len();
+                self.decide_receiver_by_label(scope, cur, field);
+            }
             let result = self.solver.table.fresh();
-            self.has_member(scope, cur, seg, result);
+            scope.poison.push(cur);
+            scope.poison.push(result);
             results.push(result);
             cur = result;
         }
-        results
+        stands &= self.decide_data_segments(scope, recv, segments, &results, decided);
+        (results, stands)
+    }
+
+    /// Decide the segments of the chain `recv.segments` from `from` up to
+    /// `results.len()` ([`Self::decide_data_access`]), segment *i*'s type
+    /// `results[i]` and its receiver `results[i − 1]` (`recv` for the first).
+    /// Returns whether what the receiver emitted still stands.
+    fn decide_data_segments(
+        &mut self,
+        scope: &mut Scope,
+        recv: TyVid,
+        segments: &[SyntaxToken],
+        results: &[TyVid],
+        from: usize,
+    ) -> bool {
+        let mut stands = true;
+        for i in from..results.len() {
+            let cur = if i == 0 { recv } else { results[i - 1] };
+            stands &= self.decide_data_access(scope, cur, &segments[i], results[i]);
+        }
+        stands
+    }
+
+    /// Decide the data-member access `recv.member`, whose type is `result`, at
+    /// its dot, on what `recv`'s type is there:
+    ///
+    /// - a non-generic named type: its field or property ([`Self::wake_member`]);
+    /// - a record the project declares: its field ([`Self::wake_record_field`]);
+    /// - a variable ([`Incomplete::IndeterminateReceiver`]: FCS reports FS0072, or
+    ///   looks the name up on `obj`), a generic type ([`Incomplete::GenericReceiver`]:
+    ///   the lookup is by name at arity 0), any other member of a project type
+    ///   ([`Incomplete::ProjectTypeMember`]), or an array, tuple, function or
+    ///   type parameter ([`Incomplete::ReceiverShape`]): declined.
+    ///
+    /// A declined access records nothing, its result is [tainted](Self::taint),
+    /// and the binding's prefix ends. Returns whether what the receiver emitted
+    /// stands ([`Self::record_member`]).
+    fn decide_data_access(
+        &mut self,
+        scope: &mut Scope,
+        recv: TyVid,
+        member: &SyntaxToken,
+        result: TyVid,
+    ) -> bool {
+        let tys = self.solver.tys;
+        let head = self.solver.table.resolve(tys.var(recv));
+        let name = ident_text(member);
+        let use_range = member.text_range();
+        let declined = match tys.kind(head) {
+            TyKind::Named { args, .. } if !args.is_empty() => Incomplete::GenericReceiver,
+            TyKind::Named { path, .. } => {
+                let path = path.spelled(self.facts.env.names());
+                let wake = self.wake_member(scope, &path, &name, result, use_range);
+                // A result the wake did not bind (a type the bridge does not
+                // carry) is one FCS knows.
+                if !tys.is_ground(self.solver.table.resolve(tys.var(result))) {
+                    self.taint(scope, tys.var(result));
+                }
+                match wake {
+                    Wake::Resolved { stands } => return stands,
+                    Wake::Declined(why) => {
+                        scope.mark_incomplete(why);
+                        return false;
+                    }
+                }
+            }
+            // A field of a project record, read off its declaration; FCS reads
+            // it as a field get, which keeps no node at the receiver.
+            TyKind::Project { .. }
+                if self.wake_record_field(scope, head, &name, result, use_range) =>
+            {
+                return false;
+            }
+            TyKind::Project { .. } => Incomplete::ProjectTypeMember,
+            TyKind::Var(_) => Incomplete::IndeterminateReceiver,
+            TyKind::Array { .. } | TyKind::Tuple(_) | TyKind::Fun { .. } | TyKind::Param(_) => {
+                Incomplete::ReceiverShape
+            }
+        };
+        self.taint(scope, tys.var(result));
+        scope.mark_incomplete(declined);
+        false
     }
 
     /// Decide the receiver `recv` of the label `label` by FCS's record-label
@@ -181,23 +262,18 @@ impl<'a> Gen<'a> {
     /// ([`ResolvedFile::field_label_under`]); binding the receiver to it is a
     /// decision ([`Self::decide`]), taken only on a faithful prefix and an
     /// untainted receiver. The access then wakes on the record like any
-    /// other ([`Self::wake_record_field`]).
+    /// other ([`Self::wake_record_field`]). The caller asks the resolver
+    /// ([`Self::gen_member_access`]).
     ///
-    /// Nothing is done where the resolver declines, where the receiver is
-    /// known (FCS looks the label up in that type), or where the record has
-    /// no path inference names it by: the access is then settled as before.
-    fn decide_receiver_by_label(&mut self, scope: &mut Scope, recv: TyVid, label: &SyntaxToken) {
-        let Some(field) = self.facts.resolved.field_label_under(
-            label.text_range(),
-            self.facts.env,
-            &self.facts.ext_scope,
-        ) else {
-            return;
-        };
-        // FCS resolved the segments before this one at their dots: one it
-        // did not resolve there is declined, which ends the prefix, so the
-        // receiver is not mistaken for one FCS knows nothing about.
-        self.settle_access(scope);
+    /// Nothing is done where the receiver is known (FCS looks the label up in
+    /// that type), or where the record has no path inference names it by: the
+    /// access is then decided on the receiver as it stands.
+    fn decide_receiver_by_label(
+        &mut self,
+        scope: &mut Scope,
+        recv: TyVid,
+        field: crate::FieldLabel,
+    ) {
         let tys = self.solver.tys;
         if !matches!(
             tys.kind(self.solver.table.resolve(tys.var(recv))),
@@ -280,9 +356,8 @@ impl<'a> Gen<'a> {
                         Incomplete::MethodCallee(callee.syntax().kind()),
                     ));
                 };
-                // FCS resolves a data-member prefix of the callee
-                // (`s.Field.M(…)`) at its dot, before the arguments.
-                self.settle_access(scope);
+                // The data-member prefix of the callee (`s.Field.M(…)`) is
+                // decided at its dots, before the arguments.
                 let recv = *receivers.last().expect("a method call has a receiver");
                 self.record_receivers(AccessPath {
                     path: &path,
@@ -542,7 +617,7 @@ impl<'a> Gen<'a> {
         result: TyVid,
         expected: Expected,
     ) -> Discharged {
-        self.record_member(decl, idx, use_range);
+        let _ = self.record_member(decl, idx, use_range);
         let params: Vec<Option<TyVid>> = (0..args.elements.len())
             .map(|i| {
                 let declared = Self::argument_parameter(method, form, i)?;
@@ -608,7 +683,7 @@ impl<'a> Gen<'a> {
             .flatten();
         match chosen {
             Some((decl, idx, m)) => {
-                self.record_member(decl, idx, use_range);
+                let _ = self.record_member(decl, idx, use_range);
                 match self.readable_member_type(decl, &m.signature.return_type) {
                     Some(ret) => {
                         self.eq(scope, tys.var(result), ret, Own::var(result));
@@ -773,7 +848,7 @@ impl<'a> Gen<'a> {
                 // Emit the receiver's own value node (coercion-free — synth).
                 self.emit(head.text_range(), head_var, Expected::Synth);
                 let mut receivers = vec![head_var];
-                receivers.extend(self.gen_member_access(scope, head_var, prefix));
+                receivers.extend(self.gen_member_access(scope, head_var, prefix).0);
                 Some((receivers, method.clone(), long_ident))
             }
             Expr::DotGet(dg) => {
@@ -793,7 +868,7 @@ impl<'a> Gen<'a> {
                 // own node).
                 let head_var = self.infer_expr(scope, &recv_expr, Expected::Synth).var()?;
                 let mut receivers = vec![head_var];
-                receivers.extend(self.gen_member_access(scope, head_var, prefix));
+                receivers.extend(self.gen_member_access(scope, head_var, prefix).0);
                 Some((receivers, method.clone(), long_ident))
             }
             Expr::Paren(p) => self.method_callee(scope, &p.inner()?),
@@ -874,21 +949,22 @@ impl<'a> Gen<'a> {
             // last dot: what precedes each dot is still a receiver it knew or
             // did not.
             let mut receivers = vec![recv];
-            receivers.extend(self.gen_member_access(scope, recv, segments));
-            self.settle_access(scope);
+            receivers.extend(self.gen_member_access(scope, recv, segments).0);
             self.record_receivers(AccessPath {
                 path: &long_ident,
                 receivers,
             });
             return Inferred::untyped(self.decline_expected(scope, Incomplete::Recovery));
         }
-        // Emit the receiver's own value node (coercion-free — synth), guarded on
-        // the access resolving: FCS keeps no receiver node for a rejected one.
-        self.out.open_receiver_guards(segments);
+        // Emit the receiver's own value node (coercion-free — synth), which
+        // stands only where the access resolves: FCS keeps no receiver node for
+        // a rejected one.
+        let mark = self.out.mark();
         self.emit(head.text_range(), recv, Expected::Synth);
-        self.out.close_guards(segments.len());
-        let results = self.gen_member_access(scope, recv, segments);
-        self.settle_access(scope);
+        let (results, stands) = self.gen_member_access(scope, recv, segments);
+        if !stands {
+            self.out.discard_since(mark);
+        }
         let (&result, before_last) = results
             .split_last()
             .expect("a member access names a member");
@@ -934,17 +1010,21 @@ impl<'a> Gen<'a> {
         }
         // The receiver is a coercion-free (synth) sub-position — a member access
         // never coerces its receiver — so synthesize it, emitting its own node,
-        // guarded on the access resolving: FCS keeps nothing inside the receiver
-        // of a rejected one.
-        self.out.open_receiver_guards(&segments);
+        // which stands only where every segment resolves: FCS keeps nothing
+        // inside the receiver of a rejected one.
+        let mark = self.out.mark();
         let recv = self.infer_expr(scope, &recv_expr, Expected::Synth).var();
-        self.out.close_guards(segments.len());
         let Some(recv) = recv else {
             // The receiver's walk recorded why it is not typed.
+            if !segments.is_empty() {
+                self.out.discard_since(mark);
+            }
             return Inferred::untyped(self.decline_expected_propagated(scope));
         };
-        let results = self.gen_member_access(scope, recv, &segments);
-        self.settle_access(scope);
+        let (results, stands) = self.gen_member_access(scope, recv, &segments);
+        if !stands {
+            self.out.discard_since(mark);
+        }
         let mut receivers = vec![recv];
         receivers.extend(&results);
         if !trailing {
@@ -1009,12 +1089,12 @@ impl<'a> Gen<'a> {
         Some(dv)
     }
 
-    /// Wake a suspended data-member access `m` on the project type `head`
-    /// when `head` is a record the project declares with a field of that name
-    /// that inference reads, accessible at the access: relate the access's
-    /// result to the field's type, the record's parameters instantiated at
-    /// `head`'s arguments. `false` for anything else (a method call, a
-    /// member that is not a field, a record not read).
+    /// Decide the data-member access `name`, whose type is `result`, on the
+    /// project type `head`, where `head` is a record the project declares
+    /// with a field of that name that inference reads, accessible at the
+    /// access: relate the access's result to the field's type, the record's
+    /// parameters instantiated at `head`'s arguments. `false` for anything
+    /// else (a member that is not a field, a record not read).
     ///
     /// FCS looks a field up by the receiver's type when it knows that type
     /// at the access. When it does not, it resolves the label through the
@@ -1025,7 +1105,9 @@ impl<'a> Gen<'a> {
         &mut self,
         scope: &mut Scope,
         head: Ty,
-        m: &SuspendedMember,
+        name: &str,
+        result: TyVid,
+        use_range: TextRange,
     ) -> bool {
         let TyKind::Project { path, args } = self.solver.tys.kind(head) else {
             return false;
@@ -1035,13 +1117,12 @@ impl<'a> Gen<'a> {
             .project_records
             .get(&(path.clone(), args.len()))
             .or_else(|| self.facts.preceding.record(path, args.len()));
-        let Some(record) = record.filter(|r| {
-            r.scope
-                .is_none_or(|scope| scope.contains_range(m.use_range))
-        }) else {
+        let Some(record) =
+            record.filter(|r| r.scope.is_none_or(|scope| scope.contains_range(use_range)))
+        else {
             return false;
         };
-        let Some(&field) = record.fields.get(&m.name) else {
+        let Some(&field) = record.fields.get(name) else {
             return false;
         };
         let declared = record.record;
@@ -1054,16 +1135,11 @@ impl<'a> Gen<'a> {
         // result, which the access made and settles at once.
         let own = self.own_since(from);
         self.eq(scope, receiver, head, own);
-        self.eq(
-            scope,
-            self.solver.tys.var(m.result),
-            field,
-            Own::var(m.result),
-        );
+        self.eq(scope, self.solver.tys.var(result), field, Own::var(result));
         true
     }
 
-    /// Wake a suspended data-member access: look up the field or non-indexer
+    /// Decide a data-member access on a named type: look up the field or non-indexer
     /// property `name` on the receiver type `path`
     /// ([`AssemblyEnv::instance_data_member`], walking its base chain), record
     /// its identity at `use_range` ([`Self::record_member`]) and bind `result`
@@ -1090,11 +1166,11 @@ impl<'a> Gen<'a> {
         let Some((decl, idx, member_ty)) = env.instance_data_member(handle, name) else {
             return Wake::Declined(Incomplete::NoSuchMember);
         };
-        self.record_member(decl, idx, use_range);
+        let stands = self.record_member(decl, idx, use_range);
         if let Some(ty) = self.readable_member_type(decl, member_ty) {
             self.eq(scope, self.solver.tys.var(result), ty, Own::var(result));
         }
-        Wake::Resolved
+        Wake::Resolved { stands }
     }
 
     /// Record that the member name at `use_range` resolves to the member
@@ -1103,14 +1179,19 @@ impl<'a> Gen<'a> {
     /// go-to-definition. Recorded even where the member's type is not read: its
     /// identity is known.
     ///
-    /// The access is one FCS accepts, so what its receiver emitted stands
-    /// ([`Emissions::confirm_guard`]), unless the receiver's nodes turn on an
-    /// assembly reading the seal withholds (an incomplete projection publishes
-    /// only what an empty env would), or the member is a field of an F#
-    /// record, union or exception type: FCS reads that as a field get, under
-    /// which the typed tree keeps no node at the receiver (`let f (v: R) = v.Q`
-    /// has one at `v.Q` only).
-    fn record_member(&mut self, decl: EntityHandle, idx: MemberIndex, use_range: TextRange) {
+    /// Returns whether what the access's receiver emitted stands: the access
+    /// is one FCS accepts, unless the receiver's nodes turn on an assembly
+    /// reading the seal withholds (an incomplete projection publishes only
+    /// what an empty env would), or the member is a field of an F# record,
+    /// union or exception type, which FCS reads as a field get, under which
+    /// the typed tree keeps no node at the receiver (`let f (v: R) = v.Q` has
+    /// one at `v.Q` only).
+    fn record_member(
+        &mut self,
+        decl: EntityHandle,
+        idx: MemberIndex,
+        use_range: TextRange,
+    ) -> bool {
         let env = self.facts.env;
         self.out
             .member_resolution(use_range, Resolution::Member { parent: decl, idx });
@@ -1118,9 +1199,7 @@ impl<'a> Gen<'a> {
             env.entity(decl).kind,
             EntityKind::Record | EntityKind::Union | EntityKind::Exception
         );
-        if !fsharp_field_carrier && !env.identities_incomplete() {
-            self.out.confirm_guard(use_range);
-        }
+        !fsharp_field_carrier && !env.identities_incomplete()
     }
 
     /// A member's type `ty`, declared by `decl`, as inference reads it: F#'s

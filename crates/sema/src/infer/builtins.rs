@@ -19,9 +19,8 @@ impl<'a> Gen<'a> {
     /// yet leaves the constraint to be solved later, by weak resolution if
     /// nothing else fixes it, which may default it to `int`
     /// (`IsBinaryOpOtherArgType`). So the operands are walked as the
-    /// arguments they are, the binding settled ([`Self::settle`], which
-    /// applies only what FCS has applied by this point in source order), and
-    /// the operand types read there: the application is typed when every one
+    /// arguments they are (the table then holds what FCS has applied by this
+    /// point in source order), and the operand types read there: the application is typed when every one
     /// is known and on the rule's list ([`builtin_verdict`]), and otherwise
     /// the binding is incomplete with the reason and the application untyped —
     /// but for a conversion whose operand is not known, or not modelled,
@@ -73,7 +72,6 @@ impl<'a> Gen<'a> {
             }
         }
         let verdict = if walked {
-            self.settle(scope);
             let tys: Vec<Ty> = vars
                 .iter()
                 .map(|v| self.solver.table.resolve(self.solver.tys.var(*v)))
