@@ -101,6 +101,20 @@ condition's trust through those, never through `trust_for_raw` /
 WoofWare/borzoi#499 hit. To tell a user *why* a value is untrusted, read
 `ParsedProject::property_untrusted_cause`.
 
+### Inside the evaluator: the trust is on the value
+
+A property's trust lives on its `PropertyMap` entry, beside the value, and an
+expansion's result carries the join of what it read
+(`docs/msbuild-value-carried-provenance-plan.md`, P3). So a new read of the
+table is `get(name)` → `Held::parts()` (value and trust together), and a read
+that leaves the trust behind must say so: `ignoring_trust`,
+`get_ignoring_trust`, `get_unescaped_ignoring_trust`. Each existing one has a
+comment naming where its trust question is answered; a new one needs the same,
+and "nowhere" is the bug. `Trust::CERTAIN` is sealed to `crate::properties` —
+if you find yourself wanting it elsewhere, you are about to fabricate
+certainty. The item pass still judges its values by `Expansion`'s scan-based
+flags (entries 6 and 7 above); its `ignoring_trust` sites are P4's worklist.
+
 ## 2. Never gate a fold on the generic provenance seam
 
 `ParsedProject::property_provenance_untrusted` fires for **dozens of

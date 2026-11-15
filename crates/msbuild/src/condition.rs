@@ -1296,7 +1296,9 @@ fn expand_system_version_parse_arg(
     undefined: &mut Vec<String>,
 ) -> Result<String, ()> {
     if let Some(property) = split_dash_zero_property(raw) {
-        if let Some(value) = props.get(property) {
+        // A condition's trust is the whole-tree scan, not its operands' (see
+        // [`expand_for_condition`]).
+        if let Some(value) = props.get_ignoring_trust(property) {
             // A condition operand is a point of use: MSBuild compares the
             // *unescaped* value.
             let value = value.unescape();
@@ -1559,6 +1561,13 @@ fn expand_for_condition(
     } else {
         substitute(raw, props)
     };
+    // The operand's carried trust is left behind, deliberately. Evaluation
+    // short-circuits (`'$(X)' == '' Or '$(X)' == 'x'` never expands the second
+    // arm when the first is true), so the trust of what *this* evaluation read
+    // would under-report what the real build may read; a condition's trust is
+    // the scan of its whole tree instead (`State::condition_trust`, Bucket B of
+    // `docs/msbuild-value-carried-provenance-plan.md`).
+    let value = value.into_ignoring_trust();
     for issue in issues {
         match issue {
             Issue::Undefined { name } => undefined.push(name),

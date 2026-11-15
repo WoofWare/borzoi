@@ -20,9 +20,16 @@
 //! so by calling a named projection, which is a visible decision rather than a
 //! quietly short list of map lookups.
 //!
-//! The fields are private to this module, so certainty cannot be fabricated by
-//! writing a struct literal: it is reachable only through [`Trust::CERTAIN`],
-//! and through joins and clears that name what they are doing.
+//! A `Trust` lives on the property table's entry, beside the value it
+//! describes ([`super::PropertyMap`]), and an expansion carries the join of
+//! every entry it read ([`super::Provenanced`]). Certainty is **sealed** to the
+//! property module: the fields are private here, and [`Trust::CERTAIN`] is
+//! visible only inside `crate::properties`, where its uses are the table's own
+//! — a fresh entry seeded from a source the walk computes or the caller
+//! supplies, and a lookup that finds no entry at all. Everywhere else a certain
+//! trust is reachable only by reading one, joining ([`Trust::join_all`]),
+//! applying a write's verdict to one read from the table, or naming why the
+//! answer is certain ([`Trust::of_exact_decision`]).
 
 use std::ops::Range;
 
@@ -194,9 +201,9 @@ pub(crate) struct TrustShape {
 ///
 /// [`Trust::CERTAIN`] is the identity of [`Trust::join`] and means every
 /// channel is clean — the walk's value for the name is the real build's.
-/// Deliberately **not** `Default`: a derived `Trust::default()` is `pub(crate)`
-/// too, so it would hand every module an all-clean value without going through
-/// [`Trust::CERTAIN`], which is the one entry point this module's seal rests on.
+/// Deliberately **not** `Default`: a derived `Trust::default()` would be
+/// `pub(crate)`, handing every module an all-clean value without going through
+/// [`Trust::CERTAIN`], which is the one entry point the seal rests on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Trust {
     unpinned: Option<UnpinnedRoot>,
@@ -206,8 +213,8 @@ pub(crate) struct Trust {
 
 impl Trust {
     /// Every channel clean. The identity of [`Trust::join`], and the only
-    /// certainty this module hands out.
-    pub(crate) const CERTAIN: Self = Trust {
+    /// certainty this module hands out — to the property module alone.
+    pub(in crate::properties) const CERTAIN: Self = Trust {
         unpinned: None,
         sdk_package: None,
         refused: false,
@@ -216,9 +223,63 @@ impl Trust {
     /// [`Trust::CERTAIN`], borrowed — what a lookup that finds no entry should
     /// hand back, so a reader can ask its question of a `&Trust` either way
     /// instead of open-coding "absent means clean".
-    pub(crate) fn certain_ref() -> &'static Trust {
+    pub(in crate::properties) fn certain_ref() -> &'static Trust {
         static CERTAIN: Trust = Trust::CERTAIN;
         &CERTAIN
+    }
+
+    /// The join of `parts`, in order: certain exactly when every part is, with
+    /// each channel's witness the first part's that has one.
+    pub(crate) fn join_all<'a>(parts: impl IntoIterator<Item = &'a Trust>) -> Trust {
+        let mut joined = Trust::CERTAIN;
+        for part in parts {
+            joined.join_in(part);
+        }
+        joined
+    }
+
+    /// The trust of a decision the values the walk holds exactly settle on
+    /// their own: no value of an unknown operand can move it, so nothing the
+    /// operands' trust says reaches the decision. The one certainty a caller
+    /// outside the property module can name, and it says why.
+    pub(crate) fn of_exact_decision() -> Trust {
+        Trust::CERTAIN
+    }
+
+    /// Whether `stored` — the trust a write recorded for a value — holds every
+    /// value-describing doubt this trust, the one the value's expansion
+    /// carried, names: the two channels [`Trust::reference_is_untrusted`]
+    /// reads. A carried refusal is not required to be held. A read of an
+    /// *unbound* refused name is an undefined read, which the write already
+    /// records as an unpinned root; a read of a *bound* one (a refusal a clean
+    /// overwrite kept, [`RefusedOutcome::Keep`]) reads a value computed exactly,
+    /// and the mark it carries is about the splice reader's tolerance of
+    /// opacity, which a copy does not inherit today.
+    pub(crate) fn is_held_by(&self, stored: &Trust) -> bool {
+        let Trust {
+            unpinned,
+            sdk_package,
+            refused: _,
+        } = self;
+        (unpinned.is_none() || stored.unpinned.is_some())
+            && (sdk_package.is_none() || stored.sdk_package.is_some())
+    }
+
+    /// [`Trust::join`] in place, cloning only a witness this trust lacks — so
+    /// the clean case, nearly every read, allocates nothing.
+    pub(crate) fn join_in(&mut self, other: &Trust) {
+        let Trust {
+            unpinned,
+            sdk_package,
+            refused,
+        } = other;
+        if self.unpinned.is_none() {
+            self.unpinned.clone_from(unpinned);
+        }
+        if self.sdk_package.is_none() {
+            self.sdk_package.clone_from(sdk_package);
+        }
+        self.refused |= *refused;
     }
 
     /// Nothing to declare on any channel.
@@ -276,6 +337,11 @@ impl Trust {
     /// reports the *first* offending reference. That is the diagnostic a reader
     /// of the value wants, and it is why the join is not commutative on the
     /// nose — only on its channel-wise shape.
+    ///
+    /// The reference form the laws below are stated over; the walk folds with
+    /// [`Trust::join_in`] and [`Trust::join_all`], each property-tested equal
+    /// to it.
+    #[cfg(test)]
     pub(crate) fn join(self, other: Trust) -> Trust {
         Trust {
             unpinned: self.unpinned.or(other.unpinned),
@@ -331,12 +397,13 @@ impl Trust {
     /// Whether a *reference* to this name is untrustworthy — the two channels
     /// that describe a value we hold but may have wrong.
     ///
-    /// The refused channel is deliberately absent: it says we hold *no* value,
-    /// which surfaces to a reader as the name being undefined and is judged
-    /// there ([`Trust::refused`], consulted by the undefined-read guard). Every
-    /// site that sets it drops the binding first, so there is no value left for
-    /// a reference to be untrusting *of* — that pairing is enforced at the
-    /// write, not by this type.
+    /// The refused channel is deliberately absent. Where it is set, the write
+    /// dropped the binding, so the name surfaces to a reader as undefined and
+    /// is judged there ([`Trust::refused`], consulted by the undefined-read
+    /// guard). It also outlives a later clean overwrite ([`RefusedOutcome::Keep`]
+    /// at that site), so a *bound* name can carry it; then the value is one we
+    /// computed exactly from ordinary text, and the mark stands only for the
+    /// splice reader's tolerance of opacity, which a reference does not share.
     pub(crate) fn reference_is_untrusted(&self) -> bool {
         let Trust {
             unpinned,
@@ -555,6 +622,20 @@ mod tests {
             let every_part_certain = parts.iter().all(Trust::is_certain);
             let folded = parts.into_iter().fold(Trust::CERTAIN, Trust::join);
             prop_assert_eq!(folded.is_certain(), every_part_certain);
+        }
+
+        /// The in-place join the expansion folds with is [`Trust::join`].
+        #[test]
+        fn join_in_is_join(a in trust_strategy(), b in trust_strategy()) {
+            let mut in_place = a.clone();
+            in_place.join_in(&b);
+            prop_assert_eq!(in_place, a.join(b));
+        }
+
+        #[test]
+        fn join_all_is_the_fold(parts in proptest::collection::vec(trust_strategy(), 0..6)) {
+            let folded = parts.iter().cloned().fold(Trust::CERTAIN, Trust::join);
+            prop_assert_eq!(Trust::join_all(&parts), folded);
         }
 
         #[test]

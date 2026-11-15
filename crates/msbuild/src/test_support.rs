@@ -46,7 +46,7 @@ pub fn is_msbuild_true(value: &str) -> bool {
 /// consumer outside the evaluator can pick the wrong domain.
 pub fn substitute(input: &str, props: &PropertyMap) -> (String, Vec<Issue>) {
     let (value, issues) = crate::properties::substitute(input, props);
-    (value.unescape(), issues)
+    (value.into_ignoring_trust().unescape(), issues)
 }
 
 /// Names MSBuild computes for itself as initial properties — the predicate the

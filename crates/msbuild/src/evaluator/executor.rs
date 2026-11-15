@@ -327,7 +327,8 @@ impl<'s, 'r> Engine<'s, 'r> {
         let mut properties = BTreeMap::new();
         for name in &probe.properties {
             self.check_read(name)?;
-            properties.insert(name.clone(), self.lookup.get_unescaped(name));
+            // `check_read` above answered the trust question.
+            properties.insert(name.clone(), self.lookup.get_unescaped_ignoring_trust(name));
         }
         let mut items = BTreeMap::new();
         for item_type in &probe.item_types {
@@ -502,7 +503,7 @@ impl<'s, 'r> Engine<'s, 'r> {
             self.check_read(name)?;
             if self
                 .lookup
-                .get(name)
+                .get_ignoring_trust(name)
                 .is_some_and(|value| value.as_escaped().contains(['@', '%', '$', ';']))
             {
                 return declined();
@@ -1051,7 +1052,12 @@ impl<'s, 'r> Engine<'s, 'r> {
     fn decide_text(&mut self, raw: &str) -> Result<bool, Decline> {
         let raw = self.with_items(raw, true)?;
         self.check_references(&raw)?;
-        if holds_reference(properties::substitute(&raw, &self.lookup).0.as_escaped()) {
+        if holds_reference(
+            properties::substitute(&raw, &self.lookup)
+                .0
+                .ignoring_trust()
+                .as_escaped(),
+        ) {
             return decline(format!(
                 "the condition {raw} expands to an item or metadata reference"
             ));
@@ -1086,7 +1092,7 @@ impl<'s, 'r> Engine<'s, 'r> {
             self.check_read(name)?;
             if self
                 .lookup
-                .get(name)
+                .get_ignoring_trust(name)
                 .is_some_and(|value| may_assemble(value.as_escaped()))
             {
                 return decline(format!("{name} may assemble an item reference"));
@@ -1099,13 +1105,20 @@ impl<'s, 'r> Engine<'s, 'r> {
         {
             return decline(format!("{raw} does not expand cleanly"));
         }
-        Ok(value.as_escaped().to_owned())
+        // `check_read` answered every reference's trust above.
+        Ok(value.ignoring_trust().as_escaped().to_owned())
     }
 
     /// Expand the `$(…)` in `raw`, which holds no item reference.
+    ///
+    /// The value's carried trust is left behind: the run's trust policy is
+    /// [`Self::check_read`], which every reference has passed by now
+    /// ([`Self::check_references`]) — the walk vouches for the name, or the run
+    /// wrote it itself.
     fn substitute(&self, raw: &str) -> Result<escaping::Escaped, Decline> {
         self.check_references(raw)?;
         let (value, issues) = properties::substitute(raw, &self.lookup);
+        let value = value.into_ignoring_trust();
         if issues
             .iter()
             .any(|issue| !matches!(issue, Issue::Undefined { .. }))
@@ -1217,7 +1230,7 @@ impl<'s, 'r> Engine<'s, 'r> {
         // `A=@`, `B=(I)` reads `@(I)`).
         if self
             .lookup
-            .get(name)
+            .get_ignoring_trust(name)
             .is_some_and(|value| holds_reference(value.as_escaped()))
         {
             return decline(format!("{name} holds an item or metadata reference"));

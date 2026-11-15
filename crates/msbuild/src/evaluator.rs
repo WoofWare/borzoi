@@ -72,11 +72,11 @@ use super::diagnostic::{
 use super::imports::normalise;
 use super::observed::{self, EntryKind, Observer, ReadCounts, ReadSet};
 use super::properties::escaping::Escaped;
-use super::properties::{self, Issue, PropertyMap};
-use super::trust::{
-    OpacityCause, PropertyProvenance, RefusedOutcome, SdkPackagePropertyTaint, TaintOutcome, Trust,
-    UndefinedBecause, UnpinnedOutcome, UnpinnedRoot,
+use super::properties::trust::{
+    OpacityCause, PropertyProvenance, RefusedOutcome, ResolvedProvenance, SdkPackagePropertyTaint,
+    TaintOutcome, Trust, UndefinedBecause, UnpinnedOutcome, UnpinnedRoot,
 };
+use super::properties::{self, Issue, PropertyMap, Provenanced};
 use super::{
     FrameworkReference, GlobRequest, GlobResolver, GlobalPackageReference, ItemKind,
     ItemMetadataValue, PackageRefOp, PackageReference, PackageVersion, ParsedProject, ResolvedItem,
@@ -511,9 +511,12 @@ fn walk_once<'r>(
         implicit_props,
         project_dir,
     ) && should_import_default_true(
+        // Only pre-records the import point, to suppress a rediscovery; the
+        // gate's trust is judged where the splice fires
+        // (`fire_entry_directory_build_props_splice`).
         state
             .lookup
-            .get_unescaped("ImportDirectoryBuildProps")
+            .get_unescaped_ignoring_trust("ImportDirectoryBuildProps")
             .as_deref(),
         state.is_sticky_global("ImportDirectoryBuildProps"),
     ) {
@@ -707,9 +710,11 @@ fn walk_once<'r>(
         targets_to_import.is_some(),
     );
     let targets_gate_open = should_import_default_true(
+        // The gate's trust is `snapshot_untrusted` above, read from the same
+        // entry with the path/gate asymmetry the splice needs.
         state
             .lookup
-            .get_unescaped("ImportDirectoryBuildTargets")
+            .get_unescaped_ignoring_trust("ImportDirectoryBuildTargets")
             .as_deref(),
         state.is_sticky_global("ImportDirectoryBuildTargets"),
     );
@@ -773,9 +778,12 @@ fn walk_once<'r>(
         .walked_directory_packages_props_import
         .as_ref()
         .is_some_and(|walked| {
+            // No consumer to protect: the discharge this decides never fires
+            // on a real SDK chain (P2′ of
+            // `docs/msbuild-value-carried-provenance-plan.md`).
             state
                 .lookup
-                .get_unescaped("DirectoryPackagesPropsPath")
+                .get_unescaped_ignoring_trust("DirectoryPackagesPropsPath")
                 .map(|raw| raw.trim().replace('\\', "/"))
                 .filter(|path| !path.is_empty())
                 .is_some_and(|path| {
@@ -804,11 +812,10 @@ fn walk_once<'r>(
         && !extra_properties
             .keys()
             .any(|name| name.eq_ignore_ascii_case("TargetFramework"))
-        && state.trust_of("TargetFramework").is_certain()
-        && state
-            .lookup
-            .get_unescaped("TargetFramework")
-            .is_some_and(|value| !value.trim().is_empty());
+        && state.lookup.get("TargetFramework").is_some_and(|held| {
+            let (value, trust) = held.parts();
+            trust.is_certain() && !value.unescape().trim().is_empty()
+        });
     let observations = WalkObservations {
         entry_has_sdk: sdk_props_to_splice.is_some(),
         directory_build_props_pending_unconsumed: state.pending_directory_build_props.is_some(),
@@ -1118,10 +1125,12 @@ fn resolve_directory_build_path(
     // An override that names a file on disk: a point of use. Padding is trimmed
     // *in the domain*, before decoding — an escaped `%20` is part of the
     // filename, not padding (see `Escaped::trimmed_unescaped`).
+    // The override's trust is judged where its resolution is consumed
+    // (`note_directory_build_splice_decision`).
     if let Some(trimmed) = state
         .lookup
-        .get(override_property)
-        .map(|v| v.trimmed_unescaped())
+        .get_ignoring_trust(override_property)
+        .map(Escaped::trimmed_unescaped)
     {
         if !trimmed.is_empty() {
             // MSBuild accepts both `\` and `/` on either platform; explicit
@@ -1820,20 +1829,6 @@ struct State<'r> {
     /// where none may rebind it.
     #[cfg(any(test, feature = "test-support"))]
     using_task_names: Vec<String>,
-    /// What the walk knows, or doesn't, about each property's stored value —
-    /// keyed by lowercase property name. All three forward-uncertainty channels
-    /// live in the one [`Trust`] value, so a name cannot be marked on one
-    /// channel and quietly missed on another; [`Trust`]'s own docs say what
-    /// each channel means and who consumes it.
-    ///
-    /// **Absence means certainty**, and the map never holds a certain
-    /// [`Trust`]: [`Self::apply_property_provenance`] — the only mutator —
-    /// drops the entry when a write clears the last channel. Readers go
-    /// through [`Self::trust_of`] and so never see the difference, but
-    /// [`Self::into_project`] *iterates* the map, and an entry that declares
-    /// nothing would be a name reported for no reason. The debug assertion
-    /// there checks the mutator holds the line.
-    property_trust: HashMap<String, Trust>,
     /// Lowercased referenceable names present in the caller's environment
     /// snapshot — *including* names promotion skipped (case collisions,
     /// toolset overwrites): the real build has *some* value for every one
@@ -1959,8 +1954,10 @@ impl HelperMetadataUncertainty {
 struct Expansion {
     /// The expanded text, still in MSBuild's escaped domain — it is stored as a
     /// property without leaving it, exactly as MSBuild stores it, and each
-    /// consumer unescapes at its own point of use.
-    value: Escaped,
+    /// consumer unescapes at its own point of use — with the trust of every
+    /// entry the expansion read. A consumer takes the trust or says it is
+    /// leaving it behind ([`Provenanced`]).
+    value: Provenanced<Escaped>,
     had_undefined: bool,
     had_unsupported: bool,
     /// Why the produced value cannot be trusted as final, if it can't: a
@@ -2100,7 +2097,7 @@ impl<'r> State<'r> {
                 } else {
                     EnvExtensionsPath::Value(value.clone())
                 };
-                lookup.remove(key);
+                lookup.unbind(key);
                 continue;
             }
 
@@ -2122,7 +2119,7 @@ impl<'r> State<'r> {
                 || is_env_ignored_toolset_name(&lower);
 
             if unmodellable {
-                lookup.remove(key);
+                lookup.unbind(key);
                 continue;
             }
             // An environment value is *already* in MSBuild's escaped domain and
@@ -2287,7 +2284,6 @@ impl<'r> State<'r> {
             initial_targets_named: false,
             #[cfg(any(test, feature = "test-support"))]
             using_task_names: Vec::new(),
-            property_trust: HashMap::new(),
             env_property_names,
             walk_opaque: None,
             target_framework_reads: TargetFrameworkReads::CarvedOut,
@@ -2671,7 +2667,7 @@ impl<'r> State<'r> {
         // environment snapshot (promoted or dropped, the real build has *some*
         // value for it), and never the subject of a write we could not decide
         // or refused.
-        if self.lookup.get("VisualStudioVersion").is_none()
+        if !self.lookup.is_bound("VisualStudioVersion")
             && !self.env_property_names.contains("visualstudioversion")
             && self.trust_of("VisualStudioVersion").is_certain()
             && let Some(value) = toolset_visual_studio_version(&version_dir)
@@ -2689,7 +2685,7 @@ impl<'r> State<'r> {
             // `toolset_honours_env_extensions_path`), so it is one of the
             // environment's values, not the toolset's path. The slot stays
             // empty and reads decline.
-            if self.lookup.get(name).is_none()
+            if !self.lookup.is_bound(name)
                 && !self.env_property_names.contains(&name.to_ascii_lowercase())
             {
                 // Same provenance as the reserved seeds above: our own paths.
@@ -2706,7 +2702,7 @@ impl<'r> State<'r> {
         // environment model whose answer depends on the toolset version: see
         // `toolset_honours_env_extensions_path`. Now that an SDK has named the
         // toolset, the value parked in `State::new` can be adjudicated.
-        if self.lookup.get("MSBuildExtensionsPath").is_none() {
+        if !self.lookup.is_bound("MSBuildExtensionsPath") {
             let toolset_value = format!("{dir}/");
             match (
                 &self.env_extensions_path,
@@ -2748,21 +2744,17 @@ impl<'r> State<'r> {
              the walk produces its result"
         );
         // The output-name verdict and the untrusted-provenance set need
-        // `&self` (the trust map), so compute them before the destructure
-        // below consumes it.
+        // `&self`, so compute them before the destructure below consumes it.
         let target_name = self.target_name_verdict();
-        debug_assert!(
-            self.property_trust.values().all(|t| !t.is_certain()),
-            "a write that clears every channel must drop the entry, so that \
-             iterating the trust map means what it looks like"
-        );
         // A refused write alone does not put a name here: this set describes
         // values a consumer holds and may have wrong, and a refusal means we
-        // hold no value at all — see [`Trust::reference_is_untrusted`].
+        // hold no value at all — see [`Trust::reference_is_untrusted`] (and
+        // #780, where that reading is shown to be wrong for this set's
+        // consumers).
         let untrusted_properties: HashMap<String, crate::UntrustedCause> = self
-            .property_trust
-            .iter()
-            .filter_map(|(name, trust)| Some((name.clone(), trust.untrusted_cause()?)))
+            .lookup
+            .uncertain()
+            .filter_map(|(name, trust)| Some((name.to_string(), trust.untrusted_cause()?)))
             .collect();
         let hidden_content = self
             .walk_opaque
@@ -2876,7 +2868,6 @@ impl<'r> State<'r> {
                 initial_targets_named: _,
             #[cfg(any(test, feature = "test-support"))]
                 using_task_names: _,
-            property_trust: _,
             env_property_names: _,
             walk_opaque: _,
             target_framework_reads: _,
@@ -2893,11 +2884,15 @@ impl<'r> State<'r> {
         // `NuGet.targets` (`'$(ManagePackageVersionsCentrally)' == 'true' AND
         // '$(CentralPackageVersionsFileImported)' == 'true'`), so they take the
         // boolean vocabulary, not string equality — see [`is_msbuild_true`].
+        //
+        // Their trust is answered at the write, not here: a CPM flag's
+        // condition and value are package-affecting (`package_context`), so an
+        // untrusted write of either already left the package set uncertain.
         let manages_versions_centrally = lookup
-            .get_unescaped("ManagePackageVersionsCentrally")
+            .get_unescaped_ignoring_trust("ManagePackageVersionsCentrally")
             .is_some_and(|v| is_msbuild_true(&v));
         let central_package_versions_file_imported = lookup
-            .get_unescaped("CentralPackageVersionsFileImported")
+            .get_unescaped_ignoring_trust("CentralPackageVersionsFileImported")
             .is_some_and(|v| is_msbuild_true(&v));
         // `CentralPackageVersionOverrideEnabled` is different in kind: the SDK
         // does not compare it, it forwards the raw value to the restore task,
@@ -2909,7 +2904,7 @@ impl<'r> State<'r> {
         // it can only retain uncertainty, never commit a version override the
         // real restore would reject.
         let central_package_version_override_enabled = !lookup
-            .get_unescaped("CentralPackageVersionOverrideEnabled")
+            .get_unescaped_ignoring_trust("CentralPackageVersionOverrideEnabled")
             .is_some_and(|v| condition::parse_msbuild_bool(&v) == Some(false));
         // `package_references` is already the effective (Include + Update
         // collapsed) set, with versionless uncertainty detected on it, from the
@@ -2957,8 +2952,10 @@ impl<'r> State<'r> {
         let properties = written
             .into_values()
             .filter_map(|project_name| {
+                // Published beside `untrusted_properties`, which carries
+                // each name's trust to the consumer.
                 lookup
-                    .get_unescaped(&project_name)
+                    .get_unescaped_ignoring_trust(&project_name)
                     .map(|v| (project_name, v))
             })
             .collect();
@@ -2973,13 +2970,18 @@ impl<'r> State<'r> {
         // fragment decoded after — MSBuild's property-to-list conversion, which
         // makes `A%3bB` the single define `A;B` rather than two
         // (oracle-pinned 2026-07-12). Decoding first would split it in two.
+        // Its trust is `define_constants_uncertain`, a consequence-side flag
+        // raised where a user-authored write could diverge.
         let define_constants = lookup
-            .get("DefineConstants")
+            .get_ignoring_trust("DefineConstants")
             .map(crate::define_constants_from_escaped)
             .unwrap_or_default();
         // Same rule, same reason: split the escaped value, decode each fragment.
+        // The plural is consumed as a declared list whose TFM-invariant
+        // intersection trusts no single branch (the `msbuild-trust-audit`
+        // skill, entry 11), so its trust is not read here.
         let target_frameworks: Vec<String> = lookup
-            .get("TargetFrameworks")
+            .get_ignoring_trust("TargetFrameworks")
             .map(|v| {
                 v.split_list()
                     .map(|f| f.unescape().trim().to_string())
@@ -2989,12 +2991,15 @@ impl<'r> State<'r> {
             .unwrap_or_default();
         // `<LangVersion>` from the same merged map. Trim and drop empties so an
         // unset (or whitespace-only) value reads as `None` rather than `Some("")`.
+        // Published beside `untrusted_properties`; the LSP reads the
+        // `LangVersion` entry there into its fold's cache key, beside the
+        // consequence-side `shape_depends_on_language_version`.
         let lang_version_untrimmed = lookup
-            .get_unescaped("LangVersion")
+            .get_unescaped_ignoring_trust("LangVersion")
             .map(|v| v.to_string())
             .filter(|s| !s.is_empty());
         let other_flags = lookup
-            .get_unescaped("OtherFlags")
+            .get_unescaped_ignoring_trust("OtherFlags")
             .map(|v| v.to_string())
             .filter(|s| !s.is_empty());
         let lang_version = lang_version_untrimmed
@@ -3334,12 +3339,10 @@ impl<'r> State<'r> {
             .or_insert_with(|| HelperMetadataUncertainty::item_definition_default(metadata_name));
     }
 
-    /// What the walk knows about `name`'s stored value. An absent entry is
-    /// [`Trust::CERTAIN`] — see [`Self::property_trust`].
+    /// What the walk knows about `name`'s stored value, bound or not: the
+    /// trust its entry in [`Self::lookup`] carries.
     fn trust_of(&self, name: &str) -> &Trust {
-        self.property_trust
-            .get(&name.to_ascii_lowercase())
-            .unwrap_or(Trust::certain_ref())
+        self.lookup.trust(name)
     }
 
     /// The trust a *value* inherits from the properties it references: the
@@ -3349,42 +3352,38 @@ impl<'r> State<'r> {
     /// mean one scan per channel, and a scan that quietly covered two of the
     /// three would look exactly like this one at the call site.
     fn trust_for_raw(&self, raw: &str) -> Trust {
-        let mut joined = Trust::CERTAIN;
-        for name in properties::property_references(raw) {
-            // Only a name with something to declare is in the map at all, so
-            // the clean case — nearly every reference — costs no clone.
-            if let Some(trust) = self.property_trust.get(&name.to_ascii_lowercase()) {
-                joined = joined.join(trust.clone());
-            }
-        }
-        joined
+        Trust::join_all(properties::property_references(raw).map(|name| self.trust_of(name)))
     }
 
     fn sdk_package_property_is_tainted(&self, name: &str) -> bool {
         self.trust_of(name).sdk_package().is_some()
     }
 
-    /// The single point that mutates any forward-uncertainty channel: apply a
-    /// [`PropertyProvenance`] verdict to all three, keyed by `name`.
-    ///
-    /// The taint span is resolved here — remapped to the entry file and
-    /// stamped with the current origin — because that is walk state the write
-    /// sites don't carry. The certain result is *removed* rather than stored,
-    /// which is what lets [`Self::property_trust`] read absence as certainty.
-    fn apply_property_provenance(&mut self, name: &str, provenance: PropertyProvenance) {
-        let resolved = provenance.map_taint(|span| SdkPackagePropertyTaint {
+    /// A write's verdict with its taint span resolved — remapped to the entry
+    /// file and stamped with the current origin — because that is walk state
+    /// the write sites don't carry.
+    fn resolve_provenance(&self, provenance: PropertyProvenance) -> ResolvedProvenance {
+        provenance.map_taint(|span| SdkPackagePropertyTaint {
             span: self.effective_span(span),
             origin: self.current_origin(),
-        });
-        let lower = name.to_ascii_lowercase();
-        let trust = self
-            .property_trust
-            .remove(&lower)
-            .unwrap_or(Trust::CERTAIN)
-            .after(resolved);
-        if !trust.is_certain() {
-            self.property_trust.insert(lower, trust);
-        }
+        })
+    }
+
+    /// Apply a [`PropertyProvenance`] verdict to all three channels of
+    /// `name`'s entry, leaving its value alone: a write that did not store a
+    /// value (skipped under a gate, or refused after [`PropertyMap::unbind`]).
+    /// A write that stores one goes through [`Self::write_property`].
+    fn apply_property_provenance(&mut self, name: &str, provenance: PropertyProvenance) {
+        let resolved = self.resolve_provenance(provenance);
+        self.lookup.apply_provenance(name, resolved);
+    }
+
+    /// Store an evaluated write's value and its verdict together, so a value
+    /// cannot enter the table without the write saying what it does to the
+    /// name's trust.
+    fn write_property(&mut self, name: &str, value: Escaped, provenance: PropertyProvenance) {
+        let resolved = self.resolve_provenance(provenance);
+        self.lookup.write(name, value, resolved);
     }
 
     fn sdk_package_taint_for_raw(&self, raw: &str) -> Option<SdkPackagePropertyTaint> {
@@ -3426,7 +3425,7 @@ impl<'r> State<'r> {
         // still open settles with the property unset.
         if !self.default_targets_decided {
             self.default_targets_decided = true;
-            self.lookup.remove("MSBuildProjectDefaultTargets");
+            self.lookup.unbind("MSBuildProjectDefaultTargets");
         }
     }
 
@@ -3476,7 +3475,8 @@ impl<'r> State<'r> {
             if self.property_provenance_untrusted(name) {
                 return ItemMetadataValue::Unknown;
             }
-            match self.lookup.get(name) {
+            // The entry's trust is the question just asked.
+            match self.lookup.get_ignoring_trust(name) {
                 None => continue,
                 Some(v) if v.is_empty() => continue,
                 Some(v) if v.as_escaped().contains("$(") => return ItemMetadataValue::Unknown,
@@ -3521,7 +3521,7 @@ impl<'r> State<'r> {
         if self.condition_is_decided_exactly(cond, exists_dir, &|name| {
             self.undefined_read_is_exact(name)
         }) {
-            Trust::CERTAIN
+            Trust::of_exact_decision()
         } else {
             self.trust_for_raw(cond)
         }
@@ -3544,7 +3544,7 @@ impl<'r> State<'r> {
     ) -> bool {
         let unknown = |name: &str| {
             self.trust_of(name).reference_is_untrusted()
-                || (self.lookup.get(name).is_none() && !exact_undefined(name))
+                || (!self.lookup.is_bound(name) && !exact_undefined(name))
         };
         if !properties::property_references(cond).any(&unknown) {
             return true;
@@ -3751,12 +3751,49 @@ impl<'r> State<'r> {
             self.push_root(root.clone(), span.clone());
             surfaced.push(root);
         }
+        self.assert_scan_holds_the_reads(
+            raw,
+            value.trust(),
+            unpinned_root.as_ref(),
+            had_unsupported,
+        );
         Expansion {
             value,
             had_undefined,
             had_unsupported,
             unpinned_root,
         }
+    }
+
+    /// The checked mirror between the two ways the walk knows what a value
+    /// rests on: the *scan* of its text ([`properties::property_references`]),
+    /// which every write verdict is computed from, and the *reads* its
+    /// expansion actually made, whose trust the value carries. The scan must
+    /// hold every doubt the reads carried — an unpinned or SDK-tainted read
+    /// the scan missed is a value whose verdict claims more than its inputs
+    /// allow (P0 property A of `docs/msbuild-value-carried-provenance-plan.md`,
+    /// checked on every expansion of every test rather than on a sample).
+    /// The refused channel is not compared ([`Trust::is_held_by`] says why).
+    /// An expansion that hit an unsupported expression is refused whole, so it
+    /// is exempt.
+    fn assert_scan_holds_the_reads(
+        &self,
+        raw: &str,
+        carried: &Trust,
+        unpinned_root: Option<&UnpinnedRoot>,
+        had_unsupported: bool,
+    ) {
+        if !cfg!(debug_assertions) || had_unsupported {
+            return;
+        }
+        let scanned_sdk_package = self.trust_for_raw(raw).sdk_package().is_some();
+        debug_assert!(
+            (carried.unpinned().is_none() || unpinned_root.is_some())
+                && (carried.sdk_package().is_none() || scanned_sdk_package),
+            "the reference scan of {raw:?} holds less doubt than the expansion's reads: \
+             carried {carried:?}, scanned root {unpinned_root:?}, scanned SDK taint \
+             {scanned_sdk_package}"
+        );
     }
 
     /// Rebind the `MSBuildThisFile*` family to the imported file. MSBuild
@@ -3790,7 +3827,8 @@ impl<'r> State<'r> {
         if built_in {
             return;
         }
-        let name = match self.lookup.get("MSBuildThisFileName") {
+        // A reserved name, which no project can write.
+        let name = match self.lookup.get_ignoring_trust("MSBuildThisFileName") {
             Some(file) => name.replace(
                 "$(MSBuildThisFileName)",
                 &properties::escaping::unescape(file.as_escaped()),
@@ -3823,7 +3861,12 @@ impl<'r> State<'r> {
         let seeds = properties::this_file_seeds(file_path);
         let saved = seeds
             .iter()
-            .map(|(name, _)| (*name, self.lookup.get(name).cloned().unwrap_or_default()))
+            // Reserved names, which no project can write: the frame saves and
+            // restores their values, and their trust is certain throughout.
+            .map(|(name, _)| {
+                let value = self.lookup.get_ignoring_trust(name).cloned();
+                (*name, value.unwrap_or_default())
+            })
             .collect();
         for (name, value) in seeds {
             self.lookup.insert_escaped(name, value);
@@ -4613,7 +4656,7 @@ fn walk_property_child_inner(
             },
             node.range(),
         );
-        state.lookup.remove(&name);
+        state.lookup.unbind(&name);
         state.written.remove(&lower);
         state.record_directory_build_path_write(&name);
         state.apply_property_provenance(
@@ -4665,7 +4708,7 @@ fn walk_property_child_inner(
         // residual. Remove any existing binding so the next reference
         // emits Undefined, and forget any prior project-side write so
         // the tainted name doesn't appear in `properties`.
-        state.lookup.remove(&name);
+        state.lookup.unbind(&name);
         state.written.remove(&lower);
         state.record_directory_build_path_write(&name);
         let taint = TaintOutcome::after_write(
@@ -4693,14 +4736,14 @@ fn walk_property_child_inner(
     // write. We diagnose item refs first to match how Include
     // attributes order the checks; the categorisation matters less than
     // emitting *some* diagnostic that flips `is_partial`.
-    if contains_item_reference(expansion.value.as_escaped()) {
+    if contains_item_reference(expansion.value.ignoring_trust().as_escaped()) {
         state.push(
             DiagnosticKind::UnresolvedItemReference {
-                reference: expansion.value.as_escaped().to_string(),
+                reference: expansion.value.ignoring_trust().as_escaped().to_string(),
             },
             node.range(),
         );
-        state.lookup.remove(&name);
+        state.lookup.unbind(&name);
         state.written.remove(&lower);
         state.record_directory_build_path_write(&name);
         let taint = TaintOutcome::after_write(
@@ -4720,14 +4763,14 @@ fn walk_property_child_inner(
         );
         return;
     }
-    if contains_metadata_reference(expansion.value.as_escaped()) {
+    if contains_metadata_reference(expansion.value.ignoring_trust().as_escaped()) {
         state.push(
             DiagnosticKind::UnresolvedMetadataReference {
-                reference: expansion.value.as_escaped().to_string(),
+                reference: expansion.value.ignoring_trust().as_escaped().to_string(),
             },
             node.range(),
         );
-        state.lookup.remove(&name);
+        state.lookup.unbind(&name);
         state.written.remove(&lower);
         state.record_directory_build_path_write(&name);
         let taint = TaintOutcome::after_write(
@@ -4794,10 +4837,20 @@ fn walk_property_child_inner(
         // carrying one flag for all of them — the plan's P3.
         refused: RefusedOutcome::Keep,
     };
-    state.lookup.insert_escaped(name.clone(), expansion.value);
+    let (value, carried) = expansion.value.into_parts();
+    state.write_property(&name, value, provenance);
+    // The verdict above is computed from the value's text (the reference
+    // scan) and the write's gate; the value itself carries the trust of what
+    // its expansion actually read. The stored trust must hold everything the
+    // reads carried — a checked mirror of the scan against the expansion.
+    debug_assert!(
+        carried.is_held_by(state.trust_of(&name)),
+        "the write of {name} stores less doubt than its value carried: \
+         carried {carried:?}, stored {:?}",
+        state.trust_of(&name)
+    );
     state.written.insert(lower.clone(), name.clone());
     state.record_directory_build_path_write(&name);
-    state.apply_property_provenance(&name, provenance);
 }
 
 /// Result of evaluating a node's `Condition` attribute.
@@ -5795,7 +5848,9 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
             );
             return;
         }
-        let project_attr_unescaped = expansion.value.unescape();
+        // The expansion's trust was judged just above, through its scan-based
+        // flags (`had_issue`, `unpinned_root`).
+        let project_attr_unescaped = expansion.value.ignoring_trust().unescape();
         let project_attr = project_attr_unescaped.as_str();
         // An empty `Project` names no file: MSBuild fails the evaluation
         // (MSB4035 for a missing attribute; `Path.Combine` of the SDK
@@ -5832,7 +5887,7 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
         // one when the file opens — structure is decided in the escaped domain,
         // so any escape that could decode to structure declines. Outside the
         // alphabet, decline.
-        let escaped = expansion.value.as_escaped();
+        let escaped = expansion.value.ignoring_trust().as_escaped();
         let escapes_only_dots = escaped.match_indices('%').all(|(at, _)| {
             escaped
                 .get(at..at + 3)
@@ -6007,7 +6062,8 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
     // silent no-op. Distinguish by the presence of a `;` before splitting; the
     // empty whole value degrades structurally exactly as the residual/unpinned
     // path above does.
-    let escaped = expansion.value.as_escaped();
+    // The expansion's trust was judged above, through its scan-based flags.
+    let escaped = expansion.value.ignoring_trust().as_escaped();
     if escaped.trim().is_empty() && !escaped.contains(';') {
         // Push the diagnostic too, not just the uncertainty: this branch
         // can be reached with a *clean* expansion (a literal `Project=""`,
@@ -6032,7 +6088,7 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
         );
         return;
     }
-    for segment in expansion.value.split_list() {
+    for segment in expansion.value.ignoring_trust().split_list() {
         // Wildcard-ness is classified on the **escaped** segment, before
         // decoding (classify, then unescape — the same order item specs use).
         // An escaped `%2a` is a literal star in a filename, so
@@ -6232,10 +6288,11 @@ fn fire_entry_directory_build_props_splice(state: &mut State<'_>) {
         props_to_import.is_some(),
     );
     if let Some(Resolution { path, source }) = props_to_import.as_ref()
+        // The gate's trust: `note_directory_build_splice_decision` above.
         && should_import_default_true(
             state
                 .lookup
-                .get_unescaped("ImportDirectoryBuildProps")
+                .get_unescaped_ignoring_trust("ImportDirectoryBuildProps")
                 .as_deref(),
             state.is_sticky_global("ImportDirectoryBuildProps"),
         )
@@ -6347,10 +6404,12 @@ fn is_sdk_directory_build_rediscovery_import(
 
 fn pending_directory_build_props_splice_matches(resolved_import: &Path, state: &State<'_>) -> bool {
     if !state.directory_build_props_splice_pending
+        // Only suppresses a rediscovery of the import point; the gate's trust
+        // is judged where the splice fires.
         || !should_import_default_true(
             state
                 .lookup
-                .get_unescaped("ImportDirectoryBuildProps")
+                .get_unescaped_ignoring_trust("ImportDirectoryBuildProps")
                 .as_deref(),
             state.is_sticky_global("ImportDirectoryBuildProps"),
         )
@@ -6442,7 +6501,12 @@ fn resolve_property_import_target(
 ) -> Option<PathBuf> {
     // The property names a file on disk: a point of use, trimmed in the domain
     // (an escaped `%20` is filename data, not padding).
-    let trimmed = state.lookup.get(property_name)?.trimmed_unescaped();
+    // The import's trust is its gate's and the reference scan's, judged by
+    // the caller ([`follow_explicit_import`]).
+    let trimmed = state
+        .lookup
+        .get_ignoring_trust(property_name)?
+        .trimmed_unescaped();
     if trimmed.is_empty() {
         return None;
     }
@@ -6501,15 +6565,18 @@ fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
         || (state.directory_build_file_spliced && !state.in_sdk_subtree)
     {
         state.default_targets_decided = true;
-        state.lookup.remove("MSBuildProjectDefaultTargets");
+        state.lookup.unbind("MSBuildProjectDefaultTargets");
         return;
     }
-    if expansion.value.is_empty() {
+    // The expansion's trust was judged just above (`had_issue`,
+    // `unpinned_root`, opacity).
+    if expansion.value.ignoring_trust().is_empty() {
         return;
     }
-    let value = expansion.value.unescape();
+    let value = expansion.value.ignoring_trust().unescape();
     state.default_targets_decided = expansion
         .value
+        .ignoring_trust()
         .as_escaped()
         .split(';')
         // Trimmed in the escaped domain, before unescaping: `%20` lists the
@@ -6837,10 +6904,11 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
                     resolved.is_some(),
                 );
                 if let Some(Resolution { path, source }) = resolved
+                    // The gate's trust: the splice decision just noted.
                     && should_import_default_true(
                         state
                             .lookup
-                            .get_unescaped("ImportDirectoryBuildProps")
+                            .get_unescaped_ignoring_trust("ImportDirectoryBuildProps")
                             .as_deref(),
                         state.is_sticky_global("ImportDirectoryBuildProps"),
                     )
@@ -6934,9 +7002,10 @@ fn props_import_point(
             {
                 return PropsImportPoint::Undecided;
             }
+            // The entry's trust is the question just asked.
             let path = state
                 .lookup
-                .get_unescaped("DirectoryBuildPropsPath")
+                .get_unescaped_ignoring_trust("DirectoryBuildPropsPath")
                 .unwrap_or_default();
             let path = path.trim();
             if path.is_empty() {

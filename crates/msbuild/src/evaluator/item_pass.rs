@@ -1043,7 +1043,7 @@ fn walk_item_child_inner(node: Node<'_, '_>, kind: ItemKind, state: &mut State<'
     // in the real build, so the captured edge may be phantom. Flag rather
     // than drop: the declared-structure walk keeps the element.
     taint_reference_list_on_untrusted_value(kind, include, &expansion, state);
-    let spelled = msbuild_spelling(include, &expansion.value);
+    let spelled = msbuild_spelling(include, expansion.value.ignoring_trust());
     match state.glob_resolver {
         None => {
             for entry in spec_fragments(&spelled) {
@@ -1172,7 +1172,7 @@ fn walk_generic_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
         return;
     };
     let metadata = read_generic_item_metadata(node, state);
-    let spelled = msbuild_spelling(include, &expansion.value);
+    let spelled = msbuild_spelling(include, expansion.value.ignoring_trust());
     let mut captured: Vec<EvaluatedItem> = Vec::new();
     for fragment in spec_fragments(&spelled) {
         // `@(Type)` / `@(Type->Exists())` copies the referenced items, metadata
@@ -1371,7 +1371,7 @@ fn resolve_item_spec(raw: &str, state: &State<'_>) -> Option<ItemSpec> {
         return None;
     }
     let mut identities = Vec::new();
-    for fragment in spec_fragments(&expansion.value) {
+    for fragment in spec_fragments(expansion.value.ignoring_trust()) {
         if let Some(expression) = parse_item_expression(fragment) {
             let items = evaluate_item_expression(expression, state)?;
             identities.extend(items.into_iter().map(|item| item.identity));
@@ -1402,7 +1402,7 @@ fn remove_clears_its_own_list(item_type: &str, remove: &str, state: &State<'_>) 
     if expansion.had_issue() {
         return false;
     }
-    let mut fragments = spec_fragments(&expansion.value);
+    let mut fragments = spec_fragments(expansion.value.ignoring_trust());
     match (fragments.next(), fragments.next()) {
         (Some(only), None) => exact_item_list_reference(only)
             .is_some_and(|referenced| referenced.eq_ignore_ascii_case(item_type)),
@@ -1651,7 +1651,7 @@ fn read_compile_order_metadata_write(
         if expansion.had_issue() {
             return None;
         }
-        let (escaped, value) = scalar_use(&expansion.value);
+        let (escaped, value) = scalar_use(expansion.value.ignoring_trust());
         if contains_item_reference(escaped) {
             state.push(
                 DiagnosticKind::UnresolvedItemReference {
@@ -1761,7 +1761,7 @@ fn resolve_compile_update_targets(
     }
     let mut targets = Vec::new();
     let mut batch = UpdateBatch::default();
-    for entry in spec_fragments(&expansion.value) {
+    for entry in spec_fragments(expansion.value.ignoring_trust()) {
         if contains_glob(entry) {
             state.push(
                 DiagnosticKind::UnsupportedGlob {
@@ -2417,7 +2417,7 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
     let expansion = expand_silent(update, state);
     let project_dir = state.entry_project_dir.clone();
     let run = state.update_batches.entry(key).or_default();
-    let fragments: Vec<&str> = spec_fragments(&expansion.value).collect();
+    let fragments: Vec<&str> = spec_fragments(expansion.value.ignoring_trust()).collect();
     // Whether the walk cannot tell if the fragment it stopped at joined.
     let mut undecided = false;
     let mut left_at = None;
@@ -2966,7 +2966,7 @@ fn resolve_exclude_set(node: Node<'_, '_>, state: &mut State<'_>) -> ExcludeSet 
     };
     state.note_package_uncertain_from_sdk_property_taint(raw);
     let expansion = state.expand(raw, node.range());
-    let parts: Vec<String> = spec_fragments(&expansion.value)
+    let parts: Vec<String> = spec_fragments(expansion.value.ignoring_trust())
         .map(str::to_owned)
         .collect();
     if expansion.had_issue()
@@ -3055,7 +3055,7 @@ fn read_item_metadata(node: Node<'_, '_>, name: &str, state: &mut State<'_>) -> 
         if expansion.had_issue() {
             return MetadataValue::Clear;
         }
-        let (escaped, v) = scalar_use(&expansion.value);
+        let (escaped, v) = scalar_use(expansion.value.ignoring_trust());
         if escaped.is_empty() {
             return MetadataValue::Clear;
         }
@@ -3254,7 +3254,7 @@ fn resolve_dependency_identity_sources(
     }
 
     let mut resolved = Vec::new();
-    for entry in spec_fragments(&expansion.value) {
+    for entry in spec_fragments(expansion.value.ignoring_trust()) {
         if let Some(item_type) = exact_item_list_reference(entry) {
             let key = item_key(item_type);
             // A type this crate captures in its own bucket has no item table
@@ -3599,9 +3599,9 @@ fn set_generic_metadata_value(
             forget(metadata, raw);
             return;
         }
-        let full = expansion.value.as_escaped();
+        let full = expansion.value.ignoring_trust().as_escaped();
         if contains_item_reference(full) || contains_metadata_reference(full) {
-            forget(metadata, scalar_use(&expansion.value).0);
+            forget(metadata, scalar_use(expansion.value.ignoring_trust()).0);
             return;
         }
         // The dependency capture reads the value trimmed in the escaped domain;
@@ -3609,7 +3609,7 @@ fn set_generic_metadata_value(
         // rewrite a backslash-bearing value, or not, by a probe of its working
         // directory; it decides on the escaped value, so `%24(` is no `$(`.
         (
-            scalar_use(&expansion.value).1,
+            scalar_use(expansion.value.ignoring_trust()).1,
             escaping::unescape(full),
             path_fixup::worlds(full).is_some(),
         )
@@ -3712,6 +3712,7 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
             unpinned_root = Some(root);
         }
     }
+    state.assert_scan_holds_the_reads(raw, value.trust(), unpinned_root.as_ref(), had_unsupported);
     Expansion {
         value,
         had_undefined,
@@ -3849,7 +3850,7 @@ fn route_item_through_resolver(
         // reference-semantics consumer). The best-effort exclusion below
         // still applies whatever we did expand.
         taint_reference_list_on_untrusted_value(kind, raw, &expansion, state);
-        for entry in spec_fragments(&expansion.value) {
+        for entry in spec_fragments(expansion.value.ignoring_trust()) {
             if contains_item_reference(entry) {
                 state.push(
                     DiagnosticKind::UnresolvedItemReference {
@@ -4483,7 +4484,11 @@ fn resolve_string_metadata(
             // an outright expansion failure.
             ItemMetadataValue::Unknown
         } else {
-            match finalize_metadata_value(expansion.value, node.range(), state) {
+            match finalize_metadata_value(
+                expansion.value.into_ignoring_trust(),
+                node.range(),
+                state,
+            ) {
                 Some(value) => ItemMetadataValue::Known(Some(value)),
                 None => ItemMetadataValue::Unknown,
             }
@@ -4541,7 +4546,11 @@ fn resolve_string_metadata(
             resolved = ItemMetadataValue::Unknown;
             continue;
         }
-        resolved = match finalize_metadata_value(expansion.value, child.range(), state) {
+        resolved = match finalize_metadata_value(
+            expansion.value.into_ignoring_trust(),
+            child.range(),
+            state,
+        ) {
             Some(value) => ItemMetadataValue::Known(Some(value)),
             None => ItemMetadataValue::Unknown,
         };

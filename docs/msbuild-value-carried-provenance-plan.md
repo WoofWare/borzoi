@@ -22,9 +22,14 @@
 > taken as a representation change with every differential, census and
 > manifest unmoved, and the #614 fix as the stage after it.
 >
-> **Open, in order:** P3; the #614 staleness channel on top of it (measured
-> under "#614: what each rule costs"); P4; the three P2″ precision items;
-> P1′.
+> **P3 landed:** the trust lives on the property table's entry beside the
+> value, the name-keyed map is gone, an expansion carries the trust of what it
+> read, certainty is sealed to the property module, and every trust-discarding
+> read says so by name (see "P3 … As landed").
+>
+> **Open, in order:** the #614 staleness channel on the carried trust
+> (measured under "#614: what each rule costs"); P4; the three P2″ precision
+> items; P1′.
 >
 > **Known wrong commits, reproducible, not fixed:** #614 (a
 > `Directory.Build.*` gate written from a property an opaque *SDK-subtree*
@@ -1079,7 +1084,7 @@ constants for exactly that reason, but it only covers the names it knows;
 a genuinely new read is still caught by review rather than by the machine.
 That, not the current numbers, is P3's standing argument.
 
-### P3 — value-carried — **scheduled** (deferred on measurement in 2026-08; see "The census, re-run")
+### P3 — value-carried — **landed**
 
 `PropertyMap`'s `Entry` gains `trust: Trust` beside its `Escaped` value.
 `PropertyMap::get` returns the pair; `substitute` returns
@@ -1117,6 +1122,105 @@ greppable decision rather than a silent default.
    level up. Whatever `Provenanced` looks like, leaving trust must be as
    explicit as leaving the escape domain — that symmetry is the design
    constraint, since this plan is explicitly modelled on that one.
+
+#### As landed
+
+The trust lives on the property table's entry, and the name-keyed map is
+gone.
+
+- **`PropertyMap`'s entry is `{ canonical, value: Option<Escaped>, trust }`.**
+  An entry may hold a trust and no value — a refused write, or one skipped
+  under a gate we could not decide — because "no binding" and "provably never
+  written" are different facts and only the entry can tell them apart; an
+  entry with no value and a certain trust says nothing, so the mutators never
+  leave one. `State::property_trust` is deleted; `State::trust_of(name)` is
+  `lookup.trust(name)`.
+- **A value enters the table with its verdict.** An evaluated write goes
+  through `PropertyMap::write(name, value, verdict)` (`State::write_property`);
+  a write that stores nothing through `apply_provenance`; a refused one
+  through `unbind` (drop the value, keep the trust) then `apply_provenance`.
+  The seeds (`insert`, `insert_computed`, `insert_escaped`) keep whatever the
+  name's entry already says, which preserves the overridable-toolset rule
+  (P2′): a seed into a name a refused write left unbound keeps the refusal.
+- **Reading a value means taking its trust or saying you are not.**
+  `PropertyMap::get` returns `Held { value, trust }` with private fields:
+  `Held::parts()` gives both, `Held::ignoring_trust()` the value alone. The
+  one-step forms are `get_ignoring_trust` / `get_unescaped_ignoring_trust`,
+  and presence alone is `is_bound`. There is no `get_unescaped`.
+- **An expansion carries the trust of what it read.** `substitute` returns
+  `(Provenanced<Escaped>, Vec<Issue>)`: the join, in evaluation order, of the
+  trust of every entry the expansion consulted, bound or not (an undefined
+  read of a refused name carries the refusal). `expr.rs` reads through a
+  `Reads` view of the table whose every lookup joins its entry's trust, so a
+  member access, a nested argument, `MSBuildDisableFeaturesFromVersion` and
+  `GetDirectoryNameOfFileAbove`'s `MSBuildThisFileDirectory` all reach the
+  result with no code at the call; `expr::evaluate`'s trust lands in the
+  `Reads` it was handed. `Provenanced`, like `Held`, has private fields and
+  leaves only through `into_parts`, `ignoring_trust` or
+  `into_ignoring_trust`. `Expansion::value` is a `Provenanced<Escaped>`.
+- **Certainty is sealed.** `trust.rs` moved under `properties/`, and
+  `Trust::CERTAIN` is `pub(in crate::properties)`: a fresh entry's seed and an
+  absent entry's lookup are the only certainties made from nothing. Outside,
+  a certain trust is read from the table, folded with `Trust::join_all`, or
+  named: `Trust::of_exact_decision()` for a condition the held values settle
+  alone. `Trust::join` is now the test-only reference the laws are stated
+  over; the walk folds with `join_in` and `join_all`, each property-tested
+  equal to it.
+- **A checked mirror between the scan and the reads.** Every write verdict is
+  still computed from the reference scan of the value's text, which this
+  stage keeps on purpose (it is the representation change, not the rule
+  change). Two debug assertions hold the scan to the expansion on every
+  expansion of every test: `State::assert_scan_holds_the_reads` (the scan's
+  root and SDK taint hold every doubt the reads carried) and, at the write,
+  `Trust::is_held_by` (the stored trust holds the carried one). That is P0's
+  property A checked on every input the suite and the corpora reach instead
+  of on a generated sample.
+
+**Unmoved, as a representation change must be:** RESULTS_PENDING
+
+#### The two questions, settled
+
+**1. Per direct-read site: does carried trust replace the bespoke signal, or
+coexist with it?** Each site now says so at the read, in a comment beside a
+`parts()` or an `ignoring_trust` call.
+
+| site | read | trust carried by | decision |
+| --- | --- | --- | --- |
+| entry walk, `builds_its_own_target_framework` | `TargetFramework` | `Held::parts` | **replaces**: the value and its trust come from one read |
+| `target_name_verdict` | `TargetName`, `AssemblyName` | the entry's trust, asked first | replaces (one entry, two questions); #780 is that it ignores `refused` |
+| `props_import_point` | `DirectoryBuildPropsPath` | the entry's trust, asked first | replaces |
+| `resolve_directory_build_path`, the four `ImportDirectoryBuild*` gate reads | gate and path | `note_directory_build_splice_decision` | **coexists**: the splice's path/gate asymmetry is consequence-side and stays where the decision is consumed |
+| the pre-body and rediscovery gate reads | `ImportDirectoryBuildProps` | the splice decision where it fires | coexists: these only pre-record or suppress an import point |
+| `into_project`: CPM flags | `ManagePackageVersionsCentrally`, `CentralPackageVersionsFileImported` | `package_context` at the write | coexists: the write already left the package set uncertain |
+| `into_project`: CPM override | `CentralPackageVersionOverrideEnabled` | conservative by construction | coexists |
+| `into_project`: `DirectoryPackagesPropsPath` | — | none needed | no consumer to protect (P2′) |
+| `into_project`: `properties`, `LangVersion`, `OtherFlags` | published values | `untrusted_properties` beside them; for `LangVersion`, also `shape_depends_on_language_version` in the LSP | **coexists** — the case question 1 anticipated |
+| `into_project`: `DefineConstants` | published list | `define_constants_uncertain` | coexists (consequence-side, user-authored only) |
+| `into_project`: `TargetFrameworks` | published list | none: the TFM-invariant intersection trusts no branch | coexists |
+| `expr.rs`: `MSBuildDisableFeaturesFromVersion`, `MSBuildThisFileDirectory` | inside an expansion | `Reads` | **replaces**: carried with no code at the site |
+| `condition.rs`: every operand | inside a condition | the whole-tree scan (`condition_trust`) | coexists by necessity: Bucket B — an evaluation-order read set under-reports a short-circuiting condition |
+| the executor's reads | inside a target run | `check_read` | coexists: the run declines any read the walk does not vouch for |
+| `reads.rs` `read_property` | probe | the entry's trust, asked first | replaces |
+| toolset seeds, `MSBuildThisFile*` frame | reserved names | none needed | presence only (`is_bound`) or a name no project can write |
+| the item pass (16 sites) | include, exclude, metadata values | `Expansion`'s scan-based flags | coexists **for now**: these are P4's sites, and the grep for `ignoring_trust` in `item_pass.rs` is that stage's worklist |
+
+So the answer is the one the question predicted, at a finer grain: carried
+trust replaces the name-keyed lookup everywhere (the map is gone), and
+*coexists* with every consequence-side signal, because those encode
+decisions about consequences (which files the version reshapes, whether a
+missing edge matters, which splice input is consulted when) that a value's
+trust cannot know.
+
+**2. How is leaving trust made as explicit as leaving the escape domain?**
+The same way, and at the same layer. `Escaped` leaves only through
+`unescape`, `as_escaped` or `trimmed_unescaped`; `Held` and `Provenanced`
+leave only through `parts`/`into_parts` (both halves, by name) or
+`ignoring_trust`/`into_ignoring_trust`. Neither has a public field or a
+`Deref`. The two compose in one direction: a reader first decides about the
+trust, then about the domain (`get_ignoring_trust(name)?.trimmed_unescaped()`),
+so each decision is a token in the source. Every remaining trust-discarding
+read is `grep ignoring_trust`, and each carries the comment that says where
+its trust question is answered.
 
 ### P4 — the same treatment for items and metadata
 

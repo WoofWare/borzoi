@@ -27,6 +27,7 @@ use std::path::Path;
 
 pub(crate) mod escaping;
 mod expr;
+pub(crate) mod trust;
 // Stage P0 of `docs/msbuild-unix-path-fixup-plan.md`: the eligibility half of
 // MSBuild's unix path fixup, wired to nothing yet (P1/P2 bracket the worlds
 // through conditions and the property table). The differential in
@@ -35,6 +36,7 @@ mod expr;
 pub(crate) mod path_fixup;
 
 use escaping::Escaped;
+use trust::{ResolvedProvenance, Trust};
 
 use crate::observed::{self, Observer};
 
@@ -62,19 +64,81 @@ pub enum Issue {
 /// `StringComparison.OrdinalIgnoreCase` rule for property names. We
 /// preserve the canonical (first-written) casing for output so callers
 /// see names exactly as they appeared in the project source.
-#[derive(Debug, Clone, Default)]
+///
+/// Each entry carries the value's [`Trust`] beside it: what the walk knows, or
+/// does not, about whether the value is the real build's. An entry may hold a
+/// trust and no value — a write we refused, or one skipped under a gate we
+/// could not decide — because "no binding" and "provably never written" are
+/// different facts, and only the entry can tell them apart. An entry with no
+/// value and a certain trust says nothing, so the mutators never leave one.
+#[derive(Debug, Clone)]
 struct Entry {
-    /// The canonical key casing (from the first insertion).
+    /// The canonical key casing (from the first insertion since the name was
+    /// last unbound).
     canonical: String,
     /// The value, in MSBuild's **escaped domain** — the form MSBuild itself
     /// stores. It leaves the domain exactly once, at a point of use; see
-    /// [`escaping::Escaped`].
-    value: Escaped,
+    /// [`escaping::Escaped`]. `None` when the name has no binding.
+    value: Option<Escaped>,
+    trust: Trust,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct PropertyMap {
     inner: HashMap<String, Entry>,
+}
+
+/// A value read from a [`PropertyMap`], with the trust its entry carries. The
+/// fields are private: a reader takes both ([`Held::parts`]) or says it is
+/// leaving the trust behind ([`Held::ignoring_trust`]), the way a value leaves
+/// the escaped domain only through a method that names how.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Held<'a> {
+    value: &'a Escaped,
+    trust: &'a Trust,
+}
+
+impl<'a> Held<'a> {
+    /// The value and its trust, both.
+    pub(crate) fn parts(self) -> (&'a Escaped, &'a Trust) {
+        (self.value, self.trust)
+    }
+
+    /// The value, leaving its trust behind — a decision the caller makes in
+    /// writing, and greppable for that reason.
+    pub(crate) fn ignoring_trust(self) -> &'a Escaped {
+        self.value
+    }
+}
+
+/// A value an expansion produced, with the join of the trust of every entry
+/// the expansion read on the way (bound or not: an undefined read of a name
+/// whose write was refused carries that refusal). As with [`Held`], the trust
+/// leaves only by a method that says so.
+#[derive(Debug, Clone)]
+pub(crate) struct Provenanced<T> {
+    value: T,
+    trust: Trust,
+}
+
+impl<T> Provenanced<T> {
+    pub(crate) fn trust(&self) -> &Trust {
+        &self.trust
+    }
+
+    pub(crate) fn into_parts(self) -> (T, Trust) {
+        (self.value, self.trust)
+    }
+
+    /// The value, leaving its trust behind.
+    pub(crate) fn ignoring_trust(&self) -> &T {
+        &self.value
+    }
+
+    /// The value, leaving its trust behind.
+    pub(crate) fn into_ignoring_trust(self) -> T {
+        self.value
+    }
 }
 
 impl PropertyMap {
@@ -84,75 +148,198 @@ impl PropertyMap {
         }
     }
 
-    /// Insert or overwrite with **project XML** text (a property body, an
-    /// attribute, or a caller-supplied global): already escaped-domain text,
-    /// stored verbatim. The canonical case is taken from the first insertion;
-    /// later writes update the value but leave the recorded casing alone
-    /// (mirrors MSBuild, which echoes back the original declaration's casing
-    /// regardless of how reassignments spelt it).
+    /// Bind **project XML** text (a property body, an attribute, or a
+    /// caller-supplied global): already escaped-domain text, stored verbatim.
+    /// The canonical case is taken from the first insertion; later writes
+    /// update the value but leave the recorded casing alone (mirrors MSBuild,
+    /// which echoes back the original declaration's casing regardless of how
+    /// reassignments spelt it).
+    ///
+    /// A seed, not a write: the name's trust is whatever the walk already
+    /// recorded for it (certain for a fresh name), because the sources that
+    /// seed — the reserved names, the caller's globals and environment, the
+    /// toolset, the `MSBuildThisFile*` frame — are ones the walk computes or is
+    /// handed, and an overridable toolset seed into a name a refused write left
+    /// unbound must keep that refusal (see `seed_toolset_properties`). A write
+    /// the walk evaluated goes through [`Self::write`], which names its
+    /// verdict.
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.insert_escaped(key, Escaped::from_xml(value.into()));
     }
 
-    /// Insert text the evaluator **computed from the world**: a filesystem
+    /// Bind text the evaluator **computed from the world**: a filesystem
     /// path, a toolset/SDK seed. (Not the `MSBuildThisFile*` family, which
     /// MSBuild splices raw: see `this_file_seeds`.) Escaped on the
     /// way in, exactly as MSBuild escapes such values when it seeds them
     /// (`Evaluator.cs:1186–1189`, `Toolset.cs:802`) — which is what makes a
     /// `%`, `;` or `(` in a project's own path inert rather than an escape, a
-    /// list separator, or an expression delimiter.
+    /// list separator, or an expression delimiter. A seed: see [`Self::insert`].
     pub fn insert_computed(&mut self, key: impl Into<String>, value: impl AsRef<str>) {
         self.insert_escaped(key, Escaped::from_computed(value.as_ref()));
     }
 
-    /// Insert an already-escaped value — the result of a substitution, which is
-    /// composed *in* the domain and never left it.
+    /// Bind an already-escaped value — the result of a substitution, which is
+    /// composed *in* the domain and never left it. A seed: see [`Self::insert`].
     pub fn insert_escaped(&mut self, key: impl Into<String>, value: Escaped) {
         let key = key.into();
         let lower = key.to_ascii_lowercase();
         match self.inner.entry(lower) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
-                slot.get_mut().value = value;
+                let entry = slot.get_mut();
+                if entry.value.is_none() {
+                    entry.canonical = key;
+                }
+                entry.value = Some(value);
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(Entry {
                     canonical: key,
-                    value,
+                    value: Some(value),
+                    trust: Trust::CERTAIN,
                 });
             }
         }
     }
 
-    /// The stored value, still escaped. The caller must decide how to leave the
-    /// domain — `Escaped::unescape` at a point of use, `Escaped::as_escaped` for
-    /// a splice or a scan MSBuild also performs on escaped text. (The domain type
-    /// is crate-internal by design: no consumer outside the evaluator should be
+    /// Bind the value of a property write the walk evaluated, and apply that
+    /// write's verdict to the name's trust ([`Trust::after`]).
+    pub(crate) fn write(
+        &mut self,
+        key: impl Into<String>,
+        value: Escaped,
+        provenance: ResolvedProvenance,
+    ) {
+        let key = key.into();
+        self.insert_escaped(key.clone(), value);
+        self.apply_provenance(&key, provenance);
+    }
+
+    /// Apply a write's verdict to the name's trust without touching its value
+    /// — a write skipped under a gate, or one whose value was refused after
+    /// [`Self::unbind`].
+    pub(crate) fn apply_provenance(&mut self, key: &str, provenance: ResolvedProvenance) {
+        let lower = key.to_ascii_lowercase();
+        match self.inner.entry(lower) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let entry = slot.get_mut();
+                entry.trust = std::mem::replace(&mut entry.trust, Trust::CERTAIN).after(provenance);
+                if entry.value.is_none() && entry.trust.is_certain() {
+                    slot.remove();
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let trust = Trust::CERTAIN.after(provenance);
+                if !trust.is_certain() {
+                    slot.insert(Entry {
+                        canonical: key.to_string(),
+                        value: None,
+                        trust,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Drop the binding for `key` (case-insensitive), keeping what the walk
+    /// knows about the name. Used to invalidate a property after a write whose
+    /// value we refused — leaving the prior value behind would let later
+    /// substitutions resolve to the stale value rather than emit Undefined.
+    pub(crate) fn unbind(&mut self, key: &str) {
+        let lower = key.to_ascii_lowercase();
+        if let std::collections::hash_map::Entry::Occupied(mut slot) = self.inner.entry(lower) {
+            if slot.get().trust.is_certain() {
+                slot.remove();
+            } else {
+                slot.get_mut().value = None;
+            }
+        }
+    }
+
+    /// The stored value and its trust, or `None` when the name has no binding
+    /// (its trust, which may still say something, is [`Self::trust`]).
+    pub(crate) fn get(&self, key: &str) -> Option<Held<'_>> {
+        let entry = self.inner.get(&key.to_ascii_lowercase())?;
+        Some(Held {
+            value: entry.value.as_ref()?,
+            trust: &entry.trust,
+        })
+    }
+
+    /// The stored value, still escaped, without its trust: [`Self::get`] and
+    /// [`Held::ignoring_trust`] in one step, for a reader whose trust question
+    /// is answered elsewhere and says where. (The domain type is
+    /// crate-internal by design: no consumer outside the evaluator should be
     /// able to pick the wrong one.)
-    pub fn get(&self, key: &str) -> Option<&Escaped> {
-        let lower = key.to_ascii_lowercase();
-        self.inner.get(&lower).map(|e| &e.value)
+    pub(crate) fn get_ignoring_trust(&self, key: &str) -> Option<&Escaped> {
+        self.get(key).map(Held::ignoring_trust)
     }
 
-    /// The stored value at its point of use: unescaped exactly once. This is
-    /// what MSBuild's own `ProjectProperty.EvaluatedValue` returns
-    /// (`ProjectProperty.cs:89`), and the form every consumer outside this crate
-    /// sees.
-    pub fn get_unescaped(&self, key: &str) -> Option<String> {
-        self.get(key).map(Escaped::unescape)
+    /// The stored value at its point of use, unescaped exactly once and
+    /// without its trust. This is what MSBuild's own
+    /// `ProjectProperty.EvaluatedValue` returns (`ProjectProperty.cs:89`).
+    pub fn get_unescaped_ignoring_trust(&self, key: &str) -> Option<String> {
+        self.get_ignoring_trust(key).map(Escaped::unescape)
     }
 
-    /// Remove the binding for `key` (case-insensitive), if any. Used to
-    /// invalidate a property after a tainted overwrite — leaving the
-    /// prior value behind would let later substitutions resolve to the
-    /// stale value rather than emit Undefined.
-    pub fn remove(&mut self, key: &str) {
-        let lower = key.to_ascii_lowercase();
-        self.inner.remove(&lower);
+    /// Whether `key` has a binding. A question about presence, not about the
+    /// value's trust.
+    pub(crate) fn is_bound(&self, key: &str) -> bool {
+        self.get(key).is_some()
     }
 
-    /// Canonical keys (the casing the value was first inserted with).
+    /// What the walk knows about `key`'s value, bound or not; certain for a
+    /// name with no entry.
+    pub(crate) fn trust(&self, key: &str) -> &Trust {
+        self.inner
+            .get(&key.to_ascii_lowercase())
+            .map_or(Trust::certain_ref(), |entry| &entry.trust)
+    }
+
+    /// Every name whose trust is not certain, lowercase, with that trust.
+    pub(crate) fn uncertain(&self) -> impl Iterator<Item = (&str, &Trust)> {
+        self.inner
+            .iter()
+            .filter(|(_, entry)| !entry.trust.is_certain())
+            .map(|(lower, entry)| (lower.as_str(), &entry.trust))
+    }
+
+    /// Canonical keys of the bound names (the casing the value was first
+    /// inserted with).
     pub fn canonical_keys(&self) -> impl Iterator<Item = &str> {
-        self.inner.values().map(|e| e.canonical.as_str())
+        self.inner
+            .values()
+            .filter(|e| e.value.is_some())
+            .map(|e| e.canonical.as_str())
+    }
+}
+
+/// A [`PropertyMap`] as one expansion reads it: every lookup joins the trust
+/// of the entry it consulted, bound or not, so the expansion's result can
+/// carry it ([`Provenanced`]). The accumulator is the one piece of mutable
+/// state, scoped to a single expansion.
+pub(crate) struct Reads<'m> {
+    map: &'m PropertyMap,
+    joined: std::cell::RefCell<Trust>,
+}
+
+impl<'m> Reads<'m> {
+    pub(crate) fn of(map: &'m PropertyMap) -> Self {
+        Reads {
+            map,
+            joined: std::cell::RefCell::new(Trust::CERTAIN),
+        }
+    }
+
+    /// The stored value of `key`, joining its entry's trust into the
+    /// expansion's.
+    pub(crate) fn get(&self, key: &str) -> Option<&'m Escaped> {
+        let entry = self.map.inner.get(&key.to_ascii_lowercase())?;
+        self.joined.borrow_mut().join_in(&entry.trust);
+        entry.value.as_ref()
+    }
+
+    fn into_trust(self) -> Trust {
+        self.joined.into_inner()
     }
 }
 
@@ -347,8 +534,24 @@ fn no_root(dir: &Path) -> String {
 /// boundary (`$(Alpha)$(Alpha)` with `<Alpha>100%</Alpha>` → `100%100%`, in
 /// which MSBuild reads `%10`) is decoded by whichever leaf unescapes, because
 /// the composition is what it decodes.
-pub fn substitute(input: &str, props: &PropertyMap) -> (Escaped, Vec<Issue>) {
-    substitute_impl(input, props, None)
+///
+/// The value carries the join of the trust of every entry the expansion read
+/// ([`Provenanced`]) — the exact read set, in evaluation order, which is the
+/// right set for a value body (Bucket A of
+/// `docs/msbuild-value-carried-provenance-plan.md`). A condition's trust is
+/// *not* this: a condition short-circuits, so its trust is the whole-tree scan
+/// ([`property_references`]), and the condition evaluator leaves the carried
+/// trust behind on purpose.
+pub(crate) fn substitute(input: &str, props: &PropertyMap) -> (Provenanced<Escaped>, Vec<Issue>) {
+    let reads = Reads::of(props);
+    let (value, issues) = substitute_impl(input, &reads, None);
+    (
+        Provenanced {
+            value,
+            trust: reads.into_trust(),
+        },
+        issues,
+    )
 }
 
 /// [`substitute`], with the filesystem-probing property functions enabled
@@ -357,17 +560,25 @@ pub fn substitute(input: &str, props: &PropertyMap) -> (Escaped, Vec<Issue>) {
 /// use this; the
 /// pure `parse_fsproj` surface promises no filesystem access, so there
 /// the same expression stays a visible [`Issue::Unsupported`].
-pub fn substitute_with_fs(
+pub(crate) fn substitute_with_fs(
     input: &str,
     props: &PropertyMap,
     observer: &Observer,
-) -> (Escaped, Vec<Issue>) {
-    substitute_impl(input, props, Some(observer))
+) -> (Provenanced<Escaped>, Vec<Issue>) {
+    let reads = Reads::of(props);
+    let (value, issues) = substitute_impl(input, &reads, Some(observer));
+    (
+        Provenanced {
+            value,
+            trust: reads.into_trust(),
+        },
+        issues,
+    )
 }
 
 fn substitute_impl(
     input: &str,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     fs_observer: Option<&Observer>,
 ) -> (Escaped, Vec<Issue>) {
     // The buffer is in the escaped domain throughout: the XML text between
@@ -476,17 +687,17 @@ fn substitute_impl(
 /// a path assembled from a guess must stay visibly unsupported.
 fn eval_exact_path_arg(
     arg: &str,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     reject_escaped_backslash: bool,
 ) -> Option<String> {
     let (value, issues) = match string_literal_arg(arg) {
-        Some(quoted) => substitute(quoted, props),
+        Some(quoted) => substitute_impl(quoted, props, None),
         None => {
             let trimmed = arg.trim();
             if trimmed.contains(STRING_DELIMS) {
                 return None;
             }
-            substitute(trimmed, props)
+            substitute_impl(trimmed, props, None)
         }
     };
     // A path function's argument is a **point of use**: MSBuild unescapes
@@ -551,7 +762,7 @@ fn contains_percent_escape(s: &str) -> bool {
 
 fn eval_exact_path_args(
     args: &str,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     reject_escaped_backslash: bool,
 ) -> Option<Vec<String>> {
     let args = split_args(args)?;
@@ -1069,6 +1280,7 @@ mod tests {
     /// leaf does.
     fn substitute(input: &str, props: &PropertyMap) -> (String, Vec<Issue>) {
         let (value, issues) = super::substitute(input, props);
+        let value = value.into_ignoring_trust();
         (value.unescape(), issues)
     }
 
@@ -1076,7 +1288,7 @@ mod tests {
     #[allow(dead_code)]
     fn substitute_with_fs(input: &str, props: &PropertyMap) -> (String, Vec<Issue>) {
         let (value, issues) = super::substitute_with_fs(input, props, &Observer::new());
-        (value.unescape(), issues)
+        (value.into_ignoring_trust().unescape(), issues)
     }
 
     #[test]
@@ -1674,7 +1886,7 @@ mod tests {
         let mut props = well_known(Path::new("/repo/a%20b/Demo.fsproj"));
         let (base, issues) = super::substitute("$(MSBuildProjectDirectory)", &props);
         assert!(issues.is_empty());
-        props.insert_escaped("Base", base);
+        props.insert_escaped("Base", base.into_ignoring_trust());
         let (out, issues) = substitute("$(Base)/Foo.fs", &props);
         assert_eq!(out, "/repo/a%20b/Foo.fs");
         assert!(issues.is_empty(), "trust must survive a write: {issues:?}");
@@ -1800,7 +2012,7 @@ mod tests {
     #[test]
     fn well_known_includes_path_derivatives() {
         let m = well_known(std::path::Path::new("/repo/proj/Demo.fsproj"));
-        let get = |k: &str| m.get_unescaped(k);
+        let get = |k: &str| m.get_unescaped_ignoring_trust(k);
         assert_eq!(get("MSBuildProjectName").as_deref(), Some("Demo"));
         assert_eq!(get("MSBuildProjectExtension").as_deref(), Some(".fsproj"));
         assert_eq!(
@@ -1846,7 +2058,9 @@ mod tests {
     #[test]
     fn a_reserved_character_in_the_project_path_is_inert() {
         let m = well_known(std::path::Path::new("/repo/a;b (x)/Demo.fsproj"));
-        let dir = m.get("MSBuildProjectDirectory").expect("seeded");
+        let dir = m
+            .get_ignoring_trust("MSBuildProjectDirectory")
+            .expect("seeded");
         assert_eq!(dir.as_escaped(), "/repo/a%3bb %28x%29");
         assert_eq!(dir.unescape(), "/repo/a;b (x)");
         // The `;` cannot split an item list, and the parens cannot open an

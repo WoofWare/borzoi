@@ -30,7 +30,7 @@
 //! reduces to a [`Value::Str`]), with no parser change.
 
 use super::escaping::Escaped;
-use super::{Issue, PropertyMap};
+use super::{Issue, Reads};
 use crate::observed::Observer;
 
 // ============================================================================
@@ -503,7 +503,7 @@ fn has_culture_sensitive_control(decoded: &str) -> bool {
 
 pub(super) fn evaluate(
     inner: &str,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     fs_observer: Option<&Observer>,
 ) -> Option<Evaluated> {
     // Stage E3 of `docs/completed/msbuild-escaped-value-plan.md`. The evaluator runs
@@ -566,7 +566,7 @@ pub const MAX_EXPRESSION_NESTING: usize = 32;
 /// depth [`MAX_EXPRESSION_NESTING`] declines.
 fn eval(
     expr: &Expr<'_>,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     fs: Option<&Observer>,
     issues: &mut Vec<Issue>,
     depth: usize,
@@ -583,7 +583,7 @@ fn eval(
 
 fn eval_root(
     root: &Root<'_>,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     fs: Option<&Observer>,
     issues: &mut Vec<Issue>,
     depth: usize,
@@ -617,7 +617,7 @@ fn eval_root(
 fn eval_link(
     receiver: Value,
     link: &Link<'_>,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
 ) -> Result<Value, Unsupported> {
@@ -664,7 +664,7 @@ fn eval_index(receiver: Value, index: &str) -> Result<Value, Unsupported> {
 fn eval_member(
     receiver: Value,
     member: &Member<'_>,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
 ) -> Result<Value, Unsupported> {
@@ -706,7 +706,7 @@ fn str_result(s: &str) -> Value {
 fn eval_string_member(
     recv: &str,
     member: &Member<'_>,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
 ) -> Result<Value, Unsupported> {
@@ -833,7 +833,7 @@ fn eval_array_member(parts: &[String], member: &Member<'_>) -> Result<Value, Uns
 fn eval_static(
     type_name: &str,
     member: &Member<'_>,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     fs: Option<&Observer>,
     issues: &mut Vec<Issue>,
     depth: usize,
@@ -953,7 +953,7 @@ fn parse_version(s: &str) -> Option<Vec<i64>> {
 fn eval_msbuild_static(
     member_name: &str,
     args: &[&str],
-    props: &PropertyMap,
+    props: &Reads<'_>,
     fs: Option<&Observer>,
     issues: &mut Vec<Issue>,
     depth: usize,
@@ -1044,8 +1044,10 @@ fn eval_msbuild_static(
         // walk, or a genuinely set variable — cannot rule out an ambient
         // threshold, so it declines.
         let [arg] = args else { return Err(Unsupported) };
+        // Read through the expansion, so the name's trust joins the result's.
         match props
-            .get_unescaped("MSBuildDisableFeaturesFromVersion")
+            .get("MSBuildDisableFeaturesFromVersion")
+            .map(Escaped::unescape)
             .as_deref()
         {
             Some("999.999") => {}
@@ -1194,7 +1196,7 @@ fn version_compare_op(member_name: &str) -> Option<fn(std::cmp::Ordering) -> boo
 /// expansion (`$(X).0`) is outside the pinned envelope and declines.
 fn eval_version_arg(
     arg: &str,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
 ) -> Result<String, Unsupported> {
@@ -1382,7 +1384,7 @@ impl StringBoolMethod {
 /// it (a safe partiality, not a real consumer shape).
 fn eval_string_arg(
     arg: &str,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
 ) -> Result<String, Unsupported> {
@@ -1398,7 +1400,7 @@ fn eval_string_arg(
 /// not an upstream decline.
 fn eval_string_arg_allowing_boundary_backslash(
     arg: &str,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     depth: usize,
 ) -> Result<String, Unsupported> {
@@ -1407,7 +1409,7 @@ fn eval_string_arg_allowing_boundary_backslash(
 
 fn eval_string_arg_inner(
     arg: &str,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     allow_boundary_backslash: bool,
     depth: usize,
@@ -1458,7 +1460,7 @@ fn eval_string_arg_inner(
 fn eval_str_template(
     body: &str,
     delim: char,
-    props: &PropertyMap,
+    props: &Reads<'_>,
     issues: &mut Vec<Issue>,
     allow_boundary_backslash: bool,
     depth: usize,
@@ -1564,6 +1566,7 @@ fn join_args(args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::properties::PropertyMap;
 
     fn map(pairs: &[(&str, &str)]) -> PropertyMap {
         let mut m = PropertyMap::new();
@@ -1578,7 +1581,7 @@ mod tests {
     /// [`Escaped`]; a function result re-enters the domain escaped, so this
     /// unescapes it back to the text MSBuild would show).
     fn ev(inner: &str, props: &PropertyMap) -> Option<(String, Vec<Issue>)> {
-        evaluate(inner, props, None).map(|e| (e.value.unescape(), e.issues))
+        evaluate(inner, &Reads::of(props), None).map(|e| (e.value.unescape(), e.issues))
     }
 
     /// Stage E3 of `docs/completed/msbuild-escaped-value-plan.md`: the evaluator runs
@@ -1654,7 +1657,7 @@ mod tests {
         let (out, issues) =
             super::super::substitute("$(P.TrimStart('z'))20b", &map(&[("P", "100%")]));
         assert!(issues.is_empty(), "{issues:?}");
-        assert_eq!(out.unescape(), "100%20b");
+        assert_eq!(out.into_ignoring_trust().unescape(), "100%20b");
     }
 
     #[test]
