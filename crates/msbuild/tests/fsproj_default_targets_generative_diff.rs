@@ -77,8 +77,8 @@ fn tree(rng: &mut SplitMix64) -> Vec<(&'static str, String)> {
     let a = imported(rng);
     let b = imported(rng);
     let mut files = vec![("p.proj", entry), ("a.props", a), ("b.targets", b)];
-    // A `Directory.Build.props` beside an SDK-less project, which MSBuild
-    // never imports and the walk splices in.
+    // A `Directory.Build.props` beside an SDK-less project, which neither
+    // MSBuild nor the walk imports (#677).
     if rng.below(5) == 0 {
         files.push((
             "Directory.Build.props",

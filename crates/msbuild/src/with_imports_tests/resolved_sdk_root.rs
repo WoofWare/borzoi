@@ -120,41 +120,51 @@ fn sdkless_entry_nested_body_sdk_is_not_recorded() {
 
 #[test]
 fn directory_build_props_import_sdk_helper_is_not_recorded() {
-    // An SDK-less entry whose body reaches no project SDK: only an implicit
-    // `Directory.Build.props` resolves an SDK, via `<Import Sdk=...>`. That
-    // helper is infrastructure, not the project's framework SDK, so it must
-    // *not* be recorded — `resolved_sdk_root` stays `None` and the consumer
-    // falls back to its default dotnet root rather than the helper's install.
+    // An SDK-less entry whose body reaches the SDK only through a nested
+    // file's own `Sdk`, whose `Microsoft.Common.props` imports a
+    // `Directory.Build.props` that resolves another SDK, via
+    // `<Import Sdk=...>`. Neither is the project's framework SDK, so neither
+    // is recorded — `resolved_sdk_root` stays `None` and the consumer falls
+    // back to its default dotnet root rather than the helper's install.
     let tmp = TempDir::new().unwrap();
     let (helper_root, helper_props, helper_targets) =
         write_synthetic_sdk(tmp.path(), "HelperSdk", "<Project/>", "<Project/>");
+    let std = write_standard_sdk(tmp.path());
     write_at(
         tmp.path(),
         "Directory.Build.props",
         r#"<Project>
   <Import Sdk="HelperSdk" Project="Sdk.props" />
+  <ItemGroup>
+    <Compile Include="from-dirbuild.fs" />
+  </ItemGroup>
 </Project>"#,
     );
+    write_at(tmp.path(), "inner.props", r#"<Project Sdk="Std" />"#);
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
         r#"<Project>
+  <Import Project="inner.props" />
   <ItemGroup>
     <Compile Include="body.fs" />
   </ItemGroup>
 </Project>"#,
     );
-    let result = parse_file_with_sdk(&project_path, |name| {
-        if name == "HelperSdk" {
-            Ok(SdkPaths {
-                root: helper_root.clone(),
-                props: helper_props.clone(),
-                targets: helper_targets.clone(),
-            })
-        } else {
-            Err(SdkResolveError::NotFound)
-        }
+    let result = parse_file_with_sdk(&project_path, |name| match name {
+        "HelperSdk" => Ok(SdkPaths {
+            root: helper_root.clone(),
+            props: helper_props.clone(),
+            targets: helper_targets.clone(),
+        }),
+        "Std" => Ok(std.clone()),
+        _ => Err(SdkResolveError::NotFound),
     });
+    assert!(
+        paths_of(&result.items).contains(&canon(tmp.path()).join("from-dirbuild.fs")),
+        "the nested SDK imports Directory.Build.props; items: {:?}",
+        result.items
+    );
     assert_eq!(
         result.resolved_sdk_root, None,
         "a helper SDK imported by Directory.Build.props must not be recorded \
@@ -166,12 +176,14 @@ fn directory_build_props_import_sdk_helper_is_not_recorded() {
 #[test]
 fn directory_build_props_root_sdk_helper_is_not_recorded() {
     // Same principle via the root-`Sdk` form: a `Directory.Build.props` that
-    // is itself `<Project Sdk="HelperSdk">` resolves HelperSdk when spliced
-    // (an *imported* file's root SDK, reached outside the entry body), but it
-    // is still infrastructure, not the project's framework SDK.
+    // is itself `<Project Sdk="HelperSdk">` resolves HelperSdk when the
+    // nested SDK imports it (an *imported* file's root SDK), but it is still
+    // infrastructure, not the project's framework SDK.
     let tmp = TempDir::new().unwrap();
     let (helper_root, helper_props, helper_targets) =
         write_synthetic_sdk(tmp.path(), "HelperSdk", "<Project/>", "<Project/>");
+    let std = write_standard_sdk(tmp.path());
+    write_at(tmp.path(), "inner.props", r#"<Project Sdk="Std" />"#);
     write_at(
         tmp.path(),
         "Directory.Build.props",
@@ -185,22 +197,26 @@ fn directory_build_props_root_sdk_helper_is_not_recorded() {
         tmp.path(),
         "Demo.fsproj",
         r#"<Project>
+  <Import Project="inner.props" />
   <ItemGroup>
     <Compile Include="body.fs" />
   </ItemGroup>
 </Project>"#,
     );
-    let result = parse_file_with_sdk(&project_path, |name| {
-        if name == "HelperSdk" {
-            Ok(SdkPaths {
-                root: helper_root.clone(),
-                props: helper_props.clone(),
-                targets: helper_targets.clone(),
-            })
-        } else {
-            Err(SdkResolveError::NotFound)
-        }
+    let result = parse_file_with_sdk(&project_path, |name| match name {
+        "HelperSdk" => Ok(SdkPaths {
+            root: helper_root.clone(),
+            props: helper_props.clone(),
+            targets: helper_targets.clone(),
+        }),
+        "Std" => Ok(std.clone()),
+        _ => Err(SdkResolveError::NotFound),
     });
+    assert!(
+        paths_of(&result.items).contains(&canon(tmp.path()).join("from-dirbuild.fs")),
+        "the nested SDK imports Directory.Build.props; items: {:?}",
+        result.items
+    );
     assert_eq!(
         result.resolved_sdk_root, None,
         "a Directory.Build.props that carries its own `Sdk` must not be \

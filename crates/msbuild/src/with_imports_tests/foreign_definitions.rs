@@ -53,10 +53,12 @@ fn every_definition_outside_the_sdk_is_recorded_whatever_its_condition() {
     let tmp = TempDir::new().unwrap();
     let resolver = canonical_sdk(
         tmp.path(),
-        r#"<Project>
+        &format!(
+            r#"<Project>
   <PropertyGroup><FscToolPath>/sdk</FscToolPath></PropertyGroup>
   <Import Project="$(MSBuildThisFileDirectory)../../../FSharp/F.props" />
-</Project>"#,
+{COMMON_PROPS_BLOCK}</Project>"#
+        ),
         r#"<Project>
   <Target Name="SdkTarget"><PropertyGroup><SdkInTarget>1</SdkInTarget></PropertyGroup></Target>
   <Import Project="$(MSBuildProjectDirectory)/user.targets" />

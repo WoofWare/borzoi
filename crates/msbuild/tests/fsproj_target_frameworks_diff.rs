@@ -86,12 +86,32 @@ fn run_diff(rel_fsproj: &str, extras: &[(&str, &str)]) {
     // sides must walk the same `Directory.Build.props` branch or
     // condition-gated property writes diverge.
     props.insert("DISABLE_ARCADE".into(), "true".into());
+    // The SDK the `dotnet` on `PATH` resolves, as MSBuild's side does: only
+    // its `Microsoft.Common.props` imports the `Directory.Build.props` the
+    // framework list reads.
+    let dotnet_root = common::dotnet_root_from_env();
+    let (user_dotnet_root, overrides_present) = common::workload_env_from_process();
+    let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
+        borzoi_msbuild::resolve_sdk(
+            &dotnet_root,
+            None,
+            name,
+            None,
+            None,
+            &borzoi_msbuild::workloads::WorkloadEnvironment {
+                user_dotnet_root: user_dotnet_root.as_deref(),
+                overrides_present,
+                global_json_pins_workload_set: false,
+            },
+            observer,
+        )
+    };
     let project = parse_fsproj_with_imports(
         &source,
         &fsproj,
         &props,
         &common::oracle_environment(),
-        None,
+        Some(&resolver),
         None,
     )
     .unwrap_or_else(|e| panic!("parse {}: {e}", fsproj.display()));

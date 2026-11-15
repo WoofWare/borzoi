@@ -52,7 +52,7 @@ fn body_item_sees_property_from_directory_build_targets() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="$(FromTargets).fs" />
   </ItemGroup>
@@ -67,7 +67,7 @@ fn body_item_sees_property_from_directory_build_targets() {
   </PropertyGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     let dir = canon(tmp.path());
     assert_eq!(paths_of(&result.items), vec![dir.join("Late.fs")]);
     assert!(
@@ -261,7 +261,7 @@ fn body_item_condition_sees_final_value_written_by_directory_build_targets() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <PropertyGroup>
     <Flag>true</Flag>
   </PropertyGroup>
@@ -279,7 +279,7 @@ fn body_item_condition_sees_final_value_written_by_directory_build_targets() {
   </PropertyGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(
         result.items.is_empty(),
         "final Flag=false must exclude the item, got {:?}",

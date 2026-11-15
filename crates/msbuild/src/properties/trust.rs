@@ -426,8 +426,8 @@ impl Trust {
     /// computed from such a value (the cause is the opacity's).
     ///
     /// Consumed only where a value decides whether a `Directory.Build.*` file
-    /// joins the walk (`State::gate_value_is_exact`, through
-    /// [`Trust::is_certain`]). Every other reader trusts a held value under
+    /// joins the walk (an import point's predicate, `evaluator::directory_build`,
+    /// through [`Trust::is_certain`]). Every other reader trusts a held value under
     /// opacity, and the projections that serve them — [`Trust::reference_is_untrusted`]
     /// and [`Trust::untrusted_cause`] — leave this channel out on purpose: on
     /// the real SDK chain most values are bound before some opacity, so those

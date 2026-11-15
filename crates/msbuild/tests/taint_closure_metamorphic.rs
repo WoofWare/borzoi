@@ -55,15 +55,10 @@ const REFUSED_BODY: &str = "$(Configuration.Substring(0,1))";
 /// under each of these.
 const REPLACEMENTS: &[&str] = &["", "a", "true", "false", "net8.0", "1.2.3", "Debug"];
 
-/// Properties a `Directory.Build.targets` splice writes rather than the
-/// generated document: the fixture's own write, and the path the splice
-/// records.
-const SPLICE_WRITTEN: &[&str] = &["FromDirBuild", "DirectoryBuildTargetsPath"];
-
 /// The Compile item the `Directory.Build.targets` fixture contributes.
 const SPLICED_FILE: &str = "FromDirBuild.fs";
 
-/// The two inputs the `Directory.Build.targets` splice decides on.
+/// The two inputs the `Directory.Build.targets` import decides on.
 const SPLICE_GATES: [&str; 2] = ["ImportDirectoryBuildTargets", "DirectoryBuildTargetsPath"];
 
 /// The names the generated documents write: the shared expression grammar's
@@ -186,7 +181,7 @@ fn gen_doc(rng: &mut SplitMix64, names: &[&'static str]) -> Doc {
     while pool.len() > 3 + rng.below(3) {
         pool.swap_remove(rng.below(pool.len()));
     }
-    // The splice's inputs stay in every pool that has them: they are what
+    // The import's inputs stay in every pool that has them: they are what
     // the `Directory.Build.targets` tier exists to exercise.
     pool.extend(gates);
     let writes: Vec<Write> = (0..2 + rng.below(6))
@@ -409,13 +404,9 @@ struct Census {
     violated: BTreeMap<&'static str, usize>,
     /// Cases set aside as the known refused-write defect (see [`check`]).
     refused_absent: usize,
-    /// Cases set aside as the known splice-value defect (see [`check`]).
-    spliced_values: usize,
-    /// Cases set aside as a stale value read outside the splice (see
+    /// Cases set aside as a stale value read outside the import points (see
     /// [`check`]).
     stale_reads: usize,
-    /// Cases set aside as #811: a splice input hidden content defined.
-    unbound_splice_inputs: usize,
     /// Certain facts some world declined while the rest agreed.
     world_declined: usize,
 }
@@ -423,14 +414,9 @@ struct Census {
 impl Census {
     fn print(&self, label: &str) {
         println!(
-            "{label}: {} cases, {} refused-write absences, {} splice values, {} stale reads and \
-             {} unbound splice inputs set aside, {} commits a world declined",
-            self.cases,
-            self.refused_absent,
-            self.spliced_values,
-            self.stale_reads,
-            self.unbound_splice_inputs,
-            self.world_declined
+            "{label}: {} cases, {} refused-write absences and {} stale reads \
+             set aside, {} commits a world declined",
+            self.cases, self.refused_absent, self.stale_reads, self.world_declined
         );
         for (kind, owed) in &self.owed {
             println!(
@@ -448,11 +434,8 @@ enum Undecided<'a> {
     /// A property write, of this name.
     Write(&'a str),
     /// An import in the SDK, of content that may redefine what was written
-    /// before it. `defines_an_unbound_splice_input` when that content writes a
-    /// `Directory.Build.targets` gate or path nothing else writes (#811).
-    Import {
-        defines_an_unbound_splice_input: bool,
-    },
+    /// before it.
+    Import,
 }
 
 /// Check one undecided document against its worlds, recording into `census`.
@@ -530,51 +513,17 @@ fn check(
             census.refused_absent += 1;
             continue;
         }
-        // A `Directory.Build.*` splice decided on an untrusted gate withdraws
-        // the item facets, but the values the spliced file writes — and the
-        // path property the splice itself writes — stay certain, though the
-        // real build may not import the file at all. A defect, tracked as
-        // #781, and set aside the same way.
-        let written_by_an_undecided_splice = matches!(
-            fact,
-            Fact::Property(name) if SPLICE_WRITTEN.iter().any(|n| n.eq_ignore_ascii_case(name))
-        ) && undecided[&Fact::CompileItems].is_none();
-        if written_by_an_undecided_splice {
-            census.spliced_values += 1;
-            continue;
-        }
-        // Under opacity, the `Directory.Build.*` splice and the Compile items
-        // doubt a value hidden content may have rewritten, and every other
+        // Under opacity, the `Directory.Build.*` import points and the Compile
+        // items doubt a value hidden content may have rewritten, and every other
         // reader trusts it: a measured trade-off
         // (`docs/msbuild-value-carried-provenance-plan.md`, "#614: what each
         // rule costs"), tracked as #792. So a stale read reaching any other
         // fact is counted, not failed, and the Compile items must hold.
         let a_stale_read_by_a_trusting_reader =
-            matches!(undecided_construct, Undecided::Import { .. })
+            matches!(undecided_construct, Undecided::Import)
                 && !matches!(fact, Fact::CompileItems);
         if a_stale_read_by_a_trusting_reader {
             census.stale_reads += 1;
-            continue;
-        }
-        // The fallback splice reads a gate or path the hidden content may have
-        // defined as certain, because an unbound name carries no trust to doubt
-        // (#811). #677's import-point rewrite closes it; until then a Compile
-        // set that differs in whether the spliced file joined, in a case of
-        // that shape, is counted, and the count pinned.
-        let spliced = |set: &[String]| set.iter().any(|s| s.contains(SPLICED_FILE));
-        let an_unbound_splice_input = matches!(
-            (fact, undecided_construct),
-            (
-                Fact::CompileItems,
-                Undecided::Import {
-                    defines_an_unbound_splice_input: true
-                }
-            )
-        ) && world_committed
-            .iter()
-            .any(|world| spliced(world) != spliced(claim));
-        if an_unbound_splice_input {
-            census.unbound_splice_inputs += 1;
             continue;
         }
         census.violation_count += 1;
@@ -658,12 +607,32 @@ fn pure_evaluate(text: &str) -> ParsedProject {
     .expect("generated documents are well-formed")
 }
 
+/// The SDK the `Directory.Build.targets` tier's documents name: its
+/// `Sdk.targets` is `Microsoft.Common.targets`'s import block, verbatim from
+/// SDK 10.0.401, which is the only thing that imports the file.
+const DIRECTORY_BUILD_SDK: &str = "DirectoryBuildSdk";
+
+/// `Microsoft.Common.targets`'s `Directory.Build.targets` import block.
+const COMMON_TARGETS_BLOCK: &str = r#"<Project>
+  <PropertyGroup>
+    <ImportDirectoryBuildTargets Condition="'$(ImportDirectoryBuildTargets)' == ''">true</ImportDirectoryBuildTargets>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ImportDirectoryBuildTargets)' == 'true' and '$(DirectoryBuildTargetsPath)' == ''">
+    <_DirectoryBuildTargetsFile Condition="'$(_DirectoryBuildTargetsFile)' == ''">Directory.Build.targets</_DirectoryBuildTargetsFile>
+    <_DirectoryBuildTargetsBasePath Condition="'$(_DirectoryBuildTargetsBasePath)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), '$(_DirectoryBuildTargetsFile)'))</_DirectoryBuildTargetsBasePath>
+    <DirectoryBuildTargetsPath Condition="'$(_DirectoryBuildTargetsBasePath)' != '' and '$(_DirectoryBuildTargetsFile)' != ''">$([System.IO.Path]::Combine('$(_DirectoryBuildTargetsBasePath)', '$(_DirectoryBuildTargetsFile)'))</DirectoryBuildTargetsPath>
+  </PropertyGroup>
+  <Import Project="$(DirectoryBuildTargetsPath)" Condition="'$(ImportDirectoryBuildTargets)' == 'true' and exists('$(DirectoryBuildTargetsPath)')"/>
+</Project>
+"#;
+
 /// A directory holding a `Directory.Build.targets` that contributes a Compile
-/// item, so the generated `ImportDirectoryBuildTargets` /
-/// `DirectoryBuildTargetsPath` writes decide whether a file joins the walk.
+/// item, and the SDK [`DIRECTORY_BUILD_SDK`] whose import of it the generated
+/// `ImportDirectoryBuildTargets` / `DirectoryBuildTargetsPath` writes decide.
 struct DirectoryBuildFixture {
     _dir: tempfile::TempDir,
     project: PathBuf,
+    sdk: PathBuf,
 }
 
 impl DirectoryBuildFixture {
@@ -677,19 +646,42 @@ impl DirectoryBuildFixture {
             ),
         )
         .unwrap();
+        let sdk = root.join("sdks").join(DIRECTORY_BUILD_SDK);
+        std::fs::create_dir_all(&sdk).unwrap();
+        std::fs::write(sdk.join("Sdk.props"), "<Project />").unwrap();
+        std::fs::write(sdk.join("Sdk.targets"), COMMON_TARGETS_BLOCK).unwrap();
         Self {
             _dir: dir,
             project: root.join("Demo.fsproj"),
+            sdk,
         }
     }
 
+    /// Evaluate a generated document (a `<Project>`) under the SDK.
     fn evaluate(&self, text: &str) -> ParsedProject {
+        let text = text.replacen(
+            "<Project>",
+            &format!("<Project Sdk=\"{DIRECTORY_BUILD_SDK}\">"),
+            1,
+        );
+        let sdk = self.sdk.clone();
+        let resolver = move |name: &str, _: &borzoi_msbuild::observed::Observer| {
+            if name.eq_ignore_ascii_case(DIRECTORY_BUILD_SDK) {
+                Ok(SdkResolution::Single(SdkPaths {
+                    root: sdk.clone(),
+                    props: sdk.join("Sdk.props"),
+                    targets: sdk.join("Sdk.targets"),
+                }))
+            } else {
+                Err(SdkResolveError::NotFound)
+            }
+        };
         parse_fsproj_with_imports(
-            text,
+            &text,
             &self.project,
             &HashMap::new(),
             &HashMap::new(),
-            None,
+            Some(&resolver),
             None,
         )
         .expect("generated documents are well-formed")
@@ -750,8 +742,8 @@ fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
             literal_write(rng, name)
         })
         .collect::<Vec<Write>>();
-    // Sometimes the hidden file writes a splice input that nothing else
-    // writes, which is #811's shape, with a value that turns the splice off.
+    // Sometimes the hidden file writes an import input that nothing else
+    // writes, which is #811's shape, with a value that turns the import off.
     let mut hidden = hidden;
     let unbound_splice_input = (rng.below(8) == 0).then(|| {
         let name = *rng.pick(&SPLICE_GATES);
@@ -769,8 +761,8 @@ fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
         name
     });
     // Most cases copy a value the SDK wrote before the opacity into the
-    // splice's gate or path, as #614's witness does; the rest leave the
-    // splice to whatever the generated body reads.
+    // import's gate or path, as #614's witness does; the rest leave the
+    // import to whatever the generated body reads.
     if rng.below(10) < 7 {
         let gate = if rng.below(5) == 0 {
             SPLICE_GATES[1]
@@ -961,16 +953,6 @@ fn sweep_opacity(seed: u64, cases: usize, names: &[&'static str]) -> Census {
                     .any(|k| k.eq_ignore_ascii_case(name))
             })
             .collect();
-        let written_outside_the_hidden_file = |name: &str| {
-            doc.before
-                .iter()
-                .chain(&doc.body.writes)
-                .any(|w| w.name.eq_ignore_ascii_case(name))
-        };
-        let defines_an_unbound_splice_input = doc
-            .hidden
-            .iter()
-            .any(|w| SPLICE_GATES.contains(&w.name) && !written_outside_the_hidden_file(w.name));
         let text = format!(
             "--- Sdk.props ---\n{}--- Hidden.props ---\n{}--- body ---\n{}",
             files.0, files.1, files.2
@@ -981,9 +963,7 @@ fn sweep_opacity(seed: u64, cases: usize, names: &[&'static str]) -> Census {
             &undecided,
             &world_facts,
             &absent_but_written,
-            Undecided::Import {
-                defines_an_unbound_splice_input,
-            },
+            Undecided::Import,
             "opacity",
         );
     }
@@ -1008,15 +988,14 @@ fn assert_sound(census: &Census, floors: &[(&str, usize)]) {
     }
 }
 
-/// The set-aside counts, pinned for the fixed seeds: a fix for #780 or #781
-/// moves them, and must update them here (and drop the set-aside once it
-/// reaches zero), so the gate cannot quietly keep exempting a class that no
-/// longer exists — or one that grew.
-fn assert_set_asides(census: &Census, refused_absent: usize, spliced_values: usize) {
+/// The set-aside count, pinned for the fixed seeds: a fix for #780 moves it,
+/// and must update it here (and drop the set-aside once it reaches zero), so
+/// the gate cannot quietly keep exempting a class that no longer exists — or
+/// one that grew.
+fn assert_set_asides(census: &Census, refused_absent: usize) {
     assert_eq!(
-        (census.refused_absent, census.spliced_values),
-        (refused_absent, spliced_values),
-        "the (#780 refused-absence, #781 splice-value) set-aside counts moved"
+        census.refused_absent, refused_absent,
+        "the #780 refused-absence set-aside count moved"
     );
 }
 
@@ -1038,7 +1017,7 @@ fn an_undecided_write_claims_no_more_than_its_worlds_agree_on() {
             ("target name", 100),
         ],
     );
-    assert_set_asides(&census, 532, 0);
+    assert_set_asides(&census, 532);
 }
 
 #[test]
@@ -1061,7 +1040,7 @@ fn an_undecided_directory_build_gate_write_claims_no_more_than_its_worlds_agree_
             ("DefineConstants", 25),
         ],
     );
-    assert_set_asides(&census, 240, 163);
+    assert_set_asides(&census, 179);
 }
 
 /// The opacity tier: a property written in the SDK before content the walk
@@ -1071,12 +1050,11 @@ fn a_value_written_before_hidden_content_claims_no_more_than_its_worlds_agree_on
     let census = sweep_opacity(0x0bac_17e5, 800, &written_names(true));
     census.print("with an undecided SDK import");
     assert_sound(&census, &[("Compile items", 30)]);
-    assert_set_asides(&census, 23, 249);
+    assert_set_asides(&census, 14);
     assert_eq!(
-        (census.stale_reads, census.unbound_splice_inputs),
-        (1165, 9),
-        "the (#792 stale value read outside the splice and the Compile items, #811 splice \
-         input hidden content defined) set-aside counts moved"
+        census.stale_reads, 347,
+        "the #792 set-aside count (a stale value read outside the import points and the \
+         Compile items) moved"
     );
 }
 
@@ -1139,11 +1117,10 @@ fn a_project_reference_gated_on_a_refused_name_is_not_certain() {
     );
 }
 
-/// #781: a `Directory.Build.targets` spliced on an undecided gate publishes
-/// its writes as trusted.
+/// #781: a `Directory.Build.targets` imported under an undecided gate
+/// publishes none of its writes as trusted.
 #[test]
-#[ignore = "#781: a Directory.Build file spliced on an undecided gate publishes its writes as trusted"]
-fn a_file_spliced_on_an_undecided_gate_publishes_no_trusted_value() {
+fn a_file_imported_under_an_undecided_gate_publishes_no_trusted_value() {
     let fixture = DirectoryBuildFixture::new();
     let project = fixture.evaluate(&format!(
         r#"<Project>
@@ -1162,10 +1139,9 @@ fn a_file_spliced_on_an_undecided_gate_publishes_no_trusted_value() {
     );
 }
 
-/// #811: the fallback splice reads its gate as never written, though content
-/// the walk could not see may have written it.
+/// #811: a gate content the walk could not see may have written is not read
+/// as never written.
 #[test]
-#[ignore = "#811: an unbound splice input that hidden content may define reads as certain"]
 fn an_unbound_splice_input_hidden_content_defined_declines() {
     let fixture = OpacityFixture::new();
     let project = fixture.evaluate(&(

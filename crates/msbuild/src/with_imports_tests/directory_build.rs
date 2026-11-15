@@ -20,14 +20,14 @@ fn a_percent_in_a_seeded_directory_build_path_is_literal() {
     let project_path = write_at(
         &root,
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="$(DirectoryBuildPropsPath)" />
   </ItemGroup>
 </Project>"#,
     );
     write_at(&root, "Directory.Build.props", "<Project />");
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(
         !result.diagnostics.iter().any(|d| matches!(
             &d.kind,
@@ -51,7 +51,7 @@ fn implicit_directory_build_props_seeds_before_project_body() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="$(SeededName).fs" />
   </ItemGroup>
@@ -66,7 +66,7 @@ fn implicit_directory_build_props_seeds_before_project_body() {
   </PropertyGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     let dir = canon(tmp.path());
     assert_eq!(paths_of(&result.items), vec![dir.join("FromProps.fs")]);
     // The follow succeeded, so no ImplicitImportPresent diagnostic
@@ -110,13 +110,13 @@ fn directory_build_props_can_import_parent_with_get_path_of_file_above() {
     let project_path = write_at(
         &src,
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     let root = canon(tmp.path());
     let project_dir = root.join("src");
     assert_eq!(
@@ -157,13 +157,13 @@ fn repro_get_path_of_file_above_guarded_by_exists() {
     let project_path = write_at(
         &src,
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     let project_dir = canon(tmp.path()).join("src");
     assert_eq!(
         paths_of(&result.items),
@@ -206,13 +206,13 @@ fn get_path_of_file_above_one_argument_overload_chains_the_same_way() {
     let project_path = write_at(
         &src,
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     let project_dir = canon(tmp.path()).join("src");
     assert_eq!(paths_of(&result.items), vec![project_dir.join("Main.fs")]);
     assert!(
@@ -232,7 +232,7 @@ fn a_false_get_path_of_file_above_gate_is_exactly_false() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup Condition="Exists($([MSBuild]::GetPathOfFileAbove('no-such-marker.props')))">
     <Compile Include="Gated.fs" />
   </ItemGroup>
@@ -241,7 +241,7 @@ fn a_false_get_path_of_file_above_gate_is_exactly_false() {
   </ItemGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert_eq!(
         paths_of(&result.items),
         vec![canon(tmp.path()).join("Main.fs")]
@@ -263,13 +263,13 @@ fn get_path_of_file_above_is_usable_in_item_position() {
     let project_path = write_at(
         &src,
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="$([MSBuild]::GetPathOfFileAbove('marker.props'))" />
   </ItemGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert_eq!(
         paths_of(&result.items),
         vec![canon(tmp.path()).join("marker.props")]
@@ -286,7 +286,7 @@ fn implicit_directory_build_targets_runs_after_project_body() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>FromBody</X>
   </PropertyGroup>
@@ -301,7 +301,7 @@ fn implicit_directory_build_targets_runs_after_project_body() {
   </PropertyGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert_eq!(
         result.properties.get("X").map(String::as_str),
         Some("FromTargets")
@@ -327,7 +327,7 @@ fn caller_extra_disables_implicit_directory_build_props() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
@@ -335,7 +335,7 @@ fn caller_extra_disables_implicit_directory_build_props() {
     );
     let mut extras = HashMap::new();
     extras.insert("ImportDirectoryBuildProps".to_string(), "false".to_string());
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     let canon_root = canon(tmp.path());
     assert_eq!(
         paths_of(&result.items),
@@ -363,7 +363,7 @@ fn project_property_disables_implicit_directory_build_targets() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <PropertyGroup>
     <ImportDirectoryBuildTargets>false</ImportDirectoryBuildTargets>
   </PropertyGroup>
@@ -372,7 +372,7 @@ fn project_property_disables_implicit_directory_build_targets() {
   </ItemGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     let canon_root = canon(tmp.path());
     assert_eq!(
         paths_of(&result.items),
@@ -406,7 +406,7 @@ fn non_true_value_disables_implicit_directory_build_props() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
@@ -414,7 +414,7 @@ fn non_true_value_disables_implicit_directory_build_props() {
     );
     let mut extras = HashMap::new();
     extras.insert("ImportDirectoryBuildProps".to_string(), "0".to_string());
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     let canon_root = canon(tmp.path());
     assert_eq!(
         paths_of(&result.items),
@@ -453,7 +453,7 @@ fn msbuild_boolean_gate_value_imports_directory_build_props() {
         let project_path = write_at(
             tmp.path(),
             "Demo.fsproj",
-            r#"<Project>
+            r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
@@ -461,7 +461,7 @@ fn msbuild_boolean_gate_value_imports_directory_build_props() {
         );
         let mut extras = HashMap::new();
         extras.insert("ImportDirectoryBuildProps".to_string(), value.to_string());
-        let result = parse_file_with_extras(&project_path, extras);
+        let result = parse_file_std_with_extras(&project_path, extras);
         let canon_root = canon(tmp.path());
         assert_eq!(
             paths_of(&result.items),
@@ -498,7 +498,7 @@ fn empty_global_gate_property_skips_directory_build_props() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
@@ -506,7 +506,7 @@ fn empty_global_gate_property_skips_directory_build_props() {
     );
     let mut extras = HashMap::new();
     extras.insert("ImportDirectoryBuildProps".to_string(), String::new());
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     assert!(
         !result.properties.contains_key("FromDirBuild"),
         "empty global gate value is sticky-empty → Directory.Build.props skipped; \
@@ -533,7 +533,7 @@ fn true_global_gate_property_imports_directory_build_props() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
@@ -541,7 +541,7 @@ fn true_global_gate_property_imports_directory_build_props() {
     );
     let mut extras = HashMap::new();
     extras.insert("ImportDirectoryBuildProps".to_string(), "true".to_string());
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     assert_eq!(
         result.properties.get("FromDirBuild").map(String::as_str),
         Some("here"),
@@ -567,7 +567,7 @@ fn empty_global_gate_property_skips_directory_build_targets() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Main.fs" />
   </ItemGroup>
@@ -575,7 +575,7 @@ fn empty_global_gate_property_skips_directory_build_targets() {
     );
     let mut extras = HashMap::new();
     extras.insert("ImportDirectoryBuildTargets".to_string(), String::new());
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     let canon_root = canon(tmp.path());
     assert_eq!(
         paths_of(&result.items),
@@ -599,10 +599,14 @@ fn empty_global_directory_build_props_path_skips() {
   <PropertyGroup><Source>nearest</Source></PropertyGroup>
 </Project>"#,
     );
-    let project_path = write_at(tmp.path(), "Demo.fsproj", "<Project>\n</Project>");
+    let project_path = write_at(
+        tmp.path(),
+        "Demo.fsproj",
+        "<Project Sdk=\"Std\">\n</Project>",
+    );
     let mut extras = HashMap::new();
     extras.insert("DirectoryBuildPropsPath".to_string(), String::new());
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     assert!(
         !result.properties.contains_key("Source"),
         "empty global DirectoryBuildPropsPath is sticky-empty → no fallback to \
@@ -624,10 +628,14 @@ fn empty_global_directory_build_targets_path_skips() {
   <PropertyGroup><Source>nearest</Source></PropertyGroup>
 </Project>"#,
     );
-    let project_path = write_at(tmp.path(), "Demo.fsproj", "<Project>\n</Project>");
+    let project_path = write_at(
+        tmp.path(),
+        "Demo.fsproj",
+        "<Project Sdk=\"Std\">\n</Project>",
+    );
     let mut extras = HashMap::new();
     extras.insert("DirectoryBuildTargetsPath".to_string(), String::new());
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     assert!(
         !result.properties.contains_key("Source"),
         "empty global DirectoryBuildTargetsPath is sticky-empty → no fallback to \
@@ -690,11 +698,11 @@ fn nested_import_resolves_against_pre_canonical_directory() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <Import Project="link_side/common.props" />
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert_eq!(
         result.properties.get("Side").map(String::as_str),
         Some("link"),
@@ -735,7 +743,7 @@ fn directory_build_targets_path_override_redirects_targets_import() {
         tmp.path(),
         "Demo.fsproj",
         &format!(
-            r#"<Project>
+            r#"<Project Sdk="Std">
   <PropertyGroup>
     <DirectoryBuildTargetsPath>{}</DirectoryBuildTargetsPath>
   </PropertyGroup>
@@ -743,7 +751,7 @@ fn directory_build_targets_path_override_redirects_targets_import() {
             alt.display(),
         ),
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert_eq!(
         result.properties.get("Source").map(String::as_str),
         Some("override"),
@@ -780,7 +788,7 @@ fn directory_build_props_path_override_via_caller_globals() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
 </Project>"#,
     );
     let mut extras = HashMap::new();
@@ -788,7 +796,7 @@ fn directory_build_props_path_override_via_caller_globals() {
         "DirectoryBuildPropsPath".to_string(),
         alt.to_string_lossy().into_owned(),
     );
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     assert_eq!(
         result.properties.get("Source").map(String::as_str),
         Some("override"),
@@ -819,13 +827,13 @@ fn directory_build_targets_path_override_to_missing_file_skips_silently() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <PropertyGroup>
     <DirectoryBuildTargetsPath>/nonexistent/path/Custom.targets</DirectoryBuildTargetsPath>
   </PropertyGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(
         !result.properties.contains_key("Source"),
         "override pointing at missing file must skip silently, \
@@ -856,13 +864,13 @@ fn no_implicit_files_walks_only_project_body() {
     let project_path = write_at(
         &deep,
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <ItemGroup>
     <Compile Include="Only.fs" />
   </ItemGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     let canon_deep = canon(&deep);
     assert_eq!(paths_of(&result.items), vec![canon_deep.join("Only.fs")]);
     // Whether is_partial is set depends on whether any Directory.*
@@ -889,13 +897,13 @@ fn implicit_directory_build_props_path_is_seeded_for_substitution() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <PropertyGroup>
     <PropsPathSeenByBody>$(DirectoryBuildPropsPath)</PropsPathSeenByBody>
   </PropertyGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     let expected = canon(&dirbuild).to_string_lossy().replace('\\', "/");
     assert_eq!(
         result
@@ -936,10 +944,10 @@ fn implicit_directory_build_targets_path_is_seeded_for_substitution() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     let expected = canon(&dirbuild).to_string_lossy().replace('\\', "/");
     assert_eq!(
         result
@@ -970,7 +978,7 @@ fn explicit_directory_build_props_path_override_is_not_rewritten() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <PropertyGroup>
     <CapturedOverride>$(DirectoryBuildPropsPath)</CapturedOverride>
   </PropertyGroup>
@@ -982,7 +990,7 @@ fn explicit_directory_build_props_path_override_is_not_rewritten() {
         "DirectoryBuildPropsPath".to_string(),
         override_value.clone(),
     );
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     assert_eq!(
         result.properties.get("AltSeen").map(String::as_str),
         Some("true"),
@@ -1002,11 +1010,8 @@ fn explicit_directory_build_props_path_override_is_not_rewritten() {
 
 #[test]
 fn directory_build_targets_path_override_with_backslashes_resolves_on_unix() {
-    // MSBuild accepts both `\` and `/` separators on either platform.
-    // Explicit `<Import Project="...">` resolution already normalises
-    // `\` to `/`; the override resolver must follow suit, otherwise
-    // `alt\Custom.targets` probes a literal-backslash filename on Unix
-    // and the import silently skips.
+    // MSBuild accepts both `\` and `/` separators on either platform, in the
+    // redirect `Microsoft.Common.targets` imports as in any `<Import>`.
     let tmp = TempDir::new().unwrap();
     write_at(
         tmp.path(),
@@ -1020,13 +1025,13 @@ fn directory_build_targets_path_override_with_backslashes_resolves_on_unix() {
         "Demo.fsproj",
         // The override value uses backslashes deliberately — that's
         // the MSBuild-style spelling we expect to handle.
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <PropertyGroup>
-    <DirectoryBuildTargetsPath>alt\Custom.targets</DirectoryBuildTargetsPath>
+    <DirectoryBuildTargetsPath>$(MSBuildProjectDirectory)\alt\Custom.targets</DirectoryBuildTargetsPath>
   </PropertyGroup>
 </Project>"#,
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert_eq!(
         result.properties.get("Source").map(String::as_str),
         Some("override"),
@@ -1054,7 +1059,7 @@ fn gated_out_implicit_props_import_does_not_seed_path_property() {
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
-        r#"<Project>
+        r#"<Project Sdk="Std">
   <PropertyGroup>
     <PropsPathSeenByBody>$(DirectoryBuildPropsPath)</PropsPathSeenByBody>
   </PropertyGroup>
@@ -1062,7 +1067,7 @@ fn gated_out_implicit_props_import_does_not_seed_path_property() {
     );
     let mut extras = HashMap::new();
     extras.insert("ImportDirectoryBuildProps".to_string(), "false".to_string());
-    let result = parse_file_with_extras(&project_path, extras);
+    let result = parse_file_std_with_extras(&project_path, extras);
     assert!(
         !result.properties.contains_key("FromDirBuild"),
         "sanity: ImportDirectoryBuildProps=false must skip the import; properties: {:?}",
@@ -1108,7 +1113,7 @@ fn an_undecided_gate_write_leaves_the_item_set_uncertain() {
         tmp.path(),
         "Demo.fsproj",
         &format!(
-            r#"<Project>
+            r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>abc</X>
     <ImportDirectoryBuildTargets Condition="{UNDECIDABLE_TRUE}">false</ImportDirectoryBuildTargets>
@@ -1119,7 +1124,7 @@ fn an_undecided_gate_write_leaves_the_item_set_uncertain() {
 </Project>"#
         ),
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(
         result.items_uncertain,
         "the gate write could not be decided, so the item set must not be \
@@ -1149,7 +1154,7 @@ fn an_undecided_gate_write_that_would_re_enable_the_import_also_flags() {
         tmp.path(),
         "Demo.fsproj",
         &format!(
-            r#"<Project>
+            r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>abc</X>
     <ImportDirectoryBuildTargets>false</ImportDirectoryBuildTargets>
@@ -1161,7 +1166,7 @@ fn an_undecided_gate_write_that_would_re_enable_the_import_also_flags() {
 </Project>"#
         ),
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(
         result.items_uncertain,
         "an undecidable write that could re-enable the import must flag; \
@@ -1198,7 +1203,7 @@ fn an_undecided_path_redirect_leaves_the_item_set_uncertain() {
         tmp.path(),
         "Demo.fsproj",
         &format!(
-            r#"<Project>
+            r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>abc</X>
     <DirectoryBuildTargetsPath Condition="{UNDECIDABLE_TRUE}">$(MSBuildThisFileDirectory)Other.targets</DirectoryBuildTargetsPath>
@@ -1209,7 +1214,7 @@ fn an_undecided_path_redirect_leaves_the_item_set_uncertain() {
 </Project>"#
         ),
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(
         result.items_uncertain,
         "an undecidable redirect must flag; items: {:?}",
@@ -1223,9 +1228,9 @@ fn an_undecided_path_redirect_leaves_the_item_set_uncertain() {
 /// `<When>` arm containing it.
 type Placement = (&'static str, fn(&str, &str) -> String);
 
-/// A project whose body is `body`, beside a `Directory.Build.targets`
-/// contributing one Compile item. `X` is defined so a sweep can write
-/// conditions and values that read it.
+/// A project under the SDK `Std` whose body is `body`, beside a
+/// `Directory.Build.targets` contributing one Compile item. `X` is defined so
+/// a sweep can write conditions and values that read it.
 fn parse_with_body(body: &str) -> crate::ParsedProject {
     let tmp = TempDir::new().unwrap();
     write_at(
@@ -1241,7 +1246,7 @@ fn parse_with_body(body: &str) -> crate::ParsedProject {
         tmp.path(),
         "Demo.fsproj",
         &format!(
-            r#"<Project>
+            r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>abc</X>
   </PropertyGroup>
@@ -1252,7 +1257,7 @@ fn parse_with_body(body: &str) -> crate::ParsedProject {
 </Project>"#
         ),
     );
-    parse_file(&project_path)
+    parse_file_std(&project_path)
 }
 
 #[test]
@@ -1269,12 +1274,11 @@ fn every_declared_gate_name_is_swept_at_its_own_consumption_point() {
     //    leaves `Directory.Build.props`'s `FromProps` reading `set` — MSBuild
     //    imported it regardless.
     //
-    // The names come from the splice constants the production code reads, so a
-    // pair added there is swept here rather than going untested.
-    let (targets_gate, targets_path) = crate::evaluator::DIRECTORY_BUILD_TARGETS_SPLICE;
-    let (props_gate, props_path) = crate::evaluator::DIRECTORY_BUILD_PROPS_SPLICE;
-    let consumed_after_body = [targets_gate, targets_path];
-    let consumed_before_body = [props_gate, props_path];
+    // The names come from the import points' own declaration, so a name added
+    // there is swept here rather than going untested.
+    use crate::evaluator::DirectoryBuildFile::{Props, Targets};
+    let consumed_after_body = [Targets.gate_name(), Targets.path_name()];
+    let consumed_before_body = [Props.gate_name(), Props.path_name()];
 
     // The three places a condition can decide whether the write happens —
     // checklist entries 1, 2 and 3. Each is evaluated by different code, and
@@ -1355,7 +1359,7 @@ fn an_untrusted_gate_write_declines_and_a_clean_overwrite_never_lies() {
     // than the decline keeps this honest under either behaviour — and it still
     // has teeth: on the two condition kinds the walker does commit, so a wrong
     // commit there fails here.
-    let (targets_gate, targets_path) = crate::evaluator::DIRECTORY_BUILD_TARGETS_SPLICE;
+    let targets = crate::evaluator::DirectoryBuildFile::Targets;
 
     let kinds: &[UntrustedWrite] = &[
         ("an undecidable condition on the write", |name| {
@@ -1383,7 +1387,7 @@ fn an_untrusted_gate_write_declines_and_a_clean_overwrite_never_lies() {
         }),
     ];
 
-    for name in [targets_gate, targets_path] {
+    for name in [targets.gate_name(), targets.path_name()] {
         for (description, build) in kinds {
             // Without the overwrite the decline is owed — this arm is what
             // stops "never record anything" passing the sweep.
@@ -1425,9 +1429,9 @@ fn an_overwrite_under_sdk_opacity_does_not_discharge_a_refusal() {
     // The regression guard for a *write-time* discharge of the refused-write
     // mark, in the form that looks safest: the value is clean, its gate is
     // clean, and last write wins on both sides, so discharging looks like
-    // plain bookkeeping. It is not, because the mark's reader
-    // (`gate_value_is_exact`) consumes it mid-walk and deliberately tolerates
-    // SDK-subtree opacity — so under opacity a cleanly-computed value can rest
+    // plain bookkeeping. It is not, because the mark's reader (the import
+    // point's predicate) consumes it mid-walk — so under opacity a
+    // cleanly-computed value can rest
     // on a property hidden content redefined, and this mark is all that stands
     // between that and a published Compile set.
     //
@@ -1447,7 +1451,7 @@ fn an_overwrite_under_sdk_opacity_does_not_discharge_a_refusal() {
   <Import Project="Hidden.props" Condition="{UNDECIDABLE_TRUE}" />
 </Project>"#
         ),
-        "<Project/>",
+        &format!("<Project>\n{COMMON_TARGETS_BLOCK}</Project>"),
     );
     write_at(
         &root,
@@ -1495,7 +1499,7 @@ fn an_overwrite_under_sdk_opacity_does_not_discharge_a_refusal() {
 /// `Directory.Build.targets` gate, and MSBuild takes the file. We skip the
 /// import, so the `false` we hold for `ThatProperty` may be stale: written
 /// before content the walk could not see. The gate copied from it carries that
-/// staleness, and `gate_value_is_exact` declines on it. No refused write is
+/// staleness, and the import point declines on it. No refused write is
 /// involved (unlike the test above).
 #[test]
 fn a_gate_read_from_a_property_an_opaque_sdk_import_redefined_declines() {
@@ -1509,7 +1513,7 @@ fn a_gate_read_from_a_property_an_opaque_sdk_import_redefined_declines() {
   <Import Project="Hidden.props" Condition="{UNDECIDABLE_TRUE}" />
 </Project>"#
         ),
-        "<Project/>",
+        &format!("<Project>\n{COMMON_TARGETS_BLOCK}</Project>"),
     );
     write_at(
         &root,
@@ -1614,7 +1618,7 @@ fn a_body_read_before_the_gated_import_stays_exact() {
             tmp.path(),
             "Demo.fsproj",
             &format!(
-                r#"<Project>
+                r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>abc</X>
     <ImportDirectoryBuildTargets Condition="{condition}">false</ImportDirectoryBuildTargets>
@@ -1623,7 +1627,7 @@ fn a_body_read_before_the_gated_import_stays_exact() {
 </Project>"#
             ),
         );
-        parse_file(&project_path)
+        parse_file_std(&project_path)
             .diagnostics
             .iter()
             .filter_map(|d| match &d.kind {
@@ -1667,7 +1671,7 @@ fn an_undecided_group_condition_over_a_gate_write_also_flags() {
             tmp.path(),
             "Demo.fsproj",
             &format!(
-                r#"<Project>
+                r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>abc</X>
   </PropertyGroup>
@@ -1678,7 +1682,7 @@ fn an_undecided_group_condition_over_a_gate_write_also_flags() {
 </Project>"#
             ),
         );
-        parse_file(&project_path).items_uncertain
+        parse_file_std(&project_path).items_uncertain
     }
 
     assert!(
@@ -1722,22 +1726,23 @@ fn an_undecided_group_condition_over_a_gate_write_also_flags() {
 }
 
 #[test]
-fn an_undecided_gate_costs_nothing_when_there_is_no_file_to_import() {
+fn an_undecided_gate_over_no_file_still_declines() {
     // The gate only matters if something could be imported. MSBuild's own
     // import is `Condition="… and exists('$(DirectoryBuildTargetsPath)')"`, so
     // with no `Directory.Build.targets` on disk and no redirect, both sides
-    // skip whatever the gate says — and an undecidable write to it therefore
-    // owes no decline.
-    //
-    // This matters because `items_uncertain` is not a small cost: the LSP
-    // stops folding the project. A trust check that fires where the decision
-    // cannot change the outcome spends that for nothing.
+    // skip whatever the gate says. The walk still declines: the SDK's
+    // discovery of the path runs under the same undecided gate, so the path
+    // is doubted too, and a doubted path may name any file
+    // (`directory_build_import_point`). So this pins a known precision loss,
+    // not a property of MSBuild: a walk that told a path doubted only through
+    // whether its discovery ran from one whose value is in doubt would commit
+    // here, and should then flip this test.
     let tmp = TempDir::new().unwrap();
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
         &format!(
-            r#"<Project>
+            r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>abc</X>
     <ImportDirectoryBuildTargets Condition="{UNDECIDABLE_TRUE}">false</ImportDirectoryBuildTargets>
@@ -1748,11 +1753,10 @@ fn an_undecided_gate_costs_nothing_when_there_is_no_file_to_import() {
 </Project>"#
         ),
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(
-        !result.items_uncertain,
-        "no Directory.Build.targets exists, so the gate cannot change the item \
-         set on either side and must not cost a decline",
+        result.items_uncertain,
+        "the gate reads an undecided value, so the path it gates is doubted",
     );
     assert_eq!(
         paths_of(&result.items),
@@ -1762,10 +1766,6 @@ fn an_undecided_gate_costs_nothing_when_there_is_no_file_to_import() {
 
 #[test]
 fn an_undecided_path_redirect_flags_even_when_nothing_resolves_here() {
-    // The counterpart of
-    // [`an_undecided_gate_costs_nothing_when_there_is_no_file_to_import`], and
-    // the boundary between them is the whole subtlety.
-    //
     // There is no `Directory.Build.targets` next to the project, so *our*
     // resolution finds nothing. That proves nothing: the undecidable write
     // redirects `DirectoryBuildTargetsPath` at a file that does exist, and
@@ -1785,7 +1785,7 @@ fn an_undecided_path_redirect_flags_even_when_nothing_resolves_here() {
         tmp.path(),
         "Demo.fsproj",
         &format!(
-            r#"<Project>
+            r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>abc</X>
     <DirectoryBuildTargetsPath Condition="{UNDECIDABLE_TRUE}">$(MSBuildThisFileDirectory)Other.targets</DirectoryBuildTargetsPath>
@@ -1796,7 +1796,7 @@ fn an_undecided_path_redirect_flags_even_when_nothing_resolves_here() {
 </Project>"#
         ),
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(
         result.items_uncertain,
         "the redirect target exists and MSBuild imports it, so the item set \
@@ -1828,7 +1828,7 @@ fn an_undecided_gate_withdraws_every_item_facet_not_just_compile() {
         tmp.path(),
         "Demo.fsproj",
         &format!(
-            r#"<Project>
+            r#"<Project Sdk="Std">
   <PropertyGroup>
     <X>abc</X>
     <ImportDirectoryBuildTargets Condition="{UNDECIDABLE_TRUE}">false</ImportDirectoryBuildTargets>
@@ -1839,7 +1839,7 @@ fn an_undecided_gate_withdraws_every_item_facet_not_just_compile() {
 </Project>"#
         ),
     );
-    let result = parse_file(&project_path);
+    let result = parse_file_std(&project_path);
     assert!(result.items_uncertain, "Compile facet");
     assert!(
         result.project_references_uncertain,

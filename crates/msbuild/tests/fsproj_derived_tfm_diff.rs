@@ -120,32 +120,16 @@ fn witness_name(pos: Position, derived: &str) -> String {
     format!("BorzoiWitness{}{suffix}", pos.tag())
 }
 
-/// The positions that exist under `sdk`.
+/// The positions graded under `sdk`: all three.
 ///
 /// A bare `<Project>` with no `Sdk` attribute imports **nothing** — MSBuild
 /// reaches `Directory.Build.props` / `.targets` only through
-/// `Microsoft.Common.props` / `.targets`, which such a document never pulls in.
-/// (Old-style projects import `Microsoft.Common.props` explicitly, which is why
-/// the file works for them.) Our walker splices both unconditionally, so for an
-/// SDK-less project it commits values for properties MSBuild's table does not
-/// contain at all.
-///
-/// That is a real wrong commit and it is **not** the subject here: it is about
-/// the splice's existence, not about the framework pair, and it is unchanged by
-/// this file's fix. It is excluded by not *planting* the out-of-body witnesses
-/// under [`Sdk::None`] — a restriction of the input to shapes MSBuild has a
-/// position for, decided by MSBuild's behaviour rather than by ours. The
-/// in-body comparison stays fully live for every SDK-less case.
-///
-/// Left as a gap on purpose: making the props splice conditional needs the
-/// document's own `<Import>`s walked first, and the props splice has to happen
-/// *before* the body that contains them — the trick that fixed the targets side
-/// does not transfer. `docs/completed/fsproj-tfm-selection-plan.md` records it.
-fn positions_for(sdk: Sdk) -> &'static [Position] {
-    match sdk {
-        Sdk::Real => &POSITIONS,
-        Sdk::None => &[Position::Body],
-    }
+/// `Microsoft.Common.props` / `.targets`, which such a document never pulls in,
+/// and neither does the walk (#677). So under [`Sdk::None`] the out-of-body
+/// witnesses are absent from MSBuild's table, and grading them holds the walk
+/// to committing none of them either.
+fn positions_for(_sdk: Sdk) -> &'static [Position] {
+    &POSITIONS
 }
 
 /// Every witness name under `sdk`, in a stable order.

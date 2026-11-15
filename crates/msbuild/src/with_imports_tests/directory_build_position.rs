@@ -5,8 +5,9 @@
 //! imports it, and the SDK's `Sdk.targets` chain reaches that — *after*
 //! `Microsoft.NET.TargetFrameworkInference.targets` has computed
 //! `TargetFrameworkIdentifier` / `TargetFrameworkVersion`. So the walker lets
-//! the chain place the import, and splices explicitly only when the chain did
-//! not.
+//! the chain place the import; a chain with no import point imports nothing,
+//! and the walk splices the file itself only as an uncertain fallback for a
+//! point it could not decide (`directory_build_import_point`).
 //!
 //! The tests here are about **the gate**, not about MSBuild's semantics: they
 //! use synthetic SDKs, which the differential
@@ -81,11 +82,10 @@ fn the_sdk_chains_own_import_places_the_file_once_after_what_sdk_targets_wrote()
 }
 
 #[test]
-fn an_sdk_that_never_imports_the_file_still_gets_the_explicit_splice() {
-    // The fallback. An SDK whose targets do not reach
-    // `Microsoft.Common.targets` would otherwise lose `Directory.Build.targets`
-    // entirely — a silent loss of the user's own build logic, which is worse
-    // than placing it late.
+fn an_sdk_that_never_imports_the_file_imports_none_of_it() {
+    // An SDK whose targets do not reach `Microsoft.Common.targets` has no
+    // import point, and the walk decided every gate it met, so MSBuild never
+    // reads `Directory.Build.targets` either.
     let tmp = TempDir::new().unwrap();
     let (sdk_dir, props, targets) = write_synthetic_sdk(
         tmp.path(),
@@ -117,19 +117,16 @@ fn an_sdk_that_never_imports_the_file_still_gets_the_explicit_splice() {
     });
     assert_eq!(
         result.properties.get("Trace").map(String::as_str),
-        Some("body;dbt=[written]"),
-        "the chain never imported it, so the explicit splice must — once, and \
-         after `Sdk.targets`, so it still sees what that wrote"
+        Some("body"),
+        "no file of the chain imports it"
     );
+    assert!(!result.property_provenance_untrusted("Trace"));
 }
 
 #[test]
-fn an_sdkless_project_still_gets_the_explicit_splice() {
-    // No SDK at all: there is no chain to place the import, so the splice is
-    // the only route. (Whether MSBuild imports it for a *bare* `<Project>` is a
-    // separate question — it does not, and that gap is recorded in
-    // `tests/fsproj_derived_tfm_diff.rs`. This test pins the walker's existing
-    // behaviour, which this change does not touch.)
+fn an_sdkless_project_imports_no_targets_file() {
+    // No SDK at all: nothing imports `Directory.Build.targets` into a bare
+    // `<Project>` (#676).
     let tmp = TempDir::new().unwrap();
     let project_path = write_at(
         tmp.path(),
@@ -146,8 +143,9 @@ fn an_sdkless_project_still_gets_the_explicit_splice() {
     let result = parse_file(&project_path);
     assert_eq!(
         result.properties.get("Trace").map(String::as_str),
-        Some("body;dbt=[from-body]")
+        Some("body")
     );
+    assert!(!result.property_provenance_untrusted("Trace"));
 }
 
 #[test]

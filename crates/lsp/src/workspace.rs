@@ -7220,14 +7220,21 @@ mod tests {
         use borzoi_msbuild::observed::soundness::{self, Edit, Perturbation, Why};
 
         /// A stub `Microsoft.NET.Sdk` of `version` under `dotnet`, whose
-        /// `Sdk.props` defines `define`.
+        /// `Sdk.props` defines `define` and imports the `Directory.Build.props`
+        /// above the project, as `Microsoft.Common.props` does.
         fn install_sdk(dotnet: &Path, version: &str, define: &str) {
             let sdk = dotnet.join(format!("sdk/{version}/Sdks/Microsoft.NET.Sdk/Sdk"));
             fs::create_dir_all(&sdk).unwrap();
             fs::write(
                 sdk.join("Sdk.props"),
                 format!(
-                    "<Project><PropertyGroup><DefineConstants>$(DefineConstants);{define}</DefineConstants></PropertyGroup></Project>"
+                    r#"<Project>
+  <PropertyGroup><DefineConstants>$(DefineConstants);{define}</DefineConstants></PropertyGroup>
+  <PropertyGroup>
+    <DirectoryBuildPropsPath>$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), 'Directory.Build.props'))/Directory.Build.props</DirectoryBuildPropsPath>
+  </PropertyGroup>
+  <Import Project="$(DirectoryBuildPropsPath)" Condition="exists('$(DirectoryBuildPropsPath)')" />
+</Project>"#
                 ),
             )
             .unwrap();

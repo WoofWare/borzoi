@@ -1,0 +1,463 @@
+//! `Directory.Build.props` and `Directory.Build.targets` (#677).
+//!
+//! MSBuild has no implicit import of either file. `Microsoft.Common.props`
+//! imports the first and `Microsoft.Common.targets` (and its cross-targeting
+//! twin) the second, each through an ordinary `<Import>` of
+//! `$(DirectoryBuild{Props,Targets}Path)` under a condition that reads the
+//! file's gate (`ImportDirectoryBuild{Props,Targets}`) and tests the file
+//! exists. So the walk follows those imports, at their own positions and
+//! under their own conditions, and a project no SDK reaches gets neither file.
+//!
+//! **The predicate.** An import point is *decided* when the walk reached it
+//! along a route of import gates it decided ([`Bookkeeping::route_undecided`]),
+//! its condition is decided from certain inputs, and its `Project` reads only
+//! certain inputs. "Certain" is [`Trust::is_certain`](super::Trust::is_certain) on the entry the read
+//! consults, which joins every channel, [`Trust::stale`](super::Trust::stale) included; a name with
+//! no binding is certain only when [`State::undefined_read_is_exact`] says the
+//! real build has none either. A decided point is an ordinary import.
+//!
+//! **The fallback.** A point reached but not decided, or never reached once
+//! the walk has passed something it could not decide (which may hold the
+//! point), is settled by [`fallback`]. What it marks depends on whether the
+//! *identity* of the file is certain: at a point the walk reached, the path
+//! input's certainty there; at one it never reached, never, since the path
+//! the point reads is the one wherever the point is:
+//!
+//! - identity certain: only whether (and where) the file is imported is in
+//!   doubt. The walk walks it with every property it writes unpinned, and
+//!   withdraws every item facet and the define set. A file that writes
+//!   nothing ([`contributes_nothing`]) changes nothing whether imported or
+//!   not, and is not walked.
+//! - identity uncertain: any file may be imported, so the whole evaluation
+//!   from this point is uncertain: every property bound so far is unpinned,
+//!   the walk latches opacity, and every item facet and the define set are
+//!   withdrawn. When nothing would be imported by default (no write touched
+//!   the path and no `Directory.Build.*` file exists above the project) the
+//!   walk's doubt is about a file only content it could not see would name,
+//!   which is that content's doubt like any other, and nothing is charged.
+//!
+//! A point never reached by a walk that decided everything is never reached
+//! by MSBuild either, and imports nothing. Under opacity, the walk has
+//! accounted for the SDK's import of a file only at a point that names the
+//! default file ([`names_the_default`]): a point that names another stands
+//! beside the SDK's own, which may be in content the walk could not see.
+
+use std::path::{Path, PathBuf};
+
+use roxmltree::Node;
+
+use crate::document::attribute;
+
+use super::condition;
+use super::observed;
+use super::properties;
+use super::properties::trust::{
+    OpacityCause, PropertyProvenance, RefusedOutcome, StaleOutcome, TaintOutcome, UnpinnedOutcome,
+    UnpinnedRoot,
+};
+use super::{
+    CurrentFile, State, StructuralCompileItemUncertainty, canonicalise_or_normalise,
+    condition_exists, condition_has_exists_for_property, import_dedup_key,
+    simple_property_reference, walk_external_file,
+};
+
+/// Which of the two files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DirectoryBuildFile {
+    Props,
+    Targets,
+}
+
+impl DirectoryBuildFile {
+    pub(crate) const ALL: [DirectoryBuildFile; 2] =
+        [DirectoryBuildFile::Props, DirectoryBuildFile::Targets];
+
+    /// The property the SDK's import condition reads to decide whether to
+    /// import the file. The walk never reads it itself: the SDK's condition
+    /// does.
+    #[cfg(test)]
+    pub(crate) fn gate_name(self) -> &'static str {
+        match self {
+            DirectoryBuildFile::Props => "ImportDirectoryBuildProps",
+            DirectoryBuildFile::Targets => "ImportDirectoryBuildTargets",
+        }
+    }
+
+    /// The property the SDK's import names the file by.
+    pub(crate) fn path_name(self) -> &'static str {
+        match self {
+            DirectoryBuildFile::Props => "DirectoryBuildPropsPath",
+            DirectoryBuildFile::Targets => "DirectoryBuildTargetsPath",
+        }
+    }
+
+    fn file_name(self) -> &'static str {
+        match self {
+            DirectoryBuildFile::Props => "Directory.Build.props",
+            DirectoryBuildFile::Targets => "Directory.Build.targets",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            DirectoryBuildFile::Props => 0,
+            DirectoryBuildFile::Targets => 1,
+        }
+    }
+
+    /// The root every fallback product of this file carries.
+    fn root(self) -> UnpinnedRoot {
+        UnpinnedRoot::UnsupportedCondition(format!(
+            "the {} import, which the walk could not decide",
+            self.file_name()
+        ))
+    }
+}
+
+/// The walk's record of the two import points.
+#[derive(Debug, Default)]
+pub(super) struct Bookkeeping {
+    /// The nearest file of each kind above the project, as discovered before
+    /// the walk: what the SDK's discovery would name by default.
+    discovered: [Option<PathBuf>; 2],
+    /// Whether the walk has accounted for the SDK's import of each kind: it
+    /// reached an import point of that kind that names the default file
+    /// ([`names_the_default`]), or settled one it could not decide.
+    accounted: [bool; 2],
+    /// How many imports the walk is inside whose gate it did not decide from
+    /// certain inputs: a point reached inside one is not decided.
+    route_undecided: usize,
+    /// Whether the walk met an import gate it did not decide from certain
+    /// inputs, whichever way it went. Every such gate also latches opacity
+    /// except one deciding cleanly on an input another channel doubts.
+    undecided_gate_seen: bool,
+    /// The canonical roots of the SDKs an imported file's own `Sdk`
+    /// attribute names. The walk does not tolerate their files as the entry
+    /// SDK's ([`State::in_sdk_subtree`]), but their `Microsoft.Common.*`
+    /// imports are import points all the same.
+    nested_sdk_roots: Vec<PathBuf>,
+    /// The root every property write carries while the walk is inside a
+    /// fallback walk.
+    pub(super) fallback: Option<UnpinnedRoot>,
+    /// Whether a fallback walked a file that contributes something.
+    pub(super) contributed: bool,
+    /// Whether a group the walk deferred while inside a fallback walk declares
+    /// or defines `<ProjectReference>` items.
+    pub(super) doubted_references: bool,
+}
+
+impl Bookkeeping {
+    pub(super) fn discover(&mut self, props: Option<&Path>, targets: Option<&Path>) {
+        self.discovered = [props.map(Path::to_path_buf), targets.map(Path::to_path_buf)];
+    }
+}
+
+/// Record the root of an SDK an imported file's own `Sdk` attribute names.
+pub(super) fn note_nested_sdk(root: &Path, state: &mut State<'_>) {
+    let canon = canonicalise_or_normalise(state.observer, root);
+    if !state.directory_build.nested_sdk_roots.contains(&canon) {
+        state.directory_build.nested_sdk_roots.push(canon);
+    }
+}
+
+/// Whether the file being walked is one of an SDK's: the entry SDK's (or one
+/// tolerated with it), or one under the root of a nested SDK.
+fn in_an_sdk_file(state: &State<'_>) -> bool {
+    if state.in_sdk_subtree {
+        return true;
+    }
+    let CurrentFile::Imported { path, .. } = &state.current_file else {
+        return false;
+    };
+    let canon = canonicalise_or_normalise(state.observer, path);
+    state
+        .directory_build
+        .nested_sdk_roots
+        .iter()
+        .any(|root| canon.starts_with(root))
+}
+
+/// Whether `node`, an `<Import>`, is an SDK's import point for a
+/// `Directory.Build.*` file: in an SDK's file ([`in_an_sdk_file`]), of
+/// `$(DirectoryBuild{Props,Targets}Path)` alone, not qualified by an SDK,
+/// under a condition that tests the file exists. The shape, not the path, so
+/// an SDK's import point is one wherever the SDK puts it.
+pub(super) fn point_kind(node: Node<'_, '_>, state: &State<'_>) -> Option<DirectoryBuildFile> {
+    if attribute(node, "Sdk").is_some() || !in_an_sdk_file(state) {
+        return None;
+    }
+    let project = attribute(node, "Project")?;
+    let name = simple_property_reference(&project)?;
+    let kind = DirectoryBuildFile::ALL
+        .into_iter()
+        .find(|kind| kind.path_name().eq_ignore_ascii_case(name))?;
+    condition_has_exists_for_property(attribute(node, "Condition").as_deref(), name).then_some(kind)
+}
+
+/// What [`visit_point`] leaves its caller to do.
+pub(super) enum Visit {
+    /// The point is decided: follow it as an ordinary import.
+    Follow,
+    /// The point is not decided, and the fallback has settled it.
+    Settled,
+}
+
+/// Account for the walk reaching an import point of `kind` at `node`, before
+/// anything else happens there.
+pub(super) fn visit_point(
+    node: Node<'_, '_>,
+    kind: DirectoryBuildFile,
+    current_file_dir: &Path,
+    state: &mut State<'_>,
+) -> Visit {
+    let condition = attribute(node, "Condition").unwrap_or_default();
+    let project = attribute(node, "Project").unwrap_or_default();
+    let path_name = kind.path_name();
+    let decided = state.directory_build.route_undecided == 0
+        && decided_from_certain_inputs(state, &condition, current_file_dir)
+        && properties::property_references(&project).all(|name| is_certain(state, name));
+    if names_the_default(kind, current_file_dir, state) {
+        state.directory_build.accounted[kind.index()] = true;
+    }
+    if decided {
+        return Visit::Follow;
+    }
+    let identity_certain = is_certain(state, path_name);
+    if !identity_certain {
+        // The whole evaluation is uncertain from here: nothing a later point
+        // could import adds to that.
+        state.directory_build.accounted[kind.index()] = true;
+    }
+    let named = named_file(state, path_name, current_file_dir);
+    fallback(kind, identity_certain, named, state);
+    Visit::Settled
+}
+
+/// Whether the import point here names the file the SDK's discovery names by
+/// default: by MSBuild's identity for an import ([`import_dedup_key`]), or, with
+/// no file to discover, by naming none. A point that names another file (a
+/// redirect, an alias) stands beside the SDK's own import, which content the
+/// walk could not see may still make.
+fn names_the_default(kind: DirectoryBuildFile, dir: &Path, state: &State<'_>) -> bool {
+    let named = point_path(state, kind.path_name(), dir);
+    match (&state.directory_build.discovered[kind.index()], named) {
+        (Some(default), Some(named)) => import_dedup_key(default) == import_dedup_key(&named),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Whether the gate of an `<Import>` or `<ImportGroup>` at `node` is decided
+/// from certain inputs; called before the walk evaluates it.
+pub(super) fn gate_is_decided(
+    node: Node<'_, '_>,
+    current_file_dir: &Path,
+    state: &mut State<'_>,
+) -> bool {
+    let decided = attribute(node, "Condition")
+        .is_none_or(|condition| decided_from_certain_inputs(state, &condition, current_file_dir));
+    if !decided {
+        state.directory_build.undecided_gate_seen = true;
+    }
+    decided
+}
+
+/// Run `walk` (the imports of an element whose gate the walk took) as inside
+/// an undecided route when `decided` is false.
+pub(super) fn within_route<T>(
+    decided: bool,
+    state: &mut State<'_>,
+    walk: impl FnOnce(&mut State<'_>) -> T,
+) -> T {
+    if decided {
+        return walk(state);
+    }
+    state.directory_build.route_undecided += 1;
+    let result = walk(state);
+    state.directory_build.route_undecided -= 1;
+    result
+}
+
+/// Settle each file whose import by the SDK the walk has not accounted for,
+/// once every import it could follow is behind it.
+pub(super) fn settle_unaccounted(state: &mut State<'_>) {
+    for kind in DirectoryBuildFile::ALL {
+        if state.directory_build.accounted[kind.index()] {
+            continue;
+        }
+        if state.walk_opaque.is_none() && !state.directory_build.undecided_gate_seen {
+            // Every gate decided and nothing hidden: MSBuild reaches no point
+            // the walk did not.
+            continue;
+        }
+        // The identity is never certain here. The point, wherever it is, is
+        // somewhere the walk did not go, and reads the path as it is there:
+        // bound by the SDK's own discovery just before it, or by a write the
+        // walk never saw, or left as some write earlier than the last the walk
+        // holds. The file the path names now is only the likeliest.
+        let project_dir = state.entry_project_dir.clone();
+        let named = named_file(state, kind.path_name(), &project_dir);
+        fallback(kind, false, named, state);
+    }
+}
+
+/// See the module docs.
+fn fallback(
+    kind: DirectoryBuildFile,
+    identity_certain: bool,
+    named: Option<PathBuf>,
+    state: &mut State<'_>,
+) {
+    if identity_certain {
+        if let Some(file) = named {
+            walk_doubted(kind, &file, state);
+        }
+        return;
+    }
+    // A path some write touched (bound, or left doubted by a write the walk
+    // skipped or refused) may name a file the walk cannot see from here.
+    let path_name = kind.path_name();
+    let path_touched = state.lookup.is_bound(path_name) || !state.trust_of(path_name).is_certain();
+    let file = named.or_else(|| state.directory_build.discovered[kind.index()].clone());
+    if !path_touched && file.is_none() {
+        return;
+    }
+    whole_evaluation_uncertain(kind, state);
+    if let Some(file) = file {
+        walk_doubted(kind, &file, state);
+    }
+}
+
+/// Walk `file`, whose import is in doubt, so that everything it writes is
+/// doubted too, and withdraw the facets it could change.
+fn walk_doubted(kind: DirectoryBuildFile, file: &Path, state: &mut State<'_>) {
+    if state.imports_seen.contains(&import_dedup_key(file)) || contributes_nothing(file, state) {
+        return;
+    }
+    let root = kind.root();
+    state.directory_build.contributed = true;
+    let saved_fallback = state.directory_build.fallback.replace(root.clone());
+    let saved_references = std::mem::take(&mut state.directory_build.doubted_references);
+    let saved_span = state.import_site_span.take();
+    walk_external_file(file, 0..0, state);
+    state.import_site_span = saved_span;
+    state.directory_build.fallback = saved_fallback;
+    let references = state.directory_build.doubted_references;
+    state.directory_build.doubted_references |= saved_references;
+    withdraw_facets(kind, root, references, state);
+}
+
+/// The whole evaluation from here is uncertain: any file may be imported.
+fn whole_evaluation_uncertain(kind: DirectoryBuildFile, state: &mut State<'_>) {
+    let root = kind.root();
+    state.latch_walk_opaque(OpacityCause::Gate(root.clone()));
+    let names: Vec<String> = state.lookup.canonical_keys().map(str::to_owned).collect();
+    for name in names {
+        if state.protected.contains(&name.to_ascii_lowercase()) {
+            continue;
+        }
+        state.apply_property_provenance(
+            &name,
+            PropertyProvenance {
+                taint: TaintOutcome::Keep,
+                unpinned: UnpinnedOutcome::Set(root.clone()),
+                refused: RefusedOutcome::Keep,
+                stale: StaleOutcome::Keep,
+            },
+        );
+    }
+    withdraw_facets(kind, root, true, state);
+}
+
+/// Withdraw the captured item facets and the define set. Through
+/// `mark_structural_skip` rather than its SDK-tolerant twin, wherever the
+/// point is: a `Directory.Build.*` file holds hand-written sources and
+/// `<PackageReference>`s, and its properties can steer the SDK's own items.
+/// The `<ProjectReference>` list only when `references`: the SDK declares no
+/// reference, so a file changes the list only through its own items, and a
+/// body item reading what the file writes reads a doubted value.
+fn withdraw_facets(
+    kind: DirectoryBuildFile,
+    root: UnpinnedRoot,
+    references: bool,
+    state: &mut State<'_>,
+) {
+    state.mark_structural_skip(
+        StructuralCompileItemUncertainty::DirectoryBuildImportUndecided {
+            project: kind.path_name().to_string(),
+            references,
+        },
+        0..0,
+    );
+    let saved = state.define_context;
+    state.define_context = true;
+    state.push_root(root, 0..0);
+    state.define_context = saved;
+}
+
+/// Whether the file at `path` writes nothing: a `<Project>` with no attribute
+/// but a namespace and no element child. Anything else may write a property,
+/// declare an item, import a file, define a target, or decide one; a file that
+/// does not read or parse is no file to call empty.
+fn contributes_nothing(path: &Path, state: &State<'_>) -> bool {
+    let canon = canonicalise_or_normalise(state.observer, path);
+    let Ok(Ok(parsed)) = observed::read_document(state.observer, &canon) else {
+        return false;
+    };
+    let root = parsed.document().root_element();
+    root.has_tag_name("Project")
+        && root.attributes().all(|a| a.name() == "xmlns")
+        && !root.children().any(|child| child.is_element())
+}
+
+/// The file the path property names, resolved against `dir` as an import
+/// there resolves it.
+fn point_path(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf> {
+    // A point of use: trimmed in the domain (an escaped `%20` is filename
+    // data, not padding). Its trust is the caller's to judge.
+    let trimmed = state
+        .lookup
+        .get_ignoring_trust(path_name)?
+        .trimmed_unescaped();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalised = trimmed.replace('\\', "/");
+    let path = Path::new(&normalised);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        dir.join(path)
+    })
+}
+
+/// [`point_path`], if the file exists.
+fn named_file(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf> {
+    point_path(state, path_name, dir).filter(|path| observed::exists(state.observer, path))
+}
+
+/// Whether a read of `name` now is what the real build reads.
+fn is_certain(state: &State<'_>, name: &str) -> bool {
+    let previous = state.quiet_target_framework_reads.replace(true);
+    let certain = state.trust_of(name).is_certain()
+        && (state.lookup.is_bound(name) || state.undefined_read_is_exact(name));
+    state.quiet_target_framework_reads.set(previous);
+    certain
+}
+
+/// Whether `condition` decides the same way whatever the names the walk is
+/// not certain of hold ([`is_certain`]), within the grammar. The pure walker
+/// has no file system, so an `Exists` leaf is outside it there.
+fn decided_from_certain_inputs(state: &State<'_>, condition: &str, dir: &Path) -> bool {
+    let observer = state.observer;
+    let exists = |path: &str| condition_exists(observer, path, dir);
+    let probes = state.follow_imports.then_some(condition::Probes {
+        exists: &exists,
+        observer,
+    });
+    let unknown = |name: &str| !is_certain(state, name);
+    matches!(
+        condition::decide_without(condition, &state.lookup, probes, &unknown),
+        condition::Decision::Decided(_)
+    )
+}

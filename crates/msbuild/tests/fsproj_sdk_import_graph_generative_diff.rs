@@ -862,24 +862,6 @@ fn render(case: &Case, sdk: &str) -> Rendered {
 /// MSBuild's (#677).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Family {
-    /// The walk splices `Directory.Build.*` into a project with no SDK, which
-    /// MSBuild never imports them into (#676, merged into #677).
-    SdkLessSplice,
-    /// The walk splices `Directory.Build.*` itself rather than following the
-    /// SDK's import, so it diverges wherever the SDK's import point is absent,
-    /// conditioned otherwise than the standard block, or reached in a
-    /// different place (#677).
-    EmulatedImportPoint,
-    /// The walk takes every SDK import of `$(DirectoryBuildPropsPath)` for
-    /// the props import point it splices itself, and suppresses it when it
-    /// names the file the splice took or is about to take: compared by
-    /// canonical path, with a relative path resolved against the project's
-    /// directory. MSBuild has no such point: it imports any file it has not
-    /// imported yet, by lexical full path, resolved against the importing
-    /// file's directory. So an SDK that writes the property itself diverges
-    /// when it names the file through an alias, relative to itself, or before
-    /// a `Directory.Build.props` it imports redirects it (#677).
-    PropsPointIdentity,
     /// `Exists()` in a `<When>` condition, in an imported file, resolves
     /// against the file's directory; MSBuild resolves it against the
     /// project's (#786). Covers `ExistsProbe` only: the element and group
@@ -908,9 +890,6 @@ enum Family {
 }
 
 const KNOWN_DIVERGENCES: &[Family] = &[
-    Family::SdkLessSplice,
-    Family::EmulatedImportPoint,
-    Family::PropsPointIdentity,
     Family::ExistsBaseDirectory,
     Family::DanglingSymlinkExists,
     Family::UndecidedImportHidesWrites,
@@ -922,31 +901,8 @@ impl Family {
     /// Whether `case` is in the family: decided from the case's shape alone,
     /// never from how the walk answered it.
     fn contains(self, case: &Case) -> bool {
-        let has_file = case.props.present || case.targets_present;
         match self {
-            Family::SdkLessSplice => case.form == Form::SdkLess && has_file,
             Family::ExistsBaseDirectory => case.props.probes_exists,
-            Family::EmulatedImportPoint => {
-                // The splice and the SDK's real import agree only when the SDK
-                // is the project's own, reached through the attribute, and its
-                // import points are the standard blocks. (Whether a
-                // `Directory.Build.*` file exists does not matter: an input
-                // written under an undecided condition can name `other.props`.)
-                case.form != Form::SdkLess
-                    && (case.form != Form::SdkAttribute
-                        || !matches!(
-                            case.props_point,
-                            PropsPoint::Standard | PropsPoint::InSdkFile
-                        )
-                        || case.second_props_point
-                        || case.targets_point != TargetsPoint::Standard)
-            }
-            // Every site but the body can be in a file the walk counts as the
-            // SDK's: `Directory.Build.targets` too, when an SDK file reaches
-            // it through the `rel.targets` link in the SDK's directory.
-            Family::PropsPointIdentity => case.reimports.iter().any(|r| {
-                r.which == Which::Props && r.shape != Shape::Literal && r.site != Site::Body
-            }),
             Family::DanglingSymlinkExists => case.reimports.iter().any(|r| {
                 matches!(
                     r.spelling,
@@ -980,9 +936,6 @@ impl Family {
     /// Whether the family explains `finding`, in a case it contains.
     fn covers(self, finding: &Finding) -> bool {
         match self {
-            Family::SdkLessSplice | Family::EmulatedImportPoint | Family::PropsPointIdentity => {
-                true
-            }
             Family::DanglingSymlinkExists => true,
             Family::ExistsBaseDirectory => {
                 finding.what == "ExistsProbe" || finding.what == "ExistsProbe (must commit)"
@@ -996,29 +949,12 @@ impl Family {
     /// asserts still diverges.
     fn witness(self) -> Case {
         match self {
-            Family::SdkLessSplice => Case {
-                form: Form::SdkLess,
-                ..Case::usual()
-            },
             Family::ExistsBaseDirectory => Case {
                 props: Props {
                     present: true,
                     probes_exists: true,
                     ..Props::default()
                 },
-                ..Case::usual()
-            },
-            Family::EmulatedImportPoint => Case {
-                props_point: PropsPoint::Absent,
-                ..Case::usual()
-            },
-            Family::PropsPointIdentity => Case {
-                reimports: vec![Reimport {
-                    which: Which::Props,
-                    spelling: Spelling::FileLink,
-                    shape: Shape::ViaProperty,
-                    site: Site::SdkProps,
-                }],
                 ..Case::usual()
             },
             Family::DanglingSymlinkExists => Case {
@@ -1057,12 +993,13 @@ impl Family {
                 }],
                 ..Case::usual()
             },
+            // With no `Directory.Build.*` file, nothing withdraws the values
+            // the hidden `Behind.props` would have changed: `Trace` lacks its
+            // marker and is published as trusted.
             Family::UndecidedImportHidesWrites => Case {
-                undecided: Some(Undecided {
-                    site: UndecidedSite::SdkProps,
-                    input: ImportInput::PropsPath,
-                    how: UndecidedHow::UnderUndecidedCondition,
-                }),
+                props_point: PropsPoint::BehindUndecidedImport,
+                props: Props::default(),
+                targets_present: false,
                 ..Case::usual()
             },
         }
@@ -1097,9 +1034,14 @@ impl Case {
     /// are all decided.
     ///
     /// A case with an [`Undecided`] write has no such obligation: that write
-    /// may decide every import that follows it.
+    /// may decide every import that follows it. Nor has a case whose import
+    /// point is behind an import the walk cannot decide: what the hidden file
+    /// writes is the walk's to doubt.
     fn must_commit(&self) -> &'static [&'static str] {
-        if self.undecided.is_some() {
+        if self.undecided.is_some()
+            || self.props_point == PropsPoint::BehindUndecidedImport
+            || self.targets_point == TargetsPoint::BehindUndecidedImport
+        {
             &[]
         } else {
             &["Trace", "BodySaw", "InDbp", "InDbt", "InOther"]
