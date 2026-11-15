@@ -1520,6 +1520,25 @@ dozen, and the counts report it.
   through a watch event. Closing it needs `borzoi-nuget` to report what it
   read.
 
+  Closed since (#665's #666 section): `borzoi_nuget::settings` asks every
+  query through a `SettingsFs`, and SDK discovery hands it one over the
+  discovery's observer (`sdk_discovery::ObservedSettings`). A config file is
+  recorded as its text, a folder as its kind or its listing, and a file's
+  identity, asked only where several spellings of a walk file are present,
+  as the stamp of a whole-file read. So the walk's config files in every
+  ancestor, the user's config and its `config` folder, the machine-wide
+  folder and the home folder's readability are confirmed with the rest of
+  the evaluation's reads, and an event naming a `nuget.config` no longer
+  drops every evaluation and env. The environment variables the settings
+  honour (`NUGET_PACKAGES`, `HOME`, `DOTNET_CLI_HOME`,
+  `NUGET_COMMON_APPLICATION_DATA`) are the workspace's `SdkDiscoveryEnv`,
+  fixed for a session. `nuget_settings_moves_are_seen_without_an_event`
+  sets each file of the chain, and deletes the home folder, with no event
+  between two generations, and holds the warm workspace to a fresh one.
+  `the_workspace_read_set_is_sound_under_nuget_settings` sweeps the world.
+  Both fail with the settings read into a throwaway observer, and the first
+  fails with only the config text unrecorded.
+
 The oracle:
 
 - `incremental_state_machine`: `WITNESSED` gains `ProjectFiles` and

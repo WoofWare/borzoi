@@ -39,7 +39,8 @@
 //! SDK resolver (`NuGetSdkResolver`) reads the package from the global
 //! packages folder of `Settings.LoadDefaultSettings(<project file>)`, the
 //! same settings model restore uses. So the folder is
-//! [`global_packages_folder`]'s answer for the project's directory (NuGet's
+//! [`borzoi_nuget::settings::global_packages_folder`]'s answer for the
+//! project's directory (NuGet's
 //! walk starts at the project *file*, whose `nuget.config` child cannot
 //! exist, so its first folder is the project's directory) under
 //! [`crate::restore::restore_environment`]: `$NUGET_PACKAGES`, else the
@@ -72,7 +73,78 @@ use borzoi_msbuild::{
     GlobalJsonError, SdkPathEntry, SdkResolution, SdkResolveError, SdkVersion, VersionSpec,
     find_global_json, nuget_package_version, parse_global_json, resolve_sdk, workloads,
 };
-use borzoi_nuget::settings::{GlobalPackagesFolderDecline, global_packages_folder};
+use borzoi_nuget::settings::{
+    GlobalPackagesFolderDecline, SettingsFs, global_packages_folder_with,
+};
+
+/// NuGet's settings loading, asking through an [`Observer`]: each query is
+/// recorded with its answer, as an evaluation's own are.
+struct ObservedSettings<'a>(&'a Observer);
+
+impl SettingsFs for ObservedSettings<'_> {
+    fn metadata(&self, path: &Path) -> std::io::Result<borzoi_nuget::settings::Metadata> {
+        use borzoi_msbuild::observed::{self as observed, EntryKind};
+        let kind = observed::kind(self.0, path).map_err(io_error)?;
+        Ok(borzoi_nuget::settings::Metadata {
+            is_file: kind == EntryKind::File,
+            is_dir: kind == EntryKind::Dir,
+        })
+    }
+
+    /// Recorded as the file's stamp, which holds only while its device and
+    /// inode do (and, being taken with no read, never while it is racy: an
+    /// identity has no contents to confirm it by).
+    fn identity(&self, path: &Path) -> std::io::Result<(u64, u64)> {
+        let stamp = borzoi_msbuild::observed::stamp(self.0, path).map_err(io_error)?;
+        Ok((stamp.dev, stamp.ino))
+    }
+
+    /// Recorded as the text it reads, so the record holds while the bytes do
+    /// whenever the read was made. A file that is not UTF-8, which NuGet's
+    /// settings model declines, is recorded as the stamp of its read.
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        use borzoi_msbuild::observed;
+        match observed::read_to_string(self.0, path) {
+            Ok(text) => Ok(text.into_bytes()),
+            Err(failure) if failure.kind() == std::io::ErrorKind::InvalidData => {
+                observed::read_stamped(self.0, path).map_err(io_error)
+            }
+            Err(failure) => Err(io_error(failure)),
+        }
+    }
+
+    fn read_dir(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<Vec<std::io::Result<borzoi_nuget::settings::DirEntry>>> {
+        use borzoi_msbuild::observed::{self as observed, EntryKind};
+        use borzoi_nuget::settings::EntryKind as Kind;
+        let entries = observed::read_dir(self.0, path).map_err(io_error)?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.map_err(io_error)?;
+                Ok(borzoi_nuget::settings::DirEntry {
+                    name: entry.name,
+                    kind: entry
+                        .kind
+                        .map(|kind| match kind {
+                            EntryKind::File => Kind::File,
+                            EntryKind::Dir => Kind::Dir,
+                            EntryKind::Symlink => Kind::Symlink,
+                            EntryKind::Other => Kind::Other,
+                        })
+                        .map_err(io_error),
+                })
+            })
+            .collect())
+    }
+}
+
+/// The `std::io::Error` a failed observation stands for.
+fn io_error(failure: borzoi_msbuild::observed::Failure) -> std::io::Error {
+    std::io::Error::new(failure.kind(), failure)
+}
 
 /// Errors that can occur while gathering SDK-resolution context for a
 /// project. A missing `global.json` is *not* an error (it means "no
@@ -418,15 +490,16 @@ impl SdkDiscovery {
             .unwrap_or_else(|| PathBuf::from("."));
         // NuGet's SDK resolver loads its settings with the project file as
         // the root; the walk's first folder holding a config file can only
-        // be the project's directory (see the module docs).
-        //
-        // `borzoi-nuget` reads the config files itself, not through
-        // `observer`, so an evaluation's read set does not hold them: a
-        // `nuget.config` edit that moves the global packages folder reaches
-        // a cached evaluation only through a watch event.
-        let nuget_packages =
-            global_packages_folder(&walk_start, &crate::restore::restore_environment(env))
-                .map(|found| found.folder);
+        // be the project's directory (see the module docs). Every query
+        // loading them makes is `observer`'s, so an evaluation that resolves
+        // through this discovery depends on the config files, their folders
+        // and their absences as on its own reads.
+        let nuget_packages = global_packages_folder_with(
+            &walk_start,
+            &crate::restore::restore_environment(env),
+            &ObservedSettings(observer),
+        )
+        .map(|found| found.folder);
         // Host root resolution is conditionally fatal: required when
         // there's no `sdk.paths` field (today's behaviour preserved),
         // optional when `sdk.paths` is set (it may name explicit

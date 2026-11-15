@@ -795,9 +795,7 @@ impl SemanticState {
     }
 
     /// Drop every assembly env and every fold against one: for a change of
-    /// a setting the envs are not keyed on, or of an input none of them
-    /// records (NuGet's settings, which SDK discovery reads directly:
-    /// [`crate::server::State::apply_watched_changes`]).
+    /// a setting the envs are not keyed on.
     pub fn drop_every_env(&mut self) {
         self.resolved_projects.clear();
         self.inferred_projects.clear();
