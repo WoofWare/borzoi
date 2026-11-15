@@ -29,7 +29,7 @@ Anyway, once NuGet has produced its `obj/project.assets.json` file, we consume i
 Consider setting `BORZOI_LSP_CACHE_DIR="$HOME/.cache/borzoi"`.
 If set, this will speed several things up substantially, most notably the parsing of assemblies your project depends on.
 
-If your `dotnet` is a shim (asdf, mise, a Nix wrapper, and so on), set `DOTNET_ROOT` to the real install: the LSP never runs `dotnet` to discover the SDK, since that would execute whatever SDK the repository's `global.json` selects.
+If your `dotnet` is a shim (asdf, mise, a Nix wrapper, and so on), set `DOTNET_ROOT` to the real install: the LSP never runs `dotnet` to discover the SDK, since that could execute arbitrary user code as specified by `global.json`.
 
 ## Speed
 
@@ -37,10 +37,9 @@ The primary design goal is speed, which is why I'm not using .NET and the F# Com
 
 ### Parser
 
-The benchmark parses the entire `dotnet/fsharp` repo (that is, it converts every `.fs`, `.fsi`, and `.fsx` file into an untyped syntax tree): a corpus of 6347 valid files, totalling 42.3MB.
-One parser is Borzoi's, one is built from FCS, both in release mode.
+The benchmark parses the entire `dotnet/fsharp` repo (that is, it converts every `.fs`, `.fsi`, and `.fsx` file into an untyped syntax tree), which comes to 42.3MB of code.
 I timed the parse loop only, reading files into memory and building FCS's parse options once up front before timing; I disabled FCS's parse cache.
-Borzoi's side is `crates/cst/examples/parse_bench.rs`'s loop in a standalone binary that depends on `borzoi-cst` with no features: cst's own examples build with its test-only reference features, which nearly double the parse time.
+Borzoi's side is `crates/cst/examples/parse_bench.rs`'s loop in a standalone binary that depends on `borzoi-cst` with no features. (cst's own examples build with its test-only reference features, which nearly double the parse time.)
 FCS's side is `fcs-dump parse-bench`.
 
 From a cold start (fresh process): Borzoi takes about 1.8s, nearly all of it parsing.
@@ -49,7 +48,6 @@ FCS takes about 8.5s (7.8s of parsing, including warming up the JIT).
 From a warm start (the .NET JIT is warm): Borzoi takes 1.75s extremely consistently, while FCS takes 4.9s.
 
 That is, Borzoi parses from scratch in under 2/5 the time FCS does (under 1/4 from a cold start), while doing more work (it preserves trivia while FCS does not).
-These figures are from November 2026, on a different machine from the original measurement, which was taken before any performance optimisation.
 
 Borzoi is *not* anywhere near fast enough that a from-scratch cold re-parse beats FCS's built-in parse cache for a file that FCS has already seen and cached.
 
