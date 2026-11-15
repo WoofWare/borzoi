@@ -2,7 +2,18 @@
 //! address-of), the infix precedence/continuation lookahead, and the
 //! long-ident encoding of operator tokens.
 
+use super::cursor::is_layout_virtual;
 use super::*;
+
+/// Whether an infix operator the Pratt climber takes has its right operand
+/// ([`Parser::peek_infix_continuation`], [`Parser::peek_cons_continuation`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Rhs {
+    Present,
+    /// FCS's `declExpr OP %prec prec_recover` shape: the operator ends its
+    /// expression, and its right operand is `ArbitraryAfterError`.
+    Missing,
+}
 
 impl<'src> Parser<'src> {
     /// `pars.fsy:5141 minusExpr` — the precedence level where unary
@@ -900,9 +911,10 @@ impl<'src> Parser<'src> {
         self.builder.finish_node();
     }
 
-    /// `Some((lbp, rbp))` if the next filtered token is an infix
-    /// operator the Pratt climber should pick up, `None` otherwise.
-    /// Two gates beyond the bare token classification:
+    /// `Some((lbp, rbp, rhs))` if the next filtered token is an infix
+    /// operator the Pratt climber should pick up, `None` otherwise. `rhs`
+    /// says whether its right operand follows. Gates beyond the bare token
+    /// classification:
     ///
     /// * **LexFilter-swallowed `RParen` ahead.** Same rule as
     ///   [`Parser::at_tuple_continuation`] / [`Parser::at_app_continuation`]:
@@ -910,17 +922,25 @@ impl<'src> Parser<'src> {
     ///   post-`)` operator into the inner expression. Without this gate
     ///   `(a) + b` would parse as `Paren(App(+, a, b))`.
     ///
-    /// * **RHS atom-starter required.** A token that *looks* like an
-    ///   infix op can also appear at the head of a construct Phase 3.4
-    ///   doesn't model — `=` in `let x = 1` is the assignment of a
-    ///   let-binding, followed by `Virtual::BlockBegin` rather than an
-    ///   expression atom. Treating it as infix would dive into
-    ///   `parse_atomic_expr` on the virtual, which has no arm for it and
-    ///   would consume it as a stray token under `parse_const_expr`. We bail
-    ///   here so the outer impl_file loop can absorb the `=` (and the rest of
-    ///   the binding) as recovery errors, keeping the tree lossless.
-    pub(super) fn peek_infix_continuation(&self) -> Option<(u16, u16)> {
-        let bp = self.peek_infix_op()?;
+    /// * **A missing right operand.** FCS's `declExpr OP %prec prec_recover`
+    ///   and `declExpr OP ends_coming_soon_or_recover` arms reduce an operator
+    ///   followed by a token that ends an expression
+    ///   ([`Parser::is_operand_terminator_at`]: a layout token, a closer,
+    ///   `then`, another operator, the end of the file, …) to `mkSynInfix op
+    ///   lhs (ArbitraryAfterError)`, so the operator is taken with
+    ///   [`Rhs::Missing`]. Before any other token that starts no operand, the
+    ///   operator is left for enclosing recovery. A LexFilter-swallowed `)` /
+    ///   `}` after the operator (`(1 +) x`) leaves it missing its operand too:
+    ///   the filtered RHS lookahead would peer past the stripped closer and
+    ///   take the enclosing token as the operand, so the raw stream after the
+    ///   operator decides.
+    ///
+    /// * **An operator before an offside block.** `=` before a
+    ///   `Virtual::BlockBegin` is the `=` of a binding head this climber was
+    ///   handed (`let x = 1` in debris), not an operator missing its operand:
+    ///   bail so the enclosing recovery absorbs the `=` and the block.
+    pub(super) fn peek_infix_continuation(&self) -> Option<(u16, u16, Rhs)> {
+        let (lbp, rbp) = self.peek_infix_op()?;
         // Swallowed-closer gate. LexFilter strips a paren expression's `)`
         // and a brace expression's `}` from the filtered stream
         // (`parse_paren_expr` / `parse_brace_expr` recover them from
@@ -937,27 +957,28 @@ impl<'src> Parser<'src> {
                 _ => break,
             }
         }
-        // Swallowed-closer-*after* gate (mirrors `peek_cons_continuation`): the
-        // operator's RHS may be a LexFilter-swallowed `)` / `}` (`(1 +) x`,
-        // `{1 +} y`). The RHS-must-exist gate below is a *filtered* lookahead, so
-        // it peers past the stripped closer and would wrongly see the enclosing
-        // token as the RHS — building the infix `App` across the closer. A raw
-        // lookahead past the operator's span catches it; leave the operator for
-        // enclosing recovery.
-        if let Some((_, op_span)) = self.peek()
-            && self.op_rhs_is_swallowed_closer(op_span.end)
-        {
-            return None;
-        }
-        // RHS-must-exist gate.
-        if !self.is_expr_start_at(self.filtered.pos() + 1) {
-            return None;
-        }
+        let rhs = match self.peek() {
+            Some((_, op_span)) if self.op_rhs_is_swallowed_closer(op_span.end) => Rhs::Missing,
+            _ if self.is_expr_start_at(self.filtered.pos() + 1) => Rhs::Present,
+            _ if matches!(
+                self.filtered.tokens().get(self.filtered.pos() + 1),
+                Some((Ok(FilteredToken::Virtual(Virtual::BlockBegin)), _))
+            ) =>
+            {
+                return None;
+            }
+            _ if self.is_operand_terminator_at(self.filtered.pos() + 1)
+                && !self.op_follows_opener() =>
+            {
+                Rhs::Missing
+            }
+            _ => return None,
+        };
         // ADJACENT_PREFIX_OP gate.
-        if self.op_is_adjacent_prefix() {
+        if rhs == Rhs::Present && self.op_is_adjacent_prefix() {
             return None;
         }
-        Some(bp)
+        Some((lbp, rbp, rhs))
     }
 
     /// `Some((node_kind, op_tok_kind, lbp))` if the next filtered token is one
@@ -1044,7 +1065,7 @@ impl<'src> Parser<'src> {
     /// tighter), matching FCS's table.
     ///
     /// Applies the swallowed-`)`/`}` gate of [`Parser::peek_infix_continuation`]
-    /// on **both sides** of the operator plus the RHS-must-exist gate:
+    /// before the operator, and reads a missing right operand as it does:
     ///
     /// * **Closer *before* `::`** (operator belongs to the enclosing frame):
     ///   inside `( e )` / `{ e }` the closer is stripped from the filtered
@@ -1053,22 +1074,17 @@ impl<'src> Parser<'src> {
     ///   `App(::, [Paren a, b])`, not `Paren(App(::, [a, b]))`. The raw scan from
     ///   the cursor catches the still-pending closer.
     ///
-    /// * **Closer *after* `::`** (the operator's RHS is missing): on incomplete
-    ///   input the `::`'s own RHS may be a LexFilter-swallowed `)` / `}` (e.g.
-    ///   `(a ::) y`). Because that closer is stripped from the filtered stream,
-    ///   the RHS-must-exist check below ([`Parser::is_expr_start_at`], a filtered
-    ///   lookahead) would peer *past* it and wrongly see the enclosing token
-    ///   (`y`) as the tail — building the cons across the closer and draining the
-    ///   real `)` as `ERROR`. The raw lookahead *after the operator's span*
-    ///   ([`Parser::next_non_trivia_raw_after`]) catches this: a closer
-    ///   immediately after `::` means no RHS, so leave the `::` for enclosing
-    ///   recovery (lossless, no mis-nesting). Mirrors the pattern-cons recovery
-    ///   path ([`Parser::emit_pat_atom`]'s raw closer reject).
-    ///
-    /// * **RHS-must-exist**: a trailing `::` with no following operand is left
-    ///   for enclosing recovery — lossless, no panic, matching how a dangling
-    ///   `+` is handled by [`Parser::peek_infix_continuation`].
-    pub(super) fn peek_cons_continuation(&self) -> Option<(u16, u16)> {
+    /// * **A missing right operand** (FCS's `declExpr COLON_COLON %prec
+    ///   prec_recover`): a `::` before a token that ends an expression
+    ///   ([`Parser::is_operand_terminator_at`]) is taken with [`Rhs::Missing`], and so is one before a
+    ///   LexFilter-swallowed `)` / `}` (`(a ::) y`): the closer is stripped
+    ///   from the filtered stream, so the filtered RHS lookahead
+    ///   ([`Parser::is_expr_start_at`]) would peer past it and take `y` as the
+    ///   tail, while the raw lookahead after the operator's span
+    ///   ([`Parser::next_non_trivia_raw_after`]) sees the closer. Before a
+    ///   `Virtual::BlockBegin` the `::` is left for enclosing recovery, as an
+    ///   infix operator is.
+    pub(super) fn peek_cons_continuation(&self) -> Option<(u16, u16, Rhs)> {
         let op_span = match self.peek() {
             Some((Ok(FilteredToken::Raw(Token::ColonColon)), span)) => span.clone(),
             _ => return None,
@@ -1082,17 +1098,21 @@ impl<'src> Parser<'src> {
                 _ => break,
             }
         }
-        // Swallowed-closer-*after* gate: a closer immediately following the `::`
-        // (in the raw stream, past the filtered-stripped one) is not an RHS —
-        // leave the `::` for recovery rather than reaching across it.
-        if self.op_rhs_is_swallowed_closer(op_span.end) {
+        let rhs = if self.op_rhs_is_swallowed_closer(op_span.end) {
+            Rhs::Missing
+        } else if self.is_expr_start_at(self.filtered.pos() + 1) {
+            Rhs::Present
+        } else if matches!(
+            self.filtered.tokens().get(self.filtered.pos() + 1),
+            Some((Ok(FilteredToken::Virtual(Virtual::BlockBegin)), _))
+        ) {
             return None;
-        }
-        // RHS-must-exist gate.
-        if !self.is_expr_start_at(self.filtered.pos() + 1) {
+        } else if self.is_operand_terminator_at(self.filtered.pos() + 1) {
+            Rhs::Missing
+        } else {
             return None;
-        }
-        Some((45, 45))
+        };
+        Some((45, 45, rhs))
     }
 
     /// `Some((lbp, rbp))` if the next filtered token is the query
@@ -1266,6 +1286,100 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Whether the significant raw token before the cursor opens a bracket
+    /// (`(`, `[`, `[|`, `{`, `{|`, `begin`): the bracket's contents are
+    /// missing, so an operator straight after it is the bracket's to recover,
+    /// not the infix climber's (FCS's `LPAREN recover` arm discards it with
+    /// the rest: `1.0<m / ( >` is `1.0 < (m / ?)`).
+    fn op_follows_opener(&self) -> bool {
+        matches!(
+            self.raw_tokens
+                .items(..self.raw_pos)
+                .rev()
+                .find_map(|(res, _)| match res {
+                    Ok(t) if raw_is_trivia(&t) => None,
+                    other => Some(other),
+                }),
+            Some(Ok(TriviaToken::Lexed(
+                Token::LParen
+                    | Token::LBrack
+                    | Token::LBrackBar
+                    | Token::LBrace
+                    | Token::LBraceBar
+                    | Token::Begin
+            )))
+        )
+    }
+
+    /// Whether the filtered token at `offset` ends an expression, so that an
+    /// operator before it has no right operand ([`Rhs::Missing`]): the end of
+    /// the file, a layout token, a closer or separator, a keyword that ends an
+    /// expression (`then`, `with`, `in`, …), a type annotation's `:`, or
+    /// another infix operator (`a +⏎|> f`). A token that merely fails to start
+    /// an operand (a `?` with no name after it, a stray keyword) is not one:
+    /// the operator is then left for enclosing recovery, as it was before FCS
+    /// reduced an unfinished operator in place.
+    fn is_operand_terminator_at(&self, offset: usize) -> bool {
+        match self.filtered.tokens().get(offset) {
+            None => true,
+            Some((Ok(FilteredToken::Virtual(v)), _)) => {
+                is_layout_virtual(&v)
+                    || matches!(
+                        v,
+                        Virtual::Then
+                            | Virtual::Else
+                            | Virtual::With
+                            | Virtual::Do
+                            | Virtual::JoinIn
+                    )
+            }
+            Some((Ok(FilteredToken::Raw(t)), _)) => matches!(
+                t,
+                Token::RParen
+                    | Token::RBrack
+                    | Token::BarRBrack
+                    | Token::RBrace
+                    | Token::BarRBrace
+                    | Token::GreaterRBrack
+                    | Token::RQuote
+                    | Token::RQuoteRaw
+                    | Token::End
+                    | Token::Comma
+                    | Token::Semi
+                    | Token::SemiSemi
+                    | Token::Then
+                    | Token::Else
+                    | Token::Elif
+                    | Token::With
+                    | Token::Do
+                    | Token::Done
+                    | Token::To
+                    | Token::DownTo
+                    | Token::In
+                    | Token::And
+                    | Token::When
+                    | Token::Bar
+                    | Token::RArrow
+                    | Token::LArrow
+                    | Token::Colon
+                    | Token::ColonEquals
+                    | Token::ColonColon
+                    | Token::ColonGreater
+                    | Token::ColonQMark
+                    | Token::ColonQMarkGreater
+                    | Token::Equals
+                    | Token::Less(_)
+                    | Token::Greater(_)
+                    | Token::Dollar
+                    | Token::AmpAmp
+                    | Token::BarBar
+                    | Token::Mod
+                    | Token::Op(_)
+            ),
+            Some((Err(_), _)) => false,
+        }
+    }
+
     /// `peek_is_expr_start` but at an arbitrary positive offset into the
     /// filtered stream rather than always at the cursor. Used by
     /// [`Parser::peek_infix_continuation`] to peer past the operator at
@@ -1419,6 +1533,20 @@ impl<'src> Parser<'src> {
             // an ordinary infix op — it just binds looser than the comma).
             _ => None,
         }
+    }
+
+    /// Record an operator's missing right operand ([`Rhs::Missing`]) and emit
+    /// its zero-width `ERROR` placeholder. The error sits on the operator
+    /// (`op_span`), where FCS's `parsUnfinishedExpression` reports it, not on
+    /// the token after it, which may be the next declaration's.
+    pub(super) fn push_missing_rhs_error(&mut self, op_span: Option<Range<usize>>, op: &str) {
+        let span = op_span.unwrap_or(self.source.len()..self.source.len());
+        self.errors.push(ParseError {
+            message: format!("expected an expression after {op}"),
+            span,
+        });
+        self.builder.start_node(SyntaxKind::ERROR);
+        self.builder.finish_node();
     }
 
     /// Emit the current filtered token (the operator) as

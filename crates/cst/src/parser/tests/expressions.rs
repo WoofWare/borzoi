@@ -1886,19 +1886,36 @@ IMPL_FILE@0..16
 /// the LexFilter-swallowed `)`. The RHS lookahead must **not** peer past that
 /// swallowed closer and grab the enclosing `y` as the tail (which would build
 /// the cons across the paren and drain the real `)` as `ERROR`, mis-nesting the
-/// body). Instead the `::` is left for enclosing recovery: no `CONS_EXPR` is
-/// built and the parse stays lossless. Pins the after-operator swallowed-closer
-/// gate in `peek_cons_continuation`.
+/// body). Instead the `CONS_EXPR` ends at the `::` with no tail (FCS's
+/// `declExpr COLON_COLON %prec prec_recover`), inside the paren, and `y` stays
+/// outside it. Pins the after-operator swallowed-closer gate in
+/// `peek_cons_continuation`.
 #[test]
 fn cons_expr_missing_rhs_before_swallowed_close_recovers() {
+    use crate::syntax::{AstNode, ConsExpr};
     let source = "let x = (a ::) y\n";
     let parse = parse(source);
     // Incomplete input → errors are expected; the contract is no panic, a
     // lossless tree, and no mis-built cons across the closer.
     assert_lossless(source, &parse);
+    let cons = parse
+        .root
+        .descendants()
+        .find_map(ConsExpr::cast)
+        .unwrap_or_else(|| panic!("a CONS_EXPR; tree:\n{}", debug_tree(&parse.root)));
     assert!(
-        !tree_contains_kind(&parse.root, SyntaxKind::CONS_EXPR),
-        "a `::` with no RHS before the swallowed `)` must not build a CONS_EXPR; tree:\n{}",
+        cons.rhs().is_none(),
+        "the `::` has no tail; tree:\n{}",
+        debug_tree(&parse.root),
+    );
+    assert_eq!(
+        cons.syntax().text_range().end(),
+        source
+            .find(')')
+            .expect("the closer")
+            .try_into()
+            .expect("offset fits"),
+        "the cons ends before the `)`, leaving `y` outside; tree:\n{}",
         debug_tree(&parse.root),
     );
 }

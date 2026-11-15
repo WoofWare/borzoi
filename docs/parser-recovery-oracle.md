@@ -162,6 +162,50 @@ corpus manifest one line per file.
   deletion and one member deletion per file against FCS, and pins each case in
   `crates/cst/tests/manifests/recovery_sweep.txt`.
 
+## Unfinished constructs
+
+FCS's grammar recovers several unfinished constructs in place, with a rule
+that reduces them rather than an error state, so nothing after them is
+discarded: an abstract slot that stops after its keywords, modifiers, name or
+`:` (an `AbstractSlot` named `""` or typed `FromParseError`); a `when` with no
+guard (no guard, and an `ArbitraryAfterError` result when no `->` follows); an
+infix operator with no right operand (`mkSynInfix op lhs ArbitraryAfterError`);
+an `if` with no `then`; and a pattern path that stops after a dot (`e.`, `_.`
+and `this.` are `Named`, `E.` a one-segment `LongIdent`).
+`parser_diff_unfinished` grades each as a generated grid against FCS: where
+the construct simply stops, the whole recovered trees must be `exact`. This
+parser does not follow FCS in four places, each listed in its grid with the
+reason:
+
+- **A stray token after an unfinished slot** (`abstract 1`). FCS's error
+  recovery discards tokens as FsYacc's error states dictate, which can take
+  the type body's closing block end with it: on the body's last line that
+  loses the file's module, or makes the next declaration one of the type's
+  members. Ours discards the rest of the member and closes the type.
+- **A guardless `when` before `->`, then more clauses.** FCS's arm for it ends
+  the clause list, so it discards the clauses after it. Ours keeps them.
+- **An operator that is also a prefix operator** (`+`, `-`, `%`, `&&`) before
+  a `)` or `,`. FCS takes its parenthesis's error arm instead, which discards
+  the parenthesis's contents. Ours keeps `a op ?`.
+- **An operator before a token that ends nothing and starts no operand** (a
+  `?` with no name, a stray keyword). Ours leaves the operator for enclosing
+  recovery, as it does before an offside block (the `=` of a binding head).
+
+Two placement families in the recovery grids stay pinned, since FCS's
+placement follows from its error states rather than from the layout:
+
+- **A stray `->` in a nested module** (`debris_grid`'s `in A: -> foo … ⏎module
+  N` cells, `foo =` among them). FCS reads `->` at module level as a
+  `YieldOrReturn` whose sequential body runs on over the following lines, and
+  a declaration that cannot start an expression (`module`, `type`, `open`,
+  `exception`, an attribute) then closes the nested module, so `N` lands in
+  the outer module. Ours keeps `N` where its indentation puts it.
+- **A raw `let` indented past a type definition** (`nested_module_scope`'s
+  `+indented` cells, whatever the broken representation). The lex filter ends
+  the representation's block at the `let` but leaves it raw, and FCS then
+  keeps every later declaration, a column-0 one included, in the innermost
+  module.
+
 ## What remains
 
 These were measured on 2026-10-30, after the fixes in this change. Of the 731

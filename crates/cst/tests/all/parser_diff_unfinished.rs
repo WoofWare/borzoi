@@ -1,0 +1,323 @@
+//! Unfinished constructs FCS's grammar recovers in place, graded against FCS:
+//! the recovered construct keeps its node (with an empty name, a
+//! `FromParseError` type or an `ArbitraryAfterError` expression where the
+//! source stops), and the declarations after it keep theirs.
+//!
+//! Each grid here generates the ways a construct can stop short, in each
+//! place it can sit. Where the construct simply stops, the recovered trees
+//! must be `exact` (the whole normalised trees equal, recovery placeholders
+//! included). Where a stray token follows, FCS's error recovery discards
+//! tokens as FsYacc's error states dictate, which this parser does not
+//! reproduce token by token, so those cells must only agree outside the
+//! damage, except the cells listed beside the grid with the reason.
+
+use crate::common::recovery::{Relation, recovered_verdict};
+
+/// What a grid cell's recovered trees must be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// The whole normalised trees are equal.
+    Exact,
+    /// The undamaged declarations agree ([`Relation::OutsideDamage`] or
+    /// better).
+    Agree,
+}
+
+/// Grade every cell, collecting the ones that miss what they want and are not
+/// listed in `diverging` (cells whose trees are allowed to diverge), then fail
+/// listing them all. A listed cell that no longer diverges fails too, so the
+/// list cannot go stale.
+fn assert_cells(cells: impl IntoIterator<Item = (String, Want)>, diverging: &[&str]) {
+    let mut failures = Vec::new();
+    let mut unused: Vec<&str> = diverging.to_vec();
+    for (src, want) in cells {
+        let verdict = recovered_verdict(&src);
+        if let Some(i) = unused.iter().position(|a| *a == src) {
+            unused.remove(i);
+            if verdict.relation != Relation::Divergent {
+                failures.push(format!(
+                    "{src:?} no longer diverges ({}); take it off the list",
+                    verdict.token()
+                ));
+            }
+            continue;
+        }
+        let met = match want {
+            Want::Exact => verdict.relation == Relation::Exact,
+            Want::Agree => verdict.relation != Relation::Divergent,
+        };
+        if !met {
+            failures.push(format!(
+                "{src:?} wants {want:?}: {}{}",
+                verdict.token(),
+                verdict
+                    .first_divergence
+                    .map(|d| format!(" ({d})"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    assert!(
+        unused.is_empty(),
+        "listed cells the grid no longer generates: {unused:?}"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} cells fail:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// An abstract slot that stops after its keywords, its access or `inline`
+/// modifiers, its name or its `:` (FCS's `classDefnMember` `recover` arms):
+/// FCS keeps an `AbstractSlot`, named `""` when the name is missing, with a
+/// `FromParseError` type, and discards the rest of the line. Each slot sits
+/// alone in a type body, before another member, before another slot, and as a
+/// type's whole representation inside a nested module (whose `let` after it
+/// stays in that module), and is followed by nothing or by a stray token.
+#[test]
+fn recover_unfinished_abstract_slot_grid() {
+    const FLAGS: &[&str] = &[
+        "abstract",
+        "abstract member",
+        "static abstract",
+        "static abstract member",
+        "[<A>] abstract",
+    ];
+    const RESTS: &[(&str, Want)] = &[
+        ("", Want::Exact),
+        (" private", Want::Exact),
+        (" inline", Want::Exact),
+        (" private inline", Want::Exact),
+        (" P", Want::Exact),
+        (" P:", Want::Exact),
+        (" P<'a>", Want::Exact),
+        (" P<'a>:", Want::Exact),
+        (" P: 1", Want::Exact),
+        (" 1", Want::Agree),
+        (" P 1", Want::Agree),
+        // FCS reads `(x)` as an operator name that fails to parse (its
+        // `opName` error arm), which names the slot differently.
+        (" (x)", Want::Agree),
+    ];
+    let mut cells = Vec::new();
+    let mut diverging = Vec::new();
+    for flags in FLAGS {
+        for &(rest, want) in RESTS {
+            let slot = format!("{flags}{rest}");
+            let alone = format!("module M\ntype T =\n    {slot}\n");
+            let nested =
+                format!("module M\nmodule A =\n    type T = {slot}\n    let x = 1\nlet z = 2\n");
+            // A stray token after the slot on the type body's last line: FCS's
+            // error recovery then discards the body's closing block end too,
+            // which loses the module at the end of the file and, inside a
+            // nested module, makes the `let` after the type one of its members
+            // and the top-level `let z` one of `A`'s.
+            if matches!(rest, " 1" | " P 1") {
+                diverging.push(alone.clone());
+                diverging.push(nested.clone());
+            }
+            cells.push((alone, want));
+            cells.push((
+                format!("module M\ntype T =\n    {slot}\n    member _.Q = 1\nlet x = 1\n"),
+                want,
+            ));
+            cells.push((
+                format!("module M\ntype T =\n    {slot}\n    abstract Q: int\nlet x = 1\n"),
+                want,
+            ));
+            cells.push((nested, want));
+        }
+    }
+    let diverging: Vec<&str> = diverging.iter().map(String::as_str).collect();
+    assert_cells(cells, &diverging);
+}
+
+/// A `when` with no guard (FCS's `parenPattern WHEN` recovery arms): before
+/// the clause's `->`, the clause has no guard and keeps its result; before
+/// the next clause's `|`, or at the end of the list, it has no guard and an
+/// `ArbitraryAfterError` result, and the clauses after it are kept. Each sits
+/// first or after another clause, in a `match`, a `function` and a
+/// `try … with`, at the top of a file and as a `let`'s body, with a `let`
+/// after it.
+///
+/// FCS's arm for a guardless `when` before `->` ends the clause list, so it
+/// discards the clauses after such a clause. This parser keeps them, so those
+/// cells only agree outside the damage.
+#[test]
+fn recover_missing_when_guard_grid() {
+    const CLAUSES: &[(&str, Want)] = &[
+        ("| a when -> ()", Want::Exact),
+        ("| a when", Want::Exact),
+        ("| a when\n| b -> ()", Want::Exact),
+        ("| a when | b -> ()", Want::Exact),
+        ("| a when\n| [<A>] b -> ()", Want::Exact),
+        ("| a when\n|", Want::Exact),
+        ("| a when\n| b when\n| c -> ()", Want::Exact),
+        ("| a when -> ()\n| b -> ()", Want::Agree),
+    ];
+    const HOSTS: &[&str] = &["match x with", "function", "try () with"];
+    let mut cells = Vec::new();
+    for &(clauses, want) in CLAUSES {
+        for before in ["", "| z -> ()\n"] {
+            for host in HOSTS {
+                let body = format!("{host}\n{before}{clauses}");
+                cells.push((format!("module M\n{body}\n"), want));
+                let indented = body.replace('\n', "\n    ");
+                cells.push((
+                    format!("module M\nlet f x =\n    {indented}\nlet y = 1\n"),
+                    want,
+                ));
+            }
+        }
+    }
+    assert_cells(cells, &[]);
+}
+
+/// An infix operator with no right operand (FCS's `declExpr OP %prec
+/// prec_recover` arms, and `ends_coming_soon_or_recover` for `@`/`^`): FCS
+/// builds `mkSynInfix op lhs (ArbitraryAfterError)` and goes on, so the
+/// operator ends its expression and the declarations after it are kept. Each
+/// operator ends a `let`'s right-hand side at the top of a file and in a
+/// nested module, ends a parenthesised expression, an argument and a named
+/// argument, sits before `then`, and before another operator on the next line.
+///
+/// An operator that is also a prefix operator (`+`, `-`, `%`, `&&`) before a
+/// closer or a `,` sends FCS into its parenthesis's error arm instead, which
+/// discards the parenthesis's whole contents (`Paren(ArbitraryAfterError)`);
+/// this parser keeps `a op ?` there, so those cells only agree outside the
+/// damage.
+#[test]
+fn recover_unfinished_infix_operator_grid() {
+    const OPS: &[&str] = &[
+        "&&", "||", "|>", "&&&", "|||", "=", "==", "<>", "<", ">", "$", "%", "::", "+", "-", "*",
+        "/", "**", "@", "^", "^^^", "<<<",
+    ];
+    const PREFIX_TOO: &[&str] = &["+", "-", "%", "&&"];
+    let mut cells = Vec::new();
+    for op in OPS {
+        let in_paren = if PREFIX_TOO.contains(op) {
+            Want::Agree
+        } else {
+            Want::Exact
+        };
+        cells.extend([
+            (
+                format!("module M\nlet x = a {op}\nlet y = 1\n"),
+                Want::Exact,
+            ),
+            (
+                format!("module M\nmodule A =\n    let x = a {op}\n    let y = 1\nlet z = 2\n"),
+                Want::Exact,
+            ),
+            (format!("module M\nlet x = (a {op})\nlet y = 1\n"), in_paren),
+            (
+                format!("module M\nlet x = f (a {op}) b\nlet y = 1\n"),
+                in_paren,
+            ),
+            (
+                format!("module M\nlet x = M(a {op}, b = 2)\nlet y = 1\n"),
+                in_paren,
+            ),
+            (
+                format!("module M\nlet x = if a {op} then 1 else 2\nlet y = 1\n"),
+                Want::Exact,
+            ),
+            (
+                format!("module M\nlet x =\n    a {op}\n    |> f\nlet y = 1\n"),
+                Want::Exact,
+            ),
+            (
+                format!("module M\ndo\n    if true {op}\n\n    ()\n"),
+                Want::Exact,
+            ),
+        ]);
+    }
+    // FCS starts the `let`'s range inside the module header here (at the
+    // header's end, before its line break), so the units' keys differ.
+    assert_cells(
+        cells,
+        &["module M\nlet x =\n    a &&&\n    |> f\nlet y = 1\n"],
+    );
+}
+
+/// A pattern path that stops after a dot (FCS's `pathOp: ident DOT %prec
+/// prec_recover` and `underscoreLongIdentPat: UNDERSCORE DOT %prec
+/// prec_recover`): FCS keeps the path up to the dot, and a one-segment path
+/// whose head is not uppercase reads as the variable it names (`e.` and `_.`
+/// are `Named`). Each path heads a `match` clause with and without its `->`,
+/// sits inside parentheses and as a constructor's argument, and heads a
+/// member (with and without its `= body`).
+#[test]
+fn recover_trailing_dot_pattern_grid() {
+    const PATHS: &[&str] = &["e.", "E.", "_.", "a.b.", "A.B.", "``e``."];
+    let mut cells = Vec::new();
+    for path in PATHS {
+        for clause in [
+            format!("| {path} -> ()"),
+            format!("| {path}"),
+            format!("| ({path}) -> ()"),
+            format!("| Some {path} -> ()"),
+            format!("| {path}\n    | b -> ()"),
+        ] {
+            cells.push((
+                format!("module M\nlet f x =\n    match x with\n    {clause}\nlet y = 1\n"),
+                Want::Exact,
+            ));
+        }
+    }
+    for head in ["this.", "_.", "x.P.", "``this``."] {
+        for keyword in ["member", "override", "default"] {
+            for body in ["", " = 2"] {
+                cells.push((
+                    format!(
+                        "module M\ntype T() =\n    {keyword} {head}{body}\n    member _.Q = 1\nlet y = 1\n"
+                    ),
+                    Want::Exact,
+                ));
+            }
+        }
+    }
+    assert_cells(cells, &[]);
+}
+
+/// An `if` with no `then` (FCS's `IF declExpr %prec prec_recover`, beside the
+/// `IF declExpr ifExprCases` arms for a `then` with no branch): FCS keeps an
+/// `IfThenElse` whose `then` branch is `ArbitraryAfterError`, and goes on.
+/// Each stops after its condition, after an unfinished condition, after
+/// `then` and after `else`, as a `let`'s right-hand side at the top of a file
+/// and in a nested module, inside parentheses, in a `do` block and at the top
+/// of a file before a later expression, and as a statement before another.
+#[test]
+fn recover_unfinished_if_grid() {
+    const IFS: &[&str] = &["if a", "if a b", "if a *", "if a then", "if a then 1 else"];
+    let mut cells = Vec::new();
+    for unfinished in IFS {
+        for src in [
+            format!("module M\nlet x = {unfinished}\nlet y = 1\n"),
+            format!("module M\nmodule A =\n    let x = {unfinished}\n    let y = 1\nlet z = 2\n"),
+            format!("module M\nlet x = ({unfinished})\nlet y = 1\n"),
+            format!("module M\nlet x = f ({unfinished}) b\nlet y = 1\n"),
+            format!("module M\ndo\n    {unfinished}\n\n    ()\n"),
+            format!("module M\n{unfinished}\n\n()\n"),
+            format!("module M\nlet f () =\n    {unfinished}\n    b\nlet y = 1\n"),
+        ] {
+            cells.push((src, Want::Exact));
+        }
+    }
+    assert_cells(cells, &[]);
+}
+
+/// An operator straight after an opener (`( >`) has no left operand: the
+/// bracket's own recovery owns it, as FCS's `LPAREN recover` arm discards it
+/// with the bracket's contents, so the climber does not take it as an
+/// operator missing its right operand (`E_IncompleteParens01.fsx`'s shape).
+#[test]
+fn recover_operator_after_an_opener_is_the_brackets() {
+    let verdict = crate::common::recovery::assert_recovered_trees_agree(
+        "[<Measure>] type m\nlet velocity12 = 1.0<m / ( >  // Err\n",
+        2,
+    );
+    assert_eq!(verdict.relation, Relation::Exact, "{}", verdict.token());
+}

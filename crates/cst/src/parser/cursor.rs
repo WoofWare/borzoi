@@ -463,14 +463,15 @@ impl<'src> Parser<'src> {
     /// LexFilter-swallowed paren/brace closer (`)` / `}`) — i.e. an operator
     /// ending at `op_end` has its right operand stripped from the filtered
     /// stream because the enclosing body ends with that dangling operator
-    /// (`(1 +)`, `(a ::)`, `{1 +}`). The operator-admission gates
-    /// ([`Parser::peek_infix_continuation`], [`Parser::peek_cons_continuation`],
-    /// [`Parser::peek_type_op_continuation`], [`Parser::at_app_continuation`])
-    /// use this to *decline* a body-trailing operator: the filtered RHS-start
-    /// lookahead peers past the swallowed closer and would otherwise pull the
-    /// post-closer token into the body, draining the real `)` / `}` as `ERROR`.
-    /// Leaving the operator for enclosing recovery keeps the closer ending the
-    /// body and the following token a sibling.
+    /// (`(1 +)`, `(a ::)`, `{1 +}`). The filtered RHS-start lookahead peers
+    /// past the swallowed closer and would otherwise pull the post-closer token
+    /// into the body, draining the real `)` / `}` as `ERROR`, so the
+    /// operator-admission gates consult this first: the infix and cons gates
+    /// ([`Parser::peek_infix_continuation`], [`Parser::peek_cons_continuation`])
+    /// take the operator with a missing right operand, and the others
+    /// ([`Parser::peek_type_op_continuation`], [`Parser::at_app_continuation`])
+    /// decline it, leaving it for enclosing recovery. Either way the closer
+    /// ends the body and the following token is a sibling.
     pub(super) fn op_rhs_is_swallowed_closer(&self, op_end: usize) -> bool {
         matches!(
             self.next_non_trivia_raw_after(op_end),
@@ -861,7 +862,7 @@ fn virtual_class(virtual_token: &Virtual) -> VirtualClass {
 }
 
 /// Whether `virtual_token` is pure layout ([`VirtualClass::Layout`]).
-fn is_layout_virtual(virtual_token: &Virtual) -> bool {
+pub(super) fn is_layout_virtual(virtual_token: &Virtual) -> bool {
     virtual_class(virtual_token) == VirtualClass::Layout
 }
 

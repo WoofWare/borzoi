@@ -5,6 +5,7 @@
 //! the expression grammar lives in the sibling `expr_control` / `expr_op` /
 //! `expr_app` / `expr_atom` modules (each its own `impl Parser` block).
 
+use super::expr_op::Rhs;
 use super::*;
 
 impl<'src> Parser<'src> {
@@ -1170,22 +1171,29 @@ impl<'src> Parser<'src> {
         // re-checks for `<` against the whole `Downcast` (→ `(a :?> b) < c`),
         // which a separate type-op loop after the infix loop could not do.
         loop {
-            if let Some((lbp, rbp)) = self.peek_infix_continuation() {
+            if let Some((lbp, rbp, rhs)) = self.peek_infix_continuation() {
                 if lbp < min_bp {
                     break;
                 }
                 // Inner `App(NonAtomic, isInfix=true, op, lhs)`. Children in
                 // source order: lhs (already emitted between cp and now) +
                 // the op wrapped as a single-segment SynLongIdent.
+                let op_span = self.peek().map(|(_, s)| s.clone());
                 self.builder.start_node_at(cp, SyntaxKind::INFIX_APP_EXPR);
                 self.emit_infix_op_as_long_ident();
                 self.builder.finish_node();
 
                 // Outer `App(NonAtomic, isInfix=false, inner, rhs)`. Children
                 // in source order: the just-closed INFIX_APP_EXPR + the
-                // RHS parsed at the operator's right-binding-power.
+                // RHS parsed at the operator's right-binding-power, or the
+                // missing-operand placeholder (an operator that ends its
+                // expression is still an operand of the next one: `a +⏎|> f`
+                // is `(a + ?) |> f`).
                 self.builder.start_node_at(cp, SyntaxKind::APP_EXPR);
-                self.parse_pratt_expr(rbp);
+                match rhs {
+                    Rhs::Present => self.parse_pratt_expr(rbp),
+                    Rhs::Missing => self.push_missing_rhs_error(op_span, "the infix operator"),
+                }
                 self.builder.finish_node();
                 built_continuation = true;
                 continue;
@@ -1196,15 +1204,17 @@ impl<'src> Parser<'src> {
             // Tuple([lhs; rhs]))`, projected by the normaliser. Right-associative
             // (`rbp == lbp`), so the recursive RHS swallows further `::`s into one
             // right-leaning chain (`a :: b :: c` ⇒ `a :: (b :: c)`).
-            if let Some((lbp, rbp)) = self.peek_cons_continuation() {
+            if let Some((lbp, rbp, rhs)) = self.peek_cons_continuation() {
                 if lbp < min_bp {
                     break;
                 }
+                let op_span = self.peek().map(|(_, s)| s.clone());
                 self.builder.start_node_at(cp, SyntaxKind::CONS_EXPR);
                 self.bump_into(SyntaxKind::COLON_COLON_TOK);
-                // The RHS exists (gated by `peek_cons_continuation`'s
-                // RHS-must-exist check), so recurse at the cons rbp.
-                self.parse_pratt_expr(rbp);
+                match rhs {
+                    Rhs::Present => self.parse_pratt_expr(rbp),
+                    Rhs::Missing => self.push_missing_rhs_error(op_span, "`::`"),
+                }
                 self.builder.finish_node();
                 built_continuation = true;
                 continue;

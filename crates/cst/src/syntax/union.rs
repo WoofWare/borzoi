@@ -3289,15 +3289,20 @@ impl MatchClause {
         child(&self.0)
     }
 
-    /// The optional `when` guard — FCS's `SynMatchClause.whenExpr`. Present
-    /// only when the clause carries a [`SyntaxKind::WHEN_TOK`]; it is then
-    /// the *leading* `Expr` child (between the `when` and the `->`). Without
-    /// a guard there is exactly one `Expr` child (the result), so we must
-    /// gate on the token to avoid mistaking the result for a guard.
+    /// The optional `when` guard — FCS's `SynMatchClause.whenExpr`: the `Expr`
+    /// child between the [`SyntaxKind::WHEN_TOK`] and the `->`. Read between
+    /// the two tokens, not positionally, so that neither a clause without a
+    /// `when` nor one whose `when` has no guard (`| _ when -> e`, which FCS
+    /// recovers with no guard) reads its result as the guard.
     pub fn guard(&self) -> Option<Expr> {
         accessor!("MatchClause::guard");
-        token(&self.0, SyntaxKind::WHEN_TOK)?;
-        children(&self.0).next()
+        self.0
+            .children_with_tokens()
+            .skip_while(|el| el.kind() != SyntaxKind::WHEN_TOK)
+            .skip(1)
+            .take_while(|el| el.kind() != SyntaxKind::RARROW_TOK)
+            .filter_map(|el| el.into_node())
+            .find_map(Expr::cast)
     }
 
     /// The clause result — FCS's `SynMatchClause.resultExpr`, the first `Expr`

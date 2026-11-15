@@ -198,6 +198,81 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Consume the rest of an unfinished member as `ERROR`, the tokens FCS's
+    /// error recovery discards after a member's `recover` arm (an abstract
+    /// slot that stops after its keywords, name or `:`): everything up to the
+    /// next layout token, `;`, `;;` or closer outside the offside blocks the
+    /// rest itself opens. Layout tokens are consumed zero-width, like
+    /// [`Self::skip_offside_block_as_error`]'s. A no-op when the member
+    /// already ends at the cursor.
+    ///
+    /// Brackets the rest opens are counted only to tell its own closers from
+    /// the enclosing construct's (`class abstract end`): they never hide a
+    /// layout token, since LexFilter may swallow a closer (`abstract (x)⏎`
+    /// leaves no `)` in the filtered stream) and a bracket counted open would
+    /// then run the skip past the member's end.
+    pub(super) fn skip_unfinished_member_rest(&mut self) {
+        let mut blocks = 0u32;
+        let mut brackets = 0u32;
+        while let Some((res, _)) = self.peek() {
+            match res {
+                Ok(FilteredToken::Virtual(Virtual::BlockBegin | Virtual::With)) => blocks += 1,
+                Ok(FilteredToken::Virtual(Virtual::BlockEnd | Virtual::End)) if blocks > 0 => {
+                    blocks -= 1;
+                }
+                Ok(FilteredToken::Virtual(_)) if self.parked_on_layout_virtual() => {
+                    if blocks == 0 {
+                        return;
+                    }
+                }
+                Ok(FilteredToken::Raw(Token::Semi | Token::SemiSemi))
+                    if blocks == 0 && brackets == 0 =>
+                {
+                    return;
+                }
+                Ok(FilteredToken::Raw(
+                    Token::LParen
+                    | Token::LBrack
+                    | Token::LBrackBar
+                    | Token::LBrackLess
+                    | Token::LBrace
+                    | Token::LBraceBar
+                    | Token::LQuote
+                    | Token::LQuoteRaw
+                    | Token::Begin,
+                )) => brackets += 1,
+                Ok(FilteredToken::Raw(
+                    Token::RParen
+                    | Token::RBrack
+                    | Token::BarRBrack
+                    | Token::GreaterRBrack
+                    | Token::RBrace
+                    | Token::BarRBrace
+                    | Token::RQuote
+                    | Token::RQuoteDot
+                    | Token::RQuoteRaw
+                    | Token::RQuoteRawDot
+                    | Token::End,
+                )) => {
+                    if brackets == 0 {
+                        if blocks == 0 {
+                            return;
+                        }
+                    } else {
+                        brackets -= 1;
+                    }
+                }
+                _ => {}
+            }
+            if self.parked_on_layout_virtual() {
+                self.builder.token(SyntaxKind::ERROR, "");
+                self.filtered.advance();
+            } else {
+                self.bump_into(SyntaxKind::ERROR);
+            }
+        }
+    }
+
     /// Consume the remainder of the *current* offside block as `ERROR`, stopping
     /// *before* the matching (depth-0) `OBLOCKEND` (left for the caller's
     /// close-drain). Unlike [`Self::skip_offside_block_as_error`], the caller is
