@@ -28,8 +28,10 @@
 //!    may declare: its tree's names or its damage's.
 //! 3. **Monotonicity** (FCS-free, [`deleting_a_token_keeps_every_decline`]).
 //!    Deleting one token of a clean seed, where that leaves the parser
-//!    recovering, keeps the gate declining each name the clean seed declined
-//!    at each place the name is written, except the deleted token's own names.
+//!    recovering, keeps the gate declining each name the clean seed declined,
+//!    except the names the deletion touches. Deleting a keyword that
+//!    introduces a declaration (`open`, `member`) removes the declaration, so
+//!    those deletions are property 2's alone.
 //!
 //! The ordinary suite runs every seed unperturbed and a fixed sample of the
 //! perturbations ([`SAMPLE`]); [`full_sweep`] (ignored, a pre-push gate) runs
@@ -39,14 +41,17 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use borzoi_assembly::op_name::compile_op_name;
 use borzoi_cst::parser::parse;
-use borzoi_cst::syntax::{AstNode, ImplFile, SyntaxNode, TextRange, TextSize};
+use borzoi_cst::syntax::{AstNode, ImplFile, TextRange};
 use borzoi_oracle_harness::fcs_position::LineIndex;
+use borzoi_oracle_harness::par_map::par_map;
 use borzoi_sema::{
     ExtensionNames, ProjectFile, ResolvedProject, SourceFile, SyntaxRecovery, qualified_names,
     resolve_project_files,
 };
 
-use crate::common::{CensusUse, full_bcl_env, invoke_fcs_dump_census, parse_census_jsonl, temp_fs_tree};
+use crate::common::{
+    CensusUse, full_bcl_env, invoke_fcs_dump_census, parse_census_jsonl, temp_fs_tree,
+};
 
 /// How many perturbed cases the ordinary suite checks, about.
 const SAMPLE: u64 = 300;
@@ -59,6 +64,41 @@ const JUNK: [&str; 31] = [
     "module",
 ];
 
+/// The characters an F# operator is spelled with.
+const OPERATOR_CHARS: &str = "!%&*+-./<=>?@^|~:$";
+
+/// The seeds whose `with` members are intrinsic (an augmentation of a type
+/// declared in the same file, or of a record, union or exception): FCS
+/// declares and binds no extension in them, and the sweep must agree.
+const CONTROLS: [&str; 2] = [
+    "intrinsic_call_before_augmentation",
+    "intrinsic_with_members",
+];
+
+/// The tokens whose deletion changes what a file declares or opens rather
+/// than only how well it parses: without one, the declaration it introduces
+/// is gone, for FCS as for us, so a decline it made may go with it.
+const DECLARING_TOKENS: [&str; 18] = [
+    "open",
+    "member",
+    "static",
+    "override",
+    "default",
+    "abstract",
+    "val",
+    "new",
+    "type",
+    "with",
+    "and",
+    "interface",
+    "inherit",
+    "module",
+    "namespace",
+    "rec",
+    "[<",
+    ">]",
+];
+
 /// The accessor spellings a member name may be called by.
 const ACCESSOR_PREFIXES: [&str; 4] = ["get_", "set_", "add_", "remove_"];
 
@@ -69,7 +109,10 @@ struct Seed {
 }
 
 fn seeds() -> Vec<Seed> {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ext_damage_seeds");
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ext_damage_seeds"
+    );
     let mut seeds: Vec<Seed> = std::fs::read_dir(dir)
         .expect("the seed directory")
         .map(|entry| entry.expect("a seed").path())
@@ -107,9 +150,13 @@ impl Perturbation {
         let (start, end) = (usize::from(at.start()), usize::from(at.end()));
         match self {
             Perturbation::Delete => format!("{}{}", &source[..start], &source[end..]),
-            Perturbation::Insert(junk) => format!("{}{junk} {}", &source[..start], &source[start..]),
+            Perturbation::Insert(junk) => {
+                format!("{}{junk} {}", &source[..start], &source[start..])
+            }
             Perturbation::Truncate => {
-                let eol = source[start..].find('\n').map_or(source.len(), |k| start + k);
+                let eol = source[start..]
+                    .find('\n')
+                    .map_or(source.len(), |k| start + k);
                 format!("{}{}", &source[..start], &source[eol..])
             }
         }
@@ -166,7 +213,6 @@ fn fnv(text: &str) -> u64 {
 
 /// One file resolved alone, as the gate sees it.
 struct Resolved {
-    root: SyntaxNode,
     project: ResolvedProject,
     recovered: bool,
 }
@@ -185,45 +231,44 @@ impl Resolved {
             .map(|(f, q)| ProjectFile::new(f, q, recovery.clone()))
             .collect();
         Resolved {
-            root: parsed.root,
             project: resolve_project_files(&project, full_bcl_env()),
             recovered,
         }
     }
 
-    /// Whether the gate declines a call of `name` in shape `is_static` at
-    /// `at`.
-    fn declines(&self, name: &str, is_static: bool, at: TextSize) -> bool {
+    /// Whether the gate declines a call of `name` in shape `is_static`.
+    fn declines(&self, name: &str, is_static: bool) -> bool {
         borzoi_sema::test_support::extension_gate_decline(
             self.project.file(0),
-            &self.root,
             full_bcl_env(),
             name,
             is_static,
-            at,
         )
         .is_some()
     }
 
     /// The extension-member names the file may declare.
     fn declared(&self) -> ExtensionNames {
-        borzoi_sema::test_support::declared_extension_names(self.project.file(0), &self.root)
+        self.project.file(0).extension_names()
     }
 }
 
 /// The member name `text` (the text of an FCS use's range) spells, compiled
-/// as the gate is asked it, and how many bytes from the range's end it
-/// starts. `None` for text that spells no single name.
-fn member_name(text: &str) -> Option<(String, usize)> {
-    if let Some(inner) = text.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
-        // An operator's definition: `(*)`, `( .. .. )`, `(+.)`.
-        let joined: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
-        let name = match joined.as_str() {
+/// as the gate is asked it. `None` for text that spells no single name.
+fn member_name(text: &str) -> Option<String> {
+    // An operator's definition, its range with or without the parentheses:
+    // `(*)`, `( .. .. )`, `+.@`.
+    let inner = text
+        .strip_prefix('(')
+        .and_then(|t| t.strip_suffix(')'))
+        .unwrap_or(text);
+    let joined: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
+    if !joined.is_empty() && joined.chars().all(|c| OPERATOR_CHARS.contains(c)) {
+        return Some(match joined.as_str() {
             "*" => "op_Multiply".to_string(),
             "...." => "op_RangeStep".to_string(),
             other => compile_op_name(other).into_owned(),
-        };
-        return Some((name, text.len()));
+        });
     }
     // The last segment after a `.` outside double backticks.
     let mut quoted = false;
@@ -249,7 +294,7 @@ fn member_name(text: &str) -> Option<(String, usize)> {
     if name.is_empty() || name.chars().any(char::is_whitespace) {
         return None;
     }
-    Some((compile_op_name(name).into_owned(), spelled.len()))
+    Some(compile_op_name(name).into_owned())
 }
 
 /// What grading one case found.
@@ -258,6 +303,8 @@ struct Graded {
     violations: Vec<String>,
     calls: usize,
     declarations: usize,
+    /// Whether our parser recovered from the case.
+    recovered: bool,
 }
 
 /// Grade `case` against FCS's census `uses` of it.
@@ -265,13 +312,16 @@ fn grade(case: &Case, uses: &[CensusUse]) -> Graded {
     let resolved = Resolved::of(&case.source);
     let declared = resolved.declared();
     let index = LineIndex::new(&case.source);
-    let mut graded = Graded::default();
+    let mut graded = Graded {
+        recovered: resolved.recovered,
+        ..Graded::default()
+    };
     for u in uses.iter().filter(|u| u.is_member) {
         let (start, end) = u.use_range_bytes(&index);
         let Some(text) = case.source.get(start..end) else {
             continue;
         };
-        let Some((name, spelled)) = member_name(text) else {
+        let Some(name) = member_name(text) else {
             continue;
         };
         if u.is_from_definition {
@@ -291,8 +341,7 @@ fn grade(case: &Case, uses: &[CensusUse]) -> Graded {
         } else if u.is_extension {
             let is_static = !u.is_instance;
             graded.calls += 1;
-            let at = TextSize::new(u32::try_from(end - spelled).expect("a small case"));
-            if !resolved.declines(&name, is_static, at) {
+            if !resolved.declines(&name, is_static) {
                 graded.violations.push(format!(
                     "{}: FCS binds `{text}` at {start} to an extension `{name}` \
                      (static: {is_static}), which the gate lets stand\n{}",
@@ -330,29 +379,31 @@ fn check(cases: &[Case]) {
         })
         .collect();
 
-    let mut violations = Vec::new();
-    let (mut calls, mut declarations, mut recovered) = (0, 0, 0);
-    for (k, case) in cases.iter().enumerate() {
+    let graded = par_map(cases.len(), |k| {
+        let case = &cases[k];
         let Some(file) = by_path.get(&format!("case_{k}.fs")).filter(|c| c.ok) else {
-            violations.push(format!("{}: FCS did not check it", case.label));
-            continue;
+            return Graded {
+                violations: vec![format!("{}: FCS did not check it", case.label)],
+                ..Graded::default()
+            };
         };
-        let graded = grade(case, &file.uses);
+        let mut graded = grade(case, &file.uses);
         if let Some(seed) = case.label.strip_suffix("/clean") {
-            let control = seed == "intrinsic_with_members";
+            let control = CONTROLS.contains(&seed);
             let graded_any = graded.calls + graded.declarations > 0;
             if graded_any == control {
-                violations.push(format!(
+                graded.violations.push(format!(
                     "{}: {} calls and {} declarations graded",
                     case.label, graded.calls, graded.declarations
                 ));
             }
         }
-        calls += graded.calls;
-        declarations += graded.declarations;
-        recovered += usize::from(!parse(&case.source).errors.is_empty());
-        violations.extend(graded.violations);
-    }
+        graded
+    });
+    let calls: usize = graded.iter().map(|g| g.calls).sum();
+    let declarations: usize = graded.iter().map(|g| g.declarations).sum();
+    let recovered = graded.iter().filter(|g| g.recovered).count();
+    let violations: Vec<String> = graded.into_iter().flat_map(|g| g.violations).collect();
     eprintln!(
         "{} cases ({recovered} recovered): {calls} extension calls and {declarations} extension \
          declarations graded, {} violations",
@@ -386,7 +437,7 @@ fn sampled_perturbations() {
     let stride = (cases.len() as u64 / SAMPLE).max(1);
     let sample: Vec<Case> = cases
         .into_iter()
-        .filter(|c| c.label.ends_with("/clean") || fnv(&c.label) % stride == 0)
+        .filter(|c| c.label.ends_with("/clean") || fnv(&c.label).is_multiple_of(stride))
         .collect();
     check(&sample);
 }
@@ -416,9 +467,9 @@ fn token_names(text: &str) -> Vec<String> {
 }
 
 /// Property 3: deleting a token of a clean seed, where the parser then
-/// recovers, keeps every decline the clean seed's gate made at each place its
-/// name is written (the file's start included), but for the names the
-/// deleted token spells itself.
+/// recovers, keeps every decline the clean seed's gate made, but for the
+/// names the deleted token and its neighbours spell (the deletion may join
+/// them) and for a deleted [`DECLARING_TOKENS`] keyword's declaration.
 #[test]
 fn deleting_a_token_keeps_every_decline() {
     let mut violations = Vec::new();
@@ -426,59 +477,62 @@ fn deleting_a_token_keeps_every_decline() {
     for seed in seeds() {
         let clean = Resolved::of(&seed.source);
         if clean.recovered {
+            eprintln!(
+                "{}: our parser recovers from the seed itself: {:?}",
+                seed.name,
+                parse(&seed.source).errors
+            );
             continue;
         }
         let tokens = significant_tokens(&seed.source);
-        // Each name a token spells, with where it is written.
-        let mut written: HashMap<String, BTreeSet<TextSize>> = HashMap::new();
-        for (range, text) in &tokens {
-            for name in token_names(text) {
-                let at = written.entry(name).or_default();
-                at.insert(TextSize::from(0));
-                at.insert(range.start());
-            }
-        }
-        let declined: Vec<(&String, bool)> = written
-            .keys()
-            .flat_map(|name| [(name, false), (name, true)])
-            .filter(|&(name, is_static)| clean.declines(name, is_static, TextSize::from(0)))
+        let spelled: BTreeSet<String> = tokens
+            .iter()
+            .flat_map(|(_, text)| token_names(text))
             .collect();
-        for (range, text) in &tokens {
+        let declined: Vec<(&String, bool)> = spelled
+            .iter()
+            .flat_map(|name| [(name, false), (name, true)])
+            .filter(|&(name, is_static)| clean.declines(name, is_static))
+            .collect();
+        for (k, (range, text)) in tokens.iter().enumerate() {
+            if DECLARING_TOKENS.contains(&text.as_str()) {
+                continue;
+            }
             let damaged = Perturbation::Delete.apply(&seed.source, *range);
             let resolved = Resolved::of(&damaged);
             if !resolved.recovered {
                 // A different program, not a damaged one.
                 continue;
             }
-            let own: HashSet<String> = token_names(text).into_iter().collect();
+            // The deleted token's names, and its neighbours' when the
+            // deletion joins them into one token (`Shout(i` to `Shouti`),
+            // renaming both.
+            let mut own: HashSet<String> = token_names(text).into_iter().collect();
+            for neighbour in [k.checked_sub(1), Some(k + 1)].into_iter().flatten() {
+                if let Some((_, t)) = tokens.get(neighbour) {
+                    own.extend(token_names(t));
+                }
+            }
             for &(name, is_static) in &declined {
                 if own.contains(name) {
                     continue;
                 }
-                for &at in &written[name] {
-                    if at == range.start() && at != TextSize::from(0) {
-                        continue;
-                    }
-                    let moved = if at > range.start() {
-                        at - range.len()
-                    } else {
-                        at
-                    };
-                    checked += 1;
-                    if !resolved.declines(name, is_static, moved) {
-                        violations.push(format!(
-                            "{}: deleting `{text}` at {} lets `{name}` (static: {is_static}) \
-                             stand at {}\n{damaged}",
-                            seed.name,
-                            u32::from(range.start()),
-                            u32::from(moved)
-                        ));
-                    }
+                checked += 1;
+                if !resolved.declines(name, is_static) {
+                    violations.push(format!(
+                        "{}: deleting `{text}` at {} lets `{name}` (static: {is_static}) \
+                         stand\n{damaged}",
+                        seed.name,
+                        u32::from(range.start()),
+                    ));
                 }
             }
         }
     }
-    eprintln!("{checked} declines checked, {} violations", violations.len());
+    eprintln!(
+        "{checked} declines checked, {} violations",
+        violations.len()
+    );
     assert!(checked > 1000, "only {checked} declines checked");
     report(&violations);
 }

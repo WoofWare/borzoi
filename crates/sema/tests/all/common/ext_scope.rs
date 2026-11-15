@@ -199,11 +199,9 @@ pub fn check(sources: &[(&str, String)], calls: &[Call]) -> Checked {
                     census: tail[k].clone(),
                     gate: borzoi_sema::test_support::extension_gate_decline(
                         resolved.file(last),
-                        parsed[last].0.syntax(),
                         env,
                         method_name(*call),
                         false,
-                        call_range(source, *call).map_or(TextSize::from(0), |r| r.end()),
                     ),
                 });
             }

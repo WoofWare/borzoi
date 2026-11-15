@@ -662,6 +662,7 @@ nix develop -c cargo test -p borzoi-sema --test all silent_region_sweep:: -- --i
 nix develop -c cargo test -p borzoi-sema --test all infer_corpus_diff:: -- --ignored    #  ~30 s
 nix develop -c cargo test -p borzoi-sema --test all infer_corpus_dump:: -- --ignored    #  ~40 s
 nix develop -c cargo test -p borzoi-sema --test all infer_incremental_diff::incremental_equals_batch_over_a_corpus_sample -- --ignored  #  ~40 s
+nix develop -c cargo test -p borzoi-sema --test all infer_extension_damage_sweep::full_sweep -- --ignored  #  ~4 min
 nix develop -c cargo test -p borzoi-sema --test all auto_open_member_sweep:: -- --ignored  # ~10 min
 nix develop -c cargo test -p borzoi      --test all parser_corpus_sweep:: -- --ignored  #  ~50 s
 nix develop -c cargo test -p borzoi      --test all xml_doc_shipped_sweep:: -- --ignored  #  ~10 s

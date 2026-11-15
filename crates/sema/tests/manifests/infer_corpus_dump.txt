@@ -2653,7 +2653,7 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/CodeGenHelper.fs	alone 
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/Delegates01.fs	alone 92f38ec6e217e152/0 dir 0d1eb72880c96ebb/0
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DerivedType.fs	alone 92f38ec6e217e152/0 dir eec05870222c3469/0
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DiscUnionCodeGen1.fs	alone 92f38ec6e217e152/0 dir 3ef7429a414ddff5/0
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DoNotInlineX.fs	alone fe97377bb8846020/20 dir 85480b1c9bc30e02/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DoNotInlineX.fs	alone 4678f02acb21ff1a/3 dir 85480b1c9bc30e02/3
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/Equality01.fs	alone 92f38ec6e217e152/0 dir 0d1eb72880c96ebb/0
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/Events01.fs	alone 92f38ec6e217e152/0 dir 0d1eb72880c96ebb/0
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/Events02.fs	alone 92f38ec6e217e152/0 dir 0d1eb72880c96ebb/0

@@ -467,11 +467,7 @@ impl<'a> Gen<'a> {
         // group and could win (§4.1(4)), for a static call too: an F#
         // augmentation `type T with static member …` joins a type-qualified
         // static group the same way.
-        if !self
-            .facts
-            .ext_scope
-            .absent(env, &name, is_static, method.text_range().start())
-        {
+        if !self.facts.ext_scope.absent(env, &name, is_static) {
             return CallRegime::Otherwise(Incomplete::ExtensionInScope);
         }
         // The provably complete intrinsic group, instance or static per the

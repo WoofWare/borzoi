@@ -95,7 +95,6 @@ mod types;
 mod unknowables;
 mod windows;
 
-pub(crate) use extension_names::{Damage, damage};
 pub use extension_names::{ExtensionNames, NamesUnknowable};
 pub use model::{
     CaseKind, DeclineCause, DeclineSite, DeclineTier, DeferredReason, ExportedItem, ExportedItems,
@@ -388,6 +387,7 @@ pub fn resolve_file(
     let item_base = r.item_base;
     let mut rf = r.finish().into_resolved_file(prescan, item_base, recovery);
     rf.extension_names = rf.syntactic_extension_names(file.syntax(), assemblies);
+    rf.damage = extension_names::damage(file.syntax(), recovery);
     rf
 }
 
@@ -1486,7 +1486,6 @@ fn resolve_project_files_impl(
             &mut preceding,
             &mut ext,
             &rf,
-            pf.file.syntax(),
             assemblies,
             screen.as_deref(),
             partners[index],
@@ -1533,26 +1532,12 @@ fn thread_forward(
     preceding: &mut ProjectItems,
     ext: &mut ExtensionNames,
     rf: &ResolvedFile,
-    root: &SyntaxNode,
     assemblies: &AssemblyEnv,
     paired_screen: Option<&model::SigScreen>,
     partner: Option<usize>,
 ) {
     preceding.extend_with(rf, assemblies.names(), paired_screen, partner);
-    ext.absorb(&extension_names_for_later_files(rf, root));
-}
-
-/// The extension-member names a file declares as later files see them: what
-/// its tree declares, and what its damaged tail may add if the parser
-/// recovered from it ([`extension_names::damage`]). One function so the
-/// fold's threading and the incremental fold's in-sync comparison read the
-/// same thing.
-fn extension_names_for_later_files(rf: &ResolvedFile, root: &SyntaxNode) -> ExtensionNames {
-    let mut names = rf.extension_names().clone();
-    if let Some(damage) = extension_names::damage(root, rf.recovery()) {
-        names.absorb(&damage.names);
-    }
-    names
+    ext.absorb(&rf.extension_names());
 }
 
 /// The [`ResolvedFile`] a signature file's Compile slot holds, as both the
@@ -1579,6 +1564,7 @@ fn signature_slot(
     // as possibly `[<Extension>]` or `[<AutoOpen>]`. Later files see the
     // signature's declarations, so its extension names are what they read.
     rf.extension_names = extension_names::file_extension_names(sig.syntax(), false, &|_, _| true);
+    rf.damage = extension_names::damage(sig.syntax(), &pf.recovery);
     rf.recovery = pf.recovery.clone();
     rf
 }
@@ -1960,11 +1946,7 @@ fn resolve_project_files_incremental_impl(
                 // downstream contribution.
                 in_sync = same_pairing
                     && rf.same_export_contribution(&prev.files[i], assemblies.names())
-                    && extension_names_for_later_files(&rf, pf.file.syntax())
-                        == extension_names_for_later_files(
-                            &prev.files[i],
-                            prev_files[i].file.syntax(),
-                        );
+                    && rf.extension_names() == prev.files[i].extension_names();
             }
             Arc::new(rf)
         };
@@ -1975,7 +1957,6 @@ fn resolve_project_files_incremental_impl(
             &mut preceding,
             &mut ext,
             &rf,
-            pf.file.syntax(),
             assemblies,
             screen.as_deref(),
             partners_new[i],
@@ -2938,9 +2919,13 @@ mod export_decl_tests {
             assert_eq!(
                 without.recovery,
                 SyntaxRecovery::Unretained,
-                "the stored field is the one thing that must differ"
+                "the stored reading is what must differ"
             );
+            // The reading, and the damage read with it (which only the
+            // extension gate and the fold's extension names consult), are
+            // the fields that may differ.
             without.recovery = of_parse.recovery.clone();
+            without.damage = of_parse.damage.clone();
             assert_eq!(
                 of_parse, without,
                 "resolution of {src:?} must not depend on the recovery reading"

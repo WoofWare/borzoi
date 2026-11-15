@@ -29,12 +29,12 @@
 //! A file the parser **recovered** from may have dropped text FCS's recovery
 //! keeps ([`Damage`]). An extension member FCS recovers is still named by a
 //! token of the file, so the names its damaged regions spell bound it, unless
-//! a region holds an attribute list or a directive, whose effect no name
-//! bounds.
+//! a region holds an attribute list, a directive or an active-pattern member,
+//! whose effect no single token's name bounds.
 
 use borzoi_assembly::op_name::compile_op_name;
 use borzoi_cst::syntax::{
-    AstNode, AttributeList, MemberDefn, Pat, SyntaxKind, SyntaxNode, TextRange, TextSize, TypeDefn,
+    AstNode, AttributeList, MemberDefn, Pat, SyntaxKind, SyntaxNode, TextRange, TypeDefn,
     TypeDefnRepr,
 };
 
@@ -79,7 +79,9 @@ pub enum NamesUnknowable {
     /// it is, and the target is not enumerated (#831).
     AttributedAbbreviation,
     /// The parser recovered from the file, and a damaged region holds an
-    /// attribute list or a directive (what `extension_names::damage` reads).
+    /// attribute list, a directive or an active-pattern member, or the
+    /// reading kept no errors to bound the damage by (what
+    /// `extension_names::damage` reads).
     Recovered,
     /// A `#r`, `#reference`, `#load`, `#I` or `#include` directive: an
     /// assembly or a file outside the project's references.
@@ -258,27 +260,31 @@ pub(crate) fn file_extension_names(
     names
 }
 
-/// What a file the parser recovered from may declare beyond what its tree
-/// shows: text the parser mis-parsed or dropped, which FCS's recovery may
-/// keep.
+/// What a file the parser recovered from may declare or open beyond what its
+/// tree shows: text the parser mis-parsed or dropped, which FCS's recovery
+/// may keep.
 ///
 /// An extension member FCS recovers is named by an identifier (or an operator,
 /// under its compiled name) written in the file, so [`Self::names`] spells
 /// every token of the damaged regions
 /// ([`SyntaxRecovery::damaged_regions`]) as a name. An attribute list or a
 /// directive in a damaged region may bring names no token spells (an
-/// attributed type abbreviation, a `#r`), so either makes the names
-/// unknowable. What lies outside them parsed intact, and the tree's own pass
-/// reads it.
+/// attributed type abbreviation, a `#r`), and so may an active-pattern
+/// member, whose name is spelled across tokens: any of them makes the names
+/// unknowable. What lies outside the regions parsed intact, and the tree's
+/// own pass reads it.
+///
+/// The names reach the whole file, not only what follows the damage: a
+/// member of a recovered declaration is in scope before it wherever F# lets
+/// a later declaration be seen earlier (a `rec` module, a `type … and …`
+/// group, the members of one type).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Damage {
-    /// Where the damage reaches calls in the file itself: the start of the
-    /// first damaged region (anything declared in damaged text is declared
-    /// after it), or the file's start when a `rec` scope lets a later
-    /// declaration be seen earlier.
-    pub(crate) from: TextSize,
     /// What the damaged regions may declare.
     pub(crate) names: ExtensionNames,
+    /// Whether a damaged region spells `open`: FCS may recover an `open` our
+    /// parser dropped, bringing a namespace's extensions into scope.
+    pub(crate) opens: bool,
 }
 
 /// The keywords without one of which text declares no member: every member
@@ -298,22 +304,24 @@ const MEMBER_KEYWORDS: [&str; 10] = [
 ];
 
 /// The [`Damage`] of the file rooted at `root` under `recovery`, or `None`
-/// when it parsed clean.
+/// when it parsed clean. A reading that kept no errors
+/// ([`SyntaxRecovery::Unretained`]) shows no region, so it may declare and
+/// open anything.
 pub(crate) fn damage(root: &SyntaxNode, recovery: &SyntaxRecovery) -> Option<Damage> {
+    if matches!(recovery, SyntaxRecovery::Unretained) {
+        return Some(Damage {
+            names: ExtensionNames::Unknowable(NamesUnknowable::Recovered),
+            opens: true,
+        });
+    }
     let regions = recovery.damaged_regions(root)?;
-    let first = regions
-        .iter()
-        .map(|r| r.start())
-        .min()
-        .unwrap_or(TextSize::from(0));
-    let mut names = ExtensionNames::default();
-    let mut declares_members = false;
     // The regions are sorted and disjoint, so one pass over the tokens with a
     // cursor into them is linear in the file.
     let mut next_region = 0;
-    let in_regions = root
+    let tokens: Vec<_> = root
         .descendants_with_tokens()
         .filter_map(|el| el.into_token())
+        .filter(|t| !t.kind().is_trivia())
         .filter(move |t| {
             let r = t.text_range();
             while next_region < regions.len() && regions[next_region].end() <= r.start() {
@@ -322,10 +330,16 @@ pub(crate) fn damage(root: &SyntaxNode, recovery: &SyntaxRecovery) -> Option<Dam
             regions
                 .get(next_region)
                 .is_some_and(|region| region.intersect(r).is_some())
-        });
-    for tok in in_regions.filter(|t| !t.kind().is_trivia()) {
-        let text = tok.text();
+        })
+        .collect();
+    let texts: Vec<&str> = tokens.iter().map(|t| t.text()).collect();
+    let mut names = ExtensionNames::default();
+    let mut declares_members = false;
+    let mut active_pattern = false;
+    let mut opens = false;
+    for (i, (tok, &text)) in tokens.iter().zip(&texts).enumerate() {
         declares_members |= MEMBER_KEYWORDS.contains(&text);
+        opens |= text == "open";
         // By spelling, not kind: in a damaged region the lexer's context may
         // give `#` or `[<` a kind of its own.
         if matches!(
@@ -337,27 +351,70 @@ pub(crate) fn damage(root: &SyntaxNode, recovery: &SyntaxRecovery) -> Option<Dam
             names.fail(NamesUnknowable::Recovered);
             break;
         }
+        // An active pattern's banana clips, however the lexer split them:
+        // `(|`, `|)`, or a `(` and a `|` apart.
+        let next = texts.get(i + 1).copied().unwrap_or("");
+        active_pattern |= text.contains("(|")
+            || text.contains("|)")
+            || (text.ends_with('(') && next.starts_with('|'))
+            || (text.ends_with('|') && next.starts_with(')'));
         let unquoted = text
             .strip_prefix("``")
             .and_then(|t| t.strip_suffix("``"))
             .unwrap_or(text);
         names.add(unquoted, true, true);
-        let compiled = compile_op_name(text);
-        if compiled != unquoted {
-            names.add(&compiled, true, true);
+        names.add(&compile_op_name(text), true, true);
+        if text == ".." {
+            // `( .. .. )` is two `..` tokens and compiles to `op_RangeStep`.
+            names.add("op_RangeStep", true, true);
         }
+        if let Some(operator) = parenthesised_operator(&texts[i..]) {
+            names.add(&operator, true, true);
+        }
+    }
+    if active_pattern && declares_members {
+        names.fail(NamesUnknowable::Recovered);
     }
     if !declares_members && names.unknowable().is_none() {
         // Text with no keyword that opens a member or a type declares no
         // member at all, whatever names it spells.
         names = ExtensionNames::default();
     }
-    let rec = root
-        .descendants_with_tokens()
-        .any(|el| el.kind() == SyntaxKind::REC_TOK);
-    Some(Damage {
-        from: if rec { TextSize::from(0) } else { first },
-        names,
+    Some(Damage { names, opens })
+}
+
+/// The compiled name of the operator `texts` opens with a parenthesised
+/// spelling of (`(*)`, `( .. .. )`, `( >>= )`): its tokens joined, as F#
+/// reads an operator's name. `None` when `texts` opens with none.
+fn parenthesised_operator(texts: &[&str]) -> Option<String> {
+    /// The most tokens an operator's spelling is joined from.
+    const MAX_TOKENS: usize = 6;
+    let mut joined = String::from(texts.first()?.strip_prefix('(')?);
+    if let Some(inner) = joined.strip_suffix(')') {
+        joined = inner.to_string();
+    } else {
+        let close = texts
+            .iter()
+            .take(MAX_TOKENS)
+            .position(|t| t.ends_with(')'))?;
+        for (k, t) in texts.iter().enumerate().take(close + 1).skip(1) {
+            joined.push_str(if k == close {
+                t.strip_suffix(')').unwrap_or(t)
+            } else {
+                t
+            });
+        }
+    }
+    let is_operator =
+        !joined.is_empty() && joined.chars().all(|c| "!%&*+-./<=>?@^|~:$".contains(c));
+    if !is_operator {
+        return None;
+    }
+    Some(match joined.as_str() {
+        // `(*)` is the multiplication operator, not a comment.
+        "*" => "op_Multiply".to_string(),
+        "...." => "op_RangeStep".to_string(),
+        other => compile_op_name(other).into_owned(),
     })
 }
 
@@ -645,11 +702,6 @@ mod tests {
         assert_eq!(damage_of("module M\nlet a = 1\n"), None, "a clean file");
         let src = "module M\nlet early = 1\ntype System.String with\n    member s.Shout() = (1 +\nlet later = 2\n";
         let d = damage_of(src).expect("damaged");
-        let error = src.find("(1 +").expect("the damage");
-        assert!(
-            usize::from(d.from) <= error,
-            "the damage reaches the error: {d:?}"
-        );
         assert!(d.names.may_have("Shout", false), "{d:?}");
         assert!(d.names.may_have("get_Shout", true), "{d:?}");
         assert!(d.names.may_have("op_Addition", false), "{d:?}");
@@ -685,8 +737,38 @@ mod tests {
     }
 
     #[test]
-    fn a_rec_scope_lets_damage_reach_the_whole_file() {
-        let d = damage_of("module rec M\nlet early = 1\nlet broken = (1 +\n").expect("damaged");
-        assert_eq!(d.from, borzoi_cst::syntax::TextSize::from(0), "{d:?}");
+    fn a_damaged_operator_member_declares_its_compiled_name() {
+        let src = "module M\ntype System.String with\n    = static member (*) (a: string, b: int) = 0L\n    static member ( .. .. ) (a: string, b: int, c: int) = 0L\n    static member ( >>= ) (a: string, b: int) = 0L\nlet mid = 1\n";
+        let d = damage_of(src).expect("damaged");
+        for name in ["op_Multiply", "op_RangeStep", "op_GreaterGreaterEquals"] {
+            assert!(d.names.may_have(name, true), "{name}: {d:?}");
+        }
+    }
+
+    #[test]
+    fn a_damaged_active_pattern_member_declares_anything() {
+        for member in [
+            "member s.(|Big|_|) (x: int)",
+            "member s.( |Big|_| ) (x: int)",
+        ] {
+            let src = format!(
+                "module M\ntype System.String with\n    = {member} = Some 0L\nlet mid = 1\n"
+            );
+            let d = damage_of(&src).expect("damaged");
+            assert_eq!(
+                d.names.unknowable(),
+                Some(NamesUnknowable::Recovered),
+                "{src:?}: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_damaged_open_is_one_fcs_may_keep() {
+        let d = damage_of("module M\nopen System. .Linq\nlet a = 1\n").expect("damaged");
+        assert!(d.opens, "{d:?}");
+        let d = damage_of("module M\nopen System.Linq\nlet a = 1\nlet b = 2\nlet broken = (1 +\n")
+            .expect("damaged");
+        assert!(!d.opens, "an intact open is the resolver's: {d:?}");
     }
 }

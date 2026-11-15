@@ -976,6 +976,19 @@ jobs:
             infer_incremental_diff::incremental_equals_batch_over_a_corpus_sample \
             -- --ignored --nocapture
 
+      - name: Gate on the extension gate over damaged files
+        if: steps.gate.outputs.run == 'true'
+        # Every perturbation (a token deleted, a junk token inserted, a line
+        # truncated) of every seed in `tests/fixtures/ext_damage_seeds`: where
+        # FCS binds an extension in the recovered file, the extension-scope
+        # gate declines its name, and every extension FCS declares there is a
+        # name the file may declare. The ordinary suite runs a sample.
+        env:
+          BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
+        run: |
+          nix develop --command cargo test -p borzoi-sema --test all \
+            infer_extension_damage_sweep::full_sweep -- --ignored --nocapture
+
       - name: Report the slowest tests
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
         run: bash tools/ci/slowest-tests.sh | tee -a "$GITHUB_STEP_SUMMARY"

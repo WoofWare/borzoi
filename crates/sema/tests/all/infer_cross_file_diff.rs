@@ -1108,14 +1108,11 @@ fn cross_file_uses_commit_what_their_in_file_twin_commits() {
     // #794 PR 2): asked about a name nothing declares, so only a file-wide
     // input can answer.
     let opens_not_enumerated = |idx: usize| {
-        let root = cross.files[idx].file.syntax();
         borzoi_sema::test_support::extension_gate_decline(
             cross.resolved.file(idx),
-            root,
             full_bcl_env(),
             "",
             false,
-            root.text_range().end(),
         ) == Some(borzoi_sema::GateInput::OpenNotEnumerated)
     };
 

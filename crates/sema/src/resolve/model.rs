@@ -23,7 +23,7 @@ use crate::diagnostics::SemaDiagnostic;
 
 use super::contributors::{Contribution, FileContributions};
 use super::decl_path::{DeclPath, ExportName};
-use super::extension_names::{ExtensionNames, MarkerQuestion};
+use super::extension_names::{Damage, ExtensionNames, MarkerQuestion};
 use super::path_set::{Extended, PathPrefixes, PathSet};
 use super::state::ActivePatternShape;
 use super::unknowables::{Unknowable, Unknowables};
@@ -3849,10 +3849,8 @@ pub struct ResolvedFile {
     /// through [`Self::open_extension_unknowable`].
     pub(super) unknowables: Unknowables,
     /// The extension-member names this file's tree declares, read from its
-    /// syntax and its attribute verdicts ([`Self::extension_names`]). What a
-    /// damaged tail may add is read with the recovery, by the fold and by the
-    /// file's own inference, so resolution itself never depends on the
-    /// recovery reading.
+    /// syntax and its attribute verdicts. [`Self::extension_names`] adds
+    /// what [`Self::damage`] may.
     pub(super) extension_names: ExtensionNames,
     /// The union of [`Self::extension_names`] over every **preceding**
     /// Compile-order file, stamped by the fold; empty for a single-file
@@ -3939,6 +3937,13 @@ pub struct ResolvedFile {
     /// commits about itself, never what it exports, so a later file's fold
     /// slot cannot observe it.
     pub(super) recovery: SyntaxRecovery,
+    /// What the text [`Self::recovery`] reports damaged may declare or open
+    /// (`resolve::extension_names::damage`), or `None` for a clean file.
+    /// Like the reading it is read under, resolution never consults it: only
+    /// the extension gate ([`Self::extension_names`],
+    /// [`Self::open_extension_unknowable`]) and the fold's threading of
+    /// extension names do.
+    pub(super) damage: Option<Damage>,
 }
 
 /// Build the end-offset index a token classifier queries, from a set of
@@ -4124,6 +4129,7 @@ impl ResolvedFile {
             // signature's own reading (`signature_slot`); until then, the
             // value that claims the least.
             recovery: SyntaxRecovery::Unretained,
+            damage: None,
         }
     }
 
@@ -4335,14 +4341,8 @@ impl ResolvedFile {
         env: &AssemblyEnv,
     ) -> Option<FieldLabel> {
         let entry = self.field_labels.get(&label)?;
-        // Clean before the label, so no damage reaches it.
         (self.recovery.clean_before(label.end())
-            && crate::infer::ExtensionScope::of(self).absent(
-                env,
-                &entry.name,
-                false,
-                label.start(),
-            ))
+            && crate::infer::ExtensionScope::of(self).absent(env, &entry.name, false))
         .then_some(entry.label)
     }
 
@@ -4355,9 +4355,8 @@ impl ResolvedFile {
         extensions: &crate::infer::ExtensionScope,
     ) -> Option<FieldLabel> {
         let entry = self.field_labels.get(&label)?;
-        (self.recovery.clean_before(label.end())
-            && extensions.absent(env, &entry.name, false, label.start()))
-        .then_some(entry.label)
+        (self.recovery.clean_before(label.end()) && extensions.absent(env, &entry.name, false))
+            .then_some(entry.label)
     }
 
     /// The full written-attribute-range→[`Resolution`] map (EX-3 §2(d)).
@@ -4365,12 +4364,16 @@ impl ResolvedFile {
         &self.attribute_resolutions
     }
 
-    /// The extension-member names this file's tree declares (read off its
-    /// syntax by `resolve::extension_names`). A file the parser recovered from
-    /// may declare more in text the parser dropped; what it may add is its
-    /// damage (`resolve::extension_names::damage`), read with the tree.
-    pub fn extension_names(&self) -> &ExtensionNames {
-        &self.extension_names
+    /// The extension-member names this file may declare: what its tree
+    /// declares (read off its syntax by `resolve::extension_names`), and, if
+    /// the parser recovered from it, every name its damaged text spells
+    /// (`resolve::extension_names::damage`).
+    pub fn extension_names(&self) -> ExtensionNames {
+        let mut names = self.extension_names.clone();
+        if let Some(damage) = &self.damage {
+            names.absorb(&damage.names);
+        }
+        names
     }
 
     /// The union of [`Self::extension_names`] over every preceding
@@ -4518,10 +4521,12 @@ impl ResolvedFile {
     }
 
     /// Whether some `open` in this file brings an extension surface whose names the
-    /// resolver cannot enumerate (EX-2).
+    /// resolver cannot enumerate (EX-2), or may: an `open` in text the parser
+    /// recovered from.
     /// The gate defers wholesale when true.
     pub fn open_extension_unknowable(&self) -> bool {
         self.unknowables.contains(Unknowable::OpenExtensionSurface)
+            || self.damage.as_ref().is_some_and(|d| d.opens)
     }
 
     /// The file's declared project **namespace** paths, each with its ancestor

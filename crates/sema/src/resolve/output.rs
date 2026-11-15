@@ -191,6 +191,7 @@ impl Output {
             sig_screen: None,
             sig_exports: Vec::new(),
             recovery: recovery.clone(),
+            damage: None,
         }
     }
 }
