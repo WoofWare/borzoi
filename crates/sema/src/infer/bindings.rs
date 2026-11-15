@@ -196,7 +196,7 @@ impl<'a> Gen<'a> {
             // rejects `let g = id` / `let x = []` with FS0030), so it just
             // links and solves.
             Some(Pat::Named(named)) => {
-                let rhs_var = self.infer_expr(scope, rhs, Expected::Synth);
+                let rhs_var = self.infer_expr(scope, rhs, Expected::Synth).var();
                 if let Some(tok) = named.ident()
                     && let Some(def) = self.facts.def_at(tok.text_range())
                 {
@@ -248,7 +248,7 @@ impl<'a> Gen<'a> {
                 // function's result, exactly, so it is walked as usual, but
                 // nothing it records is kept.
                 let body_mark = self.out.mark();
-                let ret = self.infer_expr(scope, rhs, Expected::Synth);
+                let ret = self.infer_expr(scope, rhs, Expected::Synth).var();
                 if !head.args().all(|arg| is_simple_param(&arg)) {
                     self.out.discard_since(body_mark);
                 }
@@ -455,7 +455,7 @@ impl<'a> Gen<'a> {
                         .is_none(),
                     "a LET_DECL nested inside a walked binding's RHS breaks sequential solve"
                 );
-                let _ = self.infer_expr(scope, &rhs, Expected::Known(dv));
+                let _ = self.infer_expr(scope, &rhs, Expected::Known(dv)).var();
             }
             Census::Record
         } else {

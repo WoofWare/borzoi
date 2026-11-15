@@ -97,6 +97,24 @@ lambda-access node 16-33 `fun s -> s.Length`	ours - fcs System.String -> System.
 lambda-access node 25-26 `s`	ours - fcs System.String
 lambda-access node 25-33 `s.Length`	ours - fcs System.Int32
 lambda-access node 9-34 `apply (fun s -> s.Length)`	ours System.Int32 fcs System.Int32
+lambda-method-argument-checked-before-resolution binder 4-6 `m1`	ours - fcs System.String -> 'a * System.Int32
+lambda-method-argument-checked-before-resolution binder 8-9 `y`	ours System.String fcs System.String
+lambda-method-argument-checked-before-resolution census	[Lambda]
+lambda-method-argument-checked-before-resolution fcs	errors FS0193
+lambda-method-argument-checked-before-resolution node 22-48 `y.Insert(0, (fun () -> 1))`	ours - fcs 'a
+lambda-method-argument-checked-before-resolution node 22-51 `y.Insert(0, (fun () -> 1)), 0`	ours - fcs 'a * System.Int32
+lambda-method-argument-checked-before-resolution node 50-51 `0`	ours System.Int32 fcs System.Int32
+lambda-method-argument-control binder 4-6 `m2`	ours System.String -> System.String * System.Int32 fcs System.String -> System.String * System.Int32
+lambda-method-argument-control binder 8-9 `y`	ours System.String fcs System.String
+lambda-method-argument-control census	[Lambda]
+lambda-method-argument-control fcs	errors FS0002
+lambda-method-argument-control node 22-23 `y`	ours - fcs System.String
+lambda-method-argument-control node 22-52 `y.Insert(0, idf (fun () -> 1))`	ours System.String fcs System.String
+lambda-method-argument-control node 22-55 `y.Insert(0, idf (fun () -> 1)), 0`	ours System.String * System.Int32 fcs System.String * System.Int32
+lambda-method-argument-control node 31-32 `0`	ours - fcs System.Int32
+lambda-method-argument-control node 34-51 `idf (fun () -> 1)`	ours - fcs System.String
+lambda-method-argument-control node 39-50 `fun () -> 1`	ours - fcs System.String
+lambda-method-argument-control node 54-55 `0`	ours System.Int32 fcs System.Int32
 parameter-loosened-once-known binder 4-6 `c6`	ours - fcs (System.Object -> System.Int32) -> 'a -> ('b -> System.Int32) * System.Int32 * 'a
 parameter-loosened-once-known binder 7-8 `x`	ours - fcs System.Object -> System.Int32
 parameter-loosened-once-known binder 9-10 `y`	ours - fcs 'a
