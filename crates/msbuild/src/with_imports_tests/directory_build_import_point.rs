@@ -687,3 +687,56 @@ fn a_plain_import_after_a_hidden_import_of_its_file_commits_no_order() {
         parsed.property("Order")
     );
 }
+
+/// Undecided points nested in a chain of files, each importing the next
+/// twice: walking every doubted import again would take work exponential in
+/// the chain's length. The doubted walks an evaluation makes are bounded, and
+/// past the bound a file is content the walk could not see, so the walk ends
+/// promptly and what the chain writes declines.
+#[test]
+fn nested_undecided_points_take_bounded_work() {
+    const FILES: usize = 17;
+    let tmp = tempfile::tempdir().unwrap();
+    let point = |next: usize| {
+        format!(
+            "  <PropertyGroup><DirectoryBuildTargetsPath>$(MSBuildThisFileDirectory)f{next}.targets</DirectoryBuildTargetsPath></PropertyGroup>\n  \
+             <Import Project=\"$(DirectoryBuildTargetsPath)\" \
+             Condition=\"{UNDECIDABLE} and exists('$(DirectoryBuildTargetsPath)')\" />\n"
+        )
+    };
+    let extra: Vec<(String, String)> = (1..=FILES)
+        .map(|i| {
+            let imports = if i < FILES {
+                format!("{}{}", point(i + 1), point(i + 1))
+            } else {
+                String::new()
+            };
+            (
+                format!("f{i}.targets"),
+                format!(
+                    "<Project>\n  <PropertyGroup><Chain>$(Chain);{i}</Chain></PropertyGroup>\n{imports}</Project>\n"
+                ),
+            )
+        })
+        .collect();
+    let extra_refs: Vec<(&str, &str)> = extra
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect();
+    let resolver = custom_sdk(
+        tmp.path(),
+        "<Project />\n",
+        &format!("<Project>\n{}</Project>\n", point(1)),
+        &extra_refs,
+    );
+    let project = write_at(tmp.path(), "p.fsproj", "<Project Sdk=\"Custom\" />\n");
+    let started = std::time::Instant::now();
+    let parsed = parse_file_with_sdk_resolution(&project, resolver);
+    assert!(
+        parsed.diagnostics.len() < 10_000,
+        "{} diagnostics after {:?}",
+        parsed.diagnostics.len(),
+        started.elapsed()
+    );
+    assert!(!parsed.property("Chain").is_exact());
+}

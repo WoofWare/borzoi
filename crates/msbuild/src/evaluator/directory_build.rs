@@ -45,6 +45,10 @@
 //! file (`X Or Exists(…)`) imports the path regardless, which MSBuild rejects
 //! when it names nothing, so it is charged.
 //!
+//! An evaluation makes at most [`MAX_DOUBTED_WALKS`] doubted walks: past the
+//! bound, a file the fallback would walk is content the walk does not see, and
+//! the whole evaluation is uncertain from there.
+//!
 //! **What a doubted walk may leave behind.** A fallback walk follows the file
 //! as an ordinary import, but MSBuild may not make that import, so nothing it
 //! does may stand as certain. Every field of the walk state it can change, and
@@ -517,6 +521,13 @@ fn walk_doubted(kind: DirectoryBuildFile, file: &Path, state: &mut State<'_>) {
 /// [`walk_doubted`] for any doubted import: `root` is what its products carry
 /// and `project` the import's `Project` text.
 fn walk_doubted_as(root: UnpinnedRoot, project: &str, file: &Path, state: &mut State<'_>) {
+    if state.directory_build.doubted_walks >= MAX_DOUBTED_WALKS {
+        // Past the bound the file is content the walk does not see: nothing
+        // it would write or contribute stands, as after any hidden content.
+        state.directory_build.contributed = true;
+        everything_uncertain(project, root, state);
+        return;
+    }
     state.directory_build.contributed = true;
     state.directory_build.doubted_walks += 1;
     let walk = state.directory_build.doubted_walks;
@@ -553,9 +564,20 @@ fn unpin(name: &str, root: &UnpinnedRoot, state: &mut State<'_>) {
     );
 }
 
+/// The doubted walks one evaluation makes, at most. A doubted walk may walk
+/// again a file an earlier one walked ([`doubted_duplicate`]), so files that
+/// import each other through undecided points could otherwise be walked a
+/// number of times exponential in their count. Real projects make a handful.
+const MAX_DOUBTED_WALKS: usize = 64;
+
 /// The whole evaluation from here is uncertain: any file may be imported.
 fn whole_evaluation_uncertain(kind: DirectoryBuildFile, state: &mut State<'_>) {
-    let root = kind.root();
+    everything_uncertain(&kind.project(), kind.root(), state);
+}
+
+/// [`whole_evaluation_uncertain`] for an import whose `Project` text is
+/// `project`, its products carrying `root`.
+fn everything_uncertain(project: &str, root: UnpinnedRoot, state: &mut State<'_>) {
     state.latch_walk_opaque(OpacityCause::Gate(root.clone()));
     let names: Vec<String> = state.lookup.canonical_keys().map(str::to_owned).collect();
     for name in names {
@@ -563,7 +585,7 @@ fn whole_evaluation_uncertain(kind: DirectoryBuildFile, state: &mut State<'_>) {
             unpin(&name, &root, state);
         }
     }
-    withdraw_facets(&kind.project(), root, true, state);
+    withdraw_facets(project, root, true, state);
 }
 
 /// Withdraw the captured item facets and the define set. Through
