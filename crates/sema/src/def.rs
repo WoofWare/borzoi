@@ -341,6 +341,7 @@ impl SpaceDefs {
     }
 
     /// Every def, mutably, in interning order.
+    #[cfg(feature = "test-support")]
     pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, Def> {
         self.defs.iter_mut()
     }
