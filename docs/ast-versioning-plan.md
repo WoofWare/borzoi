@@ -507,7 +507,8 @@ A switch that turns a feature on or off apart from the version does reach
 below the floor (`sdk_language::feature_switch_doubt`): `--strict-indentation-`
 restores the indentation rules of the versions below 8.0 at any version, and
 `--disableLanguageFeature` takes a feature away. A build that may pass one, in
-`$(OtherFlags)` (a switch, or a response file that may hold one), in an
+`$(OtherFlags)` (anything there but switches on a list known to be
+version-neutral, `sdk_language::only_version_neutral_switches`), in an
 `@(DisabledLanguageFeatures)` item defined outside the SDK, or through a
 carrier the walk does not hold exactly, keeps the whole ladder. Every switch
 each graded SDK's compiler lists, and every parameter its `CoreCompile` hands

@@ -41,7 +41,7 @@ use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::sdk_language::{
     COMPILER_ENVIRONMENT, COMPILER_SELECTORS, FEATURE_SWITCH_CARRIERS, FEATURE_SWITCH_ITEMS,
     FEATURE_SWITCHES, LangVersionReading, LangVersionSelection, ProjectCompiler, RefusalKind,
-    SdkLanguageFacts,
+    SdkLanguageFacts, VERSION_NEUTRAL_SWITCHES,
 };
 use borzoi::workspace::Workspace;
 use borzoi_cst::language_version::LanguageVersion;
@@ -1414,76 +1414,6 @@ fn the_compile_task_hands_the_compiler_no_environment_of_its_own() {
         }
     }
 }
-
-/// The `fsc` switches known not to turn a language feature on or off apart
-/// from the language version. `--langversion` names the version itself, which
-/// the compiler refuses below its floor whatever spells it. `--define` sets
-/// `#if` symbols, at every version alike.
-const VERSION_NEUTRAL_SWITCHES: &[&str] = &[
-    "allsigs",
-    "always-inline",
-    "baseaddress",
-    "checked",
-    "checknulls",
-    "checksumalgorithm",
-    "codepage",
-    "compilertool",
-    "compressmetadata",
-    "consolecolors",
-    "crossoptimize",
-    "debug",
-    "define",
-    "delaysign",
-    "deterministic",
-    "doc",
-    "embed",
-    "fullpaths",
-    "help",
-    "highentropyva",
-    "keyfile",
-    "langversion",
-    "lib",
-    "linkresource",
-    "mlcompatibility",
-    "nocopyfsharpcore",
-    "noframework",
-    "nointerfacedata",
-    "nologo",
-    "nooptimizationdata",
-    "nowarn",
-    "nowin32manifest",
-    "optimize",
-    "out",
-    "pathmap",
-    "pdb",
-    "platform",
-    "preferreduilang",
-    "publicsign",
-    "quotations-debug",
-    "realsig",
-    "reference",
-    "reflectionfree",
-    "refonly",
-    "refout",
-    "resource",
-    "sig",
-    "simpleresolution",
-    "sourcelink",
-    "standalone",
-    "staticlink",
-    "subsystemversion",
-    "tailcalls",
-    "target",
-    "targetprofile",
-    "utf8output",
-    "version",
-    "warn",
-    "warnaserror",
-    "warnon",
-    "win32icon",
-    "win32manifest",
-    "win32res",
-];
 
 /// The switch names `fsc --help` lists: each line's leading switch, its dashes
 /// and argument syntax dropped (`--strict-indentation[+|-]` is
