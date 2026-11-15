@@ -1126,33 +1126,36 @@ doubt, so those cases decline, and
 #### #677: the import points, as landed
 
 `evaluator::directory_build` holds the rule; its module docs are the
-specification. In short: a point is *decided* when the route of import gates
-to it, its condition and its `Project` read only certain inputs
-(`Trust::is_certain`, so `stale` counts); a decided point is an ordinary
-import. Otherwise the fallback runs, at the point or, for a file the walk
-never accounted for once it has passed hidden content, at the end of the
-property pass. With the file's identity certain it walks the file with every
-write unpinned and withdraws Compile, packages, defines, and the
-`ProjectReference` list only if the file declares references; a file with no
-element child is not walked. With the identity in doubt (a doubted path, or a
-point the walk never reached, whose path is whatever it is there) every bound
-property is unpinned, the walk latches opacity and every facet is withdrawn,
-unless no write touched the path and no `Directory.Build.*` file exists above
-the project. #781 and #811 are closed by it. Writes a stale group or
-`<Choose>` condition let run are stale too, which the import points need.
+specification, and `is_decided_point` is the one place the domain is stated.
+A point is *decided*, and is an ordinary import, only when the walk is not
+opaque there (content it could not see may have imported the file already,
+making this import a duplicate MSBuild skips), the route of import gates to
+it is decided, its condition is a conjunction whose conjuncts are each
+decided from certain inputs (`Trust::is_certain`, so `stale` counts) or
+exactly `Exists` of its own path, and the path is certain and names one
+literal file. Every other point, and a file the walk never accounted for
+once it has passed hidden content (settled at the end of the property pass),
+takes one fallback: every bound property is unpinned, the walk latches
+opacity, every facet is withdrawn, and the file is walked doubted. The
+exception is a point with nothing to import (no write touched the path, no
+`Directory.Build.*` file exists above the project) whose condition is false
+whenever its `Exists` is. #781 and #811 are closed by it. Writes a stale
+group or `<Choose>` condition let run are stale too, which the import points
+need.
 
 The cost, measured on the pinned F# corpus (SDK 11 rc, whose prerelease host
 band the walk does not model, #810, so every project is opaque after
-`Microsoft.NET.Sdk.ImportWorkloads.props`): 2 Compile, 43 `ProjectReference`
-and 55 `LangVersion` lines move from `match` to `decline`, none to anything
-else, and the msbuild corpus differential gained a trust check on
+`Microsoft.NET.Sdk.ImportWorkloads.props`): 65 manifest lines move; 2 Compile,
+49 `ProjectReference` and 55 `LangVersion` facets from `match` to `decline`,
+none to anything else, and 57 Compile declines report a different first
+cause. The msbuild corpus differential gained a trust check on
 `lang_version`. Single-framework projects lose the F# targets under that
-opacity, so the `Directory.Build.targets` point is never reached and its
-identity is in doubt (the whole evaluation is withdrawn); multi-framework
-ones reach it through `IsCrossTargetingBuild`, which reads `TargetFramework`
-under the same opacity, so the file is doubted and what it writes declines.
+opacity, so the `Directory.Build.targets` point is never reached and is
+settled at the end; multi-framework ones reach it through
+`IsCrossTargetingBuild`, which reads `TargetFramework` under the same
+opacity, so its route is undecided. Both withdraw the whole evaluation.
 Modelling prerelease bands (#810) removes the opacity and these declines with
-it. The LSP project corpus (SDK 10) moves no line.
+it.
 
 A fallback walk registers the imports it makes apart from the certain ones,
 so a later import of a file only a fallback walk imported is walked again,
