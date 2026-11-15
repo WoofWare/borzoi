@@ -76,7 +76,7 @@ use super::observed::{self, EntryKind, Observer, ReadCounts, ReadSet};
 use super::properties::escaping::Escaped;
 use super::properties::trust::{
     OpacityCause, PropertyProvenance, RefusedOutcome, ResolvedProvenance, SdkPackagePropertyTaint,
-    TaintOutcome, Trust, UndefinedBecause, UnpinnedOutcome, UnpinnedRoot,
+    StaleOutcome, TaintOutcome, Trust, UndefinedBecause, UnpinnedOutcome, UnpinnedRoot,
 };
 use super::properties::{self, Issue, PropertyMap, Provenanced};
 use super::{
@@ -2407,21 +2407,23 @@ impl<'r> State<'r> {
     /// So the question is asked once, of the final value, at the moment the
     /// splice consumes it.
     fn gate_value_is_exact(&self, name: &str) -> bool {
-        // Deliberately the **name-keyed** channels only, and not
-        // [`Self::undefined_read_is_exact`], which folds in `walk_opaque`.
-        // Opacity is latched by ordinary SDK structure — an unfollowable
-        // sub-import, a `<Choose>` the chain gates on a property we don't
-        // model — and routing it here turned every such project's Compile set
-        // uncertain, which is exactly the wholesale decline the
-        // `msbuild-trust-audit` skill warns the generic seam causes. Six
-        // existing tests assert that SDK structural uncertainty must *not*
-        // reintroduce Compile uncertainty, and they were right to.
+        // The value's own trust, every channel — and deliberately not
+        // [`Self::undefined_read_is_exact`], which folds in `walk_opaque`
+        // wholesale. Opacity is latched by ordinary SDK structure — an
+        // unfollowable sub-import, a `<Choose>` the chain gates on a property
+        // we don't model — and routing the walk-wide flag here turned every
+        // such project's Compile set uncertain (measured: five committed
+        // Compile sets on the F# corpus, five tests).
         //
-        // What is left is precise: the three channels say a write *of this
-        // name* was undecided, refused, or rode SDK-tainted input. That is the
-        // question the splice actually needs answered, and it holds whether or
-        // not the name currently has a value — an undecided write that did not
-        // happen is recorded the same way as one that did.
+        // What is asked instead is precise: a write *of this name* was
+        // undecided, refused, or rode SDK-tainted input, or the value is
+        // *stale* — bound before content the walk could not see, or computed
+        // from such a value ([`Trust::stale`], #614). That is the question the
+        // splice needs answered, and it holds whether or not the name
+        // currently has a value — an undecided write that did not happen is
+        // recorded the same way as one that did. Staleness costs nothing
+        // measurable: on the real SDK chain the gate and path are bound by the
+        // SDK's own default-fill after any opacity, so they are fresh.
         self.trust_of(name).is_certain()
     }
 
@@ -2477,9 +2479,11 @@ impl<'r> State<'r> {
         // nor reliably absent, so no *later* undefined read can claim
         // exactness. Same conclusion an ordinary `<Import>`'s undecided gate
         // reaches, reached at the same point in the walk.
-        let cause = match self.trust_of(path_name).unpinned() {
-            Some(root) => OpacityCause::Gate(root.clone()),
-            None => OpacityCause::Unentered(format!(
+        let trust = self.trust_of(path_name);
+        let cause = match (trust.unpinned(), trust.stale()) {
+            (Some(root), _) => OpacityCause::Gate(root.clone()),
+            (None, Some(stale)) => (**stale).clone(),
+            (None, None) => OpacityCause::Unentered(format!(
                 "the Directory.Build import that `$({path_name})` governs"
             )),
         };
@@ -2651,6 +2655,9 @@ impl<'r> State<'r> {
                     // being seeded here. A refusal we recorded describes a
                     // write no real evaluation performs.
                     refused: RefusedOutcome::Clear,
+                    // No file can rewrite a reserved name, so it never goes
+                    // stale; cleared with the rest for the same reason.
+                    stale: StaleOutcome::Clear,
                 },
             );
             self.reserved.insert(lower.clone());
@@ -3426,7 +3433,14 @@ impl<'r> State<'r> {
     }
 
     /// Latch [`Self::walk_opaque`], keeping the first cause.
+    ///
+    /// Every latch, not only the first, also marks each value bound now stale
+    /// ([`Trust::stale`]): the content just passed may have rewritten it. A
+    /// reserved name or a caller global cannot be rewritten by any file, so
+    /// neither goes stale.
     fn latch_walk_opaque(&mut self, cause: OpacityCause) {
+        self.lookup
+            .go_stale(&std::sync::Arc::new(cause.clone()), &self.protected);
         if self.walk_opaque.is_none() {
             self.walk_opaque = Some(cause);
         }
@@ -3565,11 +3579,10 @@ impl<'r> State<'r> {
         // condition reads nothing worse (a deliberate trade-off — see
         // `gate_value_is_exact`), but it cannot be the operand that settles an
         // unknown one: that would decide a branch the base rule leaves open.
-        // Telling a rewritable value from a current one needs values to carry
-        // their own staleness (`docs/msbuild-value-carried-provenance-plan.md`,
-        // P3); until then, nothing settles an unknown operand after opacity.
-        // Measured on the corpus, this keeps every decline the decision
-        // recovers.
+        // Telling a rewritable value from a current one is what
+        // [`Trust::stale`] records; this decision does not consume it (#792),
+        // so nothing settles an unknown operand after opacity. Measured on the
+        // corpus, this keeps every decline the decision recovers.
         if self.walk_opaque.is_some() {
             return false;
         }
@@ -3797,13 +3810,13 @@ impl<'r> State<'r> {
         if !cfg!(debug_assertions) || had_unsupported {
             return;
         }
-        let scanned_sdk_package = self.trust_for_raw(raw).sdk_package().is_some();
+        let scanned = self.trust_for_raw(raw);
         debug_assert!(
             (carried.unpinned().is_none() || unpinned_root.is_some())
-                && (carried.sdk_package().is_none() || scanned_sdk_package),
+                && (carried.sdk_package().is_none() || scanned.sdk_package().is_some())
+                && (carried.stale().is_none() || scanned.stale().is_some()),
             "the reference scan of {raw:?} holds less doubt than the expansion's reads: \
-             carried {carried:?}, scanned root {unpinned_root:?}, scanned SDK taint \
-             {scanned_sdk_package}"
+             carried {carried:?}, scanned root {unpinned_root:?}, scanned {scanned:?}"
         );
     }
 
@@ -4636,6 +4649,7 @@ fn walk_property_child_inner(
                     // The write may or may not have happened; either way we
                     // refused no value of our own.
                     refused: RefusedOutcome::Keep,
+                    stale: StaleOutcome::Keep,
                 },
             );
             return;
@@ -4653,6 +4667,7 @@ fn walk_property_child_inner(
                     taint: TaintOutcome::Set(node.range()),
                     unpinned,
                     refused: RefusedOutcome::Keep,
+                    stale: StaleOutcome::Keep,
                 },
             );
             emit_unsupported_condition(node, state);
@@ -4696,6 +4711,7 @@ fn walk_property_child_inner(
                 // same way — the mark there answers a different question, about
                 // values that may rest on content the walk hid.
                 refused: RefusedOutcome::Keep,
+                stale: StaleOutcome::Keep,
             },
         );
         return;
@@ -4744,6 +4760,7 @@ fn walk_property_child_inner(
                 // The real build stores the value we refused to compute, so
                 // later reads that rest on this name are not exact (C.2b).
                 refused: RefusedOutcome::Set,
+                stale: StaleOutcome::Keep,
             },
         );
         return;
@@ -4779,6 +4796,7 @@ fn walk_property_child_inner(
                 // The real build stores the value we refused to compute, so
                 // later reads that rest on this name are not exact (C.2b).
                 refused: RefusedOutcome::Set,
+                stale: StaleOutcome::Keep,
             },
         );
         return;
@@ -4806,6 +4824,7 @@ fn walk_property_child_inner(
                 // The real build stores the value we refused to compute, so
                 // later reads that rest on this name are not exact (C.2b).
                 refused: RefusedOutcome::Set,
+                stale: StaleOutcome::Keep,
             },
         );
         return;
@@ -4830,6 +4849,10 @@ fn walk_property_child_inner(
         None
     };
     let unpinned_by = expansion.unpinned_root.clone().or(gate_unpinned_root);
+    let stale_by = expansion.value.trust().stale().cloned().or_else(|| {
+        attribute(node, "Condition")
+            .and_then(|condition| state.trust_for_raw(&condition).stale().cloned())
+    });
     // Unlike the unevaluable-value paths above, a cleanly-expanded value
     // under a pinned gate is exact even inside an SDK file: the property
     // pass computes the same final value MSBuild would, so plain SDK
@@ -4843,20 +4866,18 @@ fn walk_property_child_inner(
             preserve_existing_sdk_taint,
         ),
         unpinned: UnpinnedOutcome::after_write(unpinned_by, write_condition_maybe_wrong),
-        // A clean value under a clean gate re-pins the *unpinned* channel, and
-        // by the same "last write wins on both sides" argument it looks like it
-        // should discharge a prior refusal too. It must not, and the reason is
-        // about the reader rather than the write:
-        // [`State::gate_value_is_exact`] consumes this mark *mid-walk* and
-        // deliberately tolerates SDK-subtree opacity (folding `walk_opaque`
-        // into it declines every real SDK project — measured, six tests).
-        // Under opacity a cleanly-computed value can rest on a property hidden
-        // content redefined, and opacity can latch either side of this write,
-        // so no write-time check can establish that it did not. A discharge is
-        // therefore a write-time answer to a read-time question. It becomes
-        // available when a value carries its own staleness instead of the walk
-        // carrying one flag for all of them — the plan's P3.
+        // A clean value under a clean gate re-pins the *unpinned* channel but
+        // leaves a prior refusal standing. Its reader,
+        // [`State::gate_value_is_exact`], consumes the mark mid-walk, so a
+        // discharge here is sound only if that reader sees every way the new
+        // value may rest on content the walk hid — which is what the stale
+        // channel below records. Discharging on that basis is a separate
+        // change, not made here.
         refused: RefusedOutcome::Keep,
+        // A value computed from a stale one is stale; so is one whose own
+        // condition read one (the scan, since a condition short-circuits). The
+        // splice is the reader ([`State::gate_value_is_exact`]).
+        stale: StaleOutcome::after_write(stale_by, write_condition_maybe_wrong),
     };
     let (value, carried) = expansion.value.into_parts();
     state.write_property(&name, value, provenance);
@@ -5604,6 +5625,7 @@ fn mark_property_group_children_provenance(
                 // A write we skipped rather than refused: we computed no value
                 // here, but neither did we drop one we had.
                 refused: RefusedOutcome::Keep,
+                stale: StaleOutcome::Keep,
             },
         );
     }

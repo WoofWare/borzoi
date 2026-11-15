@@ -91,10 +91,13 @@ mentions: `State::condition_trust` / `condition_is_decided_exactly` run
 `'$(Off)' == 'true' And '$(Untrusted)' == 'x'` is exactly false when `Off` is
 trusted — but only while the walk has hidden nothing (`walk_opaque` is
 `None`). After an undecided import, any held value may have been rewritten
-unseen (directly, by a copy of a stale value, ...), and telling a current one
-from a rewritable one needs per-value staleness (provenance plan P3); until
-then nothing settles an unknown operand there. Codex took four rounds to walk
-that boundary, so don't reopen it with a clock or a per-name timestamp. On a
+unseen (directly, by a copy of a stale value, ...). The value records that
+itself: each opacity latch marks every bound value stale (`Trust::stale`;
+reserved names and caller globals excepted), and a value computed from a stale
+one inherits it. This decision does not consume it (#792), so nothing settles
+an unknown operand after opacity. Don't reopen that boundary with a clock or a
+per-name timestamp: codex took four rounds to walk it, and if this decision
+ever consumes staleness, the per-value mark is where it reads it. On a
 real SDK an untrusted `TargetFramework` therefore still taints `LangVersion`. Ask a
 condition's trust through those, never through `trust_for_raw` /
 `unpinned_root_for_raw` on its text — that reintroduces the over-taint
@@ -114,6 +117,16 @@ and "nowhere" is the bug. `Trust::CERTAIN` is sealed to `crate::properties` —
 if you find yourself wanting it elsewhere, you are about to fabricate
 certainty. The item pass still judges its values by `Expansion`'s scan-based
 flags (entries 6 and 7 above); its `ignoring_trust` sites are P4's worklist.
+
+**Staleness has one reader.** `Trust::stale` is consumed only where a value
+decides a `Directory.Build.*` splice (`gate_value_is_exact`, through
+`is_certain`), which is what closed #614. `reference_is_untrusted` and
+`untrusted_cause` leave it out on purpose: most values on a real SDK chain are
+bound before some opacity, so the generic seam would decline wholesale. Every
+other reader trusting a stale value is the open trade-off #792, which the
+metamorphic gate's opacity tier counts. Adding a reader of it is a measured
+decision (the plan's "#614: what each rule costs" is the template), not a
+tidy-up.
 
 ## 2. Never gate a fold on the generic provenance seam
 

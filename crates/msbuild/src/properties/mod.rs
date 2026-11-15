@@ -86,6 +86,12 @@ struct Entry {
 #[derive(Debug, Default, Clone)]
 pub struct PropertyMap {
     inner: HashMap<String, Entry>,
+    /// Lowercase names bound, or given a verdict, since the last
+    /// [`Self::go_stale`]: the only entries that can be bound and fresh when
+    /// the next one runs, since that one left every bound entry stale. Keeps
+    /// each latch's work to what changed since the last, rather than the
+    /// whole table.
+    fresh: Vec<String>,
 }
 
 /// A value read from a [`PropertyMap`], with the trust its entry carries. The
@@ -145,6 +151,7 @@ impl PropertyMap {
     pub fn new() -> Self {
         Self {
             inner: HashMap::new(),
+            fresh: Vec::new(),
         }
     }
 
@@ -183,6 +190,7 @@ impl PropertyMap {
     pub fn insert_escaped(&mut self, key: impl Into<String>, value: Escaped) {
         let key = key.into();
         let lower = key.to_ascii_lowercase();
+        self.fresh.push(lower.clone());
         match self.inner.entry(lower) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
                 let entry = slot.get_mut();
@@ -219,6 +227,7 @@ impl PropertyMap {
     /// [`Self::unbind`].
     pub(crate) fn apply_provenance(&mut self, key: &str, provenance: ResolvedProvenance) {
         let lower = key.to_ascii_lowercase();
+        self.fresh.push(lower.clone());
         match self.inner.entry(lower) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
                 let entry = slot.get_mut();
@@ -293,6 +302,29 @@ impl PropertyMap {
         self.inner
             .get(&key.to_ascii_lowercase())
             .map_or(Trust::certain_ref(), |entry| &entry.trust)
+    }
+
+    /// Mark every bound name not in `protected` (lowercase) stale under
+    /// `cause`: the walk has passed content it cannot see, which may have
+    /// rewritten any value it holds — any but a reserved name or a caller
+    /// global, which no file can write.
+    ///
+    /// Visits only [`Self::fresh`]: every other bound entry was left stale by
+    /// the previous call, and only a binding or a verdict can make one fresh
+    /// again, each of which records its name there.
+    pub(crate) fn go_stale(
+        &mut self,
+        cause: &trust::StaleCause,
+        protected: &std::collections::HashSet<String>,
+    ) {
+        for lower in std::mem::take(&mut self.fresh) {
+            if let Some(entry) = self.inner.get_mut(&lower)
+                && entry.value.is_some()
+                && !protected.contains(&lower)
+            {
+                entry.trust.go_stale(cause);
+            }
+        }
     }
 
     /// Every name whose trust is not certain, lowercase, with that trust.
@@ -1259,6 +1291,83 @@ fn normalize_version_parts(mut parts: Vec<String>, min_parts: usize) -> String {
         parts.push("0".to_string());
     }
     parts.join(".")
+}
+
+#[cfg(test)]
+mod stale_tests {
+    use super::trust::OpacityCause;
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    #[derive(Debug, Clone)]
+    enum Step {
+        Seed(u8),
+        CleanWrite(u8),
+        Unbind(u8),
+        Latch,
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            (0u8..6).prop_map(Step::Seed),
+            (0u8..6).prop_map(Step::CleanWrite),
+            (0u8..6).prop_map(Step::Unbind),
+            Just(Step::Latch),
+        ]
+    }
+
+    proptest! {
+        /// The incremental latch marks exactly what a latch over the whole
+        /// table would: after any interleaving of bindings, unbindings and
+        /// latches, every bound, unprotected name bound before the last latch
+        /// is stale, and the protected one never is.
+        #[test]
+        fn each_latch_leaves_every_bound_unprotected_entry_stale(
+            steps in proptest::collection::vec(step(), 0..40),
+        ) {
+            let protected: HashSet<String> = ["p0".to_string()].into_iter().collect();
+            let cause = Arc::new(OpacityCause::Unentered("hidden".into()));
+            let mut map = PropertyMap::new();
+            // The reference: which names a whole-table latch would have marked.
+            let mut stale: HashSet<String> = HashSet::new();
+            for step in steps {
+                match step {
+                    Step::Seed(n) => map.insert(format!("P{n}"), "v"),
+                    Step::CleanWrite(n) => {
+                        let name = format!("P{n}");
+                        map.write(
+                            name.clone(),
+                            escaping::Escaped::from_xml("w".to_string()),
+                            super::trust::ResolvedProvenance {
+                                taint: super::trust::TaintOutcome::Clear,
+                                unpinned: super::trust::UnpinnedOutcome::Clear,
+                                refused: super::trust::RefusedOutcome::Clear,
+                                stale: super::trust::StaleOutcome::Clear,
+                            },
+                        );
+                        stale.remove(&name.to_ascii_lowercase());
+                    }
+                    Step::Unbind(n) => map.unbind(&format!("P{n}")),
+                    Step::Latch => {
+                        map.go_stale(&cause, &protected);
+                        for key in map.canonical_keys() {
+                            let lower = key.to_ascii_lowercase();
+                            if !protected.contains(&lower) {
+                                stale.insert(lower);
+                            }
+                        }
+                    }
+                }
+                for n in 0..6u8 {
+                    let name = format!("P{n}");
+                    let expected = stale.contains(&name.to_ascii_lowercase());
+                    prop_assert_eq!(map.trust(&name).stale().is_some(), expected, "{}", name);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

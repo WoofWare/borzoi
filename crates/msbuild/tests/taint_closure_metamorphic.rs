@@ -37,7 +37,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use borzoi_msbuild::observed::host_fs;
-use borzoi_msbuild::{ItemMetadataValue, ParsedProject, parse_fsproj};
+use borzoi_msbuild::{
+    ItemMetadataValue, ParsedProject, SdkPaths, SdkResolution, SdkResolveError, parse_fsproj,
+};
 use common::{
     CONTROLLED_PROPERTY_NAMES, SplitMix64, gen_bool_expr, gen_expand_value, gen_grammar_value,
     parse_fsproj_with_imports, soak_parameters,
@@ -57,6 +59,9 @@ const REPLACEMENTS: &[&str] = &["", "a", "true", "false", "net8.0", "1.2.3", "De
 /// generated document: the fixture's own write, and the path the splice
 /// records.
 const SPLICE_WRITTEN: &[&str] = &["FromDirBuild", "DirectoryBuildTargetsPath"];
+
+/// The Compile item the `Directory.Build.targets` fixture contributes.
+const SPLICED_FILE: &str = "FromDirBuild.fs";
 
 /// The two inputs the `Directory.Build.targets` splice decides on.
 const SPLICE_GATES: [&str; 2] = ["ImportDirectoryBuildTargets", "DirectoryBuildTargetsPath"];
@@ -400,10 +405,15 @@ struct Census {
     paid: BTreeMap<&'static str, usize>,
     violations: Vec<String>,
     violation_count: usize,
+    /// Per fact kind: the violations found.
+    violated: BTreeMap<&'static str, usize>,
     /// Cases set aside as the known refused-write defect (see [`check`]).
     refused_absent: usize,
     /// Cases set aside as the known splice-value defect (see [`check`]).
     spliced_values: usize,
+    /// Cases set aside as a stale value read outside the splice (see
+    /// [`check`]).
+    stale_reads: usize,
     /// Certain facts some world declined while the rest agreed.
     world_declined: usize,
 }
@@ -411,17 +421,32 @@ struct Census {
 impl Census {
     fn print(&self, label: &str) {
         println!(
-            "{label}: {} cases, {} refused-write absences and {} splice values set aside, \
-             {} commits a world declined",
-            self.cases, self.refused_absent, self.spliced_values, self.world_declined
+            "{label}: {} cases, {} refused-write absences, {} splice values and {} stale reads \
+             set aside, {} commits a world declined",
+            self.cases,
+            self.refused_absent,
+            self.spliced_values,
+            self.stale_reads,
+            self.world_declined
         );
         for (kind, owed) in &self.owed {
             println!(
-                "  {kind}: {owed} owed declines, {} paid",
-                self.paid.get(kind).copied().unwrap_or(0)
+                "  {kind}: {owed} owed declines, {} paid, {} violations",
+                self.paid.get(kind).copied().unwrap_or(0),
+                self.violated.get(kind).copied().unwrap_or(0)
             );
         }
     }
+}
+
+/// The construct a case made undecidable.
+#[derive(Clone, Copy)]
+enum Undecided<'a> {
+    /// A property write, of this name.
+    Write(&'a str),
+    /// An import in the SDK, of content that may redefine what was written
+    /// before it.
+    Import,
 }
 
 /// Check one undecided document against its worlds, recording into `census`.
@@ -438,7 +463,7 @@ fn check(
     undecided: &Facts,
     worlds: &[(String, Facts)],
     absent_but_written: &[&str],
-    wrapped: &str,
+    undecided_construct: Undecided<'_>,
     label: &str,
 ) {
     census.cases += 1;
@@ -446,7 +471,10 @@ fn check(
         // The floor counts only the derived complement: the wrapped write's
         // own name moves by construction, so counting it would floor the
         // swept input rather than the dependence on it.
-        let derived = !matches!(fact, Fact::Property(name) if name.eq_ignore_ascii_case(wrapped));
+        let derived = !matches!(
+            (fact, undecided_construct),
+            (Fact::Property(name), Undecided::Write(wrapped)) if name.eq_ignore_ascii_case(wrapped)
+        );
         let values: Vec<&Option<Vec<String>>> = worlds.iter().map(|(_, w)| &w[fact]).collect();
         let world_committed: Vec<&Vec<String>> = values.iter().filter_map(|v| v.as_ref()).collect();
         let owed = world_committed.len() == values.len()
@@ -509,8 +537,35 @@ fn check(
             census.spliced_values += 1;
             continue;
         }
+        // Under opacity, every reader but the `Directory.Build.*` splice
+        // trusts a value it holds, though hidden content may have rewritten
+        // it: the stale channel is consumed by the splice alone, a measured
+        // trade-off (`docs/msbuild-value-carried-provenance-plan.md`, "#614:
+        // what each rule costs"), tracked as #792. So a stale read
+        // reaching any other fact is counted, not failed — and a Compile set
+        // that differs in whether the spliced file joined is the splice's own
+        // decision, which must hold.
+        let a_stale_read_outside_the_splice = matches!(undecided_construct, Undecided::Import)
+            && match fact {
+                // Every world that commits must agree with the claim on
+                // whether the spliced file joined, not only the first that
+                // disagrees on something else.
+                Fact::CompileItems => {
+                    let spliced = |set: &[String]| set.iter().any(|s| s.contains(SPLICED_FILE));
+                    !world_committed.is_empty()
+                        && world_committed
+                            .iter()
+                            .all(|world| spliced(world) == spliced(claim))
+                }
+                _ => true,
+            };
+        if a_stale_read_outside_the_splice {
+            census.stale_reads += 1;
+            continue;
+        }
         census.violation_count += 1;
-        if census.violations.len() < 8 {
+        *census.violated.entry(fact_kind(fact)).or_default() += 1;
+        if census.violated[fact_kind(fact)] <= 2 {
             let why = match disagreeing {
                 Some((world, published)) => format!("the world `{world}` publishes {published:?}"),
                 None => "no world publishes it certain".to_string(),
@@ -571,7 +626,7 @@ fn sweep(
                 &undecided,
                 &world_facts,
                 &absent_but_written,
-                doc.writes[target].name,
+                Undecided::Write(doc.writes[target].name),
                 &format!("{label} {wrap:?}"),
             );
         }
@@ -603,7 +658,9 @@ impl DirectoryBuildFixture {
         let root = host_fs::canonicalize(dir.path()).unwrap();
         std::fs::write(
             root.join("Directory.Build.targets"),
-            r#"<Project><PropertyGroup><FromDirBuild>set</FromDirBuild></PropertyGroup><ItemGroup><Compile Include="FromDirBuild.fs" /></ItemGroup></Project>"#,
+            format!(
+                r#"<Project><PropertyGroup><FromDirBuild>set</FromDirBuild></PropertyGroup><ItemGroup><Compile Include="{SPLICED_FILE}" /></ItemGroup></Project>"#
+            ),
         )
         .unwrap();
         Self {
@@ -623,6 +680,237 @@ impl DirectoryBuildFixture {
         )
         .expect("generated documents are well-formed")
     }
+}
+
+/// The SDK the opacity tier's documents name.
+const OPACITY_SDK: &str = "OpacitySdk";
+
+/// A document under an SDK whose `Sdk.props` writes some properties and then
+/// imports a file behind a gate the walker cannot decide — content the walk
+/// cannot see, which may redefine what was written before it. The body reads
+/// those properties, including into the `Directory.Build.targets` gate and
+/// path, after the opacity.
+///
+/// This is the shape of #614, generated rather than witnessed: a value bound
+/// before hidden content and read after it may be stale.
+struct OpacityDoc {
+    /// Written in `Sdk.props` before the undecided import.
+    before: Vec<Write>,
+    /// Where an earlier undecided import of an empty file sits among
+    /// `before`, if anywhere: a second opacity, behaviourally inert (the file
+    /// writes nothing, so every world imports it unconditionally) but one the
+    /// walk latches. A value bound between the two latches is stale only if
+    /// the *second* latch marks it too.
+    earlier_opacity: Option<usize>,
+    /// Written by the hidden file, when it is imported.
+    hidden: Vec<Write>,
+    body: Doc,
+}
+
+fn gen_opacity_doc(rng: &mut SplitMix64, names: &[&'static str]) -> OpacityDoc {
+    const LITERALS: &[&str] = &[
+        "", "true", "false", "true", "false", "net8.0", "Debug", "1.2.3",
+    ];
+    let literal_write = |rng: &mut SplitMix64, name: &'static str| Write {
+        name,
+        group_condition: None,
+        condition: None,
+        body: (*rng.pick(LITERALS)).to_string(),
+    };
+    let mut body = gen_doc(rng, names);
+    let before: Vec<Write> = (0..1 + rng.below(4))
+        .map(|_| {
+            let name = *rng.pick(names);
+            literal_write(rng, name)
+        })
+        .collect();
+    let hidden = (0..1 + rng.below(3))
+        .map(|_| {
+            // Mostly a redefinition of something written before the import:
+            // that is the stale value the shape needs.
+            let name = if rng.below(4) == 0 {
+                *rng.pick(names)
+            } else {
+                rng.pick(&before).name
+            };
+            literal_write(rng, name)
+        })
+        .collect();
+    // Most cases copy a value the SDK wrote before the opacity into the
+    // splice's gate or path, as #614's witness does; the rest leave the
+    // splice to whatever the generated body reads.
+    if rng.below(10) < 7 {
+        let gate = if rng.below(5) == 0 {
+            SPLICE_GATES[1]
+        } else {
+            SPLICE_GATES[0]
+        };
+        let source = rng.pick(&before).name;
+        let at = rng.below(body.writes.len() + 1);
+        body.writes.insert(
+            at,
+            Write {
+                name: gate,
+                group_condition: None,
+                condition: None,
+                body: format!("$({source})"),
+            },
+        );
+    }
+    let earlier_opacity = (rng.below(2) == 0).then(|| rng.below(before.len() + 1));
+    OpacityDoc {
+        before,
+        earlier_opacity,
+        hidden,
+        body,
+    }
+}
+
+fn render_writes(writes: &[Write]) -> String {
+    let mut out = String::from("  <PropertyGroup>\n");
+    for write in writes {
+        out.push_str(&format!(
+            "    <{name}>{body}</{name}>\n",
+            name = write.name,
+            body = xml_escape(&write.body)
+        ));
+    }
+    out.push_str("  </PropertyGroup>\n");
+    out
+}
+
+/// The three files of one opacity case under `variant` (`Taken`, `Omitted`,
+/// or `Undecided`, whose wrap is ignored): `Sdk.props`, the hidden file, and
+/// the project body.
+fn render_opacity(doc: &OpacityDoc, variant: &Variant) -> (String, String, String) {
+    let import = match variant {
+        Variant::Omitted => String::new(),
+        Variant::Undecided(_) => format!(
+            "  <Import Project=\"Hidden.props\" Condition=\"{}\" />\n",
+            xml_escape(UNDECIDABLE)
+        ),
+        _ => "  <Import Project=\"Hidden.props\" />\n".to_string(),
+    };
+    let (early, late) = doc
+        .before
+        .split_at(doc.earlier_opacity.unwrap_or(0).min(doc.before.len()));
+    let earlier = match (doc.earlier_opacity, variant) {
+        (None, _) => String::new(),
+        (Some(_), Variant::Undecided(_)) => format!(
+            "  <Import Project=\"Empty.props\" Condition=\"{}\" />\n",
+            xml_escape(UNDECIDABLE)
+        ),
+        (Some(_), _) => "  <Import Project=\"Empty.props\" />\n".to_string(),
+    };
+    let sdk_props = format!(
+        "<Project>\n{}{earlier}{}{import}</Project>\n",
+        render_writes(early),
+        render_writes(late)
+    );
+    let hidden = format!("<Project>\n{}</Project>\n", render_writes(&doc.hidden));
+    let body = render(&doc.body, usize::MAX, &Variant::Taken).replacen(
+        "<Project>",
+        &format!("<Project Sdk=\"{OPACITY_SDK}\">"),
+        1,
+    );
+    (sdk_props, hidden, body)
+}
+
+/// [`DirectoryBuildFixture`] with an SDK beside it whose files each case
+/// writes.
+struct OpacityFixture {
+    inner: DirectoryBuildFixture,
+    sdk: PathBuf,
+}
+
+impl OpacityFixture {
+    fn new() -> Self {
+        let inner = DirectoryBuildFixture::new();
+        let sdk = inner
+            .project
+            .parent()
+            .unwrap()
+            .join("sdks")
+            .join(OPACITY_SDK);
+        std::fs::create_dir_all(&sdk).unwrap();
+        std::fs::write(sdk.join("Sdk.targets"), "<Project />").unwrap();
+        std::fs::write(sdk.join("Empty.props"), "<Project />").unwrap();
+        Self { inner, sdk }
+    }
+
+    fn evaluate(&self, (sdk_props, hidden, body): &(String, String, String)) -> ParsedProject {
+        std::fs::write(self.sdk.join("Sdk.props"), sdk_props).unwrap();
+        std::fs::write(self.sdk.join("Hidden.props"), hidden).unwrap();
+        let sdk = self.sdk.clone();
+        let resolver = move |name: &str, _: &borzoi_msbuild::observed::Observer| {
+            if name.eq_ignore_ascii_case(OPACITY_SDK) {
+                Ok(SdkResolution::Single(SdkPaths {
+                    root: sdk.clone(),
+                    props: sdk.join("Sdk.props"),
+                    targets: sdk.join("Sdk.targets"),
+                }))
+            } else {
+                Err(SdkResolveError::NotFound)
+            }
+        };
+        parse_fsproj_with_imports(
+            body,
+            &self.inner.project,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some(&resolver),
+            None,
+        )
+        .expect("generated documents are well-formed")
+    }
+}
+
+fn sweep_opacity(seed: u64, cases: usize, names: &[&'static str]) -> Census {
+    let fixture = OpacityFixture::new();
+    let mut rng = SplitMix64(seed);
+    let mut census = Census::default();
+    for _ in 0..cases {
+        let doc = gen_opacity_doc(&mut rng, names);
+        let world_facts: Vec<(String, Facts)> = [Variant::Taken, Variant::Omitted]
+            .into_iter()
+            .map(|variant| {
+                let files = render_opacity(&doc, &variant);
+                (
+                    format!("{variant:?}"),
+                    facts(&fixture.evaluate(&files), names),
+                )
+            })
+            .collect();
+        let files = render_opacity(&doc, &Variant::Undecided(Wrap::ElementCondition));
+        let project = fixture.evaluate(&files);
+        let undecided = facts(&project, names);
+        let absent_but_written: Vec<&str> = doc
+            .body
+            .writes
+            .iter()
+            .map(|w| w.name)
+            .filter(|name| {
+                !project
+                    .properties
+                    .keys()
+                    .any(|k| k.eq_ignore_ascii_case(name))
+            })
+            .collect();
+        let text = format!(
+            "--- Sdk.props ---\n{}--- Hidden.props ---\n{}--- body ---\n{}",
+            files.0, files.1, files.2
+        );
+        check(
+            &mut census,
+            &text,
+            &undecided,
+            &world_facts,
+            &absent_but_written,
+            Undecided::Import,
+            "opacity",
+        );
+    }
+    census
 }
 
 fn assert_sound(census: &Census, floors: &[(&str, usize)]) {
@@ -697,6 +985,20 @@ fn an_undecided_directory_build_gate_write_claims_no_more_than_its_worlds_agree_
         ],
     );
     assert_set_asides(&census, 240, 163);
+}
+
+/// The opacity tier: a property written in the SDK before content the walk
+/// cannot see, read by the body after it.
+#[test]
+fn a_value_written_before_hidden_content_claims_no_more_than_its_worlds_agree_on() {
+    let census = sweep_opacity(0x0bac_17e5, 800, &written_names(true));
+    census.print("with an undecided SDK import");
+    assert_sound(&census, &[("Compile items", 30)]);
+    assert_set_asides(&census, 7, 177);
+    assert_eq!(
+        census.stale_reads, 1129,
+        "the #792 set-aside count (a stale value read outside the splice) moved"
+    );
 }
 
 /// The fresh-seed twin of the two sweeps above. Seed 1 at 4 000 cases finds
