@@ -1178,9 +1178,8 @@ corpus project is reported, so Stage 3b's validation cost is known in advance.
   walker's `State` and records through `Cell`/`RefCell`: the evaluator is
   single-threaded, and the observer is hidden from everything but the one
   evaluation. `parse_fsproj_with_imports` creates it, so the read set
-  covers every pass `walk_with_imports` makes (the deferred
-  `Directory.Build.props` pass and the `TargetFramework` carve-out
-  included), and `ParsedProject` gains `read_set` and `read_counts`.
+  covers the whole walk, and `ParsedProject` gains `read_set` and
+  `read_counts`.
   `parse_fsproj` touches no file; its walker asserts that its observer saw
   nothing.
 - **The caller's resolvers observe too.** A resolver that reads the disk

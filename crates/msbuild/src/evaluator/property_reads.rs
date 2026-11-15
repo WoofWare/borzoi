@@ -65,9 +65,7 @@ pub enum InexactUnset {
     Toolset,
     /// The walk passed content it could not see, which may define it.
     Opaque(UntrustedCause),
-    /// A name the walk keeps inexact for its own consumers (`DefineConstants`,
-    /// and `TargetFramework` in a build that may be a cross-targeting
-    /// dispatch).
+    /// A name the walk keeps inexact for its own consumers (`DefineConstants`).
     ConsumerCarveOut,
 }
 

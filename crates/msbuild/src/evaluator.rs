@@ -53,7 +53,6 @@
 //! body, so properties they define become visible to substitutions
 //! further down the project file.
 
-use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -192,23 +191,6 @@ pub fn walk(
 /// [`DiagnosticKind::SdkNotFound`]; when `sdk_resolver` is `None`, the SDK
 /// attribute surfaces as [`DiagnosticKind::SdkResolverAbsent`], as in the
 /// pure walker. Either way the body is still walked.
-///
-/// **`TargetFramework` reads (two-pass).** An undefined `$(TargetFramework)`
-/// read is exactly `""` under the caller's globals whenever every other C.2b
-/// condition holds (see [`State::undefined_read_is_exact`]), but whether that
-/// fact serves the consumer depends on what kind of build the evaluation is.
-/// In a cross-targeting project (`TargetFrameworks` set, `TargetFramework`
-/// left to the inner builds) the outer evaluation is the dispatch build, and
-/// every `$(TargetFramework)`-reading decision in it differs from the inner
-/// builds a consumer actually cares about; there the read stays inexact, which
-/// is the conservative signal [`TargetFrameworkReads::CarvedOut`] keeps. A
-/// project that writes its own `TargetFramework` *is* the build, and the reads
-/// the SDK's props make before the body runs (the Web SDK's
-/// `GetTargetPlatformIdentifier($(TargetFramework))` gate) are exactly the
-/// `""` MSBuild reads there. So the walk runs with the reads exact first, and
-/// keeps that result when it never leaned on one or when it ends with a
-/// trusted, non-empty, body-written `TargetFramework`; otherwise it walks again
-/// with the carve-out.
 #[allow(clippy::too_many_arguments)]
 pub fn walk_with_imports<'r>(
     doc: &Document<'_>,
@@ -223,118 +205,6 @@ pub fn walk_with_imports<'r>(
     observer: &'r Observer,
     #[cfg(any(test, feature = "test-support"))] probe: Option<&ReadProbe>,
 ) -> Walked {
-    let walk = |target_framework_reads| {
-        walk_once(
-            doc,
-            project_path,
-            extra_properties,
-            environment,
-            implicit_props,
-            implicit_targets,
-            detected_packages_props,
-            sdk_resolver,
-            glob_resolver,
-            observer,
-            target_framework_reads,
-            #[cfg(any(test, feature = "test-support"))]
-            probe,
-        )
-    };
-    let (exact, observations) = walk(TargetFrameworkReads::Exact);
-    let (project, observations) = if !observations.target_framework_read_exempted
-        || observations.builds_its_own_target_framework
-    {
-        (exact, observations)
-    } else {
-        walk(TargetFrameworkReads::CarvedOut)
-    };
-    let WalkObservations {
-        #[cfg(any(test, feature = "test-support"))]
-        reads,
-        ..
-    } = observations;
-    Walked {
-        project,
-        #[cfg(any(test, feature = "test-support"))]
-        reads,
-    }
-}
-
-/// [`walk_with_imports`]'s result.
-pub struct Walked {
-    pub project: ParsedProject,
-    /// The walk's answer to the caller's [`ReadProbe`], when it passed one.
-    /// Only the differential tests probe the walk.
-    #[cfg(any(test, feature = "test-support"))]
-    pub reads: Option<EvaluationReads>,
-}
-
-/// How [`State::undefined_read_is_exact`] treats an undefined
-/// `$(TargetFramework)` read; [`walk_with_imports`] says when each applies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetFrameworkReads {
-    /// Under the same C.2b conditions as any other name.
-    Exact,
-    /// Never exact: the evaluation may be a cross-targeting dispatch build.
-    CarvedOut,
-}
-
-/// Observations read off [`State`] at the end of one [`walk_once`] pass,
-/// driving the two-pass decision in [`walk_with_imports`]. None are part
-/// of [`ParsedProject`].
-struct WalkObservations {
-    /// Some undefined `$(TargetFramework)` read was exact only because the
-    /// walk ran under [`TargetFrameworkReads::Exact`].
-    target_framework_read_exempted: bool,
-    /// The evaluation is a build of the `TargetFramework` its own walk wrote:
-    /// not a caller global, non-empty, written under no undecided, refused or
-    /// tainted input, and never followed by content the walk could not see.
-    /// MSBuild's `IsCrossTargetingBuild` is false for it.
-    builds_its_own_target_framework: bool,
-    /// The walk's answer to the caller's [`ReadProbe`], when it passed one.
-    #[cfg(any(test, feature = "test-support"))]
-    reads: Option<EvaluationReads>,
-}
-
-#[derive(Debug, Clone)]
-struct OrderedResolvedItem {
-    order: usize,
-    item: ResolvedItem,
-    /// The item's identity as MSBuild records it — the `Include` fragment,
-    /// trimmed and decoded, which is what a later `Remove`/`Exclude` matches and
-    /// what `@(…)` hands on. `None` for an item spliced from the glob
-    /// resolver, which returns paths rather than the relative spelling MSBuild
-    /// derives from the glob.
-    identity: Option<String>,
-    /// The item as an item table reads it, metadata and item-definition
-    /// defaults included, for a `<ProjectReference>` declared by a literal
-    /// identity. `None` for a Compile item and for one spliced from the glob
-    /// resolver.
-    #[cfg(any(test, feature = "test-support"))]
-    row: Option<EvaluatedItem>,
-}
-
-fn into_resolved_items(items: Vec<OrderedResolvedItem>) -> Vec<ResolvedItem> {
-    items.into_iter().map(|ordered| ordered.item).collect()
-}
-
-/// One evaluation under one [`TargetFrameworkReads`] mode; the public
-/// [`walk_with_imports`] chooses the mode.
-#[allow(clippy::too_many_arguments)]
-fn walk_once<'r>(
-    doc: &Document<'_>,
-    project_path: &Path,
-    extra_properties: &HashMap<String, String>,
-    environment: &HashMap<String, String>,
-    implicit_props: Option<&Path>,
-    implicit_targets: Option<&Path>,
-    detected_packages_props: Option<&Path>,
-    sdk_resolver: Option<&'r SdkResolver<'r>>,
-    glob_resolver: Option<&'r GlobResolver<'r>>,
-    observer: &'r Observer,
-    target_framework_reads: TargetFrameworkReads,
-    #[cfg(any(test, feature = "test-support"))] probe: Option<&ReadProbe>,
-) -> (ParsedProject, WalkObservations) {
     let root = doc.root_element();
     let local_overrides = collect_local_overrides(root);
     let mut state = State::new(
@@ -347,7 +217,6 @@ fn walk_once<'r>(
         glob_resolver,
         observer,
     );
-    state.target_framework_reads = target_framework_reads;
     // The entry project is never inside an SDK.
     state
         .foreign_definitions
@@ -489,26 +358,14 @@ fn walk_once<'r>(
             });
     }
 
-    let builds_its_own_target_framework = state.walk_opaque.is_none()
-        && !extra_properties
-            .keys()
-            .any(|name| name.eq_ignore_ascii_case("TargetFramework"))
-        && state.lookup.get("TargetFramework").is_some_and(|held| {
-            let (value, trust) = held.parts();
-            trust.is_certain() && !value.unescape().trim().is_empty()
-        });
-    let observations = WalkObservations {
-        target_framework_read_exempted: state.target_framework_read_exempted.get(),
-        builds_its_own_target_framework,
-        #[cfg(any(test, feature = "test-support"))]
-        reads: probe.map(|probe| state.read_probe(probe)),
-    };
+    #[cfg(any(test, feature = "test-support"))]
+    let reads = probe.map(|probe| state.read_probe(probe));
     let project = state.into_project();
     // The published reads answer every name as the probe's read of it does:
     // the table enumerates only some names, and the rest must fall to the
     // rule it states for them.
     #[cfg(any(test, feature = "test-support"))]
-    if let Some(reads) = &observations.reads {
+    if let Some(reads) = &reads {
         for (name, read) in &reads.properties {
             assert_eq!(
                 project.property(name),
@@ -517,7 +374,42 @@ fn walk_once<'r>(
             );
         }
     }
-    (project, observations)
+    Walked {
+        project,
+        #[cfg(any(test, feature = "test-support"))]
+        reads,
+    }
+}
+
+/// [`walk_with_imports`]'s result.
+pub struct Walked {
+    pub project: ParsedProject,
+    /// The walk's answer to the caller's [`ReadProbe`], when it passed one.
+    /// Only the differential tests probe the walk.
+    #[cfg(any(test, feature = "test-support"))]
+    pub reads: Option<EvaluationReads>,
+}
+
+#[derive(Debug, Clone)]
+struct OrderedResolvedItem {
+    order: usize,
+    item: ResolvedItem,
+    /// The item's identity as MSBuild records it — the `Include` fragment,
+    /// trimmed and decoded, which is what a later `Remove`/`Exclude` matches and
+    /// what `@(…)` hands on. `None` for an item spliced from the glob
+    /// resolver, which returns paths rather than the relative spelling MSBuild
+    /// derives from the glob.
+    identity: Option<String>,
+    /// The item as an item table reads it, metadata and item-definition
+    /// defaults included, for a `<ProjectReference>` declared by a literal
+    /// identity. `None` for a Compile item and for one spliced from the glob
+    /// resolver.
+    #[cfg(any(test, feature = "test-support"))]
+    row: Option<EvaluatedItem>,
+}
+
+fn into_resolved_items(items: Vec<OrderedResolvedItem>) -> Vec<ResolvedItem> {
+    items.into_iter().map(|ordered| ordered.item).collect()
 }
 
 /// Examine the project root's `Sdk` attribute and decide whether the
@@ -1032,7 +924,7 @@ struct State<'r> {
     follow_imports: bool,
     /// Our model of MSBuild's `Evaluator._importsSeen`: the
     /// [`import_dedup_key`] of every import this walk has performed, the
-    /// entry project included (seeded in [`walk_once`]). MSBuild registers
+    /// entry project included (seeded in [`walk_with_imports`]). MSBuild registers
     /// an import *before* evaluating the imported file's contents and
     /// skips any later import that resolves to a registered path —
     /// warning MSB4011, or MSB4210 when the target is the entry project —
@@ -1307,20 +1199,6 @@ struct State<'r> {
     /// `Some` carries what made it so (the first such construct), which is
     /// how a user learns why a name that reads as unset might not be.
     walk_opaque: Option<OpacityCause>,
-    /// Whether an undefined `$(TargetFramework)` read may be exact; see
-    /// [`walk_with_imports`].
-    target_framework_reads: TargetFrameworkReads,
-    /// Set when [`Self::undefined_read_is_exact_but_for_opacity`] answered
-    /// `true` for `TargetFramework` — an answer
-    /// [`TargetFrameworkReads::CarvedOut`] would have withheld.
-    target_framework_read_exempted: Cell<bool>,
-    /// Set while the item pass reads a generic item's metadatum that no
-    /// dependency consumer reads (anything but NuGet's package metadata
-    /// names). An undefined `$(TargetFramework)` read then counts as inexact
-    /// without marking [`Self::target_framework_read_exempted`]: the walk's
-    /// choice of pass, and so its [`ParsedProject`], must not turn on a value
-    /// only a target reads.
-    quiet_target_framework_reads: Cell<bool>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -1743,9 +1621,6 @@ impl<'r> State<'r> {
             using_task_names: Vec::new(),
             env_property_names,
             walk_opaque: None,
-            target_framework_reads: TargetFrameworkReads::CarvedOut,
-            target_framework_read_exempted: Cell::new(false),
-            quiet_target_framework_reads: Cell::new(false),
             diagnostic_roots: HashMap::new(),
         }
     }
@@ -1770,33 +1645,16 @@ impl<'r> State<'r> {
     /// `name`'s absence would be a fact had the walk seen every write.
     fn undefined_read_is_exact_but_for_opacity(&self, name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
-        // Consumer-contract carve-outs, not exactness facts. The define
+        // A consumer-contract carve-out, not an exactness fact: the define
         // machinery treats an undefined `$(DefineConstants)` as "the SDK
         // may set DEBUG/TRACE" (its uncertainty axis feeds the LSP's
-        // `#if` handling), and an undefined `$(TargetFramework)` is the
-        // multi-TFM shape whose truth is per-inner-build — the LSP
-        // re-evaluates with an entry-TFM global, and the crate keeps the
-        // conservative signal for callers that don't, unless the walk
-        // turns out to build its own TFM ([`walk_with_imports`]).
+        // `#if` handling).
         if lower == "defineconstants" {
             return false;
         }
-        let exact = !self.env_property_names.contains(&lower)
+        !self.env_property_names.contains(&lower)
             && self.trust_of(name).is_certain()
-            && !is_toolset_initial_property_name(&lower);
-        if lower == "targetframework" {
-            if self.quiet_target_framework_reads.get() {
-                return false;
-            }
-            match self.target_framework_reads {
-                TargetFrameworkReads::CarvedOut => return false,
-                TargetFrameworkReads::Exact if exact => {
-                    self.target_framework_read_exempted.set(true);
-                }
-                TargetFrameworkReads::Exact => {}
-            }
-        }
-        exact
+            && !is_toolset_initial_property_name(&lower)
     }
 
     /// Is `name` reading as undefined because it *is* undefined in the real
@@ -2195,9 +2053,6 @@ impl<'r> State<'r> {
                 using_task_names: _,
             env_property_names: _,
             walk_opaque: _,
-            target_framework_reads: _,
-            target_framework_read_exempted: _,
-            quiet_target_framework_reads: _,
             diagnostic_roots: _,
         } = self;
         // Central Package Management opt-in: a versionless

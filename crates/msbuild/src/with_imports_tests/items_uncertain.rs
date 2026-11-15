@@ -48,13 +48,13 @@ fn parse_with_sdk_default_items(default_items: &str, targets: &str) -> ParsedPro
 #[test]
 fn a_dead_compile_operation_inside_the_sdk_is_tolerated_under_an_inexact_group_gate() {
     // The real SDK's shape: the default glob's *group* is gated on something
-    // the walk cannot always pin (here `TargetFramework`, the consumer-contract
-    // carve-out that stays inexact under C.2b), but the glob's *own* gate is
+    // the walk cannot always pin (here `RoslynTargetsPath`, a toolset name the
+    // walk does not seed, inexact under C.2b), but the glob's *own* gate is
     // cleanly false — F#'s props default `EnableDefaultCompileItems` off. The
     // glob runs in no build, so the inexact group gate decides nothing.
     let result = parse_with_sdk_default_items(
         r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'net8.0'">
     <Compile Include="**/*.fs" Condition="'$(EnableDefaultCompileItems)' == 'true'" />
   </ItemGroup>
 </Project>"#,
@@ -70,19 +70,19 @@ fn a_dead_compile_operation_inside_the_sdk_is_tolerated_under_an_inexact_group_g
         result.diagnostics
     );
     assert!(result.compile_condition_uncertainties.is_empty());
-    // (The inexact `TargetFramework` read still flips the broad `is_partial`.)
+    // (The inexact `RoslynTargetsPath` read still flips the broad `is_partial`.)
     assert!(result.is_partial);
 }
 
 #[test]
 fn a_compile_operation_inside_the_sdk_that_may_run_is_not_tolerated() {
     // The same glob with no gate of its own: whether it runs is decided by the
-    // inexact `TargetFramework` group gate alone, and when it runs it adds
+    // inexact `RoslynTargetsPath` group gate alone, and when it runs it adds
     // files in front of the project's list. Being SDK machinery does not make
     // that decision any less load-bearing.
     let result = parse_with_sdk_default_items(
         r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'net8.0'">
     <Compile Include="**/*.fs" />
   </ItemGroup>
 </Project>"#,
@@ -189,7 +189,7 @@ fn shared_dotnet_sdk_version_files_are_tolerated() {
     // directory (`Current/Microsoft.Common.props`, language targets, etc.), not
     // only files under `Sdks/Microsoft.NET.Sdk`. Import gates there are still
     // SDK machinery and must not make the entry project's Compile set
-    // uncertain. (The gate reads `TargetFramework` — the carve-out that stays
+    // uncertain. (The gate reads `RoslynTargetsPath` — a toolset name the walk does not seed, which stays
     // inexact under C.2b — so the import genuinely stays undecidable and the
     // tolerance machinery is what's exercised.)
     let tmp = TempDir::new().unwrap();
@@ -207,7 +207,7 @@ fn shared_dotnet_sdk_version_files_are_tolerated() {
         &version_dir,
         "Current/Microsoft.Common.props",
         r#"<Project>
-  <Import Project="$(GeneratedTargets)" Condition="'$(TargetFramework)' == 'net8.0'" />
+  <Import Project="$(GeneratedTargets)" Condition="'$(RoslynTargetsPath)' == 'net8.0'" />
 </Project>"#,
     );
     let project_path = write_at(
@@ -236,7 +236,7 @@ fn shared_dotnet_sdk_version_files_are_tolerated() {
         result.diagnostics
     );
     // The broad parse is still partial because we can't decide the gate's
-    // `TargetFramework` read, but that partiality is not Compile-set
+    // `RoslynTargetsPath` read, but that partiality is not Compile-set
     // uncertainty.
     assert!(result.is_partial);
 }
@@ -363,7 +363,7 @@ fn define_constants_gated_in_directory_build_props_is_uncertain() {
         tmp.path(),
         "Directory.Build.props",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net6.0'">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == 'net6.0'">
     <DefineConstants>NET6</DefineConstants>
   </PropertyGroup>
 </Project>"#,
@@ -516,8 +516,8 @@ fn user_import_gated_on_inexact_undefined_property_makes_items_uncertain() {
     // The gate reads a property whose value the walk can't pin. Since C.2b a
     // *plain* undefined name reads exactly empty and the gate decides cleanly
     // (see the companion test below), so the undecidable-import-gate machinery
-    // this test pins needs an *inexact* read: `TargetFramework` is the
-    // consumer-contract carve-out that never passes the exactness guard. We
+    // this test pins needs an *inexact* read: `RoslynTargetsPath` is a toolset
+    // name the walk does not seed, which never passes the exactness guard. We
     // can't tell whether the import (and any Compile items it carries)
     // applies.
     let tmp = TempDir::new().unwrap();
@@ -525,7 +525,7 @@ fn user_import_gated_on_inexact_undefined_property_makes_items_uncertain() {
         tmp.path(),
         "Demo.fsproj",
         r#"<Project>
-  <Import Project="extra.props" Condition="'$(TargetFramework)' == 'net8.0'" />
+  <Import Project="extra.props" Condition="'$(RoslynTargetsPath)' == 'net8.0'" />
   <ItemGroup>
     <Compile Include="A.fs" />
   </ItemGroup>
@@ -542,7 +542,7 @@ fn user_import_gated_on_inexact_undefined_property_makes_items_uncertain() {
 fn user_import_gated_on_exact_undefined_property_is_not_items_uncertain() {
     // The flip side (C.2b): `IncludeExtra` is never written anywhere the walk
     // can see, the walk is not opaque, and the name is neither a toolset
-    // property nor a carve-out — so the read is exactly empty and the gate
+    // property nor `DefineConstants` — so the read is exactly empty and the gate
     // evaluates exactly False, matching `dotnet build` (MSBuild expands an
     // undefined `$(Name)` to ""). The import is a clean exclusion: nothing
     // uncertain, no diagnostic, not partial.
@@ -616,14 +616,14 @@ fn custom_sdk_layout_does_not_tolerate_sibling_user_files() {
 </Project>"#,
     );
     // A user Directory.Build.props beside the SDK dir (under the SDK root's
-    // parent) gates a Compile on `TargetFramework` — the carve-out that stays
+    // parent) gates a Compile on `RoslynTargetsPath` — a toolset name the walk does not seed, which stays
     // inexact under C.2b, so the gate is genuinely undecidable and only the
     // tolerance-root scoping decides whether it's respected. It must be.
     write_at(
         tmp.path(),
         "Directory.Build.props",
         r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'net8.0'">
     <Compile Include="Shared.fs" />
   </ItemGroup>
 </Project>"#,
@@ -664,7 +664,7 @@ fn sdk_import_escaping_its_root_with_dotdot_does_not_tolerate_the_user_file() {
     );
     write_at(&root, "Sdk.targets", "<Project/>");
     // The user file sits beside the SDK root (its normalised reach path is NOT
-    // under `.sdk`) and gates a Compile on the `TargetFramework` carve-out —
+    // under `.sdk`) and gates a Compile on the unseeded toolset name `RoslynTargetsPath` —
     // the read that stays inexact under C.2b, so the import genuinely stays
     // undecidable and only the tolerance-root scoping decides whether it's
     // respected.
@@ -672,7 +672,7 @@ fn sdk_import_escaping_its_root_with_dotdot_does_not_tolerate_the_user_file() {
         tmp.path(),
         "Shared.props",
         r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'net8.0'">
     <Compile Include="Shared.fs" />
   </ItemGroup>
 </Project>"#,
@@ -725,14 +725,14 @@ fn sdk_directory_symlink_escaping_the_root_does_not_tolerate_the_user_file() {
     write_at(&root, "Sdk.targets", "<Project/>");
     // A user directory outside the SDK root, holding the conditional-Compile
     // props, reached only through the in-tree directory symlink `.sdk/link`.
-    // The gate reads the `TargetFramework` carve-out (inexact under C.2b) so
+    // The gate reads the unseeded toolset name `RoslynTargetsPath` (inexact under C.2b) so
     // the import stays genuinely undecidable.
     let outside = tmp.path().join("outside");
     write_at(
         &outside,
         "Shared.props",
         r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'net8.0'">
     <Compile Include="Shared.fs" />
   </ItemGroup>
 </Project>"#,
@@ -821,7 +821,7 @@ fn conditional_compile_in_directory_build_props_undefined_gate_is_exactly_exclud
 fn conditional_compile_in_explicit_user_import_is_respected() {
     // The user-provenance counterpart of
     // `conditional_compile_inside_the_sdk_is_tolerated`: the same undecidable
-    // `TargetFramework` gate (the carve-out that stays inexact under C.2b) on
+    // `RoslynTargetsPath` gate (an unseeded toolset name, inexact under C.2b) on
     // a `<Compile>`, but in an explicitly-imported *user* props file — not
     // under the SDK tree, so it must be respected: the Compile set is
     // uncertain and the carve-out is recorded.
@@ -840,7 +840,7 @@ fn conditional_compile_in_explicit_user_import_is_respected() {
         tmp.path(),
         "Shared.props",
         r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'net8.0'">
     <Compile Include="Shared.fs" />
   </ItemGroup>
 </Project>"#,
@@ -853,7 +853,7 @@ fn conditional_compile_in_explicit_user_import_is_respected() {
     assert_eq!(result.compile_condition_uncertainties.len(), 1);
     assert_eq!(
         result.compile_condition_uncertainties[0].reason,
-        CompileConditionReason::UndefinedProperties(vec!["TargetFramework".to_string()])
+        CompileConditionReason::UndefinedProperties(vec!["RoslynTargetsPath".to_string()])
     );
 }
 
@@ -865,14 +865,14 @@ fn user_import_with_unresolved_property_path_makes_items_uncertain() {
     // *plain* undefined name substitutes exactly to "" — the import would
     // then be attempted at the literal expanded path and fail as
     // `ImportFailed` instead — so the unresolved-path machinery this test
-    // pins needs an *inexact* read: `TargetFramework`, the carve-out that
+    // pins needs an *inexact* read: `RoslynTargetsPath`, a toolset name the walk does not seed, that
     // never passes the exactness guard.
     let tmp = TempDir::new().unwrap();
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
         r#"<Project>
-  <Import Project="$(TargetFramework)/shared.props" />
+  <Import Project="$(RoslynTargetsPath)/shared.props" />
   <ItemGroup>
     <Compile Include="A.fs" />
   </ItemGroup>
@@ -891,7 +891,7 @@ fn user_import_with_unresolved_property_path_makes_items_uncertain() {
                 &cause.kind,
                 CompileItemUncertaintyCauseKind::Structural(
                     StructuralCompileItemUncertainty::ImportProjectUnresolved { project }
-                ) if project == "$(TargetFramework)/shared.props"
+                ) if project == "$(RoslynTargetsPath)/shared.props"
             )),
         "expected unresolved import path to be recorded as the causal Compile uncertainty: {:?}",
         result.compile_item_uncertainties
@@ -951,7 +951,7 @@ fn define_constants_uncertainty_records_its_cause() {
         tmp.path(),
         "Directory.Build.props",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net6.0'">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == 'net6.0'">
     <DefineConstants>NET6</DefineConstants>
   </PropertyGroup>
 </Project>"#,
@@ -965,7 +965,7 @@ fn define_constants_uncertainty_records_its_cause() {
         .collect();
     assert!(
         kinds.contains(&crate::DiagnosticKind::UndefinedProperty {
-            name: "TargetFramework".to_string()
+            name: "RoslynTargetsPath".to_string()
         }),
         "the gating condition's undefined property is the cause; got {kinds:?}"
     );
@@ -1127,7 +1127,7 @@ const DEFINE_SHAPES: &[(&str, Axis, &str)] = &[
     (
         "gated on an undefined property",
         Axis::Uncertain,
-        r#"<Project><PropertyGroup Condition="'$(TargetFramework)' == 'net6.0'"><DefineConstants>NET6</DefineConstants></PropertyGroup></Project>"#,
+        r#"<Project><PropertyGroup Condition="'$(RoslynTargetsPath)' == 'net6.0'"><DefineConstants>NET6</DefineConstants></PropertyGroup></Project>"#,
     ),
     (
         "gated on an unsupported condition",

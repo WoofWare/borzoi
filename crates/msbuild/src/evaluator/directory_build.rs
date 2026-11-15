@@ -71,7 +71,7 @@
 //! - `protected`, `depth`, `import_site_span`, `current_file`,
 //!   `in_sdk_subtree`, `enclosing_condition_stale`: restored per frame.
 //! - `diagnostics`, `diagnostic_roots`, the `*_uncertain` flags and their
-//!   causes, `walk_opaque`, `target_framework_read_exempted`: only add doubt.
+//!   causes, `walk_opaque`: only add doubt.
 //! - `walked_files`, `walked_directory_packages_props_import`: read only by the
 //!   central-package discharge, which can only clear the package uncertainty
 //!   the walk's withdrawal has already set.

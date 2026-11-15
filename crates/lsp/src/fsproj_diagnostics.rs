@@ -1645,22 +1645,22 @@ mod tests {
 
     #[test]
     fn utf16_position_after_multibyte_text() {
-        // The diagnostic lands on `$(TargetFramework)` (carved out of
-        // exact undefined reads, so it always diagnoses), which sits after a
+        // The diagnostic lands on `$(RoslynTargetsPath)` (a toolset name the
+        // walk does not seed here, so it always diagnoses), which sits after a
         // comment containing `À🦀`. The two non-ASCII chars are
         // 2 + 4 = 6 UTF-8 bytes but 1 + 2 = 3 UTF-16 units. If the
         // position translation conflated the two, the LSP column would
         // be inflated by 3.
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("App.fsproj");
-        let text = "<Project>\n<!-- À🦀 -->\n<ItemGroup><Compile Include=\"$(TargetFramework).fs\" /></ItemGroup>\n</Project>";
+        let text = "<Project>\n<!-- À🦀 -->\n<ItemGroup><Compile Include=\"$(RoslynTargetsPath).fs\" /></ItemGroup>\n</Project>";
 
         let env = env_with(|e| e.dotnet_root = Some(tmp.path().join("dotnet")));
         let diags = diagnostics_for(text, &project, &env, &default_extras());
 
         let prop_diags: Vec<_> = diags
             .iter()
-            .filter(|d| d.message.contains("$(TargetFramework)"))
+            .filter(|d| d.message.contains("$(RoslynTargetsPath)"))
             .collect();
         assert_eq!(
             prop_diags.len(),
@@ -1696,7 +1696,7 @@ mod tests {
 
         let inputs: &[&str] = &[
             // UndefinedProperty
-            "<Project><PropertyGroup><X>$(TargetFramework)</X></PropertyGroup></Project>",
+            "<Project><PropertyGroup><X>$(RoslynTargetsPath)</X></PropertyGroup></Project>",
             // UnsupportedConstruct
             "<Project><Choose><When Condition=\"true\"/></Choose></Project>",
             // ImportFailed
@@ -1704,9 +1704,9 @@ mod tests {
             // SdkNotFound (DOTNET_ROOT points nowhere useful)
             "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><Compile Include=\"X.fs\"/></ItemGroup></Project>",
             // Mixed multibyte
-            "<Project>\n<!-- À🦀 -->\n<PropertyGroup><X>$(TargetFramework)</X></PropertyGroup>\n</Project>",
+            "<Project>\n<!-- À🦀 -->\n<PropertyGroup><X>$(RoslynTargetsPath)</X></PropertyGroup>\n</Project>",
             // CR-only line terminator (lexer agrees, but verify here too)
-            "<Project>\r<PropertyGroup><X>$(TargetFramework)</X></PropertyGroup>\r</Project>",
+            "<Project>\r<PropertyGroup><X>$(RoslynTargetsPath)</X></PropertyGroup>\r</Project>",
         ];
 
         // Track how many of the inputs produced at least one diagnostic;

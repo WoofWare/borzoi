@@ -419,7 +419,8 @@ fn project_reference_glob_routes_through_resolver() {
 #[test]
 fn unpinned_exclude_value_marks_the_reference_list_uncertain() {
     // `Skip` is *written* (the gate evaluated true) but only by treating
-    // `$(TargetFramework)` — the carve-out that stays inexact under C.2b —
+    // `$(RoslynTargetsPath)` — a toolset name the walk does not seed, so
+    // inexact under C.2b —
     // as empty; the real build may skip that group, leaving `Skip` empty
     // and B *not* excluded, or (as here under our model) excluding it.
     // Either way the captured list and the real build can disagree in the
@@ -433,7 +434,7 @@ fn unpinned_exclude_value_marks_the_reference_list_uncertain() {
         tmp.path(),
         "Demo.fsproj",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <Skip>../B/B.fsproj</Skip>
   </PropertyGroup>
   <ItemGroup>
@@ -443,9 +444,8 @@ fn unpinned_exclude_value_marks_the_reference_list_uncertain() {
     );
     let out = vec![dir.join("C/C.fsproj")];
     let (result, requests) = parse_file_capturing_glob(&project_path, out);
-    // The project never writes `TargetFramework`, so the walk that trusted the
-    // read is discarded for one under the carve-out (see `walk_with_imports`),
-    // and each walk asks the resolver once — the same question.
+    // The Exclude routes through the resolver, and every request asks the same
+    // question.
     assert!(
         !requests.is_empty(),
         "the Exclude routes through the resolver"
