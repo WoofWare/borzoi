@@ -118,13 +118,15 @@ if you find yourself wanting it elsewhere, you are about to fabricate
 certainty. The item pass still judges its values by `Expansion`'s scan-based
 flags (entries 6 and 7 above); its `ignoring_trust` sites are P4's worklist.
 
-**Staleness has one reader.** `Trust::stale` is consumed only where a value
+**Staleness has two readers.** `Trust::stale` is consumed where a value
 decides a `Directory.Build.*` splice (`gate_value_is_exact`, through
-`is_certain`), which is what closed #614. `reference_is_untrusted` and
-`untrusted_cause` leave it out on purpose: most values on a real SDK chain are
-bound before some opacity, so the generic seam would decline wholesale. Every
-other reader trusting a stale value is the open trade-off #792, which the
-metamorphic gate's opacity tier counts. Adding a reader of it is a measured
+`is_certain`), which is what closed #614, and where a Compile item's `Include`
+or `Condition` reads it in a Compile context (`expand_inner`,
+`evaluate_condition_with_exemptions`), which leaves the Compile set uncertain.
+`reference_is_untrusted` and `untrusted_cause` leave it out on purpose: most
+values on a real SDK chain are bound before some opacity, so the generic seam
+would decline wholesale. Every other reader trusting a stale value is the open
+trade-off #792, which the metamorphic gate's opacity tier counts. Adding a reader of it is a measured
 decision (the plan's "#614: what each rule costs" is the template), not a
 tidy-up.
 

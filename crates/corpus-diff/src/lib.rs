@@ -559,6 +559,12 @@ fn render_compile_item_uncertainty_cause(cause: &CompileItemUncertaintyCause) ->
         CompileItemUncertaintyCauseKind::Structural(kind) => {
             structural_compile_item_uncertainty_message(kind)
         }
+        CompileItemUncertaintyCauseKind::StaleValue {
+            reference,
+            hidden_by,
+        } => format!(
+            "a Compile value '{reference}' may have been rewritten by content the walk could not see ({hidden_by:?})"
+        ),
     };
     format!("{} {message}", origin_label(&cause.origin))
 }

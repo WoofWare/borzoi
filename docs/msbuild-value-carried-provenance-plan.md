@@ -23,9 +23,10 @@
 >
 > **#614 is closed by a fourth channel, `stale`** (see "#614: as landed"): a
 > value bound before content the walk could not see, or computed from one,
-> carries the opacity behind it, and the `Directory.Build.*` splice declines
-> on it. Every other reader still trusts a held value under opacity (#792, a
-> measured trade-off the metamorphic gate's opacity tier counts).
+> carries the opacity behind it, and the `Directory.Build.*` splice and the
+> Compile items decline on it (see "#792: the Compile reader"). Every other
+> reader still trusts a held value under opacity (#792, a measured trade-off
+> the metamorphic gate's opacity tier counts).
 >
 > **Open, in order:** P4; #792 per reader, measured; the three P2″ precision
 > items; P1′.
@@ -33,10 +34,12 @@
 > **Known wrong commits, reproducible, not fixed:** #780 (a refused write
 > reads as never written), #781 (a file spliced on an undecided gate publishes
 > trusted values), #782 (a single-witness root lets the `DefineConstants`
-> self-append exemption drop a cause) and #792 (a stale value published as
-> trusted by a reader other than the splice). #780–#782 are pinned by ignored
-> tests that assert the right answer; #780, #781 and #792 are set aside by the
-> metamorphic gate with their counts pinned.
+> self-append exemption drop a cause), #792 (a stale value published as
+> trusted by a reader other than the splice and the Compile items) and #811
+> (the fallback splice reads an unbound gate or path that hidden content may
+> have defined). #780–#782 and #811 are pinned by ignored tests that assert
+> the right answer; #780, #781, #792 and #811 are set aside by the metamorphic
+> gate with their counts pinned.
 
 ## The rule
 
@@ -1072,8 +1075,52 @@ What the channel does *not* decide, deliberately: the SDK chain's own
 `Directory.Build.props` import point (`props_import_point`) asks
 `reference_is_untrusted` of `DirectoryBuildPropsPath`, which leaves staleness
 out. No generated case reaches that reader (the synthetic SDKs have no
-`Microsoft.Common.props` import point), so it was not widened; it is the first
-candidate if #792 is taken reader by reader.
+`Microsoft.Common.props` import point), so it was not widened; it is inert
+by construction (see below).
+
+#### #792: the Compile reader
+
+Each reader of a stale value was measured separately, with the real code path
+consuming `Trust::stale`, on the crate suite, the F# corpus and the LSP project
+corpus; the table and the reasons are on #792. One landed: **a Compile item's
+`Include` or `Condition`** that reads a stale value, in a Compile context,
+leaves the Compile set uncertain, with a `CompileItemUncertaintyCauseKind::StaleValue`
+cause naming the text and what the walk could not see (`expand_inner` for the
+`Include` and every other expanded value, `evaluate_condition_with_exemptions`
+for the condition). It costs nothing on any of the three populations: on a real
+SDK project the body's Compile items are evaluated before the opacity that
+follows the body, so what they read is fresh.
+
+No condition reading a stale value is decided exactly, so there is no
+"the known operands settle it" relief to give: a stale value exists only once
+the walk is opaque, where `condition_is_decided_exactly` vouches for nothing.
+
+The other readers stay as they are, each for a reason recorded on #792: the
+user `DefineConstants` write (zero cost, but the tier's `define_constants`
+cases come from SDK writes, which `define_context` leaves out, so no test can
+see it fail), `props_import_point` (inert: its only reader, `read_target`,
+already requires that the walk hid nothing), and the published properties,
+`target_name` and the final `DefineConstants` (sound declines that cost the LSP
+its reference set on most SDK projects, because content after the body is
+hidden there; a decision for the project owner).
+
+The opacity tier now holds the Compile items wholly: a Compile set that differs
+from a world's is a violation whatever the difference, not only when it is in
+whether the spliced file joined. To reach the reader often, 40% of its cases
+add a Compile item whose `Include` or `Condition` reads a value the hidden file
+rewrites (the condition compares with that rewritten value), and half of those
+drop the body's other Compile items, whose own uncertainty would otherwise
+decline the set whatever the new item reads.
+
+**#811 is set aside, not fixed.** The tier also generates, in one case in
+eight, a hidden file that writes a splice gate or path nothing else writes,
+with a value that turns the splice off. The fallback splice reads that unbound
+name as certain (an unbound name carries no trust to doubt), so the Compile set
+commits to the spliced file that the real build leaves out. The fix costs two
+F# corpus lines and five tests, and belongs to #677's import-point rewrite; the
+tier counts the cases (9 of 800) and pins the count, and
+`an_unbound_splice_input_hidden_content_defined_declines` is the ignored
+witness.
 
 ### The census, re-run — and what it says about P3's priority
 
@@ -1453,9 +1500,12 @@ redefine them (and, in half the cases, first imports an empty file behind
 another, so values are bound *between* two opacities), and the body copies
 one into the `Directory.Build.targets` gate or path. It generates #614's
 class: 13 wrong splice decisions over 800 cases before the stale channel,
-none after. A Compile set may only differ from a world's in whether the
-spliced file joined if the splice decided wrongly; every other stale read is
-#792, counted and pinned. Its plants:
+none after. It also adds Compile items reading a value the hidden file
+rewrites, and hidden writes of an otherwise unbound splice input (#811, set
+aside and pinned); see "#792: the Compile reader". The Compile items must hold;
+every other stale read is #792, counted and pinned. Its plants (the first six
+measured before the Compile reader landed and its generator dimensions were
+added, the last two after):
 
 | plant | opacity tier | #614 witness |
 | --- | ---: | --- |
@@ -1465,9 +1515,12 @@ spliced file joined if the splice decided wrongly; every other stale read is
 | the clean write ignores the staleness its value carried | mirror assertion fires | fails |
 | `Trust::is_certain` ignores `stale` | 13 | fails |
 | `Trust::join_in` forgets `refused` | 0 | passes |
+| the Compile `Include` reader is off | 9 | — |
+| the Compile `Condition` reader is off | 5 | — |
 
-The last is still the equivalent mutant: nothing reads the refused channel of
-a joined trust.
+The sixth is still the equivalent mutant: nothing reads the refused channel
+of a joined trust. Each Compile reader plant also fails
+`a_compile_item_reading_a_stale_value_declines` on its own item.
 
 ### The census ratchet — resolved by construction, not by a change
 

@@ -749,6 +749,9 @@ fn explains_dropped_references(kind: &CompileItemUncertaintyCauseKind) -> bool {
             structural.hides_project_references()
         }
         CompileItemUncertaintyCauseKind::Diagnostic(kind) => kind.hides_unseen_content(),
+        // A stale value read by a Compile item decides that item, not the
+        // reference list.
+        CompileItemUncertaintyCauseKind::StaleValue { .. } => false,
     }
 }
 
@@ -786,6 +789,14 @@ fn render_compile_cause(cause: &CompileItemUncertaintyCause) -> String {
     let text = match &cause.kind {
         CompileItemUncertaintyCauseKind::Diagnostic(kind) => render_diagnostic_kind(kind),
         CompileItemUncertaintyCauseKind::Structural(structural) => render_structural(structural),
+        CompileItemUncertaintyCauseKind::StaleValue {
+            reference,
+            hidden_by,
+        } => format!(
+            "a Compile item reading `{reference}`, a value set before a part of the build I \
+             couldn't see into, which may rewrite it; that part depends on {}",
+            untrusted_cause_phrase(hidden_by)
+        ),
     };
     with_origin(text, &cause.origin)
 }

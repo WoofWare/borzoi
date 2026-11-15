@@ -3781,6 +3781,22 @@ impl<'r> State<'r> {
             unpinned_root.as_ref(),
             had_unsupported,
         );
+        // A value deciding the Compile set that rests on one hidden content may
+        // have rewritten ([`Trust::stale`]) leaves the set uncertain, as an
+        // unpinned read would. Measured at zero cost on the crate suite, the F#
+        // corpus and the LSP project corpus (#792).
+        if self.compile_context
+            && let Some(stale) = value.trust().stale()
+        {
+            self.items_uncertain = true;
+            self.record_compile_item_uncertainty(
+                CompileItemUncertaintyCauseKind::StaleValue {
+                    reference: raw.to_string(),
+                    hidden_by: crate::UntrustedCause::of_opacity(stale),
+                },
+                span,
+            );
+        }
         Expansion {
             value,
             had_undefined,
@@ -5090,6 +5106,24 @@ fn evaluate_condition_with_exemptions(
             state.record_compile_condition_uncertainty(
                 cond,
                 CompileConditionReason::Unsupported,
+                node.range(),
+            );
+        }
+        // A condition reading a value hidden content may have rewritten
+        // ([`Trust::stale`]) may take the other branch in the real build, as
+        // the `Include` reading one may name other files (`expand_inner`).
+        // Nothing decides such a condition exactly: a stale value exists only
+        // once the walk is opaque, where `condition_is_decided_exactly` vouches
+        // for nothing.
+        let stale = properties::property_references(cond)
+            .find_map(|reference| state.trust_of(reference).stale().cloned());
+        if let Some(stale) = stale {
+            state.items_uncertain = true;
+            state.record_compile_item_uncertainty(
+                CompileItemUncertaintyCauseKind::StaleValue {
+                    reference: cond.to_string(),
+                    hidden_by: crate::UntrustedCause::of_opacity(&stale),
+                },
                 node.range(),
             );
         }
