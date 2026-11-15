@@ -3023,9 +3023,11 @@ fn select_target_framework(
         // Same source, same resolver, and the seed key can't collide (a
         // caller-owned global never yields `Reseed`) — so this arm shouldn't
         // be reachable. Degrade to the unseeded view rather than failing the
-        // whole project.
+        // whole project, withholding what it says about a compile: pass 1 of
+        // a multi-targeted project is the outer dispatch build, exact for
+        // itself and for no inner build.
         None => ServedEvaluation {
-            parsed: pass1,
+            parsed: discarded_inner_build(pass1),
             chosen_tfm: None,
             not_an_inner_build: false,
             pass2_reads: None,

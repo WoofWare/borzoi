@@ -295,7 +295,7 @@ fn clean_sdk_property_used_by_helper_identity_stays_certain() {
 #[test]
 fn sdk_tainted_skipped_property_group_marks_package_metadata_read_uncertain() {
     // `Gate` is SDK-written under a condition we cannot pin down (it reads
-    // `TargetFramework`, carved out of undefined-read exactness because the
+    // `RoslynTargetsPath`, a toolset name the walk does not seed, inexact because the
     // real build defines it), so the real build's Gate could differ, flipping
     // the gated PkgVersion write. Skipping the write under a taint-suspect
     // gate therefore taints PkgVersion itself, and the item pass's read of
@@ -305,7 +305,7 @@ fn sdk_tainted_skipped_property_group_marks_package_metadata_read_uncertain() {
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <Gate>false</Gate>
   </PropertyGroup>
 </Project>"#,
@@ -368,7 +368,7 @@ fn sdk_tainted_skipped_property_group_marks_package_metadata_read_uncertain() {
 #[test]
 fn sdk_tainted_skipped_property_condition_marks_package_metadata_read_uncertain() {
     // `Gate` is SDK-written under a condition we cannot pin down (it reads
-    // `TargetFramework`, carved out of undefined-read exactness because the
+    // `RoslynTargetsPath`, a toolset name the walk does not seed, inexact because the
     // real build defines it), so the real build's Gate could differ, flipping
     // the gated PkgVersion write. Skipping the write under a taint-suspect
     // gate therefore taints PkgVersion itself, and the item pass's read of
@@ -378,7 +378,7 @@ fn sdk_tainted_skipped_property_condition_marks_package_metadata_read_uncertain(
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <Gate>false</Gate>
   </PropertyGroup>
 </Project>"#,
@@ -440,8 +440,8 @@ fn sdk_tainted_skipped_property_condition_marks_package_metadata_read_uncertain(
 
 /// SDK properties can feed package metadata declared later in the entry
 /// project. If the SDK property assignment itself depended on a condition we
-/// cannot pin down (`TargetFramework` is carved out of undefined-read
-/// exactness), the expanded metadata value is useful but not trustworthy: a
+/// cannot pin down (`RoslynTargetsPath`, a toolset name the walk does
+/// not seed, never reads as exactly unset), the expanded metadata value is useful but not trustworthy: a
 /// real build, where the SDK defines it, could produce a different version.
 #[test]
 fn sdk_conditioned_property_used_by_project_package_metadata_marks_uncertain() {
@@ -450,7 +450,7 @@ fn sdk_conditioned_property_used_by_project_package_metadata_marks_uncertain() {
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <PkgVersion>1.0</PkgVersion>
   </PropertyGroup>
 </Project>"#,
@@ -514,7 +514,7 @@ fn sdk_conditioned_property_function_used_by_project_package_metadata_marks_unce
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <TargetFrameworkVersion>v8.0</TargetFrameworkVersion>
   </PropertyGroup>
 </Project>"#,
@@ -575,7 +575,7 @@ fn sdk_tainted_cpm_group_condition_marks_package_uncertain_when_false() {
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <EnableCentralPackageVersions>false</EnableCentralPackageVersions>
   </PropertyGroup>
 </Project>"#,
@@ -629,7 +629,7 @@ fn sdk_tainted_import_condition_marks_package_uncertain_when_false() {
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <ImportImplicitDeps>false</ImportImplicitDeps>
   </PropertyGroup>
   <Import Project="ImplicitDeps.props" Condition="'$(ImportImplicitDeps)' == 'true'" />
@@ -750,7 +750,7 @@ fn uncertain_project_property_override_preserves_prior_sdk_package_taint() {
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <PkgVersion>1.0</PkgVersion>
   </PropertyGroup>
 </Project>"#,
@@ -897,14 +897,14 @@ fn sdk_dependency_condition_uncertainty_is_not_suppressed() {
     );
 }
 
-// Cases 1 and 2 lean on `TargetFramework`, which is carved out of
-// undefined-read exactness (the real build supplies it), so both gates stay
+// Cases 1 and 2 lean on `RoslynTargetsPath`, a toolset name the walk does not
+// seed and so inexact (the real build's toolset supplies it), so both gates stay
 // untrustworthy rather than being decided exactly.
 fn sdk_helper_group_condition(condition_case: u8) -> &'static str {
     match condition_case {
         0 => "'@(_Unmodelled)' == 'x'",
-        1 => "'$(TargetFramework)' == ''",
-        2 => "'$(TargetFramework)' == 'net8.0'",
+        1 => "'$(RoslynTargetsPath)' == ''",
+        2 => "'$(RoslynTargetsPath)' == 'net8.0'",
         _ => unreachable!("condition_case strategy is 0..3"),
     }
 }
@@ -1770,7 +1770,7 @@ proptest! {
     /// evaluator cannot trust, any later dependency item that consumes the
     /// exact helper list must make the package/framework set uncertain. The
     /// helper may have been skipped, over-included, or included only because
-    /// an inexact read (here the carved-out `TargetFramework`) substituted
+    /// an inexact read (here the unseeded toolset name `RoslynTargetsPath`) substituted
     /// as empty.
     #[test]
     fn sdk_helper_group_gate_uncertainty_flows_to_project_dependency_consumer(
@@ -2135,8 +2135,8 @@ fn sdk_authored_cpm_items_still_mark_package_uncertain() {
 }
 
 /// A structural SDK construct we cannot decide can hide dependency items:
-/// the `When` gate reads `TargetFramework` (carved out of undefined-read
-/// exactness), so the Choose is not exactly decidable and its subtree is
+/// the `When` gate reads `RoslynTargetsPath` (a toolset name the walk does
+/// not seed, never exactly unset), so the Choose is not exactly decidable and its subtree is
 /// dropped. Compile uncertainty is still tolerated in SDK files, but the
 /// package set must not be reported as certain when a dependency-bearing
 /// subtree is dropped.
@@ -2148,7 +2148,7 @@ fn sdk_choose_hiding_dependency_marks_package_uncertain() {
         "MySdk",
         r#"<Project>
   <Choose>
-    <When Condition="'$(TargetFramework)' == 'net8.0'">
+    <When Condition="'$(RoslynTargetsPath)' == 'net8.0'">
       <ItemGroup>
         <FrameworkReference Include="Microsoft.AspNetCore.App" />
       </ItemGroup>
@@ -2338,8 +2338,8 @@ fn sdk_import_condition_uncertainty_marks_package_uncertain() {
 
 /// An SDK import whose `Project` path cannot be reduced is another structural
 /// skip: the skipped file may have contained implicit dependency items. The
-/// path leans on `TargetFramework`, which is carved out of undefined-read
-/// exactness, so the expansion stays unresolvable.
+/// path leans on `RoslynTargetsPath`, a toolset name the walk does not seed
+/// and so never exactly unset, so the expansion stays unresolvable.
 #[test]
 fn sdk_import_unresolved_project_path_marks_package_uncertain() {
     let tmp = TempDir::new().unwrap();
@@ -2347,7 +2347,7 @@ fn sdk_import_unresolved_project_path_marks_package_uncertain() {
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <Import Project="$(TargetFramework).props" />
+  <Import Project="$(RoslynTargetsPath).props" />
 </Project>"#,
         "<Project/>",
     );
@@ -2386,7 +2386,7 @@ fn sdk_import_unresolved_project_path_marks_package_uncertain() {
                         StructuralPackageReferenceUncertainty::ImportProjectUnresolved { project }
                     ),
                     DiagnosticOrigin::Imported
-                ) if project == "$(TargetFramework).props"
+                ) if project == "$(RoslynTargetsPath).props"
             )),
         "expected imported unresolved-import structural package uncertainty, got: {:?}",
         result.package_reference_uncertainties
@@ -2408,7 +2408,7 @@ fn sdk_tainted_import_project_path_marks_package_uncertain() {
         tmp.path(),
         "MySdk",
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <DepsProps>EmptyDeps.props</DepsProps>
   </PropertyGroup>
   <Import Project="$(DepsProps)" />

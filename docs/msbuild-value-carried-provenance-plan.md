@@ -1159,12 +1159,13 @@ workload bands modelled since #810): 25 manifest lines move; 2 Compile, 25
 `ProjectReference` and 22 `LangVersion` facets from `match` to `decline`,
 none to anything else, and 17 Compile declines report a different first
 cause. The msbuild corpus differential gained a trust check on
-`lang_version`. The 23 multi-targeting projects reach the
+`lang_version`. The 23 multi-targeting projects then reached the
 `Directory.Build.targets` point after an import gate read `TargetFramework`
-undefined, which latches opacity, and on a route through
-`IsCrossTargetingBuild`, which reads it too, so the whole evaluation is
-withdrawn (#824 asks whether the walk can certify that read for the outer
-build). The two `buildtools/checkpackages` projects compute
+undefined, which the walk held inexact by name as a consumer carve-out, so
+the whole evaluation was withdrawn. #824 removed that carve-out: an undefined
+`TargetFramework` read is exact by the rule every undefined read is (the
+outer, cross-targeting evaluation reads it unset as well), and the 23 projects
+match on Compile, `ProjectReference` and `LangVersion`. The two `buildtools/checkpackages` projects compute
 `BaseIntermediateOutputPath` from `$([System.Guid]::NewGuid())`, which no
 walk can know, so an SDK gate reading `MSBuildProjectExtensionsPath` latches
 opacity before the point, which the walk then never reaches. The LSP project
@@ -1420,7 +1421,7 @@ sees at the end of the walk, read through `ParsedProject::property(name)`:
 | --- | --- |
 | `Value(v)` | a value the walk trusts |
 | `Unset` | undefined, and undefined in the real build too |
-| `UnsetInexact(why)` | undefined in the walk, but the real build may define it: a refused write, the environment, the toolset, content the walk could not see, or a consumer carve-out (`DefineConstants`, a multi-TFM `TargetFramework`) |
+| `UnsetInexact(why)` | undefined in the walk, but the real build may define it: a refused write, the environment, the toolset, content the walk could not see, or a consumer carve-out (`DefineConstants`) |
 | `Untrusted(cause)` | a value the walk holds and may have wrong |
 
 It replaces `untrusted_properties`, whose name-keyed set left a refused write

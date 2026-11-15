@@ -94,22 +94,16 @@ pub struct PropertyMap {
     fresh: Vec<String>,
 }
 
-/// A value read from a [`PropertyMap`], with the trust its entry carries. The
-/// fields are private: a reader takes both ([`Held::parts`]) or says it is
-/// leaving the trust behind ([`Held::ignoring_trust`]), the way a value leaves
-/// the escaped domain only through a method that names how.
+/// A value read from a [`PropertyMap`]. The field is private: a reader says it
+/// is leaving the entry's trust ([`PropertyMap::trust`]) behind
+/// ([`Held::ignoring_trust`]), the way a value leaves the escaped domain only
+/// through a method that names how.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Held<'a> {
     value: &'a Escaped,
-    trust: &'a Trust,
 }
 
 impl<'a> Held<'a> {
-    /// The value and its trust, both.
-    pub(crate) fn parts(self) -> (&'a Escaped, &'a Trust) {
-        (self.value, self.trust)
-    }
-
     /// The value, leaving its trust behind — a decision the caller makes in
     /// writing, and greppable for that reason.
     pub(crate) fn ignoring_trust(self) -> &'a Escaped {
@@ -264,13 +258,12 @@ impl PropertyMap {
         }
     }
 
-    /// The stored value and its trust, or `None` when the name has no binding
-    /// (its trust, which may still say something, is [`Self::trust`]).
+    /// The stored value, or `None` when the name has no binding. Its trust,
+    /// bound or not, is [`Self::trust`].
     pub(crate) fn get(&self, key: &str) -> Option<Held<'_>> {
         let entry = self.inner.get(&key.to_ascii_lowercase())?;
         Some(Held {
             value: entry.value.as_ref()?,
-            trust: &entry.trust,
         })
     }
 

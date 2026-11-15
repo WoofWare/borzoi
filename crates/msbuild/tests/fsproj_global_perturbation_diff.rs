@@ -909,6 +909,183 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
     );
 }
 
+/// Unset-property reads in import gates (#824), every combination of:
+///
+/// - the name read: `TargetFramework`, and `BorzoiProbe`, which no document
+///   writes. A [`global_sets`] entry supplies each (the inner build and the
+///   probe), and the rest leave it unset;
+/// - the gate: the name empty, non-empty, equal to its global's value, or a
+///   derived property written under `'$(Plural)' != '' and '$(N)' == ''` (the
+///   shape of `IsCrossTargetingBuild`);
+/// - a later document write of the name, after the import, or none;
+/// - earlier content the walk cannot see: none, a hidden import that writes
+///   the name, or a hidden import that writes nothing.
+///
+/// Every read is graded, an unset one included: a trusted value must be
+/// MSBuild's, and an exact `Unset` must be MSBuild's empty. A document with no
+/// hidden content must commit `Out` under every global set: an unset name read
+/// before any write is MSBuild's empty, which the walk can know.
+///
+/// After hidden content the gate is undecided, and the walk follows the import
+/// on one side and trusts what the followed file writes (#791). Those findings
+/// are counted, each must be that shape, and the count is pinned: a fix for
+/// #791 moves it, and must drop the set-aside when it reaches zero.
+#[test]
+fn unset_reads_in_import_gates_are_exact_or_declined() {
+    use borzoi_msbuild::PropertyRead;
+
+    const NAMES: &[(&str, &str)] = &[("TargetFramework", "net10.0"), ("BorzoiProbe", "probed")];
+    const GATES: &[&str] = &["empty", "nonempty", "equals", "derived"];
+    const HIDDEN: &[&str] = &["none", "writes", "silent"];
+    const READ: &[&str] = &["Out", "Derived"];
+    const HIDDEN_FOLLOWED_791: usize = 56;
+
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let sets = global_sets();
+    let mut must_commit_misses = Vec::new();
+    let mut hidden_followed = 0usize;
+    let mut census: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut case = 0usize;
+    for (name, value) in NAMES {
+        for gate in GATES {
+            for late in [false, true] {
+                for hidden in HIDDEN {
+                    case += 1;
+                    let dir = tmp.path().join(format!("unset{case}"));
+                    std::fs::create_dir_all(&dir).unwrap();
+                    std::fs::write(
+                        dir.join("gated.props"),
+                        "<Project><PropertyGroup><Out>from-import</Out></PropertyGroup></Project>",
+                    )
+                    .unwrap();
+                    let hidden_body = match *hidden {
+                        "writes" => format!(
+                            "<Project><PropertyGroup><{name}>{value}</{name}></PropertyGroup></Project>"
+                        ),
+                        _ => "<Project><PropertyGroup><Unrelated>x</Unrelated></PropertyGroup></Project>"
+                            .to_owned(),
+                    };
+                    std::fs::write(dir.join("hidden.props"), hidden_body).unwrap();
+                    let mut xml = String::from(
+                        "<Project>\n  <PropertyGroup><Plural>a;b</Plural><UndecidedX>abc</UndecidedX></PropertyGroup>\n",
+                    );
+                    if *hidden != "none" {
+                        xml.push_str(
+                            "  <Import Project=\"hidden.props\" Condition=\"'$(UndecidedX.Substring(0,1))' == 'a'\" />\n",
+                        );
+                    }
+                    let condition = match *gate {
+                        "empty" => format!("'$({name})' == ''"),
+                        "nonempty" => format!("'$({name})' != ''"),
+                        "equals" => format!("'$({name})' == '{value}'"),
+                        _ => {
+                            xml.push_str(&format!(
+                                "  <PropertyGroup><Derived Condition=\"'$(Plural)' != '' and '$({name})' == ''\">true</Derived></PropertyGroup>\n"
+                            ));
+                            "'$(Derived)' == 'true'".to_owned()
+                        }
+                    };
+                    xml.push_str(&format!(
+                        "  <Import Project=\"gated.props\" Condition=\"{condition}\" />\n"
+                    ));
+                    if late {
+                        xml.push_str(&format!(
+                            "  <PropertyGroup><{name}>late</{name}></PropertyGroup>\n"
+                        ));
+                    }
+                    xml.push_str("</Project>\n");
+                    let project_path = dir.join("Demo.fsproj");
+                    std::fs::write(&project_path, &xml).unwrap();
+
+                    for globals in &sets {
+                        let parsed = parse_fsproj_with_imports(
+                            &xml,
+                            &project_path,
+                            &globals.iter().cloned().collect(),
+                            &common::oracle_environment(),
+                            None,
+                            None,
+                        )
+                        .expect("well-formed XML parses");
+                        let names: Vec<String> = READ.iter().map(|n| (*n).to_string()).collect();
+                        let theirs = oracle.project(&xml, &names, Some(&project_path), globals);
+                        let supplied = globals.iter().any(|(k, _)| k == name);
+                        for read_name in READ {
+                            let claim = match parsed.property(read_name) {
+                                PropertyRead::Value(v) => Some(v),
+                                PropertyRead::Unset => Some(String::new()),
+                                _ => None,
+                            };
+                            if *read_name == "Out" {
+                                let key = format!(
+                                    "name={name} gate={gate} late={late} hidden={hidden} global={supplied}"
+                                );
+                                let row = census.entry(key).or_default();
+                                row.0 += 1;
+                                row.1 += usize::from(claim.is_some());
+                                if *hidden == "none" && claim.is_none() {
+                                    must_commit_misses.push(format!(
+                                        "{read_name} declined under {globals:?}: {:?}\n{xml}",
+                                        parsed.property(read_name)
+                                    ));
+                                }
+                            }
+                            let Some(claim) = claim else { continue };
+                            let theirs = theirs.as_ref().unwrap_or_else(|| {
+                                panic!(
+                                    "MSBuild rejects this project under {globals:?}, but we \
+                                     committed {read_name} = {claim:?}\n{xml}"
+                                )
+                            });
+                            let followed_after_hidden = *hidden != "none"
+                                && *read_name == "Out"
+                                && claim == "from-import"
+                                && theirs.get(*read_name).map(String::as_str) == Some("");
+                            if followed_after_hidden {
+                                hidden_followed += 1;
+                                continue;
+                            }
+                            assert_eq!(
+                                Some(&claim),
+                                theirs.get(*read_name),
+                                "certain-implies-exact violated for ${{{read_name}}} under \
+                                 {globals:?}\n--- xml ---\n{xml}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (key, (cases, committed)) in &census {
+        eprintln!("  {key:<70} {committed}/{cases} committed");
+    }
+    eprintln!("unset gate reads: {hidden_followed} imports followed after hidden content (#791)");
+    assert_eq!(
+        hidden_followed, HIDDEN_FOLLOWED_791,
+        "the #791 set-aside count (an import followed on an undecided gate, its \
+         writes trusted) moved"
+    );
+    // Hidden content may write the name, so those cases owe nothing; the rest
+    // must each reach a commit somewhere, or the grading above is vacuous.
+    let vacuous: Vec<&String> = census
+        .iter()
+        .filter(|(key, (_, committed))| key.contains("hidden=none") && *committed == 0)
+        .map(|(key, _)| key)
+        .collect();
+    assert!(
+        vacuous.is_empty(),
+        "dimension values never committed: {vacuous:?}"
+    );
+    assert!(
+        must_commit_misses.is_empty(),
+        "{} reads with no hidden content before them declined; the first:\n{}",
+        must_commit_misses.len(),
+        must_commit_misses[0]
+    );
+}
+
 /// The **real SDK chain**, swept over the same globals.
 ///
 /// This is the part that matters most, and the part no synthetic document can

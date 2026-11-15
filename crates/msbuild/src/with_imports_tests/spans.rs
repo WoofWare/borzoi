@@ -14,7 +14,7 @@ fn diagnostic_in_imported_file_uses_import_site_span() {
     // collapse all imported-file spans to the top-level `<Import>`
     // element in the entry project — that's the closest legal
     // entry-source byte range for the issue. (The vehicle reads
-    // `$(TargetFramework)` — the carve-out that stays inexact under
+    // `$(RoslynTargetsPath)` — a toolset name the walk does not seed, inexact under
     // C.2b — because a plain undefined name now reads exactly empty
     // and would raise no diagnostic at all.)
     let tmp = TempDir::new().unwrap();
@@ -27,7 +27,7 @@ fn diagnostic_in_imported_file_uses_import_site_span() {
         "extra.props",
         r#"<Project>
   <ItemGroup>
-    <Compile Include="$(TargetFramework).fs" />
+    <Compile Include="$(RoslynTargetsPath).fs" />
   </ItemGroup>
 </Project>"#,
     );

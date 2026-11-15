@@ -555,11 +555,11 @@ fn unknown_compile_order_value_is_excluded_like_fsharp_target() {
 
 #[test]
 fn unresolved_compile_order_metadata_marks_items_uncertain_and_skips_item() {
-    // `TargetFramework` is a consumer-contract carve-out (never provably
+    // `RoslynTargetsPath` is a toolset name the walk does not seed (never provably
     // unset), so the metadata value stays unresolvable.
     let src = r#"<Project>
   <ItemGroup>
-    <Compile Include="A.fs" CompileOrder="$(TargetFramework)" />
+    <Compile Include="A.fs" CompileOrder="$(RoslynTargetsPath)" />
     <Compile Include="B.fs" />
   </ItemGroup>
 </Project>"#;
@@ -568,7 +568,7 @@ fn unresolved_compile_order_metadata_marks_items_uncertain_and_skips_item() {
     assert_eq!(
         diag_kinds(&p.diagnostics),
         [&DiagnosticKind::UndefinedProperty {
-            name: "TargetFramework".to_string()
+            name: "RoslynTargetsPath".to_string()
         }]
     );
     assert!(p.is_partial);
@@ -887,13 +887,13 @@ fn choose_interleaves_item_groups_in_document_order() {
 
 #[test]
 fn choose_undecidable_when_condition_degrades_conservatively() {
-    // `$(TargetFramework)` is a consumer-contract carve-out (never provably
+    // `$(RoslynTargetsPath)` is a toolset name the walk does not seed (never provably
     // unset), so the read surfaces as a divergence risk and the branch
     // decision cannot be pinned. Nothing is descended (branches may or may
     // not run) and the item set is structurally uncertain.
     let src = r#"<Project>
   <Choose>
-    <When Condition="'$(TargetFramework)' == 'Bar'">
+    <When Condition="'$(RoslynTargetsPath)' == 'Bar'">
       <PropertyGroup><R>maybe</R></PropertyGroup>
       <ItemGroup><Compile Include="A.fs" /></ItemGroup>
     </When>
@@ -905,7 +905,7 @@ fn choose_undecidable_when_condition_degrades_conservatively() {
     assert!(
         p.diagnostics.iter().any(|d| matches!(
             &d.kind,
-            DiagnosticKind::UndefinedProperty { name } if name == "TargetFramework"
+            DiagnosticKind::UndefinedProperty { name } if name == "RoslynTargetsPath"
         )),
         "{:?}",
         p.diagnostics
@@ -1072,13 +1072,13 @@ fn choose_malformed_shape_degrades_conservatively() {
 #[test]
 fn choose_undecidable_gate_over_nested_define_write_is_define_uncertain() {
     // The DefineConstants write sits inside a *nested* Choose, but the
-    // undecidable OUTER gate (reading carved-out, never-provably-unset
-    // `TargetFramework`) is what decides whether it ever runs — the
+    // undecidable OUTER gate (reading never-provably-unset toolset name
+    // `RoslynTargetsPath`) is what decides whether it ever runs — the
     // preprocessor symbol set must be flagged untrustworthy exactly as it
     // would be for a direct `<PropertyGroup><DefineConstants>` child.
     let src = r#"<Project>
   <Choose>
-    <When Condition="'$(TargetFramework)' == 'Bar'">
+    <When Condition="'$(RoslynTargetsPath)' == 'Bar'">
       <Choose>
         <When Condition="'a' == 'a'">
           <PropertyGroup><DefineConstants>CUSTOM</DefineConstants></PropertyGroup>
@@ -1100,12 +1100,12 @@ fn choose_undecidable_gate_over_nested_define_write_is_define_uncertain() {
 #[test]
 fn choose_undecidable_gate_over_nested_cpm_flag_is_package_uncertain() {
     // The CPM analogue of the nested-define case: the flag write is
-    // nested, the outer gate is undecidable (carved-out `TargetFramework`
+    // nested, the outer gate is undecidable (the unseeded toolset name `RoslynTargetsPath`
     // is never provably unset), so whether Central Package Management
     // turns on is unknowable and the dependency set degrades.
     let src = r#"<Project>
   <Choose>
-    <When Condition="'$(TargetFramework)' == 'Bar'">
+    <When Condition="'$(RoslynTargetsPath)' == 'Bar'">
       <Choose>
         <When Condition="'a' == 'a'">
           <PropertyGroup><ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally></PropertyGroup>
@@ -1257,8 +1257,8 @@ fn choose_label_attribute_is_tolerated() {
 #[test]
 fn choose_dead_branch_writes_do_not_taint_later_gates() {
     // The CPM/define write sits in a branch that is already *cleanly
-    // false* by the time the undecidable gate (reading carved-out
-    // `TargetFramework`) is reached — MSBuild can never run it, so it must
+    // false* by the time the undecidable gate (reading the unseeded toolset name
+    // `RoslynTargetsPath`) is reached — MSBuild can never run it, so it must
     // not make the later gate package- or preprocessor-affecting.
     let src = r#"<Project>
   <Choose>
@@ -1268,7 +1268,7 @@ fn choose_dead_branch_writes_do_not_taint_later_gates() {
         <DefineConstants>DEAD</DefineConstants>
       </PropertyGroup>
     </When>
-    <When Condition="'$(TargetFramework)' == 'Bar'">
+    <When Condition="'$(RoslynTargetsPath)' == 'Bar'">
       <PropertyGroup><Unrelated>x</Unrelated></PropertyGroup>
     </When>
   </Choose>
@@ -1341,14 +1341,14 @@ fn glob_in_include_emits_diagnostic_and_skips_item() {
 
 #[test]
 fn inexact_property_in_include_emits_diagnostic_and_skips_item() {
-    // Phase 2 *attempts* substitution; `TargetFramework` is a
-    // consumer-contract carve-out (never provably unset), so the failure
+    // Phase 2 *attempts* substitution; `RoslynTargetsPath` is a
+    // toolset name the walk does not seed (never provably unset), so the failure
     // leaves the resulting path malformed (the unknown value cannot be
     // substituted), and we refuse to emit a corrupt item alongside the
     // diagnostic.
     let src = r#"<Project>
   <ItemGroup>
-    <Compile Include="$(TargetFramework)Generated.fs" />
+    <Compile Include="$(RoslynTargetsPath)Generated.fs" />
     <Compile Include="Real.fs" />
   </ItemGroup>
 </Project>"#;
@@ -1357,7 +1357,7 @@ fn inexact_property_in_include_emits_diagnostic_and_skips_item() {
     assert_eq!(
         diag_kinds(&p.diagnostics),
         [&DiagnosticKind::UndefinedProperty {
-            name: "TargetFramework".to_string()
+            name: "RoslynTargetsPath".to_string()
         }]
     );
     assert!(p.is_partial);
@@ -1382,15 +1382,15 @@ fn item_group_with_evaluable_false_condition_silently_excludes_items_when_props_
 
 #[test]
 fn item_group_condition_referencing_inexact_property_excludes_and_diagnoses() {
-    // Phase 3: when a condition references a carved-out property
-    // (`TargetFramework` is never provably unset — MSBuild might know it
+    // Phase 3: when a condition references an unseeded toolset name
+    // (`RoslynTargetsPath` is never provably unset — MSBuild might know it
     // from a source we don't follow), we still compute a truth value by
     // treating it as "" (MSBuild semantics for unset properties). Emit
     // UndefinedProperty so the project is marked partial — the gate
     // fired, but the user should know we picked a branch under
     // uncertainty.
     let src = r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'Debug'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'Debug'">
     <Compile Include="DebugOnly.fs" />
   </ItemGroup>
 </Project>"#;
@@ -1399,7 +1399,7 @@ fn item_group_condition_referencing_inexact_property_excludes_and_diagnoses() {
     assert_eq!(
         diag_kinds(&p.diagnostics),
         [&DiagnosticKind::UndefinedProperty {
-            name: "TargetFramework".to_string()
+            name: "RoslynTargetsPath".to_string()
         }]
     );
     assert!(p.is_partial);
@@ -1461,11 +1461,11 @@ fn item_level_evaluable_false_condition_silently_excludes_when_props_known() {
 fn item_level_condition_referencing_inexact_property_excludes_and_diagnoses() {
     // Same reasoning as the ItemGroup-level test: the gate fired
     // (`'' == 'Debug'` is false, so the item is excluded), but the
-    // user must know we picked the branch on a carved-out property
-    // (`TargetFramework` is never provably unset).
+    // user must know we picked the branch on an unseeded toolset name
+    // (`RoslynTargetsPath` is never provably unset).
     let src = r#"<Project>
   <ItemGroup>
-    <Compile Include="MaybeDebug.fs" Condition="'$(TargetFramework)' == 'Debug'" />
+    <Compile Include="MaybeDebug.fs" Condition="'$(RoslynTargetsPath)' == 'Debug'" />
   </ItemGroup>
 </Project>"#;
     let p = parse(src);
@@ -1473,7 +1473,7 @@ fn item_level_condition_referencing_inexact_property_excludes_and_diagnoses() {
     assert_eq!(
         diag_kinds(&p.diagnostics),
         [&DiagnosticKind::UndefinedProperty {
-            name: "TargetFramework".to_string()
+            name: "RoslynTargetsPath".to_string()
         }]
     );
     assert!(p.is_partial);
@@ -1695,14 +1695,14 @@ fn semicolon_list_diagnoses_per_post_substitution_entry() {
 fn substitution_failure_anywhere_in_include_skips_the_whole_attribute() {
     // We substitute the whole Include attribute *before* splitting on
     // `;`, because a property value is allowed to be a list. That means
-    // an inexact property read mid-list (`TargetFramework` is carved out,
+    // an inexact property read mid-list (`RoslynTargetsPath` is a toolset name the walk does not seed,
     // never provably unset) corrupts the whole expansion (would leave
     // empty fragments / unaligned semicolons), so we drop every entry
     // from the attribute rather than keep some-and-not-others based on
     // luck of where the broken reference happened to sit.
     let src = r#"<Project>
   <ItemGroup>
-    <Compile Include="ok.fs;$(TargetFramework).fs" />
+    <Compile Include="ok.fs;$(RoslynTargetsPath).fs" />
     <Compile Include="Real.fs" />
   </ItemGroup>
 </Project>"#;
@@ -1711,7 +1711,7 @@ fn substitution_failure_anywhere_in_include_skips_the_whole_attribute() {
     assert_eq!(
         diag_kinds(&p.diagnostics),
         [&DiagnosticKind::UndefinedProperty {
-            name: "TargetFramework".to_string()
+            name: "RoslynTargetsPath".to_string()
         }]
     );
 }
@@ -2480,12 +2480,12 @@ fn compile_order_msbuild_reads_its_own_way_declines() {
 #[test]
 fn metadata_with_inexact_property_declines_but_keeps_the_item() {
     // The Include itself was fine; only the metadata value failed to
-    // substitute (`TargetFramework` is carved out, never provably unset).
+    // substitute (`RoslynTargetsPath` is a toolset name the walk does not seed, never provably unset).
     // The item stands — it is still a reference — but the value we could not
     // evaluate is `Unknown` rather than a plausible-looking string.
     let src = r#"<Project>
   <ItemGroup>
-    <ProjectReference Include="../Lib/Lib.fsproj" ExcludeAssets="$(TargetFramework)" />
+    <ProjectReference Include="../Lib/Lib.fsproj" ExcludeAssets="$(RoslynTargetsPath)" />
   </ItemGroup>
 </Project>"#;
     let p = parse(src);
@@ -2500,7 +2500,7 @@ fn metadata_with_inexact_property_declines_but_keeps_the_item() {
     assert_eq!(
         diag_kinds(&p.diagnostics),
         [&DiagnosticKind::UndefinedProperty {
-            name: "TargetFramework".to_string()
+            name: "RoslynTargetsPath".to_string()
         }]
     );
 }
@@ -2791,17 +2791,17 @@ fn tainted_property_value_does_not_silently_corrupt_downstream() {
 
 #[test]
 fn undefined_only_property_value_is_still_stored_but_unpins_consumers() {
-    // <Foo>$(TargetFramework)</Foo> substitutes to the empty string
+    // <Foo>$(RoslynTargetsPath)</Foo> substitutes to the empty string
     // (MSBuild's behaviour for undefined refs), so Foo IS bound and the
-    // item is captured best-effort. But `TargetFramework` is a
-    // consumer-contract carve-out that never counts as provably unset (a real
-    // build may set it, e.g. the multi-TFM shape), so the item-pass
-    // consumption surfaces the root `TargetFramework` again at the
+    // item is captured best-effort. But `RoslynTargetsPath` is a
+    // toolset name the walk does not seed that never counts as provably unset (a real
+    // build defines it: the toolset does), so the item-pass
+    // consumption surfaces the root `RoslynTargetsPath` again at the
     // item's own span and the Compile set degrades to uncertain — the
-    // same envelope as a direct `$(TargetFramework)` in the Include.
+    // same envelope as a direct `$(RoslynTargetsPath)` in the Include.
     let src = r#"<Project>
   <PropertyGroup>
-    <Foo>$(TargetFramework)</Foo>
+    <Foo>$(RoslynTargetsPath)</Foo>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="prefix$(Foo)suffix.fs" />
@@ -2813,10 +2813,10 @@ fn undefined_only_property_value_is_still_stored_but_unpins_consumers() {
         diag_kinds(&p.diagnostics),
         [
             &DiagnosticKind::UndefinedProperty {
-                name: "TargetFramework".to_string()
+                name: "RoslynTargetsPath".to_string()
             },
             &DiagnosticKind::UndefinedProperty {
-                name: "TargetFramework".to_string()
+                name: "RoslynTargetsPath".to_string()
             }
         ]
     );
@@ -4055,7 +4055,7 @@ fn item_definition_group_project_reference_edge_affecting_default_marks_uncertai
     // conservative direction, any unmodelled name we have not proven inert
     // (`Private`, a custom name): declining those only under-resolves, and the
     // house rule prefers that to trusting an edge MSBuild redirected. An
-    // untrusted/inexact value (the `$(TargetFramework)` carve-out) is likewise
+    // untrusted/inexact value (the unseeded toolset name `$(RoslynTargetsPath)`) is likewise
     // unknowable and declines.
     for edge_affecting in [
         r#"<ProjectReference><ReferenceOutputAssembly>false</ReferenceOutputAssembly></ProjectReference>"#,
@@ -4070,7 +4070,7 @@ fn item_definition_group_project_reference_edge_affecting_default_marks_uncertai
         r#"<ProjectReference><Private>false</Private></ProjectReference>"#,
         r#"<ProjectReference><CustomThing>whatever</CustomThing></ProjectReference>"#,
         // Inexact/untrusted value on a non-inert name: unknowable → decline.
-        r#"<ProjectReference><Targets>$(TargetFramework)</Targets></ProjectReference>"#,
+        r#"<ProjectReference><Targets>$(RoslynTargetsPath)</Targets></ProjectReference>"#,
     ] {
         let src = format!(
             r#"<Project>
@@ -4206,14 +4206,14 @@ fn undecided_choose_branch_hiding_a_reference_mutation_marks_uncertain() {
     // read makes the *decision itself* undecided (`maybe_wrong` in
     // `handle_choose`), the same treatment the Compile and package sets
     // already get there — so a mutation in that branch still flags. The
-    // vehicle is the `TargetFramework` carve-out, which stays inexact under
+    // vehicle is the unseeded toolset name `RoslynTargetsPath`, which stays inexact under
     // C.2b (a plain undefined name would now decide the gate exactly).
     let src = r#"<Project>
   <ItemGroup>
     <ProjectReference Include="../B/B.fsproj" />
   </ItemGroup>
   <Choose>
-    <When Condition="'$(TargetFramework)' == 'on'">
+    <When Condition="'$(RoslynTargetsPath)' == 'on'">
       <ItemGroup>
         <ProjectReference Remove="../B/B.fsproj" />
       </ItemGroup>
@@ -4421,13 +4421,13 @@ fn malformed_choose_marks_the_reference_list_uncertain() {
 #[test]
 fn unpinned_include_value_marks_the_reference_list_uncertain() {
     // `RefPath` is *written* (the gate evaluated true) but only by treating
-    // `$(TargetFramework)` — the carve-out that stays inexact under C.2b —
+    // `$(RoslynTargetsPath)` — a toolset name the walk does not seed, inexact under C.2b —
     // as empty; the real build may skip that group, leaving `RefPath` empty
     // and the reference unmade. The expansion is clean
     // (`had_issue() == false`), so without consulting the pin state the
     // captured edge would look trustworthy — a phantom edge.
     let src = r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <RefPath>../B/B.fsproj</RefPath>
   </PropertyGroup>
   <ItemGroup>
@@ -4461,12 +4461,12 @@ fn unpinned_include_value_marks_the_reference_list_uncertain() {
 #[test]
 fn untrusted_metadata_gate_or_value_reads_as_unknown() {
     // `Flag` is written under a gate decided only by an inexact read (the
-    // `TargetFramework` carve-out), so its value is unpinned: a metadata
+    // unseeded toolset name `RoslynTargetsPath`), so its value is unpinned: a metadata
     // write conditioned on it (in either direction), or a metadata value
     // expanded from it, may differ in the real build. Reading such metadata
     // as Known would let the compile-closure walk keep an edge MSBuild drops
     // (probed: `ReferenceOutputAssembly=false` empties `ReferencePath`).
-    let prelude = r#"<PropertyGroup Condition="'$(TargetFramework)' == ''">
+    let prelude = r#"<PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <Flag>true</Flag>
   </PropertyGroup>"#;
     // Untrusted-false metadata condition: the real build may take the write.
@@ -4616,7 +4616,7 @@ fn unevaluable_metadata_write_reads_as_unknown() {
       <ReferenceOutputAssembly Condition="Exists('tool.lock')">false</ReferenceOutputAssembly>
     </ProjectReference>
     <ProjectReference Include="../B/B.fsproj">
-      <ExcludeAssets>$(TargetFramework)</ExcludeAssets>
+      <ExcludeAssets>$(RoslynTargetsPath)</ExcludeAssets>
     </ProjectReference>
     <ProjectReference Include="../C/C.fsproj">
       <ExcludeAssets>@(SomeItems)</ExcludeAssets>
@@ -4637,7 +4637,7 @@ fn unevaluable_metadata_write_reads_as_unknown() {
     assert_eq!(
         p.project_references[1].exclude_assets,
         ItemMetadataValue::Unknown,
-        "inexact carve-out read: the value is not pinned"
+        "inexact read: the value is not pinned"
     );
     assert_eq!(
         p.project_references[2].exclude_assets,
@@ -5034,12 +5034,12 @@ fn an_unmodelled_metadata_attribute_does_not_disturb_the_item() {
 #[test]
 fn project_reference_with_inexact_property_is_dropped() {
     // Same Include-resolution rule as Compile: an inexact property read
-    // (`TargetFramework` is carved out, never provably unset) makes the
+    // (`RoslynTargetsPath` is a toolset name the walk does not seed, never provably unset) makes the
     // path corrupt, so the item is dropped and the project is marked
     // partial.
     let src = r#"<Project>
   <ItemGroup>
-    <ProjectReference Include="$(TargetFramework)/lib/Lib.csproj" />
+    <ProjectReference Include="$(RoslynTargetsPath)/lib/Lib.csproj" />
   </ItemGroup>
 </Project>"#;
     let p = parse(src);
@@ -5047,7 +5047,7 @@ fn project_reference_with_inexact_property_is_dropped() {
     assert_eq!(
         diag_kinds(&p.diagnostics),
         [&DiagnosticKind::UndefinedProperty {
-            name: "TargetFramework".to_string(),
+            name: "RoslynTargetsPath".to_string(),
         }],
     );
     assert!(p.is_partial);
@@ -5358,12 +5358,12 @@ fn target_name_preserves_padding_verbatim() {
 #[test]
 fn target_name_written_under_untrusted_gate_is_unknown() {
     // `AssemblyName` is *written* (the gate evaluated true) but only by
-    // treating `$(TargetFramework)` — the carve-out that stays inexact under
+    // treating `$(RoslynTargetsPath)` — a toolset name the walk does not seed, inexact under
     // C.2b — as empty; the real build may skip the group and produce the
     // stem-named output instead. Locating a DLL by either name would be a
     // guess; the verdict must decline.
     let src = r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <AssemblyName>Renamed</AssemblyName>
   </PropertyGroup>
 </Project>"#;
@@ -5390,11 +5390,11 @@ fn target_name_untrusted_assembly_name_is_irrelevant_under_an_override() {
 fn target_name_from_unpinned_value_is_unknown() {
     // The write itself is ungated, but its VALUE reads a property that was
     // written under a gate we couldn't pin — same taint, one hop removed.
-    // The gate reads `TargetFramework`, the consumer-contract carve-out that
+    // The gate reads `RoslynTargetsPath`, a toolset name the walk does not seed, which
     // stays inexact under C.2b (a plain undefined name would now read exactly
     // empty and pin the gate).
     let src = r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <Suffix>.Special</Suffix>
   </PropertyGroup>
   <PropertyGroup>
@@ -5425,10 +5425,10 @@ fn untrusted_property_provenance_is_queryable() {
     // The generic seam behind the per-consumer verdicts: a property written
     // under a gate we couldn't pin reads as untrusted (case-insensitively);
     // a cleanly-written or never-written one does not. The gate reads the
-    // `TargetFramework` carve-out (undefined at gate time, and inexact under
+    // unseeded toolset name `RoslynTargetsPath` (undefined at gate time, and inexact under
     // C.2b), so the write it guards is untrusted.
     let src = r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <Marked>net8.0</Marked>
   </PropertyGroup>
   <PropertyGroup>
@@ -5451,7 +5451,7 @@ fn a_member_access_does_not_launder_an_untrusted_receiver() {
     for member in ["Length", "ToString()", "TrimStart('x')", "Contains('n')"] {
         let src = format!(
             r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <Marked>net8.0</Marked>
   </PropertyGroup>
   <PropertyGroup>
@@ -5486,7 +5486,7 @@ fn a_gate_reading_an_untrusted_property_through_a_member_marks_items_uncertain()
     ] {
         let src = format!(
             r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <Marked>net8.0</Marked>
   </PropertyGroup>
   <ItemGroup Condition="{gate}">
@@ -5510,10 +5510,10 @@ fn exact_undefined_child_gate_is_not_unpinned_by_an_unpinned_group() {
     // exact-undefined read: `'$(NoSuch)' != ''` is exactly False (`NoSuch`
     // substitutes to ""), so a child carrying it cannot write whichever way
     // the unpinnable group gate goes — it must not be unpinned. The group
-    // gate reads the `TargetFramework` carve-out, so the group itself stays
+    // gate reads the unseeded toolset name `RoslynTargetsPath`, so the group itself stays
     // unpinned; only the child's exact-undefined gate is under test.
     let src = r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0'">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == 'net8.0'">
     <Marked Condition="'$(NoSuch)' != ''">x</Marked>
   </PropertyGroup>
 </Project>"#;
@@ -5740,23 +5740,23 @@ fn target_and_undefined_property_in_body_are_not_items_uncertain() {
 #[test]
 fn compile_item_condition_with_inexact_property_is_uncertain_and_recorded() {
     // The correctness carve-out: the item's inclusion depends on a property we
-    // couldn't resolve (`TargetFramework` is carved out, never provably
+    // couldn't resolve (`RoslynTargetsPath` is a toolset name the walk does not seed, never provably
     // unset), so our exclude decision may be wrong.
     let src = r#"<Project>
   <ItemGroup>
-    <Compile Include="A.fs" Condition="'$(TargetFramework)' == 'bar'" />
+    <Compile Include="A.fs" Condition="'$(RoslynTargetsPath)' == 'bar'" />
   </ItemGroup>
 </Project>"#;
     let p = parse(src);
-    // TargetFramework unknown -> '' == 'bar' -> false -> item dropped.
+    // RoslynTargetsPath unknown -> '' == 'bar' -> false -> item dropped.
     assert!(p.items.is_empty());
     assert!(p.items_uncertain);
     assert_eq!(p.compile_condition_uncertainties.len(), 1);
     let u = &p.compile_condition_uncertainties[0];
-    assert_eq!(u.condition, "'$(TargetFramework)' == 'bar'");
+    assert_eq!(u.condition, "'$(RoslynTargetsPath)' == 'bar'");
     assert_eq!(
         u.reason,
-        CompileConditionReason::UndefinedProperties(vec!["TargetFramework".to_string()])
+        CompileConditionReason::UndefinedProperties(vec!["RoslynTargetsPath".to_string()])
     );
     assert_eq!(u.origin, DiagnosticOrigin::Buffer);
 }
@@ -5764,7 +5764,7 @@ fn compile_item_condition_with_inexact_property_is_uncertain_and_recorded() {
 #[test]
 fn item_group_inexact_condition_wrapping_compile_is_uncertain() {
     let src = r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'bar'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'bar'">
     <Compile Include="A.fs" />
   </ItemGroup>
 </Project>"#;
@@ -5774,17 +5774,17 @@ fn item_group_inexact_condition_wrapping_compile_is_uncertain() {
     assert_eq!(p.compile_condition_uncertainties.len(), 1);
     assert_eq!(
         p.compile_condition_uncertainties[0].reason,
-        CompileConditionReason::UndefinedProperties(vec!["TargetFramework".to_string()])
+        CompileConditionReason::UndefinedProperties(vec!["RoslynTargetsPath".to_string()])
     );
 }
 
 #[test]
 fn item_group_inexact_condition_wrapping_only_non_compile_is_not_uncertain() {
-    // The inexact property read (carved-out `TargetFramework`) still flips
+    // The inexact property read (the unseeded toolset name `RoslynTargetsPath`) still flips
     // `is_partial`, but no Compile item is gated, so the Compile set is
     // safe and we must not fall back.
     let src = r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'bar'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'bar'">
     <PackageReference Include="X" Version="1.0.0" />
   </ItemGroup>
 </Project>"#;
@@ -5832,14 +5832,14 @@ fn compile_remove_makes_items_uncertain_without_a_condition_carve_out() {
 
 #[test]
 fn compile_update_metadata_does_not_make_items_uncertain() {
-    // The gate reads carved-out `TargetFramework` (never provably unset),
+    // The gate reads the unseeded toolset name `RoslynTargetsPath` (never provably unset),
     // so the group's inclusion is a divergence risk — but it only carries
     // a metadata-only Update.
     let src = r#"<Project>
   <ItemGroup>
     <Compile Include="A.fs" />
   </ItemGroup>
-  <ItemGroup Condition="'$(TargetFramework)' != 'false'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' != 'false'">
     <Compile Update="@(Compile)">
       <Link>%(Filename)%(Extension)</Link>
     </Compile>
@@ -5867,12 +5867,12 @@ fn compile_update_metadata_does_not_make_items_uncertain() {
 #[test]
 fn choose_with_compile_makes_items_uncertain() {
     // `<Choose>` can carry `<ItemGroup><Compile>`; this one's When gate reads
-    // carved-out `TargetFramework` (never provably unset), so the branch
+    // The unseeded toolset name `RoslynTargetsPath` (never provably unset), so the branch
     // decision can't be pinned and we don't descend — the Compile set is
     // untrustworthy.
     let src = r#"<Project>
   <Choose>
-    <When Condition="'$(TargetFramework)' == 'Bar'">
+    <When Condition="'$(RoslynTargetsPath)' == 'Bar'">
       <ItemGroup><Compile Include="A.fs" /></ItemGroup>
     </When>
   </Choose>
@@ -6645,12 +6645,12 @@ fn clean_define_constants_is_not_uncertain() {
 
 #[test]
 fn define_constants_gated_on_undefined_property_is_uncertain() {
-    // The multi-target shape: a define gated on `$(TargetFramework)`, which is
+    // The multi-target shape: a define gated on `$(RoslynTargetsPath)`, which is
     // unresolved (only `<TargetFrameworks>` plural is set). We can't tell which
     // branch applies, so the `#if` symbol set is uncertain.
     let p = parse(
         r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net6.0'">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == 'net6.0'">
     <DefineConstants>NET6</DefineConstants>
   </PropertyGroup>
 </Project>"#,
@@ -6662,16 +6662,16 @@ fn define_constants_gated_on_undefined_property_is_uncertain() {
 
 #[test]
 fn define_constants_value_with_inexact_non_self_property_is_uncertain() {
-    // An inexact *non-self* ref (`$(TargetFramework)`, not the
+    // An inexact *non-self* ref (`$(RoslynTargetsPath)`, not the
     // `$(DefineConstants)` accumulator) may be a property the real build
-    // sets (TargetFramework is a consumer-contract carve-out: never
+    // sets (RoslynTargetsPath is a toolset name the walk does not seed: never
     // provably unset), so substituting it to "" can drop defines that
     // should be present. Note: a *provably*-unset name here would now
     // read exactly empty and leave the defines certain.
     let p = parse(
         r#"<Project>
   <PropertyGroup>
-    <DefineConstants>$(TargetFramework);FOO</DefineConstants>
+    <DefineConstants>$(RoslynTargetsPath);FOO</DefineConstants>
   </PropertyGroup>
 </Project>"#,
     );
@@ -6727,14 +6727,14 @@ fn define_constants_self_append_is_not_uncertain() {
 #[test]
 fn sibling_property_undefined_in_a_define_group_is_not_define_uncertain() {
     // A non-DefineConstants property's inexact undefined reference in the
-    // same group (`TargetFramework` is carved out, so its read still
+    // same group (`RoslynTargetsPath` is a toolset name the walk does not seed, so its read still
     // diagnoses) must not taint the define-constants signal (scoped
     // context, like the Compile side).
     let p = parse(
         r#"<Project>
   <PropertyGroup>
     <DefineConstants>FOO</DefineConstants>
-    <OtherProp>$(TargetFramework)</OtherProp>
+    <OtherProp>$(RoslynTargetsPath)</OtherProp>
   </PropertyGroup>
 </Project>"#,
     );
@@ -6769,14 +6769,14 @@ fn sdk_shorthand_without_a_resolver_is_items_uncertain() {
 
 #[test]
 fn project_reference_problem_in_a_compile_group_does_not_make_items_uncertain() {
-    // A `<ProjectReference>` sibling's inexact-property condition (carved-out
-    // `TargetFramework`, never provably unset) shares the group with a
+    // A `<ProjectReference>` sibling's inexact-property condition (the unseeded toolset name
+    // `RoslynTargetsPath`, never provably unset) shares the group with a
     // `<Compile>`, but it doesn't change which sources compile.
     let p = parse(
         r#"<Project>
   <ItemGroup>
     <Compile Include="A.fs" />
-    <ProjectReference Include="X.fsproj" Condition="'$(TargetFramework)' == 'y'" />
+    <ProjectReference Include="X.fsproj" Condition="'$(RoslynTargetsPath)' == 'y'" />
   </ItemGroup>
 </Project>"#,
     );
@@ -7061,13 +7061,13 @@ fn package_reference_expands_properties_in_id_and_version() {
 
 #[test]
 fn item_consuming_unpinned_property_is_uncertain_in_both_layouts() {
-    // The property's stored value ("src/.fs") leaned on carved-out
-    // $(TargetFramework) (never provably unset); an item Include consuming
+    // The property's stored value ("src/.fs") leaned on the unseeded toolset name
+    // $(RoslynTargetsPath) (never provably unset); an item Include consuming
     // it inherits the divergence risk regardless of which side of the
     // ItemGroup the property was written on — the item pass reads the
     // final table either way.
     let property_group = r#"  <PropertyGroup>
-    <Src>src/$(TargetFramework).fs</Src>
+    <Src>src/$(RoslynTargetsPath).fs</Src>
   </PropertyGroup>
 "#;
     let item_group = r#"  <ItemGroup>
@@ -7082,7 +7082,7 @@ fn item_consuming_unpinned_property_is_uncertain_in_both_layouts() {
         assert_eq!(paths(&p.items), [Path::new("/repo/proj/src/.fs")], "{name}");
         assert!(
             p.items_uncertain,
-            "{name}: the Include leaned on inexact $(TargetFramework); causes: {:?}",
+            "{name}: the Include leaned on inexact $(RoslynTargetsPath); causes: {:?}",
             p.compile_item_uncertainties
         );
     }
@@ -7095,7 +7095,7 @@ fn package_metadata_consuming_unpinned_property_is_uncertain() {
     <PackageReference Include="Foo" Version="$(Ver)" />
   </ItemGroup>
   <PropertyGroup>
-    <Ver>1.$(TargetFramework)</Ver>
+    <Ver>1.$(RoslynTargetsPath)</Ver>
   </PropertyGroup>
 </Project>"#;
     let p = parse(src);
@@ -7103,19 +7103,19 @@ fn package_metadata_consuming_unpinned_property_is_uncertain() {
     assert_eq!(pr.version.as_deref(), Some("1."));
     assert!(
         p.package_references_uncertain,
-        "the Version leaned on inexact $(TargetFramework); causes: {:?}",
+        "the Version leaned on inexact $(RoslynTargetsPath); causes: {:?}",
         p.package_reference_uncertainties
     );
 }
 
 #[test]
 fn unpinned_state_propagates_through_property_chains() {
-    // B never references $(TargetFramework) (carved out: never provably
+    // B never references $(RoslynTargetsPath) (an unseeded toolset name: never provably
     // unset) directly, but its value was assembled from A, which did —
     // the root cause travels with the chain.
     let src = r#"<Project>
   <PropertyGroup>
-    <A>$(TargetFramework)</A>
+    <A>$(RoslynTargetsPath)</A>
     <B>lib/$(A)</B>
   </PropertyGroup>
   <ItemGroup>
@@ -7159,12 +7159,12 @@ fn clean_overwrite_re_pins_a_property() {
 fn compile_condition_reading_unpinned_property_records_condition_carve_out() {
     // The LSP's compile-uncertainty warning surfaces
     // `compile_condition_uncertainties`; a condition whose risk arrives via
-    // an unpinned property (rather than a directly-inexact one; carved-out
-    // `TargetFramework` is never provably unset) must populate it the same
+    // an unpinned property (rather than a directly-inexact one; the unseeded toolset name
+    // `RoslynTargetsPath` is never provably unset) must populate it the same
     // way, naming the root cause.
     let src = r#"<Project>
   <PropertyGroup>
-    <Use>$(TargetFramework)</Use>
+    <Use>$(RoslynTargetsPath)</Use>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="A.fs" Condition="'$(Use)' == ''" />
@@ -7178,7 +7178,7 @@ fn compile_condition_reading_unpinned_property_records_condition_carve_out() {
                 && matches!(
                     &carve_out.reason,
                     CompileConditionReason::UndefinedProperties(names)
-                        if names.iter().any(|n| n == "TargetFramework")
+                        if names.iter().any(|n| n == "RoslynTargetsPath")
                 )
         }),
         "expected a condition carve-out naming the root cause, got: {:?}",
@@ -7197,7 +7197,7 @@ fn compile_condition_reading_unpinned_property_via_split_idiom_is_uncertain() {
   <PropertyGroup>
     <V>10.0.26200.1-preview</V>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(TargetFramework)' != 'no'">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' != 'no'">
     <V>10.0.26000.1-preview</V>
   </PropertyGroup>
   <ItemGroup>
@@ -7261,14 +7261,14 @@ fn child_with_cleanly_false_condition_stays_pinned_under_uncertain_group_gate() 
 #[test]
 fn maybe_run_property_write_unpins_the_property_for_item_reads() {
     // The gate evaluates TRUE here (undefined -> "" -> equal), and
-    // `TargetFramework` is carved out (never provably unset) — a real
+    // `RoslynTargetsPath` is a toolset name the walk does not seed (never provably unset) — a real
     // build that supplies it skips that write and compiles Old.fs
     // instead. The captured value is our best evaluation; the item
     // consuming it must degrade to uncertain.
     let src = r#"<Project>
   <PropertyGroup>
     <Src>Old.fs</Src>
-    <Src Condition="'$(TargetFramework)' == ''">New.fs</Src>
+    <Src Condition="'$(RoslynTargetsPath)' == ''">New.fs</Src>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="$(Src)" />
@@ -7286,13 +7286,13 @@ fn maybe_run_property_write_unpins_the_property_for_item_reads() {
 #[test]
 fn maybe_run_group_write_unpins_written_properties() {
     // Group-level flavour of the above: the group's own gate is the
-    // unpinnable one (`TargetFramework` is carved out, never provably
+    // unpinnable one (`RoslynTargetsPath` is a toolset name the walk does not seed, never provably
     // unset); its writes inherit the root.
     let src = r#"<Project>
   <PropertyGroup>
     <Ver>1.0</Ver>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <Ver>2.0</Ver>
   </PropertyGroup>
   <ItemGroup>
@@ -7312,12 +7312,12 @@ fn maybe_run_group_write_unpins_written_properties() {
 #[test]
 fn helper_item_consuming_unpinned_identity_degrades_the_consumer() {
     // The helper's identity is captured through the silent expansion path;
-    // it must still see that PkgId's stored value leaned on carved-out
-    // $(TargetFramework) (never provably unset) — a real build with
-    // TargetFramework=Bar would reference FooBar.
+    // it must still see that PkgId's stored value leaned on the unseeded toolset name
+    // $(RoslynTargetsPath) (never provably unset) — a real build with
+    // RoslynTargetsPath=Bar would reference FooBar.
     let src = r#"<Project>
   <PropertyGroup>
-    <PkgId>Foo$(TargetFramework)</PkgId>
+    <PkgId>Foo$(RoslynTargetsPath)</PkgId>
   </PropertyGroup>
   <ItemGroup>
     <ImplicitPackage Include="$(PkgId)" />
@@ -7337,11 +7337,11 @@ fn helper_item_consuming_unpinned_identity_degrades_the_consumer() {
 #[test]
 fn helper_item_condition_reading_unpinned_property_degrades_the_consumer() {
     // The silent condition probe on helper items must also see unpinned
-    // reads: UseIt's value leaned on carved-out $(TargetFramework), so
+    // reads: UseIt's value leaned on the unseeded toolset name $(RoslynTargetsPath), so
     // whether the helper item exists is not pinned down.
     let src = r#"<Project>
   <PropertyGroup>
-    <UseIt>x$(TargetFramework)</UseIt>
+    <UseIt>x$(RoslynTargetsPath)</UseIt>
   </PropertyGroup>
   <ItemGroup>
     <ImplicitPackage Include="Foo" Condition="'$(UseIt)' == 'x'" />
@@ -7360,8 +7360,8 @@ fn helper_item_condition_reading_unpinned_property_degrades_the_consumer() {
 
 #[test]
 fn maybe_skipped_property_write_taints_package_metadata_read() {
-    // The gate reads a property we cannot pin — `TargetFramework` is a
-    // consumer-contract carve-out (never provably unset), so the real
+    // The gate reads a property we cannot pin — `RoslynTargetsPath` is a
+    // toolset name the walk does not seed (never provably unset), so the real
     // build may supply it, run the group, and change PkgVersion. Our
     // property pass skips it, so the captured 1.0 is our best evaluation,
     // but the value is not trustworthy for package purposes: the set must
@@ -7374,14 +7374,14 @@ fn maybe_skipped_property_write_taints_package_metadata_read() {
             r#"<Project>
   <PropertyGroup><PkgVersion>1.0</PkgVersion></PropertyGroup>
   <ItemGroup><PackageReference Include="Foo" Version="$(PkgVersion)"/></ItemGroup>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'true'"><PkgVersion>2.0</PkgVersion></PropertyGroup>
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == 'true'"><PkgVersion>2.0</PkgVersion></PropertyGroup>
 </Project>"#,
         ),
         (
             "read after maybe-skipped write",
             r#"<Project>
   <PropertyGroup><PkgVersion>1.0</PkgVersion></PropertyGroup>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'true'"><PkgVersion>2.0</PkgVersion></PropertyGroup>
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == 'true'"><PkgVersion>2.0</PkgVersion></PropertyGroup>
   <ItemGroup><PackageReference Include="Foo" Version="$(PkgVersion)"/></ItemGroup>
 </Project>"#,
         ),
@@ -7784,10 +7784,10 @@ fn package_reference_to_differently_cased_compile_items_is_uncertain() {
 
 #[test]
 fn package_reference_to_compile_items_from_untrusted_item_group_is_uncertain() {
-    // Carved-out `TargetFramework` is never provably unset, so the gate is
+    // The unseeded toolset name `RoslynTargetsPath` is never provably unset, so the gate is
     // untrusted.
     let src = r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'true'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'true'">
     <Compile Include="Alpha.Package" />
   </ItemGroup>
   <ItemGroup>
@@ -7858,13 +7858,13 @@ fn package_reference_exact_reference_to_project_references_is_uncertain() {
 
 #[test]
 fn tainted_package_item_list_is_uncertain_when_consumed() {
-    // The helper item's Version reads carved-out `TargetFramework` (never
+    // The helper item's Version reads the unseeded toolset name `RoslynTargetsPath` (never
     // provably unset), so the metadata is tainted; a provably-unset name
     // would instead give an exactly-empty Version, leaving the consumed
     // reference uncertain only via the versionless rule.
     let src = r#"<Project>
   <ItemGroup>
-    <MIBCPackage Include="Alpha" Version="$(TargetFramework)" />
+    <MIBCPackage Include="Alpha" Version="$(RoslynTargetsPath)" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="@(MIBCPackage)" />
@@ -7879,10 +7879,10 @@ fn tainted_package_item_list_is_uncertain_when_consumed() {
 
 #[test]
 fn helper_item_group_under_inexact_condition_is_uncertain_when_consumed() {
-    // Carved-out `TargetFramework` is never provably unset, so the gate is
+    // The unseeded toolset name `RoslynTargetsPath` is never provably unset, so the gate is
     // untrusted.
     let src = r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'true'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'true'">
     <MIBCPackage Include="Alpha" Version="1.0" />
   </ItemGroup>
   <ItemGroup>
@@ -8057,7 +8057,7 @@ fn condition_tainted_helper_item_remove_invalidates_captured_package_list() {
     let src = r#"<Project>
   <ItemGroup>
     <MIBCPackage Include="Alpha" Version="1.0" />
-    <MIBCPackage Remove="Alpha" Condition="'$(TargetFramework)' == 'true'" />
+    <MIBCPackage Remove="Alpha" Condition="'$(RoslynTargetsPath)' == 'true'" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="@(MIBCPackage)" />
@@ -8229,10 +8229,10 @@ fn package_reference_unsupported_condition_is_uncertain() {
 
 #[test]
 fn package_reference_inexact_property_condition_is_uncertain() {
-    // Carved-out `TargetFramework` is never provably unset, so the gate is
+    // The unseeded toolset name `RoslynTargetsPath` is never provably unset, so the gate is
     // a divergence risk and the (empty) captured set cannot be trusted.
     let src = r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'true'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'true'">
     <PackageReference Include="Maybe" Version="1.0" />
   </ItemGroup>
 </Project>"#;
@@ -8329,13 +8329,13 @@ fn unresolved_import_marks_package_set_uncertain() {
 
 #[test]
 fn choose_containing_package_ref_marks_uncertain() {
-    // This Choose's When gate reads carved-out `TargetFramework` (never
+    // This Choose's When gate reads the unseeded toolset name `RoslynTargetsPath` (never
     // provably unset), so the branch decision can't be pinned and we don't
     // descend; the PackageReference inside is hidden and the captured set
     // must be flagged untrustworthy (not silently empty).
     let src = r#"<Project>
   <Choose>
-    <When Condition="'$(TargetFramework)' == '1'">
+    <When Condition="'$(RoslynTargetsPath)' == '1'">
       <ItemGroup>
         <PackageReference Include="Hidden" Version="1.0" />
       </ItemGroup>
@@ -8853,7 +8853,7 @@ fn item_definition_group_helper_metadata_ignored_by_framework_reference_stays_ce
 fn inherited_helper_package_metadata_uncertainty_marks_package_uncertain() {
     let src = r#"<Project>
   <ItemGroup>
-    <MIBCPackage Include="Alpha" Version="$(TargetFramework)" />
+    <MIBCPackage Include="Alpha" Version="$(RoslynTargetsPath)" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="@(MIBCPackage)" />
@@ -8868,7 +8868,7 @@ fn inherited_helper_package_metadata_uncertainty_marks_package_uncertain() {
         cause.kind
             == PackageReferenceUncertaintyCauseKind::UnevaluableMetadata {
                 name: "Version".to_string(),
-                value: "$(TargetFramework)".to_string(),
+                value: "$(RoslynTargetsPath)".to_string(),
             }
     }));
 }
@@ -8978,7 +8978,7 @@ fn inline_cpm_tainted_manage_flag_stays_uncertain() {
     let src = r#"<Project>
   <PropertyGroup>
     <CentralPackageVersionsFileImported>true</CentralPackageVersionsFileImported>
-    <ManagePackageVersionsCentrally Condition="'$(TargetFramework)' == ''">true</ManagePackageVersionsCentrally>
+    <ManagePackageVersionsCentrally Condition="'$(RoslynTargetsPath)' == ''">true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
     <PackageVersion Include="Newtonsoft.Json" Version="13.0.1" />
@@ -8995,7 +8995,7 @@ fn inline_cpm_tainted_manage_flag_stays_uncertain() {
             &cause.kind,
             PackageReferenceUncertaintyCauseKind::Diagnostic(
                 DiagnosticKind::UndefinedProperty { name }
-            ) if name == "TargetFramework"
+            ) if name == "RoslynTargetsPath"
         )
     }));
 }
@@ -9004,7 +9004,7 @@ fn inline_cpm_tainted_manage_flag_stays_uncertain() {
 fn inline_cpm_tainted_import_marker_stays_uncertain() {
     let src = r#"<Project>
   <PropertyGroup>
-    <CentralPackageVersionsFileImported>true$(TargetFramework)</CentralPackageVersionsFileImported>
+    <CentralPackageVersionsFileImported>true$(RoslynTargetsPath)</CentralPackageVersionsFileImported>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
@@ -9022,7 +9022,7 @@ fn inline_cpm_tainted_import_marker_stays_uncertain() {
             &cause.kind,
             PackageReferenceUncertaintyCauseKind::Diagnostic(
                 DiagnosticKind::UndefinedProperty { name }
-            ) if name == "TargetFramework"
+            ) if name == "RoslynTargetsPath"
         )
     }));
 }
@@ -9571,12 +9571,12 @@ fn false_conditioned_cpm_item_stays_certain() {
 
 #[test]
 fn inexact_property_conditioned_cpm_item_is_uncertain() {
-    // A carved-out property in the condition (`TargetFramework` is never
+    // An unseeded toolset name in the condition (`RoslynTargetsPath` is never
     // provably unset) is unknown, not clean-false — MSBuild may include the
     // item if that property is supplied, so flag.
     let src = r#"<Project>
   <ItemGroup>
-    <PackageVersion Include="X" Version="1.0" Condition="'$(TargetFramework)' == 'yes'" />
+    <PackageVersion Include="X" Version="1.0" Condition="'$(RoslynTargetsPath)' == 'yes'" />
   </ItemGroup>
 </Project>"#;
     let p = parse(src);
@@ -9602,10 +9602,10 @@ fn cpm_optin_under_unevaluable_condition_is_uncertain() {
 
 #[test]
 fn cpm_optin_under_inexact_property_condition_is_uncertain() {
-    // Carved-out `TargetFramework` is never provably unset, so whether the
+    // The unseeded toolset name `RoslynTargetsPath` is never provably unset, so whether the
     // opt-in group runs is unknown.
     let src = r#"<Project>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'true'">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == 'true'">
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
@@ -9713,14 +9713,14 @@ fn later_write_after_false_cpm_property_value_stays_certain() {
 
 #[test]
 fn global_package_reference_under_inexact_condition_is_uncertain() {
-    // Finding: a GlobalPackageReference gated on a carved-out property
-    // (`TargetFramework` is never provably unset) evaluates false and would
+    // Finding: a GlobalPackageReference gated on an unseeded toolset name
+    // (`RoslynTargetsPath` is never provably unset) evaluates false and would
     // otherwise produce a trusted empty set — but MSBuild may include it if
     // the property is supplied by imports/globals.
     let src = r#"<Project>
   <ItemGroup>
     <GlobalPackageReference Include="Some.Analyzer" Version="1.0"
-                            Condition="'$(TargetFramework)' == 'true'" />
+                            Condition="'$(RoslynTargetsPath)' == 'true'" />
   </ItemGroup>
 </Project>"#;
     let p = parse(src);
@@ -9856,13 +9856,13 @@ fn item_metadata_sees_a_property_defined_later_in_the_document() {
 
 #[test]
 fn inexact_property_in_item_include_still_diagnosed() {
-    // Pass ordering must not swallow real divergence risks: a carved-out
-    // property (`TargetFramework` is never provably unset, however late in
+    // Pass ordering must not swallow real divergence risks: an unseeded toolset
+    // name (`RoslynTargetsPath` is never provably unset, however late in
     // the document you look) still surfaces as UndefinedProperty and the
     // item is still refused.
     let src = r#"<Project>
   <ItemGroup>
-    <Compile Include="$(TargetFramework)" />
+    <Compile Include="$(RoslynTargetsPath)" />
   </ItemGroup>
 </Project>"#;
     let p = parse(src);
@@ -9870,7 +9870,7 @@ fn inexact_property_in_item_include_still_diagnosed() {
     assert_eq!(
         diag_kinds(&p.diagnostics),
         [&DiagnosticKind::UndefinedProperty {
-            name: "TargetFramework".to_string()
+            name: "RoslynTargetsPath".to_string()
         }]
     );
     assert!(p.items_uncertain);
@@ -10426,7 +10426,7 @@ fn an_untrusted_property_reports_the_root_of_its_chain() {
   <PropertyGroup>
     <Derived>$(Tf)-x</Derived>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(TargetFramework)' == ''">
+  <PropertyGroup Condition="'$(RoslynTargetsPath)' == ''">
     <FromUndefined>x</FromUndefined>
   </PropertyGroup>
 </Project>"#;
@@ -10442,7 +10442,7 @@ fn an_untrusted_property_reports_the_root_of_its_chain() {
     assert_eq!(
         p.property("FromUndefined").untrusted_cause(),
         Some(&crate::UntrustedCause::UndefinedProperty {
-            name: "TargetFramework".to_string(),
+            name: "RoslynTargetsPath".to_string(),
             hidden_by: None,
         })
     );
@@ -10698,14 +10698,14 @@ fn an_unset_read_after_an_undecided_import_names_what_hid_it() {
 }
 
 /// A gate's cause is the root its reads carried, not one rebuilt from a name:
-/// `A` was computed from an unset `TargetFramework` before `TargetFramework`
+/// `A` was computed from an unset `RoslynTargetsPath` before `RoslynTargetsPath`
 /// met the unmodelled gate, so a gate reading `A` rests on the former.
 #[test]
 fn a_gate_cause_keeps_the_root_its_read_carried() {
     let src = r#"<Project>
   <PropertyGroup>
-    <A>$(TargetFramework)</A>
-    <TargetFramework Condition="'@(Later)' == ''">net10.0</TargetFramework>
+    <A>$(RoslynTargetsPath)</A>
+    <RoslynTargetsPath Condition="'@(Later)' == ''">net10.0</RoslynTargetsPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(A)' == ''">
     <L>x</L>
@@ -10715,7 +10715,7 @@ fn a_gate_cause_keeps_the_root_its_read_carried() {
     assert_eq!(
         p.property("L").untrusted_cause(),
         Some(&crate::UntrustedCause::UndefinedProperty {
-            name: "TargetFramework".to_string(),
+            name: "RoslynTargetsPath".to_string(),
             hidden_by: None,
         })
     );
@@ -10738,12 +10738,12 @@ mod cause_history_props {
     use super::parse;
 
     // Few names, and reads weighted over literals, so chains through an
-    // intermediate (`A = $(TargetFramework)`, then a gate on `$(A)`) are
-    // common rather than one case in thousands. `TargetFramework` is here
-    // because its unset read is never exact (a consumer carve-out), which is
+    // intermediate (`A = $(RoslynTargetsPath)`, then a gate on `$(A)`) are
+    // common rather than one case in thousands. `RoslynTargetsPath` is here
+    // because its unset read is never exact (a toolset name the walk does not seed), which is
     // what makes such a chain carry a cause at all.
-    const NAMES: &[&str] = &["A", "TargetFramework", "L"];
-    const OTHERS: &[&str] = &["A", "TargetFramework"];
+    const NAMES: &[&str] = &["A", "RoslynTargetsPath", "L"];
+    const OTHERS: &[&str] = &["A", "RoslynTargetsPath"];
 
     fn write() -> impl Strategy<Value = String> {
         (

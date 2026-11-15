@@ -209,19 +209,17 @@ pub(crate) fn body_target_framework(parsed: &ParsedProject) -> Option<String> {
 /// second evaluation with, or to publish as a node's known TFM: its write sits
 /// behind a gate the evaluator could not pin, the real build holds a value the
 /// evaluator does not (a write it could not compute, or the environment's), or
-/// its value still holds a `$(...)` we did not expand. An unset singular the
-/// evaluator keeps inexact for its consumers is the multi-TFM shape, and one
-/// unset only because content went unseen is the trade-off every reader but
-/// the `Directory.Build.*` import points and the Compile items makes: neither
-/// is untrusted here.
+/// its value still holds a `$(...)` we did not expand. An unset singular is
+/// the multi-TFM shape (the outer build reads it unset), and one unset only
+/// because content went unseen is the trade-off every reader but the
+/// `Directory.Build.*` import points and the Compile items makes: neither is
+/// untrusted here.
 ///
-/// Deliberately the singular only: an outer-gated PLURAL (the arcade idiom,
-/// `<TargetFrameworks Condition="'$(TargetFramework)' == ''">`) is unpinned by
-/// construction — its gate reads the then-undefined `TargetFramework` — yet the
-/// TFM-invariant intersection consumes the declared list without trusting any
-/// single branch, so distrusting it here would break the idiom for nothing. The
-/// body singular, by contrast, is consumed as an authoritative
-/// `NodeTfm::Known`.
+/// Deliberately the singular only: the plural (the arcade idiom writes it
+/// under `'$(TargetFramework)' == ''`) is consumed by the TFM-invariant
+/// intersection, which never trusts a single branch, so its provenance is
+/// not asked here. The body singular, by contrast, is consumed as an
+/// authoritative `NodeTfm::Known`.
 pub(crate) fn tfm_untrusted(parsed: &ParsedProject) -> bool {
     match parsed.property("TargetFramework") {
         PropertyRead::Untrusted(_)

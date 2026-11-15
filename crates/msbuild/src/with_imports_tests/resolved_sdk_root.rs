@@ -1,7 +1,5 @@
 //! [`ParsedProject::resolved_sdk_root`] — the import-directory root of the
-//! first SDK the *returned* evaluation resolved. The headline guarantee is
-//! that the two-pass walk reports the **selected** pass's root, never one seen
-//! only in a pass that was discarded.
+//! first SDK the evaluation resolved.
 
 use super::*;
 use tempfile::TempDir;

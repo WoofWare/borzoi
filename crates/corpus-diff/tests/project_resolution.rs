@@ -724,7 +724,7 @@ fn lsp_loader_reports_condition_details_for_uncertain_compile_items() {
     write(
         &project,
         r#"<Project>
-  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'net8.0'">
     <Compile Include="A.fs" />
   </ItemGroup>
 </Project>
@@ -736,7 +736,7 @@ fn lsp_loader_reports_condition_details_for_uncertain_compile_items() {
         Err(LoadSkip::ItemsUncertain { details }) => {
             let details = details.to_string();
             assert!(details.contains("compile conditions"), "{details}");
-            assert!(details.contains("TargetFramework"), "{details}");
+            assert!(details.contains("RoslynTargetsPath"), "{details}");
             assert!(details.contains("unresolved property"), "{details}");
         }
         other => panic!("expected detailed items-uncertain skip, got {other:?}"),
@@ -745,10 +745,10 @@ fn lsp_loader_reports_condition_details_for_uncertain_compile_items() {
 
 #[test]
 fn lsp_loader_reports_causal_details_for_uncertain_compile_items() {
-    // Vehicles: `TargetFramework` is carved out of exact undefined reads
-    // (never provably unset), so the import path stays unresolved; the
-    // `VisualStudioVersion` read is a toolset name that still diagnoses
-    // but must not mask the causal import detail.
+    // Vehicles: `RoslynTargetsPath` is a toolset name the walk does not seed
+    // here (never provably unset), so the import path stays unresolved; the
+    // `VisualStudioVersion` read is another, which still diagnoses but must
+    // not mask the causal import detail.
     let tmp = tempfile::tempdir().expect("tempdir");
     let project = tmp.path().join("Import.fsproj");
     write(
@@ -757,7 +757,7 @@ fn lsp_loader_reports_causal_details_for_uncertain_compile_items() {
   <PropertyGroup>
     <Noise>$(VisualStudioVersion)</Noise>
   </PropertyGroup>
-  <Import Project="$(TargetFramework)/Shared.props" />
+  <Import Project="$(RoslynTargetsPath)/Shared.props" />
   <ItemGroup>
     <Compile Include="A.fs" />
   </ItemGroup>
@@ -771,7 +771,7 @@ fn lsp_loader_reports_causal_details_for_uncertain_compile_items() {
             let details = details.to_string();
             assert!(details.contains("causes:"), "{details}");
             assert!(details.contains("dropped <Import Project="), "{details}");
-            assert!(details.contains("TargetFramework"), "{details}");
+            assert!(details.contains("RoslynTargetsPath"), "{details}");
             assert!(
                 !details.contains("VisualStudioVersion"),
                 "unrelated broad diagnostics should not mask causal details: {details}"

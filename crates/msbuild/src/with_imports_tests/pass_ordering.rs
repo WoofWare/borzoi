@@ -167,8 +167,8 @@ fn glob_include_expands_property_defined_later_in_document() {
 
 #[test]
 fn import_path_leaning_on_unpinned_property_is_dropped_and_flagged() {
-    // `P` was assembled from $(TargetFramework), which is carved out of
-    // undefined-read exactness: a real build that supplies TargetFramework
+    // `P` was assembled from $(RoslynTargetsPath), which is a toolset name the walk does not seed,
+    // inexact: a real build that supplies RoslynTargetsPath
     // imports a different file, so best-effort following of "shared.props"
     // would be an over-resolve. The import is dropped (same treatment as a
     // directly-undefined path) and both item sets degrade structurally.
@@ -178,7 +178,7 @@ fn import_path_leaning_on_unpinned_property_is_dropped_and_flagged() {
         "Demo.fsproj",
         r#"<Project>
   <PropertyGroup>
-    <P>$(TargetFramework)shared.props</P>
+    <P>$(RoslynTargetsPath)shared.props</P>
   </PropertyGroup>
   <Import Project="$(P)" />
   <ItemGroup>
@@ -211,8 +211,8 @@ fn import_path_leaning_on_unpinned_property_is_dropped_and_flagged() {
 
 #[test]
 fn get_path_of_file_above_with_unpinned_argument_is_dropped_and_flagged() {
-    // The search-start argument leaned on $(TargetFramework), which is
-    // carved out of undefined-read exactness: a real build could search
+    // The search-start argument leaned on $(RoslynTargetsPath), a toolset
+    // name the walk does not seed, so inexact: a real build could search
     // from a different directory and import a different file, so the
     // resolved path inherits the unpinned state and the import is dropped
     // and flagged like any other ambiguous path.
@@ -222,7 +222,7 @@ fn get_path_of_file_above_with_unpinned_argument_is_dropped_and_flagged() {
         "sub/Demo.fsproj",
         r#"<Project>
   <PropertyGroup>
-    <P>$(TargetFramework)</P>
+    <P>$(RoslynTargetsPath)</P>
   </PropertyGroup>
   <Import Project="$([MSBuild]::GetPathOfFileAbove('shared.props', '$(P)'))" />
   <ItemGroup>

@@ -834,9 +834,9 @@ fn body_reached_nested_sdk_honours_directory_build_props_cpm_gate() {
 </Project>"#,
     );
     // The nested file's *root* carries the Sdk attribute; reaching it
-    // through a body `<Import>` is the shape the deferred second pass
-    // exists for (no promotion applies — the import is not an
-    // `<Import Sdk=…>` first element).
+    // through a body `<Import>`, so the nested SDK's own import points apply
+    // (no promotion applies — the import is not an `<Import Sdk=…>` first
+    // element).
     write_at(
         tmp.path(),
         "repo/src/nested.proj",

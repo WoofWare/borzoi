@@ -2957,15 +2957,10 @@ fn walk_framework_reference(node: Node<'_, '_>, state: &mut State<'_>) {
     }
 }
 
-/// Every metadatum `node` declares, as an item table reads it. Quietly: the
-/// dependency capture has read the names it reads already, and nothing else
-/// may steer the walk.
+/// Every metadatum `node` declares, as an item table reads it.
 #[cfg(any(test, feature = "test-support"))]
 fn read_exact_metadata_quietly(node: Node<'_, '_>, state: &mut State<'_>) -> GenericItemMetadata {
-    let previous = state.quiet_target_framework_reads.replace(true);
-    let exact = read_generic_item_metadata(node, state);
-    state.quiet_target_framework_reads.set(previous);
-    exact
+    read_generic_item_metadata(node, state)
 }
 
 /// The row an `Include` of a dependency item of `item_type` adds for
@@ -3577,15 +3572,11 @@ impl GenericItemMetadataBuilder {
     }
 }
 
-/// Every metadatum `node` declares, as attributes and as child elements. A
-/// dependency consumer reads only NuGet's package metadata names; the rest are
-/// read with [`State::quiet_target_framework_reads`] set, so that reading them
-/// cannot move the walk's result.
+/// Every metadatum `node` declares, as attributes and as child elements.
 fn read_generic_item_metadata(node: Node<'_, '_>, state: &mut State<'_>) -> GenericItemMetadata {
     let mut metadata = GenericItemMetadataBuilder::default();
     for attr in node.attributes() {
         if is_item_metadata_attribute(attr.name()) {
-            let previous = quieten(attr.name(), state);
             // A value MSBuild reads as XML is held inexact, read as roxmltree
             // reads it.
             let reading = metadata_attribute(node, &attr);
@@ -3597,14 +3588,11 @@ fn read_generic_item_metadata(node: Node<'_, '_>, state: &mut State<'_>) -> Gene
                 state,
                 &mut metadata,
             );
-            state.quiet_target_framework_reads.set(previous);
         }
     }
     for child in node.children().filter(Node::is_element) {
         let name = child.tag_name().name();
-        let previous = quieten(name, state);
         read_generic_metadata_child(child, name, state, &mut metadata);
-        state.quiet_target_framework_reads.set(previous);
     }
     metadata.finish()
 }
@@ -3651,13 +3639,6 @@ fn metadata_attribute<'a>(
     attr: &roxmltree::Attribute<'a, '_>,
 ) -> Option<std::borrow::Cow<'a, str>> {
     crate::document::attribute(node, attr.name()).filter(|value| !value.contains('<'))
-}
-
-/// Set [`State::quiet_target_framework_reads`] for a metadatum named `name`
-/// that no dependency consumer reads, returning the flag's previous value.
-fn quieten(name: &str, state: &State<'_>) -> bool {
-    let quiet = state.quiet_target_framework_reads.get() || !is_package_metadata_name(name);
-    state.quiet_target_framework_reads.replace(quiet)
 }
 
 fn read_generic_metadata_child(
@@ -4423,12 +4404,8 @@ fn record_helper_item_definition_defaults(node: Node<'_, '_>, state: &mut State<
             }
             None => continue,
         };
-        let previous = state
-            .quiet_target_framework_reads
-            .replace(state.quiet_target_framework_reads.get() || dependency);
         let names = item_child_condition_may_run(child, state)
             .then(|| item_definition_child_metadata_names(child, state));
-        state.quiet_target_framework_reads.set(previous);
         let Some(names) = names else {
             continue;
         };
@@ -4454,14 +4431,12 @@ fn record_item_definition_values(
     item_type: &str,
     state: &mut State<'_>,
 ) {
-    let previous = state.quiet_target_framework_reads.replace(true);
     let (group_gate, group_tainted) = evaluate_item_condition_silent_with_sdk_taint(group, state);
     let (child_gate, child_tainted) = evaluate_item_condition_silent_with_sdk_taint(child, state);
     let decided = !group_tainted && !child_tainted;
     let skipped =
         decided && (!matches!(group_gate, CondGate::Run) || !matches!(child_gate, CondGate::Run));
     let metadata = (!skipped).then(|| read_generic_item_metadata(child, state));
-    state.quiet_target_framework_reads.set(previous);
     let Some(metadata) = metadata else {
         return;
     };
@@ -4499,8 +4474,6 @@ struct ItemDefinitionMetadataName {
 }
 
 /// Every metadata name an item definition may give its type a default for.
-/// A name no dependency consumer reads has its condition read quietly (see
-/// [`State::quiet_target_framework_reads`]).
 fn item_definition_child_metadata_names(
     node: Node<'_, '_>,
     state: &State<'_>,
@@ -4516,9 +4489,7 @@ fn item_definition_child_metadata_names(
     }
     for child in node.children().filter(Node::is_element) {
         let name = child.tag_name().name();
-        let previous = quieten(name, state);
         let may_run = item_child_condition_may_run(child, state);
-        state.quiet_target_framework_reads.set(previous);
         if !may_run {
             continue;
         }
