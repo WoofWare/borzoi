@@ -100,6 +100,14 @@ fn recover_unfinished_abstract_slot_grid() {
         // FCS reads `(x)` as an operator name that fails to parse (its
         // `opName` error arm), which names the slot differently.
         (" (x)", Want::Agree),
+        // Junk that opens a context of its own, closed or not: the rest of the
+        // member is discarded up to the member's own end, never the type's.
+        (" P = match x with", Want::Agree),
+        (" P = (x", Want::Agree),
+        (" P = begin", Want::Agree),
+        (" P with", Want::Agree),
+        (" P: int with get", Want::Agree),
+        (" { new I with member _.M = 1 }", Want::Agree),
     ];
     let mut cells = Vec::new();
     let mut diverging = Vec::new();
@@ -111,11 +119,13 @@ fn recover_unfinished_abstract_slot_grid() {
                 format!("module M\nmodule A =\n    type T = {slot}\n    let x = 1\nlet z = 2\n");
             // A stray token after the slot on the type body's last line: FCS's
             // error recovery then discards the body's closing block end too,
-            // which loses the module at the end of the file and, inside a
-            // nested module, makes the `let` after the type one of its members
-            // and the top-level `let z` one of `A`'s.
-            if matches!(rest, " 1" | " P 1") {
+            // which loses the module at the end of the file (`alone`) or,
+            // inside a nested module, makes the `let` after the type one of its
+            // members and the top-level `let z` one of `A`'s (`nested`).
+            if matches!(rest, " 1" | " P 1" | " P = (x") {
                 diverging.push(alone.clone());
+            }
+            if matches!(rest, " 1" | " P 1" | " P = match x with") {
                 diverging.push(nested.clone());
             }
             cells.push((alone, want));

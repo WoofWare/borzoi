@@ -206,19 +206,25 @@ impl<'src> Parser<'src> {
     /// [`Self::skip_offside_block_as_error`]'s. A no-op when the member
     /// already ends at the cursor.
     ///
-    /// Brackets the rest opens are counted only to tell its own closers from
-    /// the enclosing construct's (`class abstract end`): they never hide a
-    /// layout token, since LexFilter may swallow a closer (`abstract (x)⏎`
-    /// leaves no `)` in the filtered stream) and a bracket counted open would
-    /// then run the skip past the member's end.
+    /// Only the rest's own `OBLOCKBEGIN`s can hide a layout token, since
+    /// LexFilter closes each with an `OBLOCKEND`. A bracket or an `OWITH` is
+    /// counted only to tell its own closer (`)`, `OEND`) from the enclosing
+    /// construct's (`class abstract end`, an object expression's `OEND`):
+    /// LexFilter may swallow a closer (`abstract (x)⏎` leaves no `)` in the
+    /// filtered stream) or emit none (`abstract P = match x with⏎` leaves its
+    /// `with` open), and one counted open would run the skip past the
+    /// member's end and the type's.
     pub(super) fn skip_unfinished_member_rest(&mut self) {
         let mut blocks = 0u32;
         let mut brackets = 0u32;
+        let mut withs = 0u32;
         while let Some((res, _)) = self.peek() {
             match res {
-                Ok(FilteredToken::Virtual(Virtual::BlockBegin | Virtual::With)) => blocks += 1,
-                Ok(FilteredToken::Virtual(Virtual::BlockEnd | Virtual::End)) if blocks > 0 => {
-                    blocks -= 1;
+                Ok(FilteredToken::Virtual(Virtual::BlockBegin)) => blocks += 1,
+                Ok(FilteredToken::Virtual(Virtual::BlockEnd)) if blocks > 0 => blocks -= 1,
+                Ok(FilteredToken::Virtual(Virtual::With)) => withs += 1,
+                Ok(FilteredToken::Virtual(Virtual::End)) if blocks > 0 || withs > 0 => {
+                    withs = withs.saturating_sub(1);
                 }
                 Ok(FilteredToken::Virtual(_)) if self.parked_on_layout_virtual() => {
                     if blocks == 0 {
