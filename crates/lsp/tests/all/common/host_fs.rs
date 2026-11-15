@@ -30,6 +30,14 @@ pub fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path)
 }
 
+pub fn symlink_metadata(path: impl AsRef<Path>) -> std::io::Result<std::fs::Metadata> {
+    std::fs::symlink_metadata(path)
+}
+
+pub fn read_link(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+    std::fs::read_link(path)
+}
+
 /// Set the file's modification time, as an extraction that keeps an
 /// archive's times does.
 pub fn set_modified(path: impl AsRef<Path>, time: std::time::SystemTime) -> std::io::Result<()> {

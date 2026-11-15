@@ -8,11 +8,24 @@
 //! TFM, another, both, or neither, recorded in the assets file or not, and
 //! multi-targeted with a restore of their own that pins their TFM or not),
 //! `borzoi_msbuild::observed::soundness::sweep_with` perturbs every file
-//! under the fixture one at a time. Whenever every answer in the read set
-//! still stands, resolving again gives the same reference DLLs; and two
-//! perturbations the plan names must fail validation: a newer pack version
-//! installed beside the recorded ones, and an unbuilt sibling's output DLL
-//! created where the resolution found none.
+//! and symlink under the fixture one at a time. Whenever every answer in the
+//! read set still stands, resolving again gives the same reference DLLs; and
+//! two perturbations the plan names must fail validation: a newer pack
+//! version installed beside the recorded ones, and an unbuilt sibling's
+//! output DLL created where the resolution found none.
+//!
+//! The entry project may be reached through a symlink ([`Layout`]): its
+//! directory, its `obj` directory, its assets file, or a directory above
+//! every project; and a sibling's `bin` may be a symlink, and its missing
+//! output a dangling one. Each link's target is relative or absolute. A read
+//! recorded under one spelling and confirmed under another then meets every
+//! link the sweep deletes, dangles, retargets to another link's target, or
+//! whose missing target it creates. Retargeting the entry's link must fail
+//! validation, both to a copy whose assets file differs and to an identical
+//! copy elsewhere: the assets file's text is then unchanged under the
+//! spelling it was read by, but its canonical path, from which the
+//! resolution resolves the project paths the assets file records, has
+//! moved, and only the canonicalisation's read sees that.
 //!
 //! The env itself carries the read set, each DLL's stamp included, whether
 //! the DLL's projection came from reading it or from the assembly cache.
@@ -59,7 +72,35 @@ struct Sibling {
     /// of its own (`R<i>`), which an extra perturbation removes under that
     /// TFM alone through the import.
     multi: bool,
+    /// Whether its `bin` directory is a symlink to a directory elsewhere.
+    bin_linked: bool,
+    /// Whether, unbuilt under the project's TFM, its output DLL's path is a
+    /// symlink to a file that does not exist.
+    dangling_output: bool,
 }
+
+/// How the entry project is reached through a symlink.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Layout {
+    Plain,
+    /// `ws/P` is a symlink to a directory elsewhere.
+    ProjectDir,
+    /// `ws/P/obj` is a symlink to a directory elsewhere.
+    Obj,
+    /// `ws/P/obj/project.assets.json` is a symlink to a file elsewhere.
+    AssetsFile,
+    /// Every project lies under `ws/tree`, and is reached as `ws/link/…`,
+    /// `ws/link` being a symlink to it.
+    Ancestor,
+}
+
+const LAYOUTS: [Layout; 5] = [
+    Layout::Plain,
+    Layout::ProjectDir,
+    Layout::Obj,
+    Layout::AssetsFile,
+    Layout::Ancestor,
+];
 
 /// Which package folder holds a package.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +117,10 @@ struct World {
     /// The framework pack's versions, and whether each holds `ref/net8.0`.
     pack_versions: Vec<(u32, bool)>,
     siblings: Vec<Sibling>,
+    layout: Layout,
+    /// Whether each symlink's target is absolute, rather than relative to
+    /// the link's directory.
+    absolute_links: bool,
 }
 
 fn sibling() -> impl Strategy<Value = Sibling> {
@@ -84,13 +129,19 @@ fn sibling() -> impl Strategy<Value = Sibling> {
         any::<bool>(),
         prop::bool::weighted(0.8),
         any::<bool>(),
+        prop::bool::weighted(0.3),
+        prop::bool::weighted(0.3),
     )
-        .prop_map(|(built, in_assets, names_output, multi)| Sibling {
-            built,
-            in_assets,
-            names_output,
-            multi,
-        })
+        .prop_map(
+            |(built, in_assets, names_output, multi, bin_linked, dangling_output)| Sibling {
+                built,
+                in_assets,
+                names_output,
+                multi,
+                bin_linked,
+                dangling_output,
+            },
+        )
 }
 
 fn world() -> impl Strategy<Value = World> {
@@ -101,12 +152,18 @@ fn world() -> impl Strategy<Value = World> {
         ),
         prop::collection::vec((1u32..4, prop::bool::weighted(0.7)), 1..3),
         prop::collection::vec(sibling(), 0..3),
+        prop::sample::select(LAYOUTS.to_vec()),
+        any::<bool>(),
     )
-        .prop_map(|(packages, pack_versions, siblings)| World {
-            packages,
-            pack_versions,
-            siblings,
-        })
+        .prop_map(
+            |(packages, pack_versions, siblings, layout, absolute_links)| World {
+                packages,
+                pack_versions,
+                siblings,
+                layout,
+                absolute_links,
+            },
+        )
 }
 
 fn write(path: &Path, text: &str) {
@@ -114,8 +171,81 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// Lay `world` down under `root`; the entry project's path.
-fn lay_down(root: &Path, world: &World) -> PathBuf {
+/// What laying a world down made: the entry project's path, the directory
+/// every project's directory is spelt under (`ws`, or `ws/link`), and the
+/// retargets of the entry's symlink, if it has one, each of which must fail
+/// validation.
+struct Laid {
+    entry: PathBuf,
+    base: PathBuf,
+    retargets: Vec<Edit>,
+}
+
+/// The target to write in a symlink at `link` that leads to `target`, a path
+/// under the canonical root: `target` itself, or the path to it from the
+/// link's directory as the file system resolves that directory.
+fn link_target(link: &Path, target: &Path, absolute: bool) -> PathBuf {
+    if absolute {
+        return target.to_path_buf();
+    }
+    let from = host_fs::canonicalize(link.parent().unwrap()).unwrap();
+    let common = from
+        .components()
+        .zip(target.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut out = PathBuf::new();
+    for _ in from.components().skip(common) {
+        out.push("..");
+    }
+    for part in target.components().skip(common) {
+        out.push(part);
+    }
+    out
+}
+
+fn symlink(link: &Path, target: &Path, absolute: bool) {
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let written = link_target(link, target, absolute);
+    std::os::unix::fs::symlink(written, link).unwrap();
+}
+
+/// Move what is at `from` to `to`, and leave a symlink to it at `from`.
+fn move_and_link(from: &Path, to: &Path, absolute: bool) {
+    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+    std::fs::rename(from, to).unwrap();
+    symlink(from, to, absolute);
+}
+
+/// Copy the tree at `from` to `to`, a symlink as the same target.
+fn copy_tree(from: &Path, to: &Path) {
+    let meta = host_fs::symlink_metadata(from).unwrap();
+    if meta.file_type().is_symlink() {
+        std::os::unix::fs::symlink(host_fs::read_link(from).unwrap(), to).unwrap();
+    } else if meta.is_dir() {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in host_fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            copy_tree(&entry.path(), &to.join(entry.file_name()));
+        }
+    } else {
+        write(to, &host_fs::read_to_string(from).unwrap());
+    }
+}
+
+/// The entry's assets file at `path`, rewritten to name no package, project
+/// or framework.
+fn strip_assets(path: &Path) {
+    let mut assets: serde_json::Value =
+        serde_json::from_str(&host_fs::read_to_string(path).unwrap()).unwrap();
+    assets["targets"][TFM] = serde_json::json!({});
+    assets["libraries"] = serde_json::json!({});
+    assets["project"]["frameworks"][TFM] = serde_json::json!({});
+    write(path, &serde_json::to_string(&assets).unwrap());
+}
+
+/// Lay `world` down under `root`, which must be canonical.
+fn lay_down(root: &Path, world: &World) -> Laid {
     let nuget = root.join("nuget");
     let fallback = root.join("fallback");
     std::fs::create_dir_all(&nuget).unwrap();
@@ -249,7 +379,104 @@ fn lay_down(root: &Path, world: &World) -> PathBuf {
         &root.join("ws/P/obj/project.assets.json"),
         &serde_json::to_string(&assets).unwrap(),
     );
-    entry
+    link_up(root, world, entry)
+}
+
+/// Turn the plain tree [`lay_down`] wrote into `world`'s symlinked one. Every
+/// link target lies under `ws/vault` (or, for [`Layout::Ancestor`], is
+/// `ws/tree`), and each link is made after the moves that would change what
+/// a relative target resolves against.
+fn link_up(root: &Path, world: &World, entry: PathBuf) -> Laid {
+    let abs = world.absolute_links;
+    let ws = root.join("ws");
+    let vault = ws.join("vault");
+    // The entry's link, its target, and where the assets file lies in the
+    // target.
+    let entry_link = match world.layout {
+        Layout::Plain => None,
+        Layout::ProjectDir => Some((ws.join("P"), vault.join("P"), "obj/project.assets.json")),
+        Layout::Obj => Some((ws.join("P/obj"), vault.join("objP"), "project.assets.json")),
+        Layout::AssetsFile => Some((
+            ws.join("P/obj/project.assets.json"),
+            vault.join("P.assets.json"),
+            "",
+        )),
+        Layout::Ancestor => {
+            let tree = ws.join("tree");
+            std::fs::create_dir_all(&tree).unwrap();
+            for dir in host_fs::read_dir(&ws).unwrap() {
+                let dir = dir.unwrap();
+                if dir.file_name() != "tree" {
+                    std::fs::rename(dir.path(), tree.join(dir.file_name())).unwrap();
+                }
+            }
+            symlink(&ws.join("link"), &tree, abs);
+            None
+        }
+    };
+    if let Some((link, target, _)) = &entry_link {
+        move_and_link(link, target, abs);
+    }
+    let base = if world.layout == Layout::Ancestor {
+        ws.join("link")
+    } else {
+        ws.clone()
+    };
+    for (i, s) in world.siblings.iter().enumerate() {
+        let name = format!("Q{i}");
+        let bin = base.join(&name).join("bin");
+        if s.bin_linked {
+            let target = vault.join(format!("bin{name}"));
+            if host_fs::symlink_metadata(&bin).is_ok() {
+                move_and_link(&bin, &target, abs);
+            } else {
+                std::fs::create_dir_all(&target).unwrap();
+                symlink(&bin, &target, abs);
+            }
+        }
+        if s.dangling_output && !s.built.contains(&TFM) {
+            symlink(
+                &bin.join("Debug").join(TFM).join(format!("{name}.dll")),
+                &vault.join(format!("missing-{name}.dll")),
+                abs,
+            );
+        }
+    }
+    // The retargets of the entry's link: to a copy of its target whose
+    // assets file differs, and to an identical copy one directory deeper,
+    // where the project paths the assets file records resolve elsewhere.
+    let entry_link = match world.layout {
+        Layout::Ancestor => Some((
+            ws.join("link"),
+            ws.join("tree"),
+            "P/obj/project.assets.json",
+        )),
+        _ => entry_link,
+    };
+    let mut retargets = Vec::new();
+    if let Some((link, target, assets)) = &entry_link {
+        let mut differing = target.clone().into_os_string();
+        differing.push("-alt");
+        let differing = PathBuf::from(differing);
+        copy_tree(target, &differing);
+        strip_assets(&if assets.is_empty() {
+            differing.clone()
+        } else {
+            differing.join(assets)
+        });
+        let identical = vault.join("deeper").join(target.file_name().unwrap());
+        std::fs::create_dir_all(identical.parent().unwrap()).unwrap();
+        copy_tree(target, &identical);
+        for alt in [differing, identical] {
+            retargets.push(Edit::Link(link.clone(), link_target(link, &alt, abs)));
+        }
+    }
+    let entry = base.join(entry.strip_prefix(&ws).unwrap());
+    Laid {
+        entry,
+        base,
+        retargets,
+    }
 }
 
 /// A workspace that finds no SDK of the host's.
@@ -267,9 +494,11 @@ fn workspace(root: &Path) -> Workspace {
 /// sweep holds those to soundness alone.
 fn extras(
     root: &Path,
+    laid: &Laid,
     world: &World,
     searched: impl Fn(&Path) -> bool,
 ) -> (Vec<Perturbation>, usize) {
+    let base = &laid.base;
     let newest = world
         .pack_versions
         .iter()
@@ -291,7 +520,7 @@ fn extras(
             out.push(Perturbation {
                 why: Why::Extra,
                 edits: vec![Edit::Write(
-                    root.join("ws").join(format!("Q{i}")).join("other.props"),
+                    base.join(format!("Q{i}")).join("other.props"),
                     format!(
                         "<Project><ItemGroup><ProjectReference Remove=\"../R{i}/R{i}.fsproj\" /></ItemGroup></Project>\n"
                     )
@@ -301,19 +530,24 @@ fn extras(
         }
         if !s.built.contains(&TFM) {
             let name = format!("Q{i}");
-            if searched(&root.join("ws").join(&name).join("bin")) {
+            if searched(&base.join(&name).join("bin")) {
                 must_stale += 1;
             }
             out.push(Perturbation {
                 why: Why::Extra,
                 edits: vec![Edit::Write(
-                    root.join("ws")
-                        .join(&name)
-                        .join(format!("bin/Debug/{TFM}/{name}.dll")),
+                    base.join(&name).join(format!("bin/Debug/{TFM}/{name}.dll")),
                     b"dll".to_vec(),
                 )],
             });
         }
+    }
+    for retarget in &laid.retargets {
+        must_stale += 1;
+        out.push(Perturbation {
+            why: Why::Extra,
+            edits: vec![retarget.clone()],
+        });
     }
     (out, must_stale)
 }
@@ -324,6 +558,7 @@ struct Reached {
     package_dlls: u64,
     framework_dlls: u64,
     sibling_dlls: u64,
+    layouts: std::collections::BTreeSet<Layout>,
     tally: Tally,
 }
 
@@ -331,7 +566,8 @@ fn check(world: &World, reached: &mut Reached) {
     let tmp = TempDir::new().unwrap();
     // Canonical, so the read set's spellings lie under the swept root.
     let root = host_fs::canonicalize(tmp.path()).unwrap();
-    let entry = lay_down(&root, world);
+    let laid = lay_down(&root, world);
+    let entry = laid.entry.clone();
     let dotnet = root.join("dotnet");
     let compute = || {
         let mut ws = workspace(&root);
@@ -353,13 +589,15 @@ fn check(world: &World, reached: &mut Reached) {
             reached.sibling_dlls += 1;
         }
     }
-    let (extras, must_stale) = extras(&root, world, |bin| {
+    reached.layouts.insert(world.layout);
+    let (extras, must_stale) = extras(&root, &laid, world, |bin| {
         reads.reads().iter().any(|read| read.path == bin)
     });
     let tally = sweep_with(&root, &compute, &extras);
     assert!(
         tally.stale.get(&Why::Extra).copied().unwrap_or(0) >= must_stale,
-        "an installed pack version or a newly built sibling left the read set standing: {tally:?}"
+        "an installed pack version, a newly built sibling or the entry's link retargeted left \
+         the read set standing: {tally:?}"
     );
     reached.tally.absorb(&tally);
 }
@@ -383,7 +621,8 @@ struct Confirmed {
 fn check_confirmed(world: &World, confirmed: &mut Confirmed) {
     let tmp = TempDir::new().unwrap();
     let root = host_fs::canonicalize(tmp.path()).unwrap();
-    let entry = lay_down(&root, world);
+    let laid = lay_down(&root, world);
+    let entry = laid.entry.clone();
     // NuGet reads its user settings from a home that exists.
     std::fs::create_dir_all(root.join("home")).unwrap();
     let nuget = root.join("nuget");
@@ -455,11 +694,17 @@ fn check_confirmed(world: &World, confirmed: &mut Confirmed) {
             b"dll".to_vec(),
         )],
     };
-    let tally = sweep_with(&root.join("ws"), &compute, &[install]);
+    let mut extras = vec![install];
+    extras.extend(laid.retargets.iter().map(|retarget| Perturbation {
+        why: Why::Extra,
+        edits: vec![retarget.clone()],
+    }));
+    let tally = sweep_with(&root.join("ws"), &compute, &extras);
     assert_eq!(
         tally.stale.get(&Why::Extra).copied().unwrap_or(0),
-        1,
-        "a pack version installed left what the env confirms standing: {tally:?}"
+        extras.len(),
+        "a pack version installed, or the entry's link retargeted, left what the env confirms \
+         standing: {tally:?}"
     );
     confirmed.tally.absorb(&tally);
 }
@@ -539,7 +784,9 @@ fn the_generator_reaches_every_reference_kind_and_moves_the_resolution() {
                 .stale
                 .get(&Why::CreateAbsent)
                 .is_some_and(|n| *n > 0)
-            && r.tally.moved(Why::Extra) > 0,
+            && r.tally.moved(Why::Extra) > 0
+            && r.tally.moved(Why::Relink) > 0
+            && r.layouts.len() == LAYOUTS.len(),
         "{r:?}"
     );
 }
@@ -561,13 +808,17 @@ fn the_env_records_each_dll_stamp_with_or_without_the_cache() {
             in_assets: true,
             names_output: true,
             multi: false,
+            bin_linked: false,
+            dangling_output: false,
         }],
+        layout: Layout::Plain,
+        absolute_links: false,
     };
     let system_runtime = host_fs::read(crate::common::ensure_system_runtime_dll()).unwrap();
     for cached in [false, true] {
         let tmp = TempDir::new().unwrap();
         let root = host_fs::canonicalize(tmp.path()).unwrap();
-        let entry = lay_down(&root, &world);
+        let entry = lay_down(&root, &world).entry;
         let dotnet = root.join("dotnet");
         let pack_dll = dotnet.join(format!(
             "packs/Microsoft.NETCore.App.Ref/1.0.0/ref/{TFM}/System.Runtime.dll"
@@ -677,5 +928,54 @@ fn the_env_records_each_dll_stamp_with_or_without_the_cache() {
             reads.reads.first_stale().is_some(),
             "a rewritten DLL left the env's read set standing (cached: {cached})"
         );
+    }
+}
+
+/// For every layout that reaches the entry through a symlink, retargeting
+/// the link to an identical copy of what it led to, one directory deeper,
+/// fails validation: the assets file reads the same under the spelling the
+/// resolution read it by, so only the canonicalisation of its path sees the
+/// move. Seeing it matters because the project paths the assets file records
+/// are resolved from that canonical path. A sibling recorded in the assets
+/// file, built and named only there, makes the move change the answer too.
+#[test]
+fn a_link_retargeted_to_an_identical_copy_fails_validation() {
+    for layout in LAYOUTS.into_iter().filter(|l| *l != Layout::Plain) {
+        for absolute_links in [false, true] {
+            let world = World {
+                packages: vec![Folder::Primary],
+                pack_versions: vec![(1, true)],
+                siblings: vec![Sibling {
+                    built: vec![TFM],
+                    in_assets: true,
+                    names_output: false,
+                    multi: false,
+                    bin_linked: false,
+                    dangling_output: false,
+                }],
+                layout,
+                absolute_links,
+            };
+            let tmp = TempDir::new().unwrap();
+            let root = host_fs::canonicalize(tmp.path()).unwrap();
+            let laid = lay_down(&root, &world);
+            let dotnet = root.join("dotnet");
+            let mut ws = workspace(&root);
+            let tfm = ws.served_tfm_for_project(&laid.entry);
+            let mut semantic = SemanticState::new();
+            let (_, reads) =
+                semantic.reference_resolution_for_project(&laid.entry, Some(&dotnet), &tfm, &ws);
+            assert_eq!(reads.reads.first_stale(), None, "{layout:?}");
+            let [_, Edit::Link(link, identical)] = &laid.retargets[..] else {
+                panic!("{layout:?} has no retarget to an identical copy");
+            };
+            std::fs::remove_file(link).unwrap();
+            std::os::unix::fs::symlink(identical, link).unwrap();
+            assert!(
+                reads.reads.first_stale().is_some(),
+                "{layout:?} (absolute: {absolute_links}): the entry's link retargeted to an \
+                 identical copy left the read set standing"
+            );
+        }
     }
 }

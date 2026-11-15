@@ -30,8 +30,15 @@
 //! that a query it failed to record still meets a perturbation; every path
 //! the read set recorded absent created, as an MSBuild file that writes a
 //! property, and every directory it listed given a new `.fs` entry and a new
-//! `.props` entry (which reach paths whose parent does not yet exist). A
-//! caller adds its own (installing a new SDK version, say) through `extra`.
+//! `.props` entry (which reach paths whose parent does not yet exist); and
+//! every symlink under `root` deleted, retargeted to a path that does not
+//! exist, and retargeted to every other symlink (so that it names whatever
+//! that one names), with a dangling symlink's missing target created where it
+//! lies under `root`. What a link names is the file system's to say: the
+//! sweep resolves no target itself, and checks a target it creates against
+//! the file system's resolution of the link. A caller adds
+//! its own (installing a new SDK version, or retargeting a link to a tree of
+//! its own, say) through `extra`.
 //!
 //! This is test support: it writes into `root` and restores what it changed.
 
@@ -49,14 +56,31 @@ use crate::ParsedProject;
 pub enum Edit {
     /// Write the file, creating any missing parent directory.
     Write(PathBuf, Vec<u8>),
-    /// Delete the file, or the directory and everything in it.
+    /// Delete the file, the symlink (not what it leads to), or the directory
+    /// and everything in it.
     Delete(PathBuf),
+    /// Make the path a symlink whose target is the second path (relative to
+    /// the link's directory, unless absolute), replacing what is there and
+    /// creating any missing parent directory. Unix only: elsewhere it cannot
+    /// be made, and the perturbation is skipped.
+    Link(PathBuf, PathBuf),
+    /// Create, as a file, what the dangling symlink `link` names, as the file
+    /// system resolves it: in the directory the file system resolves the
+    /// target's directory to, under the target's last component. Made only
+    /// where that directory exists and lies under `within`, and where the
+    /// file system then resolves the link to the file made; otherwise the
+    /// perturbation is skipped.
+    CreateTarget { link: PathBuf, within: PathBuf },
 }
 
 impl Edit {
-    fn path(&self) -> &Path {
+    /// The path the edit names: for [`Edit::CreateTarget`], the link.
+    pub fn path(&self) -> &Path {
         match self {
-            Edit::Write(path, _) | Edit::Delete(path) => path,
+            Edit::Write(path, _)
+            | Edit::Delete(path)
+            | Edit::Link(path, _)
+            | Edit::CreateTarget { link: path, .. } => path,
         }
     }
 }
@@ -77,6 +101,8 @@ pub enum Why {
     Delete,
     CreateAbsent,
     GrowListing,
+    /// A symlink deleted or retargeted, or a dangling one's target created.
+    Relink,
     /// The caller's own.
     Extra,
 }
@@ -205,6 +231,23 @@ pub fn sweep_with<T: PartialEq + std::fmt::Debug>(
     tally
 }
 
+/// Make `edits` as a sweep makes a perturbation's, run `f` on the changed
+/// tree, and restore it: `None` when an edit could not be made (and nothing
+/// is left changed). For a test of the perturbations themselves.
+pub fn with_edits<T>(edits: &[Edit], f: impl FnOnce() -> T) -> Option<T> {
+    match apply(edits) {
+        Ok(undo) => {
+            let out = f();
+            undo.restore();
+            Some(out)
+        }
+        Err(partial) => {
+            partial.restore();
+            None
+        }
+    }
+}
+
 /// Everything under `root` a restore must put back: each entry's kind,
 /// permissions, and bytes (a file's, if readable) or target (a symlink's).
 fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (String, Option<Vec<u8>>)> {
@@ -302,7 +345,8 @@ pub fn perturbations(root: &Path, read_set: &ReadSet) -> Vec<Perturbation> {
     let mut out = Vec::new();
     let mut files = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
-    walk(root, &mut files, &mut dirs);
+    let mut links = Vec::new();
+    walk(root, &mut files, &mut dirs, &mut links);
     // Created without consulting the read set, so that a query the read set
     // failed to record still meets a perturbation that moves its answer.
     let mut names: BTreeSet<OsString> = [
@@ -321,6 +365,7 @@ pub fn perturbations(root: &Path, read_set: &ReadSet) -> Vec<Perturbation> {
         files
             .iter()
             .map(PathBuf::as_path)
+            .chain(links.iter().map(PathBuf::as_path))
             .chain(
                 read_set
                     .reads()
@@ -365,6 +410,38 @@ pub fn perturbations(root: &Path, read_set: &ReadSet) -> Vec<Perturbation> {
         let path = lexical(path);
         (under_root(&path) && !through_a_link(root, &path)).then_some(path)
     };
+    // Every link is deleted and dangled, whatever its target. It is
+    // retargeted to every other link, so that it names whatever that link
+    // names, and to what the file system says that link names now (which
+    // differs where that link's own target passes through this one). A link
+    // the file system finds dangling has its missing target created
+    // ([`Edit::CreateTarget`]). No target is resolved here.
+    let named: Vec<(&PathBuf, Option<PathBuf>)> = links
+        .iter()
+        .map(|link| (link, host_fs::canonicalize(link).ok()))
+        .collect();
+    for link in &links {
+        let mut relinks = vec![
+            Edit::Delete(link.clone()),
+            Edit::Link(link.clone(), PathBuf::from("zz_perturbed_missing_target")),
+        ];
+        for (other, names) in named.iter().filter(|(other, _)| *other != link) {
+            relinks.push(Edit::Link(link.clone(), (*other).clone()));
+            if let Some(names) = names {
+                relinks.push(Edit::Link(link.clone(), names.clone()));
+            }
+        }
+        if host_fs::metadata(link).is_err() {
+            relinks.push(Edit::CreateTarget {
+                link: link.clone(),
+                within: root.to_path_buf(),
+            });
+        }
+        out.extend(relinks.into_iter().map(|edit| Perturbation {
+            why: Why::Relink,
+            edits: vec![edit],
+        }));
+    }
     for (read, path) in read_set
         .reads()
         .iter()
@@ -445,8 +522,9 @@ fn rewritten_same_size(bytes: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Every regular file and directory under `dir`, not following symlinks.
-fn walk(dir: &Path, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
+/// Every regular file, directory and symlink under `dir`, not following
+/// symlinks.
+fn walk(dir: &Path, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>, links: &mut Vec<PathBuf>) {
     let Ok(entries) = host_fs::read_dir(dir) else {
         return;
     };
@@ -456,9 +534,10 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
         match host_fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_dir() => {
                 dirs.push(path.clone());
-                walk(&path, files, dirs);
+                walk(&path, files, dirs, links);
             }
             Ok(meta) if meta.is_file() => files.push(path),
+            Ok(meta) if meta.file_type().is_symlink() => links.push(path),
             _ => {}
         }
     }
@@ -473,6 +552,8 @@ enum Prior {
     /// Its bytes and permissions.
     File(Vec<u8>, std::fs::Permissions),
     Dir(PathBuf),
+    /// A symlink, with its target.
+    Link(PathBuf),
 }
 
 struct Undo {
@@ -483,6 +564,13 @@ struct Undo {
 fn apply(edits: &[Edit]) -> Result<Undo, Undo> {
     let mut priors = Vec::new();
     for edit in edits {
+        if let Edit::CreateTarget { link, within } = edit {
+            match create_target(link, within, 0) {
+                Some(file) => priors.push((file, Prior::Absent { created: None })),
+                None => return Err(Undo { priors }),
+            }
+            continue;
+        }
         let path = edit.path();
         let prior = match host_fs::symlink_metadata(path) {
             Ok(meta) if meta.is_file() => match host_fs::read(path) {
@@ -496,7 +584,16 @@ fn apply(edits: &[Edit]) -> Result<Undo, Undo> {
                 std::fs::rename(path, &aside).expect("move the directory aside");
                 Prior::Dir(aside)
             }
-            // A symlink, a socket: not something the sweep perturbs.
+            Ok(meta) if meta.file_type().is_symlink() && cfg!(unix) => {
+                let target = host_fs::read_link(path).expect("read the symlink's target");
+                // Writing through the link would change what it leads to,
+                // which may be shared, or outside the root: every edit
+                // replaces the link itself.
+                std::fs::remove_file(path).expect("remove the symlink");
+                Prior::Link(target)
+            }
+            // A socket, a symlink where none can be made again: not something
+            // the sweep perturbs.
             Ok(_) => return Err(Undo { priors }),
             Err(_) => Prior::Absent {
                 created: topmost_missing_ancestor(path),
@@ -511,6 +608,13 @@ fn apply(edits: &[Edit]) -> Result<Undo, Undo> {
                 Prior::File(..) => std::fs::remove_file(path),
                 _ => Ok(()),
             },
+            Edit::Link(path, target) => match prior {
+                Prior::File(..) => std::fs::remove_file(path),
+                _ => Ok(()),
+            }
+            .and_then(|()| path.parent().map_or(Ok(()), std::fs::create_dir_all))
+            .and_then(|()| symlink(target, path)),
+            Edit::CreateTarget { .. } => unreachable!("made above, without a prior of the link"),
         };
         priors.push((path.to_path_buf(), prior));
         if made.is_err() {
@@ -562,9 +666,57 @@ impl Undo {
                     std::fs::set_permissions(&path, permissions).expect("restore permissions");
                 }
                 Prior::Dir(aside) => std::fs::rename(aside, &path).expect("restore"),
+                Prior::Link(target) => symlink(&target, &path).expect("restore the symlink"),
             }
         }
     }
+}
+
+/// [`Edit::CreateTarget`]: the file made, or `None` (with nothing made) where
+/// it cannot be. Where the target's last component is itself a dangling
+/// link, its target is created in turn, `depth` bounding a cycle as the file
+/// system's own limit does.
+fn create_target(link: &Path, within: &Path, depth: usize) -> Option<PathBuf> {
+    if depth > 32 || host_fs::metadata(link).is_ok() {
+        return None;
+    }
+    let joined = link.parent()?.join(host_fs::read_link(link).ok()?);
+    let std::path::Component::Normal(name) = joined.components().next_back()? else {
+        return None;
+    };
+    let dir = host_fs::canonicalize(joined.parent()?).ok()?;
+    if !dir.starts_with(host_fs::canonicalize(within).ok()?) {
+        return None;
+    }
+    let file = dir.join(name);
+    match host_fs::symlink_metadata(&file) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return create_target(&file, within, depth + 1);
+        }
+        Ok(_) => return None,
+        Err(_) => {}
+    }
+    std::fs::write(&file, PROPERTY_FILE).ok()?;
+    // The file system is the judge of what the link names.
+    if host_fs::canonicalize(link).ok().as_deref() != Some(file.as_path()) {
+        std::fs::remove_file(&file).expect("remove a target the link does not name");
+        return None;
+    }
+    Some(file)
+}
+
+/// Make `link` a symlink to `target`.
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "the sweep makes symlinks on Unix only",
+    ))
 }
 
 /// The topmost ancestor of `path` (not `path` itself) that does not exist.
