@@ -18,10 +18,12 @@
 //! entry point additionally gives `Exists('...')` a filesystem callback;
 //! pure evaluation treats a reached `Exists` call as [`Outcome::Unsupported`].
 //! Anything outside that grammar — arithmetic, `@(...)` item references,
-//! unmodelled property functions, relational comparisons whose operands are
-//! neither numbers nor versions (a hard project error in MSBuild itself) —
-//! produces [`Outcome::Unsupported`], at which point the caller treats the
-//! containing construct as **excluded** (plan D5).
+//! unmodelled property functions — produces [`Outcome::Unsupported`], at which
+//! point the caller treats the containing construct as **excluded** (plan D5).
+//! A condition MSBuild itself throws on is [`Outcome::Illegal`] where we can
+//! show it does: a syntax error MSBuild's parser reports (the [`syntax`]
+//! port), and the evaluation errors whose every input we compute exactly. Any
+//! other failure stays `Unsupported`, which makes no claim either way.
 //!
 //! The comparison semantics were derived from MSBuild's own evaluator
 //! (`src/Build/Evaluation/Conditionals/*.cs` — `MultipleComparisonNode`,
@@ -54,6 +56,8 @@
 //! pattern. Unsupported expressions (unknown property functions, item
 //! references inside the substitution) still poison the whole condition.
 
+mod syntax;
+
 use super::observed::Observer;
 use super::properties::escaping::Escaped;
 use super::properties::{Issue, PropertyMap, substitute, substitute_with_fs};
@@ -69,18 +73,53 @@ pub(crate) struct Probes<'a> {
     pub observer: &'a Observer,
 }
 
-/// Result of evaluating a condition string. The `Unsupported` variant
-/// carries the original condition text so callers can fold it into a
-/// [`DiagnosticKind::UnsupportedCondition`](super::diagnostic::DiagnosticKind::UnsupportedCondition)
-/// without re-parsing.
+/// Result of evaluating a condition string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     True,
     False,
+    /// MSBuild throws evaluating this condition against exactly these
+    /// property values (`InvalidProjectFileException`), which rejects the
+    /// whole project. Either its syntax is illegal, which MSBuild reports
+    /// whatever the values and however `And`/`Or` short-circuit, or the part
+    /// of it MSBuild evaluates is ill typed: a relational comparison on an
+    /// operand that is neither a number nor a version (`1 < abc`), a scalar
+    /// standing as a boolean outside the boolean vocabulary (`foo`,
+    /// `$(Unset)`), `HasTrailingSlash` given more than one item. An ill-typed
+    /// operand behind a deciding `And`/`Or` operand is never evaluated, by
+    /// MSBuild or by us.
+    ///
+    /// A claim about the values given, not about the build: a consumer that
+    /// concludes MSBuild rejects the project must hold every property the
+    /// condition reads to the same trust a committed boolean needs. As for
+    /// `Unsupported`, the [`Eval`] carries no undefined names. Nor is every
+    /// condition MSBuild meets in a document evaluated: those under a false
+    /// `<PropertyGroup>`, `<ItemDefinitionGroup>` or unchosen `<When>`, and
+    /// those under a `<Target>`, are not, while an item's condition under a
+    /// false `<ItemGroup>`, or its metadata's under a false item, are
+    /// (`tests/condition_diff.rs`'s `where_msbuild_evaluates_a_condition`).
+    Illegal,
     /// The condition contains syntax or operators outside the
     /// grammar we model. Treat the containing construct as excluded;
-    /// do NOT proceed as if it were true.
+    /// do NOT proceed as if it were true. MSBuild may evaluate it to either
+    /// boolean, or reject it.
     Unsupported,
+}
+
+/// Why a condition, or a part of it, has no boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reject {
+    /// MSBuild throws on it ([`Outcome::Illegal`]).
+    Illegal,
+    /// Outside what we model ([`Outcome::Unsupported`]).
+    Unmodelled,
+}
+
+/// A helper's `Err(())` claims nothing about MSBuild.
+impl From<()> for Reject {
+    fn from((): ()) -> Self {
+        Reject::Unmodelled
+    }
 }
 
 /// Outcome plus the names of any `$(...)` references encountered
@@ -119,10 +158,11 @@ pub struct Eval {
 /// [`Outcome::True`] (matching MSBuild, which omits the attribute and
 /// the attribute-with-only-whitespace-content identically).
 ///
-/// When the outcome is `Unsupported`, the `undefined_properties` list
-/// is empty: the `UnsupportedCondition` diagnostic the caller will
-/// emit subsumes any per-property concerns, and reporting both would
-/// double up. For `True` / `False`, the list is populated.
+/// When the outcome is `Unsupported` or `Illegal`, the
+/// `undefined_properties` list is empty: the `UnsupportedCondition`
+/// diagnostic the caller will emit subsumes any per-property concerns, and
+/// reporting both would double up. For `True` / `False`, the list is
+/// populated.
 pub fn evaluate(source: &str, props: &PropertyMap) -> Eval {
     evaluate_inner(source, props, None)
 }
@@ -144,19 +184,19 @@ fn evaluate_inner(source: &str, props: &PropertyMap, fs: Option<Probes<'_>>) -> 
                 undefined_outside_empty_comparison: Vec::new(),
             };
         }
-        Err(()) => return unsupported(),
+        Err(reject) => return rejected(reject),
     };
     let mut undefined = Vec::new();
     let outcome = match eval_bool(&expr, props, fs, &mut undefined) {
         Ok(true) => Outcome::True,
         Ok(false) => Outcome::False,
-        Err(()) => {
+        Err(reject) => {
             // Discard any undefined names we may have collected: the
             // UnsupportedCondition diagnostic the caller raises is
             // the authoritative description of the failure, and a
             // separate UndefinedProperty for some property mentioned
             // in the same condition would be redundant noise.
-            return unsupported();
+            return rejected(reject);
         }
     };
     // Scan the *whole parsed tree* for reference contexts — evaluation
@@ -178,8 +218,17 @@ fn evaluate_inner(source: &str, props: &PropertyMap, fs: Option<Probes<'_>>) -> 
 }
 
 /// Parse a condition into its tree: `Ok(None)` for a blank condition (which
-/// MSBuild treats as true), `Err` for anything outside the grammar.
-fn parse_condition(source: &str) -> Result<Option<BoolExpr>, ()> {
+/// MSBuild treats as true), `Err` for anything outside the grammar, which is
+/// [`Reject::Illegal`] when MSBuild's own parser rejects it too.
+fn parse_condition(source: &str) -> Result<Option<BoolExpr>, Reject> {
+    parse_modelled(source).map_err(|()| match syntax::msbuild_parse(source) {
+        syntax::Syntax::Rejects => Reject::Illegal,
+        syntax::Syntax::Parses | syntax::Syntax::Unknown => Reject::Unmodelled,
+    })
+}
+
+/// [`parse_condition`] within the grammar we model.
+fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
     if source.trim().is_empty() {
         return Ok(None);
     }
@@ -271,12 +320,12 @@ pub fn decide_without(
     let expr = match parse_condition(source) {
         Ok(Some(expr)) => expr,
         Ok(None) => return Decision::Decided(true),
-        Err(()) => return Decision::Unsupported,
+        Err(_) => return Decision::Unsupported,
     };
     match eval_kleene(&expr, props, fs, untrusted) {
         Ok(Some(value)) => Decision::Decided(value),
         Ok(None) => Decision::Depends,
-        Err(()) => Decision::Unsupported,
+        Err(_) => Decision::Unsupported,
     }
 }
 
@@ -296,7 +345,7 @@ pub fn decided_conjunctwise(
     let expr = match parse_condition(source) {
         Ok(Some(expr)) => expr,
         Ok(None) => return true,
-        Err(()) => return false,
+        Err(_) => return false,
     };
     let mut pending = vec![&expr];
     while let Some(conjunct) = pending.pop() {
@@ -337,7 +386,7 @@ fn eval_kleene(
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
     untrusted: &dyn Fn(&str) -> bool,
-) -> Result<Option<bool>, ()> {
+) -> Result<Option<bool>, Reject> {
     match expr {
         BoolExpr::Not(inner) => Ok(eval_kleene(inner, props, fs, untrusted)?.map(|v| !v)),
         BoolExpr::And(operands) => kleene_chain(operands, false, props, fs, untrusted),
@@ -372,7 +421,7 @@ fn kleene_chain(
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
     untrusted: &dyn Fn(&str) -> bool,
-) -> Result<Option<bool>, ()> {
+) -> Result<Option<bool>, Reject> {
     let mut unknown = false;
     for operand in operands {
         match eval_kleene(operand, props, fs, untrusted)? {
@@ -476,9 +525,12 @@ impl ScalarExpr {
     }
 }
 
-fn unsupported() -> Eval {
+fn rejected(reject: Reject) -> Eval {
     Eval {
-        outcome: Outcome::Unsupported,
+        outcome: match reject {
+            Reject::Illegal => Outcome::Illegal,
+            Reject::Unmodelled => Outcome::Unsupported,
+        },
         undefined_properties: Vec::new(),
         undefined_outside_empty_comparison: Vec::new(),
     }
@@ -1198,7 +1250,7 @@ fn eval_bool(
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
     undefined: &mut Vec<String>,
-) -> Result<bool, ()> {
+) -> Result<bool, Reject> {
     match expr {
         BoolExpr::True => Ok(true),
         BoolExpr::False => Ok(false),
@@ -1236,7 +1288,7 @@ fn eval_bool(
         }
         BoolExpr::Exists(raw) => {
             let Some(fs) = fs else {
-                return Err(());
+                return Err(Reject::Unmodelled);
             };
             let value = expand_for_condition(raw, props, Some(fs.observer), undefined)?;
             // MSBuild expands the argument into an item list and asks about
@@ -1258,7 +1310,7 @@ fn eval_bool(
                 .iter()
                 .any(|entry| entry.as_escaped().to_ascii_lowercase().contains("%5c"))
             {
-                return Err(());
+                return Err(Reject::Unmodelled);
             }
             Ok(!entries.is_empty() && entries.iter().all(|entry| (fs.exists)(&entry.unescape())))
         }
@@ -1268,8 +1320,9 @@ fn eval_bool(
             // whitespace-trimmed and empty entries are dropped
             // (`'a/;'` and `';/'` are the single item `a/` / `/`). A single
             // remaining item is checked for a trailing `/` or `\`; more than
-            // one is a project error we fail safe to Unsupported; none (an
-            // empty or all-separator argument) has no trailing slash.
+            // one is a project error (`HasTrailingSlash('a;b')`); none (an
+            // empty or all-separator argument) has no trailing slash. The trim
+            // is .NET's `Trim`, which outside ASCII we do not claim to match.
             //
             // The split and the trim happen **in the escaped domain**, and each
             // entry decodes at the leaf — the same order the item pass uses, and
@@ -1282,26 +1335,47 @@ fn eval_bool(
             let mut items = value.split_list().map(|entry| entry.unescape());
             let item = items.next();
             if items.next().is_some() {
-                return Err(());
+                return Err(if value.as_escaped().is_ascii() {
+                    Reject::Illegal
+                } else {
+                    Reject::Unmodelled
+                });
             }
             Ok(item.is_some_and(|s: String| s.ends_with('/') || s.ends_with('\\')))
         }
         BoolExpr::MsbuildVersionFunction(inner) => {
             eval_msbuild_version_function(inner, props, fs.map(|fs| fs.observer), undefined)
+                .map_err(Reject::from)
         }
         BoolExpr::CoerceBool(scalar) => {
             let value =
                 expand_scalar_for_condition(scalar, props, fs.map(|fs| fs.observer), undefined)?;
             // A standalone scalar is coerced through MSBuild's boolean
             // vocabulary; a value outside it (`1`, `foo`, an unset
-            // property's "") is a project error → Unsupported.
-            parse_msbuild_bool(&value).ok_or(())
+            // property's "") is a project error. The vocabulary matches
+            // ignoring case ordinally, which outside ASCII folds letters
+            // `eq_ignore_ascii_case` does not (`ſ` is an `s`).
+            parse_msbuild_bool(&value).ok_or(if value.is_ascii() {
+                Reject::Illegal
+            } else {
+                Reject::Unmodelled
+            })
         }
         BoolExpr::Compare { op, lhs, rhs } => {
             let lhs = expand_scalar_for_condition(lhs, props, fs.map(|fs| fs.observer), undefined)?;
             let rhs = expand_scalar_for_condition(rhs, props, fs.map(|fs| fs.observer), undefined)?;
             if !matches!(op, CompareOp::Eq | CompareOp::Neq) {
-                let ordering = compare_relational_values(&lhs, &rhs)?;
+                let ordering = compare_relational_values(&lhs, &rhs).map_err(|()| {
+                    // MSBuild throws when either side is neither a number nor
+                    // a version, whatever the other side holds.
+                    if certainly_neither_number_nor_version(&lhs)
+                        || certainly_neither_number_nor_version(&rhs)
+                    {
+                        Reject::Illegal
+                    } else {
+                        Reject::Unmodelled
+                    }
+                })?;
                 return Ok(match op {
                     CompareOp::Lt => ordering.is_lt(),
                     CompareOp::Lte => !ordering.is_gt(),
@@ -1473,6 +1547,61 @@ fn compare_relational_values(lhs: &str, rhs: &str) -> Result<std::cmp::Ordering,
             .ok_or(()),
         (Err(()), Err(())) => Err(()),
     }
+}
+
+/// Whether MSBuild's relational operators certainly read `value` as neither a
+/// number nor a version, so that comparing it throws
+/// (`NumericComparisonExpressionNode`: MSB4086).
+///
+/// The one operand MSBuild reads otherwise is `$(MSBuildToolsVersion)`
+/// expanding to `Current`, which it takes as Visual Studio's version.
+fn certainly_neither_number_nor_version(value: &str) -> bool {
+    value != "Current" && certainly_not_a_number(value) && certainly_not_a_version(value)
+}
+
+/// Whether `ConversionUtilities.TryConvertDecimalOrHexToDouble` certainly
+/// fails on `value`: [`parse_msbuild_number`] fails, and `value` is free of
+/// what `double.TryParse` takes beyond that grammar. It takes trailing NULs
+/// (`'1%00' < 2` is true), the NaN and infinity symbols in any case and sign
+/// (`nan < 1` is false; an infinity is then refused as a number), and it
+/// classifies characters outside ASCII by tables not modelled here.
+fn certainly_not_a_number(value: &str) -> bool {
+    if !value.is_ascii() || value.contains('\0') {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    !lower.contains("nan") && !lower.contains("infinity") && parse_msbuild_number(value).is_none()
+}
+
+/// Whether .NET's `Version.TryParse` certainly fails on `value`. For ASCII
+/// text without NULs this is exact: two to four `.`-separated components,
+/// each an `int.TryParse(NumberStyles.Integer)` (ASCII whitespace trimmed, one
+/// optional sign, ASCII digits, within `int`) that is not negative, so `-0`
+/// is a component and `-1` is not (`'1.-0' < 2` is true, `'1.-1' < 2` an
+/// error).
+fn certainly_not_a_version(value: &str) -> bool {
+    if !value.is_ascii() || value.contains('\0') {
+        return false;
+    }
+    let parts: Vec<&str> = value.split('.').collect();
+    let component = |part: &str| {
+        let part = part.trim_matches(|c: char| matches!(c, '\t'..='\r' | ' '));
+        let (negative, digits) = match part.as_bytes().first() {
+            Some(b'-') => (true, &part[1..]),
+            Some(b'+') => (false, &part[1..]),
+            _ => (false, part),
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        let significant = digits.trim_start_matches('0');
+        if negative {
+            significant.is_empty()
+        } else {
+            significant.len() < 10 || (significant.len() == 10 && significant <= "2147483647")
+        }
+    };
+    !((2..=4).contains(&parts.len()) && parts.into_iter().all(component))
 }
 
 /// MSBuild's mixed number/version comparison (the `Compare(Version, double)`
@@ -1970,12 +2099,19 @@ mod tests {
     #[test]
     fn property_function_makes_condition_unsupported() {
         let p = props(&[("X", "foo")]);
-        // The property-function `$([System.String]::Copy('x'))` lives
+        // The property-function `$([System.String]::Copy($(X)))` lives
         // inside a string literal, but substitute() emits Unsupported
         // for it — so the whole condition becomes Unsupported.
         assert_eq!(
-            evaluate("'$([System.String]::Copy('x'))' == 'x'", &p),
+            evaluate("'$([System.String]::Copy($(X)))' == 'foo'", &p),
             Outcome::Unsupported
+        );
+        // A quote inside it ends the string literal (MSBuild's scanner looks
+        // for nothing else), which leaves tokens no grammar accepts.
+        // Oracle-pinned: rejected.
+        assert_eq!(
+            evaluate("'$([System.String]::Copy('x'))' == 'x'", &p),
+            Outcome::Illegal
         );
     }
 
@@ -2046,21 +2182,21 @@ mod tests {
     }
 
     #[test]
-    fn unterminated_string_is_unsupported() {
+    fn unterminated_string_is_illegal() {
         assert_eq!(
             evaluate("'unterminated", &PropertyMap::new()),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
     }
 
     #[test]
-    fn trailing_garbage_after_valid_prefix_is_unsupported() {
+    fn trailing_garbage_after_valid_prefix_is_illegal() {
         // A condition that parses cleanly for the first few tokens
         // and then has junk must NOT be reported as the prefix's
-        // truth value.
+        // truth value: MSBuild's parser rejects the junk.
         assert_eq!(
             evaluate("'a' == 'a' garbage", &PropertyMap::new()),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
     }
 
@@ -2076,7 +2212,7 @@ mod tests {
         );
         assert_eq!(
             evaluate("'v2.0' < '2.1'", &PropertyMap::new()),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
         assert_eq!(
             evaluate("'10.0' <= '9.0'", &PropertyMap::new()),
@@ -2151,16 +2287,12 @@ mod tests {
         // A `%` **outside** quotes is not an escape at all: MSBuild's scanner
         // rejects it outright (`MSB4090: Found an unexpected character '7' at
         // position 1 in condition "%74rue"`), and likewise inside a bare numeric
-        // (`1%2E0 > 0.5`). An MSBuild error maps to `Unsupported`, so these still
-        // decline — and must, since committing a boolean for a condition MSBuild
-        // refuses to evaluate would be a wrong gate.
-        assert_eq!(
-            evaluate("%74rue", &PropertyMap::new()),
-            Outcome::Unsupported
-        );
+        // (`1%2E0 > 0.5`). Committing a boolean for a condition MSBuild refuses
+        // to evaluate would be a wrong gate.
+        assert_eq!(evaluate("%74rue", &PropertyMap::new()), Outcome::Illegal);
         assert_eq!(
             evaluate("1%2E0 > 0.5", &PropertyMap::new()),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
 
         // Bare `%` (not followed by two hex digits) is literal, not an
@@ -2216,7 +2348,7 @@ mod tests {
         assert_eq!(evaluate("' 1 ' != '1'", &PropertyMap::new()), Outcome::True);
         assert_eq!(
             evaluate("' 2 ' > '1'", &PropertyMap::new()),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
         assert_eq!(
             evaluate("' 2.0 ' == '2.0'", &PropertyMap::new()),
@@ -2225,7 +2357,7 @@ mod tests {
 
         let p = props(&[("Value", " 2 ")]);
         assert_eq!(evaluate("'$(Value)' == '2'", &p), Outcome::False);
-        assert_eq!(evaluate("'$(Value)' > '1'", &p), Outcome::Unsupported);
+        assert_eq!(evaluate("'$(Value)' > '1'", &p), Outcome::Illegal);
     }
 
     /// Unlike the relational operators, MSBuild `==` / `!=` never fall back
@@ -2743,9 +2875,17 @@ mod tests {
     }
 
     #[test]
-    fn non_version_relational_comparison_is_unsupported() {
+    fn non_version_relational_comparison_is_illegal() {
         assert_eq!(
             evaluate("'alpha' > 'beta'", &PropertyMap::new()),
+            Outcome::Illegal
+        );
+        // `$(MSBuildToolsVersion)` expanding to `Current` compares as Visual
+        // Studio's version (oracle-pinned: `$(MSBuildToolsVersion) < 18` is
+        // false), so a `Current` operand is no claim.
+        let p = props(&[("MSBuildToolsVersion", "Current")]);
+        assert_eq!(
+            evaluate("$(MSBuildToolsVersion) < 18", &p),
             Outcome::Unsupported
         );
     }
@@ -2860,14 +3000,14 @@ mod tests {
     }
 
     #[test]
-    fn unbalanced_paren_is_unsupported() {
+    fn unbalanced_paren_is_illegal() {
         assert_eq!(
             evaluate("(true And false", &PropertyMap::new()),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
         assert_eq!(
             evaluate("true And false)", &PropertyMap::new()),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
     }
 
@@ -2940,14 +3080,19 @@ mod tests {
     }
 
     #[test]
-    fn has_trailing_slash_multi_item_argument_is_unsupported() {
-        // Two non-empty items is a project error → Unsupported.
+    fn has_trailing_slash_multi_item_argument_is_illegal() {
+        // Two non-empty items is a project error.
         assert_eq!(
             evaluate("HasTrailingSlash('a/;b')", &PropertyMap::new()),
-            Outcome::Unsupported
+            Outcome::Illegal
         );
         assert_eq!(
             evaluate("HasTrailingSlash('a;b/')", &PropertyMap::new()),
+            Outcome::Illegal
+        );
+        // .NET's `Trim` is not modelled outside ASCII, so no claim there.
+        assert_eq!(
+            evaluate("HasTrailingSlash('a;\u{e9}')", &PropertyMap::new()),
             Outcome::Unsupported
         );
     }
@@ -3016,22 +3161,22 @@ mod tests {
     }
 
     #[test]
-    fn non_boolean_bare_scalar_is_unsupported() {
+    fn non_boolean_bare_scalar_is_illegal() {
         // `1` is numeric, not in the boolean vocabulary; a non-bool word
         // and the empty string of an unset property are project errors too.
-        assert_eq!(
-            evaluate("$(P)", &props(&[("P", "1")])),
-            Outcome::Unsupported
-        );
-        assert_eq!(
-            evaluate("$(P)", &props(&[("P", "foo")])),
-            Outcome::Unsupported
-        );
+        assert_eq!(evaluate("$(P)", &props(&[("P", "1")])), Outcome::Illegal);
+        assert_eq!(evaluate("$(P)", &props(&[("P", "foo")])), Outcome::Illegal);
         assert_eq!(
             evaluate("$(Missing)", &PropertyMap::new()),
+            Outcome::Illegal
+        );
+        assert_eq!(evaluate("'foo'", &PropertyMap::new()), Outcome::Illegal);
+        // Outside ASCII, `OrdinalIgnoreCase` folds letters ASCII folding does
+        // not (`ſ` is an `s`), so no claim.
+        assert_eq!(
+            evaluate("$(P)", &props(&[("P", "ye\u{17f}")])),
             Outcome::Unsupported
         );
-        assert_eq!(evaluate("'foo'", &PropertyMap::new()), Outcome::Unsupported);
     }
 
     #[test]
@@ -3057,8 +3202,8 @@ mod tests {
         assert_eq!(evaluate("off", &PropertyMap::new()), Outcome::False);
         assert_eq!(evaluate("no", &PropertyMap::new()), Outcome::False);
         assert_eq!(evaluate("!off", &PropertyMap::new()), Outcome::True);
-        // A non-boolean bare word is a project error → Unsupported.
-        assert_eq!(evaluate("maybe", &PropertyMap::new()), Outcome::Unsupported);
+        // A non-boolean bare word is a project error.
+        assert_eq!(evaluate("maybe", &PropertyMap::new()), Outcome::Illegal);
     }
 
     #[test]
@@ -3112,17 +3257,17 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_around_simple_property_reference_is_unsupported() {
+    fn whitespace_around_simple_property_reference_is_illegal() {
         // MSBuild rejects a simple property reference with interior
         // whitespace (`$( Foo )`, `$(Foo )`, `$( Foo)`), unlike `$(Foo)`.
         // Committing to `Foo`'s value there would be a wrong gate. Pinned
         // against dotnet msbuild 10.0.300.
         let p = props(&[("Foo", "true")]);
         assert_eq!(evaluate("$(Foo)", &p), Outcome::True);
-        assert_eq!(evaluate("$( Foo )", &p), Outcome::Unsupported);
-        assert_eq!(evaluate("$(Foo )", &p), Outcome::Unsupported);
-        assert_eq!(evaluate("$( Foo)", &p), Outcome::Unsupported);
-        assert_eq!(evaluate("$( Foo ) == 'true'", &p), Outcome::Unsupported);
+        assert_eq!(evaluate("$( Foo )", &p), Outcome::Illegal);
+        assert_eq!(evaluate("$(Foo )", &p), Outcome::Illegal);
+        assert_eq!(evaluate("$( Foo)", &p), Outcome::Illegal);
+        assert_eq!(evaluate("$( Foo ) == 'true'", &p), Outcome::Illegal);
         // Property-function forms DO tolerate surrounding whitespace.
         assert_eq!(evaluate("$( Foo.Contains('r') )", &p), Outcome::True);
     }
@@ -3195,16 +3340,17 @@ mod tests {
         // to a bool would consume the marker inside the method and hide it
         // from every later check, letting us commit to a branch MSBuild never
         // reaches. The up-front raw-source marker scan closes that class.
-        for cond in [
-            "$(V.Contains('@('))",
-            "$(V.StartsWith('%('))",
-            "$(V.EndsWith('@(x)'))",
+        //
+        // The first two MSBuild rejects for another reason: its scanner
+        // counts a reference's parentheses without regard to quotes, so a
+        // quoted `(` leaves it unclosed. The third it evaluates, in an item's
+        // condition at least (oracle-pinned: false).
+        for (cond, outcome) in [
+            ("$(V.Contains('@('))", Outcome::Illegal),
+            ("$(V.StartsWith('%('))", Outcome::Illegal),
+            ("$(V.EndsWith('@(x)'))", Outcome::Unsupported),
         ] {
-            assert_eq!(
-                evaluate(cond, &props(&[("V", "x")])),
-                Outcome::Unsupported,
-                "{cond}"
-            );
+            assert_eq!(evaluate(cond, &props(&[("V", "x")])), outcome, "{cond}");
         }
     }
 
@@ -3852,8 +3998,9 @@ mod decide_without_props {
                     let agrees = match outcome {
                         Outcome::True => decided,
                         Outcome::False => !decided,
-                        // A rejected condition is a project error in MSBuild.
-                        Outcome::Unsupported => true,
+                        // A rejected condition is a project error in MSBuild, and an
+                        // unmodelled one may be.
+                        Outcome::Illegal | Outcome::Unsupported => true,
                     };
                     prop_assert!(
                         agrees,
@@ -3877,7 +4024,7 @@ mod decide_without_props {
             let expected = match evaluate(&source, &props).outcome {
                 Outcome::True => Decision::Decided(true),
                 Outcome::False => Decision::Decided(false),
-                Outcome::Unsupported => Decision::Unsupported,
+                Outcome::Illegal | Outcome::Unsupported => Decision::Unsupported,
             };
             prop_assert_eq!(decision, expected, "{}", source);
         }

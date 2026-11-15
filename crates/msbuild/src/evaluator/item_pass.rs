@@ -3740,14 +3740,19 @@ fn evaluate_item_condition_silent(node: Node<'_, '_>, state: &State<'_>) -> (Con
     } else {
         condition::evaluate(cond, &state.lookup)
     };
-    let tainted = eval.outcome == condition::Outcome::Unsupported
-        || !state.condition_is_decided_exactly(cond, Some(&state.entry_project_dir), &|name| {
+    let tainted =
+        matches!(
+            eval.outcome,
+            condition::Outcome::Illegal | condition::Outcome::Unsupported
+        ) || !state.condition_is_decided_exactly(cond, Some(&state.entry_project_dir), &|name| {
             state.undefined_read_is_exact(name)
         });
     let gate = match eval.outcome {
         condition::Outcome::True => CondGate::Run,
         condition::Outcome::False => CondGate::Skip,
-        condition::Outcome::Unsupported => CondGate::Unsupported,
+        // #820's rejection flag will consume `Illegal`; until then it gates as
+        // undecided, like `Unsupported`.
+        condition::Outcome::Illegal | condition::Outcome::Unsupported => CondGate::Unsupported,
     };
     (gate, tainted)
 }

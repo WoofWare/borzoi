@@ -10691,7 +10691,8 @@ mod gate_trust_props {
                 match crate::condition::evaluate(&gate, &props).outcome {
                     crate::condition::Outcome::True => outcomes.push(true),
                     crate::condition::Outcome::False => outcomes.push(false),
-                    crate::condition::Outcome::Unsupported => {}
+                    crate::condition::Outcome::Illegal
+                    | crate::condition::Outcome::Unsupported => {}
                 }
             }
             outcomes.sort();
