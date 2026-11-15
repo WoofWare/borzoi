@@ -46,11 +46,14 @@
 > `a_value_with_two_doubts_keeps_both_through_every_reader` holds every reader
 > of a doubly-unpinned value to both doubts. #781 (a file spliced on an undecided gate publishing trusted values)
 > and #811 (the fallback splice reading an unbound gate or path that hidden
-> content may have defined) are fixed by #677's import points. The import-graph
-> harness carries three more as known families: #819 (a certain import after
-> opacity that MSBuild skips as a duplicate), #820 (an undecided import of a
-> missing file, which MSBuild rejects) and #821 (an undecided SDK import of a
-> user file, hidden by the SDK Compile tolerance).
+> content may have defined) are fixed by #677's import points. #819 (a certain
+> import after opacity that MSBuild skips as a duplicate) and #821 (an
+> undecided SDK import of a user file, hidden by the SDK Compile tolerance) are
+> fixed by withdrawing the Compile set wherever the walk passes content it
+> could not see, SDK file or not: `items_uncertain` holds whenever
+> `hidden_content` is `Some`. The import-graph harness carries one more as a
+> known family: #820 (an undecided import of a missing file, which MSBuild
+> rejects).
 >
 > **#677 replaced the `Directory.Build.*` splice with the SDK's own import
 > points** (see "#677: the import points, as landed"). Sections written before

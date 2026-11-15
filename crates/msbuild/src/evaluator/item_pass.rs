@@ -718,9 +718,9 @@ impl UndecidedChooseItems {
     /// Mark every item list a recorded operation could reach as untrustworthy,
     /// and nothing else. `span` is the `<Choose>`'s.
     ///
-    /// The Compile axis keeps the SDK tolerance of
-    /// [`State::mark_structural_skip_respecting_sdk_compile_tolerance`]; the
-    /// package axis has none, as everywhere.
+    /// No axis is tolerated in an SDK file: a Compile operation in a branch
+    /// that may run is one that may run, which the SDK's Compile tolerance
+    /// never covers (see [`crate::ParsedProject::items_uncertain`]).
     pub(super) fn apply(self, span: Range<usize>, state: &mut State<'_>) {
         if self.compile {
             for kind in [
@@ -730,15 +730,13 @@ impl UndecidedChooseItems {
             ] {
                 state.mark_untracked_item_list(modelled_item_type(kind));
             }
-            if !state.in_sdk_subtree {
-                state.items_uncertain = true;
-                state.record_compile_item_uncertainty(
-                    CompileItemUncertaintyCauseKind::Structural(
-                        StructuralCompileItemUncertainty::UnsupportedChoose,
-                    ),
-                    span.clone(),
-                );
-            }
+            state.items_uncertain = true;
+            state.record_compile_item_uncertainty(
+                CompileItemUncertaintyCauseKind::Structural(
+                    StructuralCompileItemUncertainty::UnsupportedChoose,
+                ),
+                span.clone(),
+            );
         }
         if self.package {
             state.package_references_uncertain = true;

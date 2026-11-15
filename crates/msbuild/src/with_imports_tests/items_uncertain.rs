@@ -1,8 +1,10 @@
 //! SDK-provenance for `items_uncertain`: a Compile-affecting condition in the
-//! SDK's *own* targets/props is tolerated (it's the default-item machinery
-//! every project carries), while the same construct in a user-authored import
-//! (`Directory.Build.props`, an explicit `<Import>`) is respected — the
-//! Compile-set-trustworthiness distinction that lets real SDK projects resolve.
+//! SDK's *own* targets/props is tolerated when the operation it gates cannot
+//! run (it's the default-item machinery every project carries), while the same
+//! construct in a user-authored import (`Directory.Build.props`, an explicit
+//! `<Import>`) is respected — the Compile-set-trustworthiness distinction that
+//! lets real SDK projects resolve. Content the walk did not enter is never
+//! tolerated, SDK file or not.
 
 use super::*;
 use crate::CompileConditionReason;
@@ -183,15 +185,11 @@ fn compile_metadata_update_inside_the_sdk_is_tolerated() {
     );
 }
 
-#[test]
-fn shared_dotnet_sdk_version_files_are_tolerated() {
-    // Microsoft.NET.Sdk's `Sdk.props` enters shared files under the SDK version
-    // directory (`Current/Microsoft.Common.props`, language targets, etc.), not
-    // only files under `Sdks/Microsoft.NET.Sdk`. Import gates there are still
-    // SDK machinery and must not make the entry project's Compile set
-    // uncertain. (The gate reads `RoslynTargetsPath` — a toolset name the walk does not seed, which stays
-    // inexact under C.2b — so the import genuinely stays undecidable and the
-    // tolerance machinery is what's exercised.)
+/// Parse `Demo.fsproj` (one literal `A.fs`) against an SDK laid out as the
+/// .NET SDK is, whose `Sdk.props` imports `Current/Microsoft.Common.props`
+/// from the shared version directory, with `common` as its body. `extra` are
+/// further files, relative to the version directory.
+fn parse_with_shared_sdk_version_file(common: &str, extra: &[(&str, &str)]) -> ParsedProject {
     let tmp = TempDir::new().unwrap();
     let version_dir = tmp.path().join("dotnet").join("sdk").join("1.2.300");
     let root = version_dir.join("Sdks").join("MySdk").join("Sdk");
@@ -203,13 +201,10 @@ fn shared_dotnet_sdk_version_files_are_tolerated() {
 </Project>"#,
     );
     let targets = write_at(&root, "Sdk.targets", "<Project/>");
-    write_at(
-        &version_dir,
-        "Current/Microsoft.Common.props",
-        r#"<Project>
-  <Import Project="$(GeneratedTargets)" Condition="'$(RoslynTargetsPath)' == 'net8.0'" />
-</Project>"#,
-    );
+    write_at(&version_dir, "Current/Microsoft.Common.props", common);
+    for (name, text) in extra {
+        write_at(&version_dir, name, text);
+    }
     let project_path = write_at(
         tmp.path(),
         "Demo.fsproj",
@@ -218,6 +213,72 @@ fn shared_dotnet_sdk_version_files_are_tolerated() {
     <Compile Include="A.fs" />
   </ItemGroup>
 </Project>"#,
+    );
+    parse_file_with_sdk(&project_path, |name| {
+        if name == "MySdk" {
+            Ok(SdkPaths {
+                root: root.clone(),
+                props: props.clone(),
+                targets: targets.clone(),
+            })
+        } else {
+            Err(SdkResolveError::NotFound)
+        }
+    })
+}
+
+#[test]
+fn shared_dotnet_sdk_version_files_are_tolerated() {
+    // Microsoft.NET.Sdk's `Sdk.props` enters shared files under the SDK version
+    // directory (`Current/Microsoft.Common.props`, language targets, etc.), not
+    // only files under `Sdks/Microsoft.NET.Sdk`. Their dead Compile machinery
+    // is still SDK machinery: a Compile operation whose own gate is cleanly
+    // false, under a group gate reading `RoslynTargetsPath` (a toolset name the
+    // walk does not seed, which stays inexact under C.2b), must not make the
+    // Compile set uncertain.
+    let result = parse_with_shared_sdk_version_file(
+        r#"<Project>
+  <ItemGroup Condition="'$(RoslynTargetsPath)' == 'net8.0'">
+    <Compile Include="Generated.fs" Condition="'$(EnableGeneratedCompileItems)' == 'true'" />
+  </ItemGroup>
+</Project>"#,
+        &[],
+    );
+    assert!(
+        !result.items_uncertain,
+        "shared SDK-version files must be tolerated; causes: {:?}",
+        result.compile_item_uncertainties
+    );
+    // The broad parse is still partial because we can't decide the gate's
+    // `RoslynTargetsPath` read, but that partiality is not Compile-set
+    // uncertainty.
+    assert!(result.is_partial);
+}
+
+/// #821: an SDK file imports a user file under a gate the walk cannot decide.
+/// MSBuild takes the gate, so the user file's Compile item is in the build,
+/// ahead of the body's; the SDK's tolerance of its own machinery does not
+/// cover a file the walk never entered.
+#[test]
+fn an_undecided_sdk_import_of_a_user_file_makes_items_uncertain() {
+    let tmp = TempDir::new().unwrap();
+    let (root, props, targets) = write_synthetic_sdk(
+        tmp.path(),
+        "MySdk",
+        r#"<Project>
+  <Import Project="$(MSBuildProjectDirectory)/child.props" Condition="$([System.String]::IsNullOrWhiteSpace(''))" />
+</Project>"#,
+        "<Project/>",
+    );
+    write_at(
+        tmp.path(),
+        "child.props",
+        r#"<Project><ItemGroup><Compile Include="child.fs" /></ItemGroup></Project>"#,
+    );
+    let project_path = write_at(
+        tmp.path(),
+        "Demo.fsproj",
+        r#"<Project Sdk="MySdk"><ItemGroup><Compile Include="body.fs" /></ItemGroup></Project>"#,
     );
     let result = parse_file_with_sdk(&project_path, |name| {
         if name == "MySdk" {
@@ -231,14 +292,70 @@ fn shared_dotnet_sdk_version_files_are_tolerated() {
         }
     });
     assert!(
-        !result.items_uncertain,
-        "shared SDK-version files must be tolerated; diags: {:?}",
-        result.diagnostics
+        result.items_uncertain,
+        "MSBuild compiles child.fs before body.fs; the walk published {:?}",
+        paths_of(&result.items)
     );
-    // The broad parse is still partial because we can't decide the gate's
-    // `RoslynTargetsPath` read, but that partiality is not Compile-set
-    // uncertainty.
-    assert!(result.is_partial);
+}
+
+/// The same with the hidden file inside the SDK: an SDK file the walk did not
+/// enter may hold a Compile operation that runs (or import a user file), so
+/// that the import's target lies under an SDK root proves nothing.
+#[test]
+fn an_undecided_import_of_an_sdk_file_makes_items_uncertain() {
+    let result = parse_with_shared_sdk_version_file(
+        r#"<Project>
+  <Import Project="$(MSBuildThisFileDirectory)Hidden.props" Condition="$([System.String]::IsNullOrWhiteSpace(''))" />
+</Project>"#,
+        &[(
+            "Current/Hidden.props",
+            r#"<Project><ItemGroup><Compile Include="Generated.fs" /></ItemGroup></Project>"#,
+        )],
+    );
+    assert!(
+        result.items_uncertain,
+        "MSBuild compiles Generated.fs before A.fs; the walk published {:?}",
+        paths_of(&result.items)
+    );
+}
+
+/// An SDK import whose path the walk cannot compute is content it did not
+/// enter, like one whose gate it could not decide.
+#[test]
+fn an_unresolved_sdk_import_makes_items_uncertain() {
+    let result = parse_with_shared_sdk_version_file(
+        r#"<Project>
+  <Import Project="$(MSBuildThisFileDirectory)$(RoslynTargetsPath).props" />
+</Project>"#,
+        &[],
+    );
+    assert!(
+        result.items_uncertain,
+        "an SDK import the walk could not resolve may carry Compile items; causes: {:?}",
+        result.compile_item_uncertainties
+    );
+    assert!(result.hidden_content.is_some());
+}
+
+/// A Compile item in a branch of a `<Choose>` the walk could not decide may
+/// run, in an SDK file as anywhere.
+#[test]
+fn an_undecided_choose_in_the_sdk_with_a_compile_item_makes_items_uncertain() {
+    let result = parse_with_shared_sdk_version_file(
+        r#"<Project>
+  <Choose>
+    <When Condition="'$(RoslynTargetsPath)' == 'net8.0'">
+      <ItemGroup><Compile Include="Generated.fs" /></ItemGroup>
+    </When>
+  </Choose>
+</Project>"#,
+        &[],
+    );
+    assert!(
+        result.items_uncertain,
+        "the branch may run and compile Generated.fs; the walk published {:?}",
+        paths_of(&result.items)
+    );
 }
 
 #[test]

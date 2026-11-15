@@ -136,10 +136,11 @@ fn hidden_content_may_define_an_unbound_path_so_an_unreached_point_declines() {
     assert!(untrusted(&parsed, "FromDbt"));
 }
 
-/// The same opacity with no `Directory.Build.*` file anywhere charges nothing:
-/// the walk's doubt about the import points is a doubt about whether the
-/// default file is imported, and there is none. (A file the hidden content
-/// names is hidden content like any other.)
+/// The same opacity with no `Directory.Build.*` file anywhere charges nothing
+/// for the import points: the walk's doubt about them is a doubt about whether
+/// the default file is imported, and there is none. (A file the hidden content
+/// names is hidden content like any other, which withdraws the Compile set
+/// on its own account, #821.)
 #[test]
 fn an_import_the_walk_cannot_decide_charges_nothing_without_a_directory_build_file() {
     let tmp = tempfile::tempdir().unwrap();
@@ -156,8 +157,17 @@ fn an_import_the_walk_cannot_decide_charges_nothing_without_a_directory_build_fi
     );
     let parsed = parse_file_with_sdk_resolution(&project, resolver);
     assert!(
-        !parsed.items_uncertain,
-        "{:?}",
+        parsed.items_uncertain
+            && !parsed
+                .compile_item_uncertainties
+                .iter()
+                .any(|cause| matches!(
+                    cause.kind,
+                    CompileItemUncertaintyCauseKind::Structural(
+                        StructuralCompileItemUncertainty::DirectoryBuildImportUndecided { .. }
+                    )
+                )),
+        "the hidden import withdraws the Compile set, the points nothing: {:?}",
         parsed.compile_item_uncertainties
     );
     assert!(!parsed.project_references_uncertain);
@@ -647,7 +657,6 @@ fn a_point_after_a_hidden_import_of_its_file_commits_no_order() {
 /// point: once the walk has passed content it could not see, any import may
 /// be a duplicate of one that content made.
 #[test]
-#[ignore = "#819: a certain import after opacity may be a duplicate MSBuild skips"]
 fn a_plain_import_after_a_hidden_import_of_its_file_commits_no_order() {
     let tmp = tempfile::tempdir().unwrap();
     let resolver = custom_sdk(

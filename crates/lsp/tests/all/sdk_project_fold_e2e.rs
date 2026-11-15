@@ -305,9 +305,12 @@ fn sdk_project_with_version_straddling_file_refuses_the_fold() {
 }
 
 /// What the user reads (WoofWare/borzoi#499): a refusal over an untrusted
-/// `LangVersion` names what the version rests on. Here that is the
-/// `TargetFramework` gate, not `LangVersion`, which is pinned — so pinning it
-/// again is not the fix, and the message must not suggest that it is.
+/// `LangVersion` names what the version rests on. Here that is the gate of
+/// the value it is copied from, not `LangVersion`, which is pinned — so
+/// pinning it again is not the fix, and the message must not suggest that it
+/// is. (The gate is not on `TargetFramework`: the SDK's imports are gated on
+/// that, so an untrusted one withdraws the Compile set before the language
+/// version is asked.)
 #[test]
 fn a_language_version_refusal_names_the_condition_it_rests_on() {
     let root = scratch_dir("sdk-fold-langversion-cause");
@@ -316,8 +319,9 @@ fn a_language_version_refusal_names_the_condition_it_rests_on() {
         &fsproj,
         r#"<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework Condition="'@(NoSuchItem)' == ''">net10.0</TargetFramework>
-    <LangVersion>10.0</LangVersion>
+    <TargetFramework>net10.0</TargetFramework>
+    <ChosenLangVersion Condition="'@(NoSuchItem)' == ''">10.0</ChosenLangVersion>
+    <LangVersion>$(ChosenLangVersion)</LangVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="A.fs" />
