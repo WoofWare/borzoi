@@ -282,6 +282,62 @@ struct Undecided {
     how: UndecidedHow,
 }
 
+/// How an import point's decision is put in doubt to the walk, though not to
+/// MSBuild, which decides it (#677).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PointDoubt {
+    /// Nothing: the walk decides the point.
+    Decided,
+    /// The point's condition gains a conjunct MSBuild finds true and the walk
+    /// cannot evaluate: the walk is unsure whether the file is imported.
+    GateTrue,
+    /// The same, with a conjunct MSBuild finds false.
+    GateFalse,
+    /// The SDK's discovery computes the path with an expression the walk
+    /// refuses and MSBuild evaluates to the default: the walk is unsure which
+    /// file is imported.
+    PathRefused,
+}
+
+/// Which file a [`Repeat`] imports again: the `Directory.Build.*` file its
+/// point imports, or the file that one imports (`child`), or the file that
+/// one imports (`grandchild`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RepeatTarget {
+    File,
+    Child,
+    Grandchild,
+}
+
+/// Where a [`Repeat`] is written, relative to the point of its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RepeatSite {
+    /// In the body: after the props point, before the targets point.
+    Body,
+    /// In the SDK file holding the point, before it.
+    SdkBeforePoint,
+    /// In the SDK file holding the point, after it.
+    SdkAfterPoint,
+    /// In `child` (a cycle when it imports the file or itself).
+    InChild,
+    /// In `grandchild`.
+    InGrandchild,
+}
+
+/// An import, by its own spelling, of a file the point of [`Case::repeat_which`]
+/// imports or reaches, which MSBuild skips when that file is imported already
+/// and walks otherwise. The site sets `Seen`, `SeenChild` and
+/// `SeenGrandchild` to `pre<i>` just before it and copies them to
+/// `Repeat<i>`, `Repeat<i>Child` and `Repeat<i>Grandchild` just after. Every
+/// file it may import writes its marker to `Seen`, and `child` and
+/// `grandchild` to their own as well, so the copies say which files ran
+/// there, a file's own one even when a later file overwrote `Seen`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Repeat {
+    target: RepeatTarget,
+    site: RepeatSite,
+}
+
 #[derive(Debug, Clone)]
 struct Case {
     form: Form,
@@ -298,10 +354,24 @@ struct Case {
     body_disables_targets_import: bool,
     reimports: Vec<Reimport>,
     undecided: Option<Undecided>,
+    /// The kind whose point [`Self::point_doubt`] doubts and whose files
+    /// [`Self::repeats`] import again.
+    repeat_which: Which,
+    point_doubt: PointDoubt,
+    repeats: Vec<Repeat>,
 }
 
 /// The properties every case reads back.
-const PROPERTIES: [&str; 12] = [
+const PROPERTIES: [&str; 21] = [
+    "Seen",
+    "SeenChild",
+    "SeenGrandchild",
+    "Repeat0",
+    "Repeat0Child",
+    "Repeat0Grandchild",
+    "Repeat1",
+    "Repeat1Child",
+    "Repeat1Grandchild",
     "Trace",
     "BodySaw",
     "InDbp",
@@ -424,6 +494,124 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
                 UndecidedHow::RefusedThenStale,
             ]),
         }),
+        repeat_which: *rng.pick(&[Which::Props, Which::Targets]),
+        point_doubt: *rng.pick(&[
+            PointDoubt::Decided,
+            PointDoubt::Decided,
+            PointDoubt::GateTrue,
+            PointDoubt::GateFalse,
+            PointDoubt::PathRefused,
+        ]),
+        repeats: (0..[0, 1, 1, 2][rng.below(4)])
+            .map(|_| Repeat {
+                target: *rng.pick(&[
+                    RepeatTarget::File,
+                    RepeatTarget::Child,
+                    RepeatTarget::Grandchild,
+                ]),
+                site: *rng.pick(&[
+                    RepeatSite::Body,
+                    RepeatSite::SdkBeforePoint,
+                    RepeatSite::SdkAfterPoint,
+                    RepeatSite::InChild,
+                    RepeatSite::InGrandchild,
+                ]),
+            })
+            .collect(),
+    }
+}
+
+fn ext(which: Which) -> &'static str {
+    match which {
+        Which::Props => "props",
+        Which::Targets => "targets",
+    }
+}
+
+/// The repeats written at `site`, each between its `Seen` reset and copy.
+fn repeats_at(case: &Case, site: RepeatSite) -> String {
+    let ext = ext(case.repeat_which);
+    case.repeats
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.site == site)
+        .map(|(i, r)| {
+            let file = match r.target {
+                RepeatTarget::File => format!("Directory.Build.{ext}"),
+                RepeatTarget::Child => format!("child.{ext}"),
+                RepeatTarget::Grandchild => format!("grandchild.{ext}"),
+            };
+            let path = format!("$(MSBuildProjectDirectory)/../{file}");
+            format!(
+                "  <PropertyGroup>\n    <Seen>pre{i}</Seen>\n    <SeenChild>pre{i}</SeenChild>\n    \
+                 <SeenGrandchild>pre{i}</SeenGrandchild>\n  </PropertyGroup>\n  \
+                 <Import Project=\"{path}\" Condition=\"Exists('{path}')\" />\n  \
+                 <PropertyGroup>\n    <Repeat{i}>$(Seen)</Repeat{i}>\n    \
+                 <Repeat{i}Child>$(SeenChild)</Repeat{i}Child>\n    \
+                 <Repeat{i}Grandchild>$(SeenGrandchild)</Repeat{i}Grandchild>\n  </PropertyGroup>\n"
+            )
+        })
+        .collect()
+}
+
+/// `Directory.Build.*`'s import of `child`, when the case has repeats.
+fn child_import(case: &Case, which: Which) -> String {
+    if case.repeats.is_empty() || case.repeat_which != which {
+        return String::new();
+    }
+    format!(
+        "  <PropertyGroup>\n    <Seen>{}</Seen>\n  </PropertyGroup>\n  \
+         <Import Project=\"$(MSBuildProjectDirectory)/../child.{}\" />\n",
+        match which {
+            Which::Props => "dbp",
+            Which::Targets => "dbt",
+        },
+        ext(which)
+    )
+}
+
+/// Put the point of `case.repeat_which` in doubt in an SDK file's `text`.
+fn doubt_point(case: &Case, text: String) -> String {
+    let name = match case.repeat_which {
+        Which::Props => "DirectoryBuildPropsPath",
+        Which::Targets => "DirectoryBuildTargetsPath",
+    };
+    let file = match case.repeat_which {
+        Which::Props => "_DirectoryBuildPropsFile",
+        Which::Targets => "_DirectoryBuildTargetsFile",
+    };
+    let base = match case.repeat_which {
+        Which::Props => "_DirectoryBuildPropsBasePath",
+        Which::Targets => "_DirectoryBuildTargetsBasePath",
+    };
+    let gate = |conjunct: &str| {
+        text.replace(
+            &format!("exists('$({name})')\"/>"),
+            &format!("exists('$({name})') and {conjunct}\"/>"),
+        )
+    };
+    match case.point_doubt {
+        PointDoubt::Decided => text,
+        PointDoubt::GateTrue => gate("$([System.String]::IsNullOrWhiteSpace(''))"),
+        PointDoubt::GateFalse => gate("$([System.String]::IsNullOrWhiteSpace('no'))"),
+        PointDoubt::PathRefused => {
+            let combine =
+                format!("$([System.IO.Path]::Combine('$({base})', '$({file})'))</{name}>");
+            if !text.contains(&combine) {
+                return text;
+            }
+            text.replace(
+                &combine,
+                &format!(
+                    "$([System.IO.Path]::Combine('$({base})', '$({file})'))$(UndecidedX.Substring(0,0))</{name}>"
+                ),
+            )
+            .replacen(
+                "<Project>\n",
+                "<Project>\n  <PropertyGroup><UndecidedX>abc</UndecidedX></PropertyGroup>\n",
+                1,
+            )
+        }
     }
 }
 
@@ -640,6 +828,9 @@ fn render(case: &Case, sdk: &str) -> Rendered {
     sdk_props.push_str(&render_stale_source(case));
     sdk_props.push_str(&reimports_at(case, Site::SdkPropsBeforePoint, sdk));
     sdk_props.push_str(&render_undecided(case, UndecidedSite::SdkProps));
+    if case.repeat_which == Which::Props {
+        sdk_props.push_str(&repeats_at(case, RepeatSite::SdkBeforePoint));
+    }
     let mut sdk_files = Vec::new();
     match case.props_point {
         PropsPoint::Absent => {}
@@ -689,6 +880,9 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         ));
     }
     sdk_props.push_str(&reimports_at(case, Site::SdkProps, sdk));
+    if case.repeat_which == Which::Props {
+        sdk_props.push_str(&repeats_at(case, RepeatSite::SdkAfterPoint));
+    }
     sdk_props.push_str("</Project>\n");
     sdk_files.push(("Sdk.props", sdk_props));
 
@@ -716,6 +910,9 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             render_undecided(case, UndecidedSite::SdkTargetsHelper)
         ),
     ));
+    if case.repeat_which == Which::Targets {
+        sdk_targets.push_str(&repeats_at(case, RepeatSite::SdkBeforePoint));
+    }
     match case.targets_point {
         TargetsPoint::Absent => {}
         TargetsPoint::Standard => sdk_targets.push_str(&targets_block(STANDARD_TARGETS_CONDITION)),
@@ -756,9 +953,16 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         }
     }
     sdk_targets.push_str(&reimports_at(case, Site::SdkTargets, sdk));
+    if case.repeat_which == Which::Targets {
+        sdk_targets.push_str(&repeats_at(case, RepeatSite::SdkAfterPoint));
+    }
     sdk_targets.push_str(&tracer("sdkt2"));
     sdk_targets.push_str("</Project>\n");
     sdk_files.push(("Sdk.targets", sdk_targets));
+    let sdk_files: Vec<(&'static str, String)> = sdk_files
+        .into_iter()
+        .map(|(name, text)| (name, doubt_point(case, text)))
+        .collect();
 
     // The user's files.
     let mut case_files = Vec::new();
@@ -783,6 +987,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             );
         }
         text.push_str("  </PropertyGroup>\n");
+        text.push_str(&child_import(case, Which::Props));
         if case.props.probes_exists {
             text.push_str(
                 "  <PropertyGroup Condition=\"Exists('p.proj')\">\n    \
@@ -806,9 +1011,31 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         let mut text = String::from("<Project>\n");
         text.push_str(&tracer("dbt"));
         text.push_str("  <PropertyGroup>\n    <InDbt>1</InDbt>\n  </PropertyGroup>\n");
+        text.push_str(&child_import(case, Which::Targets));
         text.push_str(&reimports_at(case, Site::DirectoryBuildTargets, sdk));
         text.push_str("</Project>\n");
         case_files.push(("Directory.Build.targets", text));
+    }
+
+    if !case.repeats.is_empty() {
+        let ext = ext(case.repeat_which);
+        let child = format!(
+            "<Project>\n{}  <PropertyGroup>\n    <Seen>child</Seen>\n    <SeenChild>child</SeenChild>\n  </PropertyGroup>\n  \
+             <Import Project=\"$(MSBuildProjectDirectory)/../grandchild.{ext}\" />\n{}</Project>\n",
+            tracer("child"),
+            repeats_at(case, RepeatSite::InChild)
+        );
+        let grandchild = format!(
+            "<Project>\n{}  <PropertyGroup>\n    <Seen>grandchild</Seen>\n    <SeenGrandchild>grandchild</SeenGrandchild>\n  </PropertyGroup>\n{}</Project>\n",
+            tracer("grandchild"),
+            repeats_at(case, RepeatSite::InGrandchild)
+        );
+        let (child_name, grandchild_name) = match case.repeat_which {
+            Which::Props => ("child.props", "grandchild.props"),
+            Which::Targets => ("child.targets", "grandchild.targets"),
+        };
+        case_files.push((child_name, child));
+        case_files.push((grandchild_name, grandchild));
     }
 
     // The project.
@@ -821,6 +1048,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
         );
     }
     body.push_str(&reimports_at(case, Site::Body, sdk));
+    body.push_str(&repeats_at(case, RepeatSite::Body));
     let disable_props = format!(
         "{}{}",
         if case.body_disables_props_import {
@@ -1024,6 +1252,9 @@ impl Case {
             body_disables_targets_import: false,
             reimports: Vec::new(),
             undecided: None,
+            repeat_which: Which::Targets,
+            point_doubt: PointDoubt::Decided,
+            repeats: Vec::new(),
         }
     }
 
@@ -1039,6 +1270,7 @@ impl Case {
     /// writes is the walk's to doubt.
     fn must_commit(&self) -> &'static [&'static str] {
         if self.undecided.is_some()
+            || self.point_doubt != PointDoubt::Decided
             || self.props_point == PropsPoint::BehindUndecidedImport
             || self.targets_point == TargetsPoint::BehindUndecidedImport
         {
@@ -1109,6 +1341,8 @@ struct Outcome {
     /// MSBuild rejected the project.
     rejected: bool,
     committed_properties: usize,
+    /// The properties the walk committed, graded against MSBuild.
+    committed: Vec<&'static str>,
     exact_targets: usize,
     /// The walk called the Compile set certain (and MSBuild accepted the
     /// project).
@@ -1283,6 +1517,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
             }
         };
         outcome.committed_properties += 1;
+        outcome.committed.push(name);
         if let Some(ours) = committed {
             outcome.findings.push(Finding {
                 what: name.to_owned(),
@@ -1380,6 +1615,18 @@ fn brief(case: &Case) -> String {
     if let Some(u) = case.undecided {
         s.push_str(&format!(" und[{:?} {:?} @{:?}]", u.input, u.how, u.site));
     }
+    if case.point_doubt != PointDoubt::Decided {
+        s.push_str(&format!(
+            " doubt[{:?} {:?}]",
+            case.repeat_which, case.point_doubt
+        ));
+    }
+    for r in &case.repeats {
+        s.push_str(&format!(
+            " rep[{:?} {:?} {:?}]",
+            case.repeat_which, r.target, r.site
+        ));
+    }
     s
 }
 
@@ -1411,6 +1658,12 @@ fn census_keys(case: &Case) -> Vec<String> {
             case.body_disables_targets_import
         ),
     ];
+    keys.push(format!("point_doubt={:?}", case.point_doubt));
+    for r in &case.repeats {
+        keys.push(format!("repeat.target={:?}", r.target));
+        keys.push(format!("repeat.site={:?}", r.site));
+        keys.push(format!("repeat.with={:?}", case.point_doubt));
+    }
     if let Some(u) = case.undecided {
         keys.push(format!("undecided.site={:?}", u.site));
         keys.push(format!("undecided.input={:?}", u.input));
@@ -1469,6 +1722,29 @@ fn sweep(seed: u64, cases: usize) -> Report {
             .filter(|f| f.contains(&case))
             .collect();
         let (outcome, describe) = evaluate(&mut shared, &case);
+        // Which re-imports reached a graded commit: the walk committed what
+        // the import left in `Repeat<i>`, and MSBuild agreed or it is a
+        // finding.
+        for (i, r) in case.repeats.iter().enumerate() {
+            let copies = [
+                format!("Repeat{i}"),
+                format!("Repeat{i}Child"),
+                format!("Repeat{i}Grandchild"),
+            ];
+            if outcome
+                .committed
+                .iter()
+                .any(|name| copies.iter().any(|copy| copy == name))
+            {
+                for key in [
+                    format!("repeat_commit.site={:?}", r.site),
+                    format!("repeat_commit.target={:?}", r.target),
+                    format!("repeat_commit.with={:?}", case.point_doubt),
+                ] {
+                    *report.census.entry(key).or_default() += 1;
+                }
+            }
+        }
         report.cases += 1;
         report.rejected += usize::from(outcome.rejected);
         report.committed_properties += outcome.committed_properties;
@@ -1638,6 +1914,22 @@ fn the_import_graph_is_exact_or_declined() {
         "undecided.how=UnderUndecidedCondition",
         "undecided.how=RefusedThenOverwritten",
         "undecided.how=RefusedThenStale",
+        "point_doubt=Decided",
+        "point_doubt=GateTrue",
+        "point_doubt=GateFalse",
+        "point_doubt=PathRefused",
+        "repeat.target=File",
+        "repeat.target=Child",
+        "repeat.target=Grandchild",
+        "repeat.site=Body",
+        "repeat.site=SdkBeforePoint",
+        "repeat.site=SdkAfterPoint",
+        "repeat.site=InChild",
+        "repeat.site=InGrandchild",
+        "repeat.with=Decided",
+        "repeat.with=GateTrue",
+        "repeat.with=GateFalse",
+        "repeat.with=PathRefused",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1649,6 +1941,30 @@ fn the_import_graph_is_exact_or_declined() {
     assert!(
         missing.is_empty(),
         "dimension values generated fewer than 5 times: {missing:?}"
+    );
+    // And each re-import shape reaches a commit the oracle grades. Not under
+    // `PathRefused`: a doubted path withdraws the whole evaluation, so the
+    // walk commits nothing after the point there, by design.
+    let uncommitted: Vec<String> = [
+        "repeat_commit.site=Body",
+        "repeat_commit.site=SdkBeforePoint",
+        "repeat_commit.site=SdkAfterPoint",
+        "repeat_commit.site=InChild",
+        "repeat_commit.site=InGrandchild",
+        "repeat_commit.target=File",
+        "repeat_commit.target=Child",
+        "repeat_commit.target=Grandchild",
+        "repeat_commit.with=Decided",
+        "repeat_commit.with=GateTrue",
+        "repeat_commit.with=GateFalse",
+    ]
+    .into_iter()
+    .filter(|key| report.census.get(*key).copied().unwrap_or(0) < 3)
+    .map(str::to_owned)
+    .collect();
+    assert!(
+        uncommitted.is_empty(),
+        "re-import shapes that reached a graded commit fewer than 3 times: {uncommitted:?}"
     );
 }
 
