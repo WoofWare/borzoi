@@ -310,6 +310,59 @@ mod tests {
         }
     }
 
+    /// A piece of a double-quoted attribute value: legal text, and character
+    /// references whether or not they name a character XML allows.
+    const VALUE_PIECES: [&str; 17] = [
+        "a",
+        " ",
+        "\t",
+        "\n",
+        "\r",
+        "\r\n",
+        ">",
+        "'",
+        "&amp;",
+        "&lt;",
+        "&#10;",
+        "&#x9;",
+        "&#xD800;",
+        "&#x110000;",
+        "&#0;",
+        "&#xFFFD;",
+        "&#1114111;",
+    ];
+
+    proptest::proptest! {
+        /// Whatever document [`parse`] admits, every attribute of it reads
+        /// without a panic, and folding its reading gives roxmltree's value
+        /// (the `debug_assert` in [`read_attribute`]); and a document holding
+        /// a reference to no character is never admitted.
+        #[test]
+        fn every_admitted_attribute_reads(
+            attributes in proptest::collection::vec(
+                (separator(), proptest::collection::vec(proptest::sample::select(VALUE_PIECES.to_vec()), 0..8)),
+                1..4,
+            )
+        ) {
+            let mut source = String::from("<A");
+            for (i, (sep, pieces)) in attributes.iter().enumerate() {
+                source.push_str(&format!(" a{i}{sep}=\"{}\"", pieces.concat()));
+            }
+            source.push_str(" />");
+            let refers_to_no_character = source.contains("&#xD800;") || source.contains("&#x110000;");
+            match parse(&source) {
+                Ok(doc) => {
+                    proptest::prop_assert!(!refers_to_no_character, "{source:?}");
+                    let root = doc.root_element();
+                    for attr in root.attributes() {
+                        proptest::prop_assert!(attribute(root, attr.name()).is_some());
+                    }
+                }
+                Err(_) => proptest::prop_assert!(refers_to_no_character || source.contains("&#0;"), "{source:?}"),
+            }
+        }
+    }
+
     /// A character reference to a code point that is no Unicode scalar value,
     /// which `roxmltree` reads as `U+FFFD`, refuses the document wherever it
     /// stands; one that names a character, `U+FFFD` itself included, does not.
