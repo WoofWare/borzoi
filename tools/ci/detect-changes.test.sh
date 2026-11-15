@@ -66,6 +66,8 @@ assert_eq "msbuild-condition-oracle" "$(expect msbuild)"       "$(classify 'tool
 assert_eq "crates/semafoo is not sema" "$(expect)"             "$(classify 'crates/semafoo/x.rs')"
 assert_eq "spawnfoo is not spawn"    "$(expect)"               "$(classify 'crates/spawnfoo/x.rs')"
 assert_eq "msbuild-cond-oracle-extra" "$(expect)"              "$(classify 'tools/msbuild-condition-oracle-extra/x.fs')"
+assert_eq "workload-oracle"          "$(expect msbuild)"       "$(classify 'tools/workload-oracle/Program.fs')"
+assert_eq "workload-oracle-extra"    "$(expect)"               "$(classify 'tools/workload-oracle-extra/x.fs')"
 
 # --- base resolution / fail-open (real git repos) ----------------------------
 

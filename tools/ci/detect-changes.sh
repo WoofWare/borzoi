@@ -35,9 +35,10 @@ set -euo pipefail
 filter_prefixes() {
   case "$1" in
     cst)       echo "crates/cst" ;;
-    # The condition/property oracle exists solely for crates/msbuild's
-    # differential tests, so both live under one filter (mirrors nuget).
-    msbuild)   echo "crates/msbuild tools/msbuild-condition-oracle" ;;
+    # The condition/property oracle and the workload oracle exist solely for
+    # crates/msbuild's differential tests, so they live under its filter
+    # (mirrors nuget).
+    msbuild)   echo "crates/msbuild tools/msbuild-condition-oracle tools/workload-oracle" ;;
     assembly)  echo "crates/assembly" ;;
     # The inheritdoc oracle exists solely for crates/lsp's differential
     # tests, so both live under one filter (mirrors nuget). crates/lsp's

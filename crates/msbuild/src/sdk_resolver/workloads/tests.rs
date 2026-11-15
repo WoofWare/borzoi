@@ -756,6 +756,20 @@ fn prerelease_host_sdk_resolves_in_its_own_band() {
 }
 
 #[test]
+fn host_version_with_build_metadata_degrades() {
+    // `WorkloadResolver.Create` hands the raw version to
+    // `WorkloadFileBasedInstall.IsUserLocal`, whose `System.Version` parse of
+    // `10.0.300+abc` throws whenever a user profile is known.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let version_dir = host_sdk(root, "10.0.300+abc", &["w.workload"]);
+    manifest(root, "10.0.300", "w.workload", "1.0.0");
+
+    let err = resolve_targets(root, &version_dir, &no_user_env()).unwrap_err();
+    assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));
+}
+
+#[test]
 fn prerelease_host_falls_back_to_earlier_previews_and_its_release_band() {
     // The fallback's candidates are the bands below the host band and the
     // host's release band, which a prerelease host *precedes*. The highest

@@ -296,6 +296,14 @@ fn gen_host(rng: &mut SplitMix64) -> Host {
         if rng.below(2) == 0 {
             version.push_str(&format!(".{}.{}", 25000 + rng.below(999), rng.below(200)));
         }
+    } else if rng.below(6) == 0 {
+        // A prerelease that collapses to the release band.
+        version.push_str(rng.pick(&["-dev", "-ci.1", "-rtm.25515.1"]));
+    }
+    if rng.below(4) == 0 {
+        // Build metadata, which the user-local check cannot parse on a host
+        // without a prerelease.
+        version.push_str("+abc");
     }
     Host {
         version,
@@ -419,7 +427,9 @@ fn gen_layout(rng: &mut SplitMix64) -> Layout {
     let dotnet_root = host_fs::canonicalize(dir.path()).unwrap().join("dotnet");
     let host = gen_host(rng);
     let mut description = format!("host {}\n", host.version);
-    let mut in_domain = true;
+    // The locators resolve a host whose spelling they certify; for the rest
+    // they make no claim.
+    let mut in_domain = test_support::workload_accepts_host_version(&host.version);
 
     let sdk_dir = dotnet_root.join("sdk").join(&host.version);
     std::fs::create_dir_all(&sdk_dir).unwrap();
@@ -450,7 +460,7 @@ fn gen_layout(rng: &mut SplitMix64) -> Layout {
     // A user-local install: a user root (sometimes with manifests of its own
     // for the host band), and the `userlocal` marker under the release band's
     // name, under the prerelease band's, or nowhere.
-    let user_root = (rng.below(3) == 0).then(|| {
+    let user_root = (rng.below(2) == 0).then(|| {
         let user_root = dotnet_root.parent().unwrap().join("user");
         std::fs::create_dir_all(&user_root).unwrap();
         let (band, release) = host.bands();
@@ -599,7 +609,7 @@ fn sweep_locators(seed: u64, cases: usize) {
             hosts.len()
         );
         assert!(
-            committed >= cases && prerelease_committed >= cases / 2,
+            committed >= cases * 2 / 3 && prerelease_committed >= cases / 3,
             "{}: the sweep committed too little to grade ({committed}, {prerelease_committed} on \
              prerelease hosts)",
             sdk.display()

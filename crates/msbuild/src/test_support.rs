@@ -96,6 +96,12 @@ pub fn workload_feature_band(version: &str) -> Option<String> {
     crate::sdk_resolver::workloads::feature_band_of(version)
 }
 
+/// Whether the workload locators take `version` as a host SDK version, or
+/// decline it. Exposed for the same differential.
+pub fn workload_accepts_host_version(version: &str) -> bool {
+    crate::sdk_resolver::workloads::accepts_host_version(version)
+}
+
 /// The order the workload locators put the feature bands of `a` and `b` in,
 /// or `None` where either declines. Exposed for the same differential.
 pub fn compare_workload_feature_bands(a: &str, b: &str) -> Option<std::cmp::Ordering> {

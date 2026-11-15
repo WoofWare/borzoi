@@ -247,12 +247,19 @@ pub fn resolve_workload_locator(
 /// The feature band of the host SDK (`10.0.301` → `10.0.300`,
 /// `11.0.100-rc.1.26425.128` → `11.0.100-rc.1`): `SdkFeatureBand` of the
 /// version directory's name. A name [`FeatureBand`] does not certify
-/// degrades.
+/// degrades, and so does one with build metadata: `WorkloadResolver.Create`
+/// hands the raw version to `WorkloadFileBasedInstall.IsUserLocal`, whose
+/// `System.Version` parse of `10.0.100+abc` throws.
 fn host_feature_band(sdk_version_dir: &Path) -> Result<FeatureBand, SdkResolveError> {
     let name = sdk_version_dir
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| unsupported("host SDK directory has a non-UTF-8 name"))?;
+    if name.contains('+') {
+        return Err(unsupported(format!(
+            "host SDK version with build metadata: {name}"
+        )));
+    }
     FeatureBand::parse(name).ok_or_else(|| {
         unsupported(format!(
             "host SDK directory is not a version whose feature band we certify: {name}"
@@ -265,6 +272,13 @@ fn host_feature_band(sdk_version_dir: &Path) -> Result<FeatureBand, SdkResolveEr
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn feature_band_of(version: &str) -> Option<String> {
     FeatureBand::parse(version).map(|band| band.to_string())
+}
+
+/// Whether [`resolve_workload_locator`] takes `version` as a host SDK
+/// version at all. Exposed for the differential.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn accepts_host_version(version: &str) -> bool {
+    host_feature_band(Path::new(version)).is_ok()
 }
 
 /// The order of the feature bands of two versions, or `None` where either
