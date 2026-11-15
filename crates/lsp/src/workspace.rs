@@ -2858,7 +2858,7 @@ fn evaluate_project(
     // so an override widens it — and the override additionally withholds every
     // other TFM-derived conclusion (see `EvaluatedProject::not_an_inner_build`).
     let not_an_inner_build = served.not_an_inner_build;
-    let tfm_untrusted = pass1_untrusted || not_an_inner_build;
+    let tfm_untrusted = pass1_untrusted || not_an_inner_build || served.tfm_unknown;
     // The evaluator reports the `SdkPaths::root` of the entry project's own SDK
     // (`ParsedProject::resolved_sdk_root`); recover the install root from it.
     // This is the single source of truth for an entry-SDK project — see
@@ -2925,6 +2925,10 @@ struct ServedEvaluation {
     /// document is an inner build — see
     /// [`EvaluatedProject::not_an_inner_build`], which this becomes.
     not_an_inner_build: bool,
+    /// The project's TFMs cannot be read ([`tfm_policy::TfmChoice::PluralUnknown`]),
+    /// so no TFM is known for it: folded into
+    /// [`EvaluatedProject::tfm_untrusted`].
+    tfm_unknown: bool,
     /// The read set of the seeded second pass, when one ran, whether or not
     /// it is the one served: a discarded pass decided `not_an_inner_build`.
     pass2_reads: Option<ReadSet>,
@@ -2970,6 +2974,18 @@ fn select_target_framework(
                 parsed: discarded_inner_build(pass1),
                 chosen_tfm: None,
                 not_an_inner_build: true,
+                tfm_unknown: false,
+                pass2_reads: None,
+            };
+        }
+        // Pass 1 may be the outer dispatch build: exact for itself, and for no
+        // inner build.
+        if choice == tfm_policy::TfmChoice::PluralUnknown {
+            return ServedEvaluation {
+                parsed: discarded_inner_build(pass1),
+                chosen_tfm: None,
+                not_an_inner_build: false,
+                tfm_unknown: true,
                 pass2_reads: None,
             };
         }
@@ -2978,6 +2994,7 @@ fn select_target_framework(
             parsed: pass1,
             chosen_tfm,
             not_an_inner_build: false,
+            tfm_unknown: false,
             pass2_reads: None,
         };
     };
@@ -2999,6 +3016,7 @@ fn select_target_framework(
                 parsed: pass2,
                 chosen_tfm: Some(seed),
                 not_an_inner_build: false,
+                tfm_unknown: false,
             },
             // The document opts `TargetFramework` out of global protection,
             // so the seeded pass may be a chimera: values above an override
@@ -3017,6 +3035,7 @@ fn select_target_framework(
                 parsed: discarded_inner_build(pass1),
                 chosen_tfm: None,
                 not_an_inner_build: true,
+                tfm_unknown: false,
                 pass2_reads: Some(pass2.read_set),
             },
         },
@@ -3030,6 +3049,7 @@ fn select_target_framework(
             parsed: discarded_inner_build(pass1),
             chosen_tfm: None,
             not_an_inner_build: false,
+            tfm_unknown: false,
             pass2_reads: None,
         },
     }
@@ -3391,6 +3411,40 @@ mod tests {
               </PropertyGroup>
 {groups}            </Project>"#
         )
+    }
+
+    /// `TargetFrameworks` written by an expression the evaluator refuses: the
+    /// project may be multi-targeted, and the evaluation in hand is then the
+    /// outer dispatch build, whose `TargetFramework`-gated facts no inner
+    /// build shares. None of them may be served as the project's, and no TFM
+    /// may be named for it.
+    #[test]
+    fn an_unknown_plural_serves_no_outer_build_facts() {
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("Sample.fsproj");
+        write_file(
+            &proj,
+            r#"<Project>
+  <PropertyGroup>
+    <Tfms>net8.0;net10.0</Tfms>
+    <TargetFrameworks>$(Tfms.Substring(0))</TargetFrameworks>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0'"><DefineConstants>EIGHT</DefineConstants></PropertyGroup>
+  <ItemGroup><Compile Include="A.fs" Condition="'$(TargetFramework)' == 'net8.0'" /></ItemGroup>
+</Project>"#,
+        );
+        let mut ws = Workspace::with_env_and_extra_build_properties(
+            SdkDiscoveryEnv::default(),
+            HashMap::new(),
+        );
+        let parsed = &ws.evaluated(&proj).expect("the project evaluates").parsed;
+        assert!(
+            parsed.items_uncertain && parsed.define_constants_uncertain,
+            "the outer build's Compile set {:?} and defines {:?} were served as the project's",
+            parsed.items,
+            parsed.define_constants
+        );
+        assert_eq!(ws.served_tfm_for_project(&proj), ServedTfm::Untrusted);
     }
 
     #[test]

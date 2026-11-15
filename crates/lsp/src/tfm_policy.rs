@@ -45,6 +45,13 @@ pub(crate) enum TfmChoice {
     Untrusted,
     /// Case 4 — the project declares no TFM anywhere.
     NoneDeclared,
+    /// Case 4, declined — no TFM the evaluator could read is declared, but
+    /// the plural `TargetFrameworks` is not provably unset (a write the
+    /// evaluator refused or could not pin, or content it could not see). The
+    /// project may be multi-targeted, and pass 1 then the outer dispatch
+    /// build, whose `TargetFramework`-gated facts no inner build shares: serve
+    /// it with every TFM-derived conclusion withheld.
+    PluralUnknown,
 }
 
 impl TfmChoice {
@@ -56,7 +63,7 @@ impl TfmChoice {
         match self {
             TfmChoice::CallerOwned(tfm) => tfm.as_deref(),
             TfmChoice::BodyPinned(tfm) | TfmChoice::Reseed(tfm) => Some(tfm),
-            TfmChoice::Untrusted | TfmChoice::NoneDeclared => None,
+            TfmChoice::Untrusted | TfmChoice::NoneDeclared | TfmChoice::PluralUnknown => None,
         }
     }
 
@@ -69,7 +76,8 @@ impl TfmChoice {
             TfmChoice::CallerOwned(_)
             | TfmChoice::BodyPinned(_)
             | TfmChoice::Untrusted
-            | TfmChoice::NoneDeclared => None,
+            | TfmChoice::NoneDeclared
+            | TfmChoice::PluralUnknown => None,
         }
     }
 }
@@ -102,7 +110,8 @@ impl TfmChoice {
 ///    serve — pairing first-declared parses with whatever the env's no-TFM
 ///    fallback selects (the E5 incoherence). Keeping pass 1 lets every read of
 ///    the unpinned `TargetFramework` flip its own `*_uncertain` flag instead;
-/// 4. else [`TfmChoice::NoneDeclared`] (no TFM declared anywhere): keep pass 1.
+/// 4. else [`TfmChoice::NoneDeclared`] (no TFM declared anywhere): keep pass 1;
+///    or, when the plural is not provably unset, [`TfmChoice::PluralUnknown`].
 ///
 /// The one extra parse in case 3 happens once per multi-targeted project.
 pub(crate) fn tfm_choice(pass1: &ParsedProject, extras: &HashMap<String, String>) -> TfmChoice {
@@ -118,7 +127,18 @@ pub(crate) fn tfm_choice(pass1: &ParsedProject, extras: &HashMap<String, String>
     }
     match target_frameworks(pass1).first() {
         Some(first) => TfmChoice::Reseed(first.clone()),
+        None if !plural_read_is_exact(pass1) => TfmChoice::PluralUnknown,
         None => TfmChoice::NoneDeclared,
+    }
+}
+
+/// Whether the plural `TargetFrameworks` reads as the real build's: a trusted
+/// value with nothing left unexpanded, or a name the real build leaves unset
+/// too.
+fn plural_read_is_exact(parsed: &ParsedProject) -> bool {
+    match parsed.property("TargetFrameworks") {
+        PropertyRead::Value(value) => !value.contains("$("),
+        read => read.is_exact(),
     }
 }
 
