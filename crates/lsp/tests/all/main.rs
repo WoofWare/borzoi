@@ -9,6 +9,7 @@ mod common;
 
 mod alias_resolve_through_diff;
 mod assembly_cache_project_e2e;
+mod assets_paths_through_symlinks;
 mod assembly_cache_roundtrip;
 mod csharp_ref_assembly_env_e2e;
 mod csharp_sidecar;
