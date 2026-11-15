@@ -2308,8 +2308,19 @@ through a symlink (its directory, its `obj`, its assets file, or a directory
 above every project, each with a relative or an absolute target), and a
 sibling's `bin` through one, its missing output through a dangling one. The
 sweep (`borzoi_msbuild::observed::soundness`) perturbs symlinks: it deletes
-each, dangles it, retargets it to every other link's target, and creates a
-dangling link's missing target (`Why::Relink`). Two extras retarget the
+each, dangles it, retargets it to every other link and to what the file
+system says that link names, and creates a dangling link's missing target
+(`Why::Relink`). It resolves no target itself: the file system is the judge,
+and a created target is kept only if the file system then resolves the link
+to it. Three planners that resolved targets themselves each missed a case
+(relative targets in two directories, a target through a link's `..`, a
+target whose directory is missing), so
+`the_sweep_perturbs_every_link_as_the_file_system_resolves_it` holds the
+plan to the file system over generated link trees (relative and absolute
+targets, chains, links to directories, `..` through a link, missing
+parents): every link is deleted, dangled, made to name whatever each other
+link names, and, dangling, made to name the file writing through it would
+create. It fails on each of the three earlier planners. Two extras retarget the
 entry's link, to a copy whose assets file differs and to an identical copy
 one directory deeper. The second is the one only the canonicalisation sees:
 the assets file reads the same under the spelling another reader read it

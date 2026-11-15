@@ -426,78 +426,250 @@ fn a_dangling_symlink_is_swept() {
     sweep_symlinked_exists(false);
 }
 
-/// Two links in different directories whose relative targets are spelt
-/// alike name different files, so the sweep retargets each to the other's
-/// file: it compares, and hands over, targets resolved against their own
-/// link's directory. Each retarget must lead where the other link leads.
+/// The directories a generated link tree holds, each with a file `f` whose
+/// text is the directory's name.
 #[cfg(unix)]
-#[test]
-fn a_relative_target_is_retargeted_by_the_file_it_names() {
+const LINK_TREE_DIRS: [&str; 4] = ["", "a", "b", "a/sub"];
+
+/// What a generated link's target names, before it is spelt.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum LinkTarget {
+    /// A directory's file `f`.
+    File(usize),
+    /// A directory.
+    Dir(usize),
+    /// Another generated link (or the link itself).
+    Link(usize),
+    /// A missing name in a directory that exists.
+    Missing(usize),
+    /// A missing name in a directory that does not exist.
+    MissingParent,
+    /// `hop/../f`, through the tree's `hop` link (to `a/sub`): the file
+    /// system takes the `..` from `a/sub`, naming `a/f`, where a lexical
+    /// reading names the root's `f`.
+    Through,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+struct LinkSpec {
+    /// The directory the link lies in.
+    dir: usize,
+    target: LinkTarget,
+    /// Whether the target is spelt absolute, rather than relative to the
+    /// link's directory.
+    absolute: bool,
+}
+
+#[cfg(unix)]
+fn link_spec(links: usize) -> impl Strategy<Value = LinkSpec> {
+    let dirs = LINK_TREE_DIRS.len();
+    let target = prop_oneof![
+        (0..dirs).prop_map(LinkTarget::File),
+        (0..dirs).prop_map(LinkTarget::Dir),
+        (0..links).prop_map(LinkTarget::Link),
+        (0..dirs).prop_map(LinkTarget::Missing),
+        Just(LinkTarget::MissingParent),
+        Just(LinkTarget::Through),
+    ];
+    (0..dirs, target, any::<bool>()).prop_map(|(dir, target, absolute)| LinkSpec {
+        dir,
+        target,
+        absolute,
+    })
+}
+
+#[cfg(unix)]
+fn link_tree() -> impl Strategy<Value = Vec<LinkSpec>> {
+    (1usize..=5).prop_flat_map(|n| prop::collection::vec(link_spec(n), n))
+}
+
+/// Lay the tree down under `root`; every link's path, `hop` first.
+#[cfg(unix)]
+fn lay_link_tree(root: &Path, specs: &[LinkSpec]) -> Vec<PathBuf> {
+    for dir in LINK_TREE_DIRS {
+        write_at(
+            &root.join(dir),
+            "f",
+            if dir.is_empty() { "root" } else { dir },
+        );
+    }
+    std::os::unix::fs::symlink("a/sub", root.join("hop")).unwrap();
+    let path_of = |i: usize| {
+        root.join(LINK_TREE_DIRS[specs[i].dir])
+            .join(format!("l{i}"))
+    };
+    // A relative spelling descends from the link's directory where the
+    // target lies below it (so links in two directories can spell different
+    // targets alike), and otherwise climbs to the root (no directory on the
+    // way is a link) and descends from there.
+    let spell = |spec: &LinkSpec, from_root: &str| {
+        let below = LINK_TREE_DIRS[spec.dir];
+        if spec.absolute {
+            root.join(from_root)
+        } else if below.is_empty() {
+            PathBuf::from(from_root)
+        } else if let Some(local) = from_root.strip_prefix(&format!("{below}/")) {
+            PathBuf::from(local)
+        } else {
+            let up = LINK_TREE_DIRS[spec.dir]
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .map(|_| "..")
+                .collect::<Vec<_>>()
+                .join("/");
+            PathBuf::from(if up.is_empty() { "." } else { &up }).join(from_root)
+        }
+    };
+    let mut links = vec![root.join("hop")];
+    for (i, spec) in specs.iter().enumerate() {
+        let dir = |d: usize| LINK_TREE_DIRS[d].to_string();
+        let from_root = match spec.target {
+            LinkTarget::File(d) => Path::new(&dir(d)).join("f"),
+            LinkTarget::Dir(d) => PathBuf::from(dir(d)),
+            LinkTarget::Link(j) => Path::new(LINK_TREE_DIRS[specs[j].dir]).join(format!("l{j}")),
+            LinkTarget::Missing(d) => Path::new(&dir(d)).join("missing"),
+            LinkTarget::MissingParent => PathBuf::from("nodir/sub/missing"),
+            LinkTarget::Through => PathBuf::from("hop/../f"),
+        };
+        let from_root = from_root
+            .to_str()
+            .unwrap()
+            .trim_start_matches('/')
+            .to_string();
+        std::os::unix::fs::symlink(spell(spec, &from_root), path_of(i)).unwrap();
+        links.push(path_of(i));
+    }
+    links
+}
+
+/// Every entry under `root`, with its kind and its text or target.
+#[cfg(unix)]
+fn link_tree_snapshot(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in host_fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = host_fs::symlink_metadata(&path).unwrap();
+            let what = if meta.file_type().is_symlink() {
+                format!("link {:?}", host_fs::read_link(&path).unwrap())
+            } else if meta.is_dir() {
+                stack.push(path.clone());
+                "dir".to_string()
+            } else {
+                format!("file {:?}", host_fs::read_to_string(&path).ok())
+            };
+            out.push((path, what));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The sweep's symlink perturbations, held to the file system's own
+/// resolution over a generated link tree, with no path resolution in the
+/// check. For every link: some perturbation deletes it; some dangles it; for
+/// every other link that names something, some perturbation makes it name
+/// the same thing (`canonicalize` agreeing); and where the link dangles and
+/// writing through it would make a file under the root, some perturbation
+/// makes it name that very file. Every perturbation is undone exactly.
+#[cfg(unix)]
+fn check_link_perturbations(specs: &[LinkSpec]) -> Result<(), String> {
     let tmp = TempDir::new().unwrap();
     let root = canon(tmp.path());
-    for dir in ["a", "b"] {
-        write_at(&root, &format!("{dir}/target"), dir);
-        std::os::unix::fs::symlink("target", root.join(dir).join("link")).unwrap();
-    }
+    let links = lay_link_tree(&root, specs);
+    let before = link_tree_snapshot(&root);
     let planned = crate::observed::soundness::perturbations(&root, &ReadSet::default());
-    for (from, to) in [("a", "b"), ("b", "a")] {
-        let link = root.join(from).join("link");
-        let retargets: Vec<&Path> = planned
-            .iter()
-            .filter(|p| p.why == Why::Relink)
-            .flat_map(|p| &p.edits)
-            .filter_map(|edit| match edit {
-                Edit::Link(path, target) if *path == link => Some(target.as_path()),
-                _ => None,
-            })
-            .collect();
-        let leads_to_other = retargets.iter().any(|target| {
-            host_fs::read_to_string(link.parent().unwrap().join(target)).ok()
-                == Some(to.to_string())
-        });
-        assert!(
-            leads_to_other,
-            "{from}/link is never retargeted to {to}/target: {retargets:?}"
-        );
+    let edits: Vec<&Edit> = planned
+        .iter()
+        .filter(|p| p.why == Why::Relink)
+        .flat_map(|p| &p.edits)
+        .collect();
+    let some_edit = |pred: &dyn Fn() -> bool| {
+        edits.iter().any(|edit| {
+            let held = crate::observed::soundness::with_edits(std::slice::from_ref(*edit), pred);
+            assert_eq!(link_tree_snapshot(&root), before, "{edit:?} was not undone");
+            held == Some(true)
+        })
+    };
+    for link in &links {
+        let is_link = || host_fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink());
+        if !some_edit(&|| host_fs::symlink_metadata(link).is_err()) {
+            return Err(format!("{link:?} is never deleted"));
+        }
+        if !some_edit(&|| is_link() && host_fs::metadata(link).is_err()) {
+            return Err(format!("{link:?} is never dangled"));
+        }
+        for other in links.iter().filter(|other| *other != link) {
+            let Ok(names) = host_fs::canonicalize(other) else {
+                continue;
+            };
+            if !some_edit(&|| host_fs::canonicalize(link).ok().as_ref() == Some(&names)) {
+                return Err(format!(
+                    "{link:?} is never made to name {names:?}, which {other:?} names"
+                ));
+            }
+        }
+        if host_fs::metadata(link).is_err() {
+            // The reference: what writing through the link makes, if anything.
+            let made = std::fs::write(link, "x")
+                .is_ok()
+                .then(|| host_fs::canonicalize(link).unwrap());
+            if let Some(made) = &made {
+                std::fs::remove_file(made).unwrap();
+            }
+            assert_eq!(link_tree_snapshot(&root), before);
+            if let Some(made) = made.filter(|made| made.starts_with(&root))
+                && !some_edit(&|| host_fs::canonicalize(link).ok().as_ref() == Some(&made))
+            {
+                return Err(format!(
+                    "{link:?} dangles, and {made:?}, its target, is never made"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+    #[test]
+    fn the_sweep_perturbs_every_link_as_the_file_system_resolves_it(specs in link_tree()) {
+        check_link_perturbations(&specs).map_err(TestCaseError::fail)?;
     }
 }
 
-/// A target that passes through a symlink of its own (`hop/../marker`, with
-/// `hop` leading to `real/inner`) names `real/marker`, not `marker`: another
-/// link is retargeted to the file the target names as the file system
-/// resolves it.
+/// The trees the planner's earlier versions got wrong, pinned: two links in
+/// different directories whose relative targets are spelt alike; a target
+/// through a link (`hop/..`); and a dangling link whose target's directory
+/// does not exist.
 #[cfg(unix)]
 #[test]
-fn a_target_through_a_symlink_is_retargeted_by_the_file_it_names() {
-    let tmp = TempDir::new().unwrap();
-    let root = canon(tmp.path());
-    write_at(&root, "real/inner/x", "x");
-    write_at(&root, "real/marker", "real");
-    write_at(&root, "marker", "lexical");
-    write_at(&root, "other", "other");
-    std::os::unix::fs::symlink("real/inner", root.join("hop")).unwrap();
-    std::os::unix::fs::symlink("hop/../marker", root.join("a")).unwrap();
-    std::os::unix::fs::symlink("other", root.join("b")).unwrap();
-    let planned = crate::observed::soundness::perturbations(&root, &ReadSet::default());
-    let b = root.join("b");
-    let retargets: Vec<String> = planned
-        .iter()
-        .flat_map(|p| &p.edits)
-        .filter_map(|edit| match edit {
-            Edit::Link(path, target) if *path == b => {
-                host_fs::read_to_string(root.join(target)).ok()
-            }
-            _ => None,
-        })
-        .collect();
-    assert!(
-        retargets.iter().any(|text| text == "real"),
-        "b is never retargeted to the file a names: {retargets:?}"
-    );
-    assert!(
-        !retargets.iter().any(|text| text == "lexical"),
-        "b is retargeted to a lexical reading of a's target: {retargets:?}"
-    );
+fn the_sweep_perturbs_the_pinned_link_trees() {
+    let spec = |dir, target, absolute| LinkSpec {
+        dir,
+        target,
+        absolute,
+    };
+    for specs in [
+        vec![
+            spec(1, LinkTarget::File(1), false),
+            spec(2, LinkTarget::File(2), false),
+        ],
+        vec![
+            spec(0, LinkTarget::Through, false),
+            spec(2, LinkTarget::File(2), false),
+        ],
+        vec![spec(1, LinkTarget::MissingParent, false)],
+    ] {
+        if let Err(why) = check_link_perturbations(&specs) {
+            panic!("{specs:?}: {why}");
+        }
+    }
 }
 
 /// A query that climbs out of the swept root (`Exists('../outside/…')`) is

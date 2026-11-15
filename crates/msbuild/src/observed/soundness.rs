@@ -32,8 +32,11 @@
 //! property, and every directory it listed given a new `.fs` entry and a new
 //! `.props` entry (which reach paths whose parent does not yet exist); and
 //! every symlink under `root` deleted, retargeted to a path that does not
-//! exist, and retargeted to every other symlink's target, with a dangling
-//! symlink's missing target created where it lies under `root`. A caller adds
+//! exist, and retargeted to every other symlink (so that it names whatever
+//! that one names), with a dangling symlink's missing target created where it
+//! lies under `root`. What a link names is the file system's to say: the
+//! sweep resolves no target itself, and checks a target it creates against
+//! the file system's resolution of the link. A caller adds
 //! its own (installing a new SDK version, or retargeting a link to a tree of
 //! its own, say) through `extra`.
 //!
@@ -61,12 +64,23 @@ pub enum Edit {
     /// creating any missing parent directory. Unix only: elsewhere it cannot
     /// be made, and the perturbation is skipped.
     Link(PathBuf, PathBuf),
+    /// Create, as a file, what the dangling symlink `link` names, as the file
+    /// system resolves it: in the directory the file system resolves the
+    /// target's directory to, under the target's last component. Made only
+    /// where that directory exists and lies under `within`, and where the
+    /// file system then resolves the link to the file made; otherwise the
+    /// perturbation is skipped.
+    CreateTarget { link: PathBuf, within: PathBuf },
 }
 
 impl Edit {
+    /// The path the edit names: for [`Edit::CreateTarget`], the link.
     pub fn path(&self) -> &Path {
         match self {
-            Edit::Write(path, _) | Edit::Delete(path) | Edit::Link(path, _) => path,
+            Edit::Write(path, _)
+            | Edit::Delete(path)
+            | Edit::Link(path, _)
+            | Edit::CreateTarget { link: path, .. } => path,
         }
     }
 }
@@ -215,6 +229,23 @@ pub fn sweep_with<T: PartialEq + std::fmt::Debug>(
         );
     }
     tally
+}
+
+/// Make `edits` as a sweep makes a perturbation's, run `f` on the changed
+/// tree, and restore it: `None` when an edit could not be made (and nothing
+/// is left changed). For a test of the perturbations themselves.
+pub fn with_edits<T>(edits: &[Edit], f: impl FnOnce() -> T) -> Option<T> {
+    match apply(edits) {
+        Ok(undo) => {
+            let out = f();
+            undo.restore();
+            Some(out)
+        }
+        Err(partial) => {
+            partial.restore();
+            None
+        }
+    }
 }
 
 /// Everything under `root` a restore must put back: each entry's kind,
@@ -379,43 +410,32 @@ pub fn perturbations(root: &Path, read_set: &ReadSet) -> Vec<Perturbation> {
         let path = lexical(path);
         (under_root(&path) && !through_a_link(root, &path)).then_some(path)
     };
-    // Each link's target as the file system resolves it from the link's
-    // directory: a relative target names a different file from a link in
-    // another directory, so targets are compared, and handed to another link,
-    // resolved. A target may pass through symlinks of its own (`hop/..`), so
-    // it is resolved by the file system, not lexically: whole when it exists,
-    // and otherwise its directory, with the missing name joined on.
-    let resolved_target = |link: &Path| {
-        let joined = link.parent()?.join(host_fs::read_link(link).ok()?);
-        host_fs::canonicalize(&joined).ok().or_else(|| {
-            let name = joined.file_name()?;
-            Some(host_fs::canonicalize(joined.parent()?).ok()?.join(name))
-        })
-    };
-    let mut targets: Vec<PathBuf> = links.iter().filter_map(|link| resolved_target(link)).collect();
-    targets.sort();
-    targets.dedup();
+    // Every link is deleted and dangled, whatever its target. It is
+    // retargeted to every other link, so that it names whatever that link
+    // names, and to what the file system says that link names now (which
+    // differs where that link's own target passes through this one). A link
+    // the file system finds dangling has its missing target created
+    // ([`Edit::CreateTarget`]). No target is resolved here.
+    let named: Vec<(&PathBuf, Option<PathBuf>)> = links
+        .iter()
+        .map(|link| (link, host_fs::canonicalize(link).ok()))
+        .collect();
     for link in &links {
-        let Some(resolved) = resolved_target(link) else {
-            continue;
-        };
         let mut relinks = vec![
             Edit::Delete(link.clone()),
             Edit::Link(link.clone(), PathBuf::from("zz_perturbed_missing_target")),
         ];
-        relinks.extend(
-            targets
-                .iter()
-                .filter(|other| **other != resolved)
-                .map(|other| Edit::Link(link.clone(), other.clone())),
-        );
-        // The target, created when it is missing and lies physically under
-        // the root.
-        if let Some(resolved) = inside(&resolved)
-            && host_fs::metadata(link).is_err()
-            && host_fs::symlink_metadata(&resolved).is_err()
-        {
-            relinks.push(Edit::Write(resolved, PROPERTY_FILE.to_vec()));
+        for (other, names) in named.iter().filter(|(other, _)| *other != link) {
+            relinks.push(Edit::Link(link.clone(), (*other).clone()));
+            if let Some(names) = names {
+                relinks.push(Edit::Link(link.clone(), names.clone()));
+            }
+        }
+        if host_fs::metadata(link).is_err() {
+            relinks.push(Edit::CreateTarget {
+                link: link.clone(),
+                within: root.to_path_buf(),
+            });
         }
         out.extend(relinks.into_iter().map(|edit| Perturbation {
             why: Why::Relink,
@@ -544,6 +564,13 @@ struct Undo {
 fn apply(edits: &[Edit]) -> Result<Undo, Undo> {
     let mut priors = Vec::new();
     for edit in edits {
+        if let Edit::CreateTarget { link, within } = edit {
+            match create_target(link, within, 0) {
+                Some(file) => priors.push((file, Prior::Absent { created: None })),
+                None => return Err(Undo { priors }),
+            }
+            continue;
+        }
         let path = edit.path();
         let prior = match host_fs::symlink_metadata(path) {
             Ok(meta) if meta.is_file() => match host_fs::read(path) {
@@ -587,6 +614,7 @@ fn apply(edits: &[Edit]) -> Result<Undo, Undo> {
             }
             .and_then(|()| path.parent().map_or(Ok(()), std::fs::create_dir_all))
             .and_then(|()| symlink(target, path)),
+            Edit::CreateTarget { .. } => unreachable!("made above, without a prior of the link"),
         };
         priors.push((path.to_path_buf(), prior));
         if made.is_err() {
@@ -642,6 +670,39 @@ impl Undo {
             }
         }
     }
+}
+
+/// [`Edit::CreateTarget`]: the file made, or `None` (with nothing made) where
+/// it cannot be. Where the target's last component is itself a dangling
+/// link, its target is created in turn, `depth` bounding a cycle as the file
+/// system's own limit does.
+fn create_target(link: &Path, within: &Path, depth: usize) -> Option<PathBuf> {
+    if depth > 32 || host_fs::metadata(link).is_ok() {
+        return None;
+    }
+    let joined = link.parent()?.join(host_fs::read_link(link).ok()?);
+    let std::path::Component::Normal(name) = joined.components().next_back()? else {
+        return None;
+    };
+    let dir = host_fs::canonicalize(joined.parent()?).ok()?;
+    if !dir.starts_with(host_fs::canonicalize(within).ok()?) {
+        return None;
+    }
+    let file = dir.join(name);
+    match host_fs::symlink_metadata(&file) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return create_target(&file, within, depth + 1);
+        }
+        Ok(_) => return None,
+        Err(_) => {}
+    }
+    std::fs::write(&file, PROPERTY_FILE).ok()?;
+    // The file system is the judge of what the link names.
+    if host_fs::canonicalize(link).ok().as_deref() != Some(file.as_path()) {
+        std::fs::remove_file(&file).expect("remove a target the link does not name");
+        return None;
+    }
+    Some(file)
 }
 
 /// Make `link` a symlink to `target`.
