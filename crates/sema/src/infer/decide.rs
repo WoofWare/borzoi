@@ -55,6 +55,28 @@ pub(super) enum TupleSplit {
     AtEnd,
 }
 
+/// What a lambda's parameter is checked against, and what the rest of the
+/// lambda is, when the lambda is checked against an expected type
+/// ([`Gen::function_split`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) enum FunctionSplit {
+    /// The expected type is a function type, or was made one: the parameter
+    /// is checked against `domain`, and the rest of the lambda — its next
+    /// parameter, or its body — against `rest`, whose type is `result`.
+    /// `fresh` says the split made `domain` itself, with no expected type to
+    /// relate it to, so that nothing but the parameter binds it.
+    Split {
+        domain: TyVid,
+        result: TyVid,
+        rest: Expected,
+        fresh: bool,
+    },
+    /// The expected type is not a function type, nor can be made one: FCS
+    /// reports it (`UnifyFunctionType`) and abandons the lambda, checking
+    /// nothing inside it.
+    NotAFunction,
+}
+
 /// What [`Gen::decide`] did with a relation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Decision {
@@ -347,6 +369,109 @@ impl<'a> Gen<'a> {
                 (fresh, TupleSplit::AtEnd)
             }
         }
+    }
+
+    /// What a lambda's parameter is checked against, and the rest of the
+    /// lambda, when the lambda is checked against `expected`
+    /// ([`FunctionSplit`]).
+    ///
+    /// FCS (`TcIteratedLambdas`) takes the expected type apart before it
+    /// checks the parameter (`UnifyFunctionType`, on the expected type
+    /// committed as it is: a lambda is never converted): a function type is
+    /// split into its domain and result; a variable is first equated with a
+    /// function type of fresh parts, a decision like any other; anything else
+    /// is an error, after which FCS checks nothing inside the lambda. With no
+    /// expected type the parts are fresh and the rest is synthesized. Under
+    /// an unknown expected type FCS splits a type inference does not know, so
+    /// both parts are [tainted](Self::taint) and the rest is unknown too.
+    pub(super) fn function_split(
+        &mut self,
+        scope: &mut Scope,
+        expected: Expected,
+    ) -> (FunctionSplit, Discharged) {
+        let tys = self.solver.tys;
+        let (k, equal) = match expected {
+            Expected::Synth => {
+                let domain = self.solver.table.fresh();
+                let result = self.solver.table.fresh();
+                let rest = Expected::Synth;
+                let split = FunctionSplit::Split {
+                    domain,
+                    result,
+                    rest,
+                    fresh: true,
+                };
+                return (split, Discharged(()));
+            }
+            Expected::Unknown => {
+                let domain = self.solver.table.fresh();
+                let result = self.solver.table.fresh();
+                self.taint(scope, tys.var(domain));
+                self.taint(scope, tys.var(result));
+                let rest = Expected::Unknown;
+                let split = FunctionSplit::Split {
+                    domain,
+                    result,
+                    rest,
+                    fresh: false,
+                };
+                return (split, Discharged(()));
+            }
+            Expected::Known(k) => (k, false),
+            Expected::Equal(k) => (k, true),
+        };
+        let resolved = self.solver.table.resolve(tys.var(k));
+        let split = match *tys.kind(resolved) {
+            TyKind::Fun { arg, ret } => {
+                // A part that is a variable is the part itself, as for a
+                // tuple's elements ([`Self::tuple_element_expectations`]).
+                let mut part = |t: Ty| match *tys.kind(t) {
+                    TyKind::Var(v) => v,
+                    _ => self.fresh_equal(scope, t),
+                };
+                let domain = part(arg);
+                let result = part(ret);
+                FunctionSplit::Split {
+                    domain,
+                    result,
+                    rest: Expected::Known(result),
+                    fresh: false,
+                }
+            }
+            TyKind::Var(_) => {
+                let domain = self.solver.table.fresh();
+                let result = self.solver.table.fresh();
+                let fun = self.fresh_equal(scope, tys.fun(tys.var(domain), tys.var(result)));
+                let decision = if equal {
+                    self.decide_equal(scope, fun, k)
+                } else {
+                    self.decide(scope, fun, k)
+                };
+                match decision {
+                    Decision::Taken => FunctionSplit::Split {
+                        domain,
+                        result,
+                        rest: Expected::Known(result),
+                        fresh: false,
+                    },
+                    // Not applied: FCS's parts are what it bound them to,
+                    // which a declined decision has tainted.
+                    Decision::Declined => FunctionSplit::Split {
+                        domain,
+                        result,
+                        rest: Expected::Unknown,
+                        fresh: false,
+                    },
+                    Decision::Failed => FunctionSplit::NotAFunction,
+                }
+            }
+            TyKind::Named { .. }
+            | TyKind::Project { .. }
+            | TyKind::Tuple(_)
+            | TyKind::Array { .. }
+            | TyKind::Param(_) => FunctionSplit::NotAFunction,
+        };
+        (split, Discharged(()))
     }
 
     /// [`Self::decide`] for a relation that is an equality alone

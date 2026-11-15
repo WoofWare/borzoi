@@ -306,8 +306,8 @@ impl<'a> Gen<'a> {
             return self.scheme_use(scope, self.solver.tys, scheme);
         }
         let dv = self.def_var(def);
-        let match_local = scope.match_locals.contains(&def);
-        let current_param = scope.is_param(def) || match_local;
+        let pattern_local = scope.pattern_locals.contains(&def);
+        let current_param = scope.is_param(def) || pattern_local;
         if !current_param {
             self.taint(scope, self.solver.tys.var(dv));
             scope.poison.push(dv);

@@ -104,6 +104,10 @@ isolation.
   extension-absence gate, OV-6.1 curry detection, OV-7 static calls, and OV-9's
   generator + corpus differential; per
   [`overload-resolution-plan.md`](overload-resolution-plan.md).
+- **Lambdas** — a lambda checked as FCS checks it: the expected type split
+  per parameter, each parameter against its domain, the body against the
+  result; a binding's own leading lambdas folded into its parameters; details
+  below.
 
 ---
 
@@ -1149,7 +1153,7 @@ as one variable with the parameter, so the pattern probe replays each
 slot-binder pair too: `let f x = if x then (match x with 1 -> x | _ -> x)
 else false` declines, where FCS rejects the pattern and keeps `bool -> bool`.
 
-Still declining: `function` (lambdas are unmodelled); `try … with`;
+Still declining: `function`; `try … with`;
 active, record, list, array, `:?`, `null` and OR patterns; an annotated name
 in a match pattern (FCS relates it by equality and rejects a mismatch, where
 the annotation would already have typed the name); a case or constant in a
@@ -1298,6 +1302,70 @@ Still declining: record construction (`{ A = 1 }`) and copy-and-update,
 whose labels the resolver does not resolve; a field reached through a module
 value in one path (`Lib.r0.A`); a field through a receiver annotated under
 an `open` of a project module (as for every annotation there).
+
+### Lambdas
+
+**FCS's order.** A lambda `fun p1 … pn -> body` is checked one parameter at
+a time (`TcIteratedLambdas`): the expected type is split into a domain and a
+result (`UnifyFunctionType`, on the expected type committed as it is — a
+lambda is never converted), the parameter is checked against the domain, and
+the rest of the lambda against the result. A function type is taken apart; a
+variable is equated with a function type of fresh parts, a decision like any
+other; anything else is an error after which FCS checks nothing inside the
+lambda. So a lambda argument sees its domain before its body is checked:
+`xs |> List.map (fun s -> s.Length)` fixes `List.map`'s element type from
+`xs` before the lambda, and `s.Length` resolves. A function type is sealed,
+so a use's loosening leaves a function-typed parameter alone and the domain
+reaches the lambda exactly.
+
+**What is modelled.** A parameter that is a name, an annotated name, `_` or
+`()`: the name's type is its domain; an annotation, or `()`'s `unit`, is
+related to the domain as FCS's equality — a decision, except on a
+synthesized lambda's own fresh domain, which the parameter alone binds and
+so binds even once the prefix has ended. A parameter is one of the binding's
+monomorphic locals, read by its uses as a `match` pattern's names are, and is
+never published: FCS's binder dump lists a lambda's parameters only where it
+folds the lambda into a declaration's own. The lambdas that are a
+module-level binding's right-hand side or a function's body (through
+parentheses, and each that is the body of one so folded) are those: FCS keeps
+no lambda node for them. A paren pattern (`let (f) = fun …`) and a local
+(`let g = fun … in …`) fold nothing. A lambda in function position
+(`(fun x -> …) a`) is checked against a fresh type before the arguments, as
+FCS checks any callee that is not a name; what it records is kept only where
+it is typed and splits over every argument, since FCS keeps nothing inside an
+application it rejects (`(fun x -> x) 1 2`). A condition on a lambda parameter
+or a `match` pattern's name is decided as one on a parameter, and one on a
+value already `bool` needs nothing.
+
+**Still declining.** A tuple parameter (`fun (a, b) -> …`): FCS elaborates it
+through a `let` that reshapes the enclosing declaration's typed tree — `let`
+nodes at the parameters, and duplicate binder records for the enclosing
+function's own parameters — so the lambda ends the prefix and its body is
+walked recording nothing, as before. So does any other parameter shape, and
+a name bound twice. A method argument that is a lambda still declines the
+call before its arguments are walked (`GetNewInferenceTypeForMethodArg`), and
+is then walked against an unknown type, its parameters tainted. A
+module-level `let g = fun x -> x` is still a value binding here: published
+when ground, never generalised, where FCS generalises it as a function.
+
+Graded by `infer_lambda_diff`: 23 lambda shapes by 15 positions (a value's
+and a function's right-hand side, a local, an argument against an open, a
+function and a non-function domain, the pipe, a return annotation, a callee —
+applied to its argument, to one argument too many, and to one of the wrong
+type — a branch, a tuple element), certain-implies-exact on every node and binder,
+with must-commit obligations on the cell's binder and, where the position
+records it, the lambda's node; an FCS file that cannot be checked whole (an
+error FCS does not recover from in a binding's own right-hand side) is graded
+cell by cell. A second group holds member resolution through a domain known
+before the lambda, and declines where the parameter is open at the access.
+`infer_entry_order_diff` now counts its `app (fun z -> A) B` cases as plain,
+so their points after the sink are must-commit.
+
+Measured on the stride-13 corpus sample: agreements unchanged (593 + 901,
+0 divergences); complete bindings 282 → 288 of 2771; `Lambda` gone from the
+121 bindings it was present in (the only reason in 11), the reasons beneath
+it now surfacing in its place. `infer_corpus_dump` moves 408 files, none
+down: 11087 → 11152 commits alone, 8188 → 8224 in directory.
 
 ### Remaining 3.x hard piles (census-priority order)
 

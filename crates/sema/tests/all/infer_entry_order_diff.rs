@@ -44,16 +44,16 @@
 //! `p` may be used several times, so the first relation FCS applies to it is
 //! the one that fixes it. With a probability drawn per file, a leaf is
 //! replaced by one of the wrong type (an ill-typed argument), and a
-//! subexpression is put under a lambda (`app (fun z -> A) B`), which inference
-//! does not model. `idf 3` and `idf "w"` are **witnesses**: each is typed only
+//! subexpression is put under a lambda (`app (fun z -> A) B`), whose body
+//! `app`'s result relates to the domain before the lambda is checked. `idf 3` and `idf "w"` are **witnesses**: each is typed only
 //! by its own argument check, so whether it is committed shows whether the
 //! checks around it fired. `p` is open until something fixes it, so its node
 //! and the function's binder show what the checks did to it.
 //!
 //! Two further axes reach what happens once the faithful prefix has ended.
 //! With a probability drawn per file a construct inference does not model is
-//! put before the sink (`(p : int)`, `(fun () -> gt p)`, `(while false do
-//! ignore (gi p))`, `(fun () -> y.Insert(0, p))`, or one that leaves `p` alone), most of
+//! put before the sink (`(p : int)`, `[gt p]`, `(while false do
+//! ignore (gi p))`, `[y.Insert(0, p)]`, or one that leaves `p` alone), most of
 //! them fixing `p` in FCS where inference cannot see it. And up to two
 //! **term-position contexts** follow the extras: a term whose type FCS may
 //! know and inference, after such a construct, does not (`idf p`, `[y]`, `p
@@ -104,13 +104,13 @@
 //!     cannot change what FCS decided at it, so the prefix is still faithful
 //!     there;
 //!   - the witness after the sink, `p`'s node, and the binders, in a case FCS
-//!     accepts built only from the plain constructs — no lambda, no ill-typed
-//!     leaf, no second use of `p`, no branch, method call, applied parameter,
-//!     return annotation, construct ending the prefix or term-position
-//!     context: every check in it is one inference models,
-//!     decided where FCS decides it. A method call FCS decides at the call
-//!     (`y.Substring(I)`, `y.IndexOf(S)`, [`ArgGen::access`]) is a plain
-//!     construct. The richer constructs are graded by certain-implies-exact
+//!     accepts built only from the plain constructs — no ill-typed leaf, no
+//!     second use of `p`, no branch, method call, applied parameter, return
+//!     annotation, construct ending the prefix or term-position context:
+//!     every check in it is one inference models, decided where FCS decides
+//!     it. A lambda under `app` is a plain construct, and so is a method call
+//!     FCS decides at the call (`y.Substring(I)`, `y.IndexOf(S)`,
+//!     [`ArgGen::access`]). The richer constructs are graded by certain-implies-exact
 //!     alone, since inference may soundly decline inside them.
 //!
 //!   Each only where FCS's type is ground.
@@ -245,8 +245,7 @@ impl Features {
     /// Whether the case uses only the plain constructs, so that its points
     /// after the sink are must-commit where FCS accepts it.
     fn plain(&self) -> bool {
-        !(self.lambda
-            || self.ill_typed
+        !(self.ill_typed
             || self.multi_p
             || self.branch
             || self.method_arg
@@ -492,8 +491,8 @@ impl ArgGen<'_> {
     /// everything after it is walked once the binding's faithful prefix has
     /// ended. Most fix `p` in FCS — to `int`, `string`, `int * string` or
     /// `int -> string` — through what inference does not see (a type
-    /// annotation on an expression, a lambda's body, a loop's body, a method
-    /// argument under a lambda); the rest leave `p` as it was.
+    /// annotation on an expression, a list's element, a loop's body, a method
+    /// argument in a list); the rest leave `p` as it was.
     fn loss(&mut self) -> String {
         self.features.lost = true;
         let fixed = match self.rng.below(4) {
@@ -504,11 +503,11 @@ impl ArgGen<'_> {
         };
         let form = match self.rng.below(7) {
             0 | 1 => format!("(p : {})", fixed.0),
-            2 if !fixed.1.is_empty() => format!("(fun () -> {} p)", fixed.1),
+            2 if !fixed.1.is_empty() => format!("[{} p]", fixed.1),
             3 if !fixed.1.is_empty() => format!("(while false do ignore ({} p))", fixed.1),
-            4 => "(fun () -> y.Insert(0, p))".into(),
+            4 => "[y.Insert(0, p)]".into(),
             5 => return "(y : string)".into(),
-            6 => return "(fun () -> 1)".into(),
+            6 => return "[1]".into(),
             _ => format!("(p : {})", fixed.0),
         };
         self.p_uses += 1;
@@ -1150,8 +1149,7 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
         "clean-plain",
     ] {
         let n = tally.with.get(name).copied().unwrap_or(0);
-        // A clean case with a coercion inside needs a lambda-free,
-        // ill-typed-free draw that reaches an `obj` element: rarer than the
+        // A clean case with a coercion inside needs an ill-typed-free draw that reaches an `obj` element: rarer than the
         // rest by about half.
         // So does a clean, plain case holding an access.
         let floor = if matches!(name, "clean-coerced-inside" | "clean-plain-access") {

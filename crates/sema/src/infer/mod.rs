@@ -83,15 +83,27 @@
 //! type, so it too defers. In check mode both branches are checked. The result
 //! flows to the binder and hover (`let r = if … then 1 else 2` ⇒ `int`).
 //!
-//! **Function and lambda bodies.** Generation walks the
-//! **body** of a function binding (`let f x … = body`), a lambda
-//! (`fun x … -> body`), and a `while` loop, so their sub-expressions get typed —
-//! e.g. a function body that is an `if` emits its result type
-//! (`let f c = if c then 1 else 2` ⇒ the `if` and the `1` type as `int`). Each
-//! body carries the right bidirectional *mode*: a function-binding body and a
-//! synth-position lambda body are coercion-free (synth); a lambda reached in
-//! *check* mode passes it on (an expected function type could retarget the body);
-//! a `while` body is checked against `unit`.
+//! **Function bodies and `while` loops.** Generation walks the **body** of a
+//! function binding (`let f x … = body`) and a `while` loop, so their
+//! sub-expressions get typed — e.g. a function body that is an `if` emits its
+//! result type (`let f c = if c then 1 else 2` ⇒ the `if` and the `1` type as
+//! `int`). A function-binding body is coercion-free (synth); a `while` body is
+//! checked against `unit`.
+//!
+//! **Lambdas.** A lambda `fun p1 … pn -> body` is checked as FCS checks it
+//! ([`Gen::infer_lambda`]): for each parameter the expected type is split into
+//! a domain and a result ([`Gen::function_split`]: a function type is taken
+//! apart, a variable is equated with a fresh one, anything else is an error
+//! that abandons the lambda), the parameter is checked against the domain, and
+//! the body against the last result, synthesized where the lambda is. So a
+//! lambda argument sees its domain before its body is checked: in
+//! `xs |> List.map (fun s -> s.Length)` the pipe fixes `List.map`'s element
+//! type before the lambda, and `s.Length` resolves. A parameter is a name, an
+//! annotated name, `_` or `()`; a tuple parameter, which FCS elaborates
+//! through a `let` that reshapes the enclosing declaration's typed tree,
+//! declines. The lambdas that are a module-level binding's right-hand side,
+//! or a function's body, are folded into its parameters by FCS, which keeps no
+//! node for them ([`Gen::fold_binding_lambdas`]).
 //!
 //! **`TyKind::Fun`, monomorphic function types, and condition typing.**
 //! A `let`-function binder carries a [`TyKind::Fun`] type built by currying its
@@ -149,7 +161,7 @@
 //! - **Per-binding walk-completeness** ([`Scope::complete`]). During one binding's
 //!   generation, any sub-expression or pattern we do not fully model marks the
 //!   binding *incomplete* (every `None`-return arm of [`Gen::infer_construct`], a
-//!   deferred literal, an unresolved name, a lambda, a struct/degenerate tuple, an
+//!   deferred literal, an unresolved name, a struct/degenerate tuple, an
 //!   `if` with no final `else`, an unmodelled parameter pattern, and a condition shape
 //!   [`Gen::constrain_bool`] does not fully model — a compound `x && y` drops FCS
 //!   constraints on `x`/`y`). Incomplete ⇒ **no generalisation** (ground emission
@@ -487,7 +499,7 @@ use borzoi_assembly::{
 };
 use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{
-    AppExpr, AstNode, AttributeList, Binding, ConstExpr, DotGetExpr, Expr, IfThenElseExpr,
+    AppExpr, AstNode, AttributeList, Binding, ConstExpr, DotGetExpr, Expr, FunExpr, IfThenElseExpr,
     ImplFile, LetDecl, LetOrUseExpr, LongIdent, LongIdentExpr, LongIdentPat, MatchExpr, MemberDefn,
     ModuleOrNamespace, ModuleOrNamespaceKind, NamedPat, NestedModuleDecl, ParenPat, Pat,
     RecordRepr, SequentialExpr, SyntaxKind, SyntaxNode, SyntaxToken, TupleSegment, Type, TypeDefn,
@@ -527,6 +539,7 @@ pub(crate) use extension_scope::ExtensionScope;
 mod facts;
 mod finish;
 mod generalise;
+mod lambdas;
 mod literals;
 mod members;
 mod patterns;
@@ -901,8 +914,16 @@ pub enum Incomplete {
     QualifiedPath,
     /// A literal whose type is not fixed in isolation (`1I`, `__LINE__`).
     DeferredLiteral,
-    /// A lambda: its function type is not modelled.
-    Lambda,
+    /// A lambda parameter whose pattern is not modelled, by its syntax kind:
+    /// a tuple, a constructor, an attribute, …
+    LambdaParameter(SyntaxKind),
+    /// A lambda checked against an expected type that is not a function
+    /// type: FCS reports it and checks nothing inside the lambda.
+    LambdaNotAFunction,
+    /// A lambda parameter whose annotation, or `()`'s `unit`, does not fit
+    /// its domain: FCS reports it and checks nothing further inside the
+    /// lambda.
+    LambdaParameterMismatch,
     /// A `while` loop: its `unit` type is not modelled.
     While,
     /// An `if` without a final `else`, whose result is `unit`.
@@ -1006,9 +1027,9 @@ pub enum Incomplete {
     /// Any other pattern, by its syntax kind: a constructor, a record, a
     /// literal, …
     PatternShape(SyntaxKind),
-    /// A callee that is not a value or a curried application, by its syntax
-    /// kind: an operator that is not a plain name, a type application, a
-    /// lambda, …
+    /// A callee that is not a value, a curried application or a lambda, by
+    /// its syntax kind: an operator that is not a plain name, a type
+    /// application, …
     CalleeShape(SyntaxKind),
     /// A method call whose callee is not modelled, by the callee's syntax kind
     /// (a receiver that is not an in-file value, …).

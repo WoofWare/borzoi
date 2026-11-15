@@ -115,7 +115,7 @@ id-wrapped-access node 21-35 `(idf x).Length`	ours System.Int32 fcs System.Int32
 id-wrapped-access node 22-27 `idf x`	ours System.String fcs System.String
 id-wrapped-access node 26-27 `x`	ours - fcs System.String
 id-wrapped-lambda-access binder 4-6 `r3`	ours System.Int32 fcs System.Int32
-id-wrapped-lambda-access census	[Lambda, IndeterminateReceiver]
+id-wrapped-lambda-access census	[]
 id-wrapped-lambda-access fcs	clean
 id-wrapped-lambda-access node 16-39 `idf (fun s -> s.Length)`	ours - fcs System.String -> System.Int32
 id-wrapped-lambda-access node 21-38 `fun s -> s.Length`	ours - fcs System.String -> System.Int32
@@ -123,7 +123,7 @@ id-wrapped-lambda-access node 30-31 `s`	ours - fcs System.String
 id-wrapped-lambda-access node 30-38 `s.Length`	ours - fcs System.Int32
 id-wrapped-lambda-access node 9-40 `apply (idf (fun s -> s.Length))`	ours System.Int32 fcs System.Int32
 lambda-access binder 4-6 `r4`	ours System.Int32 fcs System.Int32
-lambda-access census	[Lambda, IndeterminateReceiver]
+lambda-access census	[]
 lambda-access fcs	clean
 lambda-access node 16-33 `fun s -> s.Length`	ours - fcs System.String -> System.Int32
 lambda-access node 25-26 `s`	ours - fcs System.String
@@ -146,14 +146,14 @@ lambda-argument-before-the-argument-that-picks-the-overload node 34-35 `1`	ours 
 lambda-argument-before-the-argument-that-picks-the-overload node 9-36 `T.M((fun x -> x.Length), 1)`	ours - fcs System.Int32
 lambda-method-argument-checked-before-resolution binder 4-6 `m1`	ours - fcs System.String -> 'a * System.Int32
 lambda-method-argument-checked-before-resolution binder 8-9 `y`	ours System.String fcs System.String
-lambda-method-argument-checked-before-resolution census	[OverloadUnresolved, Lambda]
+lambda-method-argument-checked-before-resolution census	[OverloadUnresolved]
 lambda-method-argument-checked-before-resolution fcs	errors FS0193
 lambda-method-argument-checked-before-resolution node 22-48 `y.Insert(0, (fun () -> 1))`	ours - fcs 'a
 lambda-method-argument-checked-before-resolution node 22-51 `y.Insert(0, (fun () -> 1)), 0`	ours - fcs 'a * System.Int32
 lambda-method-argument-checked-before-resolution node 50-51 `0`	ours System.Int32 fcs System.Int32
 lambda-method-argument-control binder 4-6 `m2`	ours System.String -> System.String * System.Int32 fcs System.String -> System.String * System.Int32
 lambda-method-argument-control binder 8-9 `y`	ours System.String fcs System.String
-lambda-method-argument-control census	[Lambda]
+lambda-method-argument-control census	[LambdaNotAFunction]
 lambda-method-argument-control fcs	errors FS0002
 lambda-method-argument-control node 22-23 `y`	ours - fcs System.String
 lambda-method-argument-control node 22-52 `y.Insert(0, idf (fun () -> 1))`	ours System.String fcs System.String
@@ -257,7 +257,7 @@ receiver-canonicalised-before-the-lookup node 32-33 `x`	ours - fcs System.Int32
 shaped-argument-after-an-argument-the-candidate-fixes binder 4-6 `h2`	ours - fcs 'a -> System.Int32 -> 'a * 'a * System.Int32
 shaped-argument-after-an-argument-the-candidate-fixes binder 7-8 `p`	ours - fcs 'a
 shaped-argument-after-an-argument-the-candidate-fixes binder 9-10 `q`	ours - fcs System.Int32
-shaped-argument-after-an-argument-the-candidate-fixes census	[OverloadUnresolved, Lambda]
+shaped-argument-after-an-argument-the-candidate-fixes census	[OverloadUnresolved]
 shaped-argument-after-an-argument-the-candidate-fixes fcs	errors FS0193
 shaped-argument-after-an-argument-the-candidate-fixes node 14-44 `both p (T3.I(q, (fun x -> x)))`	ours - fcs 'a
 shaped-argument-after-an-argument-the-candidate-fixes node 14-50 `both p (T3.I(q, (fun x -> x))), p, q`	ours - fcs 'a * 'a * System.Int32
@@ -269,7 +269,7 @@ shaped-argument-against-a-bcl-candidate binder 19-20 `p`	ours - fcs 'a
 shaped-argument-against-a-bcl-candidate binder 21-22 `q`	ours - fcs System.Int32
 shaped-argument-against-a-bcl-candidate binder 4-6 `h3`	ours - fcs System.String -> 'a -> System.Int32 -> 'a * 'a * System.Int32
 shaped-argument-against-a-bcl-candidate binder 8-9 `s`	ours System.String fcs System.String
-shaped-argument-against-a-bcl-candidate census	[OverloadUnresolved, Lambda]
+shaped-argument-against-a-bcl-candidate census	[OverloadUnresolved]
 shaped-argument-against-a-bcl-candidate fcs	errors FS0193
 shaped-argument-against-a-bcl-candidate node 26-60 `both p (s.Insert(q, (fun x -> x)))`	ours - fcs 'a
 shaped-argument-against-a-bcl-candidate node 26-66 `both p (s.Insert(q, (fun x -> x))), p, q`	ours - fcs 'a * 'a * System.Int32
@@ -279,7 +279,7 @@ shaped-argument-against-a-bcl-candidate node 62-63 `p`	ours - fcs 'a
 shaped-argument-against-a-bcl-candidate node 65-66 `q`	ours - fcs System.Int32
 shaped-argument-against-the-one-candidate binder 4-6 `h1`	ours - fcs 'a -> 'a * 'a
 shaped-argument-against-the-one-candidate binder 7-8 `p`	ours - fcs 'a
-shaped-argument-against-the-one-candidate census	[OverloadUnresolved, Lambda]
+shaped-argument-against-the-one-candidate census	[OverloadUnresolved]
 shaped-argument-against-the-one-candidate fcs	errors FS0193
 shaped-argument-against-the-one-candidate node 12-42 `both p (T3.I(1, (fun x -> x)))`	ours - fcs 'a
 shaped-argument-against-the-one-candidate node 12-45 `both p (T3.I(1, (fun x -> x))), p`	ours - fcs 'a * 'a

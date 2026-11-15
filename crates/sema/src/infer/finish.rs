@@ -26,10 +26,18 @@ pub(super) struct Walked {
 /// receiver types up to that dot alone.
 ///
 /// Keeping the receivers up to the dot is sound only while no receiver
-/// there takes its type from context after the dot. Today none does: a
-/// lambda's parameter, a record field's value and a computation
-/// expression's body are not typed from their context. Once they are, it
-/// fails, since FCS picks a lambda's overload or a record's type from what
+/// there takes its type from context after the dot. None does. A lambda's
+/// parameter takes its type from context only as an application's or a
+/// pipe's argument ([`Gen::infer_lambda`]), whose domain FCS fixes from the
+/// callee and the expected type before it checks the lambda: what follows
+/// the lambda reaches it only through a variable the lambda's walk sees
+/// open, which records no receiver type. A record field's value and a
+/// computation expression's body are not walked, and a method call with a
+/// lambda argument is declined before its arguments are walked, which are
+/// then walked against an unknown type ([`Gen::infer_method_call`]): the
+/// lambda's parameters are tainted, or fixed by their own annotations, which
+/// nothing after the dot can change. Those last are where context after the
+/// dot decides, since FCS picks a lambda's overload or a record's type from what
 /// follows: with `M(f: string -> int)` and `M(f: int -> int, n: int)`,
 /// `C.M((fun s -> s.), 1)` gives `s : int` and `C.M(fun s -> s.)` gives
 /// `s : string`, and `{ F = (fun s -> s.); G = 1 }` picks a different
