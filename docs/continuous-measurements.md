@@ -251,6 +251,10 @@ distinct; a manifest whose every entry is keyed can merge key by key
 (`borzoi_oracle_harness::manifest::merge3`), and `.gitattributes` gives those to
 the merge driver `tools/manifest-merge.sh` (enable it with
 `git config merge.borzoi-manifest.driver 'bash tools/manifest-merge.sh %O %A %B %P'`).
+It builds the driver with the ambient cargo only when that cargo's devshell
+vendored the worktree's `Cargo.lock` (`BORZOI_CARGO_LOCK_SHA256`), and through
+`nix develop` otherwise, since a shell entered on another revision points cargo
+at a registry that may lack a crate the lock names.
 A key one branch changed takes that branch's entry; a key both changed
 differently is a conflict. So a manifest merges cleanly exactly as far as its
 lines are independent. `project_corpus`, `resolve_corpus_diff`,

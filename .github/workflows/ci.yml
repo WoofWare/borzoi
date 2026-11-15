@@ -166,6 +166,9 @@ jobs:
       - name: Test the facade freeze check
         run: bash tools/ci/facade-lock-check.test.sh
 
+      - name: Test the manifest merge driver's choice of cargo
+        run: bash tools/manifest-merge.test.sh
+
       # The parser differential must compare every typed-AST accessor sema and
       # the LSP read (crates/cst/tests/all/common/accessor_coverage.rs). The
       # check reads their sources, so it belongs to no one crate's change

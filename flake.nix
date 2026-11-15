@@ -383,6 +383,11 @@
               cp ${cargoVendorDir}/config.toml "$cargoHome/config.toml"
             fi
             export CARGO_HOME=$cargoHome
+            # The `Cargo.lock` that registry was vendored from. A shell outlives
+            # it (direnv, or a long-lived editor or agent) and serves other
+            # worktrees, so `tools/manifest-merge.sh` uses the ambient cargo
+            # only where this matches the lock it builds against.
+            export BORZOI_CARGO_LOCK_SHA256=${builtins.hashFile "sha256" ./Cargo.lock}
 
             export DOTNET_ROOT=${dotnet-sdk}/share/dotnet
             # Not on PATH and never DOTNET_ROOT: only the tests that evaluate
