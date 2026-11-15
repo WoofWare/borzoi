@@ -2724,22 +2724,55 @@ fn method_named_argument_use_blocks_generalisation() {
 }
 
 #[test]
-fn overload_argument_inside_an_unknown_parameter_declines() {
-    // `let id x = x` then `s.StartsWith(id "h")`. FCS checks a method's
-    // argument against the parameter of the one overload its arity leaves,
-    // relating it before anything inside it is checked
-    // (`UnifyUniqueOverloading`); which overloads the arity leaves is not
-    // known while the argument is walked, so the argument's expected type is
-    // unknown, and `id`'s result, related there, is tainted. Its argument
-    // check then declines, the overload's argument is not known at the call,
-    // and the call declines: silence, where FCS has `System.Boolean`
-    // (`StartsWith` has two one-argument overloads, so FCS checks the
-    // argument against a fresh type). Looking the method group up before the
-    // arguments (#662 L3) is what lets this commit.
+fn overload_argument_checked_against_a_fresh_type_resolves() {
+    // `let id x = x` then `s.StartsWith(id "h")` (#775). FCS looks the method
+    // group up at the dot, before the arguments: `StartsWith` has two
+    // overloads of one argument, so no parameter is related to the argument
+    // first (`UnifyUniqueOverloading` leaves it), and `id "h"` is checked
+    // against a fresh type, which decides it `string`. The call then resolves
+    // to `StartsWith(string)`, the char overload refuted: `System.Boolean`.
     let src = "module M\nlet id x = x\nlet s = \"hi\"\nlet b = s.StartsWith(id \"h\")\n";
     assert_sound(src);
     let (_, def_types) = infer_bcl(src);
-    assert_eq!(def_types.get("b").map(String::as_str), None);
+    assert_eq!(
+        def_types.get("b").map(String::as_str),
+        Some("System.Boolean"),
+        "the argument is decided against a fresh type and the overload resolves (#662 L3)"
+    );
+}
+
+#[test]
+fn arity_unique_overload_fixes_its_argument_before_checking_it() {
+    // `Substring` has two overloads, one of one argument: FCS relates that
+    // overload's parameter to the argument's type before it checks the
+    // argument (`UnifyUniqueOverloading`), so `p : int`, and the call is
+    // `Substring(int)`'s `string`.
+    let src = "module M\nlet k (s: string) p = (s.Substring(p), p)\n";
+    assert_sound(src);
+    let (_, def_types) = infer_bcl(src);
+    assert_eq!(
+        def_types.get("k").map(String::as_str),
+        Some("System.String -> System.Int32 -> System.String * System.Int32"),
+        "the one overload of the call's arity fixes `p` before `p` is checked (#662 L3)"
+    );
+}
+
+#[test]
+fn arity_unique_overload_relates_its_return_before_its_arguments() {
+    // The one overload's return is related to the call's expected type,
+    // `both`'s `'a` and `p`'s with it, before the arguments are checked: `p`
+    // is `string` when `gi p` is checked, which FCS rejects, keeping
+    // `p : string`. Relating the return only after the arguments would let
+    // `gi p` fix `p : int`.
+    let src = "module M\nlet both (x: 'a) (y: 'a) = x\nlet gi (i: int) = 0\n\
+               let k (s: string) p = (both p (s.Substring(gi p)), p)\n";
+    assert_sound(src);
+    let (_, def_types) = infer_bcl(src);
+    assert_eq!(
+        def_types.get("k").map(String::as_str),
+        Some("System.String -> System.String -> System.String * System.String"),
+        "the call's return is related before its arguments are checked (#662 L3)"
+    );
 }
 
 #[test]

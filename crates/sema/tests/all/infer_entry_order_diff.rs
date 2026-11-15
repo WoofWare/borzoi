@@ -78,6 +78,19 @@
 //! `Gen::infer_construct`'s arms from its source, so an arm inference gains
 //! fails it until the alphabet has a form for it.
 //!
+//! The member-access and method-call arms are split by what FCS knows at
+//! the access: a receiver known there or not, a record field, a chain, a
+//! method of one candidate, of one overload of its arity (whose parameter
+//! and return FCS relates before it checks the arguments), of several (resolved
+//! once the arguments are checked against fresh types) with an argument
+//! known or open at the resolution, an extension member, a lambda argument,
+//! a static call. Each such form claims what inference makes of the access
+//! ([`Claim`]): **decided** — where FCS accepts the case and the prefix is
+//! faithful before the form, the member is resolved and the witness after
+//! the form, `p` and the form's own node are committed, since an access
+//! decided at the access leaves the prefix faithful (#662 L3) — or
+//! **declined**: no member and no node, whatever FCS makes of the access.
+//!
 //! The other cases are a body under a return annotation,
 //! `let cK (y: string) (n: int) (b: bool) p : T = ARG`, with `ARG` generated
 //! against `T` (`let c4 p : string = both p (gi p)`).
@@ -95,8 +108,10 @@
 //!     leaf, no second use of `p`, no branch, method call, applied parameter,
 //!     return annotation, construct ending the prefix or term-position
 //!     context: every check in it is one inference models,
-//!     decided where FCS decides it. The richer constructs are graded by
-//!     certain-implies-exact alone, since L2 may soundly decline inside them.
+//!     decided where FCS decides it. A method call FCS decides at the call
+//!     (`y.Substring(I)`, `y.IndexOf(S)`, [`ArgGen::access`]) is a plain
+//!     construct. The richer constructs are graded by certain-implies-exact
+//!     alone, since inference may soundly decline inside them.
 //!
 //!   Each only where FCS's type is ground.
 //!
@@ -107,7 +122,7 @@
 use std::collections::BTreeMap;
 
 use borzoi_cst::parser::parse;
-use borzoi_cst::syntax::{AstNode, Expr, ImplFile, Pat, SyntaxKind, SyntaxNode, TextRange};
+use borzoi_cst::syntax::{AstNode, Expr, ImplFile, Pat, SyntaxKind, SyntaxNode, TextRange, TextSize};
 use borzoi_sema::{
     Incomplete, PrecedingTypes, ProjectFile, ProjectItems, SourceFile, SyntaxRecovery, infer_file,
     infer_project, qualified_names, resolve_file, resolve_project_files,
@@ -137,7 +152,10 @@ const HEADER: &str = "module EntryOrder\n\
                       type U1 = U1 of (obj * int)\n\
                       type U2 = U2 of obj * int\n\
                       type 'a W = WA of 'a | WN\n\
-                      type K = static member M (s: string) = s\n";
+                      type K = static member M (s: string) = s\n\
+                      type R = { F: int; G: string }\n\
+                      let rv : R = { F = 1; G = \"g\" }\n\
+                      type System.Int32 with member i.Twice (j: int) = j\n";
 
 /// The types the generator builds an argument against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +233,10 @@ struct Features {
     /// pattern with a term position, a match pattern, a condition, an
     /// argument ([`ArgGen::context`]).
     term_position: bool,
+    /// A member access or method call FCS decides at the access, from what
+    /// it knows there ([`ArgGen::access`]): it leaves a case plain, since
+    /// inference decides it there too (#662 L3).
+    access: bool,
 }
 
 impl Features {
@@ -252,6 +274,8 @@ struct Regime {
     lost_pct: usize,
     /// The chance of each of up to two term-position contexts.
     context_pct: usize,
+    /// The chance of an access FCS decides at the access ([`ArgGen::access`]).
+    access_pct: usize,
 }
 
 struct ArgGen<'r> {
@@ -269,6 +293,13 @@ impl ArgGen<'_> {
     /// result, where a leaf of another type coerces only because the domain
     /// reached it first.
     fn expr(&mut self, want: &Want, depth: usize, under_obj_element: bool) -> String {
+        // First, so that the other forms do not crowd it out of the plain
+        // cases its must-commit points need.
+        if depth > 0 && self.rng.chance(self.regime.access_pct) {
+            if let Some(access) = self.access(want, depth - 1) {
+                return access;
+            }
+        }
         if depth > 0 && self.rng.chance(self.regime.lambda_pct) {
             self.features.lambda = true;
             let body = self.expr(want, depth - 1, false);
@@ -358,6 +389,45 @@ impl ArgGen<'_> {
                     }
                 }
             }
+        }
+    }
+
+    /// A method call FCS decides at the call, against `want`, if there is one
+    /// of that type: `y.Substring(I)`, whose one overload of one argument
+    /// FCS relates to `I` before it checks it (`UnifyUniqueOverloading`),
+    /// and `y.IndexOf(S)`, whose two overloads of one argument it resolves
+    /// once `S` is checked against a fresh type. Where `S`'s type is still
+    /// open at the resolution FCS reports it (FS0041), so the case is not one
+    /// FCS accepts.
+    fn access(&mut self, want: &Want, depth: usize) -> Option<String> {
+        match want {
+            // Half the time the argument is `p` itself, which the overload's
+            // parameter fixes, or one under `idf`, which only a check against
+            // a known type decides: the shapes whose types FCS knows only by
+            // deciding the call where it does.
+            Want::Str => {
+                self.features.access = true;
+                let p_allowed = self.p_uses == 0 || self.rng.chance(self.regime.multi_p_pct);
+                let i = if p_allowed && self.rng.chance(50) {
+                    self.p_uses += 1;
+                    self.features.open_param = true;
+                    self.features.multi_p |= self.p_uses > 1;
+                    "p".to_string()
+                } else {
+                    self.expr(&Want::Int, depth, false)
+                };
+                Some(format!("y.Substring({i})"))
+            }
+            Want::Int => {
+                self.features.access = true;
+                let s = self.expr(&Want::Str, depth, false);
+                Some(if self.rng.chance(50) {
+                    format!("y.IndexOf(idf ({s}))")
+                } else {
+                    format!("y.IndexOf({s})")
+                })
+            }
+            _ => None,
         }
     }
 
@@ -550,7 +620,16 @@ impl ArgGen<'_> {
         // decision inside the form would otherwise run ahead of: each mentions
         // `p` where the entry relation fixes it, and again where a check would
         // fix it otherwise.
-        match self.rng.below(17) {
+        match self.rng.below(18) {
+            17 => {
+                // A receiver FCS does not know at the access, grounded only
+                // after it: FCS reports FS0072 there, and inference commits
+                // nothing at it.
+                self.features.method_arg = true;
+                self.p_uses += 2;
+                self.features.multi_p = true;
+                "p.Length, monos p".into()
+            }
             16 => {
                 // A union case whose result fails its expected type: FCS
                 // never checks its fields, so they fix nothing of `p`.
@@ -721,11 +800,13 @@ fn regime_for(seed: u64) -> Regime {
         // plain cases the must-commit points need.
         lost_pct: 0,
         context_pct: 0,
+        access_pct: 0,
     };
     if rng.chance(50) {
         regime.lost_pct = [30, 60][rng.below(2)];
         regime.context_pct = [40, 70][rng.below(2)];
     }
+    regime.access_pct = [15, 35, 60][rng.below(3)];
     regime
 }
 
@@ -853,6 +934,9 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
     let mut tally = Tally::default();
     let mut unsound: Vec<String> = Vec::new();
     let mut missing: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    // A few cases holding an access, with FCS's verdict, for a liveness
+    // failure to show why none was clean and plain.
+    let mut access_samples: Vec<String> = Vec::new();
     for seed in 0..files as u64 {
         let (src, cases) = file_for(seed);
         let parsed = parse(&src);
@@ -931,6 +1015,9 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
                 tally.rejected += 1;
             }
             let f = case.features;
+            if f.access && access_samples.len() < 8 {
+                access_samples.push(format!("clean {clean}, {f:?}: {}", case.text));
+            }
             for (name, on) in [
                 ("lambda", f.lambda),
                 ("ill-typed", f.ill_typed),
@@ -948,6 +1035,8 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
                 ("statement form", f.statement_form),
                 ("lost before", f.lost),
                 ("term position", f.term_position),
+                ("access", f.access),
+                ("clean-plain-access", clean && f.plain() && f.access),
                 ("lost before a term position", f.lost && f.term_position),
                 (
                     "clean-coerced-inside",
@@ -1052,6 +1141,8 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
         "lost before",
         "term position",
         "lost before a term position",
+        "access",
+        "clean-plain-access",
         "clean-coerced-inside",
         "clean-plain",
     ] {
@@ -1059,12 +1150,17 @@ fn argument_checks_are_decided_at_the_arguments_entry() {
         // A clean case with a coercion inside needs a lambda-free,
         // ill-typed-free draw that reaches an `obj` element: rarer than the
         // rest by about half.
-        let floor = if name == "clean-coerced-inside" {
+        // So does a clean, plain case holding an access.
+        let floor = if matches!(name, "clean-coerced-inside" | "clean-plain-access") {
             min / 3
         } else {
             min
         };
-        assert!(n >= floor, "only {n} cases with {name}: {tally:?}");
+        assert!(
+            n >= floor,
+            "only {n} cases with {name}: {tally:?}\ncases with an access:\n{}",
+            access_samples.join("\n")
+        );
     }
     assert!(
         tally.clean >= min * 4 && tally.rejected >= min,
@@ -1152,14 +1248,58 @@ enum Arm {
     Convert,
     /// A built-in prefix operator (`-x`).
     Operator,
+    /// `y.Insert(n, T)`: one candidate, an argument whose type FCS may know
+    /// and inference may not.
     MethodCall,
+    /// `y.Insert(idf n, "z")`: one candidate, its arguments known.
+    MethodSingle,
+    /// `y.Substring(idf n)`: two overloads, one of this arity, which FCS
+    /// relates to the arguments and the return before it checks them
+    /// (`UnifyUniqueOverloading`).
+    MethodArityUnique,
+    /// `y.Substring(p)`: as [`Arm::MethodArityUnique`], the candidate's
+    /// parameter fixing `p` before `p` is checked.
+    MethodArityUniqueP,
+    /// `y.StartsWith(idf "h")`: two overloads of this arity, resolved once
+    /// the argument is checked against a fresh type (#775).
+    MethodOverloaded,
+    /// `y.StartsWith(p)`: two overloads of this arity and an argument still
+    /// open at the resolution, which FCS reports (FS0041).
+    MethodOverloadedOpen,
+    /// `p.ToString()`: a receiver whose type is a variable at the dot, which
+    /// FCS looks the method up on as `obj` after canonicalising.
+    MethodVarReceiver,
+    /// `n.Twice(n)`: an extension member the header declares (on `int`, so
+    /// that the augmentation does not touch the `string` receivers).
+    MethodExtension,
+    /// `y.Insert(0, (fun () -> 1))`: a lambda argument.
+    MethodLambdaArg,
+    /// `System.String.IsNullOrEmpty(idf y)`: a static call, one candidate.
+    StaticSingle,
+    /// `System.Char.IsDigit(y, idf n)`: a static call, one overload of
+    /// this arity.
+    StaticArityUnique,
     /// A union case applied to its field.
     CaseApply,
-    /// `v.Member`, whose head is a value.
+    /// `y.Length`: a value receiver known at the access.
     MemberAccess,
+    /// `p.Length`: a receiver whose type is a variable at the access (FS0072).
+    MemberUnknown,
+    /// `rv.F`: a field of a record the file declares.
+    RecordField,
+    /// `p.F`: a record label on a receiver unknown at the access, which FCS
+    /// resolves through the record-label environment (#707).
+    RecordFieldUnknown,
+    /// `rv.G.Length`: a chain, each segment's receiver the last one's result.
+    MemberChain,
     /// `M.v`, whose head is a module.
     ModuleValue,
+    /// `(T).Length`.
     DotGet,
+    /// `(idf y).Length`: a receiver typed by an application before the dot.
+    DotGetKnown,
+    /// `(y.Substring(idf n)).Length`: a receiver typed by a method call.
+    DotGetOfCall,
     /// `let x = … in …`.
     Let,
     /// `let (…) = … in …`, a pattern of structure.
@@ -1167,8 +1307,28 @@ enum Arm {
     Sequential,
 }
 
+/// What a cell claims of the access its form makes, beyond
+/// certain-implies-exact ([`Arm::claim`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// Nothing beyond certain-implies-exact.
+    Graded,
+    /// FCS decides the access at the access, from what it knows there, and
+    /// so does inference (#662 L3): where FCS accepts the case and the prefix
+    /// is faithful before the form, the form's member is resolved, the prefix
+    /// is still faithful after it, and what the access fixes is committed
+    /// ([`every_arm_in_every_context_is_certain_implies_exact`] names the
+    /// points).
+    Decided,
+    /// The access's receiver, or an argument its resolution needs, is not
+    /// known at the access: whatever FCS makes of it (FS0072, FS0041, or a
+    /// lookup on `obj` after canonicalising), inference commits nothing at
+    /// it — no member and no node.
+    Declined,
+}
+
 impl Arm {
-    const ALL: [Arm; 22] = [
+    const ALL: [Arm; 38] = [
         Arm::Literal,
         Arm::Unit,
         Arm::Ident,
@@ -1184,10 +1344,26 @@ impl Arm {
         Arm::Convert,
         Arm::Operator,
         Arm::MethodCall,
+        Arm::MethodSingle,
+        Arm::MethodArityUnique,
+        Arm::MethodArityUniqueP,
+        Arm::MethodOverloaded,
+        Arm::MethodOverloadedOpen,
+        Arm::MethodVarReceiver,
+        Arm::MethodExtension,
+        Arm::MethodLambdaArg,
+        Arm::StaticSingle,
+        Arm::StaticArityUnique,
         Arm::CaseApply,
         Arm::MemberAccess,
+        Arm::MemberUnknown,
+        Arm::RecordField,
+        Arm::RecordFieldUnknown,
+        Arm::MemberChain,
         Arm::ModuleValue,
         Arm::DotGet,
+        Arm::DotGetKnown,
+        Arm::DotGetOfCall,
         Arm::Let,
         Arm::LetPattern,
         Arm::Sequential,
@@ -1212,13 +1388,29 @@ impl Arm {
             Arm::Convert => 12,
             Arm::Operator => 13,
             Arm::MethodCall => 14,
-            Arm::CaseApply => 15,
-            Arm::MemberAccess => 16,
-            Arm::ModuleValue => 17,
-            Arm::DotGet => 18,
-            Arm::Let => 19,
-            Arm::LetPattern => 20,
-            Arm::Sequential => 21,
+            Arm::MethodSingle => 15,
+            Arm::MethodArityUnique => 16,
+            Arm::MethodArityUniqueP => 17,
+            Arm::MethodOverloaded => 18,
+            Arm::MethodOverloadedOpen => 19,
+            Arm::MethodVarReceiver => 20,
+            Arm::MethodExtension => 21,
+            Arm::MethodLambdaArg => 22,
+            Arm::StaticSingle => 23,
+            Arm::StaticArityUnique => 24,
+            Arm::CaseApply => 25,
+            Arm::MemberAccess => 26,
+            Arm::MemberUnknown => 27,
+            Arm::RecordField => 28,
+            Arm::RecordFieldUnknown => 29,
+            Arm::MemberChain => 30,
+            Arm::ModuleValue => 31,
+            Arm::DotGet => 32,
+            Arm::DotGetKnown => 33,
+            Arm::DotGetOfCall => 34,
+            Arm::Let => 35,
+            Arm::LetPattern => 36,
+            Arm::Sequential => 37,
         }
     }
 
@@ -1238,16 +1430,33 @@ impl Arm {
             | Arm::Convert
             | Arm::Operator
             | Arm::MethodCall
+            | Arm::MethodSingle
+            | Arm::MethodArityUnique
+            | Arm::MethodArityUniqueP
+            | Arm::MethodOverloaded
+            | Arm::MethodOverloadedOpen
+            | Arm::MethodVarReceiver
+            | Arm::MethodExtension
+            | Arm::MethodLambdaArg
+            | Arm::StaticSingle
+            | Arm::StaticArityUnique
             | Arm::CaseApply => "App",
-            Arm::MemberAccess | Arm::ModuleValue => "LongIdent",
-            Arm::DotGet => "DotGet",
+            Arm::MemberAccess
+            | Arm::MemberUnknown
+            | Arm::RecordField
+            | Arm::RecordFieldUnknown
+            | Arm::MemberChain
+            | Arm::ModuleValue => "LongIdent",
+            Arm::DotGet | Arm::DotGetKnown | Arm::DotGetOfCall => "DotGet",
             Arm::Let | Arm::LetPattern => "LetOrUse",
             Arm::Sequential => "Sequential",
         }
     }
 
     /// A form of this arm, its parts drawn from `g` ([`ArgGen::term`]): terms
-    /// whose type FCS may know where inference does not.
+    /// whose type FCS may know where inference does not. An access form whose
+    /// cell claims something ([`Self::claim`]) is spelled the same in every
+    /// draw, from parts whose types FCS and inference both know.
     fn production(self, g: &mut ArgGen<'_>, depth: usize) -> String {
         match self {
             Arm::Literal => ["1", "\"s\"", "true"][g.rng.below(3)].into(),
@@ -1276,21 +1485,161 @@ impl Arm {
             Arm::Convert => format!("int ({})", g.term(depth)),
             Arm::Operator => format!("-({})", g.term(depth)),
             Arm::MethodCall => format!("y.Insert(n, {})", g.term(depth)),
-            Arm::CaseApply => format!("Some ({})", g.term(depth)),
-            Arm::MemberAccess => {
-                if g.rng.chance(50) {
-                    g.p_uses += 1;
-                    "p.Length".into()
-                } else {
-                    "y.Length".into()
-                }
+            Arm::MethodSingle => "y.Insert(idf n, \"z\")".into(),
+            Arm::MethodArityUnique => "y.Substring(idf n)".into(),
+            Arm::MethodArityUniqueP => {
+                g.p_uses += 1;
+                "y.Substring(p)".into()
             }
+            Arm::MethodOverloaded => "y.StartsWith(idf \"h\")".into(),
+            Arm::MethodOverloadedOpen => {
+                g.p_uses += 1;
+                "y.StartsWith(p)".into()
+            }
+            Arm::MethodVarReceiver => {
+                g.p_uses += 1;
+                "p.ToString()".into()
+            }
+            Arm::MethodExtension => "n.Twice(n)".into(),
+            Arm::MethodLambdaArg => "y.Insert(0, (fun () -> 1))".into(),
+            Arm::StaticSingle => "System.String.IsNullOrEmpty(idf y)".into(),
+            Arm::StaticArityUnique => "System.Char.IsDigit(y, idf n)".into(),
+            Arm::CaseApply => format!("Some ({})", g.term(depth)),
+            Arm::MemberAccess => "y.Length".into(),
+            Arm::MemberUnknown => {
+                g.p_uses += 1;
+                "p.Length".into()
+            }
+            Arm::RecordField => "rv.F".into(),
+            Arm::RecordFieldUnknown => {
+                g.p_uses += 1;
+                "p.F".into()
+            }
+            Arm::MemberChain => "rv.G.Length".into(),
             Arm::ModuleValue => "List.empty".into(),
             Arm::DotGet => format!("({}).Length", g.term(depth)),
+            Arm::DotGetKnown => "(idf y).Length".into(),
+            Arm::DotGetOfCall => "(y.Substring(idf n)).Length".into(),
             Arm::Let => format!("let z = {} in z", g.term(depth)),
             Arm::LetPattern => format!("let (a, ()) = ({}, ()) in a", g.term(depth)),
             Arm::Sequential => format!("ignore 1; {}", g.term(depth)),
         }
+    }
+
+    /// What the arm's cells claim of its access ([`Claim`]).
+    ///
+    /// A record label on an unknown receiver ([`Arm::RecordFieldUnknown`])
+    /// claims nothing: FCS resolves it through the record-label environment,
+    /// which the resolver is to model (#707), so declining it is where
+    /// inference is today, not what it must do. An extension member
+    /// ([`Arm::MethodExtension`]) likewise: FCS resolves it, and inference
+    /// declines while an extension of the name may be in scope.
+    fn claim(self) -> Claim {
+        match self {
+            Arm::MethodSingle
+            | Arm::MethodArityUnique
+            | Arm::MethodArityUniqueP
+            | Arm::MethodOverloaded
+            | Arm::StaticSingle
+            | Arm::StaticArityUnique
+            | Arm::MemberAccess
+            | Arm::RecordField
+            | Arm::MemberChain
+            | Arm::DotGetKnown
+            | Arm::DotGetOfCall => Claim::Decided,
+            Arm::MethodOverloadedOpen | Arm::MethodVarReceiver | Arm::MemberUnknown => {
+                Claim::Declined
+            }
+            Arm::Literal
+            | Arm::Unit
+            | Arm::Ident
+            | Arm::Paren
+            | Arm::Tuple
+            | Arm::If
+            | Arm::ElselessIf
+            | Arm::Match
+            | Arm::Lambda
+            | Arm::While
+            | Arm::Apply
+            | Arm::Infix
+            | Arm::Convert
+            | Arm::Operator
+            | Arm::MethodCall
+            | Arm::MethodExtension
+            | Arm::MethodLambdaArg
+            | Arm::CaseApply
+            | Arm::RecordFieldUnknown
+            | Arm::ModuleValue
+            | Arm::DotGet
+            | Arm::Let
+            | Arm::LetPattern
+            | Arm::Sequential => Claim::Graded,
+        }
+    }
+
+    /// Whether a [`Claim::Decided`] form's member is resolved even once the
+    /// prefix has ended before it: its receiver's type is known whatever
+    /// inference has stopped deciding (a parameter's annotation, a module
+    /// value's type, a method's return), and so is the candidate, by its
+    /// arity alone. A form whose receiver or overload needs a decision —
+    /// `idf y`'s argument check, `StartsWith`'s argument type — does not.
+    fn resolves_after_a_loss(self) -> bool {
+        matches!(
+            self,
+            Arm::MethodSingle
+                | Arm::MethodArityUnique
+                | Arm::MethodArityUniqueP
+                | Arm::StaticSingle
+                | Arm::StaticArityUnique
+                | Arm::MemberAccess
+                | Arm::RecordField
+                | Arm::MemberChain
+                | Arm::DotGetOfCall
+        )
+    }
+
+    /// The member name an access form resolves last, whose resolution the
+    /// claims read: `None` for a form that is not an access, or whose member
+    /// inference does not record.
+    fn member(self) -> Option<&'static str> {
+        Some(match self {
+            Arm::MethodCall | Arm::MethodSingle | Arm::MethodLambdaArg => "Insert",
+            Arm::MethodArityUnique | Arm::MethodArityUniqueP => "Substring",
+            Arm::MethodOverloaded | Arm::MethodOverloadedOpen => "StartsWith",
+            Arm::MethodVarReceiver => "ToString",
+            Arm::MethodExtension => "Twice",
+            Arm::StaticSingle => "IsNullOrEmpty",
+            Arm::StaticArityUnique => "IsDigit",
+            Arm::MemberAccess
+            | Arm::MemberUnknown
+            | Arm::MemberChain
+            | Arm::DotGet
+            | Arm::DotGetKnown
+            | Arm::DotGetOfCall => "Length",
+            // A project record's field is the resolver's to name: inference
+            // reads its type (`Gen::wake_record_field`) and records no member.
+            Arm::RecordField
+            | Arm::RecordFieldUnknown
+            | Arm::Literal
+            | Arm::Unit
+            | Arm::Ident
+            | Arm::Paren
+            | Arm::Tuple
+            | Arm::If
+            | Arm::ElselessIf
+            | Arm::Match
+            | Arm::Lambda
+            | Arm::While
+            | Arm::Apply
+            | Arm::Infix
+            | Arm::Convert
+            | Arm::Operator
+            | Arm::CaseApply
+            | Arm::ModuleValue
+            | Arm::Let
+            | Arm::LetPattern
+            | Arm::Sequential => return None,
+        })
     }
 }
 
@@ -1322,7 +1671,8 @@ fn arm_of(e: &Expr) -> Option<Arm> {
             Expr::LongIdent(li) => {
                 let segments = li.long_ident()?.idents().count();
                 if segments >= 2 {
-                    Arm::MethodCall
+                    let arg = a.arg()?.syntax().text().to_string();
+                    method_arm(li.syntax().text().to_string().trim(), arg.trim())
                 } else {
                     Arm::Operator
                 }
@@ -1336,13 +1686,25 @@ fn arm_of(e: &Expr) -> Option<Arm> {
         }),
         Expr::LongIdent(li) => {
             let head = li.long_ident()?.idents().next()?;
-            Some(if matches!(head.text(), "List" | "Option" | "Seq") {
-                Arm::ModuleValue
-            } else {
-                Arm::MemberAccess
+            if matches!(head.text(), "List" | "Option" | "Seq") {
+                return Some(Arm::ModuleValue);
+            }
+            Some(match li.syntax().text().to_string().trim() {
+                "p.Length" => Arm::MemberUnknown,
+                "rv.F" => Arm::RecordField,
+                "p.F" => Arm::RecordFieldUnknown,
+                "rv.G.Length" => Arm::MemberChain,
+                _ => Arm::MemberAccess,
             })
         }
-        Expr::DotGet(_) => Some(Arm::DotGet),
+        Expr::DotGet(dg) => {
+            let receiver = dg.expr()?.syntax().text().to_string();
+            Some(match receiver.trim() {
+                "(idf y)" => Arm::DotGetKnown,
+                "(y.Substring(idf n))" => Arm::DotGetOfCall,
+                _ => Arm::DotGet,
+            })
+        }
         Expr::LetOrUse(l) if l.is_bang() || l.is_use() || l.is_rec() => None,
         Expr::LetOrUse(l) => {
             let named = l
@@ -1400,6 +1762,25 @@ fn arm_of(e: &Expr) -> Option<Arm> {
     }
 }
 
+/// The method-call arm of a call `callee arg` whose callee is a dotted
+/// path, by its spelling: the access forms are spelled one way each
+/// ([`Arm::production`]), and anything else is [`Arm::MethodCall`].
+fn method_arm(callee: &str, arg: &str) -> Arm {
+    match (callee, arg) {
+        ("y.Insert", "(idf n, \"z\")") => Arm::MethodSingle,
+        ("y.Insert", "(0, (fun () -> 1))") => Arm::MethodLambdaArg,
+        ("y.Substring", "(idf n)") => Arm::MethodArityUnique,
+        ("y.Substring", "(p)") => Arm::MethodArityUniqueP,
+        ("y.StartsWith", "(idf \"h\")") => Arm::MethodOverloaded,
+        ("y.StartsWith", "(p)") => Arm::MethodOverloadedOpen,
+        ("p.ToString", "()") => Arm::MethodVarReceiver,
+        ("n.Twice", "(n)") => Arm::MethodExtension,
+        ("System.String.IsNullOrEmpty", "(idf y)") => Arm::StaticSingle,
+        ("System.Char.IsDigit", "(y, idf n)") => Arm::StaticArityUnique,
+        _ => Arm::MethodCall,
+    }
+}
+
 /// A position that hands an expression an expected type, as FCS's checking
 /// order does ([`Context::template`]): each [`Expected`] state, reached
 /// through each form that passes one down.
@@ -1437,10 +1818,13 @@ enum Context {
     CaseField,
     /// A body under a return annotation.
     Annotated,
+    /// An argument whose expected type is `p`'s, a variable the form may
+    /// mention too: `both p ({H})`.
+    SharesP,
 }
 
 impl Context {
-    const ALL: [Context; 15] = [
+    const ALL: [Context; 16] = [
         Context::LetRhs,
         Context::Argument,
         Context::BranchUnderArgument,
@@ -1456,6 +1840,7 @@ impl Context {
         Context::Receiver,
         Context::CaseField,
         Context::Annotated,
+        Context::SharesP,
     ];
 
     /// The context's position in [`Self::ALL`]: an exhaustive match, so a
@@ -1477,6 +1862,7 @@ impl Context {
             Context::Receiver => 12,
             Context::CaseField => 13,
             Context::Annotated => 14,
+            Context::SharesP => 15,
         }
     }
 
@@ -1500,6 +1886,34 @@ impl Context {
             Context::Receiver => "({H}).Length",
             Context::CaseField => "WA ({H})",
             Context::Annotated => "({H})",
+            Context::SharesP => "both p ({H})",
+        }
+    }
+
+    /// Whether the context itself keeps the prefix faithful where FCS accepts
+    /// the case, so that a [`Claim::Decided`] form in it is followed by a
+    /// faithful prefix: an operator's or a conversion's operand is decided
+    /// by a signature inference may not read at the form's type, and a
+    /// statement's relation to `unit` is one inference drops. A body under a
+    /// return annotation has nothing after it.
+    fn holds_the_prefix(self) -> bool {
+        match self {
+            Context::LetRhs
+            | Context::Argument
+            | Context::BranchUnderArgument
+            | Context::Else
+            | Context::LaterArm
+            | Context::UnitPattern
+            | Context::TuplePattern
+            | Context::MethodArg
+            | Context::Scrutinee
+            | Context::Receiver
+            | Context::CaseField
+            | Context::SharesP => true,
+            Context::Operand
+            | Context::ConvertOperand
+            | Context::Statement
+            | Context::Annotated => false,
         }
     }
 }
@@ -1526,22 +1940,36 @@ fn alphabet() -> Vec<Cell> {
     cells
 }
 
-/// One alphabet case: its text, and the range of its form within it.
+/// One alphabet case: its text, and the ranges within it of its form and
+/// of the points a cell's [`Claim`] reads.
 struct AlphabetCase {
     cell: Cell,
     text: String,
     hole: (usize, usize),
+    /// The witness `idf 3` before the context, where the prefix is faithful
+    /// there and the case is not under a return annotation.
+    before: Option<(usize, usize)>,
+    /// The witness `idf "w"` after the context, but under a return
+    /// annotation, where nothing follows the form.
+    after: Option<(usize, usize)>,
+    /// The `p` at the case's end, but under a return annotation.
+    p_node: Option<(usize, usize)>,
+    /// The member name the form resolves last ([`Arm::member`]).
+    member: Option<(usize, usize)>,
 }
 
 /// The case for `cell`, its parts drawn from `seed`:
 ///
 /// ```text
-/// let aK (y: string) (n: int) (b: bool) p = (BEFORE, CONTEXT[FORM], p)
+/// let aK (y: string) (n: int) (b: bool) p = (BEFORE, CONTEXT[FORM], idf "w", p)
 /// let aK (y: string) (n: int) (b: bool) p : int = (ignore (BEFORE); (FORM))
 /// ```
 ///
 /// `BEFORE` is a construct that ends the prefix ([`ArgGen::loss`]) when the
-/// cell says so, and the witness `idf 3` otherwise.
+/// cell says so, and the witness `idf 3` otherwise. `idf "w"` is the witness
+/// after: it is typed only by its own argument check, which is decided only
+/// while the prefix is faithful, so whether it is committed says whether
+/// the form ended the prefix.
 fn alphabet_case(k: usize, cell: Cell, seed: u64) -> AlphabetCase {
     let mut rng = Rng(seed ^ (k as u64).wrapping_mul(0x9e37_79b9));
     let regime = regime_for(seed);
@@ -1558,7 +1986,8 @@ fn alphabet_case(k: usize, cell: Cell, seed: u64) -> AlphabetCase {
     };
     let before = if cell.lost { g.loss() } else { "idf 3".into() };
     let form = cell.arm.production(&mut g, 1);
-    let (head, prefix, suffix) = if cell.context == Context::Annotated {
+    let annotated = cell.context == Context::Annotated;
+    let (head, prefix, suffix) = if annotated {
         (
             format!("let a{k:03} (y: string) (n: int) (b: bool) p : int = "),
             format!("(ignore ({before}); "),
@@ -1568,7 +1997,7 @@ fn alphabet_case(k: usize, cell: Cell, seed: u64) -> AlphabetCase {
         (
             format!("let a{k:03} (y: string) (n: int) (b: bool) p = "),
             format!("({before}, "),
-            ", p)".to_string(),
+            ", idf \"w\", p)".to_string(),
         )
     };
     let (pre, post) = cell
@@ -1578,10 +2007,36 @@ fn alphabet_case(k: usize, cell: Cell, seed: u64) -> AlphabetCase {
         .expect("a template has one hole");
     let start = head.len() + prefix.len() + pre.len();
     let text = format!("{head}{prefix}{pre}{form}{post}{suffix}");
+    let tail = text.len() - suffix.len();
+    let (before, after, p_node) = if annotated {
+        (None, None, None)
+    } else {
+        let at = head.len() + 1;
+        let w = tail + ", ".len();
+        let p = w + "idf \"w\", ".len();
+        (
+            (!cell.lost).then_some((at, at + "idf 3".len())),
+            Some((w, w + "idf \"w\"".len())),
+            Some((p, p + 1)),
+        )
+    };
+    let member = cell.arm.member().map(|name| {
+        let dotted = format!(".{name}");
+        let at = start
+            + form
+                .rfind(&dotted)
+                .expect("an access form names its member")
+            + 1;
+        (at, at + name.len())
+    });
     AlphabetCase {
         cell,
         text,
         hole: (start, start + form.len()),
+        before,
+        after,
+        p_node,
+        member,
     }
 }
 
@@ -1649,6 +2104,56 @@ const FCS_UNGRADED: &[(Arm, Context, &str)] = &[
         Context::Operand,
         "`-(y.Insert(…))`: string",
     ),
+    (
+        Arm::MethodSingle,
+        Context::Operand,
+        "`-(y.Insert(…))`: string",
+    ),
+    (
+        Arm::MethodArityUnique,
+        Context::Operand,
+        "`-(y.Substring(…))`: string",
+    ),
+    (
+        Arm::MethodArityUniqueP,
+        Context::Operand,
+        "`-(y.Substring(p))`: string",
+    ),
+    (
+        Arm::MethodOverloaded,
+        Context::Operand,
+        "`-(y.StartsWith(…))`: bool",
+    ),
+    (
+        Arm::MethodVarReceiver,
+        Context::Operand,
+        "`-(p.ToString())`: string",
+    ),
+    (
+        Arm::StaticSingle,
+        Context::Operand,
+        "`-(String.IsNullOrEmpty(…))`: bool",
+    ),
+    (
+        Arm::StaticArityUnique,
+        Context::Operand,
+        "`-(Char.IsDigit(…))`: bool",
+    ),
+    (
+        Arm::MethodOverloaded,
+        Context::ConvertOperand,
+        "`int (y.StartsWith(…))`: bool",
+    ),
+    (
+        Arm::StaticSingle,
+        Context::ConvertOperand,
+        "`int (String.IsNullOrEmpty(…))`: bool",
+    ),
+    (
+        Arm::StaticArityUnique,
+        Context::ConvertOperand,
+        "`int (Char.IsDigit(…))`: bool",
+    ),
     (Arm::CaseApply, Context::Operand, "`-(Some t)`: an option"),
     (
         Arm::ModuleValue,
@@ -1707,6 +2212,10 @@ fn every_arm_in_every_context_is_certain_implies_exact() {
     let (mut certain, mut files) = (0, 0);
     let mut uncheckable: Vec<String> = Vec::new();
     let mut receivers = ReceiverClaim::default();
+    // The claims' points graded, by arm and kind, and their failures.
+    let mut claimed: BTreeMap<(Arm, &'static str), usize> = BTreeMap::new();
+    let mut undecided: Vec<String> = Vec::new();
+    let mut wrongly_decided: Vec<String> = Vec::new();
     let pending = |graded: &BTreeMap<Cell, usize>| -> Vec<Cell> {
         alphabet()
             .into_iter()
@@ -1817,6 +2326,91 @@ fn every_arm_in_every_context_is_certain_implies_exact() {
                     *graded.entry(case.cell).or_default() += 1;
                 }
             }
+            // What each cell claims of its access ([`Claim`]).
+            let line_of = |offset: usize| src[..offset].matches('\n').count() as u32 + 1;
+            for (start, case) in &cases {
+                let abs = |(s, e): (usize, usize)| (start + s, start + e);
+                let cell = case.cell;
+                let resolved_member = case.member.map(abs).and_then(|(s, e)| {
+                    let range = TextRange::new(
+                        TextSize::from(u32::try_from(s).expect("a small file")),
+                        TextSize::from(u32::try_from(e).expect("a small file")),
+                    );
+                    inferred.member_resolution_at(range)
+                });
+                let clean = !dumps.errors.iter().any(|e| e.line == line_of(*start));
+                match cell.arm.claim() {
+                    Claim::Graded => {}
+                    // Nothing at the access, however FCS fares.
+                    Claim::Declined => {
+                        *claimed.entry((cell.arm, "declined")).or_default() += 1;
+                        if let Some(res) = resolved_member {
+                            wrongly_decided.push(format!(
+                                "{cell:?}: member resolved to {res:?}: {}",
+                                case.text
+                            ));
+                        }
+                        // Under a pattern's equality FCS types a method
+                        // call's node by the pattern itself, resolved or not.
+                        let hole = abs(case.hole);
+                        let by_pattern =
+                            matches!(cell.context, Context::UnitPattern | Context::TuplePattern);
+                        if !by_pattern && let Some(ty) = ours_types.get(&hole) {
+                            wrongly_decided.push(format!(
+                                "{cell:?}: `{}` typed {ty}: {}",
+                                &src[hole.0..hole.1],
+                                case.text
+                            ));
+                        }
+                    }
+                    // Decided at the access, in a case FCS accepts.
+                    Claim::Decided if clean => {
+                        if (!cell.lost || cell.arm.resolves_after_a_loss()) && case.member.is_some()
+                        {
+                            *claimed.entry((cell.arm, "member")).or_default() += 1;
+                            if resolved_member.is_none() {
+                                undecided
+                                    .push(format!("{cell:?}: member not resolved: {}", case.text));
+                            }
+                        }
+                        if cell.lost || !cell.context.holds_the_prefix() {
+                            continue;
+                        }
+                        // The prefix is faithful before the form and the
+                        // context holds it, so it is faithful after the form:
+                        // the witnesses, the form's own node where its context
+                        // records one, and `p` (which the form or `both p`
+                        // may fix) are FCS's, where FCS's type is ground.
+                        let mut points = vec![
+                            ("witness before", case.before),
+                            ("witness after", case.after),
+                            ("p node", case.p_node),
+                        ];
+                        if cell.context == Context::LetRhs {
+                            points.push(("form node", Some(case.hole)));
+                        }
+                        for (kind, at) in points {
+                            let Some(at) = at.map(abs) else { continue };
+                            let Some(fcs) = dumps.types.get(&at) else {
+                                continue;
+                            };
+                            if fcs.contains('\'') || dumps.is_ungraded(at) {
+                                continue;
+                            }
+                            *claimed.entry((cell.arm, kind)).or_default() += 1;
+                            if ours_types.get(&at) != Some(fcs) {
+                                undecided.push(format!(
+                                    "{cell:?}: {kind} `{}` FCS {fcs}, ours {:?}: {}",
+                                    &src[at.0..at.1],
+                                    ours_types.get(&at),
+                                    case.text
+                                ));
+                            }
+                        }
+                    }
+                    Claim::Decided => {}
+                }
+            }
         }
         rounds += 1;
     }
@@ -1854,6 +2448,35 @@ fn every_arm_in_every_context_is_certain_implies_exact() {
         "FCS grades cells `FCS_UNGRADED` says it does not; remove them: {now_graded:?}"
     );
     assert!(certain > 0, "nothing committed, so nothing graded");
+    eprintln!("alphabet claims graded: {claimed:?}");
+    assert!(
+        wrongly_decided.is_empty(),
+        "{} accesses decided whose receiver or overload is not known at the access:\n{}",
+        wrongly_decided.len(),
+        wrongly_decided.join("\n")
+    );
+    assert!(
+        undecided.is_empty(),
+        "{} points of accesses FCS decides at the access, not decided:\n{}",
+        undecided.len(),
+        undecided.join("\n")
+    );
+    // Each claim was graded somewhere: a context filter or an FCS verdict
+    // that excluded every case would make it vacuous.
+    for arm in Arm::ALL {
+        let kinds: &[&str] = match arm.claim() {
+            Claim::Graded => &[],
+            Claim::Declined => &["declined"],
+            Claim::Decided if arm.member().is_some() => &["member", "witness after"],
+            Claim::Decided => &["witness after"],
+        };
+        for kind in kinds {
+            assert!(
+                claimed.get(&(arm, *kind)).copied().unwrap_or(0) > 0,
+                "{arm:?}'s claim graded no {kind} point: {claimed:?}"
+            );
+        }
+    }
     receivers.assert_holds();
 }
 
