@@ -26,6 +26,12 @@ rowan-reference = ["dep:rowan"]
 # queue (`docs/token-pipeline-soa-plan.md`, D7).
 # Test-only, on for this crate's own tests through the self-reference below.
 token-reference = []
+# Asserts on every parse that the scans which find what a diagnostic needs
+# without visiting the whole tree (the warn directives, read off the raw
+# token table; the feature gates' walk, filtered to the kinds a gate can fire
+# on) find what a walk over every element of the tree finds.
+# Test-only, on for this crate's own tests through the self-reference below.
+walk-reference = []
 # Exports the union typed facade (`syntax::{ImplFile, Expr, Pat, Type,
 # ModuleDecl, …}`) and each facade's `to_union` escape back to it. The union is the maximal, every-version surface and gains a variant
 # whenever a construct is modelled, so it carries no stability promise; without
@@ -62,6 +68,7 @@ borzoi-cst = { path = ".", features = [
     "accessor-trace",
     "rowan-reference",
     "token-reference",
+    "walk-reference",
     "unstable-union",
     "v4_6",
     "v4_7",

@@ -27,24 +27,38 @@ use super::{ParseDiagnostic, ParseError};
 
 /// The diagnostics, errors then warnings, FCS reports for the warn directives
 /// of the tree `root`, parsed from `source` at `lang`.
+///
+/// `directive_spans` are the spans of the tree's `WARN_DIRECTIVE` tokens, in
+/// source order. The caller reads them off the raw token table, since finding
+/// them in `root` means visiting every element of the file; under the
+/// `walk-reference` feature they are checked against that walk.
 pub(super) fn warn_directive_diagnostics(
     root: &SyntaxNode,
     source: &str,
+    directive_spans: &[Range<usize>],
     lang: LanguageVersion,
 ) -> (Vec<ParseDiagnostic>, Vec<ParseDiagnostic>) {
+    #[cfg(feature = "walk-reference")]
+    {
+        let in_tree: Vec<Range<usize>> = root
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|t| t.kind() == SyntaxKind::WARN_DIRECTIVE)
+            .map(|t| usize::from(t.text_range().start())..usize::from(t.text_range().end()))
+            .collect();
+        assert_eq!(
+            directive_spans, in_tree,
+            "the raw table's warn directives are the tree's `WARN_DIRECTIVE` tokens"
+        );
+    }
     let mut report = Report {
         lang,
         errors: Vec::new(),
         warnings: Vec::new(),
     };
-    let directives: Vec<WarnDirective> = root
-        .descendants_with_tokens()
-        .filter_map(SyntaxElement::into_token)
-        .filter(|t| t.kind() == SyntaxKind::WARN_DIRECTIVE)
-        .map(|t| {
-            let start = usize::from(t.text_range().start());
-            parse_directive(t.text(), start, &mut report)
-        })
+    let directives: Vec<WarnDirective> = directive_spans
+        .iter()
+        .map(|span| parse_directive(&source[span.clone()], span.start, &mut report))
         .collect();
     if directives.is_empty() {
         return (report.errors, report.warnings);
