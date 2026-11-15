@@ -15,14 +15,14 @@ use super::model::{
 use super::prescan::Prescan;
 use super::state::ActivePatternShape;
 use super::unknowables::Unknowables;
-use crate::def::{Def, DefId};
+use crate::def::{DefArena, DefId};
 use crate::diagnostics::SemaDiagnostic;
 use crate::recovery::SyntaxRecovery;
 
 /// The walk's output; see the [module docs](self).
 #[derive(Default)]
 pub(super) struct Output {
-    pub(super) defs: Vec<Def>,
+    pub(super) defs: DefArena,
     pub(super) items: Vec<ExportedItem>,
     pub(super) resolutions: HashMap<TextRange, Resolution>,
     /// The subset of [`Self::resolutions`] recorded for an **or-pattern

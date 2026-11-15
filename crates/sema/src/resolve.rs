@@ -63,7 +63,7 @@ use borzoi_cst::syntax::{
 
 use crate::assembly_env::AssemblyEnv;
 pub(crate) use crate::def::id_text;
-use crate::def::{Def, DefId, DefKind};
+use crate::def::{Def, DefArena, DefId, DefKind, DefSpace};
 use crate::names::NameTable;
 use crate::qnof::QualifiedNameOfFile;
 
@@ -583,7 +583,7 @@ pub fn signature_partners(files: &[ProjectFile]) -> Vec<Option<usize>> {
 /// module root — which the paired implementation's slot materialises.
 struct SignatureSurface {
     screen: Arc<model::SigScreen>,
-    defs: Vec<Def>,
+    defs: DefArena,
     exports: Vec<model::SigExport>,
 }
 
@@ -876,7 +876,7 @@ fn collect_sig_container_exports(
     container: &[String],
     decls: impl Iterator<Item = SigDecl>,
     access_floor: Option<usize>,
-    defs: &mut Vec<Def>,
+    defs: &mut DefArena,
     exports: &mut Vec<model::SigExport>,
     auto_open_type_containers: &mut Vec<Vec<String>>,
 ) {
@@ -916,7 +916,7 @@ fn collect_sig_container_exports(
         "access_floor must be a proper prefix length of the container"
     );
     let container_id = names.intern_path(container);
-    let mut push = |defs: &mut Vec<Def>,
+    let mut push = |defs: &mut DefArena,
                     def: Def,
                     qualified: bool,
                     access_root_len: Option<usize>,
@@ -926,8 +926,9 @@ fn collect_sig_container_exports(
         let name = def.name();
         let text = names.text(name);
         let pos = def.range.start();
-        let def_id = DefId::new(defs.len());
-        defs.push(def);
+        // A signature has no expressions: every ident it binds is a
+        // declaration.
+        let def_id = defs.push(DefSpace::Declaration, def);
         let qualified = qualified && !contested.contains(text);
         exports.push(model::SigExport {
             name: ExportName::new(name),
@@ -1062,7 +1063,7 @@ fn signature_surface(
     let mut bare_value_paths: Vec<Vec<String>> = Vec::new();
     let mut namespaces: HashSet<Vec<String>> = HashSet::default();
     let mut namespace_slot_type_names: Vec<(Vec<String>, String)> = Vec::new();
-    let mut defs = Vec::new();
+    let mut defs = DefArena::default();
     let mut exports = Vec::new();
     for fragment in sig.modules() {
         match fragment.kind() {
@@ -2310,6 +2311,32 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// In debug builds, assert that every export and every placed type names a
+    /// declaration def ([`DefSpace::Declaration`]): what a later file reads of
+    /// this one must not depend on what any body binds.
+    fn debug_assert_declarations_name_declaration_defs(&self) {
+        if cfg!(debug_assertions) {
+            for item in &self.out.items {
+                if let model::ExportDef::Own(def) = item.def {
+                    debug_assert_eq!(
+                        def.space(),
+                        DefSpace::Declaration,
+                        "the export of {:?} names a local def",
+                        self.out.defs[def]
+                    );
+                }
+            }
+            for placed in &self.out.placed_types {
+                debug_assert_eq!(
+                    placed.def.space(),
+                    DefSpace::Declaration,
+                    "the placed type {:?} names a local def",
+                    placed.path
+                );
+            }
+        }
+    }
+
     /// Close the walk: seal what it read from the assemblies, check what
     /// it recorded, and hand on its [`Output`](output::Output).
     fn finish(mut self) -> output::Output {
@@ -2317,14 +2344,21 @@ impl<'a> Resolver<'a> {
         self.debug_assert_shadowable_types_are_attributed();
         self.debug_assert_commit_maps_are_disjoint();
         self.debug_assert_opaque_regions_record_nothing();
+        self.debug_assert_declarations_name_declaration_defs();
         self.windows.assert_closed();
         self.out
     }
 
+    /// Add `def` to the file's arena: to the local space while the walk is
+    /// inside an expression ([`Windows::in_expression`]), and to the
+    /// declaration space otherwise.
     fn intern(&mut self, def: Def) -> DefId {
-        let id = DefId::new(self.out.defs.len());
-        self.out.defs.push(def);
-        id
+        let space = if self.windows.in_expression() {
+            DefSpace::Local
+        } else {
+            DefSpace::Declaration
+        };
+        self.out.defs.push(space, def)
     }
 
     /// Record **why** the occurrence at `range` declined, for the census
@@ -2713,6 +2747,113 @@ mod signature_surface_tests {
     }
 }
 
+/// Declaration defs are numbered whether or not bodies are walked
+/// (`docs/resolve-what-a-request-reads-plan.md`, D2): a binder inside an
+/// expression is a local def, in a space of its own, so adding one moves no
+/// declaration's [`DefId`].
+#[cfg(test)]
+mod def_space_tests {
+    use super::*;
+    use borzoi_cst::parser::parse;
+    use proptest::prelude::*;
+
+    /// An expression with `p` in scope, binding some locals of its own.
+    fn body() -> impl Strategy<Value = String> {
+        let leaf = prop_oneof![
+            Just("p".to_string()),
+            Just("(let y = p in y)".to_string()),
+            Just("((fun z -> z) p)".to_string()),
+            Just("(match p with w -> w)".to_string()),
+            Just("(List.head [ for i in [ p ] -> i ])".to_string()),
+            Just("(let rec go n = if n then p else go true in go false)".to_string()),
+        ];
+        leaf.prop_recursive(2, 6, 2, |inner| {
+            (inner.clone(), inner).prop_map(|(a, b)| format!("(let q = {a} in {b})"))
+        })
+    }
+
+    /// One top-level declaration of a module, given its index (for unique
+    /// names) and the body each of its bodies takes.
+    #[derive(Debug, Clone)]
+    enum Decl {
+        Let,
+        Union,
+        Class,
+        Nested,
+    }
+
+    fn render(decls: &[(Decl, String)]) -> String {
+        let mut src = String::from("module M\n");
+        for (k, (decl, body)) in decls.iter().enumerate() {
+            let line = match decl {
+                Decl::Let => format!("let f{k} p = {body}\n"),
+                Decl::Union => format!("type U{k} = A{k} | B{k} of int\n"),
+                Decl::Class => format!("type C{k}() =\n    member this.M{k} p = {body}\n"),
+                Decl::Nested => format!("module N{k} =\n    let g{k} p = {body}\n"),
+            };
+            src.push_str(&line);
+        }
+        src
+    }
+
+    fn resolve_src(src: &str) -> ResolvedFile {
+        let parsed = parse(src);
+        assert!(parsed.errors.is_empty(), "{src}\n{:?}", parsed.errors);
+        let recovery = SyntaxRecovery::of(&parsed);
+        let file = ImplFile::cast(parsed.root).expect("an implementation file");
+        resolve_file(
+            &file,
+            &ProjectItems::default(),
+            &AssemblyEnv::default(),
+            &recovery,
+        )
+    }
+
+    /// What a later file names an earlier one's declarations by.
+    fn declaration_defs(rf: &ResolvedFile) -> (Vec<model::ExportDef>, Vec<DefId>) {
+        (
+            rf.exports.items.iter().map(|e| e.def).collect(),
+            rf.placed_type_defs().collect(),
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn a_body_edit_moves_no_declaration_def(
+            decls in proptest::collection::vec(
+                (
+                    prop_oneof![
+                        Just(Decl::Let),
+                        Just(Decl::Union),
+                        Just(Decl::Class),
+                        Just(Decl::Nested),
+                    ],
+                    body(),
+                ),
+                1..8,
+            ),
+            edit in any::<prop::sample::Index>(),
+            extra in body(),
+        ) {
+            let before = render(&decls);
+            let k = edit.index(decls.len());
+            let mut edited = decls.clone();
+            edited[k].1 = format!("(let extra = {extra} in {})", edited[k].1);
+            let after = render(&edited);
+            let (before_rf, after_rf) = (resolve_src(&before), resolve_src(&after));
+            prop_assert_eq!(
+                declaration_defs(&before_rf),
+                declaration_defs(&after_rf),
+                "before:\n{}\nafter:\n{}",
+                before,
+                after
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod contribution_tests {
     use super::*;
@@ -2731,18 +2872,14 @@ mod contribution_tests {
     }
 
     /// A body-only edit that adds a *local* binder must not count as an export
-    /// contribution change: it shifts a later top-level export's file-local
-    /// `DefId` but leaves its qualified path, `ItemId`, accessibility, and
-    /// case-ness untouched — so a downstream file's resolution is unaffected and
-    /// the incremental fold must keep the suffix reusable. Regression for the
-    /// codex round-2 finding that whole-`ExportedItem` comparison (which includes
-    /// `def`) defeated suffix reuse for this common edit. The paired `assert_ne!`
-    /// pins that the files *do* differ — so the contribution check is genuinely
-    /// ignoring the local shift, not the whole diff.
+    /// contribution change: it adds a local def and its resolutions, and
+    /// leaves every export's qualified path, `ItemId`, accessibility, case-ness
+    /// and declaration `DefId` untouched, so a downstream file's resolution is
+    /// unaffected and the incremental fold must keep the suffix reusable. The
+    /// paired `assert_ne!` pins that the files *do* differ, so the contribution
+    /// check is genuinely ignoring the local difference, not the whole diff.
     #[test]
     fn body_local_binder_does_not_change_export_contribution() {
-        // `g`'s binder is interned after `f`'s body; adding a local `y` there
-        // shifts `g`'s `DefId` (`f`=0 in both; `g`=1 before, =2 after `y`).
         let env = AssemblyEnv::default();
         let before = resolve_one("module M\nlet f x = x\nlet g = 1\n", &env);
         let after = resolve_one("module M\nlet f x = (let y = x in y)\nlet g = 1\n", &env);

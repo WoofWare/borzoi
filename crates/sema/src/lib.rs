@@ -61,7 +61,7 @@ pub use assembly_env::{
     StaticLookup, UnionCaseIndex, ValueSurface, fsharp_core_intrinsic_tycons,
 };
 pub use binders::{BinderRole, PatternName, pattern_names};
-pub use def::{Def, DefId, DefKind, SemanticClass};
+pub use def::{Def, DefId, DefKind, DefSpace, SemanticClass};
 pub use diagnostics::{SemaDiagnostic, SemaDiagnosticKind};
 pub use function_ty::FunctionTyGap;
 pub use infer::{

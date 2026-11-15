@@ -1987,7 +1987,7 @@ impl<'a> Resolver<'a> {
             let later_in_file_type = self
                 .lookup_type_def_at_arity(only, arity)
                 .and_then(|(_, found)| found)
-                .is_some_and(|id| u32::from(self.out.defs[id.index()].range.start()) > import_pos);
+                .is_some_and(|id| u32::from(self.out.defs[id].range.start()) > import_pos);
             if !later_in_file_type {
                 return TypePathResolution::Deferred(DeclineSite::pre_walk(
                     DeclineCause::SameFileAutoOpenType,
@@ -2530,8 +2530,7 @@ impl<'a> Resolver<'a> {
                         || self.prescan.own_exception_simple_names.contains(last)
                         || self.prescan.own_auto_open_type_names.contains(last)
                 }) || self.scope.recursive_module_active
-                    || self.scope.latest_open_pos
-                        > u32::from(self.out.defs[id.index()].range.start());
+                    || self.scope.latest_open_pos > u32::from(self.out.defs[id].range.start());
                 if unreliable {
                     AttrCandidate::Deferred(DeclineSite::pre_walk(
                         DeclineCause::AttributeInFileUnreliable,
@@ -3058,7 +3057,7 @@ impl<'a> Resolver<'a> {
     /// ([`OpenScope::latest_open_pos`](crate::resolve::open_scope::OpenScope::latest_open_pos)(super::state::Resolver)), so it could
     /// supply a same-named type that wins.
     pub(super) fn opened_after(&self, id: DefId) -> bool {
-        self.scope.latest_open_pos > u32::from(self.out.defs[id.index()].range.start())
+        self.scope.latest_open_pos > u32::from(self.out.defs[id].range.start())
     }
 
     /// What a single-segment type name `name` at `arity` binds when an

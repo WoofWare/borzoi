@@ -16,7 +16,18 @@ use super::state::{AliasTargets, Frame, Resolver, ScopeEntry};
 use super::types::TypePathResolution;
 
 impl<'a> Resolver<'a> {
+    /// Resolve every name in `expr`, interning its binders as local defs
+    /// ([`Windows::in_expression`](super::windows::Windows::in_expression)).
+    #[inline(always)]
     pub(super) fn resolve_expr(&mut self, expr: &Expr) {
+        if self.windows.in_expression() {
+            self.resolve_expr_node(expr);
+        } else {
+            self.with_expression(|r| r.resolve_expr_node(expr));
+        }
+    }
+
+    fn resolve_expr_node(&mut self, expr: &Expr) {
         match expr {
             Expr::Const(_) => {}
             // A unit-of-measure annotated literal (`1.0<m>`). The underlying
@@ -1382,7 +1393,7 @@ impl<'a> Resolver<'a> {
         let Some(range) = range else {
             return Callee::MaybeNamed;
         };
-        let of_def = |id: DefId| match self.out.defs[id.index()].kind {
+        let of_def = |id: DefId| match self.out.defs[id].kind {
             DefKind::Value { .. } | DefKind::Parameter | DefKind::PatternLocal => Callee::Function,
             DefKind::UnionCase => Callee::Case(id),
             _ => Callee::MaybeNamed,

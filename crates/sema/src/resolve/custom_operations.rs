@@ -839,7 +839,7 @@ impl Resolver<'_> {
     /// The operations of a builder bound in this file as `let b = T(…)`,
     /// with `T` a type of this file.
     fn project_builder_operations(&self, def: DefId, root: &SyntaxNode) -> CeOps {
-        let d = &self.out.defs[def.index()];
+        let d = &self.out.defs[def];
         if d.kind != (DefKind::Value { is_function: false }) {
             return CeOps::Unknown;
         }
@@ -870,7 +870,7 @@ impl Resolver<'_> {
                     .and_then(|r| self.same_file_def(*r))
             });
         match constructed {
-            Some(t) if self.out.defs[t.index()].kind == DefKind::Type => {
+            Some(t) if self.out.defs[t].kind == DefKind::Type => {
                 self.project_type_operations(t, root, 0)
             }
             _ => CeOps::Unknown,
@@ -883,7 +883,7 @@ impl Resolver<'_> {
         if depth > 32 {
             return CeOps::Unknown;
         }
-        let Some(name) = ident_at(root, self.out.defs[type_def.index()].range) else {
+        let Some(name) = ident_at(root, self.out.defs[type_def].range) else {
             return CeOps::Unknown;
         };
         let Some(defn) = name.parent_ancestors().find_map(TypeDefn::cast) else {
@@ -914,7 +914,7 @@ impl Resolver<'_> {
             };
             let resolved = self.out.resolutions.get(&base.text_range()).copied();
             let ops = match (resolved, resolved.and_then(|r| self.same_file_def(r))) {
-                (_, Some(t)) if self.out.defs[t.index()].kind == DefKind::Type => {
+                (_, Some(t)) if self.out.defs[t].kind == DefKind::Type => {
                     self.project_type_operations(t, root, depth + 1)
                 }
                 (Some(Resolution::Entity(h)), _) => {

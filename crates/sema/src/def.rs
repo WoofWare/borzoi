@@ -256,21 +256,103 @@ impl DefKind {
     }
 }
 
-/// A stable identifier for a [`Def`] within a single resolved file — an index
-/// into the file's definition arena (see [`crate::ResolvedFile`]). A newtype
+/// Which of a file's two def arenas a [`Def`] lives in
+/// (`docs/resolve-what-a-request-reads-plan.md`, D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DefSpace {
+    /// A def interned while the walk is outside every expression: a type, a
+    /// case, a module-level value, a member, their parameters. Numbered in
+    /// the order the declaration walk meets them, so the numbering does not
+    /// depend on what any body binds.
+    Declaration,
+    /// A def interned while the walk is inside an expression: a `let` in a
+    /// body, a lambda's or a match clause's binders.
+    Local,
+}
+
+/// A stable identifier for a [`Def`] within a single resolved file: its space
+/// and its index in that space's arena (see [`crate::ResolvedFile`]). A newtype
 /// rather than a bare index per "no primitive obsession": a `DefId` from one
 /// file is meaningless against another's arena, and the type makes that
 /// mismatch a compile error rather than a silently-wrong lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DefId(u32);
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefId {
+    space: DefSpace,
+    index: u32,
+}
 
 impl DefId {
-    pub(crate) fn new(index: usize) -> Self {
-        DefId(u32::try_from(index).expect("more than u32::MAX defs in one file"))
+    fn new(space: DefSpace, index: usize) -> Self {
+        DefId {
+            space,
+            index: u32::try_from(index).expect("more than u32::MAX defs in one file"),
+        }
     }
 
-    pub(crate) fn index(self) -> usize {
-        self.0 as usize
+    /// The arena this def lives in.
+    pub fn space(self) -> DefSpace {
+        self.space
+    }
+}
+
+impl std::fmt::Debug for DefId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let space = match self.space {
+            DefSpace::Declaration => "D",
+            DefSpace::Local => "L",
+        };
+        write!(f, "DefId({space}{})", self.index)
+    }
+}
+
+/// A file's defs, in two arenas ([`DefSpace`]): each [`DefId`] indexes the
+/// arena its space names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DefArena {
+    declarations: Vec<Def>,
+    locals: Vec<Def>,
+}
+
+impl DefArena {
+    fn arena(&self, space: DefSpace) -> &Vec<Def> {
+        match space {
+            DefSpace::Declaration => &self.declarations,
+            DefSpace::Local => &self.locals,
+        }
+    }
+
+    /// Add `def` to `space`'s arena, returning its id.
+    pub(crate) fn push(&mut self, space: DefSpace, def: Def) -> DefId {
+        let arena = match space {
+            DefSpace::Declaration => &mut self.declarations,
+            DefSpace::Local => &mut self.locals,
+        };
+        let id = DefId::new(space, arena.len());
+        arena.push(def);
+        id
+    }
+
+    /// The def `id` names, if this arena holds it.
+    pub(crate) fn get(&self, id: DefId) -> Option<&Def> {
+        self.arena(id.space).get(id.index as usize)
+    }
+
+    /// Every def: the declarations, then the locals, each in interning order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Def> + '_ {
+        self.declarations.iter().chain(&self.locals)
+    }
+
+    /// Every def, mutably, in [`Self::iter`]'s order.
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Def> + '_ {
+        self.declarations.iter_mut().chain(&mut self.locals)
+    }
+}
+
+impl std::ops::Index<DefId> for DefArena {
+    type Output = Def;
+
+    fn index(&self, id: DefId) -> &Def {
+        &self.arena(id.space)[id.index as usize]
     }
 }
 
