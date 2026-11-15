@@ -38,8 +38,8 @@
 use borzoi_msbuild::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
     CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause, DiagnosticKind,
-    DiagnosticOrigin, ImplicitImportKind, ImportFailReason, ParsedProject,
-    StructuralCompileItemUncertainty, UntrustedCause,
+    DiagnosticOrigin, ImplicitImportKind, ImportFailReason, ParsedProject, RejectionCause,
+    StructuralCompileItemUncertainty, UnloadableImport, UntrustedCause,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -416,6 +416,7 @@ fn untrusted_cause_phrase(cause: &UntrustedCause) -> String {
         UntrustedCause::Refused { name } => {
             format!("`$({name})`, which the project sets to a value I can't compute")
         }
+        UntrustedCause::Rejected(rejection) => render_rejection_cause(&rejection.cause),
     }
 }
 
@@ -918,6 +919,33 @@ fn render_diagnostic_kind(kind: &DiagnosticKind) -> String {
             },
             path.display()
         ),
+        DiagnosticKind::MayBeRejected { cause } => render_rejection_cause(cause),
+    }
+}
+
+/// Wildcard-free for the same reason as [`render_diagnostic_kind`].
+fn render_rejection_cause(cause: &RejectionCause) -> String {
+    match cause {
+        RejectionCause::Import {
+            project,
+            gate_undecided,
+            why,
+        } => {
+            let gate = if *gate_undecided {
+                " under a condition I can't evaluate"
+            } else {
+                ""
+            };
+            let why = match why {
+                UnloadableImport::PathUndecided => "a path I can't compute".to_string(),
+                UnloadableImport::NoPath => "no path".to_string(),
+                UnloadableImport::Failed(reason) => render_import_fail(reason),
+            };
+            format!(
+                "an `<Import>` of `{project}`{gate} that may load nothing ({why}), so MSBuild \
+                 may reject the whole project"
+            )
+        }
     }
 }
 

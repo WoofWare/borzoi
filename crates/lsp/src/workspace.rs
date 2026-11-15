@@ -4987,6 +4987,47 @@ mod tests {
         assert_eq!(ws.owning_project(&file), heuristic(&file));
     }
 
+    #[test]
+    fn a_project_msbuild_may_reject_serves_nothing_as_the_builds() {
+        // The import of a missing file fails MSBuild's evaluation (MSB4019,
+        // #845), so the body's `TargetFramework`, written before it, is no
+        // more the build's than anything else: no TFM is served, the fold is
+        // declined, and the deferral names the rejection.
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("P.fsproj");
+        write_file(
+            &proj,
+            r#"<Project>
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+              <Import Project="Missing.props" />
+              <ItemGroup><Compile Include="A.fs" /></ItemGroup>
+            </Project>"#,
+        );
+        write_file(&tmp.path().join("A.fs"), "let x = 1");
+        let mut ws = Workspace::default();
+        assert!(matches!(
+            ws.served_tfm_for_project(&proj),
+            ServedTfm::Untrusted
+        ));
+        let deferrals = crate::project_deferral::deferrals(
+            ws.project_evaluation(&proj),
+            crate::project_deferral::FoldOutcome::Unknown,
+        );
+        let fold = deferrals
+            .iter()
+            .find(|d| d.capability() == crate::project_deferral::DeferredCapability::ProjectFold)
+            .expect("the fold is declined");
+        let crate::project_deferral::Causes::Recorded(causes) = fold.causes() else {
+            panic!("no recorded cause: {:?}", fold.causes());
+        };
+        assert!(
+            causes
+                .iter()
+                .any(|c| c.contains("MSBuild may reject the whole project")),
+            "{causes:?}"
+        );
+    }
+
     // ----- Stage 3.1: `Workspace::project_graph` over real fsproj trees -----
 
     use crate::project_graph::{GraphProblem, ProjectKind};

@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::common::parse_fsproj_with_imports;
-use borzoi_msbuild::parse_fsproj;
+use borzoi_msbuild::{PropertyRead, parse_fsproj};
 use common::{
     CONTROLLED_PROPERTY_NAMES, Oracle, SplitMix64, breaks_inside_quote, gen_bool_expr, gen_props,
     respell_whitespace,
@@ -1101,4 +1101,160 @@ fn an_undecided_choose_hides_only_the_names_its_branches_write() {
             );
         }
     }
+}
+
+/// Imports MSBuild may fail to load (#820, #845): a missing file, a directory,
+/// a dangling link, malformed XML, an empty path, and a path the walk cannot
+/// compute, each under a gate the walk decides either way, cannot decide, or
+/// that requires the file. MSBuild rejects the whole project when it attempts
+/// one (MSB4019, MSB4025, MSB4020/MSB4035), so the writes before and after it
+/// are graded too: a project MSBuild rejects must commit nothing, and one it
+/// evaluates must commit only its values. The cross product is the sweep, so
+/// the undecided gates meet every target.
+#[test]
+fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
+    const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+    const UNDECIDED_FALSE: &str = "$([System.String]::IsNullOrWhiteSpace('no'))";
+    // `{p}` is the import's own `Project` text.
+    const PROBES_ITS_OWN_FILE_OR_IS_FALSE: &[&str] = &[
+        "'a' == 'b'",
+        "Exists('{p}')",
+        "UNDECIDED_TRUE And Exists('{p}')",
+    ];
+    let gates = [
+        "",
+        "'a' == 'a'",
+        "'a' == 'b'",
+        UNDECIDED_TRUE,
+        UNDECIDED_FALSE,
+        "Exists('{p}')",
+        "UNDECIDED_TRUE Or Exists('{p}')",
+        "UNDECIDED_FALSE Or Exists('{p}')",
+        "UNDECIDED_TRUE And Exists('{p}')",
+    ];
+    // `(Project text, a write before the import that the text reads)`.
+    let targets: &[(&str, &str)] = &[
+        ("there.props", ""),
+        ("missing.props", ""),
+        ("sub", ""),
+        ("bad.props", ""),
+        ("$(Nothing)", ""),
+        ("none/*.props", ""),
+        ("there.props;missing.props", ""),
+        // A case respelling of an import already made: MSBuild skips it
+        // unloaded, whatever the file system holds.
+        ("THERE.props", "<Import Project=\"there.props\" />"),
+        ("there.props;THERE.props", ""),
+        // A path that names an existing file whichever write MSBuild keeps.
+        (
+            "$(Where)",
+            "<PropertyGroup><Where>there.props</Where><Where Condition=\"UNDECIDED_TRUE\">there.props</Where></PropertyGroup>",
+        ),
+        (
+            "$(Where)",
+            "<PropertyGroup><Where Condition=\"UNDECIDED_TRUE\">there.props</Where></PropertyGroup>",
+        ),
+        (
+            "$(Where)",
+            "<PropertyGroup><Where Condition=\"UNDECIDED_TRUE\">missing.props</Where></PropertyGroup>",
+        ),
+        #[cfg(unix)]
+        ("dangling.props", ""),
+    ];
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::write(
+        dir.join("there.props"),
+        "<Project><PropertyGroup><Gamma>there</Gamma></PropertyGroup></Project>",
+    )
+    .unwrap();
+    std::fs::write(dir.join("bad.props"), "<Project>").unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/x.props"), "<Project />").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("gone.props", dir.join("dangling.props")).unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let names: Vec<String> = ["Alpha", "Beta", "Gamma"].map(String::from).to_vec();
+    let (mut rejected, mut committed) = (0usize, 0usize);
+    // The gate sits on the import, or on an `<ImportGroup>` around it, which
+    // gates it as much.
+    for (gate_template, in_group) in gates
+        .iter()
+        .flat_map(|gate| [(*gate, false), (*gate, true)])
+    {
+        for (project, before) in targets {
+            let gate = gate_template
+                .replace("UNDECIDED_TRUE", UNDECIDED_TRUE)
+                .replace("UNDECIDED_FALSE", UNDECIDED_FALSE)
+                .replace("{p}", project);
+            let condition = if gate.is_empty() {
+                String::new()
+            } else {
+                format!(" Condition=\"{gate}\"")
+            };
+            let before = before.replace("UNDECIDED_TRUE", UNDECIDED_TRUE);
+            let import = if in_group {
+                format!("<ImportGroup{condition}><Import Project=\"{project}\" /></ImportGroup>")
+            } else {
+                format!("<Import Project=\"{project}\"{condition} />")
+            };
+            let xml = format!(
+                "<Project>\n  <PropertyGroup><Alpha>a</Alpha></PropertyGroup>\n  {before}\n  \
+                 {import}\n  \
+                 <PropertyGroup><Beta>b</Beta></PropertyGroup>\n</Project>\n"
+            );
+            std::fs::write(&project_path, &xml).unwrap();
+            let parsed = parse_fsproj_with_imports(
+                &xml,
+                &project_path,
+                &HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+            )
+            .expect("well-formed");
+            let ours: Vec<(&String, String)> = names
+                .iter()
+                .filter_map(|name| match parsed.property(name) {
+                    // MSBuild reads an undefined name as empty.
+                    PropertyRead::Unset => Some((name, String::new())),
+                    read => read.value().map(|v| (name, v.to_owned())),
+                })
+                .collect();
+            let Some(theirs) = oracle.project(&xml, &names, Some(&project_path), &[]) else {
+                rejected += 1;
+                assert!(
+                    ours.is_empty(),
+                    "certain-implies-exact violated: MSBuild rejects this project, but we \
+                     committed {ours:?}\n--- xml ---\n{xml}"
+                );
+                continue;
+            };
+            for (name, value) in &ours {
+                committed += 1;
+                assert_eq!(
+                    Some(value),
+                    theirs.get(*name),
+                    "certain-implies-exact violated for {name}\n--- xml ---\n{xml}"
+                );
+            }
+            // The other direction, for the gates that rule the import out
+            // whenever it would fail: a gate decided false, and one that
+            // requires the file, MSBuild's `Exists` of which is false where
+            // nothing is. Withdrawing there is a decline MSBuild gives no cause
+            // for.
+            if PROBES_ITS_OWN_FILE_OR_IS_FALSE.contains(&gate_template) {
+                assert_eq!(
+                    parsed.rejection, None,
+                    "MSBuild evaluates the project, and the gate rules the import out \
+                     whenever it fails\n--- xml ---\n{xml}"
+                );
+            }
+        }
+    }
+    eprintln!("import failures: {rejected} rejected by MSBuild, {committed} values committed");
+    // Anti-vacuity: both sides of the contract are exercised.
+    assert!(rejected >= 20, "only {rejected} rejected");
+    assert!(committed >= 40, "only {committed} committed");
 }

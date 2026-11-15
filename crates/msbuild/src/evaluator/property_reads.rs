@@ -67,6 +67,9 @@ pub enum InexactUnset {
     Opaque(UntrustedCause),
     /// A name the walk keeps inexact for its own consumers (`DefineConstants`).
     ConsumerCarveOut,
+    /// MSBuild may reject the whole project, so no name has a value in it
+    /// ([`crate::ParsedProject::rejection`]).
+    Rejected(Box<crate::Rejection>),
 }
 
 impl InexactUnset {
@@ -82,6 +85,7 @@ impl InexactUnset {
                 name: name.to_string(),
             },
             InexactUnset::Opaque(cause) => undefined(Some(cause)),
+            InexactUnset::Rejected(rejection) => UntrustedCause::Rejected(rejection.clone()),
             InexactUnset::Environment | InexactUnset::Toolset | InexactUnset::ConsumerCarveOut => {
                 undefined(None)
             }
@@ -100,7 +104,8 @@ pub struct PropertyReads {
     pub named: HashMap<String, PropertyRead>,
     /// The read of a name not in [`Self::named`] and not one of MSBuild's
     /// toolset names: [`PropertyRead::Unset`], or, once the walk has passed
-    /// content it could not see, [`InexactUnset::Opaque`].
+    /// content it could not see, [`InexactUnset::Opaque`], or, when MSBuild may
+    /// reject the project, [`InexactUnset::Rejected`].
     pub otherwise: PropertyRead,
 }
 
@@ -120,6 +125,11 @@ impl PropertyReads {
         if let Some(read) = self.named.get(&lower) {
             return read.clone();
         }
+        // No name has a value in a project MSBuild may reject, a toolset
+        // name included.
+        if let PropertyRead::UnsetInexact(InexactUnset::Rejected(_)) = &self.otherwise {
+            return self.otherwise.clone();
+        }
         if is_toolset_initial_property_name(&lower) {
             return PropertyRead::UnsetInexact(InexactUnset::Toolset);
         }
@@ -130,6 +140,15 @@ impl PropertyReads {
 impl State<'_> {
     /// What a read of `name` sees at the end of the walk.
     pub(super) fn read_property(&self, name: &str) -> PropertyRead {
+        // MSBuild may hold no value for anything (`ParsedProject::rejection`).
+        if let Some(rejection) = &self.rejection {
+            let rejection = Box::new(rejection.clone());
+            return if self.lookup.is_bound(name) {
+                PropertyRead::Untrusted(UntrustedCause::Rejected(rejection))
+            } else {
+                PropertyRead::UnsetInexact(InexactUnset::Rejected(rejection))
+            };
+        }
         let trust = self.trust_of(name);
         if trust.reference_is_untrusted() {
             let cause = trust
@@ -177,11 +196,14 @@ impl State<'_> {
                 (lower, read)
             })
             .collect();
-        let otherwise = match &self.walk_opaque {
-            Some(cause) => {
+        let otherwise = match (&self.rejection, &self.walk_opaque) {
+            (Some(rejection), _) => {
+                PropertyRead::UnsetInexact(InexactUnset::Rejected(Box::new(rejection.clone())))
+            }
+            (None, Some(cause)) => {
                 PropertyRead::UnsetInexact(InexactUnset::Opaque(UntrustedCause::of_opacity(cause)))
             }
-            None => PropertyRead::Unset,
+            (None, None) => PropertyRead::Unset,
         };
         PropertyReads { named, otherwise }
     }

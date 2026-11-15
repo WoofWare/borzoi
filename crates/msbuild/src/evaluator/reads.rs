@@ -124,20 +124,32 @@ impl State<'_> {
             .iter()
             .map(|name| (name.clone(), self.read_property(name)))
             .collect();
+        // MSBuild may reject the project, and then has no item, target or run
+        // to compare with (`ParsedProject::rejection`).
+        let rejected = self.rejection.is_some();
         let items = probe
             .item_types
             .iter()
-            .map(|item_type| (item_type.clone(), self.read_items(item_type)))
+            .map(|item_type| {
+                let mut read = self.read_items(item_type);
+                read.exact &= !rejected;
+                (item_type.clone(), read)
+            })
             .collect();
         let targets = probe
             .targets
             .iter()
             .map(|name| (name.clone(), self.read_target(name)))
             .collect();
-        let execution = probe
-            .execute
-            .as_ref()
-            .map(|execute| super::executor::execute(self, execute));
+        let execution = probe.execute.as_ref().map(|execute| {
+            if rejected {
+                super::executor::ExecutionRead::Declined(
+                    "MSBuild may reject the project".to_string(),
+                )
+            } else {
+                super::executor::execute(self, execute)
+            }
+        });
         EvaluationReads {
             properties,
             items,
@@ -154,8 +166,9 @@ impl State<'_> {
     ///
     /// The target graph is the files the walk reached. It is MSBuild's when
     /// the walk is not opaque and walked no `Directory.Build.*` file as a
-    /// fallback ([`super::directory_build`]), which MSBuild may not import.
-    /// Otherwise whatever the file defines or steers is the walk's alone.
+    /// fallback ([`super::directory_build`]), which MSBuild may not import,
+    /// and MSBuild may not reject the project. Otherwise whatever the file
+    /// defines or steers is the walk's alone.
     pub(super) fn read_target(&self, name: &str) -> TargetRead {
         let definition = self
             .target_definitions
@@ -168,7 +181,9 @@ impl State<'_> {
                 .target_definitions
                 .iter()
                 .all(|(defined, _)| plain_target_name(defined));
-        let graph_is_msbuilds = self.walk_opaque.is_none() && !self.directory_build.contributed;
+        let graph_is_msbuilds = self.walk_opaque.is_none()
+            && !self.directory_build.contributed
+            && self.rejection.is_none();
         TargetRead {
             definition,
             exact: comparable && graph_is_msbuilds,

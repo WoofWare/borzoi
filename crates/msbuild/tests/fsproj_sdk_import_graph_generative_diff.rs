@@ -1187,74 +1187,38 @@ fn render(case: &Case, sdk: &str) -> Rendered {
 /// MSBuild's (#677).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Family {
-    /// A decided import of a path that names no file MSBuild can load: a
-    /// symlink whose target is missing, which `Exists()` reports present, or
-    /// an SDK-qualified import of a property holding a rooted path, which
-    /// MSBuild appends to the SDK's directory. MSBuild rejects the project
-    /// (MSB4019). The walk reports the failed import, but still publishes the
-    /// values bound around it, and in SDK content the SDK's Compile tolerance
-    /// keeps the Compile set certain (#845). Covers findings against a
-    /// rejected project only.
-    ImportOfUnloadableFile,
     /// An import input written under a condition the walk cannot decide, or
     /// refused: the walk takes one side of every import it decides, and a
     /// later write of a property the skipped (or followed) file also writes
     /// is published as trusted, with only later *undefined* reads made
-    /// inexact (#791). Covers property findings only: the Compile set must
-    /// still be uncertain.
+    /// inexact (#791). It holds #820's remainder too: an import point in
+    /// content the walk cannot see whose failure ([`PointDoubt::GateOr`] over
+    /// a missing file) makes MSBuild reject an evaluation the walk cannot know
+    /// is rejected. Covers property findings only: the Compile set must still
+    /// be uncertain.
     UndecidedImportHidesWrites,
-    /// An import point whose `Exists` is a disjunct ([`PointDoubt::GateOr`]):
-    /// MSBuild imports its path regardless, and rejects the project (MSB4019)
-    /// when the path names no file. A reached point is never decided and
-    /// withdraws the whole evaluation, but a literal write after it is
-    /// committed for an evaluation MSBuild refuses, and a point in content the
-    /// walk cannot see makes MSBuild refuse an evaluation the walk accepts
-    /// (#820). Covers property findings, and Compile and reference findings on
-    /// a project MSBuild rejects.
-    UndecidedImportOfMissingFile,
 }
 
-const KNOWN_DIVERGENCES: &[Family] = &[
-    Family::ImportOfUnloadableFile,
-    Family::UndecidedImportHidesWrites,
-    Family::UndecidedImportOfMissingFile,
-];
+const KNOWN_DIVERGENCES: &[Family] = &[Family::UndecidedImportHidesWrites];
 
 impl Family {
     /// Whether `case` is in the family: decided from the case's shape alone,
     /// never from how the walk answered it.
     fn contains(self, case: &Case) -> bool {
         match self {
-            Family::ImportOfUnloadableFile => case.reimports.iter().any(|r| {
-                let dangling = matches!(
-                    r.spelling,
-                    Spelling::FileLink | Spelling::Relative | Spelling::RelativeElsewhere
-                ) && match r.which {
-                    Which::Props => !case.props.present,
-                    Which::Targets => !case.targets_present,
-                };
-                dangling || r.shape == Shape::ViaPropertySdkAbsolute
-            }),
             Family::UndecidedImportHidesWrites => {
                 case.undecided.is_some()
                     || case.props_point == PropsPoint::BehindUndecidedImport
                     || case.targets_point == TargetsPoint::BehindUndecidedImport
                     || case.has_hidden_repeat()
             }
-            Family::UndecidedImportOfMissingFile => case.point_doubt == PointDoubt::GateOr,
         }
     }
 
     /// Whether the family explains `finding`, in a case it contains.
     fn covers(self, finding: &Finding) -> bool {
         match self {
-            Family::ImportOfUnloadableFile => finding.theirs == "a rejected project",
             Family::UndecidedImportHidesWrites => finding.kind == FindingKind::Property,
-            Family::UndecidedImportOfMissingFile => {
-                finding.kind == FindingKind::Property
-                    || (matches!(finding.kind, FindingKind::Compile | FindingKind::References)
-                        && finding.theirs == "a rejected project")
-            }
         }
     }
 
@@ -1262,16 +1226,6 @@ impl Family {
     /// asserts still diverges.
     fn witness(self) -> Case {
         match self {
-            Family::ImportOfUnloadableFile => Case {
-                targets_present: false,
-                reimports: vec![Reimport {
-                    which: Which::Targets,
-                    spelling: Spelling::FileLink,
-                    shape: Shape::Literal,
-                    site: Site::Body,
-                }],
-                ..Case::usual()
-            },
             // With no `Directory.Build.*` file, nothing withdraws the values
             // the hidden `Behind.props` would have changed: `Trace` lacks its
             // marker and is published as trusted.
@@ -1279,16 +1233,6 @@ impl Family {
                 props_point: PropsPoint::BehindUndecidedImport,
                 props: Props::default(),
                 targets_present: false,
-                ..Case::usual()
-            },
-            // The SDK resets `Seen` after the point, a literal the walk commits.
-            Family::UndecidedImportOfMissingFile => Case {
-                targets_present: false,
-                point_doubt: PointDoubt::GateOr,
-                repeats: vec![Repeat {
-                    target: RepeatTarget::File,
-                    site: RepeatSite::SdkAfterPoint,
-                }],
                 ..Case::usual()
             },
         }

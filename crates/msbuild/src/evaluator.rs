@@ -94,6 +94,7 @@ mod item_spec;
 pub(crate) mod property_reads;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod reads;
+mod rejection;
 use item_pass::{
     CapturedPackageReference, CurrentFile, DeferredGroupKind, DeferredItemGroup,
     RetainedImportedFile, item_key, replay_deferred_item_groups,
@@ -1199,6 +1200,10 @@ struct State<'r> {
     /// `Some` carries what made it so (the first such construct), which is
     /// how a user learns why a name that reads as unset might not be.
     walk_opaque: Option<OpacityCause>,
+    /// The first construct that may make MSBuild reject the whole project
+    /// ([`rejection`]); [`Self::into_project`] withdraws what the walk publishes
+    /// when it is set.
+    rejection: Option<crate::Rejection>,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -1621,6 +1626,7 @@ impl<'r> State<'r> {
             using_task_names: Vec::new(),
             env_property_names,
             walk_opaque: None,
+            rejection: None,
             diagnostic_roots: HashMap::new(),
         }
     }
@@ -2067,6 +2073,7 @@ impl<'r> State<'r> {
                 using_task_names: _,
             env_property_names: _,
             walk_opaque: _,
+            rejection,
             diagnostic_roots: _,
         } = self;
         // Central Package Management opt-in: a versionless
@@ -2125,6 +2132,44 @@ impl<'r> State<'r> {
         );
         if package_reference_uncertainties.is_empty() {
             package_references_uncertain = false;
+        }
+        // MSBuild may reject the project, and then holds nothing, whatever the
+        // walk bound before or after the construct: every facet is withdrawn,
+        // each axis naming the rejection as its cause. The property reads
+        // were withdrawn above, by `read_property`.
+        let mut items_uncertain = items_uncertain;
+        let mut compile_item_uncertainties = compile_item_uncertainties;
+        let mut define_constants_uncertain = define_constants_uncertain;
+        let mut define_constants_uncertainties = define_constants_uncertainties;
+        let mut project_references_uncertain = project_references_uncertain;
+        let mut hidden_content = hidden_content;
+        if let Some(rejection) = &rejection {
+            let kind = DiagnosticKind::MayBeRejected {
+                cause: rejection.cause.clone(),
+            };
+            let (span, origin) = (rejection.span.clone(), rejection.origin.clone());
+            items_uncertain = true;
+            compile_item_uncertainties.push(CompileItemUncertaintyCause {
+                kind: CompileItemUncertaintyCauseKind::Diagnostic(kind.clone()),
+                span: span.clone(),
+                origin: origin.clone(),
+            });
+            define_constants_uncertain = true;
+            define_constants_uncertainties.push(DefineConstantsUncertaintyCause {
+                kind: kind.clone(),
+                span: span.clone(),
+                origin: origin.clone(),
+            });
+            package_references_uncertain = true;
+            package_reference_uncertainties.push(PackageReferenceUncertaintyCause {
+                kind: PackageReferenceUncertaintyCauseKind::Diagnostic(kind),
+                span,
+                origin,
+            });
+            project_references_uncertain = true;
+            hidden_content.get_or_insert_with(|| {
+                crate::UntrustedCause::Rejected(Box::new(rejection.clone()))
+            });
         }
         let is_partial = !diagnostics.is_empty();
         let mut items = into_resolved_items(compile_first);
@@ -2220,6 +2265,7 @@ impl<'r> State<'r> {
             workload_definitions,
             sdk_files_imported_from_outside,
             hidden_content,
+            rejection,
             diagnostics,
             is_partial,
             items_uncertain,
@@ -2403,6 +2449,16 @@ impl<'r> State<'r> {
         if self.import_gate_context || is_structural_compile_risk(&kind) {
             self.project_references_uncertain = true;
         }
+        // An import that did not load fails MSBuild's evaluation (#845), but
+        // for the walk's own depth limit, which MSBuild does not have.
+        let failed_import = match &kind {
+            DiagnosticKind::ImportFailed { path, reason }
+                if !matches!(reason, ImportFailReason::DepthLimit { .. }) =>
+            {
+                Some((path.display().to_string(), reason.clone(), span.clone()))
+            }
+            _ => None,
+        };
         let origin = self.current_origin();
         let span = self.effective_span(span);
         if compile_uncertain {
@@ -2430,6 +2486,16 @@ impl<'r> State<'r> {
                 });
         }
         self.diagnostics.push(Diagnostic { kind, span, origin });
+        if let Some((project, reason, span)) = failed_import {
+            self.note_possible_rejection(
+                crate::RejectionCause::Import {
+                    project,
+                    gate_undecided: false,
+                    why: crate::UnloadableImport::Failed(reason),
+                },
+                span,
+            );
+        }
     }
 
     /// The [`DiagnosticOrigin`] for a construct reached at the current walk
@@ -2654,7 +2720,9 @@ impl<'r> State<'r> {
         for name in ["TargetName", "AssemblyName"] {
             match self.read_property(name) {
                 PropertyRead::Untrusted(_)
-                | PropertyRead::UnsetInexact(InexactUnset::Refused | InexactUnset::Environment) => {
+                | PropertyRead::UnsetInexact(
+                    InexactUnset::Refused | InexactUnset::Environment | InexactUnset::Rejected(_),
+                ) => {
                     return ItemMetadataValue::Unknown;
                 }
                 // Content the walk could not see may define either name;
@@ -3369,9 +3437,9 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
             }
             // Same rule as `follow_explicit_import`: an undecided group
             // gate may bring in or omit whole files of property writes.
-            if state.diagnostics.len() != diagnostics_before_gate
-                || matches!(gate, CondGate::Unsupported)
-            {
+            let gate_raised_doubt = state.diagnostics.len() != diagnostics_before_gate
+                || matches!(gate, CondGate::Unsupported);
+            if gate_raised_doubt {
                 let cause = state.gate_opacity_cause(node, diagnostics_before_gate);
                 state.latch_walk_opaque(cause);
             }
@@ -3401,11 +3469,16 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                 CondGate::Skip => {
                     state.import_gate_context = prev_gate;
                     state.package_import_gate_context = prev_pkg_gate;
+                    // As for a bare `<Import>` (#820).
+                    if gate_raised_doubt || !route_decided {
+                        rejection::undecided_import_group(node, current_file_dir, state);
+                    }
                 }
                 CondGate::Unsupported => {
                     emit_unsupported_condition(node, state);
                     state.import_gate_context = prev_gate;
                     state.package_import_gate_context = prev_pkg_gate;
+                    rejection::undecided_import_group(node, current_file_dir, state);
                 }
             }
         }
@@ -4997,13 +5070,22 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
     // Skip may hide writes the real build performs, Run may perform
     // writes the real build skips. Either way no later undefined read
     // can claim exactness.
-    if state.diagnostics.len() != diagnostics_before_gate || matches!(gate, CondGate::Unsupported) {
+    let gate_raised_doubt =
+        state.diagnostics.len() != diagnostics_before_gate || matches!(gate, CondGate::Unsupported);
+    if gate_raised_doubt {
         let cause = state.gate_opacity_cause(node, diagnostics_before_gate);
         state.latch_walk_opaque(cause);
     }
     match gate {
         CondGate::Run => {}
-        CondGate::Skip => return,
+        CondGate::Skip => {
+            // A gate the walk did not decide from certain inputs may hold in
+            // the build, which then makes the import (#820).
+            if gate_raised_doubt || !route_decided {
+                rejection::undecided_import(node, current_file_dir, state);
+            }
+            return;
+        }
         CondGate::Unsupported => {
             // Re-enter the gate context so the `UnsupportedCondition` flags.
             state.import_gate_context = true;
@@ -5011,6 +5093,7 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
             emit_unsupported_condition(node, state);
             state.import_gate_context = prev_gate;
             state.package_import_gate_context = prev_pkg_gate;
+            rejection::undecided_import(node, current_file_dir, state);
             return;
         }
     }
@@ -5098,6 +5181,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
                 },
                 node.range(),
             );
+            rejection::taken_import_with_undecided_path(node, current_file_dir, state);
             return;
         }
         // The expansion's trust was judged just above, through its scan-based
@@ -5125,6 +5209,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
                 },
                 node.range(),
             );
+            state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
             return;
         }
         // Commit only on a path spelt from a positive alphabet: ASCII
@@ -5139,17 +5224,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // one when the file opens — structure is decided in the escaped domain,
         // so any escape that could decode to structure declines. Outside the
         // alphabet, decline.
-        let escaped = expansion.value.ignoring_trust().as_escaped();
-        let escapes_only_dots = escaped.match_indices('%').all(|(at, _)| {
-            escaped
-                .get(at..at + 3)
-                .is_some_and(|e| e.eq_ignore_ascii_case("%2e"))
-        });
-        if !escapes_only_dots
-            || !project_attr.chars().all(|c| {
-                c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '/' | '\\')
-            })
-        {
+        if !sdk_project_in_alphabet(expansion.value.ignoring_trust().as_escaped(), project_attr) {
             state.push(
                 DiagnosticKind::UnsupportedConstruct {
                     element: format!(
@@ -5166,6 +5241,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
                 },
                 node.range(),
             );
+            state.note_unloadable_import(node, crate::UnloadableImport::PathUndecided);
             return;
         }
         // MSBuild accepts either separator on either platform, as for a
@@ -5186,19 +5262,13 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // separator it doubles collapses in `NormalizePath` (probed,
         // `dotnet msbuild` 10.0.401: `Project="$(P)"` with `P=/abs/x.props`
         // names `…/Sdk//abs/x.props`).
-        let written_rooted = project_attr_raw.replace('\\', "/").starts_with('/');
-        let under_root = if written_rooted {
-            relative.as_str()
-        } else {
-            relative.trim_start_matches('/')
-        };
+        let under_root = sdk_project_under_root(project_attr_raw, &relative);
         let walk_under = |root: &Path, state: &mut State<'_>| {
             // MSBuild imports `Path.Combine(root, Project)` as an escaped
             // import expression, so the root is re-parsed too: a `$(` expands,
             // a `;` splits it into a list, `*`/`?` glob and `%XX` decodes. A
             // root holding one names something else to MSBuild; decline.
-            let root_text = root.to_string_lossy();
-            if root_text.contains(['%', ';', '*', '?']) || root_text.contains("$(") {
+            if sdk_root_is_reparsed(root) {
                 state.push(
                     DiagnosticKind::UnsupportedConstruct {
                         element: format!(
@@ -5217,13 +5287,14 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
                     },
                     node.range(),
                 );
+                state.note_unloadable_import(node, crate::UnloadableImport::PathUndecided);
                 return;
             }
             // `NormalizePath` is `GetFullPath`: a relative root resolves
             // against the working directory *before* `..` collapses, so a
             // leading `..` that `normalise` alone could not pop still climbs.
-            let joined = match std::path::absolute(root.join(under_root)) {
-                Ok(joined) => joined,
+            let path = match sdk_import_path(root, under_root) {
+                Ok(path) => path,
                 Err(e) => {
                     state.push(
                         DiagnosticKind::ImportFailed {
@@ -5237,7 +5308,6 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
                     return;
                 }
             };
-            let path = normalise(&joined);
             if names_directory {
                 state.push(
                     DiagnosticKind::ImportFailed {
@@ -5289,6 +5359,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             },
             node.range(),
         );
+        state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
         return;
     };
     let expansion = state.expand(raw_path, node.range());
@@ -5307,6 +5378,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             },
             node.range(),
         );
+        rejection::taken_import_with_undecided_path(node, current_file_dir, state);
         return;
     }
     // The `Project` attribute is a semicolon-separated *list* of paths
@@ -5353,6 +5425,7 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             },
             node.range(),
         );
+        state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
         return;
     }
     for segment in expansion.value.ignoring_trust().split_list() {
@@ -5391,6 +5464,49 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             }
         }
     }
+}
+
+/// Whether an SDK import's expanded `Project` (`escaped`, and `unescaped`
+/// decoded) is spelt from the alphabet the walk joins under an SDK root: ASCII
+/// alphanumerics, `.`, `_`, `-`, `+`, the separators, and no escape but `%2e`
+/// (`follow_import_after_gate` says why). Shared with the rejection judgement
+/// ([`rejection`]), which must name the file the walk would.
+fn sdk_project_in_alphabet(escaped: &str, unescaped: &str) -> bool {
+    let escapes_only_dots = escaped.match_indices('%').all(|(at, _)| {
+        escaped
+            .get(at..at + 3)
+            .is_some_and(|e| e.eq_ignore_ascii_case("%2e"))
+    });
+    escapes_only_dots
+        && unescaped
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '/' | '\\'))
+}
+
+/// What `Path.Combine(root, Project)` appends to an SDK root, for a `Project`
+/// written as `raw` and expanded to `relative` (`/`-separated): all of it when
+/// `raw` is written rooted, and otherwise the expansion with its leading
+/// separators dropped.
+fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
+    if raw.replace('\\', "/").starts_with('/') {
+        relative
+    } else {
+        relative.trim_start_matches('/')
+    }
+}
+
+/// Whether MSBuild re-parses `root` in an import path, and so names something
+/// other than the directory: it holds a `$(`, `;`, `*`, `?` or `%`.
+fn sdk_root_is_reparsed(root: &Path) -> bool {
+    let root_text = root.to_string_lossy();
+    root_text.contains(['%', ';', '*', '?']) || root_text.contains("$(")
+}
+
+/// The file an SDK import names: `root` joined with `under_root`, made absolute
+/// against the working directory and then collapsed lexically, as
+/// `NormalizePath` does.
+fn sdk_import_path(root: &Path, under_root: &str) -> std::io::Result<PathBuf> {
+    Ok(normalise(&std::path::absolute(root.join(under_root))?))
 }
 
 /// A wildcard `<Import Project=…>`. MSBuild expands the wildcard and —

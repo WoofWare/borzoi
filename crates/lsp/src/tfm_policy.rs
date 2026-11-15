@@ -274,7 +274,9 @@ pub(crate) fn tfm_untrusted(parsed: &ParsedProject) -> bool {
 fn read_untrusted(read: PropertyRead) -> bool {
     match read {
         PropertyRead::Untrusted(_)
-        | PropertyRead::UnsetInexact(InexactUnset::Refused | InexactUnset::Environment) => true,
+        | PropertyRead::UnsetInexact(
+            InexactUnset::Refused | InexactUnset::Environment | InexactUnset::Rejected(_),
+        ) => true,
         PropertyRead::Value(value) => value.contains("$("),
         PropertyRead::Unset
         | PropertyRead::UnsetInexact(
