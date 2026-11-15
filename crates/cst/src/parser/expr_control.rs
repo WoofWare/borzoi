@@ -699,7 +699,7 @@ impl<'src> Parser<'src> {
                         .peek()
                         .map(|(_, s)| s.clone())
                         .unwrap_or_else(|| self.source.len()..self.source.len());
-                    self.errors.push(ParseError {
+                    self.push_in_place_recovery_error(ParseError {
                         message: "expected guard expression after `when`".to_string(),
                         span,
                     });

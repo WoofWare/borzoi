@@ -32,6 +32,7 @@ impl<'src> Parser<'src> {
             errors: Vec::new(),
             last_binding_owns_close: false,
             rhs_closed_cleanly: false,
+            in_place_recoveries: 0,
             warnings: Vec::new(),
             interp_nest: Vec::new(),
             obj_brace_base_new: None,
@@ -381,6 +382,13 @@ impl<'src> Parser<'src> {
     /// expression, FCS's `UNDERSCORE DOT recover`). Records the error at the
     /// current token (or end-of-source) and emits the same zero-width ERROR
     /// placeholder, so the enclosing node still closes losslessly.
+    /// Record a diagnostic for a construct FCS's grammar recovers in place
+    /// (see [`Self::in_place_recoveries`]).
+    pub(super) fn push_in_place_recovery_error(&mut self, error: ParseError) {
+        self.errors.push(error);
+        self.in_place_recoveries += 1;
+    }
+
     pub(super) fn push_missing_operand_error_with(&mut self, message: &str) {
         let span = self
             .peek()

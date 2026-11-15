@@ -1518,7 +1518,7 @@ impl<'src> Parser<'src> {
         self.bump_into(SyntaxKind::IDENT_TOK);
         let dot_end = self.peek().map_or(self.source.len(), |(_, s)| s.end);
         self.bump_into(SyntaxKind::DOT_TOK);
-        self.errors.push(ParseError {
+        self.push_in_place_recovery_error(ParseError {
             message: "expected an identifier after `.`".to_string(),
             span: dot_end..dot_end,
         });

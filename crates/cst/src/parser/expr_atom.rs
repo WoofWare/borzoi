@@ -999,8 +999,10 @@ impl<'src> Parser<'src> {
     /// `parse_seq_block_body`), wrapped in `EXPR_DECL > LET_OR_USE_EXPR`.
     ///
     /// Caller must have verified `peek()` is `Virtual::Let` or (at body top
-    /// level) a raw `Token::Let`/`Token::Use`.
-    pub(super) fn parse_module_let(&mut self) {
+    /// level) a raw `Token::Let`/`Token::Use`. Returns whether the next
+    /// declaration may follow with no separator (see
+    /// [`Self::close_module_let_block`]).
+    pub(super) fn parse_module_let(&mut self) -> bool {
         let let_span = self
             .peek()
             .map(|(_, s)| s.clone())
@@ -1019,6 +1021,7 @@ impl<'src> Parser<'src> {
         // takes it (`close_module_let_block`).
         self.last_binding_owns_close = false;
         let errors_before = self.errors.len();
+        let in_place_before = self.in_place_recoveries;
         self.parse_let_head_and_bindings();
         let owns_block = self.last_binding_owns_close;
         // A closer the lex filter's outer wrapper swallowed (a stray `)` or
@@ -1033,7 +1036,9 @@ impl<'src> Parser<'src> {
                     matches!(token, Token::RParen | Token::RBrace)
                         && !self.filtered_stream_carries(span.start)
                 });
-        let clean = self.errors.len() == errors_before && !swallowed_pending;
+        // Errors for constructs recovered in place leave the binding clean.
+        let clean = self.errors.len() - errors_before == self.in_place_recoveries - in_place_before
+            && !swallowed_pending;
         // Classify from the binding terminator — the first filtered token past
         // the final binding's RHS-close `Virtual::BlockEnd` run (the cursor sits
         // at that `BlockEnd`; a recovered RHS leaves it elsewhere → `None` → a
@@ -1080,7 +1085,7 @@ impl<'src> Parser<'src> {
             self.builder.start_node_at(cp, SyntaxKind::LET_OR_USE_EXPR);
             self.builder.finish_node(); // LET_OR_USE_EXPR
             self.builder.finish_node(); // EXPR_DECL
-            return;
+            return false;
         }
         if let Some(term_idx) = explicit_in_terminator {
             // The expression form (`let x = e in body`) is the only shape where
@@ -1110,7 +1115,7 @@ impl<'src> Parser<'src> {
                 self.builder.start_node_at(cp, SyntaxKind::LET_OR_USE_EXPR);
                 self.builder.finish_node(); // LET_OR_USE_EXPR
                 self.builder.finish_node(); // EXPR_DECL
-                return;
+                return false;
             }
             // Decl-flat `let x = e in⏎ <sibling>`: a flat `SynModuleDecl.Let`.
             // Claim the swallowed `in` as a clean `IN_TOK` (+ the RHS-close
@@ -1120,15 +1125,13 @@ impl<'src> Parser<'src> {
             self.builder.start_node_at(cp, SyntaxKind::LET_DECL);
             self.builder.finish_node();
             self.close_binder_binding();
-            return;
+            return false;
         }
         // Plain `let x = e` (no explicit `in`) or a recovered RHS: a flat
         // `SynModuleDecl.Let`.
         self.builder.start_node_at(cp, SyntaxKind::LET_DECL);
         self.builder.finish_node();
-        if clean && owns_block {
-            self.close_module_let_block(block_let);
-        }
+        clean && owns_block && self.close_module_let_block(block_let)
     }
 
     /// Take a cleanly parsed module-level `let`'s RHS-close `BlockEnd`, the
@@ -1148,12 +1151,15 @@ impl<'src> Parser<'src> {
     /// FCS's parser recovers depends on where its yacc error arises, which our
     /// error list does not say. Each virtual is bumped as the loop bumps
     /// layout, after the trivia before it, so the tree is the loop's.
-    fn close_module_let_block(&mut self, block_let: bool) {
+    ///
+    /// Returns whether the token it stopped at is a raw `let` that FCS shifts
+    /// as the next declaration with no separator before it.
+    fn close_module_let_block(&mut self, block_let: bool) -> bool {
         if !matches!(
             self.peek(),
             Some((Ok(FilteredToken::Virtual(Virtual::BlockEnd)), _))
         ) {
-            return;
+            return false;
         }
         self.bump_layout_virtual();
         if !block_let
@@ -1162,7 +1168,7 @@ impl<'src> Parser<'src> {
                 Some((Ok(FilteredToken::Virtual(Virtual::DeclEnd)), _)) | None
             )
         {
-            return;
+            return false;
         }
         if let Some((_, span)) = self.peek().cloned() {
             self.errors.push(ParseError {
@@ -1170,17 +1176,25 @@ impl<'src> Parser<'src> {
                 span,
             });
         }
+        // A raw `let` (one LexFilter left unpromoted, on a line indented past
+        // the binding's) is a token FCS's parser can shift after `recover`,
+        // as the start of a module-level declaration, so panic mode discards
+        // nothing: the loop parses it.
+        if matches!(self.peek(), Some((Ok(FilteredToken::Raw(Token::Let)), _))) {
+            return true;
+        }
         while let Some((res, _)) = self.peek().cloned() {
             match res {
                 Ok(FilteredToken::Virtual(v)) => {
                     self.bump_layout_virtual();
                     if v == Virtual::DeclEnd {
-                        return;
+                        return false;
                     }
                 }
                 _ => self.bump_into(SyntaxKind::ERROR),
             }
         }
+        false
     }
 
     /// The filtered index of the final binding's terminator — the first token

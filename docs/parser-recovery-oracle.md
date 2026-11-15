@@ -181,7 +181,9 @@ reason:
   recovery discards tokens as FsYacc's error states dictate, which can take
   the type body's closing block end with it: on the body's last line that
   loses the file's module, or makes the next declaration one of the type's
-  members. Ours discards the rest of the member and closes the type.
+  members. Ours discards the rest of the member (up to a member keyword on
+  the same line, unless the rest opened a bracket or a `with`) and closes
+  the type.
 - **A guardless `when` before `->`, then more clauses.** FCS's arm for it ends
   the clause list, so it discards the clauses after it. Ours keeps them.
 - **An operator that is also a prefix operator** (`+`, `-`, `%`, `&&`) before
@@ -190,6 +192,13 @@ reason:
 - **An operator before a token that ends nothing and starts no operand** (a
   `?` with no name, a stray keyword). Ours leaves the operator for enclosing
   recovery, as it does before an offside block (the `=` of a binding head).
+
+A construct recovered in place leaves its binding as clean as FCS's
+parser sees it, so what follows the binding is recovered as after a clean
+one. In particular a raw `let` on a line indented past a module-level
+binding is FCS's next declaration: the binding's missing terminator is an
+error, but FCS's error recovery shifts the `let` rather than discarding it
+(`recover_raw_let_after_a_binding_grid`).
 
 Two placement families in the recovery grids stay pinned, since FCS's
 placement follows from its error states rather than from the layout:

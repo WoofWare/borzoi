@@ -11,7 +11,7 @@
 //! reproduce token by token, so those cells must only agree outside the
 //! damage, except the cells listed beside the grid with the reason.
 
-use crate::common::recovery::{Relation, recovered_verdict};
+use crate::common::recovery::Relation;
 
 /// What a grid cell's recovered trees must be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,13 +25,22 @@ enum Want {
 
 /// Grade every cell, collecting the ones that miss what they want and are not
 /// listed in `diverging` (cells whose trees are allowed to diverge), then fail
-/// listing them all. A listed cell that no longer diverges fails too, so the
-/// list cannot go stale.
+/// listing them all. Whatever a cell wants, it must also keep every unit FCS
+/// keeps, under the same key: an error span of ours covering a declaration
+/// would otherwise let the relation hold while we lose it. A listed cell that
+/// no longer diverges fails too, so the list cannot go stale.
 fn assert_cells(cells: impl IntoIterator<Item = (String, Want)>, diverging: &[&str]) {
+    use crate::common::recovery::{fcs_units, grade, our_units};
     let mut failures = Vec::new();
     let mut unused: Vec<&str> = diverging.to_vec();
     for (src, want) in cells {
-        let verdict = recovered_verdict(&src);
+        let json = {
+            let mut tmp = tempfile::NamedTempFile::with_suffix(".fs").expect("create tempfile");
+            std::io::Write::write_all(&mut tmp, src.as_bytes()).expect("write source");
+            crate::common::fcs_ast_batch(tmp.path())
+        };
+        let parse = borzoi_cst::parser::parse(&src);
+        let verdict = grade(&parse, &Default::default(), &json, &src);
         if let Some(i) = unused.iter().position(|a| *a == src) {
             unused.remove(i);
             if verdict.relation != Relation::Divergent {
@@ -55,6 +64,12 @@ fn assert_cells(cells: impl IntoIterator<Item = (String, Want)>, diverging: &[&s
                     .map(|d| format!(" ({d})"))
                     .unwrap_or_default()
             ));
+        }
+        let ours = our_units(&parse);
+        for unit in fcs_units(&json, &src) {
+            if !ours.iter().any(|o| o.key == unit.key) {
+                failures.push(format!("{src:?} loses {}", unit.key));
+            }
         }
     }
     assert!(
@@ -111,6 +126,7 @@ fn recover_unfinished_abstract_slot_grid() {
     ];
     let mut cells = Vec::new();
     let mut diverging = Vec::new();
+    let mut survivors = Vec::new();
     for flags in FLAGS {
         for &(rest, want) in RESTS {
             let slot = format!("{flags}{rest}");
@@ -137,11 +153,92 @@ fn recover_unfinished_abstract_slot_grid() {
                 format!("module M\ntype T =\n    {slot}\n    abstract Q: int\nlet x = 1\n"),
                 want,
             ));
+            // The next member on the slot's own line: the discarded rest of
+            // the slot ends where a member keyword begins, so the member
+            // survives, unless the rest opened a bracket or a `with` (the lex
+            // filter's contexts around the member are then the rest's, and the
+            // member is discarded with it, as on `main`). (`abstract` before
+            // `member` is one `abstract member` keyword run, whose junk `_.Q =
+            // 1` is on the body's last line.)
+            let flat = !rest.contains(['=', '(', '{']) && !rest.contains("with");
+            for next in [
+                "member _.Q = 1",
+                "abstract Q: int",
+                "val q: int",
+                "new() = {}",
+            ] {
+                let src = format!("module M\ntype T() =\n    {slot} {next}\nlet x = 1\n");
+                if matches!(*flags, "abstract" | "static abstract" | "[<A>] abstract")
+                    && rest.is_empty()
+                    && next.starts_with("member")
+                {
+                    diverging.push(src.clone());
+                } else if flat {
+                    survivors.push(src.clone());
+                }
+                cells.push((src, Want::Agree));
+            }
             cells.push((nested, want));
         }
     }
     let diverging: Vec<&str> = diverging.iter().map(String::as_str).collect();
+    assert_members_survive(&survivors);
     assert_cells(cells, &diverging);
+}
+
+/// Every source's first type definition keeps as many members as FCS's does:
+/// members sit inside their type's unit, so [`assert_cells`]'s unit-level
+/// loss check cannot see one discarded with an unfinished member's rest. A
+/// tree the normaliser does not model counts no members.
+fn assert_members_survive(sources: &[String]) {
+    use crate::common::normalised_ast::{
+        NormalisedDecl, NormalisedRoot, NormalisedTypeRepr, normalise_fcs_dump, normalise_parse,
+    };
+    fn members(root: &NormalisedRoot) -> usize {
+        let NormalisedRoot::Impl(file) = root else {
+            return 0;
+        };
+        file.modules
+            .iter()
+            .flat_map(|m| &m.decls)
+            .find_map(|d| match d {
+                NormalisedDecl::Types(defs) => defs.first(),
+                _ => None,
+            })
+            .map_or(0, |def| {
+                let repr = match &def.repr {
+                    NormalisedTypeRepr::ObjectModel { members, .. } => members.len(),
+                    _ => 0,
+                };
+                repr + def.members.len()
+            })
+    }
+    let mut lost = Vec::new();
+    for src in sources {
+        let json = {
+            let mut tmp = tempfile::NamedTempFile::with_suffix(".fs").expect("create tempfile");
+            std::io::Write::write_all(&mut tmp, src.as_bytes()).expect("write source");
+            crate::common::fcs_ast_batch(tmp.path())
+        };
+        let parse = borzoi_cst::parser::parse(src);
+        let count = |f: &dyn Fn() -> NormalisedRoot| {
+            crate::common::catch_unwind_silent(std::panic::AssertUnwindSafe(f))
+                .map_or(0, |root| members(&root))
+        };
+        let (fcs, ours) = (
+            count(&|| normalise_fcs_dump(&json)),
+            count(&|| normalise_parse(&parse)),
+        );
+        if ours < fcs {
+            lost.push(format!("{src:?}: FCS keeps {fcs} members, ours {ours}"));
+        }
+    }
+    assert!(
+        lost.is_empty(),
+        "{} types lose members FCS keeps:\n{}",
+        lost.len(),
+        lost.join("\n")
+    );
 }
 
 /// A `when` with no guard (FCS's `parenPattern WHEN` recovery arms): before
@@ -330,4 +427,39 @@ fn recover_operator_after_an_opener_is_the_brackets() {
         2,
     );
     assert_eq!(verdict.relation, Relation::Exact, "{}", verdict.token());
+}
+
+/// A binding whose right-hand side recovers in place, followed by a raw `let`
+/// on a line indented past the binding's own: FCS reports the `let` (the
+/// binding's terminator is missing), but its error recovery shifts it as the
+/// start of a module-level declaration rather than discarding it, so the
+/// declaration survives. Each right-hand side is clean, ends in an unfinished
+/// operator, or holds one, at the top of a file and in a nested module.
+#[test]
+fn recover_raw_let_after_a_binding_grid() {
+    const RHS: &[&str] = &[
+        "a",
+        "a *",
+        "a +",
+        "if a then 1 else 2",
+        "if a * then 1 else 2",
+        "f (a *) b",
+        "match a with | b when -> ()",
+    ];
+    let mut cells = Vec::new();
+    for rhs in RHS {
+        for indent in ["  ", "    ", "        "] {
+            cells.push((
+                format!("module M\nlet x = {rhs}\n{indent}let y = 1\nlet z = 2\n"),
+                Want::Agree,
+            ));
+            cells.push((
+                format!(
+                    "module M\nmodule A =\n    let x = {rhs}\n    {indent}let y = 1\n    let z = 2\n"
+                ),
+                Want::Agree,
+            ));
+        }
+    }
+    assert_cells(cells, &[]);
 }

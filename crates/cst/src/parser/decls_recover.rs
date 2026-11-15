@@ -201,8 +201,8 @@ impl<'src> Parser<'src> {
     /// Consume the rest of an unfinished member as `ERROR`, the tokens FCS's
     /// error recovery discards after a member's `recover` arm (an abstract
     /// slot that stops after its keywords, name or `:`): everything up to the
-    /// next layout token, `;`, `;;` or closer outside the offside blocks the
-    /// rest itself opens. Layout tokens are consumed zero-width, like
+    /// next layout token, `;`, `;;`, closer or member keyword outside the
+    /// offside blocks the rest itself opens. Layout tokens are consumed zero-width, like
     /// [`Self::skip_offside_block_as_error`]'s. A no-op when the member
     /// already ends at the cursor.
     ///
@@ -218,6 +218,9 @@ impl<'src> Parser<'src> {
         let mut blocks = 0u32;
         let mut brackets = 0u32;
         let mut withs = 0u32;
+        // Whether the rest has crossed a layout token or an `OWITH`, after
+        // which the lex filter's contexts no longer frame a next member.
+        let mut crossed_layout = false;
         while let Some((res, _)) = self.peek() {
             match res {
                 Ok(FilteredToken::Virtual(Virtual::BlockBegin)) => blocks += 1,
@@ -233,6 +236,26 @@ impl<'src> Parser<'src> {
                 }
                 Ok(FilteredToken::Raw(Token::Semi | Token::SemiSemi))
                     if blocks == 0 && brackets == 0 =>
+                {
+                    return;
+                }
+                // The next member's keyword, on the same line: FCS's error
+                // recovery shifts it as the start of the next member. After a
+                // bracket, a layout token or a `with` of the rest's, the lex
+                // filter's contexts around the member are the rest's, not the
+                // type body's, so the rest runs on to the member's end.
+                Ok(FilteredToken::Raw(
+                    Token::Member
+                    | Token::Abstract
+                    | Token::Override
+                    | Token::Default
+                    | Token::Static
+                    | Token::Val
+                    | Token::New
+                    | Token::Inherit,
+                ))
+                | Ok(FilteredToken::Virtual(Virtual::InterfaceMember))
+                    if brackets == 0 && !crossed_layout =>
                 {
                     return;
                 }
@@ -269,6 +292,14 @@ impl<'src> Parser<'src> {
                     }
                 }
                 _ => {}
+            }
+            if self.parked_on_layout_virtual()
+                || matches!(
+                    self.peek(),
+                    Some((Ok(FilteredToken::Virtual(Virtual::With)), _))
+                )
+            {
+                crossed_layout = true;
             }
             if self.parked_on_layout_virtual() {
                 self.builder.token(SyntaxKind::ERROR, "");

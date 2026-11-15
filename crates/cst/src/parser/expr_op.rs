@@ -1541,7 +1541,7 @@ impl<'src> Parser<'src> {
     /// the token after it, which may be the next declaration's.
     pub(super) fn push_missing_rhs_error(&mut self, op_span: Option<Range<usize>>, op: &str) {
         let span = op_span.unwrap_or(self.source.len()..self.source.len());
-        self.errors.push(ParseError {
+        self.push_in_place_recovery_error(ParseError {
             message: format!("expected an expression after {op}"),
             span,
         });

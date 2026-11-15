@@ -1210,6 +1210,12 @@ struct Parser<'src> {
     /// block and its gatherer stopped exactly at that block's `BlockEnd`,
     /// with nothing left for the recovery drain.
     rhs_closed_cleanly: bool,
+    /// How many of [`Self::errors`] report a construct FCS's grammar recovers
+    /// in place ([`Self::push_in_place_recovery_error`]): an unfinished
+    /// operator, a guardless `when`, a pattern path ending in a dot. FCS's
+    /// parser reduces those without entering an error state, so they leave a
+    /// binding as clean as FCS's for what follows it.
+    in_place_recoveries: usize,
     /// Warning-severity diagnostics (FCS `warning(...)` cases that leave
     /// `hadErrors` false). Kept separate from `errors` — see [`Parse`].
     warnings: Vec<ParseError>,
