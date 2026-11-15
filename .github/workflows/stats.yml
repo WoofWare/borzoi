@@ -199,10 +199,28 @@ jobs:
           # a run that did not measure: the summary is written before those
           # ratchets are checked, so assert against its contents rather than
           # the exit code.
+          #
+          # What this run should have measured is what the checked-in manifest
+          # records as comparable. A project the manifest pins as skipped (an
+          # oracle defect, blessed and reviewed on the pull request that
+          # moved it) is not one any run of this commit could measure. The
+          # manifest must still name every pinned project, and expect at least
+          # one, so a manifest that drifted from the pins, or whose project
+          # lines this parse no longer recognises, fails here rather than
+          # lowering the bar to zero.
+          manifest=crates/corpus-diff/manifests/project_corpus.txt
+          read -r listed expected < <(awk -F'\t' '
+            $1 ~ /\.fsproj$/ { listed++; if ($2 ~ /^comparable( |$)/) expected++ }
+            END { print listed + 0, expected + 0 }' "$manifest")
+          if [ "$listed" -ne "$BORZOI_PROJECT_PINNED" ] || [ "$expected" -lt 1 ]; then
+            echo "$manifest names $listed projects ($expected comparable)" \
+              "but the pin file names $BORZOI_PROJECT_PINNED" >&2
+            exit 1
+          fi
           comparable="$(jq -er '.statistics.projects.comparable' "$summary")"
-          if [ "$comparable" -ne "$BORZOI_PROJECT_PINNED" ]; then
-            echo "only $comparable of $BORZOI_PROJECT_PINNED pinned projects became comparable" \
-              "(runner exit $runner_status)" >&2
+          if [ "$comparable" -ne "$expected" ]; then
+            echo "$comparable of $BORZOI_PROJECT_PINNED pinned projects became comparable;" \
+              "$manifest expects $expected (runner exit $runner_status)" >&2
             exit 1
           fi
 
