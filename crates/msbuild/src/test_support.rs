@@ -9,11 +9,9 @@
 //! [`Outcome::False`], MSBuild agrees with that exact boolean; when we return
 //! [`Outcome::Unsupported`] we make no claim (our conservative fail-safe).
 //!
-//! Only the pieces the differential needs are re-exported. `Exists(..)` is
-//! deliberately out of scope: [`evaluate`] treats a reached `Exists` as
-//! [`Outcome::Unsupported`] (no filesystem oracle), so the differential never
-//! commits on it — the filesystem predicate is covered by the in-module unit
-//! tests instead.
+//! Only the pieces the differential needs are re-exported. [`evaluate`] treats
+//! a reached `Exists` as [`Outcome::Unsupported`] (no file system);
+//! [`evaluate_with_exists`] answers it from the file system, as the walk does.
 
 pub use crate::condition::{Eval, MAX_CONDITION_NESTING, Outcome, evaluate};
 pub use crate::properties::MAX_EXPRESSION_NESTING;
@@ -106,6 +104,25 @@ pub fn workload_accepts_host_version(version: &str) -> bool {
 /// or `None` where either declines. Exposed for the same differential.
 pub fn compare_workload_feature_bands(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     crate::sdk_resolver::workloads::compare_feature_bands(a, b)
+}
+
+/// Evaluate `condition` with `Exists('…')` answered from the file system,
+/// relative paths resolved against `exists_dir`, as the walk answers it for
+/// an element whose condition resolves there. Exposed so
+/// `tests/condition_diff.rs` can hold `Exists()` to MSBuild over generated
+/// trees of files, directories and symlinks.
+pub fn evaluate_with_exists(
+    condition: &str,
+    props: &PropertyMap,
+    exists_dir: &std::path::Path,
+) -> Outcome {
+    let observer = crate::observed::Observer::new();
+    let exists = |path: &str| crate::evaluator::condition_exists(&observer, path, exists_dir);
+    let probes = crate::condition::Probes {
+        exists: &exists,
+        observer: &observer,
+    };
+    crate::condition::evaluate_with_exists(condition, props, probes).outcome
 }
 
 pub use crate::evaluator::executor::{ExecutedItem, ExecutionProbe, ExecutionRead};

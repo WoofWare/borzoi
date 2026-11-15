@@ -522,3 +522,308 @@ fn whitespace_variant_sweep_soak() {
     let census = whitespace_variant_sweep(&mut oracle, &mut rng, cases);
     eprintln!("whitespace-variant soak: {census:?}");
 }
+
+// ---------------------------------------------------------------------------
+// `Exists()` against the file system.
+// ---------------------------------------------------------------------------
+
+/// `Exists()` over a real tree. Unix-only: the tree is made of symlinks and a
+/// socket.
+#[cfg(unix)]
+mod exists_on_disk {
+    use super::*;
+    use borzoi_msbuild::test_support::{Outcome, PropertyMap, evaluate_with_exists};
+    use std::path::PathBuf;
+
+    /// A tree of every kind of entry `Exists()` can meet, under a fresh directory:
+    /// files, directories, symlinks to each, a dangling symlink and a chain ending
+    /// in one, a symlink loop, a link to `..`, a socket, and a directory link out
+    /// of the project directory (`d/up`), whose `..` the OS and .NET resolve
+    /// differently. `proj` is the project directory every relative path resolves
+    /// against.
+    ///
+    /// The tree lives under the system temporary directory, whose path is short:
+    /// a socket's path must fit in `sun_path` (107 bytes on Linux, 103 on macOS).
+    /// Where it still does not, the tree has no socket and `sock` is a missing
+    /// name to both sides.
+    struct ExistsTree {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        socket: Option<std::os::unix::net::UnixListener>,
+    }
+
+    impl ExistsTree {
+        fn new() -> Self {
+            use std::os::unix::fs::symlink;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path().to_path_buf();
+            let proj = root.join("proj");
+            for sub in ["proj/d", "other"] {
+                std::fs::create_dir_all(root.join(sub)).expect("mkdir");
+            }
+            for file in ["proj/f", "proj/d/g", "other/o"] {
+                std::fs::write(root.join(file), "").expect("write");
+            }
+            for (target, link) in [
+                ("f", "flink"),
+                ("d", "dlink"),
+                ("missing", "dangling"),
+                ("dangling", "chain"),
+                ("loop", "loop"),
+                ("..", "dirup"),
+                ("../../other", "d/up"),
+            ] {
+                symlink(target, proj.join(link)).expect("symlink");
+            }
+            let socket = std::os::unix::net::UnixListener::bind(proj.join("sock")).ok();
+            ExistsTree {
+                _dir: dir,
+                root,
+                socket,
+            }
+        }
+
+        fn proj(&self) -> PathBuf {
+            self.root.join("proj")
+        }
+    }
+
+    /// The names a generated path is spelt from: every entry of [`ExistsTree`],
+    /// a case respelling, names that are not there, and the relative segments.
+    const EXISTS_SEGMENTS: &[&str] = &[
+        "f", "F", "d", "g", "up", "flink", "dlink", "dangling", "chain", "loop", "dirup", "sock",
+        "o", "other", "proj", "missing", "x%00", "..", "..", ".", "",
+    ];
+
+    /// One `Exists()` argument: a `;` list of one to three generated paths, each
+    /// relative or rooted in the tree, `/` or `\` separated, with or without a
+    /// trailing separator, padded or not, and sometimes routed through a property
+    /// or spelt with an escape. `props` collects the properties it references.
+    fn gen_exists_argument(
+        rng: &mut SplitMix64,
+        tree: &ExistsTree,
+        props: &mut Vec<(String, String)>,
+    ) -> String {
+        let entries = 1 + rng.below(3) * rng.below(2);
+        let mut list = Vec::new();
+        for _ in 0..entries {
+            let mut path = String::new();
+            if rng.below(5) == 0 {
+                path.push_str(&tree.root.to_string_lossy());
+                path.push('/');
+                path.push_str(rng.pick(&["proj/", "other/", ""]));
+            }
+            let segments = 1 + rng.below(2) + rng.below(2);
+            for i in 0..segments {
+                if i > 0 {
+                    path.push_str(rng.pick(&["/", "/", "\\"]));
+                }
+                path.push_str(rng.pick(EXISTS_SEGMENTS));
+            }
+            if rng.below(5) == 0 {
+                path.push_str(rng.pick(&["/", "\\", "/."]));
+            }
+            if rng.below(8) == 0 {
+                // An escape decodes to the character it spells: a `.`, a
+                // separator, or a `;` that is filename data rather than a split.
+                if let Some(at) = path.find(['.', '/', 'f']) {
+                    let escape = match path.as_bytes()[at] {
+                        b'.' => "%2e",
+                        b'/' => *rng.pick(&["%2f", "%5c"]),
+                        _ => "%66",
+                    };
+                    path.replace_range(at..at + 1, escape);
+                }
+            }
+            if rng.below(6) == 0 {
+                let name = format!("ExistsP{}", props.len());
+                props.push((name.clone(), path));
+                path = format!("$({name})");
+            }
+            if rng.below(6) == 0 {
+                path = format!(" {path} ");
+            }
+            list.push(path);
+        }
+        let mut argument = list.join(";");
+        if rng.below(10) == 0 {
+            argument.push(';');
+        }
+        argument
+    }
+
+    fn xml_escape(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+
+    /// What one batch of `Exists()` conditions came to, both sides.
+    #[derive(Default, Debug)]
+    struct ExistsCensus {
+        committed_true: usize,
+        committed_false: usize,
+        declined: usize,
+    }
+
+    /// Grade `conditions` (with `props`) against MSBuild, certain-implies-exact:
+    /// each is a property element's condition in a project in `tree`'s project
+    /// directory, so its relative `Exists()` paths resolve there, as ours do.
+    fn grade_exists_batch(
+        oracle: &mut Oracle,
+        tree: &ExistsTree,
+        conditions: &[String],
+        props: &[(String, String)],
+        census: &mut ExistsCensus,
+    ) {
+        let mut xml = String::from("<Project><PropertyGroup>");
+        for (name, value) in props {
+            xml.push_str(&format!("<{name}>{}</{name}>", xml_escape(value)));
+        }
+        xml.push_str("</PropertyGroup><PropertyGroup>");
+        let names: Vec<String> = (0..conditions.len()).map(|i| format!("R{i}")).collect();
+        for (name, condition) in names.iter().zip(conditions) {
+            xml.push_str(&format!(
+                "<{name} Condition=\"{}\">T</{name}>",
+                xml_escape(condition)
+            ));
+        }
+        xml.push_str("</PropertyGroup></Project>");
+        let project = tree.proj().join("p.proj");
+        let theirs = oracle
+            .project(&xml, &names, Some(&project), &[])
+            .unwrap_or_else(|| panic!("MSBuild rejects the batch:\n{xml}"));
+        let mut map = PropertyMap::new();
+        for (name, value) in props {
+            map.insert(name.clone(), value.clone());
+        }
+        for (name, condition) in names.iter().zip(conditions) {
+            let ours = evaluate_with_exists(condition, &map, &tree.proj());
+            let theirs = theirs[name] == "T";
+            match ours {
+                Outcome::Unsupported => census.declined += 1,
+                Outcome::True | Outcome::False => {
+                    let ours = ours == Outcome::True;
+                    assert_eq!(
+                        ours,
+                        theirs,
+                        "certain-implies-exact violated for {condition:?} with {props:?} \
+                     (project directory {})",
+                        tree.proj().display()
+                    );
+                    if ours {
+                        census.committed_true += 1;
+                    } else {
+                        census.committed_false += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hand-picked `Exists()` corners, each pinned to MSBuild's answer here and
+    /// round-tripped through the oracle: a dangling symlink exists, `..` collapses
+    /// as text before the file system sees it, a trailing separator asks for a
+    /// directory, and the argument is a `;` list every entry of which must exist.
+    #[test]
+    fn exists_corners() {
+        let tree = ExistsTree::new();
+        let mut oracle = Oracle::spawn();
+        let dangling = tree.proj().join("dangling").to_string_lossy().into_owned();
+        let mut cases: Vec<(&str, bool)> = vec![
+            ("f", true),
+            ("dangling", true),
+            ("chain", true),
+            ("loop", true),
+            ("dangling/", false),
+            ("dangling/.", true),
+            ("dlink/", true),
+            ("f/", false),
+            // `d/up` is `other`; lexically `d/up/..` is `d`.
+            ("d/up/o", true),
+            ("d/up/../g", true),
+            ("d/up/../../other/o", false),
+            ("dirup/proj/f", true),
+            ("missing/../f", true),
+            ("f;flink", true),
+            ("f;missing", false),
+            ("f%3bflink", false),
+            (";", false),
+            // .NET rejects a NUL before a `..` can erase it.
+            ("bad%00/../f", false),
+            ("d\\g", true),
+        ];
+        // A socket is no directory, so a file to `File.Exists`.
+        cases.push(("sock", tree.socket.is_some()));
+        let conditions: Vec<String> = cases
+            .iter()
+            .map(|(path, _)| format!("Exists('{path}')"))
+            .chain([format!("Exists('{dangling}')")])
+            .collect();
+        let mut census = ExistsCensus::default();
+        grade_exists_batch(&mut oracle, &tree, &conditions, &[], &mut census);
+        for ((path, expected), condition) in cases.iter().zip(&conditions) {
+            let ours = evaluate_with_exists(condition, &PropertyMap::new(), &tree.proj());
+            let ours = match ours {
+                Outcome::True => true,
+                Outcome::False => false,
+                Outcome::Unsupported => panic!("{path}: declined"),
+            };
+            assert_eq!(ours, *expected, "Exists('{path}')");
+        }
+        assert_eq!(census.declined, 0, "{census:?}");
+        // An escaped `\` decides rootedness apart from its role as a separator.
+        let root = tree.root.to_string_lossy();
+        for declined in ["d%5cg".to_owned(), format!("%5c{}/proj/f", &root[1..])] {
+            let condition = format!("Exists('{declined}')");
+            assert_eq!(
+                evaluate_with_exists(&condition, &PropertyMap::new(), &tree.proj()),
+                Outcome::Unsupported,
+                "{condition}"
+            );
+        }
+    }
+
+    /// Generated `Exists()` arguments over [`ExistsTree`], certain-implies-exact.
+    fn exists_sweep(seed: u64, cases: usize) -> ExistsCensus {
+        let tree = ExistsTree::new();
+        let mut oracle = Oracle::spawn();
+        let mut rng = SplitMix64(seed);
+        let mut census = ExistsCensus::default();
+        const BATCH: usize = 100;
+        let mut done = 0;
+        while done < cases {
+            let mut props = Vec::new();
+            let conditions: Vec<String> = (0..BATCH.min(cases - done))
+                .map(|_| {
+                    format!(
+                        "Exists('{}')",
+                        gen_exists_argument(&mut rng, &tree, &mut props)
+                    )
+                })
+                .collect();
+            grade_exists_batch(&mut oracle, &tree, &conditions, &props, &mut census);
+            done += conditions.len();
+        }
+        census
+    }
+
+    #[test]
+    fn exists_matches_msbuild_over_a_generated_tree() {
+        let census = exists_sweep(0xe815_75ee_d000, 4000);
+        eprintln!("exists sweep: {census:?}");
+        assert!(
+            census.committed_true >= 500 && census.committed_false >= 500,
+            "{census:?}"
+        );
+    }
+
+    /// Fresh-seed twin of [`exists_matches_msbuild_over_a_generated_tree`].
+    #[test]
+    #[ignore = "fresh-seed soak; run it when touching Exists()"]
+    fn exists_soak() {
+        let (seed, cases) = soak_parameters("condition exists", 20_000);
+        eprintln!("exists soak: {:?}", exists_sweep(seed, cases));
+    }
+}

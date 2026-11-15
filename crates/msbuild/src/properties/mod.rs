@@ -38,7 +38,8 @@ pub(crate) mod path_fixup;
 use escaping::Escaped;
 use trust::{ResolvedProvenance, Trust};
 
-use crate::observed::{self, Observer};
+use crate::dotnet_io;
+use crate::observed::Observer;
 
 #[cfg(feature = "test-support")]
 pub use expr::MAX_EXPRESSION_NESTING;
@@ -584,8 +585,8 @@ pub(crate) fn substitute(input: &str, props: &PropertyMap) -> (Provenanced<Escap
 }
 
 /// [`substitute`], with the filesystem-probing property functions enabled
-/// (`GetDirectoryNameOfFileAbove` walks ancestor directories with
-/// `is_file`, through `observer`). Only the with-imports evaluation path may
+/// (`GetDirectoryNameOfFileAbove` walks ancestor directories asking .NET's
+/// `File.Exists` of each, through `observer`). Only the with-imports evaluation path may
 /// use this; the
 /// pure `parse_fsproj` surface promises no filesystem access, so there
 /// the same expression stays a visible [`Issue::Unsupported`].
@@ -847,7 +848,9 @@ fn get_directory_name_of_file_above(
     }
     let mut dir = start_dir.to_path_buf();
     loop {
-        if observed::is_file(observer, &dir.join(file_path)) {
+        // `fileSystem.FileExists`: .NET's `File.Exists`, so a dangling
+        // symlink stops the walk and a directory of the name does not.
+        if dotnet_io::file_exists(observer, &dir.join(file_path)) {
             return Some(dir.to_string_lossy().into_owned());
         }
         if !dir.pop() {

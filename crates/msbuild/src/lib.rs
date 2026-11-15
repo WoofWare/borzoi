@@ -23,6 +23,7 @@
 mod condition;
 mod diagnostic;
 pub mod document;
+mod dotnet_io;
 mod evaluator;
 mod glob;
 pub mod glob_resolver;

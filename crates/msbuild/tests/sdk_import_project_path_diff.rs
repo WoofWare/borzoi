@@ -1,12 +1,13 @@
 //! Differential: how `<Import Sdk="X" Project="P"/>` resolves `P`, against
 //! real `dotnet msbuild`.
 //!
-//! MSBuild imports `Path.Combine(sdkResult.Path, P)`, normalised
-//! (`FileUtilities.NormalizePath`, Evaluator.cs). So `P` may climb out of the
-//! SDK directory with `..` — the Web SDK's `Sdk.Server.targets` imports
-//! `Microsoft.NET.Sdk.Web.ProjectSystem`'s
-//! `..\targets\Microsoft.NET.Sdk.Web.BeforeCommon.targets` — and an absolute
-//! `P` names its own file.
+//! MSBuild imports `Path.Combine(sdkResult.Path, P)` of `P` as written, then
+//! expands and normalises it (`FileUtilities.NormalizePath`, Evaluator.cs). So
+//! `P` may climb out of the SDK directory with `..` — the Web SDK's
+//! `Sdk.Server.targets` imports `Microsoft.NET.Sdk.Web.ProjectSystem`'s
+//! `..\targets\Microsoft.NET.Sdk.Web.BeforeCommon.targets` — and a `P` written
+//! absolute names its own file, while one a property makes absolute is
+//! appended to the SDK directory.
 //!
 //! The SDK here is a temp directory MSBuild's default resolver finds through
 //! `MSBuildSDKsPath`. It holds marker files inside the SDK's `Sdk/` directory,
@@ -222,11 +223,25 @@ fn evaluate_both(
     borzoi_msbuild::ParsedProject,
     Result<String, String>,
 ) {
+    evaluate_both_after(layout, "", imports)
+}
+
+/// [`evaluate_both`], with `prelude` (property groups the imports read)
+/// written before the imports.
+fn evaluate_both_after(
+    layout: &Layout,
+    prelude: &str,
+    imports: &[String],
+) -> (
+    String,
+    borzoi_msbuild::ParsedProject,
+    Result<String, String>,
+) {
     let body: String = imports
         .iter()
         .map(|p| format!("  <Import Sdk=\"MySdk\" Project=\"{p}\" />\n"))
         .collect();
-    let xml = format!("<Project>\n{body}</Project>\n");
+    let xml = format!("<Project>\n{prelude}{body}</Project>\n");
     let proj_dir = layout.root.join("proj");
     std::fs::create_dir_all(&proj_dir).expect("mkdir proj");
     let proj = proj_dir.join("p.proj");
@@ -372,6 +387,77 @@ fn sdk_import_project_path_tails_resolve_as_msbuild_does() {
         imported > 0 && failed > 0,
         "imported {imported}, failed {failed}"
     );
+}
+
+/// A respelling (with or without a tail) split at a random point, one side
+/// held by the property `P`: `$(P)rest` or `first$(P)`. MSBuild joins the SDK
+/// directory to the attribute as written, before expanding it, so a rooted
+/// spelling that starts inside `$(P)` is appended to the SDK directory, while
+/// one written rooted names its own file.
+fn check_property_cases(seed: u64, cases: usize) -> (usize, usize) {
+    let layout = Layout::new();
+    let mut rng = SplitMix64(seed);
+    let (mut imported, mut failed) = (0, 0);
+    for case in 0..cases {
+        let (spelling, in_domain) = respell_with_tail(&mut rng, &layout);
+        let boundaries: Vec<usize> = (0..=spelling.len())
+            .filter(|at| spelling.is_char_boundary(*at))
+            .collect();
+        let at = *rng.pick(&boundaries);
+        let (first, rest) = spelling.split_at(at);
+        let (value, attribute) = if rng.below(2) == 0 {
+            (first, format!("$(P){rest}"))
+        } else {
+            (rest, format!("{first}$(P)"))
+        };
+        let prelude = format!("  <PropertyGroup><P>{value}</P></PropertyGroup>\n");
+        let (xml, parsed, theirs) =
+            evaluate_both_after(&layout, &prelude, std::slice::from_ref(&attribute));
+        let label = format!("seed {seed} case {case}");
+        if assert_certain_implies_exact(&label, &xml, &parsed, theirs, in_domain) {
+            imported += 1;
+        } else {
+            failed += 1;
+        }
+    }
+    (imported, failed)
+}
+
+#[test]
+fn sdk_import_project_paths_through_a_property_resolve_as_msbuild_does() {
+    let (imported, failed) = check_property_cases(0, 16);
+    assert!(
+        imported > 0 && failed > 0,
+        "imported {imported}, failed {failed}"
+    );
+}
+
+/// The shape that found the raw-text join: a property holding an absolute
+/// path names `<sdk>//<that path>` to MSBuild, which is no file, while the
+/// same text written in the attribute names the file itself.
+#[test]
+fn an_absolute_path_through_a_property_is_appended_to_the_sdk_directory() {
+    let layout = Layout::new();
+    let absolute = layout.sdk_root().join("E.props");
+    let absolute = absolute.to_string_lossy();
+    let prelude = format!("  <PropertyGroup><P>{absolute}</P></PropertyGroup>\n");
+    let (xml, parsed, theirs) = evaluate_both_after(&layout, &prelude, &["$(P)".to_string()]);
+    assert!(
+        !assert_certain_implies_exact("via $(P)", &xml, &parsed, theirs, true),
+        "MSBuild imported {absolute} through $(P)"
+    );
+    let (xml, parsed, theirs) = evaluate_both(&layout, &[absolute.into_owned()]);
+    assert!(assert_certain_implies_exact(
+        "written", &xml, &parsed, theirs, true
+    ));
+}
+
+#[test]
+#[ignore = "soak: fresh seed, BORZOI_MSBUILD_SOAK_SEED / _CASES"]
+fn sdk_import_project_paths_through_a_property_soak() {
+    let (seed, cases) = common::soak_parameters("sdk_import_project_paths_property", 40);
+    let (imported, failed) = check_property_cases(seed, cases);
+    println!("imported {imported}, failed {failed}");
 }
 
 /// Spellings outside the modelled domain whose `..` erases a segment MSBuild

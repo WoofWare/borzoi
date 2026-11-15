@@ -172,7 +172,7 @@ enum Spelling {
     /// the SDK's files and `Directory.Build.targets` but not beside the
     /// project. An `<Import>`'s condition resolves `Exists()` against the
     /// importing file's directory, as the import itself does; most other
-    /// conditions resolve it against the project's (#786).
+    /// conditions resolve it against the project's.
     RelativeElsewhere,
 }
 
@@ -193,7 +193,7 @@ enum Shape {
     /// relative to the SDK's directory, whatever the spelling.
     ViaPropertySdk,
     /// [`Shape::ViaPropertySdk`] with the spelling's absolute path, which the
-    /// join appends rather than substitutes (#793).
+    /// join appends rather than substitutes.
     ViaPropertySdkAbsolute,
 }
 
@@ -1113,16 +1113,15 @@ fn render(case: &Case, sdk: &str) -> Rendered {
 /// MSBuild's (#677).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Family {
-    /// `Exists()` in a `<When>` condition, in an imported file, resolves
-    /// against the file's directory; MSBuild resolves it against the
-    /// project's (#786). Covers `ExistsProbe` only: the element and group
-    /// probes agree.
-    ExistsBaseDirectory,
-    /// `Exists()` on a symlink whose target is missing: MSBuild (.NET's
-    /// `File.Exists`) says true, the walk says false. So an import guarded by
-    /// it is skipped by the walk and attempted by MSBuild, which then rejects
-    /// the project (#778).
-    DanglingSymlinkExists,
+    /// A decided import of a path that names no file MSBuild can load: a
+    /// symlink whose target is missing, which `Exists()` reports present, or
+    /// an SDK-qualified import of a property holding a rooted path, which
+    /// MSBuild appends to the SDK's directory. MSBuild rejects the project
+    /// (MSB4019). The walk reports the failed import, but still publishes the
+    /// values bound around it, and in SDK content the SDK's Compile tolerance
+    /// keeps the Compile set certain (#845). Covers findings against a
+    /// rejected project only.
+    ImportOfUnloadableFile,
     /// An import input written under a condition the walk cannot decide, or
     /// refused: the walk takes one side of every import it decides, and a
     /// later write of a property the skipped (or followed) file also writes
@@ -1130,14 +1129,6 @@ enum Family {
     /// inexact (#791). Covers property findings only: the Compile set must
     /// still be uncertain.
     UndecidedImportHidesWrites,
-    /// An SDK-qualified import of a property holding a rooted path: MSBuild
-    /// joins the SDK's directory to the attribute as written and rejects the
-    /// project, the walk expands first and imports the rooted file (#793).
-    SdkImportJoinsRawText,
-    /// `Exists()` resolves `..` physically; .NET's `File.Exists` collapses it
-    /// as text first. They part on a relative path tested from a file reached
-    /// through the directory link `proj/up` (#778).
-    ExistsResolvesPhysically,
     /// Content the walk cannot see imports a file, and a later plain import of
     /// it (or of a file it imports) is one MSBuild skips as a duplicate; the
     /// walk does not know the earlier import, walks the later one, and commits
@@ -1161,11 +1152,8 @@ enum Family {
 }
 
 const KNOWN_DIVERGENCES: &[Family] = &[
-    Family::ExistsBaseDirectory,
-    Family::DanglingSymlinkExists,
+    Family::ImportOfUnloadableFile,
     Family::UndecidedImportHidesWrites,
-    Family::SdkImportJoinsRawText,
-    Family::ExistsResolvesPhysically,
     Family::HiddenImportThenPlainImport,
     Family::UndecidedImportOfMissingFile,
     Family::SdkToleratedHiddenImport,
@@ -1176,15 +1164,15 @@ impl Family {
     /// never from how the walk answered it.
     fn contains(self, case: &Case) -> bool {
         match self {
-            Family::ExistsBaseDirectory => case.props.probes_exists,
-            Family::DanglingSymlinkExists => case.reimports.iter().any(|r| {
-                matches!(
+            Family::ImportOfUnloadableFile => case.reimports.iter().any(|r| {
+                let dangling = matches!(
                     r.spelling,
                     Spelling::FileLink | Spelling::Relative | Spelling::RelativeElsewhere
                 ) && match r.which {
                     Which::Props => !case.props.present,
                     Which::Targets => !case.targets_present,
-                }
+                };
+                dangling || r.shape == Shape::ViaPropertySdkAbsolute
             }),
             Family::UndecidedImportHidesWrites => {
                 case.undecided.is_some()
@@ -1205,29 +1193,13 @@ impl Family {
                             .iter()
                             .any(|r| r.site != RepeatSite::HiddenBeforePoint))
             }
-            Family::SdkImportJoinsRawText => case
-                .reimports
-                .iter()
-                .any(|r| r.shape == Shape::ViaPropertySdkAbsolute),
-            Family::ExistsResolvesPhysically => {
-                case.reimports
-                    .iter()
-                    .any(|r| r.spelling == Spelling::DirLink)
-                    && case
-                        .reimports
-                        .iter()
-                        .any(|r| r.shape == Shape::ViaPropertySdk)
-            }
         }
     }
 
     /// Whether the family explains `finding`, in a case it contains.
     fn covers(self, finding: &Finding) -> bool {
         match self {
-            Family::DanglingSymlinkExists => true,
-            Family::ExistsBaseDirectory => {
-                finding.what == "ExistsProbe" || finding.what == "ExistsProbe (must commit)"
-            }
+            Family::ImportOfUnloadableFile => finding.theirs == "a rejected project",
             Family::UndecidedImportHidesWrites => finding.kind == FindingKind::Property,
             Family::HiddenImportThenPlainImport => finding.kind == FindingKind::Compile,
             Family::UndecidedImportOfMissingFile => {
@@ -1236,7 +1208,6 @@ impl Family {
                         && finding.theirs == "a rejected project")
             }
             Family::SdkToleratedHiddenImport => finding.kind == FindingKind::Compile,
-            Family::SdkImportJoinsRawText | Family::ExistsResolvesPhysically => true,
         }
     }
 
@@ -1244,46 +1215,12 @@ impl Family {
     /// asserts still diverges.
     fn witness(self) -> Case {
         match self {
-            Family::ExistsBaseDirectory => Case {
-                props: Props {
-                    present: true,
-                    probes_exists: true,
-                    ..Props::default()
-                },
-                ..Case::usual()
-            },
-            Family::DanglingSymlinkExists => Case {
+            Family::ImportOfUnloadableFile => Case {
                 targets_present: false,
                 reimports: vec![Reimport {
                     which: Which::Targets,
                     spelling: Spelling::FileLink,
                     shape: Shape::Literal,
-                    site: Site::Body,
-                }],
-                ..Case::usual()
-            },
-            Family::ExistsResolvesPhysically => Case {
-                reimports: vec![
-                    Reimport {
-                        which: Which::Targets,
-                        spelling: Spelling::DirLink,
-                        shape: Shape::PropertyOnly,
-                        site: Site::SdkProps,
-                    },
-                    Reimport {
-                        which: Which::Targets,
-                        spelling: Spelling::DotDot,
-                        shape: Shape::ViaPropertySdk,
-                        site: Site::DirectoryBuildTargets,
-                    },
-                ],
-                ..Case::usual()
-            },
-            Family::SdkImportJoinsRawText => Case {
-                reimports: vec![Reimport {
-                    which: Which::Props,
-                    spelling: Spelling::DotDot,
-                    shape: Shape::ViaPropertySdkAbsolute,
                     site: Site::Body,
                 }],
                 ..Case::usual()
