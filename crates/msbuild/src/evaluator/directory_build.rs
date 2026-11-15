@@ -362,7 +362,7 @@ pub(super) fn visit_point(
     if decided {
         return Visit::Follow;
     }
-    let identity_certain = is_certain(state, path_name);
+    let identity_certain = is_certain(state, path_name) && names_one_file(state, path_name);
     if !identity_certain {
         // The whole evaluation is uncertain from here: nothing a later point
         // could import adds to that.
@@ -584,6 +584,17 @@ fn point_path(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf>
     } else {
         dir.join(path)
     })
+}
+
+/// Whether the path property names at most one file: a value that is no list
+/// and no wildcard, classified in the escaped domain as an import's `Project`
+/// is. A list or a wildcard imports every file it names or matches, which the
+/// fallback's walk of one file does not model, so its identity is in doubt.
+fn names_one_file(state: &State<'_>, path_name: &str) -> bool {
+    state
+        .lookup
+        .get_ignoring_trust(path_name)
+        .is_none_or(|value| !value.as_escaped().contains(';') && !value.is_filespec_wildcard())
 }
 
 /// [`point_path`], if the file exists.

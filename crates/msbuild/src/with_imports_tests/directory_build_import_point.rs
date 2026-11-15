@@ -630,3 +630,57 @@ fn a_point_naming_an_alias_leaves_the_sdks_own_import_to_the_fallback() {
         paths_of(&parsed.items)
     );
 }
+
+/// A path whose value is a wildcard or a list names no one file, yet MSBuild
+/// imports every file it matches: an undecided point over it may import them
+/// all, so what they write declines.
+fn a_point_over_a_spec_of(spec: &str, files: &[&str]) {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolver = custom_sdk(
+        tmp.path(),
+        "<Project />\n",
+        &format!(
+            "<Project>\n  <Import Project=\"$(DirectoryBuildTargetsPath)\" \
+             Condition=\"{UNDECIDABLE} Or Exists('$(DirectoryBuildTargetsPath)')\" />\n</Project>\n"
+        ),
+        &[],
+    );
+    for file in files {
+        write_at(
+            &tmp.path().join("imports"),
+            file,
+            "<Project><PropertyGroup><FromSpec>1</FromSpec></PropertyGroup></Project>",
+        );
+    }
+    let project = write_at(
+        tmp.path(),
+        "p.fsproj",
+        &format!(
+            "<Project Sdk=\"Custom\">\n  <PropertyGroup>\n    \
+             <DirectoryBuildTargetsPath>{spec}</DirectoryBuildTargetsPath>\n  \
+             </PropertyGroup>\n</Project>\n"
+        ),
+    );
+    let parsed = parse_file_with_sdk_resolution(&project, resolver);
+    assert!(
+        !parsed.property("FromSpec").is_exact(),
+        "MSBuild imports the files {spec} names and defines `FromSpec`; the walk read {:?}",
+        parsed.property("FromSpec")
+    );
+}
+
+#[test]
+fn an_undecided_point_over_a_wildcard_path_declines_what_its_files_write() {
+    a_point_over_a_spec_of(
+        "$(MSBuildProjectDirectory)/imports/*.targets",
+        &["a.targets"],
+    );
+}
+
+#[test]
+fn an_undecided_point_over_a_path_list_declines_what_its_files_write() {
+    a_point_over_a_spec_of(
+        "$(MSBuildProjectDirectory)/imports/a.targets;$(MSBuildProjectDirectory)/imports/b.targets",
+        &["a.targets", "b.targets"],
+    );
+}
