@@ -439,6 +439,16 @@ impl Census {
     }
 }
 
+/// The construct a case made undecidable.
+#[derive(Clone, Copy)]
+enum Undecided<'a> {
+    /// A property write, of this name.
+    Write(&'a str),
+    /// An import in the SDK, of content that may redefine what was written
+    /// before it.
+    Import,
+}
+
 /// Check one undecided document against its worlds, recording into `census`.
 ///
 /// A certain fact must be published, with the same value, by every world that
@@ -453,8 +463,7 @@ fn check(
     undecided: &Facts,
     worlds: &[(String, Facts)],
     absent_but_written: &[&str],
-    wrapped: &str,
-    under_opacity: bool,
+    undecided_construct: Undecided<'_>,
     label: &str,
 ) {
     census.cases += 1;
@@ -462,7 +471,10 @@ fn check(
         // The floor counts only the derived complement: the wrapped write's
         // own name moves by construction, so counting it would floor the
         // swept input rather than the dependence on it.
-        let derived = !matches!(fact, Fact::Property(name) if name.eq_ignore_ascii_case(wrapped));
+        let derived = !matches!(
+            (fact, undecided_construct),
+            (Fact::Property(name), Undecided::Write(wrapped)) if name.eq_ignore_ascii_case(wrapped)
+        );
         let values: Vec<&Option<Vec<String>>> = worlds.iter().map(|(_, w)| &w[fact]).collect();
         let world_committed: Vec<&Vec<String>> = values.iter().filter_map(|v| v.as_ref()).collect();
         let owed = world_committed.len() == values.len()
@@ -533,7 +545,7 @@ fn check(
         // reaching any other fact is counted, not failed — and a Compile set
         // that differs in whether the spliced file joined is the splice's own
         // decision, which must hold.
-        let a_stale_read_outside_the_splice = under_opacity
+        let a_stale_read_outside_the_splice = matches!(undecided_construct, Undecided::Import)
             && match (fact, disagreeing.as_ref()) {
                 (Fact::CompileItems, Some((_, Some(world)))) => {
                     let spliced = |set: &[String]| set.iter().any(|s| s.contains(SPLICED_FILE));
@@ -609,8 +621,7 @@ fn sweep(
                 &undecided,
                 &world_facts,
                 &absent_but_written,
-                doc.writes[target].name,
-                false,
+                Undecided::Write(doc.writes[target].name),
                 &format!("{label} {wrap:?}"),
             );
         }
@@ -890,8 +901,7 @@ fn sweep_opacity(seed: u64, cases: usize, names: &[&'static str]) -> Census {
             &undecided,
             &world_facts,
             &absent_but_written,
-            "",
-            true,
+            Undecided::Import,
             "opacity",
         );
     }
