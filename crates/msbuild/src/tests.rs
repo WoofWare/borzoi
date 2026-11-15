@@ -2344,6 +2344,10 @@ fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
         "><ExcludeAssets>a<?p q?>b</ExcludeAssets></ProjectReference",
         "><ExcludeAssets>a\r\nb</ExcludeAssets></ProjectReference",
     ] {
+        // MSBuild runs its path fixup on Unix hosts alone.
+        if cfg!(windows) && metadata.contains('\\') {
+            continue;
+        }
         let src = format!(
             "<Project><ItemGroup><ProjectReference Include=\"../Lib/Lib.fsproj\" {metadata} /></ItemGroup></Project>"
         )
@@ -2392,6 +2396,10 @@ fn package_metadata_msbuild_reads_its_own_way_is_uncertain() {
             false,
         ),
     ] {
+        // MSBuild runs its path fixup on Unix hosts alone.
+        if cfg!(windows) && metadata.contains('\\') {
+            continue;
+        }
         let element = |kind: &str, include: &str| {
             format!("<{kind} Include=\"{include}\" {metadata} />")
                 .replace("></X />", &format!("></{kind}>"))
@@ -2438,6 +2446,10 @@ fn compile_order_msbuild_reads_its_own_way_declines() {
         "CompileOrder=\"\\tmp\\CompileFirst\" />",
         "><CompileOrder>Compile<x/>First</CompileOrder></Compile>",
     ] {
+        // MSBuild runs its path fixup on Unix hosts alone.
+        if cfg!(windows) && order.contains('\\') {
+            continue;
+        }
         let src = format!(
             "<Project><ItemGroup><Compile Include=\"B.fs\" /><Compile Include=\"A.fs\" {order}</ItemGroup></Project>"
         );
