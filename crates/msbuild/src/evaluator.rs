@@ -4844,8 +4844,8 @@ fn walk_property_child_inner(
     };
     let unpinned_by = expansion.unpinned_root.clone().or(gate_unpinned_root);
     let stale_by = expansion.value.trust().stale().cloned().or_else(|| {
-        node.attribute("Condition")
-            .and_then(|condition| state.trust_for_raw(condition).stale().cloned())
+        attribute(node, "Condition")
+            .and_then(|condition| state.trust_for_raw(&condition).stale().cloned())
     });
     // Unlike the unevaluable-value paths above, a cleanly-expanded value
     // under a pinned gate is exact even inside an SDK file: the property
