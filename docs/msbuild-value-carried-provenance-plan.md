@@ -61,9 +61,9 @@
 > whole-evaluation withdrawal, `ParsedProject::rejection`: MSBuild rejects
 > such a project outright, so no value bound before or after the import is
 > the build's, and a positional mark (opacity, staleness) would leave the
-> earlier ones committed. Every site is `Possible` for now; grading a
-> `Certain` rejection against the oracle, which needs certain reachability,
-> lands with #783's illegal conditions. What remains is a failing import in
+> earlier ones committed. #783's illegal conditions join them, and a site
+> MSBuild reaches for certain is a `Certain` rejection, graded against the
+> oracle; the rest are `Possible`. What remains is a failing import in
 > content the walk cannot see, which the import-graph harness carries in
 > `UndecidedImportHidesWrites`.
 >

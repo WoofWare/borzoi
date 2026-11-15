@@ -1006,7 +1006,7 @@ fn a_value_written_before_hidden_content_claims_no_more_than_its_worlds_agree_on
     census.print("with an undecided SDK import");
     assert_sound(&census, &[("Compile items", 30)]);
     assert_eq!(
-        census.stale_reads, 26,
+        census.stale_reads, 24,
         "the #792 set-aside count (a stale value read outside the import points and the \
          Compile items) moved"
     );

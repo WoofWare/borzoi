@@ -816,9 +816,11 @@ fn whitespace_variant_sweep_fixed_seed() {
 /// rejects the project: the facts a consumer of `Outcome::Illegal` stands on,
 /// pinned through the `project` op. A condition behind a false
 /// `<PropertyGroup>`, `<ItemDefinitionGroup>` or `<ImportGroup>`, an unchosen
-/// `<When>`, or a `<Target>` is never evaluated, syntax errors included. An
-/// item's condition is evaluated under a false `<ItemGroup>`, and its
-/// metadata's under a false item, type errors included.
+/// `<When>`, or a `<Target>` is never evaluated, syntax errors included, nor is
+/// one on a write of a global property. An item's condition is evaluated under
+/// a false `<ItemGroup>`, and an `Include` item's metadata's under a false item
+/// or group, type errors included; an `Update` item's metadata's only where the
+/// update applies. `evaluator/rejection.rs` judges conditions by these facts.
 #[test]
 fn where_msbuild_evaluates_a_condition() {
     let mut oracle = Oracle::spawn();
@@ -927,6 +929,57 @@ fn where_msbuild_evaluates_a_condition() {
             r#"<Target Name="T"><PropertyGroup><R Condition="tr ue">x</R></PropertyGroup></Target>"#,
             false,
         ),
+        // An `Include` item's metadata, whatever its group or item holds, and
+        // whether or not the include names anything; an `Update`'s only
+        // where the update applies.
+        (
+            r#"<ItemGroup Condition="false"><I Include="x"><M Condition="tr ue">m</M></I></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup><I Include="nomatch/*.cs"><M Condition="1 &lt; abc">m</M></I></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup><I Include="$(Nothing)"><M Condition="tr ue">m</M></I></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup><I Include="x" Exclude="x"><M Condition="tr ue">m</M></I></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup><I Update="nothere"><M Condition="tr ue">m</M></I></ItemGroup>"#,
+            false,
+        ),
+        (
+            r#"<ItemGroup><I Include="x"/><I Update="x"><M Condition="tr ue">m</M></I></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemGroup><I Include="x"/><I Update="x" Condition="false"><M Condition="tr ue">m</M></I></ItemGroup>"#,
+            false,
+        ),
+        (
+            r#"<ItemGroup Condition="false"><I Update="x" Condition="1 &lt; abc"/></ItemGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemDefinitionGroup><I><M Condition="1 &lt; abc">m</M></I></ItemDefinitionGroup>"#,
+            true,
+        ),
+        (
+            r#"<ItemDefinitionGroup><I Condition="tr ue"/></ItemDefinitionGroup>"#,
+            true,
+        ),
+        (
+            r#"<UsingTask TaskName="X" AssemblyFile="y.dll" Condition="1 &lt; abc"/>"#,
+            true,
+        ),
+        (
+            r#"<Choose><When Condition="false"/><Otherwise><ItemGroup><I Include="x" Condition="tr ue"/></ItemGroup></Otherwise></Choose>"#,
+            true,
+        ),
         // An item list is illegal in a property's condition, even behind a
         // false `and`, and legal in an item's.
         (
@@ -940,6 +993,23 @@ fn where_msbuild_evaluates_a_condition() {
     ] {
         let xml = format!("<Project>{body}</Project>");
         let theirs = oracle.project(&xml, &names, None, &[]);
+        assert_eq!(theirs.is_none(), rejected, "{xml}");
+    }
+    // A write of a global property is discarded with its condition
+    // unevaluated; its group's condition is still evaluated.
+    let globals = [("G".to_string(), "global".to_string())];
+    for (body, rejected) in [
+        (
+            r#"<PropertyGroup><G Condition="tr ue">x</G></PropertyGroup>"#,
+            false,
+        ),
+        (
+            r#"<PropertyGroup Condition="tr ue"><G>x</G></PropertyGroup>"#,
+            true,
+        ),
+    ] {
+        let xml = format!("<Project>{body}</Project>");
+        let theirs = oracle.project(&xml, &names, None, &globals);
         assert_eq!(theirs.is_none(), rejected, "{xml}");
     }
 }

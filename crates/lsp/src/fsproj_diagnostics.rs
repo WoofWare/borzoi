@@ -10,14 +10,16 @@
 //! own `<ProjectReference>` elements whose target is missing or is a project
 //! kind we don't model (consumer #3 stage 3.2).
 //!
-//! Severities are uniformly `WARNING`: the parser is by-design best-effort
-//! and each diagnostic records a *divergence from MSBuild*, not a fatal
-//! syntax error. One `ERROR` case is the compiler's refusal of the project's
-//! `<LangVersion>` ([`crate::sdk_language`]), which fails the build. The other
-//! is when the XML itself doesn't
-//! parse — `parse_fsproj_with_imports` returns `Err(ParseError::Xml)`,
-//! which surfaces as a single error at the document head with the
-//! roxmltree message.
+//! Severities are `WARNING` but for three cases: the parser is by-design
+//! best-effort and each diagnostic records a *divergence from MSBuild*, not a
+//! fatal error. Each `ERROR` fails the build: the compiler's refusal of the
+//! project's `<LangVersion>` ([`crate::sdk_language`]); a construct the
+//! evaluation claims makes MSBuild reject the project
+//! ([`DiagnosticKind::Rejected`]: an import of a missing file, a condition
+//! MSBuild cannot evaluate), where a construct that only may is a warning; and
+//! XML that doesn't parse, for which `parse_fsproj_with_imports` returns
+//! `Err(ParseError::Xml)`, surfaced as a single error at the document head
+//! with the roxmltree message.
 //!
 //! A discovery error ([`DiscoveryError`]: no `.NET` install found, or an
 //! unreadable/unparseable `global.json`) demotes us to evaluating without
@@ -99,7 +101,7 @@ pub fn diagnostics_for(
                 //
                 // Meta-import diagnostics (`ImportFailed`, `SdkNotFound`,
                 // `SdkVersionNotSatisfied`, `SdkResolverAbsent`,
-                // `UnresolvedImport`, `MayBeRejected`) describe
+                // `UnresolvedImport`, `MayBeRejected`, `Rejected`) describe
                 // the *integrity of the import chain*. Top-level ones are
                 // already `Buffer`-origin because the walker pushes them
                 // before descending. But a *nested* import that itself
@@ -119,6 +121,7 @@ pub fn diagnostics_for(
                                 | DiagnosticKind::SdkResolverAbsent { .. }
                                 | DiagnosticKind::UnresolvedImport { .. }
                                 | DiagnosticKind::MayBeRejected { .. }
+                                | DiagnosticKind::Rejected { .. }
                         )
                 })
                 .map(|d| to_lsp_diagnostic(text, &d.kind, &d.span, discovery_failure))
@@ -724,11 +727,20 @@ fn to_lsp_diagnostic(
             start: offset_to_position(text, span.start),
             end: offset_to_position(text, span.end),
         },
-        severity: Some(DiagnosticSeverity::WARNING),
+        severity: Some(severity(kind)),
         source: Some("borzoi".to_string()),
         message: message(kind, discovery_failure),
         related_information,
         ..Default::default()
+    }
+}
+
+/// A diagnostic's severity: an error for a construct that makes MSBuild reject
+/// the project, which fails the build, and a warning for every divergence.
+fn severity(kind: &DiagnosticKind) -> DiagnosticSeverity {
+    match kind {
+        DiagnosticKind::Rejected { .. } => DiagnosticSeverity::ERROR,
+        _ => DiagnosticSeverity::WARNING,
     }
 }
 
@@ -841,13 +853,19 @@ fn message(kind: &DiagnosticKind, discovery_failure: Option<&DiscoveryError>) ->
                 path.display()
             )
         }
-        DiagnosticKind::MayBeRejected {
-            cause:
-                RejectionCause::Import {
-                    project,
-                    gate_undecided,
-                    why,
-                },
+        DiagnosticKind::MayBeRejected { cause } => rejection_message(cause, false),
+        DiagnosticKind::Rejected { cause } => rejection_message(cause, true),
+    }
+}
+
+/// The message for a construct that makes MSBuild reject the project
+/// (`certain`), or that may.
+fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
+    match cause {
+        RejectionCause::Import {
+            project,
+            gate_undecided,
+            why,
         } => {
             let gate = if *gate_undecided {
                 ", under a condition I can't evaluate,"
@@ -859,9 +877,23 @@ fn message(kind: &DiagnosticKind, discovery_failure: Option<&DiscoveryError>) ->
                 UnloadableImport::NoPath => "no path".to_string(),
                 UnloadableImport::Failed(reason) => import_fail_message(reason),
             };
+            if certain {
+                format!(
+                    "MSBuild rejects this project: it imports `{project}`, which loads nothing \
+                     ({why}) — no evaluated value is trusted"
+                )
+            } else {
+                format!(
+                    "MSBuild may reject this project: it may import `{project}`{gate} which \
+                     loads nothing ({why}) — no evaluated value is trusted"
+                )
+            }
+        }
+        RejectionCause::IllegalCondition { condition } => {
+            let rejects = if certain { "rejects" } else { "may reject" };
             format!(
-                "MSBuild may reject this project: it may import `{project}`{gate} which loads \
-                 nothing ({why}) — no evaluated value is trusted"
+                "MSBuild {rejects} this project: it cannot evaluate the condition `{condition}` \
+                 — no evaluated value is trusted"
             )
         }
     }
@@ -1666,6 +1698,56 @@ mod tests {
         );
         // Span covers the <Import> element on line 1 (zero-indexed).
         assert_eq!(d.range.start.line, 1);
+    }
+
+    #[test]
+    fn a_certain_rejection_is_an_error_and_a_possible_one_a_warning() {
+        // The missing import fails MSBuild's evaluation, and so does the
+        // condition MSBuild cannot parse: each fails the build, so each is an
+        // error at its construct. Under a gate the walk cannot decide, MSBuild
+        // may never evaluate the condition: a warning.
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("App.fsproj");
+        let env = env_with(|e| e.dotnet_root = Some(tmp.path().join("dotnet")));
+        for (text, line, severity) in [
+            (
+                "<Project>\n  <Import Project=\"./does-not-exist.props\" />\n</Project>",
+                1,
+                DiagnosticSeverity::ERROR,
+            ),
+            (
+                "<Project>\n  <PropertyGroup>\n    <R Condition=\"tr ue\">x</R>\n  </PropertyGroup>\n</Project>",
+                2,
+                DiagnosticSeverity::ERROR,
+            ),
+            (
+                "<Project>\n  <PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace(''))\">\n    \
+                 <R Condition=\"tr ue\">x</R>\n  </PropertyGroup>\n</Project>",
+                2,
+                DiagnosticSeverity::WARNING,
+            ),
+        ] {
+            let diags = diagnostics_for(text, &project, &env, &default_extras());
+            let rejections: Vec<_> = diags
+                .iter()
+                .filter(|d| {
+                    d.message.starts_with("MSBuild rejects this project")
+                        || d.message.starts_with("MSBuild may reject this project")
+                })
+                .collect();
+            assert_eq!(rejections.len(), 1, "{text}\n{diags:#?}");
+            assert_eq!(rejections[0].severity, Some(severity), "{text}");
+            assert_eq!(rejections[0].range.start.line, line, "{text}");
+            let errors = diags
+                .iter()
+                .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+                .count();
+            assert_eq!(
+                errors,
+                usize::from(severity == DiagnosticSeverity::ERROR),
+                "{diags:#?}"
+            );
+        }
     }
 
     #[test]

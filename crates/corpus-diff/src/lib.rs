@@ -520,6 +520,7 @@ fn item_uncertainty_diagnostic(kind: &DiagnosticKind) -> bool {
             | DiagnosticKind::SdkResolutionUnsupported { .. }
             | DiagnosticKind::ImplicitImportPresent { .. }
             | DiagnosticKind::MayBeRejected { .. }
+            | DiagnosticKind::Rejected { .. }
     )
 }
 
@@ -532,6 +533,7 @@ fn define_constants_uncertainty_diagnostic(kind: &DiagnosticKind) -> bool {
             | DiagnosticKind::UnresolvedMetadataReference { .. }
             | DiagnosticKind::UnsupportedCondition { .. }
             | DiagnosticKind::MayBeRejected { .. }
+            | DiagnosticKind::Rejected { .. }
     )
 }
 
@@ -681,6 +683,7 @@ fn msbuild_diagnostic_message(kind: &DiagnosticKind) -> String {
         DiagnosticKind::MayBeRejected { cause } => {
             format!("MSBuild may reject the project: {cause:?}")
         }
+        DiagnosticKind::Rejected { cause } => format!("MSBuild rejects the project: {cause:?}"),
     }
 }
 

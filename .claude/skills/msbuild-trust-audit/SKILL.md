@@ -69,9 +69,13 @@ looks like a one-off and is the same family. Sweep all twelve at once.
     `NodeTfm::Known` — but the outer-gated **plural** (the arcade idiom) is
     unpinned by construction and must stay trusted, because the TFM-invariant
     intersection never believes a single branch anyway.
-12. **A project MSBuild may reject** (`ParsedProject::rejection`, #820, #845).
+12. **A project MSBuild may reject** (`ParsedProject::rejection`, #820, #845,
+    #783): an import that loads nothing, or a condition MSBuild throws on.
     MSBuild rejection is total: nothing the walk bound, before the failing
-    import or after it, is the build's. The evaluator withdraws what has a
+    construct or after it, is the build's. A `Certain` rejection and a
+    `Possible` one withdraw alike; `Certain` is only a claim the differentials
+    grade (and the LSP's error on the `.fsproj`), so never gate a commit on
+    `Certain` alone. The evaluator withdraws what has a
     trust channel (every `property()` read, the four `*_uncertain` flags,
     `target_name`, `hidden_content`), but the trust-blind fields
     (`properties`, `target_frameworks`, `lang_version`, `other_flags`,

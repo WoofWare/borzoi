@@ -217,6 +217,13 @@ fn evaluate_inner(source: &str, props: &PropertyMap, fs: Option<Probes<'_>>) -> 
     }
 }
 
+/// Whether MSBuild's own parser rejects `source`: MSBuild then throws on it
+/// whatever the values it reads and however `And`/`Or` short-circuit, so an
+/// [`Outcome::Illegal`] for it holds of every property table.
+pub(crate) fn rejected_by_syntax(source: &str) -> bool {
+    syntax::msbuild_parse(source) == syntax::Syntax::Rejects
+}
+
 /// Parse a condition into its tree: `Ok(None)` for a blank condition (which
 /// MSBuild treats as true), `Err` for anything outside the grammar, which is
 /// [`Reject::Illegal`] when MSBuild's own parser rejects it too.

@@ -1,14 +1,15 @@
-//! What may make MSBuild reject the whole project (#820, #845), and the
+//! What may make MSBuild reject the whole project (#820, #845, #783), and the
 //! withdrawal that follows: [`crate::ParsedProject::rejection`].
 //!
 //! MSBuild fails the evaluation when an import it makes names no file it can
-//! load, and then has no value for anything. The walk records the first such
-//! construct as a [`Rejection`] and keeps going, for the read set and the
-//! diagnostics; [`State::into_project`] withdraws what it publishes.
+//! load, or when a condition it evaluates throws, and then has no value for
+//! anything. The walk records the first such construct as a [`Rejection`]
+//! (the first [`RejectionCertainty::Certain`] one, if any) and keeps going,
+//! for the read set and the diagnostics; [`State::into_project`] withdraws
+//! what it publishes.
 //!
-//! Every site here is [`RejectionCertainty::Possible`]: it claims nothing
-//! about MSBuild, so it needs no proof that MSBuild reaches the import. The
-//! sites are:
+//! **Possible.** A [`RejectionCertainty::Possible`] site claims nothing about
+//! MSBuild, so it needs no proof that MSBuild reaches it. The import sites are:
 //!
 //! - an import the walk took whose path is empty or absent, which failed to
 //!   load ([`State::push`]), or whose path it could not compute and may load
@@ -25,16 +26,55 @@
 //! that path. `Exists` is true of a directory and of a dangling link, neither
 //! of which an import loads, so either is still a rejection.
 //!
+//! A condition the walk evaluates to [`condition::Outcome::Illegal`] is a
+//! site too ([`illegal_condition_at`]), and so is one MSBuild may evaluate
+//! where the walk does not: under a gate the walk could not decide from
+//! certain inputs ([`judge_unwalked`]), and every condition of the item pass,
+//! judged group by group ([`judge_deferred`]) because MSBuild evaluates an
+//! item's condition, and an `Include` item's metadata conditions, whatever
+//! its group's or its own gate holds.
+//!
+//! **Certain.** A [`RejectionCertainty::Certain`] site is a claim the
+//! differentials grade, so it needs MSBuild to reach the construct for
+//! certain ([`reach_is_certain`]): the walk has hidden nothing before it
+//! ([`State::walk_opaque`]), it is in no doubted `Directory.Build.*` walk and
+//! behind no import gate the walk did not decide from certain inputs
+//! (`directory_build::reached_for_certain`), and every gate around it in its
+//! file was decided from certain inputs ([`State::reach_doubted`]). The walk
+//! never descends a `<Target>`, which MSBuild does not evaluate. On top of
+//! that:
+//!
+//! - an import that failed to load ([`import_failure_certainty`]) or has no
+//!   path ([`State::note_unloadable_import`]) must name its path from certain
+//!   values ([`import_path_is_certain`]) and not be a duplicate MSBuild skips,
+//!   which the walk's own skip settles before it tries the file. Only a
+//!   missing file and an empty path are claimed: what the walk's XML reader
+//!   and file system call malformed or unreadable, MSBuild may read;
+//! - an illegal condition whose verdict depends on the values it reads
+//!   (MSB4086, a non-boolean scalar) must read only certain values, the
+//!   stale channel included ([`operands_are_certain`]); a syntax error
+//!   rejects whatever they hold ([`condition::rejected_by_syntax`]).
+//!
+//! Short of that, the same construct is a Possible site.
+//!
+//! Where MSBuild evaluates a condition at all is pinned against the oracle in
+//! `tests/condition_diff.rs`'s `where_msbuild_evaluates_a_condition`: never
+//! under a false `<PropertyGroup>`, `<ItemDefinitionGroup>` (or false item
+//! definition) or `<ImportGroup>`, an unchosen `<When>` (nor a `<When>` after
+//! the chosen one), on or inside a `<Target>`, or on a write of a global
+//! property; always for an `<ItemGroup>`'s items and an `Include` item's
+//! metadata; an `Update` item's metadata only when the update applies.
+//!
 //! **What is not judged.** Content the walk did not see may hold an import
 //! that fails, or rewrite a value so that one the walk reached fails; the walk
-//! cannot know of either. So a doubt that is only the walk's opacity — an
-//! undefined read that would be exact had the walk seen every write, or a
-//! value hidden content may have rewritten ([`super::Trust::stale`]) — is that
-//! content's doubt, and the judgement reads such a name as the walk holds it
-//! ([`certain_but_for_opacity`]), as every reader but the import points and
-//! the Compile items does (#792). Nor is an SDK the walk cannot resolve: its
-//! resolver may decline one MSBuild resolves. The pure walker follows no
-//! import and judges none.
+//! cannot know of either. So for a Possible import site, a doubt that is only
+//! the walk's opacity — an undefined read that would be exact had the walk
+//! seen every write, or a value hidden content may have rewritten
+//! ([`super::Trust::stale`]) — is that content's doubt, and the judgement reads
+//! such a name as the walk holds it ([`certain_but_for_opacity`]), as every
+//! reader but the import points and the Compile items does (#792). Nor is an
+//! SDK the walk cannot resolve: its resolver may decline one MSBuild resolves.
+//! The pure walker follows no import and judges none; it judges conditions.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -42,7 +82,7 @@ use std::path::{Path, PathBuf};
 
 use roxmltree::Node;
 
-use crate::diagnostic::{DiagnosticKind, ImportFailReason};
+use crate::diagnostic::ImportFailReason;
 use crate::document::attribute;
 use crate::imports::normalise;
 use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
@@ -50,31 +90,60 @@ use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 use super::item_pass::expand_silent;
 use super::observed::{self, EntryKind};
 use super::{
-    SdkResolution, State, condition, condition_exists, import_dedup_key, properties,
-    sdk_import_path, sdk_project_in_alphabet, sdk_project_under_root, sdk_root_is_reparsed,
+    SdkResolution, State, condition, condition_exists, directory_build, import_dedup_key,
+    properties, sdk_import_path, sdk_project_in_alphabet, sdk_project_under_root,
+    sdk_root_is_reparsed,
 };
 
 impl State<'_> {
-    /// Record that MSBuild may reject the project for `cause`, at `span`: the
-    /// first such construct is the evaluation's [`Rejection`], and each gets a
-    /// [`DiagnosticKind::MayBeRejected`].
-    pub(super) fn note_possible_rejection(&mut self, cause: RejectionCause, span: Range<usize>) {
-        if self.rejection.is_none() {
-            self.rejection = Some(Rejection {
-                certainty: RejectionCertainty::Possible,
-                cause: cause.clone(),
-                span: self.effective_span(span.clone()),
-                origin: self.current_origin(),
-            });
+    /// Record that MSBuild may reject the project, or does (`certainty`), for
+    /// `cause`, at `span`: the first certain construct, else the first, is the
+    /// evaluation's [`Rejection`], and each gets a [`crate::DiagnosticKind::Rejected`]
+    /// or [`crate::DiagnosticKind::MayBeRejected`].
+    pub(super) fn note_rejection(
+        &mut self,
+        certainty: RejectionCertainty,
+        cause: RejectionCause,
+        span: Range<usize>,
+    ) {
+        let replaces = match &self.rejection {
+            None => true,
+            Some(held) => {
+                held.certainty == RejectionCertainty::Possible
+                    && certainty == RejectionCertainty::Certain
+            }
+        };
+        let rejection = Rejection {
+            certainty,
+            cause,
+            span: self.effective_span(span.clone()),
+            origin: self.current_origin(),
+        };
+        let kind = rejection.diagnostic_kind();
+        if replaces {
+            self.rejection = Some(rejection);
         }
-        self.push(DiagnosticKind::MayBeRejected { cause }, span);
+        self.push(kind, span);
     }
 
-    /// [`Self::note_possible_rejection`] for an import at `node` the walk took
-    /// and cannot load.
+    /// [`Self::note_rejection`] of a [`RejectionCertainty::Possible`] site.
+    pub(super) fn note_possible_rejection(&mut self, cause: RejectionCause, span: Range<usize>) {
+        self.note_rejection(RejectionCertainty::Possible, cause, span);
+    }
+
+    /// [`Self::note_rejection`] for an import at `node` the walk took and
+    /// cannot load: certain for an import with no path, named from certain
+    /// values ([`State::taken_import_path_certain`]) where MSBuild reaches it
+    /// for certain.
     pub(super) fn note_unloadable_import(&mut self, node: Node<'_, '_>, why: UnloadableImport) {
         let project = attribute(node, "Project").unwrap_or_default().into_owned();
-        self.note_possible_rejection(
+        let certainty = certain_if(
+            why == UnloadableImport::NoPath
+                && self.taken_import_path_certain
+                && reach_is_certain(self),
+        );
+        self.note_rejection(
+            certainty,
             RejectionCause::Import {
                 project,
                 gate_undecided: false,
@@ -82,6 +151,295 @@ impl State<'_> {
             },
             node.range(),
         );
+    }
+}
+
+fn certain_if(certain: bool) -> RejectionCertainty {
+    if certain {
+        RejectionCertainty::Certain
+    } else {
+        RejectionCertainty::Possible
+    }
+}
+
+/// Whether MSBuild reaches the walk's current position for certain (see the
+/// module docs): the walk has hidden nothing before it, it is in no doubted
+/// walk and behind no import gate or path it did not decide from certain
+/// inputs, and every gate around it in its file was so decided.
+pub(super) fn reach_is_certain(state: &State<'_>) -> bool {
+    state.walk_opaque.is_none()
+        && state.reach_doubted == 0
+        && directory_build::reached_for_certain(state)
+}
+
+/// Whether every name `text` reads is read now as the build reads it, every
+/// trust channel clean, staleness included ([`directory_build::is_certain`]).
+pub(super) fn operands_are_certain(state: &State<'_>, text: &str) -> bool {
+    properties::property_references(text).all(|name| directory_build::is_certain(state, name))
+}
+
+/// Whether the walk names the `Project` of the import at `node` from certain
+/// values ([`operands_are_certain`]), with nothing it leaves as text.
+pub(super) fn import_path_is_certain(node: Node<'_, '_>, state: &State<'_>) -> bool {
+    let project = attribute(node, "Project").unwrap_or_default();
+    !expand_silent(&project, state).had_unsupported && operands_are_certain(state, &project)
+}
+
+/// How sure the walk is that a failed load of the import it is taking, for
+/// `reason`, makes MSBuild reject the project. Asked as the failure is pushed,
+/// before it latches the walk opaque.
+pub(super) fn import_failure_certainty(
+    state: &State<'_>,
+    reason: &ImportFailReason,
+) -> RejectionCertainty {
+    certain_if(
+        matches!(reason, ImportFailReason::NotFound)
+            && state.taken_import_path_certain
+            && reach_is_certain(state),
+    )
+}
+
+/// A condition the walk evaluated to [`condition::Outcome::Illegal`], at
+/// `span`: MSBuild rejects the project if it evaluates it with the values the
+/// walk read. `reached`: whether MSBuild evaluates it for certain.
+pub(super) fn illegal_condition_at(
+    state: &mut State<'_>,
+    condition: &str,
+    reached: bool,
+    span: Range<usize>,
+) {
+    let certain = reached
+        && (condition::rejected_by_syntax(condition) || operands_are_certain(state, condition));
+    state.note_rejection(
+        certain_if(certain),
+        RejectionCause::IllegalCondition {
+            condition: condition.to_owned(),
+        },
+        span,
+    );
+}
+
+/// What a judged condition decides about the constructs under it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Judged {
+    /// Decided from certain inputs, to this boolean.
+    Decided(bool),
+    /// Anything else: MSBuild may take either side, or reject.
+    Undecided,
+}
+
+impl Judged {
+    /// Whether MSBuild evaluates what this gate gates, for certain
+    /// (`Some(reached)`), perhaps (`Some(false)`) or never (`None`), the gate
+    /// itself reached as `reached` says.
+    fn inner(self, reached: bool) -> Option<bool> {
+        match self {
+            Judged::Decided(true) => Some(reached),
+            Judged::Decided(false) => None,
+            Judged::Undecided => Some(false),
+        }
+    }
+}
+
+/// Judge the condition at `node` as MSBuild evaluates it, `Exists` resolved
+/// against `exists_dir`, noting a rejection when it is illegal. `reached`:
+/// whether MSBuild evaluates it for certain.
+fn judge_condition(node: Node<'_, '_>, exists_dir: &Path, reached: bool, state: &mut State<'_>) {
+    if let Some(text) = attribute(node, "Condition") {
+        judge_text(node, &text, exists_dir, reached, state);
+    }
+}
+
+/// [`judge_condition`] of a gate, and what it decides about the constructs
+/// under it.
+fn judge_gate(
+    node: Node<'_, '_>,
+    exists_dir: &Path,
+    reached: bool,
+    state: &mut State<'_>,
+) -> Judged {
+    let Some(text) = attribute(node, "Condition") else {
+        return Judged::Decided(true);
+    };
+    match judge_text(node, &text, exists_dir, reached, state) {
+        outcome @ (condition::Outcome::True | condition::Outcome::False)
+            if directory_build::decided_from_certain_inputs(state, &text, exists_dir) =>
+        {
+            Judged::Decided(outcome == condition::Outcome::True)
+        }
+        _ => Judged::Undecided,
+    }
+}
+
+/// [`judge_condition`] of the condition `text` at `node`, returning its outcome.
+fn judge_text(
+    node: Node<'_, '_>,
+    text: &str,
+    exists_dir: &Path,
+    reached: bool,
+    state: &mut State<'_>,
+) -> condition::Outcome {
+    let observer = state.observer;
+    let exists = |path: &str| condition_exists(observer, path, exists_dir);
+    let outcome = if state.follow_imports {
+        let probes = condition::Probes {
+            exists: &exists,
+            observer,
+        };
+        condition::evaluate_with_exists(text, &state.lookup, probes).outcome
+    } else {
+        condition::evaluate(text, &state.lookup).outcome
+    };
+    if outcome == condition::Outcome::Illegal {
+        illegal_condition_at(state, text, reached, node.range());
+    }
+    outcome
+}
+
+/// Judge the conditions MSBuild evaluates in `node`, a construct of the
+/// property pass the walk does not walk: one under a gate it could not decide
+/// from certain inputs, or the gate of a group the walk skips unevaluated.
+/// `dir` is the directory of the file holding it, and `reached` says whether
+/// MSBuild reaches `node` for certain.
+pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
+    let entry_dir = state.entry_project_dir.clone();
+    match node.tag_name().name() {
+        "PropertyGroup" => {
+            if let Some(inner) = judge_gate(node, dir, reached, state).inner(reached) {
+                judge_properties(node, inner, state);
+            }
+        }
+        "ImportGroup" => {
+            if let Some(inner) = judge_gate(node, dir, reached, state).inner(reached) {
+                judge_imports(node, dir, inner, state);
+            }
+        }
+        "Import" => {
+            judge_condition(node, dir, reached, state);
+        }
+        "Choose" => judge_whens(node, 0, dir, reached, state),
+        "ItemGroup" => judge_item_group(node, reached, state),
+        "ItemDefinitionGroup" => judge_item_definition_group(node, reached, state),
+        "UsingTask" => {
+            judge_condition(node, &entry_dir, reached, state);
+        }
+        _ => {}
+    }
+}
+
+/// Judge the property writes of the `<PropertyGroup>` at `node`, which
+/// MSBuild evaluates as `reached` says. A write of a global property is
+/// discarded unevaluated, condition and all.
+pub(super) fn judge_properties(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    let entry_dir = state.entry_project_dir.clone();
+    for child in node.children().filter(Node::is_element) {
+        if state
+            .protected
+            .contains(&child.tag_name().name().to_ascii_lowercase())
+        {
+            continue;
+        }
+        judge_condition(child, &entry_dir, reached, state);
+    }
+}
+
+/// Judge the imports' own conditions in the `<ImportGroup>` at `node`, which
+/// MSBuild evaluates as `reached` says.
+pub(super) fn judge_imports(node: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
+    for child in node.children().filter(|c| c.has_tag_name("Import")) {
+        judge_condition(child, dir, reached, state);
+    }
+}
+
+/// Judge the `<When>`s of the `<Choose>` at `node` from the `from`th on, and
+/// what they choose, MSBuild reaching the first of them as `reached` says.
+/// MSBuild evaluates a `<When>` only while every earlier one was false, and
+/// the `<Otherwise>` only when all were.
+pub(super) fn judge_whens(
+    node: Node<'_, '_>,
+    from: usize,
+    dir: &Path,
+    reached: bool,
+    state: &mut State<'_>,
+) {
+    let entry_dir = state.entry_project_dir.clone();
+    let mut reach = Some(reached);
+    for when in node
+        .children()
+        .filter(|c| c.has_tag_name("When"))
+        .skip(from)
+    {
+        let Some(at) = reach else {
+            return;
+        };
+        match judge_gate(when, &entry_dir, at, state) {
+            Judged::Decided(true) => {
+                judge_branch(when, dir, at, state);
+                reach = None;
+            }
+            Judged::Decided(false) => {}
+            Judged::Undecided => {
+                judge_branch(when, dir, false, state);
+                reach = Some(false);
+            }
+        }
+    }
+    if let Some(at) = reach
+        && let Some(otherwise) = node.children().find(|c| c.has_tag_name("Otherwise"))
+    {
+        judge_branch(otherwise, dir, at, state);
+    }
+}
+
+/// Judge what the `<When>` or `<Otherwise>` at `branch` holds, which MSBuild
+/// evaluates as `reached` says.
+pub(super) fn judge_branch(branch: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
+    for child in branch.children().filter(Node::is_element) {
+        judge_unwalked(child, dir, reached, state);
+    }
+}
+
+/// Judge the conditions of a group the item pass replays: `<ItemGroup>`,
+/// `<ItemDefinitionGroup>` or `<UsingTask>`, against the final property
+/// table. `reached`: whether MSBuild reaches the group for certain, as the
+/// property pass found it ([`reach_is_certain`] there).
+pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
+    judge_unwalked(node, dir, reached, state);
+}
+
+/// Judge the `<ItemGroup>` at `node`, which MSBuild reaches as `reached` says.
+/// MSBuild evaluates each item's condition whatever the group's holds, and an
+/// `Include` item's metadata conditions whatever the item's holds; an
+/// `Update`'s metadata only where the update applies.
+fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    let entry_dir = state.entry_project_dir.clone();
+    judge_condition(node, &entry_dir, reached, state);
+    for item in node.children().filter(Node::is_element) {
+        judge_condition(item, &entry_dir, reached, state);
+        let metadata_reached = reached && attribute(item, "Include").is_some();
+        for metadata in item.children().filter(Node::is_element) {
+            judge_condition(metadata, &entry_dir, metadata_reached, state);
+        }
+    }
+}
+
+/// Judge the `<ItemDefinitionGroup>` at `node`, which MSBuild reaches as
+/// `reached` says. MSBuild evaluates a definition's condition only under a
+/// true group, and its metadata's only under a true definition. `Exists` resolves
+/// against the project's directory, as for every item-pass condition.
+fn judge_item_definition_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
+    let entry_dir = state.entry_project_dir.clone();
+    let Some(inner) = judge_gate(node, &entry_dir, reached, state).inner(reached) else {
+        return;
+    };
+    for definition in node.children().filter(Node::is_element) {
+        let Some(metadata_reached) = judge_gate(definition, &entry_dir, inner, state).inner(inner)
+        else {
+            continue;
+        };
+        for metadata in definition.children().filter(Node::is_element) {
+            judge_condition(metadata, &entry_dir, metadata_reached, state);
+        }
     }
 }
 
@@ -395,4 +753,16 @@ pub(super) fn may_load_nothing_at(
         return None;
     }
     load_failure(state, path, &mut HashSet::new()).map(UnloadableImport::Failed)
+}
+
+/// Judge the condition of the group at `node` alone, which the walk skips
+/// unevaluated though MSBuild evaluates it as `reached` says: a
+/// `<PropertyGroup>` whose every write MSBuild discards unevaluated.
+pub(super) fn judge_unwalked_gate(
+    node: Node<'_, '_>,
+    dir: &Path,
+    reached: bool,
+    state: &mut State<'_>,
+) {
+    judge_condition(node, dir, reached, state);
 }
