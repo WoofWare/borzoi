@@ -1145,13 +1145,19 @@ enum Family {
     /// Compile findings only: an import point after hidden content is never
     /// decided, so a point's import of the file must still decline.
     HiddenImportThenPlainImport,
-    /// An import point whose `Exists` is a disjunct ([`PointDoubt::GateOr`])
-    /// over a file that does not exist: MSBuild imports the path and rejects
-    /// the project (MSB4019). The point is never decided and withdraws the
-    /// whole evaluation, but a literal write after it is committed for an
-    /// evaluation MSBuild refuses (#820). Covers property findings only: the
-    /// Compile set must still decline.
+    /// An import point whose `Exists` is a disjunct ([`PointDoubt::GateOr`]):
+    /// MSBuild imports its path regardless, and rejects the project (MSB4019)
+    /// when the path names no file. A reached point is never decided and
+    /// withdraws the whole evaluation, but a literal write after it is
+    /// committed for an evaluation MSBuild refuses, and a point in content the
+    /// walk cannot see makes MSBuild refuse an evaluation the walk accepts
+    /// (#820). Covers property findings, and Compile findings on a project
+    /// MSBuild rejects.
     UndecidedImportOfMissingFile,
+    /// Content the walk cannot see, in an SDK file, imports a user file with
+    /// Compile items: the SDK's Compile tolerance keeps the set certain
+    /// without them (#821). Covers Compile findings only.
+    SdkToleratedHiddenImport,
 }
 
 const KNOWN_DIVERGENCES: &[Family] = &[
@@ -1162,6 +1168,7 @@ const KNOWN_DIVERGENCES: &[Family] = &[
     Family::ExistsResolvesPhysically,
     Family::HiddenImportThenPlainImport,
     Family::UndecidedImportOfMissingFile,
+    Family::SdkToleratedHiddenImport,
 ];
 
 impl Family {
@@ -1185,13 +1192,11 @@ impl Family {
                     || case.targets_point == TargetsPoint::BehindUndecidedImport
                     || case.has_hidden_repeat()
             }
-            Family::UndecidedImportOfMissingFile => {
-                case.point_doubt == PointDoubt::GateOr
-                    && !match case.repeat_which {
-                        Which::Props => case.props.present,
-                        Which::Targets => case.targets_present,
-                    }
-            }
+            Family::UndecidedImportOfMissingFile => case.point_doubt == PointDoubt::GateOr,
+            Family::SdkToleratedHiddenImport => case
+                .repeats
+                .iter()
+                .any(|r| r.site == RepeatSite::HiddenBeforePoint && r.target != RepeatTarget::File),
             Family::HiddenImportThenPlainImport => {
                 case.has_hidden_repeat()
                     && (!case.reimports.is_empty()
@@ -1225,7 +1230,12 @@ impl Family {
             }
             Family::UndecidedImportHidesWrites => finding.kind == FindingKind::Property,
             Family::HiddenImportThenPlainImport => finding.kind == FindingKind::Compile,
-            Family::UndecidedImportOfMissingFile => finding.kind == FindingKind::Property,
+            Family::UndecidedImportOfMissingFile => {
+                finding.kind == FindingKind::Property
+                    || (finding.kind == FindingKind::Compile
+                        && finding.theirs == "a rejected project")
+            }
+            Family::SdkToleratedHiddenImport => finding.kind == FindingKind::Compile,
             Family::SdkImportJoinsRawText | Family::ExistsResolvesPhysically => true,
         }
     }
@@ -1294,6 +1304,18 @@ impl Family {
                 repeats: vec![Repeat {
                     target: RepeatTarget::File,
                     site: RepeatSite::SdkAfterPoint,
+                }],
+                ..Case::usual()
+            },
+            // No `Directory.Build.*` file, so the point withdraws nothing, and
+            // `child` (with `grandchild`) is imported only by the hidden import.
+            Family::SdkToleratedHiddenImport => Case {
+                props: Props::default(),
+                targets_present: false,
+                repeat_which: Which::Props,
+                repeats: vec![Repeat {
+                    target: RepeatTarget::Child,
+                    site: RepeatSite::HiddenBeforePoint,
                 }],
                 ..Case::usual()
             },
