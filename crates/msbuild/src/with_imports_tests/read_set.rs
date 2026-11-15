@@ -380,7 +380,9 @@ fn a_full_world_records_every_kind_of_query() {
 /// `target`; `target_exists` decides whether the link dangles. The sweep must
 /// accept both: deleting or creating `target` moves the answer about `alias`,
 /// which the precision check has to see as touching it, and a dangling link
-/// is not an absent path to create a file at.
+/// is not an absent path to create a file at. Deleting the link, dangling
+/// it, or creating a dangling link's target moves the answer too, and must
+/// leave a read stale.
 #[cfg(unix)]
 fn sweep_symlinked_exists(target_exists: bool) {
     let tmp = TempDir::new().unwrap();
@@ -408,7 +410,8 @@ fn sweep_symlinked_exists(target_exists: bool) {
         )
         .expect("well-formed XML parses")
     };
-    sweep(&root, &evaluate, &[]);
+    let tally = sweep(&root, &evaluate, &[]);
+    assert!(tally.moved(Why::Relink) > 0, "{tally:?}");
 }
 
 #[cfg(unix)]
@@ -455,7 +458,7 @@ fn the_sweep_writes_only_under_its_root() {
     let planned = crate::observed::soundness::perturbations(&root, &evaluate().read_set);
     for perturbation in &planned {
         for edit in &perturbation.edits {
-            let (Edit::Write(path, _) | Edit::Delete(path)) = edit;
+            let path = edit.path();
             let lexical: PathBuf = path.components().fold(PathBuf::new(), |mut out, c| {
                 match c {
                     std::path::Component::ParentDir => {

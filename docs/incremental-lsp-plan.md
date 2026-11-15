@@ -2301,8 +2301,30 @@ defect the generated trees can show: the canonicalisation that seeds a
 graph node's TFM, which `graph_ref_targets` records again for the same path
 (the read set is a set, so it is unchanged), and the canonicalisation of an
 assets file's path, whose answer moves only through a symlink, which the
-fixtures never hold. The second is a gap: a soundness fixture with symlinked
-project and `obj` directories would see it.
+fixtures then never held.
+
+The second is now seen (#690). The generated worlds reach the entry
+through a symlink (its directory, its `obj`, its assets file, or a directory
+above every project, each with a relative or an absolute target), and a
+sibling's `bin` through one, its missing output through a dangling one. The
+sweep (`borzoi_msbuild::observed::soundness`) perturbs symlinks: it deletes
+each, dangles it, retargets it to every other link's target, and creates a
+dangling link's missing target (`Why::Relink`). Two extras retarget the
+entry's link, to a copy whose assets file differs and to an identical copy
+one directory deeper. The second is the one only the canonicalisation sees:
+the assets file reads the same under the spelling another reader read it
+by, but the project paths it records resolve from its canonical path. Each
+extra must fail validation, and
+`a_link_retargeted_to_an_identical_copy_fails_validation` asserts the
+second directly for every layout. `incremental_state_machine` gains
+`Cmd::Relink`, which makes a project's `obj` a symlink to one of two
+directories whose assets files differ, a dangling one, or a real directory
+again, between generations and with no watch event in the unwatched
+scripts.
+
+| plant | caught by |
+|---|---|
+| the assets file's canonicalisation unrecorded | both soundness tests, `a_link_retargeted_to_an_identical_copy_fails_validation` |
 
 **Measured** on WoofWare.Incremental, 20 keystrokes per run, each row the
 minimum over three runs of each binary: Stage 5 merged with `main`

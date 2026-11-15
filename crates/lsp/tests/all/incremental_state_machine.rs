@@ -44,7 +44,11 @@
 //! per-directory `project.assets.json` files over a stub framework pack holding
 //! the real `System.Runtime.dll`, which may also name a package whose DLL, in a
 //! package folder of the world's own, is a copy of the real `System.Console.dll`
-//! or not an assembly at all. Sources reference one another across files
+//! or not an assembly at all. A project directory's `obj` may be relinked
+//! ([`Cmd::Relink`]): made a symlink to one of two directories elsewhere whose
+//! assets files differ, a dangling symlink, or a real directory again, so the
+//! assets file the env reads is reached through a link retargeted between
+//! generations. Sources reference one another across files
 //! (`A.x`, `open S`, `S.x.Length`) and into the package (`System.Console.Out`),
 //! and their bindings sit under `#if FOO` /
 //! `#if BAR` blocks keyed on each project's `DefineConstants`, so a stale define
@@ -571,6 +575,37 @@ enum Cmd {
     /// version is [`InputClass::InstalledVersionContents`] instead
     /// ([`World::install`]). Only pinned scripts use it.
     Install(&'static str, String),
+    /// Make the project directory's `obj` what [`ObjLink`] names, replacing
+    /// what is there (a real `obj` is deleted with its assets file), and
+    /// queue a watch event for its assets file as an
+    /// [`InputClass::ReferenceResolution`] write when one existed before or
+    /// exists after.
+    Relink(Proj, ObjLink),
+}
+
+/// What [`Cmd::Relink`] makes a project directory's `obj`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObjLink {
+    /// A symlink, with a relative target, to `vault/<dir>-<lib>`, whose
+    /// assets file (written the first time the directory is made) names the
+    /// `Lib` package when `lib`. A write to the assets file through the link
+    /// lands there, and stays for the next relink to it.
+    Vault(bool),
+    /// A symlink to a directory that does not exist.
+    Dangling,
+    /// A real, empty directory.
+    Real,
+}
+
+impl ObjLink {
+    /// The target a symlink at `<dir>/obj` holds, if this is one.
+    fn target(self, proj: Proj) -> Option<String> {
+        match self {
+            ObjLink::Vault(lib) => Some(format!("../vault/{}-{lib}", proj.dir())),
+            ObjLink::Dangling => Some(format!("../vault/{}-gone", proj.dir())),
+            ObjLink::Real => None,
+        }
+    }
 }
 
 impl fmt::Debug for Cmd {
@@ -585,6 +620,7 @@ impl fmt::Debug for Cmd {
             Cmd::Write(file, c) => write!(f, "Write({file:?}, {:?})", c.render(*file)),
             Cmd::Delete(file) => write!(f, "Delete({file:?})"),
             Cmd::Touch(proj, touch) => write!(f, "Touch({:?}, {touch:?})", FileId::Proj(*proj)),
+            Cmd::Relink(proj, to) => write!(f, "Relink({}/obj, {to:?})", proj.dir()),
             Cmd::Flush => f.write_str("Flush"),
             Cmd::Check => f.write_str("Check"),
             Cmd::Peek(src) => write!(f, "Peek({:?})", FileId::Src(*src)),
@@ -914,6 +950,19 @@ fn content_for(file: FileId) -> BoxedStrategy<Content> {
     }
 }
 
+/// A relink of `P/obj` or `Q/obj`.
+fn relink_strategy() -> impl Strategy<Value = Cmd> {
+    (
+        prop_oneof![Just(Proj::P), Just(Proj::Q)],
+        prop_oneof![
+            3 => any::<bool>().prop_map(ObjLink::Vault),
+            1 => Just(ObjLink::Dangling),
+            1 => Just(ObjLink::Real),
+        ],
+    )
+        .prop_map(|(proj, to)| Cmd::Relink(proj, to))
+}
+
 fn lib_dll_strategy() -> impl Strategy<Value = LibDll> {
     prop_oneof![3 => Just(LibDll::Console), 1 => Just(LibDll::Junk)]
 }
@@ -931,6 +980,7 @@ fn cmd_strategy() -> impl Strategy<Value = Cmd> {
         3 => with_content(disk_file_strategy()).prop_map(|(f, c)| Cmd::Write(f, c)),
         1 => disk_file_strategy().prop_map(Cmd::Delete),
         2 => (proj_strategy(), touch_strategy()).prop_map(|(p, t)| Cmd::Touch(p, t)),
+        1 => relink_strategy(),
         3 => Just(Cmd::Flush),
         3 => Just(Cmd::Check),
         2 => src_strategy().prop_map(Cmd::Peek),
@@ -1027,8 +1077,9 @@ fn assembly_file_strategy() -> impl Strategy<Value = FileId> {
 }
 
 /// Commands that write and delete the assets files and the `Lib` package's
-/// DLL (and write sources) behind the server's back and never deliver the
-/// watch events, and comparisons are frequent.
+/// DLL, relink the `obj` directories that hold the assets files (and write
+/// sources) behind the server's back and never deliver the watch events, and
+/// comparisons are frequent.
 fn unwatched_assembly_cmd_strategy() -> impl Strategy<Value = Cmd> {
     prop_oneof![
         3 => source_file_strategy().prop_map(Cmd::Open),
@@ -1036,6 +1087,7 @@ fn unwatched_assembly_cmd_strategy() -> impl Strategy<Value = Cmd> {
         1 => source_file_strategy().prop_map(Cmd::Close),
         6 => with_content(assembly_file_strategy()).prop_map(|(f, c)| Cmd::Write(f, c)),
         2 => assembly_file_strategy().prop_map(Cmd::Delete),
+        3 => relink_strategy(),
         1 => with_content(source_file_strategy()).prop_map(|(f, c)| Cmd::Write(f, c)),
         4 => Just(Cmd::Check),
         3 => src_strategy().prop_map(Cmd::Peek),
@@ -1063,6 +1115,7 @@ fn unflushed_cmd_strategy() -> impl Strategy<Value = Cmd> {
         1 => Just(Cmd::Delete(FileId::Proj(Proj::O))),
         2 => with_content(assembly_file_strategy()).prop_map(|(f, c)| Cmd::Write(f, c)),
         1 => assembly_file_strategy().prop_map(Cmd::Delete),
+        1 => relink_strategy(),
         5 => Just(Cmd::Check),
         3 => src_strategy().prop_map(Cmd::Peek),
     ]
@@ -1581,6 +1634,8 @@ const WITNESSED: &[InputClass] = &[
 struct Pending {
     event: Value,
     class: InputClass,
+    /// Queued by a [`Cmd::Relink`].
+    relink: bool,
 }
 
 struct World {
@@ -1672,13 +1727,21 @@ impl World {
         let path = self.path(file);
         let existed = path.host_exists();
         let class = self.class_of(file, !existed);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let parent = path.parent().unwrap();
+        // A write through a dangling `obj` link ([`ObjLink::Dangling`])
+        // makes the directory it leads to.
+        let dir = match crate::common::host_fs::read_link(parent) {
+            Ok(target) => parent.parent().unwrap().join(target),
+            Err(_) => parent.to_path_buf(),
+        };
+        fs::create_dir_all(dir).unwrap();
         fs::write(&path, bytes).unwrap();
         // FileChangeType: 1 = Created, 2 = Changed, 3 = Deleted.
         let typ = if existed { 2 } else { 1 };
         self.pending.push(Pending {
             event: json!({ "uri": self.uri(file), "type": typ }),
             class,
+            relink: false,
         });
     }
 
@@ -1706,6 +1769,7 @@ impl World {
         self.pending.push(Pending {
             event: json!({ "uri": uri, "type": if existed { 2 } else { 1 } }),
             class,
+            relink: false,
         });
     }
 
@@ -1718,8 +1782,58 @@ impl World {
         self.pending.push(Pending {
             event: json!({ "uri": self.uri(file), "type": 3 }),
             class,
+            relink: false,
         });
         true
+    }
+
+    /// [`Cmd::Relink`].
+    fn relink(&mut self, proj: Proj, to: ObjLink) {
+        let obj = self.root.join(proj.dir()).join("obj");
+        let assets = FileId::Assets(proj);
+        let existed = self.path(assets).host_exists();
+        match crate::common::host_fs::symlink_metadata(&obj) {
+            Ok(meta) if meta.is_dir() => fs::remove_dir_all(&obj).unwrap(),
+            Ok(_) => fs::remove_file(&obj).unwrap(),
+            Err(_) => fs::create_dir_all(obj.parent().unwrap()).unwrap(),
+        }
+        match to.target(proj) {
+            Some(target) => {
+                let dir = obj.parent().unwrap().join(&target);
+                match to {
+                    ObjLink::Vault(lib) => {
+                        let file = dir.join("project.assets.json");
+                        if !file.host_exists() {
+                            fs::create_dir_all(&dir).unwrap();
+                            fs::write(&file, Content::Assets { lib }.bytes(assets, &self.root))
+                                .unwrap();
+                        }
+                    }
+                    // A write through the link made its target; it dangles
+                    // again.
+                    _ => {
+                        if dir.host_exists() {
+                            fs::remove_dir_all(&dir).unwrap();
+                        }
+                    }
+                }
+                std::os::unix::fs::symlink(&target, &obj).unwrap();
+            }
+            None => fs::create_dir(&obj).unwrap(),
+        }
+        let exists = self.path(assets).host_exists();
+        if existed || exists {
+            let typ = match (existed, exists) {
+                (false, true) => 1,
+                (true, false) => 3,
+                _ => 2,
+            };
+            self.pending.push(Pending {
+                event: json!({ "uri": self.uri(assets), "type": typ }),
+                class: InputClass::ReferenceResolution,
+                relink: true,
+            });
+        }
     }
 
     /// Whether a [`Cmd::Check`] compares now: no event is pending whose class
@@ -1740,6 +1854,12 @@ impl World {
 
     fn describe(&self) -> String {
         let mut out = String::new();
+        for proj in [Proj::P, Proj::Q] {
+            let obj = self.root.join(proj.dir()).join("obj");
+            if let Ok(target) = crate::common::host_fs::read_link(&obj) {
+                out.push_str(&format!("--- {}/obj -> {}\n", proj.dir(), target.display()));
+            }
+        }
         for file in FILES {
             let disk = self.disk(file);
             let buffer = self.open.get(&file);
@@ -1981,6 +2101,8 @@ struct Coverage {
     /// Of those, the ones with an assets file's or the `Lib` package DLL's
     /// write pending.
     unflushed_assembly_checks: usize,
+    /// Of those, the ones with an `obj` relinked ([`Cmd::Relink`]) pending.
+    unflushed_relink_checks: usize,
     queries: usize,
     /// A definition landing in a different file from the one asked about.
     cross_file_definitions: usize,
@@ -2151,6 +2273,9 @@ fn check(
             }
             if pending(InputClass::ReferenceResolution) {
                 coverage.unflushed_assembly_checks += 1;
+            }
+            if world.pending.iter().any(|p| p.relink) {
+                coverage.unflushed_relink_checks += 1;
             }
         }
         for q in ordered {
@@ -2328,6 +2453,9 @@ fn apply(
         }
         Cmd::Delete(file) => {
             world.delete(*file);
+        }
+        Cmd::Relink(proj, to) => {
+            world.relink(*proj, *to);
         }
         Cmd::Touch(proj, touch) => {
             let file = FileId::Proj(*proj);
@@ -2721,10 +2849,12 @@ fn unwatched_project_creations_agree_with_a_fresh_session() {
 }
 
 /// For all generated scripts that write and delete the assets files and the
-/// `Lib` package's DLL (and write sources) and never deliver a watch event,
-/// every answer agrees with fresh sessions at every comparison, and so does
-/// what the client displays: an env's reads outside the installed versions
-/// are a [`WITNESSED`] input, so the server notices the writes itself
+/// `Lib` package's DLL, relink the `obj` directories that hold the assets
+/// files (and write sources) and never deliver a watch event, every answer
+/// agrees with fresh sessions at every comparison, and so does what the
+/// client displays: an env's reads outside the installed versions, the
+/// canonical spelling of its assets file among them, are a [`WITNESSED`]
+/// input, so the server notices the writes and the relinks itself
 /// (`docs/incremental-lsp-plan.md`, Stage 6b). Every env here records all
 /// its reads: the world has no C# project and restores nothing on demand.
 #[test]
@@ -2748,10 +2878,11 @@ fn unwatched_assembly_writes_agree_with_a_fresh_session() {
         Err(err) => panic!("seed {seed}: {err}"),
     }
     // Non-vacuity: comparisons were made with an assets file's or the
-    // package DLL's write still unannounced, and they compared answers that
-    // read the package.
+    // package DLL's write, and an `obj` relinked, still unannounced, and they
+    // compared answers that read the package.
     assert!(
         coverage.unflushed_assembly_checks > 0
+            && coverage.unflushed_relink_checks > 0
             && coverage.package_hovers > 0
             && coverage.assembly_member_hovers > 0,
         "the generated cases made no comparison with an assembly input written: {coverage:#?}"
@@ -2760,7 +2891,8 @@ fn unwatched_assembly_writes_agree_with_a_fresh_session() {
 
 /// For all generated scripts that make every kind of write the server is
 /// meant to notice on its own (sources, project files, projects created and
-/// deleted, assets files, the package DLL) and never deliver a watch event,
+/// deleted, assets files, their `obj` directories relinked, the package DLL)
+/// and never deliver a watch event,
 /// every answer agrees with fresh sessions at every comparison, and so does
 /// what the client displays: every witnessable input class is [`WITNESSED`]
 /// (`docs/incremental-lsp-plan.md`, Stage 7), so the server needs no watch
