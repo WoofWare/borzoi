@@ -631,6 +631,11 @@ Workspace-wide commands unify features, so they always build `borzoi-cst` with
 `unstable-union` on. After touching `crates/cst`, also run CI's featureless
 pair: `cargo clippy -p borzoi-cst --lib -- -D warnings` and
 `RUSTDOCFLAGS="-D warnings" cargo doc -p borzoi-cst --no-deps --document-private-items`.
+They likewise build `borzoi-assembly`, `borzoi-msbuild` and `borzoi-sema` with
+their `test-support` feature on, so after touching one of those, run the same
+pair for it (`-p borzoi-msbuild` and so on), as CI does: an item gated on
+`any(test, feature = "test-support")` hides from the workspace gate both a use
+and an intra-doc link that the featureless build cannot resolve.
 
 Note `oracle-harness`'s `batch_recovers_from_a_transient_wedge` hardcodes a
 300 ms child deadline and flakes on a loaded machine (e.g. sibling worktrees

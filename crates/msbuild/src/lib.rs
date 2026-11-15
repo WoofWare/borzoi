@@ -1423,8 +1423,9 @@ pub fn parse_fsproj_with_imports_asking_every_time(
 }
 
 /// [`parse_fsproj_with_imports`], also answering `probe` from the end of the
-/// walk when one is given (see [`evaluator::reads`]). Only the differential
-/// tests pass a probe, so a build without them has no `probe` parameter.
+/// walk when one is given (see `evaluator::reads`). Only the differential
+/// tests pass a probe, so a build without them has neither that module nor
+/// the `probe` parameter.
 pub(crate) fn parse_fsproj_probed(
     source: &str,
     project_path: &Path,
