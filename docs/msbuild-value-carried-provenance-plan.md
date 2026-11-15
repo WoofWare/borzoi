@@ -1411,8 +1411,29 @@ before P3 makes the join the thing every value carries.
 
 The first two are set aside by the gate, each counted and the count pinned
 for the fixed seeds, so a fix must move the pin; the third is pinned as an
-ignored witness. #614 is outside what this harness wraps (it wraps writes,
-not imports inside the SDK), and stays pinned by its own ignored test.
+ignored witness.
+
+**The opacity tier** wraps an import rather than a write: a synthetic SDK
+writes properties, then imports a file behind an undecidable gate that may
+redefine them (and, in half the cases, first imports an empty file behind
+another, so values are bound *between* two opacities), and the body copies
+one into the `Directory.Build.targets` gate or path. It generates #614's
+class: 13 wrong splice decisions over 800 cases before the stale channel,
+none after. A Compile set may only differ from a world's in whether the
+spliced file joined if the splice decided wrongly; every other stale read is
+#792, counted and pinned. Its plants:
+
+| plant | opacity tier | #614 witness |
+| --- | ---: | --- |
+| the latch marks nothing stale | 13 | fails |
+| only the first latch marks (not a value bound between two) | 4 | passes |
+| `Trust::join_in` drops `stale` | 11 | fails |
+| the clean write ignores the staleness its value carried | mirror assertion fires | fails |
+| `Trust::is_certain` ignores `stale` | 13 | fails |
+| `Trust::join_in` forgets `refused` | 0 | passes |
+
+The last is still the equivalent mutant: nothing reads the refused channel of
+a joined trust.
 
 ### The census ratchet — resolved by construction, not by a change
 
