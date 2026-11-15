@@ -2581,6 +2581,41 @@ fn decode_compiler_message(attr: &PickledAttribute) -> CompilerMessage {
 }
 
 fn has_auto_open_attribute(pickled: &PickledCcu, attribs: &[PickledAttribute]) -> bool {
+    has_pickled_attribute(
+        pickled,
+        attribs,
+        &["Microsoft", "FSharp", "Core", "AutoOpenAttribute"],
+    )
+}
+
+/// Whether `attribs` carries `System.Runtime.CompilerServices.ExtensionAttribute`.
+/// On a type abbreviation it makes the abbreviated type's C#-style extension
+/// members join method groups wherever the abbreviation is in scope: FCS reads
+/// the marker off the abbreviation (`IsTyconRefUsedForCSharpStyleExtensionMembers`)
+/// and lists its target's methods.
+fn has_extension_attribute(pickled: &PickledCcu, attribs: &[PickledAttribute]) -> bool {
+    has_pickled_attribute(
+        pickled,
+        attribs,
+        &[
+            "System",
+            "Runtime",
+            "CompilerServices",
+            "ExtensionAttribute",
+        ],
+    )
+}
+
+/// Whether `attribs` carries the attribute type at the non-local path `path`.
+/// FCS pickles an attribute's type after stripping abbreviations, so an alias
+/// of the attribute (`type AO = AutoOpenAttribute`, then `[<AO>]`) is pickled
+/// as the attribute itself (`infer_assembly_attributed_abbreviation_diff`'s
+/// aliased cells).
+fn has_pickled_attribute(
+    pickled: &PickledCcu,
+    attribs: &[PickledAttribute],
+    path: &[&str],
+) -> bool {
     attribs.iter().any(|a| match &a.tcref {
         PickledTcRef::NonLocal(idx) => {
             pickled
@@ -2588,12 +2623,12 @@ fn has_auto_open_attribute(pickled: &PickledCcu, attribs: &[PickledAttribute]) -
                 .nlerefs
                 .get(*idx as usize)
                 .is_some_and(|nle| {
-                    let path: Vec<&str> = nle
+                    let found: Vec<&str> = nle
                         .path
                         .iter()
                         .filter_map(|&i| pickled.header.strings.get(i as usize).map(String::as_str))
                         .collect();
-                    path == ["Microsoft", "FSharp", "Core", "AutoOpenAttribute"]
+                    found == path
                 })
         }
         PickledTcRef::Local(_) => false,
@@ -2624,6 +2659,11 @@ struct AbbrevMarkerSite {
     /// marker without the flag would read as a complete, static-less surface
     /// (codex round 22).
     is_auto_open: bool,
+    /// The pickled `[<Extension>]` attribute, carried onto the marker's
+    /// [`Entity::is_extension_container`]: FCS lists an `[<Extension>]` type
+    /// abbreviation's target's C#-style extension members wherever the
+    /// abbreviation is in scope, so a marker without the flag would hide them.
+    is_extension_container: bool,
     /// The pickled `[<Obsolete>]` and `[<CompilerMessage>]` attributes, the two
     /// `CheckEntityAttributes` consults that can make F# **reject** a use of the
     /// name outright (`FS0101` / `FS12004`).
@@ -2971,6 +3011,7 @@ pub(crate) fn apply_abbreviation_markers(
                     typar_names: Vec::new(),
                     is_exception: true,
                     is_auto_open: false,
+                    is_extension_container: false,
                     obsolete: pickled_obsolete(pickled, &entity.attribs),
                     compiler_message: pickled_compiler_message(pickled, &entity.attribs),
                     // An exception abbreviation's target is a constructor, not a
@@ -3024,6 +3065,7 @@ pub(crate) fn apply_abbreviation_markers(
                 typar_names,
                 is_exception: false,
                 is_auto_open: has_auto_open_attribute(pickled, &entity.attribs),
+                is_extension_container: has_extension_attribute(pickled, &entity.attribs),
                 obsolete: pickled_obsolete(pickled, &entity.attribs),
                 compiler_message: pickled_compiler_message(pickled, &entity.attribs),
                 abbreviation_target,
@@ -3147,7 +3189,9 @@ fn abbreviation_marker(
         union_cases: UnionCases::Unknowable,
         union_case_makers: Vec::new(),
         static_extension_member_names: Vec::new(),
-        is_extension_container: false,
+        // An `[<Extension>]` abbreviation: its target's C#-style extension
+        // members, which the marker does not list, join method groups.
+        is_extension_container: target.is_extension_container,
         custom_attrs: Vec::new(),
         // The decoded RHS of the abbreviation, or `None` for an exception
         // abbreviation and for any target shape the decoder does not model.
