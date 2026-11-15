@@ -1040,6 +1040,25 @@ passing); `fsproj_msbuild_corpus_diff` (71 real-SDK projects) and
 of `project-corpus-gate.sh` (the LSP project corpus, the restore-cone census
 and the rest) passes with no manifest regenerated.
 
+**After the corpus moved to SDK 11.0.100 (#798), the cost is three F# corpus
+lines, all forced by the rule.** `FSharpDiagServer.fsproj` and the two
+`CompilerCompat` projects pin a prerelease host SDK band through
+`global.json`. The walk does not model those bands
+(`sdk_resolver/workloads.rs`), so it cannot resolve the SDK's
+`Microsoft.NET.SDK.WorkloadAutoImportPropsLocator` import, and it marks
+everything after that point as hidden. That point comes after each project's
+`Directory.Build.props` has written `ImportDirectoryBuildTargets=false`, so
+the gate value is stale when the fallback `Directory.Build.targets` splice
+reads it (`gate_value_is_exact`). The workload props the walk cannot see may
+set the gate back, so the decline is owed:
+- `FSharpDiagServer`'s Compile set and `ProjectReference` list move from
+  `match` to `decline`;
+- so does the `ProjectReference` list of each `CompilerCompat` project.
+
+Modelling prerelease host bands would remove the opacity, and these
+declines with it (#810). Narrowing the stale rule cannot remove
+them soundly.
+
 A latch visits only the entries bound or given a verdict since the previous
 one (`PropertyMap::fresh`), since that one left every bound entry stale, and
 every stale value shares its latch's cause (`StaleCause`, an `Arc`): marking
