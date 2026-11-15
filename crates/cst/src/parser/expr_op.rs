@@ -59,6 +59,12 @@ impl<'src> Parser<'src> {
             self.parse_if_then_else();
             return;
         }
+        // `...e` outside a record's bindings: like `if`, a `declExpr` that
+        // takes the rest of the expression to its right.
+        if self.peek_is_dot_dot_dot() {
+            self.parse_misplaced_spread();
+            return;
+        }
         // `fun <pat>+ -> <body>` / `function <clauses>` — in either spelling:
         // LexFilter's `OFUN`/`OFUNCTION` relabel, or the raw keyword where it
         // pushed no context (see [`DualKeyword`]). Like `if`, this dispatch
@@ -1285,6 +1291,10 @@ impl<'src> Parser<'src> {
             // consumes the operator (`a && let x = e in b`). `parse_minus_expr`
             // dispatches it. (`use` is excluded — see that dispatch's note.)
             Some((Ok(FilteredToken::Raw(Token::Let)), _)) => true,
+            // `...e` — FCS reads `DOT_DOT_DOT declExpr` as an operand too
+            // (`1 + ...x`), reporting FS3902 and dropping it (see
+            // [`Parser::parse_misplaced_spread`]).
+            Some((Ok(FilteredToken::Raw(Token::DotDotDot)), _)) => true,
             // `_.member` — the accessor-function shorthand as an infix RHS
             // (`x + _.Foo`). Kept symmetric with `peek_is_expr_start`'s arm; the
             // `_.` two-token shape is checked at this offset rather than the

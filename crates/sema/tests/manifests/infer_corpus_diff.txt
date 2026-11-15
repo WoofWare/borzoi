@@ -996,9 +996,9 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/Platform/AssemblyNameForExe.fs:6:
 tests/FSharp.Compiler.ComponentTests/EmittedIL/QueryExpressionStepping/Linq101Select01.fs	compared
 tests/FSharp.Compiler.ComponentTests/EmittedIL/RealInternalSignature/RealInternalSignature.fs	compared
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SeqExpressionTailCalls/SeqExpressionTailCalls02.fs	compared
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs	our-parse-errors
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs	our-parse-errors
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs	our-parse-errors
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs	compared
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs	compared
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs	compared
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch04.fs	compared
 tests/FSharp.Compiler.ComponentTests/EmittedIL/StructGettersReadOnly.fs	compared
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DoNotInlineX.fs	our-parse-errors

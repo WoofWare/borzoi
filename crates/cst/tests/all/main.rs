@@ -88,6 +88,7 @@ mod parser_diff_prefix_typars;
 mod parser_diff_quote_pat;
 mod parser_diff_ranges;
 mod parser_diff_raw_keyword_grid;
+mod parser_diff_record_spreads;
 mod parser_diff_recovery;
 mod parser_diff_reserved_idents;
 mod parser_diff_seq_separators;

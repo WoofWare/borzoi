@@ -61,7 +61,7 @@ impl<'src> Parser<'src> {
         // not in the filtered stream, so "no field" surfaces as the cursor
         // already being at the (swallowed) close — i.e. not a field start.
         if self.raw_starts_record_field_decl() {
-            self.parse_record_field_decl();
+            self.parse_record_decl_item();
             // Subsequent fields after one `seps_block` group. FCS's `seps_block`
             // is a *single* group, so a repeated separator
             // (`type T = { F : int; ; G : int }`) is a parse error; consuming one
@@ -74,7 +74,7 @@ impl<'src> Parser<'src> {
                 if at_close(self) || !self.raw_starts_record_field_decl() {
                     break;
                 }
-                self.parse_record_field_decl();
+                self.parse_record_decl_item();
             }
         } else {
             let span = self
@@ -135,8 +135,8 @@ impl<'src> Parser<'src> {
 
     /// `true` iff the cursor begins a record field — a leading attribute list
     /// `[<…>]` (phase 10.7), a `mutable` keyword, an access modifier, or a
-    /// field-name ident. (The swallowed `}` close is not a field start, so this is
-    /// `false` at the end of the field list.)
+    /// field-name ident — or a spread's `...`. (The swallowed `}` close is not a
+    /// field start, so this is `false` at the end of the field list.)
     fn raw_starts_record_field_decl(&self) -> bool {
         matches!(
             self.peek(),
@@ -149,10 +149,34 @@ impl<'src> Parser<'src> {
                         | Token::Public
                         | Token::Ident(_)
                         | Token::QuotedIdent(_)
+                        | Token::DotDotDot
                 )),
                 _,
             ))
         )
+    }
+
+    /// Parse one item of a record type's field list (`recdFieldDecl`): a
+    /// field, or a spread `...T` ([`SyntaxKind::RECORD_SPREAD_DECL`], FCS's
+    /// `SynFieldOrSpread.Spread`). A `...` with no type after it is FCS's
+    /// FS3900 over a `SynType.FromParseError`; the node then holds the `...`
+    /// alone.
+    fn parse_record_decl_item(&mut self) {
+        let Some((Ok(FilteredToken::Raw(Token::DotDotDot)), dots)) = self.peek().cloned() else {
+            self.parse_record_field_decl();
+            return;
+        };
+        self.builder.start_node(SyntaxKind::RECORD_SPREAD_DECL);
+        self.bump_into(SyntaxKind::DOT_DOT_DOT_TOK);
+        if self.peek_starts_type() && !self.at_swallowed_seq_closer() {
+            self.parse_type();
+        } else {
+            self.errors.push(ParseError {
+                message: MISSING_SPREAD_SOURCE_TYPE.to_string(),
+                span: dots,
+            });
+        }
+        self.builder.finish_node(); // RECORD_SPREAD_DECL
     }
 
     /// Parse one record field into a [`SyntaxKind::RECORD_FIELD_DECL`] node —

@@ -912,6 +912,11 @@ impl<'a> Resolver<'a> {
                         self.resolve_type(&ty);
                     }
                 }
+                for (_, spread) in r.spreads() {
+                    if let Some(ty) = spread.ty() {
+                        self.resolve_type(&ty);
+                    }
+                }
             }
             Some(TypeDefnRepr::Union(u)) => {
                 for case in u.cases() {

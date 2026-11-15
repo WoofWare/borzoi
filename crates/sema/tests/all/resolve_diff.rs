@@ -99,6 +99,11 @@ const CORPUS: &[&str] = &[
     // `r`'s (external/unknown) record type, so FCS reports no in-file decl for
     // it — only `r`/`v` are checked, which our `Record` arm resolves.
     "let f r v = { r with F = v }\n",
+    // record spreads: each spread's source resolves in the enclosing scope, a
+    // binder inside one included, as does a field value after it. The labels
+    // are `r`'s (unknown) record type's, as above.
+    "let f r v g = { ...r; F = v; ...g (fun x -> x) }\n",
+    "let f r v = { r with ...(let s = v in s); G = v }\n",
     // NOTE: anonymous-record expressions (`{| A = a |}`) are intentionally
     // *not* in this strict corpus. Unlike a regular record's labels (external
     // decl, skipped), FCS treats an anon-record field *name* as an in-file

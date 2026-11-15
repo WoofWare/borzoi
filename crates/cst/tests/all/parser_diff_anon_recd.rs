@@ -69,13 +69,11 @@ fn diff_ast_anon_recd_empty() {
 // `struct {| A = 1 |}` (`isStruct = true`) is now parsed — see
 // `parser_diff_struct_expr` (phase 10.18 struct expressions).
 
-/// `{| A.B = 1 |}` — FCS rejects a *dotted* field name in (non-copy)
-/// construction ("Invalid anonymous record type"; dotted names are meaningful
-/// only for copy-update nesting). We report the same diagnostic rather than
-/// silently accepting it. Clean error (lossless, no panic).
+/// `{| A.B = 1 |}` — FCS's parser accepts a dotted field name in construction as
+/// well as in a copy (after a spread it names a nested field), and so do we.
 #[test]
-fn diff_ast_anon_recd_dotted_field_is_clean_error() {
-    assert_clean_error("let x = {| A.B = 1 |}\n");
+fn diff_ast_anon_recd_dotted_field() {
+    assert_asts_match("let x = {| A.B = 1 |}\n");
 }
 
 /// Deferred — `{| f r with A = 1 |}` (a non-longident copy source). FCS accepts

@@ -468,9 +468,18 @@ fn sig_feature_gates_match_fcs_at_every_version() {
 /// compiler the feature table transcribes, which we follow at every version:
 /// the legacy oracle starts an indented `#nowarn`'s directive range, where
 /// FS0236 and `ScopedNowarn`'s FS3350 are reported, at the start of its line,
-/// where the table's compiler starts it at the `#`; and it reports nothing for
-/// an `#elif` below 11.0, where the table's compiler reports FS3350.
+/// where the table's compiler starts it at the `#`; it reports nothing for an
+/// `#elif` below 11.0, where the table's compiler reports FS3350; and it
+/// predates record spreads, lexing `...` as an operator. Record spreads
+/// (`RecordSpreads`, 11.0) are gated in FCS's type checker, so FCS's parse
+/// reports nothing at any version: the fixture is a control, holding the tree
+/// to be the same at every version (sema's `infer_legality_pin_diff` holds the
+/// gate to FCS's check).
 const IMPL_FROM_FLOOR: &[(&str, Expect)] = &[
+    (
+        "module M\ntype T = { A: int }\ntype R = { ...T; B: int }\nlet f (t: T) = { ...t; B = 1 }, {| ...t |}\n",
+        Control,
+    ),
     (
         "module M\nmodule N =\n    #nowarn \"41\" // why\n    let x = 1\n",
         Gated,

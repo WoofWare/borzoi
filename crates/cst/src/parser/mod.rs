@@ -77,6 +77,24 @@ const DELEGATE_AUGMENTATION_ERROR: &str =
 const TYPE_SIG_UNSUPPORTED_BODY_ERROR: &str = "this signature type-definition body form is not yet supported (later \
      phase-10.14 slice)";
 
+/// FCS's FS3899 (`parsMissingSpreadSrcExpr`): a record or anonymous-record
+/// expression's `...` with no expression after it.
+const MISSING_SPREAD_SOURCE_EXPR: &str = "Missing spread source expression after '...'.";
+
+/// FCS's FS3900 (`parsMissingSpreadSrcTy`): a record type's `...` with no type
+/// after it.
+const MISSING_SPREAD_SOURCE_TYPE: &str = "Missing spread source type after '...'.";
+
+/// FCS's FS3902 (`parsSpreadNotSupported`): `...e` outside a record or
+/// anonymous record's bindings. FCS drops the expression
+/// (`ArbitraryAfterError`).
+const SPREAD_NOT_SUPPORTED: &str = "Spreading is not supported in this construct.";
+
+/// FCS's FS3903 (`parsSpreadNotSupportedBeforeWith`): `{ ...e with … }`, whose
+/// `e` FCS keeps as the copy source.
+const SPREAD_BEFORE_WITH: &str = "Spreading is not supported in this position. Use one of the forms \
+     { ...expr1; A = expr2 } or { expr1 with A = expr2 } instead.";
+
 /// One item in an object-model type body (phases 9.7–9.9b). Distinguishes the
 /// terminator shape: a `Member`/`ClassLet` has an offside `= <expr>` RHS block
 /// (it leaves a RHS-close `OBLOCKEND`), whereas a `ValField` has no RHS block

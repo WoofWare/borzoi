@@ -12,6 +12,10 @@
 //! - **records** — one per `type`, or an `and` pair; generic or not; struct or
 //!   not; `[<RequireQualifiedAccess>]` (whose labels FCS never adds) or not;
 //!   each declaring a random subset of three labels, so labels collide;
+//! - **spreads** — a record spreading an earlier record of its module
+//!   (`{ ...Src; … }`, F# 11), before its own fields (which shadow the
+//!   spread's) or after them (shadowing theirs), so it carries the source's
+//!   labels too, each declared at the spread's type;
 //! - **nested modules** — plain, `[<AutoOpen>]` (whose records join the
 //!   enclosing scope when it closes) or `rec` (whose records are all in scope
 //!   from its start);
@@ -43,7 +47,9 @@
 //! 3. **Must commit.** Where the model's winner is a record the resolver
 //!    models — declared in the file in the probe's scope (not brought by an
 //!    `[<AutoOpen>]` module's close, which the resolver declines), with no
-//!    `open` after it in scope, outside a `rec` module, in a file whose opens
+//!    `open` after it in scope, outside a `rec` module, with no record with a
+//!    spread in scope (whose labels the resolver does not read, so it declines
+//!    every label there), in a file whose opens
 //!    and extensions leave the label's name provably unextended — the
 //!    resolver must answer.
 //!
@@ -208,6 +214,32 @@ struct RecordSpec {
     /// A member whose body is a probe of this label: FCS reads the record's
     /// own labels there ahead of the table.
     member_probe: Option<&'static str>,
+    /// A spread of an earlier record of the same module.
+    spread: Option<SpreadSpec>,
+}
+
+/// A record's spread, `...Src`.
+#[derive(Clone, Debug)]
+struct SpreadSpec {
+    source: String,
+    /// Every label the source carries, its own spread's included.
+    labels: Vec<&'static str>,
+    /// Whether the spread precedes the record's own fields, which then shadow
+    /// its labels; after them, its labels shadow theirs.
+    first: bool,
+}
+
+impl RecordSpec {
+    /// Every label the record carries: its own and its spread's.
+    fn all_labels(&self) -> Vec<&'static str> {
+        let mut out = self.labels.clone();
+        for &label in self.spread.iter().flat_map(|s| s.labels.iter()) {
+            if !out.contains(&label) {
+                out.push(label);
+            }
+        }
+        out
+    }
 }
 
 /// A field's type, as a chain through it reads it.
@@ -293,6 +325,7 @@ fn gen_record(rng: &mut Rng, names: &mut Names, attributes: bool) -> RecordSpec 
         labels: rng.labels(),
         linked: rng.chance(1, 2),
         member_probe: rng.chance(1, 6).then(|| rng.label()),
+        spread: None,
     }
 }
 
@@ -328,12 +361,36 @@ fn gen_items(
 ) -> Vec<Item> {
     let len = 1 + rng.below(if depth == 0 { 8 } else { 4 });
     let mut items = Vec::new();
+    // The records a later record of this body may spread: public and not
+    // generic, by name, with every label each carries.
+    let mut spread_sources: Vec<(String, Vec<&'static str>)> = Vec::new();
     for _ in 0..len {
         let pick = rng.below(16);
         let item = match pick {
             // An attribute in a `rec` module is one the resolver does not
             // pin, which shuts the extension gate on the whole file.
-            0..=4 => gen_records(rng, names, !in_rec || kind == FileKind::Opens),
+            0..=4 => {
+                let mut item = gen_records(rng, names, !in_rec || kind == FileKind::Opens);
+                if let Item::Records(specs) = &mut item {
+                    for r in specs.iter_mut() {
+                        if !spread_sources.is_empty() && rng.chance(1, 4) {
+                            let (source, labels) =
+                                spread_sources[rng.below(spread_sources.len())].clone();
+                            r.spread = Some(SpreadSpec {
+                                source,
+                                labels,
+                                first: rng.chance(1, 2),
+                            });
+                        }
+                    }
+                    for r in specs.iter() {
+                        if !r.generic && r.access == Access::Public {
+                            spread_sources.push((r.name.clone(), r.all_labels()));
+                        }
+                    }
+                }
+                item
+            }
             5..=8 => gen_probe(rng),
             9..=10 if depth < 2 && !in_rec => {
                 let rec = kind != FileKind::Ext && rng.chance(1, 3);
@@ -420,6 +477,8 @@ struct Event {
     and_second: bool,
     /// An `[<AutoOpen>]` module's close brought it here.
     copied: bool,
+    /// The record carries a spread.
+    spread: bool,
     access: Access,
     /// The outermost frame (by index in the stack) the record is accessible
     /// in: its own module's, for a `private` record; a `private` module's
@@ -447,6 +506,10 @@ struct Frame {
     /// The labels the resolver's `[<AutoOpen>]` copies put here, by
     /// position: each shadows, declining, whatever it outranks.
     copied: Vec<(&'static str, usize)>,
+    /// A record with a spread is declared here, or an `[<AutoOpen>]` close
+    /// copied one here: the resolver's entry for it, which answers every
+    /// label, declines whatever it outranks.
+    has_spread: bool,
 }
 
 /// What the model says FCS reports at a probe.
@@ -497,7 +560,7 @@ fn record_events(
         .enumerate()
         .filter(|(_, r)| !r.rqa && !(foreign && r.access == Access::PrivateType))
         .flat_map(|(i, r)| {
-            r.labels.iter().map(move |&label| Event {
+            r.all_labels().into_iter().map(move |label| Event {
                 label,
                 field: FieldId {
                     file,
@@ -509,6 +572,7 @@ fn record_events(
                 generic: r.generic,
                 and_second: i == 1,
                 copied: false,
+                spread: r.spread.is_some(),
                 access: r.access,
                 floor: if r.access == Access::PrivateType {
                     at
@@ -530,6 +594,7 @@ fn core_event(origin: Origin, pos: usize) -> Event {
         generic: true,
         and_second: false,
         copied: false,
+        spread: false,
         access: Access::Public,
         floor: 0,
     }
@@ -615,6 +680,29 @@ impl Emitter {
             let link = (r.linked && !r.generic)
                 .then(|| self.abbreviable.last().map(|(n, _)| n.clone()))
                 .flatten();
+            // Each label's declaration and type: the spread's at its type, for
+            // a label it copies, unless an own field of the label follows it.
+            let mut declared: Vec<(&'static str, Range<usize>, FieldTy)> = Vec::new();
+            let spread = |e: &mut Self, declared: &mut Vec<_>, s: &SpreadSpec| {
+                e.src.push_str("...");
+                let start = e.src.len();
+                e.src.push_str(&s.source);
+                let end = e.src.len();
+                for &label in &s.labels {
+                    let source = FieldId {
+                        file: e.file,
+                        record: s.source.clone(),
+                        label,
+                    };
+                    let ty = e.field_types[&source].clone();
+                    declared.retain(|(l, _, _)| *l != label);
+                    declared.push((label, start..end, ty));
+                }
+            };
+            if let Some(s) = r.spread.as_ref().filter(|s| s.first) {
+                spread(self, &mut declared, s);
+                self.src.push_str("; ");
+            }
             for (k, &label) in r.labels.iter().enumerate() {
                 if k > 0 {
                     self.src.push_str("; ");
@@ -631,17 +719,25 @@ impl Emitter {
                     _ => ("string".to_string(), FieldTy::Prim),
                 };
                 self.src.push_str(&format!(": {ty}"));
+                declared.retain(|(l, _, _)| *l != label);
+                declared.push((label, start..end, field_ty));
+            }
+            if let Some(s) = r.spread.as_ref().filter(|s| !s.first) {
+                self.src.push_str("; ");
+                spread(self, &mut declared, s);
+            }
+            for (label, at, field_ty) in declared {
                 let id = FieldId {
                     file: self.file,
                     record: r.name.clone(),
                     label,
                 };
                 self.field_types.insert(id.clone(), field_ty);
-                self.fields.push((id, start..end));
+                self.fields.push((id, at));
             }
             self.src.push_str(" }\n");
             self.record_labels
-                .insert((self.file, r.name.clone()), r.labels.clone());
+                .insert((self.file, r.name.clone()), r.all_labels());
             if let Some(label) = r.member_probe {
                 let m = self.names.next("M");
                 self.src.push_str(&format!("{pad}    member _.{m} p = p."));
@@ -737,20 +833,20 @@ impl Emitter {
             // there too.
             let looked_up =
                 label == OBJECT_MEMBER || stack.iter().any(|f| f.extensions.contains(&label));
-            let (prediction, winner, passed_skipped) = if !looked_up && own.labels.contains(&label)
-            {
-                (
-                    Prediction::Field(FieldId {
-                        file: self.file,
-                        record: own.name.clone(),
-                        label,
-                    }),
-                    None,
-                    false,
-                )
-            } else {
-                self.predict(stack, label)
-            };
+            let (prediction, winner, passed_skipped) =
+                if !looked_up && own.all_labels().contains(&label) {
+                    (
+                        Prediction::Field(FieldId {
+                            file: self.file,
+                            record: own.name.clone(),
+                            label,
+                        }),
+                        None,
+                        false,
+                    )
+                } else {
+                    self.predict(stack, label)
+                };
             self.probes.push(Probe {
                 file: self.file,
                 binder,
@@ -794,13 +890,14 @@ impl Emitter {
                     let index = stack.len() - 1;
                     let frame = stack.last_mut().unwrap();
                     for r in specs.iter().filter(|r| r.rqa) {
-                        for &l in &r.labels {
+                        for l in r.all_labels() {
                             frame.skipped.push((l, pos));
                         }
                     }
                     for r in specs.iter().filter(|r| !r.rqa) {
-                        frame.declared.extend(r.labels.iter().copied());
+                        frame.declared.extend(r.all_labels());
                     }
+                    frame.has_spread |= specs.iter().any(|r| r.spread.is_some());
                     if !frame.rec {
                         let at = (index, frame.floor);
                         let events =
@@ -872,6 +969,7 @@ impl Emitter {
                     self.module_records.push((name.clone(), own));
                     if *auto_open {
                         let parent = stack.last_mut().unwrap();
+                        parent.has_spread |= inner.has_spread;
                         // FCS adds the module's own records, then its
                         // `[<AutoOpen>]` submodules'.
                         let (own, submodules): (Vec<Event>, Vec<Event>) = inner
@@ -1047,6 +1145,7 @@ impl Emitter {
                                 .flat_map(|f| f.copied.iter())
                                 .any(|&(l, at)| l == label && at > w.pos)
                             && !stack.iter().any(|f| f.rec)
+                            && !stack.iter().any(|f| f.has_spread)
                             && !stack
                                 .iter()
                                 .flat_map(|f| f.opens.iter())
@@ -1213,6 +1312,7 @@ fn build_project(seed: u64, blocks_per_file: usize) -> Project {
 fn fcs_report(
     uses: &[NormalisedProjectUse],
     range: TextRange,
+    label: &str,
     written: &[(PathBuf, String)],
     fields: &[(FieldId, Range<usize>)],
 ) -> Prediction {
@@ -1246,7 +1346,10 @@ fn fcs_report(
         .expect("the declaring file is one of the project's");
     let field = fields
         .iter()
-        .find(|(f, r)| f.file == file && r.start == decl.start && r.end == decl.end)
+        .find(|(f, r)| {
+            // A spread declares every label it copies at its type.
+            f.file == file && r.start == decl.start && r.end == decl.end && f.label == label
+        })
         .unwrap_or_else(|| panic!("FCS named an ungenerated field at {decl:?}"));
     Prediction::Field(field.0.clone())
 }
@@ -1275,6 +1378,8 @@ struct Tally {
     member_table_fields: usize,
     /// Winners whose record is not plain public.
     restricted_winners: usize,
+    /// Winners whose record carries a spread.
+    spread_winners: usize,
 }
 
 fn origin_index(o: Origin) -> usize {
@@ -1355,7 +1460,13 @@ fn run(seed: u64, blocks_per_file: usize) -> Tally {
             src.lines().nth(line - 1).unwrap_or_default().trim(),
             probe.label
         );
-        let fcs = fcs_report(&fu.uses, probe.range, &written, &project.fields);
+        let fcs = fcs_report(
+            &fu.uses,
+            probe.range,
+            probe.label,
+            &written,
+            &project.fields,
+        );
         if probe.prediction != fcs {
             let near: Vec<&NormalisedProjectUse> = fu
                 .uses
@@ -1379,6 +1490,7 @@ fn run(seed: u64, blocks_per_file: usize) -> Tally {
             t.by_origin[origin_index(w.origin)] += 1;
             t.generic_winners += usize::from(w.generic);
             t.and_second_winners += usize::from(w.and_second);
+            t.spread_winners += usize::from(w.spread);
         }
         t.passed_skipped += usize::from(probe.passed_skipped);
         if let Some(w) = &probe.winner {
@@ -1392,7 +1504,7 @@ fn run(seed: u64, blocks_per_file: usize) -> Tally {
             }
         }
         if let Some((at, second, predicted, unknown)) = &probe.chain {
-            let fcs2 = fcs_report(&fu.uses, *at, &written, &project.fields);
+            let fcs2 = fcs_report(&fu.uses, *at, second, &written, &project.fields);
             assert_eq!(
                 predicted, &fcs2,
                 "{ctx}: the model disagrees with FCS at the chain's second label `{second}`"
@@ -1509,6 +1621,7 @@ fn assert_floors(t: &Tally, blocks: usize) {
         ("member probes on their own record", t.member_own_fields, 25),
         ("member probes through the table", t.member_table_fields, 18),
         ("winners not plain public", t.restricted_winners, 120),
+        ("winners carrying a spread", t.spread_winners, 15),
     ] {
         let floor = floor * blocks / 100;
         assert!(n >= floor, "only {n} {what} (floor {floor}): {t:?}");

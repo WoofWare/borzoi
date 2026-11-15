@@ -1260,8 +1260,12 @@ fn collect_fcs_type_defn(
                 // `SynField(attributes, isStatic, idOpt, …)`.
                 "Record" => {
                     let rfields = fields(simple)[1].as_array().expect("record fields");
-                    for (k, item) in rfields.iter().enumerate() {
-                        let field = super::normalised_ast::fcs_record_decl_field(item);
+                    // A spread declares no field: number the fields alone, as
+                    // the CST side's `RecordRepr::fields` does.
+                    let decl_fields = rfields
+                        .iter()
+                        .filter_map(super::normalised_ast::fcs_record_decl_field);
+                    for (k, field) in decl_fields.enumerate() {
                         let id_opt = &fields(field)[2];
                         if !id_opt.is_null() && case_name(id_opt) == "Some" {
                             push_fcs_fact(

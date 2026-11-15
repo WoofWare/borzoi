@@ -515,6 +515,11 @@ const FIXTURES: &[(&str, FileKind)] = &[
         "[<Measure>] type m\nlet f x = match x with 1<m> -> 0 | _ -> 1\n",
         FileKind::Impl,
     ),
+    (
+        "type T = { A: int }\ntype R = { X: int; ...T }\nlet f (t: T) = { ...t; X = 1 }, {| t with ...t; B = 2 |}\n",
+        FileKind::Impl,
+    ),
+    ("namespace N\ntype R = { ...T; X: int }\n", FileKind::Sig),
 ];
 
 /// Checks every fixture at every version into `indexes`; returns the holes met.

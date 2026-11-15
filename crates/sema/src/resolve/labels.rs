@@ -32,6 +32,10 @@
 //!   ahead of the walk;
 //! - an entry that may or may not be there: a record whose
 //!   `[<RequireQualifiedAccess>]` is uncertain, or a label it declares twice;
+//! - a record with a spread (`{ ...T; F: int }`), which copies labels the walk
+//!   does not read, and whose later spread may replace an explicit field of
+//!   the same name: every entry it makes declines, and one more, which
+//!   answers every label, shadows whatever it outranks;
 //! - an entry an `[<AutoOpen>]` module's close (or a possible one) adds to
 //!   the enclosing container. FCS adds the module's accessible records there,
 //!   its own ahead of its `[<AutoOpen>]` submodules', but which records are
@@ -79,7 +83,9 @@ const OBJECT_MEMBERS: [&str; 5] = [
 /// One label in one container's part of the table.
 #[derive(Debug, Clone)]
 struct LabelEntry {
-    name: String,
+    /// The label, or `None` for an entry that answers every label: a record
+    /// spread's, whose copied labels the walk does not read.
+    name: Option<String>,
     label: FieldLabel,
     /// Where the label entered this container's scope.
     pos: u32,
@@ -93,15 +99,23 @@ struct LabelEntry {
 pub(super) struct LabelTable {
     by_container: HashMap<PathId, Vec<LabelEntry>>,
     /// Every label any entry carries: a use of any other label has no
-    /// answer to look for.
+    /// answer to look for, unless some entry answers every label
+    /// ([`Self::any_label`]).
     names: HashSet<String>,
+    /// Whether an entry answers every label (a record spread's).
+    any_label: bool,
     /// How many type definitions' member bodies the walk is inside.
     in_type_bodies: usize,
 }
 
 impl LabelTable {
     fn push(&mut self, container: PathId, entry: LabelEntry) {
-        self.names.insert(entry.name.clone());
+        match &entry.name {
+            Some(name) => {
+                self.names.insert(name.clone());
+            }
+            None => self.any_label = true,
+        }
         self.by_container.entry(container).or_default().push(entry);
     }
 }
@@ -125,6 +139,12 @@ impl Resolver<'_> {
             RequireQualifiedAccess::CertainlyNot => true,
             RequireQualifiedAccess::Unknown { .. } => false,
         };
+        // A spread (`{ ...T; F: int }`) copies `T`'s fields, which the walk
+        // does not read: the record may declare any label, and a later spread
+        // may replace an explicit field of the same name. So every entry it
+        // makes declines, and one more answers every label.
+        let spread = repr.spreads().next().map(|(_, s)| s.syntax().text_range());
+        let certain = certain && spread.is_none();
         let fields: Vec<(String, TextRange)> = repr
             .fields()
             .filter_map(|f| f.ident())
@@ -136,7 +156,7 @@ impl Resolver<'_> {
             self.labels.push(
                 container,
                 LabelEntry {
-                    name: name.clone(),
+                    name: Some(name.clone()),
                     label: FieldLabel {
                         record,
                         arity,
@@ -144,6 +164,21 @@ impl Resolver<'_> {
                     },
                     pos: group_pos,
                     certain: certain && !twice,
+                },
+            );
+        }
+        if let Some(spread) = spread {
+            self.labels.push(
+                container,
+                LabelEntry {
+                    name: None,
+                    label: FieldLabel {
+                        record,
+                        arity,
+                        field: spread,
+                    },
+                    pos: group_pos,
+                    certain: false,
                 },
             );
         }
@@ -192,7 +227,7 @@ impl Resolver<'_> {
     pub(super) fn record_field_labels(&mut self, segments: &[SyntaxToken]) {
         for seg in segments {
             let name = id_text(seg);
-            if !self.labels.names.contains(&*name) {
+            if !self.labels.any_label && !self.labels.names.contains(&*name) {
                 continue;
             }
             if let Some(label) = self.field_label(&name) {
@@ -222,7 +257,12 @@ impl Resolver<'_> {
                 .labels
                 .by_container
                 .get(&self.lexical.container_path.prefix_id(k))
-                .and_then(|entries| entries.iter().rev().find(|e| e.name == name))
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .rev()
+                        .find(|e| e.name.as_deref().is_none_or(|n| n == name))
+                })
             else {
                 continue;
             };

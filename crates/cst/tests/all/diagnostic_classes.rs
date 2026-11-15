@@ -143,6 +143,10 @@ const FIXTURES: &[(LanguageFeature, &str)] = &[
         LanguageFeature::FromEndSlicing,
         "module M\nlet xs = [| 1; 2 |]\nlet a = xs.[^1]\nlet b = xs[..^1]\n",
     ),
+    (
+        LanguageFeature::RecordSpreads,
+        "module M\ntype T = { A: int }\ntype R = { ...T; B: int }\nlet f (t: T) = { ...t; B = 1 }\nlet g (t: T) = {| ...t; C = 2 |}\n",
+    ),
 ];
 
 const LADDER: [LanguageVersion; 10] = [

@@ -326,6 +326,10 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/Nullness/CustomType.fs@357 member
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Nullness/CustomType.fs@612 token	outside-damage 3/3/4
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Nullness/ModuleLevelFunctions.fs@147 token	outside-damage 8/8/9
 tests/FSharp.Compiler.ComponentTests/EmittedIL/RealInternalSignature/ModuleInitialization.fs@12284 token	exact 27/27/27
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NoOverlap_Spread_Explicit.fs@102 token	divergent 2/2/4 beyond-fcs:4 at:module[0]/Attributes@88,module[0]/Types@88,module[0]/Expr@104
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_Explicit_Spread_Generics.fs@78 token	outside-damage 2/2/4
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_SpreadFromAnon.fs@107 token	outside-damage 1/1/1 beyond-fcs:1
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsExplicit.fs@172 token	exact 2/2/3
 tests/FSharp.Compiler.ComponentTests/EmittedIL/StaticOptimizations/String_SignedIntegralTypes.fs@64 token	exact 7/7/7
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch05.fs@150 token	outside-damage 2/2/3
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch09.fs@946 token	exact 5/5/6

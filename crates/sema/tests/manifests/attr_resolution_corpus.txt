@@ -641,7 +641,10 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/AnonymousRecordExpression
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/AnonymousRecordExpressionSpreads.fs:68:3 "Theory" commit
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/AnonymousRecordExpressionSpreads.fs:74:3 "Theory" commit
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/AnonymousRecordExpressionSpreads.fs:80:3 "Theory" commit
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs our-parse-errors
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs compared fcs-clean
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:1:15 "NoComparison" commit
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:1:29 "DefaultAugmentation" commit
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:1:3 "NoEquality" commit
 tests/FSharp.Compiler.ComponentTests/EmittedIL/StaticOptimizations/StaticOptimizations.fs compared fcs-check-errors
 tests/FSharp.Compiler.ComponentTests/EmittedIL/StructDefensiveCopy/StructDefensiveCopy.fs compared fcs-check-errors
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/Extensions02.fs compared fcs-check-errors

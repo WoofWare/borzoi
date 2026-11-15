@@ -27,6 +27,12 @@ enum BraceBody {
     /// computation expression — mirroring the `new`-headed
     /// [`Parser::parse_obj_or_computation_brace`] checkpoint discipline.
     AppExprHead,
+    /// A `...`-headed brace with an expression after the `...`: a record whose
+    /// first binding is a spread (`{ ...e; F = x }`, FCS's `recdExprCore:
+    /// DOT_DOT_DOT declExprBlock recdExprBindings`), or, when a `with` follows
+    /// an `appExpr` source, FCS's FS3903 copy-and-update (`{ ...e with F = x
+    /// }`). Resolved by [`Parser::parse_spread_head_brace`].
+    SpreadHead,
     /// A computation expression `{ e }` / `seq { … }` (the catch-all).
     Computation,
 }
@@ -1374,11 +1380,17 @@ impl<'src> Parser<'src> {
             self.parse_app_head_brace();
             return;
         }
+        if matches!(body, BraceBody::SpreadHead) {
+            self.parse_spread_head_brace();
+            return;
+        }
         let node_kind = match body {
             BraceBody::Record { .. } => SyntaxKind::RECORD_EXPR,
             BraceBody::Computation => SyntaxKind::COMPUTATION_EXPR,
-            // Routed above to `parse_app_head_brace` (deferred node kind).
-            BraceBody::AppExprHead => unreachable!("AppExprHead handled before this match"),
+            // Routed above to their handlers (deferred node kind).
+            BraceBody::AppExprHead | BraceBody::SpreadHead => {
+                unreachable!("an appExpr- or spread-headed brace is routed before this match")
+            }
         };
         self.builder.start_node(node_kind);
         self.bump_into(SyntaxKind::LBRACE_TOK);
@@ -1409,13 +1421,17 @@ impl<'src> Parser<'src> {
                 // error for an empty body.
                 self.parse_seq_block_elements("expected expression inside `{ }`");
             }
-            // Routed earlier to `parse_app_head_brace` (deferred node kind).
-            BraceBody::AppExprHead => unreachable!("AppExprHead handled before this match"),
+            // Routed earlier to their handlers (deferred node kind).
+            BraceBody::AppExprHead | BraceBody::SpreadHead => {
+                unreachable!("an appExpr- or spread-headed brace is routed before this match")
+            }
         }
         let closer_context = match body {
             BraceBody::Record { .. } => "record expression",
             BraceBody::Computation => "computation expression",
-            BraceBody::AppExprHead => unreachable!("AppExprHead handled before this match"),
+            BraceBody::AppExprHead | BraceBody::SpreadHead => {
+                unreachable!("an appExpr- or spread-headed brace is routed before this match")
+            }
         };
         self.bump_swallowed_closer(
             SyntaxKind::RBRACE_TOK,
@@ -2018,20 +2034,20 @@ impl<'src> Parser<'src> {
     /// list. Mirrors [`Self::parse_record_body`] but stops at the real filtered
     /// `|}` closer ([`Token::BarRBrace`]) instead of the swallowed `}`.
     fn parse_anon_recd_body(&mut self, copy_update: bool) {
+        // Whether the first binding, a spread, is already parsed.
+        let mut first_parsed = false;
         if copy_update {
             // Copy source — `parse_expr` stops at the `Virtual::With`.
             if self.peek_is_expr_start() {
                 self.parse_expr();
             }
-            if let Some((Ok(FilteredToken::Virtual(Virtual::With)), with_span)) =
-                self.peek().cloned()
-            {
-                self.drain_raw_up_to(with_span.start);
-                self.emit_text(SyntaxKind::WITH_TOK, with_span);
-                self.raw_pos += 1;
-                self.filtered.advance();
-            } else if matches!(self.peek(), Some((Ok(FilteredToken::Raw(Token::With)), _))) {
-                self.bump_into(SyntaxKind::WITH_TOK);
+            self.bump_copy_with();
+        } else if self.peek_is_dot_dot_dot() && self.expr_start_at(self.filtered.pos() + 1) {
+            // `{| ...e; … |}`, or FS3903's `{| ...e with … |}`.
+            if self.parse_spread_head() {
+                self.bump_copy_with();
+            } else {
+                first_parsed = true;
             }
         }
 
@@ -2044,57 +2060,32 @@ impl<'src> Parser<'src> {
             )
         };
 
-        if self.peek_is_record_field_start() {
-            self.parse_anon_recd_field(copy_update);
-        } else if !at_bar_rbrace(self) {
-            let span = self
-                .peek()
-                .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| self.source.len()..self.source.len());
-            self.errors.push(ParseError {
-                message: "expected a field binding in anonymous record".to_string(),
-                span,
-            });
+        if !first_parsed {
+            if self.peek_is_record_binding_start() {
+                self.parse_record_binding();
+            } else if !at_bar_rbrace(self) {
+                let span = self
+                    .peek()
+                    .map(|(_, s)| s.clone())
+                    .unwrap_or_else(|| self.source.len()..self.source.len());
+                self.errors.push(ParseError {
+                    message: "expected a field binding in anonymous record".to_string(),
+                    span,
+                });
+            }
         }
 
         while !at_bar_rbrace(self) && self.consume_one_seps_group(at_bar_rbrace) {
-            if at_bar_rbrace(self) || !self.peek_is_record_field_start() {
+            if at_bar_rbrace(self) || !self.peek_is_record_binding_start() {
                 break;
             }
-            self.parse_anon_recd_field(copy_update);
+            self.parse_record_binding();
         }
 
         // A copy-update closes with a `Virtual::End` (FCS's `appExpr OWITH …
         // OEND`) at the `|}` position; consume it zero-width so the real
         // `|}` still reaches the closer bump.
         self.eat_zero_width_virtual(Virtual::End);
-    }
-
-    /// Parse one anon-record field, reusing [`Self::parse_record_field`]. In
-    /// *non*-copy-update construction FCS only accepts single-segment field
-    /// names — a dotted path `{| A.B = 1 |}` is "Invalid anonymous record type"
-    /// (dotted names are meaningful only for copy-update nesting,
-    /// `pars.fsy:5920`). We still parse the field (lossless), but report the
-    /// FCS diagnostic so a dotted construction field is a clean error, not a
-    /// silently-accepted divergence. The cursor is at the field-name head ident
-    /// (caller checked [`Self::peek_is_record_field_start`]).
-    fn parse_anon_recd_field(&mut self, copy_update: bool) {
-        if !copy_update
-            && (self.filtered.tokens().kind_at(self.filtered.pos() + 1)
-                == Some(FilteredKind::Token(TokenKind::Dot)))
-        {
-            let span = self
-                .peek()
-                .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| self.source.len()..self.source.len());
-            self.errors.push(ParseError {
-                message: "invalid anonymous record: a construction field name must be a single \
-                          identifier, not a dotted path"
-                    .to_string(),
-                span,
-            });
-        }
-        self.parse_record_field();
     }
 
     /// Lookahead disambiguating a non-`new`-headed `{ … }` brace body
@@ -2136,6 +2127,28 @@ impl<'src> Parser<'src> {
             == Some(FilteredKind::Token(TokenKind::Inherit))
         {
             return BraceBody::Record { copy_update: false };
+        }
+        // A `...`-headed brace. Right before the `}`, FCS shifts it into a
+        // record whose one binding is a spread with no source (FS3899, `LBRACE
+        // DOT_DOT_DOT rbrace`). Before an expression it is a record whose first
+        // binding is a spread, or FS3903's copy-and-update when a `with`
+        // follows an `appExpr` ([`BraceBody::SpreadHead`]). Before anything
+        // else (`{ ...; X = 1 }`) the `...` reduces as an expression, FS3902's
+        // `ArbitraryAfterError`, in a computation expression.
+        if let Some((Ok(FilteredToken::Raw(Token::DotDotDot)), dots)) =
+            self.filtered.tokens().get(self.filtered.pos() + 1)
+        {
+            if matches!(
+                self.next_non_trivia_raw_after(dots.end),
+                Some(Token::RBrace)
+            ) {
+                return BraceBody::Record { copy_update: false };
+            }
+            return if self.expr_start_at(self.filtered.pos() + 2) {
+                BraceBody::SpreadHead
+            } else {
+                BraceBody::Computation
+            };
         }
         let mut i = self.filtered.pos() + 1; // past `{`
         // A record starts with a longident head — an ident or F#'s `global`
@@ -2277,10 +2290,10 @@ impl<'src> Parser<'src> {
             let at_rbrace =
                 |p: &Self| matches!(p.next_non_trivia_raw_at_pos(), Some(Token::RBrace));
             while !at_rbrace(self) && self.consume_one_seps_group(at_rbrace) {
-                if at_rbrace(self) || !self.peek_is_record_field_start() {
+                if at_rbrace(self) || !self.peek_is_record_binding_start() {
                     break;
                 }
-                self.parse_record_field();
+                self.parse_record_binding();
             }
         } else {
             self.parse_record_fields();
@@ -2335,16 +2348,7 @@ impl<'src> Parser<'src> {
     /// source expression must already have been parsed and the cursor must sit
     /// at the `with` (`Virtual::With`/raw `Token::With`).
     fn parse_record_copy_update_tail(&mut self) {
-        // `with`: `Virtual::With` is the `OWITH` relabel of a raw `Token::With`
-        // at the same span (the `MATCH`/`WITH_TOK` pattern).
-        if let Some((Ok(FilteredToken::Virtual(Virtual::With)), with_span)) = self.peek().cloned() {
-            self.drain_raw_up_to(with_span.start);
-            self.emit_text(SyntaxKind::WITH_TOK, with_span);
-            self.raw_pos += 1;
-            self.filtered.advance();
-        } else if matches!(self.peek(), Some((Ok(FilteredToken::Raw(Token::With)), _))) {
-            self.bump_into(SyntaxKind::WITH_TOK);
-        }
+        self.bump_copy_with();
 
         self.parse_record_fields();
 
@@ -2368,8 +2372,8 @@ impl<'src> Parser<'src> {
         // First field — required, except for an empty record (`{}`, and the
         // empty copy-update `{ x with }`), where the swallowed `}` is the next
         // significant raw token and there is simply no field to parse.
-        if self.peek_is_record_field_start() {
-            self.parse_record_field();
+        if self.peek_is_record_binding_start() {
+            self.parse_record_binding();
         } else if !matches!(self.next_non_trivia_raw_at_pos(), Some(Token::RBrace)) {
             let span = self
                 .peek()
@@ -2380,7 +2384,12 @@ impl<'src> Parser<'src> {
                 span,
             });
         }
+        self.parse_record_bindings_tail();
+    }
 
+    /// The `;`/offside-separated bindings after a record's first, up to the
+    /// swallowed `}`.
+    fn parse_record_bindings_tail(&mut self) {
         // Separator-introduced fields. FCS's `seps_block` (`pars.fsy:5767`) is a
         // *single* separator group, so a repeated separator (`{ F = 1; ; G = 2 }`)
         // is a parse error; consuming exactly one group per gap (via
@@ -2398,11 +2407,115 @@ impl<'src> Parser<'src> {
         // let `bump_swallowed_closer` claim the `}`.
         let at_rbrace = |p: &Self| matches!(p.next_non_trivia_raw_at_pos(), Some(Token::RBrace));
         while !at_rbrace(self) && self.consume_one_seps_group(at_rbrace) {
-            if at_rbrace(self) || !self.peek_is_record_field_start() {
+            if at_rbrace(self) || !self.peek_is_record_binding_start() {
                 break;
             }
-            self.parse_record_field();
+            self.parse_record_binding();
         }
+    }
+
+    /// The `with` of a copy-and-update record or anonymous record, as a
+    /// `WITH_TOK`: `Virtual::With` is the `OWITH` relabel of a raw `Token::With`
+    /// at the same span (the `MATCH`/`WITH_TOK` pattern).
+    fn bump_copy_with(&mut self) {
+        if let Some((Ok(FilteredToken::Virtual(Virtual::With)), with_span)) = self.peek().cloned() {
+            self.drain_raw_up_to(with_span.start);
+            self.emit_text(SyntaxKind::WITH_TOK, with_span);
+            self.raw_pos += 1;
+            self.filtered.advance();
+        } else if matches!(self.peek(), Some((Ok(FilteredToken::Raw(Token::With)), _))) {
+            self.bump_into(SyntaxKind::WITH_TOK);
+        }
+    }
+
+    /// Whether a copy-and-update `with` directly follows the expression just
+    /// parsed, *in this brace*. Discriminated on both streams, as for
+    /// [`Self::parse_app_head_brace`]: the **raw** stream is the nesting guard
+    /// (a nested brace's swallowed `}` would otherwise let the filtered
+    /// `peek()` surface an enclosing `with`), and the filtered `peek()`
+    /// confirms the form (`Virtual::With` or a raw `with`).
+    fn copy_with_follows(&self) -> bool {
+        matches!(self.next_non_trivia_raw_at_pos(), Some(Token::With))
+            && matches!(
+                self.peek(),
+                Some((
+                    Ok(FilteredToken::Virtual(Virtual::With) | FilteredToken::Raw(Token::With)),
+                    _
+                ))
+            )
+    }
+
+    /// Parse a record's or anonymous record's first binding when it is a
+    /// spread with an expression: the cursor is at the `...`, and an expression
+    /// starts after it. FCS reads it two ways (`recdExprCore`):
+    ///
+    /// - `DOT_DOT_DOT declExprBlock recdExprBindings`, a spread, emitted as a
+    ///   [`SyntaxKind::RECORD_SPREAD`] (returns `false`);
+    /// - `DOT_DOT_DOT appExpr (WITH | OWITH) …`, FS3903: a copy-and-update whose
+    ///   source is the `appExpr`, with the `...` dropped. The `...` and the
+    ///   source stay direct children of the record, the error is reported at the
+    ///   `...`, and the cursor is left at the `with` (returns `true`).
+    ///
+    /// Which one is decided as in [`Self::parse_app_head_brace`]: an
+    /// `appExpr`-headed source is parsed for real at `appExpr` level, and it is
+    /// the copy source if a `with` follows it; otherwise the precedence climb
+    /// resumes from it to the full spread expression.
+    fn parse_spread_head(&mut self) -> bool {
+        let dots = self
+            .peek()
+            .map(|(_, s)| s.clone())
+            .unwrap_or_else(|| self.source.len()..self.source.len());
+        let spread_cp = self.builder.checkpoint();
+        self.bump_into(SyntaxKind::DOT_DOT_DOT_TOK);
+        let app_head = match self.peek() {
+            Some((Ok(FilteredToken::Raw(t)), _)) => {
+                (raw_starts_atomic_expr(t) && self.is_expr_start_at(self.filtered.pos()))
+                    || matches!(t, Token::Op(text) if is_prefix_op_text(text))
+            }
+            _ => false,
+        };
+        if app_head {
+            let expr_cp = self.builder.checkpoint();
+            self.parse_app_expr();
+            if self.copy_with_follows() {
+                self.errors.push(ParseError {
+                    message: SPREAD_BEFORE_WITH.to_string(),
+                    span: dots,
+                });
+                return true;
+            }
+            self.continue_expr_after_app(expr_cp);
+        } else {
+            self.parse_expr();
+        }
+        self.builder
+            .start_node_at(spread_cp, SyntaxKind::RECORD_SPREAD);
+        self.builder.finish_node();
+        false
+    }
+
+    /// Parse a `...`-headed brace with an expression after the `...`
+    /// ([`BraceBody::SpreadHead`]): a record whose first binding is a spread
+    /// (`{ ...e; F = x }`), or FS3903's copy-and-update `{ ...e with F = x }`
+    /// ([`Self::parse_spread_head`]). Either way a [`SyntaxKind::RECORD_EXPR`].
+    fn parse_spread_head_brace(&mut self) {
+        self.builder.start_node(SyntaxKind::RECORD_EXPR);
+        self.bump_into(SyntaxKind::LBRACE_TOK);
+        if let Some((_, raw_span)) = self.next_non_trivia_raw_at_pos_with_span() {
+            self.drain_raw_up_to(raw_span.start);
+        }
+        if self.parse_spread_head() {
+            self.parse_record_copy_update_tail();
+        } else {
+            self.parse_record_bindings_tail();
+        }
+        self.bump_swallowed_closer(
+            SyntaxKind::RBRACE_TOK,
+            |t| matches!(t, Token::RBrace),
+            "}",
+            "record expression",
+        );
+        self.builder.finish_node();
     }
 
     /// Parse an ident-headed brace whose head longident continues as an
@@ -2443,15 +2556,7 @@ impl<'src> Parser<'src> {
         // `}` would otherwise let the filtered `peek()` surface an enclosing
         // `with`), and the filtered `peek()` confirms the `with` form
         // (`Virtual::With`/raw With).
-        let with_follows = matches!(self.next_non_trivia_raw_at_pos(), Some(Token::With))
-            && matches!(
-                self.peek(),
-                Some((
-                    Ok(FilteredToken::Virtual(Virtual::With) | FilteredToken::Raw(Token::With)),
-                    _
-                ))
-            );
-        if with_follows {
+        if self.copy_with_follows() {
             self.builder
                 .start_node_at(outer_cp, SyntaxKind::RECORD_EXPR);
             self.parse_record_copy_update_tail();
@@ -2488,7 +2593,7 @@ impl<'src> Parser<'src> {
     }
 
     /// One record field `F = e` → `RECORD_FIELD > [LONG_IDENT, EQUALS_TOK,
-    /// <value-expr>]`. Caller must have checked [`Self::peek_is_record_field_start`].
+    /// <value-expr>]`. Caller must have checked [`Self::peek_is_record_binding_start`].
     fn parse_record_field(&mut self) {
         self.builder.start_node(SyntaxKind::RECORD_FIELD);
         // Field name — FCS's `RecordFieldName` (a `SynLongIdent`).
@@ -2543,19 +2648,92 @@ impl<'src> Parser<'src> {
         self.builder.finish_node();
     }
 
-    /// Whether the cursor is at the start of a record field — a longident head
-    /// (an ident or F#'s `global` path root). The dotted tail is handled by
-    /// `parse_long_ident_path`.
-    fn peek_is_record_field_start(&self) -> bool {
+    /// Whether the cursor is at the start of a record binding (FCS's
+    /// `recdBinding`): a field's longident head (an ident or F#'s `global`
+    /// path root; the dotted tail is handled by `parse_long_ident_path`), or a
+    /// spread's `...`.
+    fn peek_is_record_binding_start(&self) -> bool {
         matches!(
             self.peek(),
             Some((
                 Ok(FilteredToken::Raw(
-                    Token::Ident(_) | Token::QuotedIdent(_) | Token::Global
+                    Token::Ident(_) | Token::QuotedIdent(_) | Token::Global | Token::DotDotDot
                 )),
                 _
             ))
         )
+    }
+
+    /// Whether the cursor is at a `...` ([`Token::DotDotDot`]).
+    pub(super) fn peek_is_dot_dot_dot(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some((Ok(FilteredToken::Raw(Token::DotDotDot)), _))
+        )
+    }
+
+    /// One record binding (FCS's `recdBinding`): a spread
+    /// ([`Self::parse_record_spread`]) or a field ([`Self::parse_record_field`]).
+    /// Caller must have checked [`Self::peek_is_record_binding_start`].
+    fn parse_record_binding(&mut self) {
+        if self.peek_is_dot_dot_dot() {
+            self.parse_record_spread();
+        } else {
+            self.parse_record_field();
+        }
+    }
+
+    /// `...e` outside a record's or anonymous record's bindings — FCS's
+    /// `declExpr: DOT_DOT_DOT declExpr | DOT_DOT_DOT`, which reports FS3902 at
+    /// the `...` and drops the whole construct for an `ArbitraryAfterError`.
+    /// Emitted as an `ERROR` node `[DOT_DOT_DOT_TOK, <expr>?]`, which is no
+    /// `Expr`, so the slot it fills reads as empty, and its expression, which
+    /// FCS never checks, is reached by no accessor. The cursor is at the `...`.
+    pub(super) fn parse_misplaced_spread(&mut self) {
+        let dots = self
+            .peek()
+            .map(|(_, s)| s.clone())
+            .unwrap_or_else(|| self.source.len()..self.source.len());
+        self.errors.push(ParseError {
+            message: SPREAD_NOT_SUPPORTED.to_string(),
+            span: dots,
+        });
+        self.builder.start_node(SyntaxKind::ERROR);
+        self.bump_into(SyntaxKind::DOT_DOT_DOT_TOK);
+        if self.peek_is_expr_start() && !self.at_swallowed_seq_closer() {
+            self.parse_expr();
+        }
+        self.builder.finish_node();
+    }
+
+    /// One spread `...e` of a record or anonymous record → `RECORD_SPREAD >
+    /// [DOT_DOT_DOT_TOK, <expr>]` (FCS's `recdBinding: DOT_DOT_DOT
+    /// declExprBlock`). The expression is block-scoped like a field's value
+    /// ([`Self::parse_record_field`]). A `...` with nothing after it is FCS's
+    /// FS3899 over an `ArbitraryAfterError` source; the node then holds the
+    /// `...` alone. The cursor is at the `...`.
+    fn parse_record_spread(&mut self) {
+        let dots = self
+            .peek()
+            .map(|(_, s)| s.clone())
+            .unwrap_or_else(|| self.source.len()..self.source.len());
+        self.builder.start_node(SyntaxKind::RECORD_SPREAD);
+        self.bump_into(SyntaxKind::DOT_DOT_DOT_TOK);
+        if matches!(
+            self.peek(),
+            Some((Ok(FilteredToken::Virtual(Virtual::BlockBegin)), _)),
+        ) {
+            self.bump_into(SyntaxKind::ERROR);
+            self.parse_if_body("record spread", true);
+        } else if self.peek_is_expr_start() && !self.at_swallowed_seq_closer() {
+            self.parse_expr();
+        } else {
+            self.errors.push(ParseError {
+                message: MISSING_SPREAD_SOURCE_EXPR.to_string(),
+                span: dots,
+            });
+        }
+        self.builder.finish_node();
     }
 
     /// Emit one FS1245 (`lexInvalidUnicodeLiteral`) per `\U........` escape in

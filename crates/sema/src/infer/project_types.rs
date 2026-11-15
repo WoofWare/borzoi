@@ -606,6 +606,10 @@ impl<'a> FileFacts<'a> {
     /// same-file augmentation of its name, declares (`members`, the record's
     /// [`IntrinsicMemberNames`]); a member whose name is not read off its head
     /// (`members` is `None`) leaves no field read.
+    ///
+    /// A record with a spread (`{ ...T; F: int }`) leaves no field read: the
+    /// spread copies fields inference does not read, and a later spread may
+    /// replace an explicit field of the same name with one of another type.
     fn record_field_schemes(
         &self,
         tys: &TyTable,
@@ -616,6 +620,9 @@ impl<'a> FileFacts<'a> {
         let Some(members) = members else {
             return HashMap::default();
         };
+        if repr.spreads().next().is_some() {
+            return HashMap::default();
+        }
         // A label declared twice is an error FCS recovers from by keeping
         // the first, where a map keeps the last: neither is read.
         let mut labels: HashMap<String, usize> = HashMap::default();

@@ -610,6 +610,8 @@ pub(super) fn raw_after_lparen_starts_expr(tok: &Token<'_>) -> bool {
             // `(` must be admitted here — exactly like the fused `IntDotDot` above
             // — or `(..^1)` is rejected before the split is parsed.
             | Token::DotDotHat
+            // `(...e)` — FCS's FS3902 `...e`, a `declExpr` (`Parser::parse_misplaced_spread`).
+            | Token::DotDotDot
             | Token::Op("*")
             // `(#` opens FSharp.Core's inline-IL expression
             // `(# "instr" … #)` (FCS's `inlineAssemblyExpr`, a `parenExprBody`).

@@ -13,6 +13,7 @@ AndsPat::operands
 AnonRecdExpr::copy_source
 AnonRecdExpr::fields
 AnonRecdExpr::is_struct
+AnonRecdExpr::spreads
 AnonRecdType::fields
 AnonRecdType::is_struct
 AnonRecdTypeField::ident
@@ -267,6 +268,7 @@ RationalConstRational::numerator
 RecordExpr::copy_source
 RecordExpr::fields
 RecordExpr::inherit
+RecordExpr::spreads
 RecordField::field_name
 RecordField::value
 RecordFieldDecl::attributes
@@ -277,6 +279,9 @@ RecordPat::fields
 RecordPatField::name
 RecordPatField::pat
 RecordRepr::fields
+RecordRepr::spreads
+RecordSpread::expr
+RecordSpreadDecl::ty
 SequentialExpr::statements
 SigFile::modules
 SignatureParameterType::attributes

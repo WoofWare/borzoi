@@ -4457,9 +4457,24 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/QueryExpressionStepping/Linq101Se
 tests/FSharp.Compiler.ComponentTests/EmittedIL/QueryExpressionStepping/Linq101Select01.fs:94:9 "select"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/EmittedIL/RealInternalSignature/RealInternalSignature.fs	compared fcs-check-errors b1=73 assembly=129 external=2
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SeqExpressionTailCalls/SeqExpressionTailCalls02.fs	compared fcs-clean b1=6 assembly=4 external=0
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs	our-parse-errors
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs	our-parse-errors
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs	our-parse-errors
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs	compared fcs-clean b1=1 assembly=3 external=0
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs	compared fcs-clean b1=1 assembly=5 external=0
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:1:15 "NoComparison"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:1:29 "DefaultAugmentation"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs:1:3 "NoEquality"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs	compared fcs-clean b1=12 assembly=15 external=0
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:1:15 "NoComparison"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:1:29 "DefaultAugmentation"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:1:3 "NoEquality"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:3:15 "NoComparison"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:3:29 "DefaultAugmentation"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:3:3 "NoEquality"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:5:15 "NoComparison"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:5:29 "DefaultAugmentation"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:5:3 "NoEquality"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:7:15 "NoComparison"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:7:29 "DefaultAugmentation"	assembly-gap
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs:7:3 "NoEquality"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch04.fs	compared fcs-clean b1=1 assembly=9 external=1
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch04.fs:11:13 "Console.WriteLine"	assembly-gap
 tests/FSharp.Compiler.ComponentTests/EmittedIL/SteppingMatch/SteppingMatch04.fs:7:13 "Console.WriteLine"	assembly-gap

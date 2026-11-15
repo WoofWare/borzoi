@@ -96,8 +96,6 @@ tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/E_Syntax
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/SimpleConstant/E_NoRangeConst01.fs	both-reject outside-damage 8/8/9
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/TypeConstraint/E_typeconstraint01.fs	both-reject outside-damage 4/4/5
 tests/FSharp.Compiler.ComponentTests/Conformance/PseudoCustomAttributes/AssemblyCopyright_001.fs	non-utf8
-tests/FSharp.Compiler.ComponentTests/Conformance/Spreads/RecordSpreads.fsx	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/Conformance/Spreads/SpreadInlineLib.fs	fcs-normaliser-unmodelled
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/BasicExtensionOperators.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/MiniFSharpPlusExtensionSRTP.fs	fcs-normaliser-unmodelled
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ScopeCapture.fs	range-divergent
@@ -119,36 +117,6 @@ tests/FSharp.Compiler.ComponentTests/Conformance/UnitsOfMeasure/Parenthesis/E_In
 tests/FSharp.Compiler.ComponentTests/Conformance/UnitsOfMeasure/Parenthesis/E_IncompleteParens02.fsx	both-reject outside-damage 4/4/5
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Inlining/Match02.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/EmittedIL/QueryExpressionStepping/Utils.fs	non-utf8
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_CoercionsApplied.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_ExplicitShadowsSpread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_ExtraFieldsAreIgnored.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NestedUpdates.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Explicit_Spread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Spread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_SpreadShadowsExplicit.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_SpreadShadowsSpread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_Structness.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_CoercionsApplied.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_ExplicitShadowsSpread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_ExtraFieldsAreIgnored.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NestedUpdates.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NoOverlap_Explicit_Spread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NoOverlap_SpreadFromAnon.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NoOverlap_Spread_Explicit.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NoOverlap_Spread_Spread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsSpread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_Structness.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_AttributesAreShadowed.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_ExplicitShadowsSpread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_Explicit_Spread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_Explicit_Spread_Generics.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_SpreadFromAnon.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_Spread_Explicit.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_Spread_Spread.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsExplicit.fs	fcs-normaliser-unmodelled
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs	fcs-normaliser-unmodelled
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DerivedType.fs	both-reject exact 3/3/4
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DoNotInlineX.fs	both-reject outside-damage 9/9/10
 tests/FSharp.Compiler.ComponentTests/InteractiveSession/ErrorTestCases/E_emptyRecord.fsx	both-reject exact 2/2/3

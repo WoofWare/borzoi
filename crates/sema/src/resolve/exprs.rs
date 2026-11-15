@@ -2,7 +2,8 @@
 
 use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{
-    AppExpr, AstNode, Expr, InterpStringPart, MatchClause, Pat, SyntaxToken, TypeAppExpr,
+    AppExpr, AstNode, Expr, InterpStringPart, MatchClause, Pat, RecordField, RecordSpread,
+    SyntaxToken, TypeAppExpr,
 };
 
 use crate::binders::{BinderRole, PatternName, pattern_names};
@@ -452,32 +453,30 @@ impl<'a> Resolver<'a> {
                 self.leave_computation_expression(pushed);
             }
             Expr::Record(e) => {
-                // `{ src with F = e; … }` — resolve the copy source (if any) and
-                // each field's value in the enclosing scope. The field *names*
-                // are record labels resolved against the record's type (not
-                // value references); we don't model types, so they are left
-                // alone rather than mis-resolved to locals.
+                // `{ src with F = e; … }` — resolve the copy source (if any),
+                // and each spread's source and field's value, in the enclosing
+                // scope. The field *names* are record labels resolved against
+                // the record's type (not value references); we don't model
+                // types, so they are left alone rather than mis-resolved to
+                // locals.
                 if let Some(src) = e.copy_source() {
                     self.resolve_expr(&src);
                 }
-                for field in e.fields() {
-                    if let Some(value) = field.value() {
-                        self.resolve_expr(&value);
-                    }
+                for value in record_binding_exprs(e.fields(), e.spreads()) {
+                    self.resolve_expr(&value);
                 }
             }
             Expr::AnonRecd(e) => {
                 // `{| src with F = e; … |}` — identical scoping to `Record`:
-                // resolve the copy source (if any) and each field's value in
+                // resolve the copy source (if any), each spread's source and each
+                // field's value in
                 // the enclosing scope; the anonymous-record field labels have
                 // no in-file binder and are left alone.
                 if let Some(src) = e.copy_source() {
                     self.resolve_expr(&src);
                 }
-                for field in e.fields() {
-                    if let Some(value) = field.value() {
-                        self.resolve_expr(&value);
-                    }
+                for value in record_binding_exprs(e.fields(), e.spreads()) {
+                    self.resolve_expr(&value);
                 }
             }
             Expr::ArrayOrList(e) => {
@@ -1672,6 +1671,29 @@ fn is_named_arg_label(ident: &borzoi_cst::syntax::IdentExpr) -> bool {
         named_arg_shape(&el),
         Some((Some(Expr::Ident(lhs)), _)) if lhs.syntax() == ident.syntax()
     )
+}
+
+/// The expressions a record or anonymous record binds, in source order: each
+/// spread's source and each field's value. `spreads` carries each spread's
+/// index among the bindings (`RecordExpr::spreads`).
+fn record_binding_exprs(
+    fields: impl Iterator<Item = RecordField>,
+    spreads: impl Iterator<Item = (usize, RecordSpread)>,
+) -> Vec<Expr> {
+    let mut fields = fields;
+    let mut out = Vec::new();
+    let mut bindings = 0;
+    for (index, spread) in spreads {
+        while bindings < index {
+            let Some(field) = fields.next() else { break };
+            out.extend(field.value());
+            bindings += 1;
+        }
+        out.extend(spread.expr());
+        bindings += 1;
+    }
+    out.extend(fields.filter_map(|f| f.value()));
+    out
 }
 
 #[cfg(test)]
