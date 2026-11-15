@@ -160,8 +160,7 @@ impl<'a> Gen<'a> {
         let args: Vec<Ty> = (0..arity)
             .map(|_| tys.var(self.solver.table.fresh()))
             .collect();
-        let record = self.solver.table.fresh();
-        self.eq(scope, tys.var(record), tys.project(path, args));
+        let record = self.fresh_equal(scope, tys.project(path, args));
         self.decide(scope, record, recv);
     }
 
