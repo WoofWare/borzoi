@@ -158,6 +158,12 @@ This is a Cargo workspace with nine members:
   `fsproj_generic_items_generative_diff` holds the generic item tables the
   probe reads, metadata included, to the `itemsMeta` op on generated
   projects.
+  The workload locator SDKs (`sdk_resolver/workloads.rs`) have their own
+  test-only oracle, `tools/workload-oracle`, which loads each installed SDK's
+  workload resolver by reflection (on that SDK's runtime, so SDK 11's
+  prerelease is graded too). `workload_locator_diff` holds the feature band,
+  the band order and both locators' answers on generated dotnet layouts to it,
+  for every SDK of `BORZOI_DOTNET_ROOT_SDK11`.
 - `crates/assembly/` — `borzoi-assembly`. F#-flavoured reader for
   ECMA-335 assemblies: owned `Entity`/`Member`/`TypeRef` model, the
   `EcmaView` trait, and a projector over an *in-crate* ECMA-335 reader

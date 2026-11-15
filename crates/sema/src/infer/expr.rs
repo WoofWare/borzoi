@@ -386,6 +386,8 @@ impl<'a> Gen<'a> {
                 // The first clause's result is handed the expected type
                 // itself, and its proof stands for the match.
                 let mut first: Option<(TyVid, Discharged)> = None;
+                // The first clause's proof, where its result is not typed.
+                let mut untyped: Option<Discharged> = None;
                 for clause in m.clauses() {
                     let (Some(pat), Some(body)) = (clause.pat(), clause.result()) else {
                         return Inferred::untyped(
@@ -473,7 +475,11 @@ impl<'a> Gen<'a> {
                     // With no expected type the first clause's result fixes
                     // the overall type, and each later one is checked against
                     // it; otherwise each is checked against the expected type.
+                    // After a first clause whose result is not typed, each
+                    // later one is checked against what that clause fixed,
+                    // which inference does not know.
                     let arm_expected = match (expected, &first) {
+                        _ if untyped.is_some() => Expected::Unknown,
                         (Expected::Synth, Some((first, _))) => Expected::Known(*first),
                         // Under an equality only the first clause is exact:
                         // the rest are checked against the type it fixed.
@@ -481,14 +487,21 @@ impl<'a> Gen<'a> {
                         _ => expected,
                     };
                     let walked = self.infer_expr(scope, &body, arm_expected);
-                    if first.is_none() {
-                        let Some(v) = walked.var else {
-                            return walked;
-                        };
-                        first = Some((v, walked.discharged));
+                    if first.is_none() && untyped.is_none() {
+                        match walked.var {
+                            Some(v) => first = Some((v, walked.discharged)),
+                            // The prefix has ended there, so nothing later is
+                            // decided; the later clauses are still walked,
+                            // for what is known without a decision (a member
+                            // of a receiver both know).
+                            None => untyped = Some(walked.discharged),
+                        }
                     } else {
                         let _ = walked.var();
                     }
+                }
+                if let Some(d) = untyped {
+                    return Inferred::untyped(d);
                 }
                 // Two or more clauses, each with a result, or a decline above.
                 let (first, d) = first.expect("a match of two or more clauses");

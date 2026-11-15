@@ -1143,19 +1143,21 @@ whenever its `Exists` is. #781 and #811 are closed by it. Writes a stale
 group or `<Choose>` condition let run are stale too, which the import points
 need.
 
-The cost, measured on the pinned F# corpus (SDK 11 rc, whose prerelease host
-band the walk does not model, #810, so every project is opaque after
-`Microsoft.NET.Sdk.ImportWorkloads.props`): 65 manifest lines move; 2 Compile,
-49 `ProjectReference` and 55 `LangVersion` facets from `match` to `decline`,
-none to anything else, and 57 Compile declines report a different first
+The cost, measured on the pinned F# corpus (SDK 11 rc, its prerelease
+workload bands modelled since #810): 25 manifest lines move; 2 Compile, 25
+`ProjectReference` and 22 `LangVersion` facets from `match` to `decline`,
+none to anything else, and 17 Compile declines report a different first
 cause. The msbuild corpus differential gained a trust check on
-`lang_version`. Single-framework projects lose the F# targets under that
-opacity, so the `Directory.Build.targets` point is never reached and is
-settled at the end; multi-framework ones reach it through
-`IsCrossTargetingBuild`, which reads `TargetFramework` under the same
-opacity, so its route is undecided. Both withdraw the whole evaluation.
-Modelling prerelease bands (#810) removes the opacity and these declines with
-it.
+`lang_version`. The 23 multi-targeting projects reach the
+`Directory.Build.targets` point after an import gate read `TargetFramework`
+undefined, which latches opacity, and on a route through
+`IsCrossTargetingBuild`, which reads it too, so the whole evaluation is
+withdrawn (#824 asks whether the walk can certify that read for the outer
+build). The two `buildtools/checkpackages` projects compute
+`BaseIntermediateOutputPath` from `$([System.Guid]::NewGuid())`, which no
+walk can know, so an SDK gate reading `MSBuildProjectExtensionsPath` latches
+opacity before the point, which the walk then never reaches. The LSP project
+corpus (SDK 10) moves no line.
 
 A fallback walk registers the imports it makes apart from the certain ones,
 so a later import of a file only a fallback walk imported is walked again,
