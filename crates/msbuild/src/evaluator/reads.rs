@@ -239,7 +239,8 @@ impl State<'_> {
                 .expect("an untrusted reference has a cause");
             return PropertyRead::Untrusted(cause);
         }
-        if let Some(value) = self.lookup.get_unescaped(name) {
+        // The entry's trust is the question answered just above.
+        if let Some(value) = self.lookup.get_unescaped_ignoring_trust(name) {
             return PropertyRead::Value(value);
         }
         if self.undefined_read_is_exact(name) {

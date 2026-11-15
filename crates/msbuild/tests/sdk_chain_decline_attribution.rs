@@ -164,7 +164,7 @@ fn undefined_name_census<'a>(
         let names: BTreeSet<String> = property_references(raw)
             .into_iter()
             .map(|n| n.to_ascii_lowercase())
-            .filter(|n| defined.get(n).is_none())
+            .filter(|n| defined.get_unescaped_ignoring_trust(n).is_none())
             .collect();
         for name in names {
             *counts.entry(name).or_default() += 1;

@@ -31,7 +31,6 @@ pub mod observed;
 mod properties;
 mod sdk_resolver;
 mod target_frameworks;
-mod trust;
 
 #[cfg(feature = "test-support")]
 pub mod test_support;
@@ -53,6 +52,7 @@ pub use imports::detect_implicit_imports;
 /// to [`parse_fsproj_with_imports`] through the `environment` map must escape it
 /// this way, or a `%`/`;`/`(` in the path would be mis-decoded.
 pub use properties::escaping::escape;
+pub use properties::trust::UntrustedCause;
 pub use sdk_resolver::global_json::{
     GlobalJson, GlobalJsonError, GlobalJsonSettings, SdkPathEntry, find_global_json,
     parse_global_json,
@@ -62,7 +62,6 @@ pub use sdk_resolver::{
     SdkResolveError, SdkVersion, locate_dotnet_sdk, nuget_package_version, resolve_sdk, workloads,
 };
 pub use target_frameworks::target_frameworks;
-pub use trust::UntrustedCause;
 
 /// MSBuild's boolean vocabulary (`ConversionUtilities.TryConvertStringToBool`):
 /// `true`/`on`/`yes` and `false`/`off`/`no`, each optionally negated with a
