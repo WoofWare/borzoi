@@ -15,7 +15,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::observed::soundness::{Edit, Perturbation, Tally, Why, sweep};
-use crate::observed::{Observation, Observer, ReadSet};
+use crate::observed::{Observation, Observer, ReadSet, TextDigest};
 use crate::{resolve_sdk, workloads};
 
 /// Which optional parts of the world exist.
@@ -374,6 +374,91 @@ fn a_full_world_records_every_kind_of_query() {
             <= counts.opens + counts.stats + counts.listings + counts.canonicalizations,
         "the read set holds distinct queries, never more than were made"
     );
+}
+
+/// An evaluation that reads one file as text and as XML reads it once: the
+/// workload locator reads the SDK's `KnownWorkloadManifests.txt` as text, and
+/// a project that imports the same file reads it as XML, before the locator or
+/// after it. [`super::sound`] holds each to the reference, which asks every
+/// time, and to one query per read; the known list is empty (no XML) or an
+/// empty `<Project />` (no manifest id).
+#[test]
+fn a_file_read_as_text_and_as_xml_is_read_once() {
+    const LOCATOR: &str = r#"<Import Project="WorkloadManifest.targets" Sdk="Microsoft.NET.SDK.WorkloadManifestTargetsLocator" />"#;
+    for known in ["", "<Project />"] {
+        for locator_first in [true, false] {
+            let tmp = TempDir::new().unwrap();
+            let root = canon(tmp.path());
+            let dotnet = root.join("dotnet");
+            let list = write_at(&dotnet, "sdk/10.0.100/KnownWorkloadManifests.txt", known);
+            let import = format!(r#"<Import Project="{}" />"#, list.display());
+            let (first, second) = if locator_first {
+                (LOCATOR, import.as_str())
+            } else {
+                (import.as_str(), LOCATOR)
+            };
+            let source = format!("<Project>\n  {first}\n  {second}\n</Project>\n");
+            let project = canon(&write_at(&root, "proj/Demo.fsproj", &source));
+            let resolver = |name: &str, observer: &Observer| {
+                resolve_sdk(
+                    &dotnet,
+                    None,
+                    name,
+                    None,
+                    None,
+                    &workloads::WorkloadEnvironment {
+                        user_dotnet_root: None,
+                        overrides_present: false,
+                        global_json_pins_workload_set: false,
+                    },
+                    observer,
+                )
+            };
+            let parsed = sound(&project, |through| {
+                through
+                    .evaluate(
+                        &source,
+                        &project,
+                        &HashMap::new(),
+                        &HashMap::new(),
+                        Some(&resolver),
+                        None,
+                    )
+                    .expect("well-formed XML parses")
+            });
+            let case = format!("known list {known:?}, locator first: {locator_first}");
+            let texts_of_list: Vec<_> = parsed
+                .read_set
+                .reads()
+                .iter()
+                .filter(|read| {
+                    read.path == list && matches!(read.observation, Observation::Text(_))
+                })
+                .collect();
+            assert!(
+                matches!(
+                    texts_of_list[..],
+                    [read] if read.observation == Observation::Text(Ok(TextDigest::of(known)))
+                ),
+                "{case}: {texts_of_list:#?}"
+            );
+            let malformed = parsed.diagnostics.iter().any(|d| {
+                matches!(
+                    &d.kind,
+                    DiagnosticKind::ImportFailed {
+                        reason: ImportFailReason::MalformedXml { .. },
+                        ..
+                    }
+                )
+            });
+            assert_eq!(
+                malformed,
+                known.is_empty(),
+                "{case}: {:#?}",
+                parsed.diagnostics
+            );
+        }
+    }
 }
 
 /// A project behind `Exists('alias')`, where `alias` is a symlink to

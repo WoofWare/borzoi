@@ -20,6 +20,8 @@
 //! ([`Observer::new`]). The read set is what it would be had the query been
 //! asked again and got the same answer, which is one read; a file that moves
 //! during the evaluation is seen by the next validation, which asks again.
+//! A file read whole as text ([`read_to_string`]) and as XML
+//! ([`read_document`]) is one query, so one read serves both.
 //! An imported file's parsed document is kept across evaluations in
 //! [`ImportDocuments`], found by the file's path and reused only when the
 //! file's bytes, read again, are the bytes it was parsed from.
@@ -75,8 +77,10 @@ impl Default for Observer {
 /// raw spelling (`p/child/` and `p/child` are different queries).
 #[derive(Debug, Default)]
 struct Memo {
-    texts: HashMap<OsString, Result<String, Failure>>,
-    documents: HashMap<OsString, Result<Parsed, Failure>>,
+    /// Every whole-file read, which [`read_to_string`] and [`read_document`]
+    /// both answer from: they ask the same query, so a file read both ways
+    /// is read once.
+    files: HashMap<OsString, Result<WholeFile, Failure>>,
     kinds: HashMap<OsString, Result<EntryKind, Failure>>,
     link_kinds: HashMap<OsString, Result<EntryKind, Failure>>,
     listings: HashMap<OsString, Result<Vec<Result<DirEntry, Failure>>, Failure>>,
@@ -86,6 +90,64 @@ struct Memo {
 /// A whole-file read parsed as XML ([`read_document`]): the document, or why
 /// the text does not parse.
 pub type Parsed = Result<Arc<ParsedDocument>, roxmltree::Error>;
+
+/// The text of a file read whole, as far as its readers have taken it: parsed
+/// as XML once some reader asked for the document, and held only as text
+/// before.
+#[derive(Debug)]
+enum WholeFile {
+    Text(String),
+    /// The document, which holds the text.
+    Document(Arc<ParsedDocument>),
+    /// A text that does not parse, with `roxmltree`'s error.
+    Malformed(String, roxmltree::Error),
+}
+
+impl WholeFile {
+    fn text(&self) -> &str {
+        match self {
+            WholeFile::Text(text) | WholeFile::Malformed(text, _) => text,
+            WholeFile::Document(document) => document.text(),
+        }
+    }
+
+    /// The document, parsed by `observer` now if no reader has asked for it
+    /// before.
+    fn document(&mut self, observer: &Observer, path: &Path) -> Parsed {
+        match self {
+            WholeFile::Document(document) => Ok(Arc::clone(document)),
+            WholeFile::Malformed(_, error) => Err(error.clone()),
+            WholeFile::Text(text) => {
+                let (file, parsed) = held(observer.parse_document(path, std::mem::take(text)));
+                *self = file;
+                parsed
+            }
+        }
+    }
+}
+
+/// What [`Observer::parse_document`] made of a file's text: the document, or
+/// the text with its digest and `roxmltree`'s error.
+type ParsedText = Result<Arc<ParsedDocument>, Malformed>;
+
+/// The [`WholeFile`] the memo holds for `parsed`, and the document or error a
+/// reader is answered with.
+fn held(parsed: ParsedText) -> (WholeFile, Parsed) {
+    match parsed {
+        Ok(document) => (WholeFile::Document(Arc::clone(&document)), Ok(document)),
+        Err(Malformed { text, error, .. }) => {
+            (WholeFile::Malformed(text, error.clone()), Err(error))
+        }
+    }
+}
+
+/// A text that does not parse as XML, with its digest and `roxmltree`'s
+/// error.
+struct Malformed {
+    text: String,
+    digest: TextDigest,
+    error: roxmltree::Error,
+}
 
 /// Parsed documents of imported files, kept from one evaluation to the next:
 /// at most one per path, the last one parsed.
@@ -842,46 +904,76 @@ fn stamped_bytes(path: &Path) -> (Result<FileStamp, Failure>, Result<Vec<u8>, Fa
 
 /// [`std::fs::read_to_string`].
 pub fn read_to_string(observer: &Observer, path: &Path) -> Result<String, Failure> {
-    if let Some(answer) = observer.recall(|m| &m.texts, path) {
+    if let Some(answer) = observer.recall_file(path, |file| file.text().to_owned()) {
         return answer;
     }
     let result = read_text(path);
     observer.record(path, Observation::Text(text_digest(&result)));
-    observer.remember(|m| &mut m.texts, path, &result);
+    if observer.memo.is_some() {
+        observer.remember_file(path, result.clone().map(WholeFile::Text));
+    }
     result
 }
 
 /// [`read_to_string`], parsed as XML: the read [`read_to_string`] records,
-/// and the document `roxmltree` parses from its text.
+/// and the document `roxmltree` parses from its text. A file both read and
+/// read as XML is read once, and parsed once.
 ///
 /// The document is the observer's [`ImportDocuments`] entry for `path` when
 /// that was parsed from exactly the bytes read, and is parsed (and kept
 /// there, replacing any other) otherwise.
 pub fn read_document(observer: &Observer, path: &Path) -> Result<Parsed, Failure> {
-    if let Some(answer) = observer.recall(|m| &m.documents, path) {
+    if let Some(answer) = observer.recall_file(path, |file| file.document(observer, path)) {
         return answer;
     }
     let result = read_text(path).map(|text| observer.parse_document(path, text));
     let digest = match &result {
         Ok(Ok(parsed)) => Ok(parsed.digest()),
-        Ok(Err((_, digest))) => Ok(*digest),
+        Ok(Err(malformed)) => Ok(malformed.digest),
         Err(failure) => Err(failure.clone()),
     };
     observer.record(path, Observation::Text(digest));
-    let result = result.map(|parsed| parsed.map_err(|(error, _)| error));
-    observer.remember(|m| &mut m.documents, path, &result);
-    result
+    match result {
+        Ok(parsed) => {
+            let (file, parsed) = held(parsed);
+            observer.remember_file(path, Ok(file));
+            Ok(parsed)
+        }
+        Err(failure) => {
+            observer.remember_file(path, Err(failure.clone()));
+            Err(failure)
+        }
+    }
 }
 
 impl Observer {
-    /// The document parsed from `text`, the text of the file at `path`: the
-    /// kept one when it was parsed from these bytes, else a new parse, kept
-    /// in its place. A text that does not parse fails with its digest.
-    fn parse_document(
+    /// `answer` of the memo's whole-file read of `path`, if it has one;
+    /// `None` in an observer that asks every time.
+    fn recall_file<T>(
         &self,
         path: &Path,
-        text: String,
-    ) -> Result<Arc<ParsedDocument>, (roxmltree::Error, TextDigest)> {
+        answer: impl FnOnce(&mut WholeFile) -> T,
+    ) -> Option<Result<T, Failure>> {
+        let mut memo = self.memo.as_ref()?.borrow_mut();
+        match memo.files.get_mut(path.as_os_str())? {
+            Ok(file) => Some(Ok(answer(file))),
+            Err(failure) => Some(Err(failure.clone())),
+        }
+    }
+
+    /// Remember a whole-file read of `path`, in an observer that remembers.
+    fn remember_file(&self, path: &Path, file: Result<WholeFile, Failure>) {
+        if let Some(memo) = &self.memo {
+            memo.borrow_mut()
+                .files
+                .insert(path.as_os_str().to_owned(), file);
+        }
+    }
+
+    /// The document parsed from `text`, the text of the file at `path`: the
+    /// kept one when it was parsed from these bytes, else a new parse, kept
+    /// in its place.
+    fn parse_document(&self, path: &Path, text: String) -> ParsedText {
         let key = path.as_os_str();
         let reusing = self.memo.is_some();
         let mut documents = self.documents.borrow_mut();
@@ -894,7 +986,13 @@ impl Observer {
             return Ok(kept);
         }
         let digest = TextDigest::of(&text);
-        let parsed = Arc::new(ParsedDocument::parse(text, digest).map_err(|e| (e, digest))?);
+        let parsed = Arc::new(
+            ParsedDocument::parse(text, digest).map_err(|(text, error)| Malformed {
+                text,
+                digest,
+                error,
+            })?,
+        );
         if reusing {
             documents.parsed += 1;
             documents
@@ -1302,6 +1400,151 @@ mod tests {
         let (back, _) = evaluate(documents);
         assert!(!Arc::ptr_eq(&first, &back), "only the last parse is kept");
         assert_eq!(back.document().root_element().tag_name().name(), "A");
+    }
+
+    /// A query function an evaluation calls. [`stamp`] and [`read_stamped`]
+    /// are not among them: they serve the caller's caches and binary reads,
+    /// and remember nothing.
+    #[derive(Clone, Copy, Debug)]
+    enum Query {
+        Text,
+        Document,
+        Kind,
+        LinkKind,
+        Listing,
+        Canonical,
+    }
+
+    impl Query {
+        const ALL: [Query; 6] = [
+            Query::Text,
+            Query::Document,
+            Query::Kind,
+            Query::LinkKind,
+            Query::Listing,
+            Query::Canonical,
+        ];
+
+        /// The query's answer, in a form two answers compare in.
+        fn ask(self, observer: &Observer, path: &Path) -> String {
+            match self {
+                Query::Text => format!("{:?}", read_to_string(observer, path)),
+                Query::Document => match read_document(observer, path) {
+                    Ok(Ok(document)) => format!("document {:?}", document.text()),
+                    other => format!("{:?}", other.map(|parsed| parsed.map(|_| ()))),
+                },
+                Query::Kind => format!("{:?}", kind(observer, path)),
+                Query::LinkKind => format!("{:?}", link_kind(observer, path)),
+                Query::Listing => format!("{:?}", listed(&read_dir(observer, path))),
+                Query::Canonical => format!("{:?}", canonicalize(observer, path)),
+            }
+        }
+
+        /// The count a call of this query adds to in an observer that asks
+        /// every time.
+        fn count(self, counts: &mut ReadCounts) -> &mut u64 {
+            match self {
+                Query::Text | Query::Document => &mut counts.opens,
+                Query::Kind | Query::LinkKind => &mut counts.stats,
+                Query::Listing => &mut counts.listings,
+                Query::Canonical => &mut counts.canonicalizations,
+            }
+        }
+    }
+
+    /// Every sequence of up to three queries of one path, and every pair of
+    /// queries of any two paths, asked of an unchanging tree: the observer
+    /// that remembers answers each as the reference does, records the same
+    /// read set, asks each query in it exactly once, and parses each
+    /// document once, which a later evaluation handed its documents reuses.
+    /// The paths are every kind of thing a query can meet: a well-formed and
+    /// a malformed document, a file that is not UTF-8, a directory, an
+    /// absent path, and a link to the well-formed document.
+    #[test]
+    fn every_sequence_of_queries_asks_each_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().host_canonicalize().unwrap();
+        std::fs::write(dir.join("well-formed"), "<A/>").unwrap();
+        std::fs::write(dir.join("malformed"), "<A>").unwrap();
+        std::fs::write(dir.join("not-utf8"), b"<A>\xff</A>").unwrap();
+        std::fs::create_dir(dir.join("dir")).unwrap();
+        let mut paths: Vec<PathBuf> = ["well-formed", "malformed", "not-utf8", "dir", "absent"]
+            .iter()
+            .map(|name| dir.join(name))
+            .collect();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("well-formed"), dir.join("link")).unwrap();
+            paths.push(dir.join("link"));
+        }
+
+        let mut sequences: Vec<Vec<(Query, &Path)>> = Vec::new();
+        for path in &paths {
+            let one = || {
+                Query::ALL
+                    .iter()
+                    .map(|&query| vec![(query, path.as_path())])
+            };
+            sequences.extend(one());
+            for first in one() {
+                for second in one() {
+                    sequences.push([first.clone(), second.clone()].concat());
+                    for third in one() {
+                        sequences.push([first.clone(), second.clone(), third].concat());
+                    }
+                }
+            }
+        }
+        let every: Vec<(Query, &Path)> = paths
+            .iter()
+            .flat_map(|path| Query::ALL.iter().map(move |&query| (query, path.as_path())))
+            .collect();
+        for &first in &every {
+            for &second in &every {
+                sequences.push(vec![first, second]);
+            }
+        }
+
+        for sequence in &sequences {
+            let reference = Observer::asking_every_time();
+            let expected: Vec<String> = sequence
+                .iter()
+                .map(|&(query, path)| query.ask(&reference, path))
+                .collect();
+            let mut asked = ReadCounts::default();
+            for &(query, _) in sequence {
+                *query.count(&mut asked) += 1;
+            }
+            let (reference_reads, reference_counts) = reference.finish();
+            assert_eq!(reference_counts, asked, "{sequence:?}");
+            let mut documents = ImportDocuments::default();
+            for evaluation in ["first", "again"] {
+                let observer = Observer::with_documents(documents);
+                let answers: Vec<String> = sequence
+                    .iter()
+                    .map(|&(query, path)| query.ask(&observer, path))
+                    .collect();
+                let (reads, counts, kept) = observer.finish_with_documents();
+                let case = format!("{evaluation} evaluation of {sequence:?}");
+                assert_eq!(answers, expected, "{case}");
+                assert_eq!(reads, reference_reads, "{case}");
+                assert_eq!(counts, reuse::one_query_per_read(&reads), "{case}");
+                // Each well-formed document read as XML is parsed by the
+                // first evaluation, once, and reused by the second.
+                let parses = sequence
+                    .iter()
+                    .filter(|(query, path)| {
+                        matches!(query, Query::Document)
+                            && matches!(read_document(&Observer::new(), path), Ok(Ok(_)))
+                    })
+                    .map(|(_, path)| *path)
+                    .collect::<HashSet<_>>()
+                    .len() as u64;
+                let reused = if evaluation == "first" { 0 } else { parses };
+                assert_eq!((kept.parsed(), kept.reused()), (parses, reused), "{case}");
+                documents = kept;
+            }
+        }
     }
 
     /// A file that does not parse as XML records its read, fails as
