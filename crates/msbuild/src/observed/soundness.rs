@@ -379,14 +379,18 @@ pub fn perturbations(root: &Path, read_set: &ReadSet) -> Vec<Perturbation> {
         let path = lexical(path);
         (under_root(&path) && !through_a_link(root, &path)).then_some(path)
     };
-    // Each link's target as its own directory resolves it: a relative target
-    // names a different file from a link in another directory, so targets
-    // are compared, and handed to another link, resolved. The walk follows
-    // no symlink, so no directory between the root and a link is one, and
-    // resolving lexically is resolving as the file system does.
+    // Each link's target as the file system resolves it from the link's
+    // directory: a relative target names a different file from a link in
+    // another directory, so targets are compared, and handed to another link,
+    // resolved. A target may pass through symlinks of its own (`hop/..`), so
+    // it is resolved by the file system, not lexically: whole when it exists,
+    // and otherwise its directory, with the missing name joined on.
     let resolved_target = |link: &Path| {
-        let target = host_fs::read_link(link).ok()?;
-        Some(lexical(&link.parent()?.join(target)))
+        let joined = link.parent()?.join(host_fs::read_link(link).ok()?);
+        host_fs::canonicalize(&joined).ok().or_else(|| {
+            let name = joined.file_name()?;
+            Some(host_fs::canonicalize(joined.parent()?).ok()?.join(name))
+        })
     };
     let mut targets: Vec<PathBuf> = links.iter().filter_map(|link| resolved_target(link)).collect();
     targets.sort();

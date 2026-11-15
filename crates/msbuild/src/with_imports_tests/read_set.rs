@@ -462,6 +462,44 @@ fn a_relative_target_is_retargeted_by_the_file_it_names() {
     }
 }
 
+/// A target that passes through a symlink of its own (`hop/../marker`, with
+/// `hop` leading to `real/inner`) names `real/marker`, not `marker`: another
+/// link is retargeted to the file the target names as the file system
+/// resolves it.
+#[cfg(unix)]
+#[test]
+fn a_target_through_a_symlink_is_retargeted_by_the_file_it_names() {
+    let tmp = TempDir::new().unwrap();
+    let root = canon(tmp.path());
+    write_at(&root, "real/inner/x", "x");
+    write_at(&root, "real/marker", "real");
+    write_at(&root, "marker", "lexical");
+    write_at(&root, "other", "other");
+    std::os::unix::fs::symlink("real/inner", root.join("hop")).unwrap();
+    std::os::unix::fs::symlink("hop/../marker", root.join("a")).unwrap();
+    std::os::unix::fs::symlink("other", root.join("b")).unwrap();
+    let planned = crate::observed::soundness::perturbations(&root, &ReadSet::default());
+    let b = root.join("b");
+    let retargets: Vec<String> = planned
+        .iter()
+        .flat_map(|p| &p.edits)
+        .filter_map(|edit| match edit {
+            Edit::Link(path, target) if *path == b => {
+                host_fs::read_to_string(root.join(target)).ok()
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        retargets.iter().any(|text| text == "real"),
+        "b is never retargeted to the file a names: {retargets:?}"
+    );
+    assert!(
+        !retargets.iter().any(|text| text == "lexical"),
+        "b is retargeted to a lexical reading of a's target: {retargets:?}"
+    );
+}
+
 /// A query that climbs out of the swept root (`Exists('../outside/…')`) is
 /// recorded, but the sweep plans no change outside its root.
 #[test]
