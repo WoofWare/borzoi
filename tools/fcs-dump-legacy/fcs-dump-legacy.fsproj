@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>FcsDumpLegacy</RootNamespace>
+    <AssemblyName>fcs-dump-legacy</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Nullable>enable</Nullable>
+    <!-- The SDK auto-references FSharp.Core at its bundled version, which
+         follows the SDK rather than FCS; opt out and pin the one FCS needs. -->
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <!-- Copy each package's doc XML beside its DLL in the build output. The
+         borzoi-assembly doc-ID differential (`doc_id_fsharp_diff.rs`) grades
+         the F#-compiled references below against the keys their compiler
+         wrote, and this output directory is the one place every lane has
+         them at pinned versions. -->
+    <CopyDocumentationFilesFromPackages>true</CopyDocumentationFilesFromPackages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- FSharp.Compiler.Service depends on exactly one FSharp.Core version
+         (an `[x, x]` range); this must be it. -->
+    <PackageReference Include="FSharp.Core" Version="10.1.204" />
+    <PackageReference Include="FSharp.Compiler.Service" Version="43.12.204" />
+    <PackageReference Include="FSharp.SystemTextJson" Version="1.4.36" />
+  </ItemGroup>
+
+</Project>

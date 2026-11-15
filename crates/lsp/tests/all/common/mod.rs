@@ -195,6 +195,30 @@ pub fn ensure_fsharp_core_dll() -> PathBuf {
         .join("FSharp.Core.dll")
 }
 
+/// The `netstandard2.1` build of the FSharp.Core package `tools/fcs-dump`
+/// references, from the NuGet packages folder its build restored into.
+/// [`ensure_fsharp_core_dll`] is the `net10.0` build, which leaves out the
+/// polyfills (`System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes`,
+/// say) only the `netstandard` builds carry.
+pub fn ensure_netstandard_fsharp_core_dll() -> PathBuf {
+    ensure_fcs_dump_built();
+    let fsproj = host_fs::read_to_string(project_dir().join("fcs-dump.fsproj"))
+        .expect("read fcs-dump.fsproj");
+    let version = fsproj
+        .split("Include=\"FSharp.Core\" Version=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("fcs-dump.fsproj pins an FSharp.Core version");
+    let packages = std::env::var_os("NUGET_PACKAGES")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".nuget/packages")))
+        .expect("a NuGet packages folder");
+    packages
+        .join("fsharp.core")
+        .join(version)
+        .join("lib/netstandard2.1/FSharp.Core.dll")
+}
+
 /// Path to `FSharp.Compiler.Service.dll`, from the same `tools/fcs-dump` build
 /// as [`ensure_fsharp_core_dll`]: a real assembly that script resolution never
 /// references on its own.

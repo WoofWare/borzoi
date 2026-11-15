@@ -538,6 +538,15 @@ fn every_fcs_feature_has_a_row_with_its_version() {
         fcs.floor,
         fcs.ladder,
     );
+    let oracle_floor = borzoi_oracle_harness::FCS_SUPPORT_FLOOR;
+    if oracle_floor != fcs.floor {
+        failures.push(format!(
+            "the harnesses send requests below {oracle_floor} to the legacy oracle \
+             (`borzoi_oracle_harness::FCS_SUPPORT_FLOOR`), but IsVersionSupported's floor is \
+             {}; move the constant",
+            fcs.floor,
+        ));
+    }
     failures.extend(retirement_failures(&rows, &fcs.cases, &fcs.floor));
     report("its features", failures);
 

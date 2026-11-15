@@ -144,11 +144,11 @@ fn fcs_sig_decl_with(v: &Value, recurse: bool) -> NormalisedSigDecl {
             // `SynModuleSigDecl.NestedModule(moduleInfo: SynComponentInfo,
             // isRecursive, moduleDecls: SynModuleSigDecl list, range, trivia)` —
             // same leading fields as the impl `SynModuleDecl.NestedModule`. Name
-            // is `SynComponentInfo.longId` (field 3); attrs field 0 (phase 10.7d).
+            // is `SynComponentInfo.synType` (field 3); attrs field 0 (phase 10.7d).
             let f = fields(v);
             let module_info = fields(&f[0]);
             let attributes = fcs_attribute_lists(&module_info[0]);
-            let long_id = fcs_ident_list_texts(&module_info[3]);
+            let long_id = fcs_component_info_long_id(&module_info[3]);
             // `SynComponentInfo.accessibility` (field 6).
             let access = fcs_access(&module_info[6]);
             let is_rec = f[1]
@@ -251,7 +251,7 @@ fn fcs_sig_decl_with(v: &Value, recurse: bool) -> NormalisedSigDecl {
 /// Project one `SynTypeDefnSig(typeInfo, typeRepr, members, range, trivia)`
 /// (phase 10.14) to the shared [`NormalisedTypeDefn`]. The `SynComponentInfo`
 /// (field 0) is read exactly like the impl-side [`fcs_type_defn`]: field 0 its
-/// `attributes`, field 1 `typeParams`, field 2 `constraints`, field 3 `longId`.
+/// `attributes`, field 1 `typeParams`, field 2 `constraints`, field 3 `synType`.
 /// The repr (field 1) is a `SynTypeDefnSigRepr` whose `Simple` case wraps the
 /// same `SynTypeDefnSimpleRepr` as the impl side (so [`fcs_simple_repr`] is
 /// reused). Unlike `SynTypeDefn`, a `SynTypeDefnSig` has **no**
@@ -265,7 +265,7 @@ fn fcs_sig_type_defn(v: &Value) -> NormalisedTypeDefn {
     let typars = fcs_typar_decls(&component_info[1]);
     let typar_form = fcs_typar_form(&component_info[1]);
     let constraints = fcs_type_defn_constraints(&component_info[1], &component_info[2]);
-    let long_id = fcs_ident_list_texts(&component_info[3]);
+    let long_id = fcs_component_info_long_id(&component_info[3]);
     // `SynComponentInfo.accessibility` (field 6) — the type header's own access.
     let access = fcs_access(&component_info[6]);
     let repr = fcs_sig_type_repr(&f[1]);
@@ -511,6 +511,29 @@ fn fcs_ident_list_texts(idents: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The name of a type, module or exception head: `SynComponentInfo.synType`
+/// (field 3, a `SynType option`). A named head is
+/// `Some(SynType.LongIdent(SynLongIdent(path, …)))`, whose path is spelt like a
+/// module header's (`fcs_ident_list_texts`); `None` is a head FCS recovered
+/// without a name. A tuple-type head (`type (int * int) with …`, the
+/// `ExtensionConstraintSolutions` syntax) is not modelled.
+fn fcs_component_info_long_id(syn_type: &Value) -> Vec<String> {
+    fcs_ident_list_texts(fcs_component_info_idents(syn_type))
+}
+
+/// The `Ident list` of [`fcs_component_info_long_id`]'s head, as a JSON array
+/// (`[]` for `None`).
+pub(in crate::common) fn fcs_component_info_idents(syn_type: &Value) -> &Value {
+    static EMPTY: Value = Value::Array(Vec::new());
+    let Some(ty) = fcs_opt(syn_type) else {
+        return &EMPTY;
+    };
+    match case_name(ty) {
+        "LongIdent" => &fields(&fields(ty)[0])[0],
+        other => panic!("a SynComponentInfo head of SynType.{other} is not modelled"),
+    }
+}
+
 /// Extract the segment texts of a `SynLongIdent` (the DU case `SynLongIdent
 /// of id: Ident list * dotRanges: range list * trivia: IdentTrivia option
 /// list`). Field 0 is the ident list, field 2 the parallel trivia list whose
@@ -609,14 +632,14 @@ fn fcs_decl_with(v: &Value, recurse: bool) -> NormalisedDecl {
         "NestedModule" => {
             // `SynModuleDecl.NestedModule(moduleInfo: SynComponentInfo,
             // isRecursive, decls, isContinuing, range, trivia)`. The name is
-            // `SynComponentInfo.longId` (field 3, a plain `Ident list`); the
+            // `SynComponentInfo.synType` (field 3, see [`fcs_component_info_long_id`]); the
             // header attributes are `SynComponentInfo.attributes` (field 0, phase
             // 10.7d); the accessibility is field 6 (`module internal N =`).
             // typars / constraints / xmlDoc / `isContinuing` / ranges are elided.
             let f = fields(v);
             let module_info = fields(&f[0]);
             let attributes = fcs_attribute_lists(&module_info[0]);
-            let long_id = fcs_ident_list_texts(&module_info[3]);
+            let long_id = fcs_component_info_long_id(&module_info[3]);
             // `SynComponentInfo.accessibility` (field 6) — `module internal N =`.
             let access = fcs_access(&module_info[6]);
             let is_rec = f[1]
@@ -804,8 +827,8 @@ fn fcs_exception_defn(v: &Value, sig: bool) -> NormalisedExnDefn {
 
 /// Project one `SynTypeDefn(typeInfo, typeRepr, members, implicitConstructor,
 /// range, trivia)` (phase 9.1/9.3). `SynComponentInfo` is field 0: its field 1
-/// is `typeParams` (`SynTyparDecls option`, phase 9.3) and field 3 is `longId`
-/// (a plain `Ident list`); field 0 is `attributes` (phase 10.7a), field 6 the
+/// is `typeParams` (`SynTyparDecls option`, phase 9.3) and field 3 is `synType`
+/// (see [`fcs_component_info_long_id`]); field 0 is `attributes` (phase 10.7a), field 6 the
 /// header `accessibility`. The repr is field 1. `preferPostfix` / xmlDoc /
 /// trivia are elided.
 fn fcs_type_defn(v: &Value) -> NormalisedTypeDefn {
@@ -816,7 +839,7 @@ fn fcs_type_defn(v: &Value) -> NormalisedTypeDefn {
     let typars = fcs_typar_decls(&component_info[1]);
     let typar_form = fcs_typar_form(&component_info[1]);
     let constraints = fcs_type_defn_constraints(&component_info[1], &component_info[2]);
-    let long_id = fcs_ident_list_texts(&component_info[3]);
+    let long_id = fcs_component_info_long_id(&component_info[3]);
     // `SynComponentInfo.accessibility` (field 6) — `type internal Foo`.
     let access = fcs_access(&component_info[6]);
     let repr = fcs_type_repr(&f[1]);
@@ -1176,15 +1199,15 @@ fn fcs_simple_repr(simple: &Value) -> NormalisedTypeRepr {
             NormalisedTypeRepr::Abbrev(fcs_type(&tf[1]))
         }
         "Record" => {
-            // `Record(accessibility, recordFields: SynField list, range)` —
-            // field 0 is the repr-level access (`type R = private { … }`),
-            // field 1 the field list.
+            // `Record(accessibility, recordFieldsAndSpreads: SynFieldOrSpread
+            // list, range)` — field 0 is the repr-level access
+            // (`type R = private { … }`), field 1 the field list.
             let rf = fields(simple);
             let recd_fields = rf[1]
                 .as_array()
                 .expect("SynTypeDefnSimpleRepr.Record field 1 must be array")
                 .iter()
-                .map(fcs_field)
+                .map(|item| fcs_field(fcs_record_decl_field(item)))
                 .collect();
             NormalisedTypeRepr::Record {
                 access: fcs_access(&rf[0]),
@@ -1666,6 +1689,26 @@ fn fcs_syn_ident_name(syn_ident: &Value) -> String {
 /// only for a `val` field, 9.9b — always `false` for record/union fields),
 /// field 2 `idOpt` (`Ident option`), field 3 the `fieldType`, field 4
 /// `isMutable`.
+/// The `SynField` of one item of a record type's field list
+/// (`SynFieldOrSpread.Field(field)`). A type spread (`{ ...T; … }`, the
+/// `RecordSpreads` syntax) is not modelled.
+pub(in crate::common) fn fcs_record_decl_field(item: &Value) -> &Value {
+    match case_name(item) {
+        "Field" => &fields(item)[0],
+        other => panic!("a record type's SynFieldOrSpread.{other} is not modelled"),
+    }
+}
+
+/// The `SynExprRecordField` of one item of a record expression's field list
+/// (`SynExprRecordFieldOrSpread.Field(field, blockSeparator)`). A spread
+/// (`{ ...r; … }`) is not modelled.
+fn fcs_record_expr_field(item: &Value) -> &Value {
+    match case_name(item) {
+        "Field" => &fields(item)[0],
+        other => panic!("a record expression's SynExprRecordFieldOrSpread.{other} is not modelled"),
+    }
+}
+
 fn fcs_field(v: &Value) -> NormalisedField {
     let f = fields(v);
     let is_static = f[1]
@@ -2706,7 +2749,7 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
             let raw_parts = f[0]
                 .as_array()
                 .expect("SynExpr.InterpolatedString field 0 (parts) must be an array");
-            let parts = raw_parts.iter().map(fcs_interp_part).collect();
+            let parts = fcs_interp_parts(raw_parts);
             let kind = fcs_syn_string_kind(&f[1]);
             NormalisedExpr::InterpolatedString { parts, kind }
         }
@@ -2928,7 +2971,7 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
             // deferred — asserted absent; field 1 `copyInfo` is the
             // `{ src with … }` source `(SynExpr * BlockSeparator) option`
             // (the `Some` wraps a `[expr, blockSep]` tuple); field 2 is the
-            // `SynExprRecordField` list.
+            // `SynExprRecordFieldOrSpread` list.
             let f = fields(v);
             // Field 0 `baseInfo` — `{ inherit Base(args); … }`. `Some` wraps a
             // `[SynType, SynExpr, …]` tuple: element 0 the base type, element 1 the
@@ -2967,7 +3010,7 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
                 .as_array()
                 .expect("SynExpr.Record recordFields must be a JSON array")
                 .iter()
-                .map(fcs_record_field)
+                .map(|item| fcs_record_field(fcs_record_expr_field(item)))
                 .collect();
             NormalisedExpr::Record {
                 inherit_info,
@@ -2980,9 +3023,10 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
             // trivia)` (`SyntaxTree.fsi:620`). Field 0 is `isStruct`; field 1
             // the `{| src with … |}` copy source (`(SynExpr * BlockSeparator)
             // option` — `Some` wraps a `[expr, sep]` tuple); field 2 the
-            // `(SynLongIdent * range option * SynExpr) list` — each field is a
-            // *3-element JSON array* (not a `SynExprRecordField`), so it can't
-            // reuse `fcs_record_field`. The field value is mandatory (no Option).
+            // `SynExprAnonRecordFieldOrSpread` list, whose `Field` case wraps a
+            // `SynExprAnonRecordField(fieldName: SynLongIdent, equalsRange,
+            // expr, range)`. The field value is mandatory (no Option). A spread
+            // (`{| ...r |}`) is not modelled.
             let f = fields(v);
             let is_struct = f[0]
                 .as_bool()
@@ -3005,13 +3049,17 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
                 .as_array()
                 .expect("SynExpr.AnonRecd recordFields must be a JSON array")
                 .iter()
-                .map(|fld| {
-                    let tuple = fld
-                        .as_array()
-                        .expect("AnonRecd field is a (SynLongIdent, mEquals, SynExpr) tuple");
+                .map(|item| {
+                    let field = match case_name(item) {
+                        "Field" => fields(&fields(item)[0]),
+                        other => panic!(
+                            "an anonymous record's SynExprAnonRecordFieldOrSpread.{other} is \
+                             not modelled"
+                        ),
+                    };
                     NormalisedRecordField {
-                        name: fcs_syn_long_ident_segments(&tuple[0]),
-                        value: Some(Box::new(fcs_expr(&tuple[2]))),
+                        name: fcs_syn_long_ident_segments(&field[0]),
+                        value: Some(Box::new(fcs_expr(&field[2]))),
                     }
                 })
                 .collect();
@@ -3311,7 +3359,7 @@ fn fcs_match_clause(v: &Value) -> NormalisedMatchClause {
 }
 
 /// Project a JSON-encoded `SynExprRecordField(fieldName, equalsRange, expr,
-/// range, blockSeparator)` (`SyntaxTree.fsi:991`). Field 0 is the
+/// range)` (`SyntaxTree.fsi`). Field 0 is the
 /// `RecordFieldName = (SynLongIdent * bool)` tuple (we take the `SynLongIdent`
 /// segments, dropping the trailing-dot bool); field 2 is the `SynExpr option`
 /// value; the equals/separator/range slots are elided.
@@ -3333,42 +3381,72 @@ fn fcs_record_field(v: &Value) -> NormalisedRecordField {
     NormalisedRecordField { name, value }
 }
 
-/// Project a JSON-encoded `SynInterpolatedStringPart`. The two cases
-/// (`String of value * range`, `FillExpr of fillExpr * qualifiers: Ident
-/// option`) ride through as `AdjacentTag` records; we project the value text
-/// (for String) or the inner expression plus its qualifier (for FillExpr),
-/// eliding only ranges. The `Ident option` qualifier serialises with a
-/// mixed encoding: `None` is bare `null`, while `Some` is a `{Case: "Some",
-/// Fields: [ident]}` DU whose payload is the `Ident` record (`{ idText,
-/// idRange }`), whose `idText` we keep.
-fn fcs_interp_part(v: &Value) -> NormalisedInterpPart {
-    let case = case_name(v);
-    let f = fields(v);
-    match case {
-        "String" => {
-            let value = fcs_utf16_units(&f[0], "SynInterpolatedStringPart.String field 0 (value)");
-            NormalisedInterpPart::String(value)
+/// Project a `SynExpr.InterpolatedString`'s parts list. The two
+/// `SynInterpolatedStringPart` cases (`String of value * range`, `FillExpr of
+/// fillExpr * formatting: SynInterpolationFormatting`) ride through as
+/// `AdjacentTag` records; ranges are elided.
+///
+/// The model keeps a hole's formatting where the source writes it (see
+/// [`NormalisedInterpPart`]), and FCS moves it into `formatting`
+/// (`ParseHelpers.mkInterpolatedStringFillParts`), so this folds it back, the
+/// inverse of that split:
+///
+/// - `DotNet(alignment, format)`: an alignment `n` rejoins the hole as the
+///   tuple `hole, n` it was parsed as, and `format` is the qualifier.
+/// - `Printf(specifier, _)`: the specifier FCS peeled off the end of the
+///   preceding `String` part (`%d{x}`) goes back on the end of it.
+fn fcs_interp_parts(raw_parts: &[Value]) -> Vec<NormalisedInterpPart> {
+    let mut parts = Vec::with_capacity(raw_parts.len());
+    for v in raw_parts {
+        let f = fields(v);
+        match case_name(v) {
+            "String" => {
+                let value =
+                    fcs_utf16_units(&f[0], "SynInterpolatedStringPart.String field 0 (value)");
+                parts.push(NormalisedInterpPart::String(value));
+            }
+            "FillExpr" => {
+                let hole = fcs_expr(&f[0]);
+                let formatting = &f[1];
+                let ff = fields(formatting);
+                let (expr, qualifier) = match case_name(formatting) {
+                    "DotNet" => {
+                        let expr = match fcs_opt(&ff[0]) {
+                            Some(alignment) => NormalisedExpr::Tuple {
+                                is_struct: false,
+                                elements: vec![hole, fcs_expr(alignment)],
+                            },
+                            None => hole,
+                        };
+                        let qualifier = fcs_opt(&ff[1]).map(|ident| {
+                            ident
+                                .get("idText")
+                                .and_then(Value::as_str)
+                                .expect("SynInterpolationFormatting.DotNet format Ident has idText")
+                                .to_string()
+                        });
+                        (expr, qualifier)
+                    }
+                    "Printf" => {
+                        let specifier =
+                            fcs_utf16_units(&ff[0], "SynInterpolationFormatting.Printf specifier");
+                        match parts.last_mut() {
+                            Some(NormalisedInterpPart::String(lit)) => lit.extend(specifier),
+                            other => panic!(
+                                "a printf specifier follows {other:?}, not the String part FCS \
+                                 peeled it from"
+                            ),
+                        }
+                        (hole, None)
+                    }
+                    other => panic!("unknown SynInterpolationFormatting case {other:?}"),
+                };
+                parts.push(NormalisedInterpPart::FillExpr { expr, qualifier });
+            }
+            other => panic!("unknown SynInterpolatedStringPart case {other:?}"),
         }
-        "FillExpr" => {
-            let expr = fcs_expr(&f[0]);
-            let qualifier = if f[1].is_null() {
-                None
-            } else {
-                match case_name(&f[1]) {
-                    "Some" => Some(
-                        fields(&f[1])[0]
-                            .get("idText")
-                            .and_then(Value::as_str)
-                            .expect("SynInterpolatedStringPart.FillExpr qualifier Ident has idText")
-                            .to_string(),
-                    ),
-                    other => panic!("unexpected FillExpr qualifiers Option case {other:?}"),
-                }
-            };
-            NormalisedInterpPart::FillExpr { expr, qualifier }
-        }
-        other => panic!("unknown SynInterpolatedStringPart case {other:?}"),
     }
+    parts
 }
 
 /// `SynStringKind` discriminator: `{Case: "Regular" | "Verbatim" |

@@ -43,6 +43,7 @@ assert_eq "this script (tools/ci)"   "$(expect workspace)"     "$(classify 'tool
 assert_eq "stats tool"               "$(expect stats)"         "$(classify 'tools/stats/src/lib.rs')"
 assert_eq "astgen tool"              "$(expect astgen)"        "$(classify 'tools/astgen/src/lib.rs')"
 assert_eq "fcs-dump tool"            "$(expect fcs)"           "$(classify 'tools/fcs-dump/Program.fs')"
+assert_eq "legacy fcs-dump tool"     "$(expect fcs)"           "$(classify 'tools/fcs-dump-legacy/Program.fs')"
 assert_eq "sidecar prod"             "$(expect sidecar)"       "$(classify 'tools/csharp-sidecar/Foo.cs')"
 assert_eq "sidecar tests"            "$(expect sidecar)"       "$(classify 'tools/csharp-sidecar.tests/Bar.cs')"
 assert_eq "nuget crate"              "$(expect lsp nuget)"     "$(classify 'crates/nuget/src/version.rs')"

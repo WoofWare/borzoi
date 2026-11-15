@@ -26,6 +26,8 @@
 //!   `return e: T` / `yield e: T` and their `!` forms.
 //! - `BetterAnonymousRecordParsing` (10.0): the lex-filter's split of `>|}`
 //!   and `@>|}`, reported at FCS's lexbuf lexeme.
+//! - `PreprocessorElif` (11.0): an `#elif` directive (graded from F# 8.0: the
+//!   legacy oracle predates the check).
 //!
 //! The gate is diagnostic-only: FCS recovers and builds the tree it builds at
 //! the newest version, and so do we, so the tree is also checked to be the same
@@ -46,6 +48,7 @@ use borzoi_cst::language_version::LanguageVersion;
 use borzoi_cst::parser::{FileKind, Parse, ParseOptions, parse_with_options};
 use tempfile::NamedTempFile;
 
+use crate::common::oracle::{ORACLE_SUPPORT_FLOOR, Oracle};
 use crate::common::{fcs_all_diagnostics, fcs_ast_batch_at, normalised_ast};
 
 /// FCS's FS3535 warning on a `static abstract` member from F# 7.0 on. We do not
@@ -391,14 +394,15 @@ fn fcs_diagnostics(json: &str, source: &str) -> BTreeSet<Diagnostic> {
         .collect()
 }
 
-/// Every way `source` diverges from FCS across [`VERSIONS`], one line each, so
-/// a run reports the whole grid rather than its first cell.
-fn check(source: &str, kind: FileKind, expect: Expect) -> Vec<String> {
+/// Every way `source` diverges from FCS across the [`VERSIONS`] at or above
+/// `floor`, one line each, so a run reports the whole grid rather than its
+/// first cell.
+fn check(source: &str, kind: FileKind, expect: Expect, floor: LanguageVersion) -> Vec<String> {
     let mut failures = Vec::new();
     let tmp = source_file(source, kind);
     let preview = parse_at(source, kind, LanguageVersion::Preview);
     let mut fcs_gates = false;
-    for &(lang, lang_text) in VERSIONS {
+    for &(lang, lang_text) in VERSIONS.iter().filter(|(lang, _)| *lang >= floor) {
         let json = fcs_ast_batch_at(tmp.path(), lang_text);
         let fcs_diags = fcs_diagnostics(&json, source);
         fcs_gates |= !fcs_diags.is_empty();
@@ -436,10 +440,10 @@ fn check(source: &str, kind: FileKind, expect: Expect) -> Vec<String> {
     failures
 }
 
-fn check_all(fixtures: &[(&str, Expect)], kind: FileKind) {
+fn check_all(fixtures: &[(&str, Expect)], kind: FileKind, floor: LanguageVersion) {
     let failures: Vec<String> = fixtures
         .iter()
-        .flat_map(|&(source, expect)| check(source, kind, expect))
+        .flat_map(|&(source, expect)| check(source, kind, expect, floor))
         .collect();
     assert!(
         failures.is_empty(),
@@ -451,12 +455,35 @@ fn check_all(fixtures: &[(&str, Expect)], kind: FileKind) {
 
 #[test]
 fn impl_feature_gates_match_fcs_at_every_version() {
-    check_all(IMPL, FileKind::Impl);
+    check_all(IMPL, FileKind::Impl, LanguageVersion::MIN);
 }
 
 #[test]
 fn sig_feature_gates_match_fcs_at_every_version() {
-    check_all(SIG, FileKind::Sig);
+    check_all(SIG, FileKind::Sig, LanguageVersion::MIN);
+}
+
+/// Fixtures graded only from the current oracle's support floor up, because
+/// below it the legacy oracle (`common::oracle`) reads them otherwise than the
+/// compiler the feature table transcribes, which we follow at every version:
+/// the legacy oracle starts an indented `#nowarn`'s directive range, where
+/// FS0236 and `ScopedNowarn`'s FS3350 are reported, at the start of its line,
+/// where the table's compiler starts it at the `#`; and it reports nothing for
+/// an `#elif` below 11.0, where the table's compiler reports FS3350.
+const IMPL_FROM_FLOOR: &[(&str, Expect)] = &[
+    (
+        "module M\nmodule N =\n    #nowarn \"41\" // why\n    let x = 1\n",
+        Gated,
+    ),
+    (
+        "module M\n#if FOO\nlet x = 1\n#elif BAR\nlet x = 2\n#else\nlet x = 3\n#endif\n",
+        Gated,
+    ),
+];
+
+#[test]
+fn impl_feature_gates_match_fcs_from_the_support_floor() {
+    check_all(IMPL_FROM_FLOOR, FileKind::Impl, ORACLE_SUPPORT_FLOOR);
 }
 
 /// Gated constructs in input both sides also reject and recover from — a
@@ -639,30 +666,6 @@ fn extended_interpolation_lexes_as_fcs_does_at_every_version() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Where FCS puts an indented `#nowarn`'s `DirectiveRange`, which its FS0236,
-/// FS3875, FS3353 and top-level-`#warnon` FS3350 report at. The compiler the
-/// feature table transcribes starts it after the spaces before the `#`
-/// (`WarnScopes.fs`, `parseDirective`); the oracle's older FCS starts it at the
-/// start of the line. We follow the compiler, so this pins the oracle's reading
-/// with ours, and fails once the oracle moves (then delete it, and indent a
-/// directive in `IMPL`).
-#[test]
-fn an_indented_directive_range_starts_at_its_hash() {
-    let source = "module M\nmodule N =\n    #nowarn \"41\" // why\n    let x = 1\n";
-    let line_start = source.find("    #nowarn").expect("the directive");
-    let hash = source.find('#').expect("the directive");
-    let end = source.find(" // why").expect("the comment") + " // why".len();
-    let message = "Directives inside modules are ignored".to_string();
-    let tmp = source_file(source, FileKind::Impl);
-    let json = fcs_ast_batch_at(tmp.path(), "9.0");
-    assert_eq!(
-        fcs_diagnostics(&json, source),
-        BTreeSet::from([(line_start, end, message.clone(), "Warning")]),
-    );
-    let ours = our_diagnostics(&parse_at(source, FileKind::Impl, LanguageVersion::V9_0));
-    assert_eq!(ours, BTreeSet::from([(hash, end, message, "Warning")]));
-}
-
 /// The modelled gates' diagnostics at `lang` for one file: the FS3350s naming a
 /// modelled feature, the FS1153s on a `float32` literal (FCS reports FS1153
 /// for other bad literals too), the FS0010 of a `_.` pattern, the FS0525 of a
@@ -671,8 +674,8 @@ fn an_indented_directive_range_starts_at_its_hash() {
 /// Nullness is left out: below 9.0 FCS does not parse `string | null` as a
 /// nullness annotation at all (`docs/completed/ast-versioning-nullness-proof.md`).
 /// So are the warn-directive diagnostics reported at the directive's range
-/// (FS0236, and `ScopedNowarn`'s FS3350), which the oracle starts elsewhere
-/// for an indented directive ([`an_indented_directive_range_starts_at_its_hash`]).
+/// (FS0236, and `ScopedNowarn`'s FS3350), which the fixtures grade (`IMPL`,
+/// [`IMPL_FROM_FLOOR`]).
 fn modelled_gate_diagnostics(
     diags: impl IntoIterator<Item = (std::ops::Range<usize>, String)>,
     source: &str,
@@ -688,6 +691,7 @@ fn modelled_gate_diagnostics(
         LanguageFeature::ParsedHashDirectiveArgumentNonQuotes,
         LanguageFeature::AllowTypedLetUseAndBang,
         LanguageFeature::BetterAnonymousRecordParsing,
+        LanguageFeature::PreprocessorElif,
     ]
     .map(|f| f.not_available_message(lang))
     .to_vec();
@@ -713,13 +717,16 @@ fn modelled_gate_diagnostics(
         .collect()
 }
 
-/// Every corpus file's modelled gate diagnostics at F# 4.6, against FCS's.
-/// The fixtures above are hand-picked; this is where a construct they miss
-/// (a production that shares a gated node but not FCS's check, say) shows up.
+/// Every corpus file's modelled gate diagnostics at the current oracle's
+/// support floor (`ORACLE_SUPPORT_FLOOR`, F# 8.0), against FCS's. The fixtures
+/// above are hand-picked; this is where a construct they miss (a production
+/// that shares a gated node but not FCS's check, say) shows up. It grades the
+/// gates above the floor: the legacy oracle, the only one that grades the
+/// retired gates below it, runs on fixtures alone (`common::oracle`).
 /// Each file where either side reports one is pinned in
 /// `tests/manifests/feature_gate_corpus.txt` as `agree` or `diverge`.
 #[test]
-#[ignore = "full-corpus differential parse at F# 4.6 (us + FCS); run with --ignored under nix develop"]
+#[ignore = "full-corpus differential parse at F# 8.0 (us + FCS); run with --ignored under nix develop"]
 fn feature_gates_match_fcs_over_corpus() {
     use crate::common::corpus_manifest::{
         check_manifest, corpus_count_item, corpus_relative, regenerate_ignored, sort_by_corpus_key,
@@ -744,6 +751,13 @@ fn feature_gates_match_fcs_over_corpus() {
         };
         names.iter().map(|s| s.to_string()).collect()
     };
+    let lang = ORACLE_SUPPORT_FLOOR;
+    let lang_text = lang.to_string();
+    assert_eq!(
+        Oracle::for_version(lang),
+        Oracle::Current,
+        "a corpus sweep grades the current oracle"
+    );
     let verdicts = par_map(files.len(), |i| {
         let path = &files[i];
         let source = match read_corpus_source(path) {
@@ -765,22 +779,22 @@ fn feature_gates_match_fcs_over_corpus() {
             ParseOptions {
                 file_kind: kind,
                 symbols: &symbols,
-                lang: LanguageVersion::V4_6,
+                lang,
             },
         );
         let ours = modelled_gate_diagnostics(
             parse.errors.into_iter().map(|e| (e.span, e.message)),
             &source,
-            LanguageVersion::V4_6,
+            lang,
         );
-        let json = fcs_ast_batch_at(path, "4.6");
+        let json = fcs_ast_batch_at(path, &lang_text);
         let fcs = if json.contains("\"Diagnostics\":") {
             modelled_gate_diagnostics(
                 fcs_all_diagnostics(&json, &source)
                     .into_iter()
                     .map(|(span, message, _)| (span, message)),
                 &source,
-                LanguageVersion::V4_6,
+                lang,
             )
         } else {
             return Some("fcs-error".to_string());

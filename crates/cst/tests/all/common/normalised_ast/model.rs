@@ -1805,21 +1805,24 @@ pub struct NormalisedRecordField {
     pub value: Option<Box<NormalisedExpr>>,
 }
 
-/// One member of an interpolated string body. Mirrors FCS's
-/// `SynInterpolatedStringPart` (`SyntaxTree.fsi:1000`) one-for-one, only
-/// eliding ranges.
+/// One member of an interpolated string body: FCS's
+/// `SynInterpolatedStringPart`, ranges elided, with each hole's formatting
+/// where the source writes it. FCS moves an alignment and a printf specifier
+/// into `SynInterpolationFormatting`; the FCS projection folds them back
+/// (`from_fcs::fcs_interp_parts`), the inverse of that split.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NormalisedInterpPart {
     /// `SynInterpolatedStringPart.String of value: string * range: range`
     /// — a literal-text part. The range is elided; the value is the raw UTF-16
-    /// code-unit payload.
+    /// code-unit payload, a printf specifier before a hole (`%d{x}`)
+    /// included.
     String(Vec<u16>),
-    /// `SynInterpolatedStringPart.FillExpr of fillExpr: SynExpr *
-    ///                                        qualifiers: Ident option`
-    /// — a fill expression. `expr` is the spliced expression; `qualifier` is
-    /// the trailing `: ident` format specifier (FCS grammar `declExpr COLON
-    /// ident`, e.g. `{x:N2}` → `Some("N2")`), or `None` for a bare `{x}`. The
-    /// qualifier's range is elided; its `idText` is kept.
+    /// `SynInterpolatedStringPart.FillExpr` — a fill expression. `expr` is the
+    /// spliced expression as the grammar parses it (`declExpr`), so an
+    /// alignment `{x,5}` is the tuple `x, 5`; `qualifier` is the trailing
+    /// `: ident` format specifier (FCS grammar `declExpr COLON ident`, e.g.
+    /// `{x:N2}` → `Some("N2")`), or `None` for a bare `{x}`. The qualifier's
+    /// range is elided; its `idText` is kept.
     FillExpr {
         expr: NormalisedExpr,
         qualifier: Option<String>,

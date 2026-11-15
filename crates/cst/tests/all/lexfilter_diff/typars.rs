@@ -1,6 +1,6 @@
 //! Type-application `<...>` scan-ahead and its non-typar carve-outs.
 
-use crate::common::assert_filtered_streams_match;
+use crate::common::{assert_filtered_streams_match, assert_filtered_streams_match_from_floor};
 
 /// Simplest typar application: `list<int>` in a type annotation. Exercises
 /// `peek_adjacent_typars` from the `list` IDENT trigger, producing
@@ -157,8 +157,10 @@ fn diff_filtered_tyapp_nested_greater_bar_rbrack() {
 /// the `HighPrecedenceTypeApp` / `HighPrecedenceParenthesisApp` pair
 /// and balances the offside separator across the inner line break.
 /// Verifies the typar scan and outer offside tracking interact
-/// correctly when the `<…>` spans multiple lines.
+/// correctly when the `<…>` spans multiple lines. The closing `>` aligned with
+/// the block continues it (dotnet/fsharp#15171), which the legacy compiler
+/// did not do.
 #[test]
 fn diff_filtered_tyapp_multiline() {
-    assert_filtered_streams_match("let x =\n    Foo<\n        Bar\n    >()\n");
+    assert_filtered_streams_match_from_floor("let x =\n    Foo<\n        Bar\n    >()\n");
 }

@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use borzoi_cst::language_version::LanguageVersion;
 use borzoi_oracle_harness::{BatchChild, BoundedCommand, default_timeout};
 use borzoi_sema::test_support::binder_completeness::{
     OracleBinder, OracleBinderClass, OracleUse, is_unclassified_value, unmodelled_binders,
@@ -141,7 +142,8 @@ pub fn invoke_fcs_dump_with_refs(subcommand: &str, source: &Path, refs: &[&Path]
 /// Like [`invoke_fcs_dump`], but checks (and so parses) `source` at the
 /// `<LangVersion>` `lang` (`"5.0"`, `"preview"`, …) rather than FCS's default.
 /// The version rides in the batch request, as the refs do, so one resident
-/// child serves every version.
+/// child serves every version. A version below [`ORACLE_SUPPORT_FLOOR`] is
+/// checked by the legacy oracle ([`legacy_file_batch_pool`]).
 pub fn invoke_fcs_dump_at_langversion(subcommand: &str, source: &Path, lang: &str) -> String {
     let request = serde_json::json!({
         "kind": subcommand,
@@ -150,7 +152,14 @@ pub fn invoke_fcs_dump_at_langversion(subcommand: &str, source: &Path, lang: &st
         "langversion": lang,
     })
     .to_string();
-    let line = fcs_file_batch_pool().request(&request);
+    let version = LanguageVersion::from_lang_version_text(lang)
+        .unwrap_or_else(|| panic!("{lang:?} is not a <LangVersion> FCS reads"));
+    let pool = if version < ORACLE_SUPPORT_FLOOR {
+        legacy_file_batch_pool()
+    } else {
+        fcs_file_batch_pool()
+    };
+    let line = pool.request(&request);
     reject_batch_error(&line, subcommand);
     line
 }
@@ -244,11 +253,13 @@ pub fn try_invoke_fcs_dump_with_refs(
 }
 
 /// The number of resident `fcs-dump` pools in this test binary; the child budget
-/// (`BORZOI_FCS_CHILDREN`, default 6) is split evenly between them, mirroring
-/// `cst`'s harness. Two: the single-file `file-batch` pool
-/// ([`fcs_file_batch_pool`]) and the multi-file `uses-project` pool
-/// ([`fcs_project_batch_pool`]).
-const FCS_POOLS: usize = 2;
+/// (`BORZOI_FCS_CHILDREN`, default three a pool) is split evenly between them,
+/// mirroring `cst`'s harness. Three: the single-file `file-batch` pool
+/// ([`fcs_file_batch_pool`]), the multi-file `uses-project` pool
+/// ([`fcs_project_batch_pool`]), and the legacy oracle's `file-batch` pool
+/// ([`legacy_file_batch_pool`]), which spawns only for a check below the
+/// support floor.
+const FCS_POOLS: usize = 3;
 
 /// Process-wide cap on resident `fcs-dump` children, split evenly across the
 /// [`FCS_POOLS`] pools. Each child is a warm FCS/.NET process holding hundreds of
@@ -260,8 +271,32 @@ fn fcs_children_budget() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(6)
+        .unwrap_or(3 * FCS_POOLS)
         .max(FCS_POOLS)
+}
+
+/// The lowest language version the current oracle's compiler supports
+/// (`LanguageVersion.IsVersionSupported`): `borzoi_oracle_harness::FCS_SUPPORT_FLOOR`,
+/// which `borzoi-cst`'s `language_features` holds to the compiler's source. Below
+/// it the compiler no longer behaves as the older ones did, having deleted
+/// the features introduced there (`docs/ast-versioning-plan.md`, D12), so a
+/// check pinned below it goes to the legacy oracle, `tools/fcs-dump-legacy`:
+/// a frozen copy on FCS 43.12.204.
+pub const ORACLE_SUPPORT_FLOOR: LanguageVersion = LanguageVersion::V8_0;
+
+#[test]
+fn the_routing_floor_is_the_harnesses_floor() {
+    assert_eq!(
+        ORACLE_SUPPORT_FLOOR.to_string(),
+        borzoi_oracle_harness::FCS_SUPPORT_FLOOR
+    );
+}
+
+/// One of the two `fcs-dump` builds: the current oracle, or the legacy one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Oracle {
+    Current,
+    Legacy,
 }
 
 /// A pool of interchangeable resident `fcs-dump` children driving one
@@ -272,6 +307,7 @@ fn fcs_children_budget() -> usize {
 /// converges on roughly the real concurrency rather than eagerly paying `n` .NET
 /// startups. Mirrors `crates/cst/tests/all/common/mod.rs`.
 struct BatchPool {
+    oracle: Oracle,
     subcommand: &'static str,
     /// Per-request deadline for this pool's children. Snippet pools take the
     /// harness default; the whole-project pool keeps [`PROJECT_TIMEOUT`] — a
@@ -283,10 +319,11 @@ struct BatchPool {
 }
 
 impl BatchPool {
-    fn new(subcommand: &'static str, request_timeout: Duration) -> Self {
+    fn new(oracle: Oracle, subcommand: &'static str, request_timeout: Duration) -> Self {
         let share = fcs_children_budget() / FCS_POOLS;
         let n = std::thread::available_parallelism().map_or(4, |n| n.get());
         Self {
+            oracle,
             subcommand,
             request_timeout,
             slots: (0..n.min(share).max(1)).map(|_| Mutex::new(None)).collect(),
@@ -311,37 +348,47 @@ impl BatchPool {
     }
 
     fn round_trip(&self, slot: &mut Option<BatchChild>, request: &str) -> String {
-        slot.get_or_insert_with(|| spawn_fcs_batch_child(self.subcommand, self.request_timeout))
-            .request(request)
+        slot.get_or_insert_with(|| {
+            spawn_fcs_batch_child(self.oracle, self.subcommand, self.request_timeout)
+        })
+        .request(request)
     }
 }
 
-/// Spawn one resident `fcs-dump <subcommand>` child under `timeout` per request,
-/// honouring `BORZOI_FCS_DUMP` (a prebuilt framework-dependent binary) exactly as
-/// [`fcs_dump_command`] does, and otherwise `dotnet <fcs-dump.dll>`.
-/// [`BatchChild::with_factory`] (not `spawn`) so the per-request deadline is the
-/// pool's, not the harness's fixed `default_timeout`; `2` attempts matches
-/// `spawn`'s default retry-on-a-fresh-child.
-fn spawn_fcs_batch_child(subcommand: &'static str, timeout: Duration) -> BatchChild {
-    let make: Box<dyn FnMut() -> Command + Send> =
-        if let Some(bin) = std::env::var_os("BORZOI_FCS_DUMP") {
-            Box::new(move || {
-                let mut c = Command::new(&bin);
-                c.arg(subcommand);
-                c
-            })
-        } else {
-            let dll = ensure_fcs_dump_built()
-                .to_str()
-                .expect("fcs-dump.dll path is UTF-8")
-                .to_owned();
-            Box::new(move || {
-                let mut c = Command::new("dotnet");
-                c.arg(&dll).arg(subcommand);
-                c
-            })
-        };
-    BatchChild::with_factory(make, format!("fcs-dump {subcommand}"), timeout, 2)
+/// Spawn one resident `<oracle> <subcommand>` child under `timeout` per request,
+/// honouring `BORZOI_FCS_DUMP` (`BORZOI_FCS_DUMP_LEGACY` for the legacy oracle:
+/// a prebuilt framework-dependent binary) as [`fcs_dump_command`] does, and
+/// otherwise `dotnet <the built .dll>`. [`BatchChild::with_factory`] (not
+/// `spawn`) so the per-request deadline is the pool's, not the harness's fixed
+/// `default_timeout`; `2` attempts matches `spawn`'s default
+/// retry-on-a-fresh-child.
+fn spawn_fcs_batch_child(
+    oracle: Oracle,
+    subcommand: &'static str,
+    timeout: Duration,
+) -> BatchChild {
+    let (variable, tool) = match oracle {
+        Oracle::Current => ("BORZOI_FCS_DUMP", "fcs-dump"),
+        Oracle::Legacy => ("BORZOI_FCS_DUMP_LEGACY", "fcs-dump-legacy"),
+    };
+    let make: Box<dyn FnMut() -> Command + Send> = if let Some(bin) = std::env::var_os(variable) {
+        Box::new(move || {
+            let mut c = Command::new(&bin);
+            c.arg(subcommand);
+            c
+        })
+    } else {
+        let dll = ensure_built(oracle)
+            .to_str()
+            .expect("the oracle's .dll path is UTF-8")
+            .to_owned();
+        Box::new(move || {
+            let mut c = Command::new("dotnet");
+            c.arg(&dll).arg(subcommand);
+            c
+        })
+    };
+    BatchChild::with_factory(make, format!("{tool} {subcommand}"), timeout, 2)
 }
 
 /// The resident single-file oracle pool (`fcs-dump file-batch`): `uses`,
@@ -350,7 +397,14 @@ fn spawn_fcs_batch_child(subcommand: &'static str, timeout: Duration) -> BatchCh
 /// per-request deadline is ample.
 fn fcs_file_batch_pool() -> &'static BatchPool {
     static P: OnceLock<BatchPool> = OnceLock::new();
-    P.get_or_init(|| BatchPool::new("file-batch", default_timeout()))
+    P.get_or_init(|| BatchPool::new(Oracle::Current, "file-batch", default_timeout()))
+}
+
+/// [`fcs_file_batch_pool`] over the legacy oracle, for the checks pinned below
+/// [`ORACLE_SUPPORT_FLOOR`].
+fn legacy_file_batch_pool() -> &'static BatchPool {
+    static P: OnceLock<BatchPool> = OnceLock::new();
+    P.get_or_init(|| BatchPool::new(Oracle::Legacy, "file-batch", default_timeout()))
 }
 
 /// Turn a resident batch handler's `{ "BatchError": <msg> }` failure sentinel
@@ -428,7 +482,7 @@ pub fn invoke_fcs_dump_project_with_refs(paths: &[&Path], refs: &[&Path]) -> Str
 /// order, the same scale the one-shot `uses-project` budgeted for.
 fn fcs_project_batch_pool() -> &'static BatchPool {
     static P: OnceLock<BatchPool> = OnceLock::new();
-    P.get_or_init(|| BatchPool::new("uses-project-batch", PROJECT_TIMEOUT))
+    P.get_or_init(|| BatchPool::new(Oracle::Current, "uses-project-batch", PROJECT_TIMEOUT))
 }
 
 /// Run `fcs-dump uses-census-batch` over `paths` (any order; **each file is
@@ -2367,19 +2421,29 @@ pub fn ensure_tier_corpus_built() -> (&'static Path, &'static Path) {
 /// Honours `BORZOI_FCS_DUMP` via [`fcs_dump_command`] — that path
 /// never reaches this function.
 fn ensure_fcs_dump_built() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            let project = project_dir();
-            let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
-            dotnet_build(&project, "dotnet build fcs-dump");
-            project
-                .join("bin")
-                .join("Release")
-                .join("net10.0")
-                .join("fcs-dump.dll")
-        })
-        .as_path()
+    ensure_built(Oracle::Current)
+}
+
+/// Build `oracle`'s tool (`tools/fcs-dump` or `tools/fcs-dump-legacy`) once
+/// (thread-safe) and return the path to the produced `.dll`.
+fn ensure_built(oracle: Oracle) -> &'static Path {
+    static CURRENT: OnceLock<PathBuf> = OnceLock::new();
+    static LEGACY: OnceLock<PathBuf> = OnceLock::new();
+    let (cell, tool) = match oracle {
+        Oracle::Current => (&CURRENT, "fcs-dump"),
+        Oracle::Legacy => (&LEGACY, "fcs-dump-legacy"),
+    };
+    cell.get_or_init(|| {
+        let project = workspace_root().join("tools").join(tool);
+        let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
+        dotnet_build(&project, &format!("dotnet build {tool}"));
+        project
+            .join("bin")
+            .join("Release")
+            .join("net10.0")
+            .join(format!("{tool}.dll"))
+    })
+    .as_path()
 }
 
 /// Run a `dotnet build` of `project` under a deadline, failing loudly (with the

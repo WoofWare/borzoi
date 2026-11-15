@@ -189,7 +189,14 @@ pub enum InterpKind {
 pub enum Token<'a> {
     // ---- trivia -------------------------------------------------------------
     /// Spaces, tabs, and a leading UTF-8 BOM (which F# tolerates at file start).
+    ///
+    /// A `#:` line (`#:package …`, RFC FS-1337) is whitespace too, as FCS's
+    /// lexer reads `"#:" anystring` at every language version, so nothing that
+    /// reads comments (the XML-doc collector, say) sees it. FCS reports FS3909
+    /// when one does not start its line (the parser's
+    /// `colon_directive_diagnostics`).
     #[regex(r"[ \t\u{FEFF}]+")]
+    #[regex(r"#:[^\n\r]*", allow_greedy = true)]
     Whitespace,
 
     #[regex(r"\r\n|\n|\r")]
@@ -600,6 +607,10 @@ pub enum Token<'a> {
     Semi,
     #[token("..^")]
     DotDotHat,
+    /// `...` — FCS's `DOT_DOT_DOT`, the record-spread token, lexed at every
+    /// language version (`lex.fsl`). Three dots are never an operator.
+    #[token("...")]
+    DotDotDot,
     #[token("..")]
     DotDot,
     /// F# "funky operator names" — fixed identifier-like operator forms that

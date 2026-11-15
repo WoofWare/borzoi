@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bf1b75b44fee05d6bb8ed2d4df3eb481a994d7472674f7fb7be67e6fe3dcb2ed # shrinks to items = [Item { prelude: [Doc(12)], template: Value, attr: false, slots: [[], [], [], [], []], trailing: None }], crlf = false

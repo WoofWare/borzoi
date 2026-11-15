@@ -31,6 +31,7 @@ mod lexfilter_diff;
 mod line_index;
 mod line_table_reference;
 mod nullness_gate;
+mod oracle_legacy_shapes;
 mod oracle_pool;
 mod parser_corpus;
 mod parser_corpus_diff;

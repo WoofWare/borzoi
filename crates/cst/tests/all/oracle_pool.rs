@@ -16,7 +16,7 @@ use crate::common::{effective_fcs_children, fcs_slots_per_pool};
 
 /// The number of pools the budget is divided among. Kept in step with `common`'s
 /// `FCS_POOLS` by [`the_pool_count_matches_the_harness`] below.
-const POOLS: usize = 3;
+const POOLS: usize = 5;
 
 /// **The invariant**: however the budget is set, the children a full complement of
 /// pools can hold must not exceed it. Exhaustive over every setting that could
@@ -63,7 +63,7 @@ fn the_budget_is_honoured_or_raised_to_the_workable_floor() {
 }
 
 /// `oracle_pool.rs` hardcodes the pool count to check the arithmetic against; if
-/// a fourth pool is added to `common`, this catches the drift. (`common`'s own
+/// a pool is added to `common`, this catches the drift. (`common`'s own
 /// `BatchPool::new` asserts the same thing from the other side, at run time.)
 #[test]
 fn the_pool_count_matches_the_harness() {

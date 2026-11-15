@@ -19,6 +19,8 @@ mod from_cst;
 mod from_fcs;
 mod model;
 
+pub(in crate::common) use from_fcs::{fcs_component_info_idents, fcs_record_decl_field};
+
 /// Canonicalise a `match` / `match!` **scrutinee** identifier: a bare `_arg<N>`
 /// collapses to `_arg`, dropping FCS's stateful `SynArgNameGenerator` index.
 /// Applied identically on both projectors at every

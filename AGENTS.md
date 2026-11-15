@@ -534,7 +534,16 @@ Override the binary with `BORZOI_FCS_DUMP=/path/to/fcs-dump`; it must be a
 `dotnet build` output). FCS's script checks take their framework references from
 the runtime fcs-dump runs on, so a self-contained bundle would check every file
 against its own directory — implementation assemblies plus
-FSharp.Compiler.Service itself — and fcs-dump refuses to start that way. To
+FSharp.Compiler.Service itself — and fcs-dump refuses to start that way.
+
+A request below F# 8.0 — the current FCS's support floor, below which it no
+longer behaves as the older compilers did because it deleted the features
+introduced there — goes to a second oracle, `tools/fcs-dump-legacy`: a frozen
+copy on FCS 43.12.204, never edited, built and spawned only when such a request
+arrives (`BORZOI_FCS_DUMP_LEGACY` names a prebuilt one). The cst harness routes
+to it (`crates/cst/tests/all/common/oracle.rs`), and so does sema's for a check
+pinned below the floor (`infer_legality_pin_diff`), on fixtures and grids, never
+a corpus sweep; `docs/ast-versioning-plan.md` D12 has the reasoning. To
 inspect the FCS side directly:
 
 ```sh

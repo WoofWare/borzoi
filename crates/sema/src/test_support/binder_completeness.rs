@@ -190,27 +190,6 @@ pub fn binder_verdict(rf: &ResolvedFile, binder: &OracleBinder) -> BinderVerdict
     }
 }
 
-/// The binders FCS reports a definition for whose name no bare lookup reaches,
-/// keyed by the node directly holding the binder's token. A binder here is not
-/// one the walk needs to know: nothing it could capture exists. Each entry is
-/// held to that claim by a row of `binder_site_grid` that plants a bare use of
-/// the name in the binder's would-be scope and checks FCS binds it elsewhere.
-pub const UNSCOPED_BINDER_LEAVES: &[(SyntaxKind, &str)] = &[(
-    SyntaxKind::AUTO_PROPERTY,
-    "`member val X`: FCS reports the compiler's backing value `X` as a \
-     definition, but a bare `X` in the type's body reaches the enclosing scope",
-)];
-
-/// Whether the binder at `range` is one no bare lookup reaches
-/// ([`UNSCOPED_BINDER_LEAVES`]).
-pub fn is_unscoped(root: &SyntaxNode, range: TextRange) -> bool {
-    binder_leaf(root, range).is_some_and(|leaf| {
-        UNSCOPED_BINDER_LEAVES
-            .iter()
-            .any(|(kind, _)| *kind == leaf.kind())
-    })
-}
-
 /// The node directly holding the token the binder at `range` starts with.
 fn binder_leaf(root: &SyntaxNode, range: TextRange) -> Option<SyntaxNode> {
     root.token_at_offset(range.start().min(root.text_range().end()))
@@ -219,7 +198,6 @@ fn binder_leaf(root: &SyntaxNode, range: TextRange) -> Option<SyntaxNode> {
 }
 
 /// Every one of `oracle`'s binders the walk does not know, in source order.
-/// A binder no bare lookup reaches ([`is_unscoped`]) is not one it needs to.
 pub fn unmodelled_binders(
     rf: &ResolvedFile,
     root: &SyntaxNode,
@@ -229,7 +207,6 @@ pub fn unmodelled_binders(
         .iter()
         .filter(|b| b.introduces_a_name())
         .filter(|b| binder_verdict(rf, b) == BinderVerdict::Unmodelled)
-        .filter(|b| !is_unscoped(root, b.range))
         .map(|b| UnmodelledBinder {
             name: b.name.clone(),
             range: b.range,

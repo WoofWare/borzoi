@@ -575,8 +575,9 @@ impl<'src> Parser<'src> {
     /// valid, producing `Some(SynValTyparDecls(Some(PostfixList [])))`). When
     /// `permit_empty` is set, an empty list closed immediately by `>` is accepted
     /// silently; a non-`>` token after `<` is still junk and errors in either
-    /// mode. (The `, ..` flex list — the other `explicitValTyparDeclsCore`
-    /// extension — is still unmodelled; it stops cleanly at the close check.)
+    /// mode. `permit_empty` also admits the binding grammar's flexible list: a
+    /// final `..` (more parameters may be inferred), after a `,` or alone
+    /// (`let f< .. > x`), a [`SyntaxKind::DOT_DOT_TOK`] in the list.
     pub(super) fn parse_typar_decls_postfix(&mut self, permit_empty: bool) {
         self.builder.start_node(SyntaxKind::TYPAR_DECLS);
         // Consume the `HighPrecedenceTyApp` virtual *if present* (it is emitted
@@ -629,8 +630,14 @@ impl<'src> Parser<'src> {
                 ) {
                     self.bump_into(SyntaxKind::ERROR);
                 }
+                if permit_empty && self.at_dot_dot() {
+                    self.bump_into(SyntaxKind::DOT_DOT_TOK);
+                    break;
+                }
                 self.parse_typar_decl(true);
             }
+        } else if opened_less && permit_empty && self.at_dot_dot() {
+            self.bump_into(SyntaxKind::DOT_DOT_TOK);
         } else if opened_less {
             let next_is_close = matches!(
                 self.peek(),
@@ -669,6 +676,16 @@ impl<'src> Parser<'src> {
             });
         }
         self.builder.finish_node(); // TYPAR_DECLS
+    }
+
+    /// Whether the cursor is at a `..` that FCS lexes as `DOT_DOT`: one glued to
+    /// a following operator character (`..>`) is a single operator to FCS's
+    /// lexer (`ignored_op_char* '>' op_char*`), which ours splits.
+    fn at_dot_dot(&self) -> bool {
+        let Some((Ok(FilteredToken::Raw(Token::DotDot)), span)) = self.peek() else {
+            return false;
+        };
+        !self.source[span.end..].starts_with(|c: char| "!$%&*+-./<=>?@^|~:".contains(c))
     }
 
     /// Whether the cursor (a type header, past any accessibility) opens a

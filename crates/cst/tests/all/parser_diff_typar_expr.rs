@@ -146,3 +146,11 @@ fn bare_typar_expr_inherit_arg_is_clean_error() {
 fn typar_expr_split_by_offside_break_is_clean_error() {
     assert_clean_error("let f =\n    '\n    T\n");
 }
+
+/// A value's explicit type parameters may end in `..` (more may be
+/// inferred), after a list or alone (`f< .. >`; `<..>` glued is one operator).
+#[test]
+fn diff_flexible_explicit_typars() {
+    assert_asts_match("let f< .. > x = x\n");
+    assert_asts_match("let g<'a, .. > (x: 'a) = x\n");
+}

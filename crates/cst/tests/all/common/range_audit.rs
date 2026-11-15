@@ -1221,12 +1221,12 @@ fn collect_fcs_type_defn(
     out: &mut Vec<AstRangeFact>,
 ) {
     // `SynTypeDefn(typeInfo, typeRepr, members, implicitConstructor, range,
-    // trivia)`; `SynComponentInfo(attributes, typeParams, constraints, longId,
+    // trivia)`; `SynComponentInfo(attributes, typeParams, constraints, synType,
     // …)`.
     let f = fields(defn);
-    let long_id = fields(&f[0])[3]
+    let long_id = super::normalised_ast::fcs_component_info_idents(&fields(&f[0])[3])
         .as_array()
-        .expect("SynComponentInfo.longId");
+        .expect("SynComponentInfo.synType's Ident list");
     if let Some(name) = long_id.last() {
         push_fcs_fact(
             out,
@@ -1256,11 +1256,12 @@ fn collect_fcs_type_defn(
                         );
                     }
                 }
-                // `Record(accessibility, recordFields, range)`;
+                // `Record(accessibility, recordFieldsAndSpreads, range)`;
                 // `SynField(attributes, isStatic, idOpt, …)`.
                 "Record" => {
                     let rfields = fields(simple)[1].as_array().expect("record fields");
-                    for (k, field) in rfields.iter().enumerate() {
+                    for (k, item) in rfields.iter().enumerate() {
+                        let field = super::normalised_ast::fcs_record_decl_field(item);
                         let id_opt = &fields(field)[2];
                         if !id_opt.is_null() && case_name(id_opt) == "Some" {
                             push_fcs_fact(

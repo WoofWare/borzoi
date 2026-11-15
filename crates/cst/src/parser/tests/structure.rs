@@ -682,12 +682,11 @@ fn sig_val_adjacent_empty_typar_is_rejected() {
     assert_lossless(source, &parse);
 }
 
-/// Phase 10.12 (typars) — the `<…, ..>` flexible-typar tail is **not** a valid
-/// value signature: our oracle FCS rejects `val f<'T, ..> : 'T -> 'T` ("Unexpected
-/// infix operator in value signature" — the `..` is read as an infix operator
-/// here, not the flex-typar tail). Our parser likewise errors and stays lossless
-/// (no silent accept, no panic). Pins a codex-review point. (`parse_typar_decls_‑
-/// postfix` does not model the `, ..` tail; it is reported, not corrupted.)
+/// Phase 10.12 (typars) — a glued `..>` is not the flexible-typar tail: FCS
+/// rejects `val f<'T, ..> : 'T -> 'T` ("Unexpected infix operator in value
+/// signature" — its lexer reads `..>` as one infix operator). Our parser likewise
+/// errors and stays lossless (no silent accept, no panic); the spaced `.. >`
+/// is the tail (`parse_typar_decls_postfix`).
 #[test]
 fn sig_val_flex_typar_tail_is_rejected() {
     let source = "module M\nval f<'T, ..> : 'T -> 'T\n";

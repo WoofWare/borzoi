@@ -316,6 +316,17 @@ impl<'a> Iterator for InterpDriver<'a> {
         let (tok, rel_span) = self.inner.next()?;
         let abs: Range<usize> = (rel_span.start + self.base)..(rel_span.end + self.base);
 
+        // `=` glued to an interpolated-string opener (`C(Name=$"v")`): FCS's
+        // lexer takes the `=` alone and lexes the string from the opener, at
+        // every language version (`lex.fsl`'s `'=' '$' '"'` rules), where the
+        // operator rule would read `=$` as one operator.
+        if let Ok(Token::Op(_)) = &tok
+            && equals_before_interp_opener(&self.source.as_bytes()[abs.start..])
+        {
+            self.restart_inner(abs.start + 1);
+            return Some((Ok(Token::Equals), abs.start..abs.start + 1));
+        }
+
         // An extended opener below F# 8.0, whether or not the Logos arm found
         // its end: lex it as triple-quoted.
         if !self.extended_interpolation
@@ -412,4 +423,18 @@ impl<'a> Iterator for InterpDriver<'a> {
             other => Some((other, abs)),
         }
     }
+}
+
+/// Whether `rest` is an `=` immediately followed by an interpolated-string
+/// opener: `$"`, `$`s then `"""`, `$@"` or `@$"` (`lex.fsl`'s `'=' '$' '"'`,
+/// `'=' ('$'+) '"' '"' '"'` and `'=' ("$@" | "@$") '"'`).
+fn equals_before_interp_opener(rest: &[u8]) -> bool {
+    let Some(after) = rest.strip_prefix(b"=") else {
+        return false;
+    };
+    let dollars = after.iter().take_while(|&&b| b == b'$').count();
+    after.starts_with(b"$\"")
+        || after.starts_with(b"$@\"")
+        || after.starts_with(b"@$\"")
+        || (dollars > 0 && after[dollars..].starts_with(b"\"\"\""))
 }

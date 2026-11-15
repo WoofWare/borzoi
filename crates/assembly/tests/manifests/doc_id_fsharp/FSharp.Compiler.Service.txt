@@ -1,12 +1,13 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-assembly --test all doc_id_fsharp_diff:: -- --include-ignored
-hits 7188
-keys 7364
-miss M:FSharp.Compiler.LowerSequenceExpressions.ConvertSequenceExprToObject(FSharp.Compiler.TcGlobals.TcGlobals,FSharp.Compiler.Import.ImportMap,FSharp.Compiler.TypedTree.Expr)
+hits 8324
+keys 8514
+miss M:FSharp.Compiler.LowerSequenceExpressions.ConvertSequenceExprToObject(FSharp.Compiler.TcGlobals.TcGlobals,FSharp.Compiler.Import.ImportMap,System.Boolean,FSharp.Compiler.TypedTree.Expr)
 miss M:FSharp.Compiler.MethodCalls.AdjustCallerArgs``3(Microsoft.FSharp.Core.FSharpFunc{FSharp.Compiler.TypedTree.ValRef,Microsoft.FSharp.Core.FSharpFunc{FSharp.Compiler.TypedTree.ValUseFlag,Microsoft.FSharp.Core.FSharpFunc{Microsoft.FSharp.Collections.FSharpList{FSharp.Compiler.TypedTree.TType},Microsoft.FSharp.Core.FSharpFunc{FSharp.Compiler.Text.Range,System.Tuple{FSharp.Compiler.TypedTree.Expr,FSharp.Compiler.TypedTree.TType}}}}},Microsoft.FSharp.Core.FSharpFunc{FSharp.Compiler.Text.Range,Microsoft.FSharp.Core.FSharpFunc{FSharp.Compiler.AbstractIL.IL.ILFieldInit,FSharp.Compiler.TypedTree.Const}},Microsoft.FSharp.Core.FSharpOption{System.String},FSharp.Compiler.InfoReader.InfoReader,FSharp.Compiler.AccessibilityLogic.AccessorDomain,FSharp.Compiler.MethodCalls.CalledMeth{FSharp.Compiler.TypedTree.Expr},Microsoft.FSharp.Collections.FSharpList{FSharp.Compiler.TypedTree.Expr},Microsoft.FSharp.Core.FSharpOption{``0},FSharp.Compiler.Text.Range,FSharp.Compiler.Text.Range)
-miss M:FSharp.Compiler.TypedTreeOps.|IntegerForLoopExpr|_|(FSharp.Compiler.TypedTree.Expr)
-miss M:FSharp.Compiler.TypedTreeOps.|TryWithExpr|_|(FSharp.Compiler.TypedTree.Expr)
+miss M:FSharp.Compiler.TypedTreeOps.ExprAnalysis.|IntegerForLoopExpr|_|(FSharp.Compiler.TypedTree.Expr)
+miss M:FSharp.Compiler.TypedTreeOps.ExprAnalysis.|TryWithExpr|_|(FSharp.Compiler.TypedTree.Expr)
+miss M:Internal.Utilities.Library.Extras.cacheOptByrefByVersion``1(System.Int32,Microsoft.FSharp.Core.FSharpOption{System.Tuple{System.Int32,``0}}@,Microsoft.FSharp.Core.FSharpFunc{Microsoft.FSharp.Core.Unit,``0})
 miss P:FSharp.Compiler.AbstractIL.IL.ILTypeRef.BasicQualifiedName
 miss P:FSharp.Compiler.AbstractIL.IL.ILTypeRef.Enclosing
 miss P:FSharp.Compiler.AbstractIL.IL.ILTypeRef.FullName
@@ -27,9 +28,17 @@ miss P:FSharp.Compiler.Syntax.NamePatPairField.NamePatPairField.equalsRange
 miss P:FSharp.Compiler.Syntax.NamePatPairField.NamePatPairField.fieldName
 miss P:FSharp.Compiler.Syntax.NamePatPairField.NamePatPairField.pat
 miss P:FSharp.Compiler.Syntax.NamePatPairField.NamePatPairField.range
+miss T:FSharp.Compiler.AbstractIL.EncMethodDebugInformation.EncLocalSlotInfo.Temp
 miss T:FSharp.Compiler.AbstractIL.IL.ILArrayBound
 miss T:FSharp.Compiler.AbstractIL.IL.ILArrayBounds
 miss T:FSharp.Compiler.AbstractIL.IL.ILCodeLabel
+miss T:FSharp.Compiler.AbstractIL.ILX.EraseUnionsTypes.CaseStorage.Null
+miss T:FSharp.Compiler.AbstractIL.ILX.EraseUnionsTypes.CaseStorage.OnRoot
+miss T:FSharp.Compiler.AbstractIL.ILX.EraseUnionsTypes.CaseStorage.Singleton
+miss T:FSharp.Compiler.AbstractIL.ILX.EraseUnionsTypes.DataAccess.RawFields
+miss T:FSharp.Compiler.AbstractIL.ILX.EraseUnionsTypes.DataAccess.ViaHelpers
+miss T:FSharp.Compiler.AbstractIL.ILX.EraseUnionsTypes.DataAccess.ViaListHelpers
+miss T:FSharp.Compiler.AbstractIL.ILX.EraseUnionsTypes.DataAccess.ViaOptionHelpers
 miss T:FSharp.Compiler.AccessibilityLogic.AccessorDomain.AccessibleFromEverywhere
 miss T:FSharp.Compiler.AccessibilityLogic.AccessorDomain.AccessibleFromSomeFSharpCode
 miss T:FSharp.Compiler.AccessibilityLogic.AccessorDomain.AccessibleFromSomewhere
@@ -55,6 +64,7 @@ miss T:FSharp.Compiler.ConstraintSolver.ContextInfo.ReturnInComputationExpressio
 miss T:FSharp.Compiler.ConstraintSolver.ContextInfo.TupleInRecordFields
 miss T:FSharp.Compiler.ConstraintSolver.ContextInfo.YieldInComputationExpression
 miss T:FSharp.Compiler.ConstraintSolver.TcValF
+miss T:FSharp.Compiler.ConstraintSolver.TraitContext
 miss T:FSharp.Compiler.Features.LanguageFeature.PreferExtensionMethodOverPlainProperty
 miss T:FSharp.Compiler.GraphChecking.FileIndex
 miss T:FSharp.Compiler.GraphChecking.FileName
@@ -81,6 +91,7 @@ miss T:FSharp.Compiler.Optimizer.OptimizationProcessingMode.Parallel
 miss T:FSharp.Compiler.Optimizer.OptimizationProcessingMode.Sequential
 miss T:FSharp.Compiler.OverloadResolutionCache.OverloadResolutionCacheResult.CachedResolved
 miss T:FSharp.Compiler.ParseAndCheckInputs.ModuleNamesDict
+miss T:FSharp.Compiler.Symbols.ParsedDocCommentId.None
 miss T:FSharp.Compiler.Text.FileIndex
 miss T:FSharp.Compiler.Text.NotedSourceConstruct.Binding
 miss T:FSharp.Compiler.Text.NotedSourceConstruct.Combine
@@ -153,6 +164,7 @@ miss T:FSharp.Compiler.TypedTree.ValBaseOrThisInfo.CtorThisVal
 miss T:FSharp.Compiler.TypedTree.ValBaseOrThisInfo.MemberThisVal
 miss T:FSharp.Compiler.TypedTree.ValBaseOrThisInfo.NormalVal
 miss T:FSharp.Compiler.TypedTree.ValInline.Always
+miss T:FSharp.Compiler.TypedTree.ValInline.InlinedDefinition
 miss T:FSharp.Compiler.TypedTree.ValInline.Never
 miss T:FSharp.Compiler.TypedTree.ValInline.Optional
 miss T:FSharp.Compiler.TypedTree.ValRecursiveScopeInfo.ValNotInRecScope
@@ -161,19 +173,21 @@ miss T:FSharp.Compiler.TypedTree.ValUseFlag.CtorValUsedAsSelfInit
 miss T:FSharp.Compiler.TypedTree.ValUseFlag.CtorValUsedAsSuperInit
 miss T:FSharp.Compiler.TypedTree.ValUseFlag.NormalValUse
 miss T:FSharp.Compiler.TypedTree.ValUseFlag.VSlotDirectCall
-miss T:FSharp.Compiler.TypedTreeOps.Body
-miss T:FSharp.Compiler.TypedTreeOps.Count
-miss T:FSharp.Compiler.TypedTreeOps.Elem
-miss T:FSharp.Compiler.TypedTreeOps.GenericParameterStyle.Implicit
-miss T:FSharp.Compiler.TypedTreeOps.GenericParameterStyle.Prefix
-miss T:FSharp.Compiler.TypedTreeOps.GenericParameterStyle.Suffix
-miss T:FSharp.Compiler.TypedTreeOps.Idx
-miss T:FSharp.Compiler.TypedTreeOps.Loop
-miss T:FSharp.Compiler.TypedTreeOps.TraitWitnessInfoHashMap`1
-miss T:FSharp.Compiler.TypedTreeOps.TyconRefRemap
-miss T:FSharp.Compiler.TypedTreeOps.TyparInstantiation
-miss T:FSharp.Compiler.TypedTreeOps.ValCopyFlag.OnlyCloneExprVals
-miss T:FSharp.Compiler.TypedTreeOps.ValRemap
+miss T:FSharp.Compiler.TypedTree.WellKnownEntityAttribs
+miss T:FSharp.Compiler.TypedTree.WellKnownValAttribs
+miss T:FSharp.Compiler.TypedTreeOps.ExprRemapping.ValCopyFlag.OnlyCloneExprVals
+miss T:FSharp.Compiler.TypedTreeOps.MemberRepresentation.GenericParameterStyle.Implicit
+miss T:FSharp.Compiler.TypedTreeOps.MemberRepresentation.GenericParameterStyle.Prefix
+miss T:FSharp.Compiler.TypedTreeOps.MemberRepresentation.GenericParameterStyle.Suffix
+miss T:FSharp.Compiler.TypedTreeOps.TupleCompilation.Body
+miss T:FSharp.Compiler.TypedTreeOps.TupleCompilation.Count
+miss T:FSharp.Compiler.TypedTreeOps.TupleCompilation.Elem
+miss T:FSharp.Compiler.TypedTreeOps.TupleCompilation.Idx
+miss T:FSharp.Compiler.TypedTreeOps.TupleCompilation.Loop
+miss T:FSharp.Compiler.TypedTreeOps.TypeEquivalence.TraitWitnessInfoHashMap`1
+miss T:FSharp.Compiler.TypedTreeOps.TypeRemapping.TyconRefRemap
+miss T:FSharp.Compiler.TypedTreeOps.TypeRemapping.TyparInstantiation
+miss T:FSharp.Compiler.TypedTreeOps.TypeRemapping.ValRemap
 miss T:FSharp.Compiler.TypedTreePickle.pickler`1
 miss T:FSharp.Compiler.TypedTreePickle.unpickler`1
 miss T:Internal.Utilities.Collections.Zmap`2

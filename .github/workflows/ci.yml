@@ -231,7 +231,9 @@ jobs:
           path: |
             tools/fcs-dump/bin
             tools/fcs-dump/obj
-          key: fcs-dump-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/fcs-dump/**/*.fs', 'tools/fcs-dump/**/*.fsproj', 'flake.lock') }}
+            tools/fcs-dump-legacy/bin
+            tools/fcs-dump-legacy/obj
+          key: fcs-dump-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/fcs-dump/**/*.fs', 'tools/fcs-dump/**/*.fsproj', 'tools/fcs-dump-legacy/**/*.fs', 'tools/fcs-dump-legacy/**/*.fsproj', 'flake.lock') }}
           restore-keys: |
             fcs-dump-${{ runner.os }}-${{ runner.arch }}-
 
@@ -260,12 +262,19 @@ jobs:
         # implementation assemblies plus FSharp.Compiler.Service itself — and
         # fcs-dump refuses to run that way. Every consumer runs under
         # `nix develop`, whose DOTNET_ROOT the apphost resolves the runtime from.
+        #
+        # The legacy oracle (`tools/fcs-dump-legacy`, which grades the retired
+        # language-feature gates below the current FCS's support floor) is
+        # published beside it, into the same artifact; only the cst
+        # and sema harnesses run it (`BORZOI_FCS_DUMP_LEGACY`).
         run: |
-          nix develop --command dotnet publish tools/fcs-dump \
-            -c Release \
-            -r ${{ steps.rid.outputs.rid }} \
-            --self-contained false \
-            -o "$RUNNER_TEMP/fcs-dump-bundle"
+          for tool in fcs-dump fcs-dump-legacy; do
+            nix develop --command dotnet publish "tools/$tool" \
+              -c Release \
+              -r ${{ steps.rid.outputs.rid }} \
+              --self-contained false \
+              -o "$RUNNER_TEMP/$tool-bundle"
+          done
 
       - name: Package fcs-dump bundle
         if: steps.gate.outputs.run == 'true'
@@ -274,7 +283,8 @@ jobs:
         # if-no-files-found: error would.
         run: |
           test -x "$RUNNER_TEMP/fcs-dump-bundle/fcs-dump"
-          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/fcs-dump.tgz" fcs-dump-bundle
+          test -x "$RUNNER_TEMP/fcs-dump-legacy-bundle/fcs-dump-legacy"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/fcs-dump.tgz" fcs-dump-bundle fcs-dump-legacy-bundle
 
       - name: Upload fcs-dump bundle
         if: steps.gate.outputs.run == 'true'
@@ -348,11 +358,13 @@ jobs:
         run: |
           tar -C "$RUNNER_TEMP" -xpzf "$RUNNER_TEMP/fcs-dump.tgz"
           test -x "$RUNNER_TEMP/fcs-dump-bundle/fcs-dump"
+          test -x "$RUNNER_TEMP/fcs-dump-legacy-bundle/fcs-dump-legacy"
 
       - name: Test cst crate
         if: steps.gate.outputs.run == 'true'
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
+          BORZOI_FCS_DUMP_LEGACY: ${{ runner.temp }}/fcs-dump-legacy-bundle/fcs-dump-legacy
         run: |
           nix develop --command cargo test -p borzoi-cst --verbose
 
@@ -377,8 +389,8 @@ jobs:
         # exactly by `crates/cst/tests/manifests/` (any movement fails, with a
         # line diff and the regeneration command) — so they gate here, on the
         # pull request, where a regression can still be stopped. The third
-        # holds the language-version feature gates to FCS at F# 4.6 over the
-        # same corpus (`crates/cst/tests/manifests/feature_gate_corpus.txt`).
+        # holds the language-version feature gates to FCS at the current
+        # oracle's support floor (F# 8.0) over the same corpus (`crates/cst/tests/manifests/feature_gate_corpus.txt`).
         # The fourth parses every file at every language version and pins
         # which ones parse differently, and how
         # (`crates/cst/tests/manifests/version_dependence_census.txt`).
@@ -868,6 +880,7 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         env:
           BORZOI_FCS_DUMP: ${{ runner.temp }}/fcs-dump-bundle/fcs-dump
+          BORZOI_FCS_DUMP_LEGACY: ${{ runner.temp }}/fcs-dump-legacy-bundle/fcs-dump-legacy
         run: |
           nix develop --command cargo test -p borzoi-sema --verbose
 

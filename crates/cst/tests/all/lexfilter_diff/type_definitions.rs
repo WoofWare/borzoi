@@ -1,6 +1,6 @@
 //! `type` definitions, members, and struct/class/interface bodies.
 
-use crate::common::assert_filtered_streams_match;
+use crate::common::{assert_filtered_streams_match, assert_filtered_streams_match_from_floor};
 
 /// Simplest type-alias `type T = int`. TYPE is swallowed (FCS rewrites
 /// it as `TYPE_COMING_SOON` / `TYPE_IS_HERE` via `insertComingSoonTokens`
@@ -263,4 +263,14 @@ fn diff_filtered_class_body_empty() {
 #[test]
 fn diff_filtered_class_body_deindented() {
     assert_filtered_streams_match("type C = class\n  val x: int\nend\n");
+}
+
+/// An anonymous record type closed on its own line, then a postfix type: the
+/// `|}` continues the type's sequence block (dotnet/fsharp#19762), so the
+/// postfix type is no new element.
+#[test]
+fn diff_filtered_anon_record_type_closed_on_its_own_line() {
+    assert_filtered_streams_match_from_floor(
+        "type T =\n    {| Id: int\n    |} list\ntype U =\n    {| Id: int\n    |} []\n",
+    );
 }

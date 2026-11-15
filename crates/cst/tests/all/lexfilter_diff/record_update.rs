@@ -1,6 +1,6 @@
 //! `{ r with ... }` record-update brace-shape dispatch.
 
-use crate::common::assert_filtered_streams_match;
+use crate::common::{assert_filtered_streams_match, assert_filtered_streams_match_from_floor};
 
 /// Single-line record-update `{ r with A = 1 }`. The brace-shape WITH
 /// dispatch (FCS LexFilter.fs:2363) pushes CtxtWithAsLet, emits OWITH,
@@ -125,4 +125,13 @@ fn diff_filtered_record_update_equals_then_eof() {
 #[test]
 fn diff_filtered_record_update_wrapped_rhs() {
     assert_filtered_streams_match("let r2 = { r with A =\n                    f x }\n");
+}
+
+/// A spread after a copy-and-update's `with` opens the bindings' sequence
+/// block, as a field binding does.
+#[test]
+fn diff_filtered_record_update_spread_after_with() {
+    assert_filtered_streams_match_from_floor(
+        "let r2 = { r with ...s }\nlet r3 =\n    { r with\n        ...s }\n",
+    );
 }

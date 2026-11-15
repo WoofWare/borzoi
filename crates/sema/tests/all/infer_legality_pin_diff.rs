@@ -15,12 +15,11 @@
 //!
 //! - our parse reports only `Legality` errors naming the feature, over the tree
 //!   it parses to at the feature's version, where it is clean;
-//! - FCS's parse reports only FS3350 at the old pin (for a feature in
-//!   [`ORACLE_PREDATES`], nothing), its check nothing more, and neither
-//!   anything at the feature's version, and every expression and binder type
-//!   it reports is the same at both. For a feature FCS checks only in its type
-//!   checker (interpolated strings, `^` index arguments), its parse reports
-//!   nothing and its check only the feature's error;
+//! - FCS's parse reports only FS3350 at the old pin, its check nothing more,
+//!   and neither anything at the feature's version, and every expression and
+//!   binder type it reports is the same at both. For a feature FCS checks only
+//!   in its type checker (interpolated strings, `^` index arguments), its parse
+//!   reports nothing and its check only the feature's error;
 //! - every type inference commits at the old pin is FCS's there.
 //!
 //! The fixtures put the gated construct inside an annotated declaration, so a
@@ -94,16 +93,6 @@ const FIXTURES: &[(LanguageFeature, &str)] = &[
 /// `Legality` features FCS consults while parsing that the parser does not
 /// gate, so no legality error exists to grade. The parser gates every one.
 const NOT_GATED: &[(LanguageFeature, &str)] = &[];
-
-/// Fixtures whose feature error the oracle's FCS (the `FSharp.Compiler.Service`
-/// package `tools/fcs-dump` references) does not report, though the compiler
-/// the feature table transcribes does. Their types are still graded, but the
-/// oracle cannot show the error is one it type-checks past, so each must
-/// draw no parse error from it, and fails here once the oracle reports one.
-const ORACLE_PREDATES: &[(LanguageFeature, &str)] = &[(
-    LanguageFeature::PreprocessorElif,
-    "the oracle's FCS reports nothing for `#elif` at 10.0",
-)];
 
 /// Features FCS checks only in its type checker whose check, below the
 /// feature's version, abandons the construct (`checkLanguageFeatureError`
@@ -243,11 +232,6 @@ fn every_parse_time_legality_feature_has_a_fixture() {
             ));
         }
     }
-    for (f, _) in ORACLE_PREDATES {
-        if !FIXTURES.iter().any(|(g, _)| g == f) {
-            failures.push(format!("{f:?} is in ORACLE_PREDATES but has no fixture"));
-        }
-    }
     for (f, _) in CHECK_ABANDONS {
         if !checked_only(*f) || !FIXTURES.iter().any(|(g, _)| g == f) {
             failures.push(format!(
@@ -299,13 +283,6 @@ fn fcs_types_a_legality_gated_file_as_it_does_at_the_features_version() {
             }
             if fcs_old.errors.is_empty() {
                 fail(format!("FCS's check at {old} reports nothing"));
-            }
-        } else if ORACLE_PREDATES.iter().any(|(f, _)| *f == feature) {
-            if !parsed_old.is_empty() {
-                fail(format!(
-                    "FCS's parse at {old} now reports {parsed_old:?}; take the feature out of \
-                     ORACLE_PREDATES"
-                ));
             }
         } else if parsed_old.is_empty() || parsed_old.iter().any(|&code| code != FEATURE_ERROR) {
             fail(format!(

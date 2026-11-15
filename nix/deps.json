@@ -15,9 +15,19 @@
     "hash": "sha256-7sxkj1ew2dpem7q+/ZSGbo6UyhH0fGYbFG9YP9coKBU="
   },
   {
+    "pname": "FSharp.Compiler.Service",
+    "version": "43.13.101",
+    "hash": "sha256-FQbak9LHbeb9yk+BtGZoa5P1RRzSoExgC9ctxok1PsA="
+  },
+  {
     "pname": "FSharp.Core",
     "version": "10.1.204",
     "hash": "sha256-wr2Wi8N92//irv8cP089Sf5Y0Q2BYhME/Yl66uQ1vvQ="
+  },
+  {
+    "pname": "FSharp.Core",
+    "version": "11.0.101",
+    "hash": "sha256-bBQ8ak4ATjILoU68RhtWjGDa6w/No+uNjlz6FCdrmqE="
   },
   {
     "pname": "FSharp.Core",
