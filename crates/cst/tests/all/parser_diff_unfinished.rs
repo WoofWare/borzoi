@@ -476,24 +476,35 @@ fn recover_raw_let_after_a_binding_grid() {
     }
     assert_cells(cells, &[]);
 }
+
 /// What follows an unfinished construct, systematically: each construct of
 /// the grids above (an unfinished slot in a type body, a binding whose
 /// right-hand side recovers in place) followed by each declaration or member
 /// a buffer may hold next, on the same line or on the next at several
 /// indents. Whatever the recovery, every unit FCS keeps should survive under
 /// its key, and the type keep as many members as FCS's. Most of the cells
-/// that do not are older than these ports (a raw `type` or `let` after a
-/// broken member, FCS's keeping a declaration its error state reached): each
-/// is pinned in `tests/manifests/unfinished_followers.txt`, and must be one
-/// where `main`'s parser fails too (`unfinished_followers.base.txt`).
+/// that do not are older than these ports: each is pinned in
+/// `tests/manifests/unfinished_followers.txt`, and must be one where `main`'s
+/// parser fails too (`unfinished_followers.base.txt`).
+///
+/// Each construct has a finished twin (`abstract P: int` for a slot, `a * b`
+/// for `a *`, `when c ->` for a guardless `when`). A cell worse than `main`
+/// is accepted when its twin, with the same follower, fails too: `main` then
+/// kept the declaration only because its recovery failed earlier, and the
+/// faithful recovery parses on into a gap the finished shape has on `main`
+/// as well (a `type` after a member at the member column, a declaration
+/// after a stray `then`, …), not one the ports opened.
 #[test]
 fn recover_followers_of_unfinished_constructs_grid() {
-    const SLOTS: &[&str] = &[
-        "abstract",
-        "abstract P",
-        "abstract P:",
-        "abstract (x)",
-        "abstract P 1",
+    use borzoi_oracle_harness::manifest::{Manifest, UPDATE_ENV};
+    // Each construct beside its finished twin.
+    const SLOTS: &[(&str, &str)] = &[
+        ("abstract", "abstract P: int"),
+        ("abstract P", "abstract P: int"),
+        ("abstract P:", "abstract P: int"),
+        ("abstract (x)", "abstract P: int"),
+        ("abstract P 1", "abstract P: int"),
+        ("abstract)", "abstract P: int"),
     ];
     const MEMBER_FOLLOWERS: &[&str] = &[
         "member _.Q = 1",
@@ -510,6 +521,7 @@ fn recover_followers_of_unfinished_constructs_grid() {
     ];
     const DECL_FOLLOWERS: &[&str] = &[
         "type S = int",
+        "[<A>] type S = int",
         "module N = let n = 1",
         "open System",
         "exception E",
@@ -518,60 +530,136 @@ fn recover_followers_of_unfinished_constructs_grid() {
         "do ()",
         "#nowarn \"1\"",
     ];
-    const RHS: &[&str] = &[
-        "a",
-        "a *",
-        "if a * then 1 else 2",
-        "match a with | b when -> ()",
-        "f (a *) b",
-        "(a *)",
-        "(a *) in",
-        "a * in",
-        "if a * then",
-        "function | _ when | y -> ()",
-        "function | _ when | y -> () then",
-        "match a with | b. -> ()",
+    const RHS: &[(&str, &str)] = &[
+        ("a", "a"),
+        ("a *", "a * b"),
+        ("if a * then 1 else 2", "if a * b then 1 else 2"),
+        (
+            "match a with | b when -> ()",
+            "match a with | b when c -> ()",
+        ),
+        ("f (a *) b", "f (a * b) b"),
+        ("(a *)", "(a * b)"),
+        ("(a *) in", "(a * b) in"),
+        ("a * in", "a * b in"),
+        ("if a * then", "if a * b then"),
+        (
+            "function | _ when | y -> ()",
+            "function | _ when c -> () | y -> ()",
+        ),
+        (
+            "function | _ when | y -> () then",
+            "function | _ when c -> () | y -> () then",
+        ),
+        ("match a with | b. -> ()", "match a with | b.c -> ()"),
     ];
-    let mut cells = Vec::new();
+    // Each cell beside its twin.
+    let mut cells: Vec<(String, String)> = Vec::new();
     let mut members = Vec::new();
-    for slot in SLOTS {
+    for &(slot, twin) in SLOTS {
+        let host = |s: &str, sep: &str, next: &str| {
+            format!("module M\ntype T() =\n    {s}{sep}{next}\nlet x = 1\n")
+        };
         for next in MEMBER_FOLLOWERS {
             for sep in [" ", "\n    ", "\n        "] {
-                let src = format!("module M\ntype T() =\n    {slot}{sep}{next}\nlet x = 1\n");
-                members.push(src.clone());
-                cells.push((src, Want::Agree));
+                members.push(host(slot, sep, next));
+                cells.push((host(slot, sep, next), host(twin, sep, next)));
             }
         }
         for next in DECL_FOLLOWERS {
             for sep in [" ", "\n", "\n ", "\n    ", "\n        "] {
-                cells.push((
-                    format!("module M\ntype T() =\n    {slot}{sep}{next}\nlet x = 1\n"),
-                    Want::Agree,
-                ));
+                cells.push((host(slot, sep, next), host(twin, sep, next)));
             }
+            // The slot as the type's whole representation, on its line.
+            let repr = |s: &str| format!("module M\ntype T() = {s}\n{next}\nlet x = 1\n");
+            cells.push((repr(slot), repr(twin)));
         }
     }
-    for rhs in RHS {
+    for &(rhs, twin) in RHS {
         for next in DECL_FOLLOWERS {
             for sep in [" ", "\n", "\n ", "\n  ", "\n    "] {
-                cells.push((
-                    format!("module M\nlet x = {rhs}{sep}{next}\nlet z = 2\n"),
-                    Want::Agree,
-                ));
-                cells.push((
-                    format!("module M\nmodule A =\n    let x = {rhs}{}{next}\n    let z = 2\nlet w = 3\n", sep.replace('\n', "\n    ")),
-                    Want::Agree,
-                ));
+                let top = |r: &str| format!("module M\nlet x = {r}{sep}{next}\nlet z = 2\n");
+                cells.push((top(rhs), top(twin)));
+                let nested_sep = sep.replace('\n', "\n    ");
+                let nested = |r: &str| {
+                    format!(
+                        "module M\nmodule A =\n    let x = {r}{nested_sep}{next}\n    let z = 2\nlet w = 3\n"
+                    )
+                };
+                cells.push((nested(rhs), nested(twin)));
             }
         }
     }
-    use borzoi_oracle_harness::manifest::{Manifest, UPDATE_ENV};
-    let mut failures = check_members_survive(&members);
-    failures.extend(check_cells(cells, &[]));
-    // Each failure as a key spelled the same under any parser: the cell's
-    // source, then what fails.
-    let keys: Vec<String> = failures
+    let keys = follower_keys(
+        check_members_survive(&members)
+            .into_iter()
+            .chain(check_cells(
+                cells.iter().map(|(src, _)| (src.clone(), Want::Agree)),
+                &[],
+            )),
+    );
+    let actual = Manifest::from_entries(keys.clone()).expect("one line per key");
+    crate::common::corpus_manifest::check_manifest(
+        "unfinished_followers",
+        &actual,
+        &format!(
+            "{UPDATE_ENV}=1 nix develop -c cargo test -p borzoi-cst --test all parser_diff_unfinished::recover_followers"
+        ),
+    );
+    // The twins of the failing cells, and which of them fail too.
+    let failing: std::collections::BTreeSet<&str> = keys
         .iter()
+        .filter_map(|k| k.rsplit_once(" | ").map(|(cell, _)| cell))
+        .collect();
+    let twin_of: std::collections::BTreeMap<String, &str> = cells
+        .iter()
+        .map(|(src, twin)| (format!("{src:?}"), twin.as_str()))
+        .collect();
+    let twins: Vec<String> = failing
+        .iter()
+        .filter_map(|cell| twin_of.get(*cell).map(|t| t.to_string()))
+        .collect();
+    let twin_members: Vec<String> = twins
+        .iter()
+        .filter(|t| {
+            members
+                .iter()
+                .any(|m| twin_of.get(&format!("{m:?}")) == Some(&t.as_str()))
+        })
+        .cloned()
+        .collect();
+    let failing_twins: std::collections::BTreeSet<String> = follower_keys(
+        check_members_survive(&twin_members)
+            .into_iter()
+            .chain(check_cells(
+                twins.iter().map(|t| (t.clone(), Want::Agree)),
+                &[],
+            )),
+    )
+    .into_iter()
+    .filter_map(|k| k.rsplit_once(" | ").map(|(cell, _)| cell.to_string()))
+    .collect();
+    let accepted: Vec<&str> = keys
+        .iter()
+        .filter(|k| {
+            k.rsplit_once(" | ")
+                .and_then(|(cell, _)| twin_of.get(cell))
+                .is_some_and(|twin| failing_twins.contains(&format!("{twin:?}")))
+        })
+        .map(String::as_str)
+        .collect();
+    crate::common::corpus_manifest::check_no_worse_than_base(
+        "unfinished_followers",
+        &keys,
+        &accepted,
+    );
+}
+
+/// Each grid failure as a key spelled the same under any parser: the cell's
+/// source, then what fails.
+fn follower_keys(failures: impl IntoIterator<Item = String>) -> Vec<String> {
+    failures
+        .into_iter()
         .map(|f| {
             // `{src:?}: FCS keeps …` (a member), `{src:?} wants …` or
             // `{src:?} loses <unit>`.
@@ -587,50 +675,5 @@ fn recover_followers_of_unfinished_constructs_grid() {
             };
             format!("{} | {what}", &f[..=end])
         })
-        .collect();
-    let actual = Manifest::from_entries(keys.clone()).expect("one line per key");
-    crate::common::corpus_manifest::check_manifest(
-        "unfinished_followers",
-        &actual,
-        &format!(
-            "{UPDATE_ENV}=1 nix develop -c cargo test -p borzoi-cst --test all parser_diff_unfinished::recover_followers"
-        ),
-    );
-    // Cells this branch is knowingly worse on than `main`: `main` kept the
-    // declaration only because its recovery failed earlier, and the faithful
-    // recovery now parses on into an older gap that `main` has on the clean
-    // shape too.
-    // - A slot with no name (`abstract`, `abstract (x)`), then a `type` or
-    //   `module` at the member column: `main` refused the slot, while a
-    //   recovered one leaves the keyword inside the type body, where a `type`
-    //   or `module` after any member is lost (`member _.P = 1⏎    type S`),
-    //   the "`module` or `open` inside a type body" class of
-    //   `docs/parser-recovery-oracle.md`.
-    // - A guardless `when` before the next clause, whose result is followed by
-    //   a stray `then`: `main` stopped the clause list at the `when`, while the
-    //   continued list meets the `then`, after which a declaration is lost
-    //   (`function | y -> () then⏎ type S`) as on `main`.
-    let knowingly_worse = |key: &str| {
-        let slot_then_keyword = ["abstract", "abstract (x)"].iter().any(|slot| {
-            ["type S = int", "module N = let n = 1"].iter().any(|next| {
-                let cell = format!(
-                    "{:?}",
-                    format!("module M\ntype T() =\n    {slot}\n    {next}\n")
-                );
-                key.starts_with(cell.trim_end_matches('"'))
-            })
-        });
-        let when_then = key.starts_with("\"module M\\nlet x = function | _ when | y -> () then\\n");
-        slot_then_keyword || when_then
-    };
-    let accepted: Vec<&str> = keys
-        .iter()
-        .map(String::as_str)
-        .filter(|k| knowingly_worse(k))
-        .collect();
-    crate::common::corpus_manifest::check_no_worse_than_base(
-        "unfinished_followers",
-        &keys,
-        &accepted,
-    );
+        .collect()
 }

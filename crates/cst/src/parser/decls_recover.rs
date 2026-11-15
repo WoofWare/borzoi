@@ -222,10 +222,11 @@ impl<'src> Parser<'src> {
         // which the lex filter's contexts no longer frame a next member.
         let mut crossed_layout = false;
         while let Some((res, _)) = self.peek() {
-            // A closer of the rest's own bracket that LexFilter swallowed is
-            // on the raw stream only: take it with its bracket, or it is left
-            // pending for whatever follows the member.
-            if brackets > 0
+            // A closer LexFilter swallowed is on the raw stream only: one of
+            // the rest's own brackets, or a stray one on the member's line
+            // (`abstract)`), is taken with the rest, or it is left pending for
+            // whatever follows the member.
+            if (brackets > 0 || !crossed_layout)
                 && let Some((Token::RParen | Token::RBrace, span)) =
                     self.next_non_trivia_raw_at_pos_with_span()
                 && !self.filtered_stream_carries(span.start)
@@ -236,7 +237,7 @@ impl<'src> Parser<'src> {
                     ")",
                     "an unfinished member",
                 );
-                brackets -= 1;
+                brackets = brackets.saturating_sub(1);
                 continue;
             }
             match res {
