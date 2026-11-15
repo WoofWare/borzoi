@@ -125,7 +125,7 @@ fn diff_offside_message_position_counts_utf16_units() {
 /// module-body SeqBlock push (as the strict path does at 8.0+) would instead
 /// leave `z` a sibling. Pins that the push decision honours the resolved
 /// strict-indentation boolean, not a hardcoded strict push — so the tree agrees
-/// with FCS at 7.0. (At the default 10.0 the same source errors and `z` *is* a
+/// with FCS at 7.0. (At the default version the same source errors and `z` *is* a
 /// sibling; that divergence is version-correct.)
 #[test]
 fn diff_ast_offside_v7_keeps_module_body_push() {
@@ -178,7 +178,7 @@ fn diff_offside_trailing_inactive_region_eof_anchor() {
 /// `let f = function` with no clauses: FCS anchors the `CtxtMatchClauses` at EOF
 /// (col −1), left of the enclosing `let` (col 0), and reports FS0058 at
 /// `source.len()`. The FUNCTION push is unconditional, so nothing aborts — only
-/// the diagnostic appears. Default 10.0 ⇒ error.
+/// the diagnostic appears. At the default version ⇒ error.
 #[test]
 fn diff_offside_function_no_clauses_at_eof() {
     assert_offside_spans_match("let f = function\n");

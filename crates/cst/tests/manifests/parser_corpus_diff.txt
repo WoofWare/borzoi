@@ -1,21 +1,22 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-cst --test all parser_corpus_diff:: -- --ignored
-(corpus)	files=6355
+(corpus)	files=6769
 buildtools/fsyacc/fsyaccdriver.fs	range-divergent
 src/Compiler/Service/ServiceErrorResolutionHints.fs	both-reject exact 2/2/3
 src/FSharp.Core/Nullable.fsi	both-reject outside-damage 24/24/59
-src/FSharp.Core/Query.fs	both-reject divergent 206/206/207 at:module[0]/Let@6418,module[0]/Let@6490,module[0]/Let@6529
+src/FSharp.Core/Query.fs	both-reject divergent 206/206/207 at:module[0]/Let@6428,module[0]/Let@6500,module[0]/Let@6539
 src/FSharp.Core/Query.fsi	both-reject outside-damage 15/15/16
-src/FSharp.Core/array2.fs	we-accept-fcs-rejects divergent 9/11/14 beyond-fcs:12 at:module[0]/Types@1578,module[0]/nested@435/Let@1455
+src/FSharp.Core/array2.fs	we-accept-fcs-rejects divergent 11/13/16 beyond-fcs:14 at:module[0]/Types@1824,module[0]/nested@472/Let@1703
 src/FSharp.Core/array3.fs	we-accept-fcs-rejects outside-damage 7/10/12 beyond-fcs:15
-src/FSharp.Core/fslib-extra-pervasives.fsi	both-reject outside-damage 45/45/51
-src/FSharp.Core/local.fs	both-reject outside-damage 21/21/24 beyond-fcs:111
-src/FSharp.Core/nativeptr.fs	we-accept-fcs-rejects divergent 3/10/14 beyond-fcs:8 at:module[0]/Types@1972,module[0]/nested@195/Let@1649,module[0]/nested@195/Let@1828
+src/FSharp.Core/fslib-extra-pervasives.fs	fcs-normaliser-unmodelled
+src/FSharp.Core/fslib-extra-pervasives.fsi	both-reject outside-damage 47/47/53
+src/FSharp.Core/local.fs	both-reject outside-damage 132/133/136
+src/FSharp.Core/nativeptr.fs	we-accept-fcs-rejects divergent 3/10/14 beyond-fcs:8 at:module[0]/Types@1958,module[0]/nested@195/Let@1640,module[0]/nested@195/Let@1814
 src/FSharp.Core/prim-types-prelude.fs	we-accept-fcs-rejects outside-damage 27/27/62
 src/FSharp.Core/prim-types-prelude.fsi	we-accept-fcs-rejects outside-damage 28/28/63
-src/FSharp.Core/prim-types.fs	both-reject divergent 97/97/104 beyond-fcs:364 at:Module@4,Module@5,Module@6,Module@7,Module@8,Module@9,module[3]/Types@20729,module[3]/nested@20554/Let@20689,+453#5f78d957
-src/FSharp.Core/prim-types.fsi	both-reject outside-damage 490/490/562
+src/FSharp.Core/prim-types.fs	both-reject divergent 103/103/110 beyond-fcs:364 at:Module@5,Module@6,Module@7,Module@8,Module@9,Module@10,module[4]/Types@21417,module[4]/nested@21244/Let@21377,+455#742063cd
+src/FSharp.Core/prim-types.fsi	both-reject outside-damage 497/497/569
 src/FSharp.Core/seqcore.fs	both-reject outside-damage 47/48/51
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/codepage/libCodepage.fs	non-utf8
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/times/times01.fs	both-reject exact 8/8/10
@@ -31,15 +32,17 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/Accessibil
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_accessibilityOnRecords02.fs	both-reject exact 2/2/3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_orderingOfAccessibilityKeyword_let01.fs	both-reject exact 1/1/5
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_orderingOfAccessibilityKeyword_member01.fs	both-reject outside-damage 2/2/3
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_orderingOfAccessibilityKeyword_module01.fs	both-reject divergent 0/1/3 at:module[0]/NestedModule@88,module[0]/nested@81/Let@145,module[0]/nested@88/Let@145
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_orderingOfAccessibilityKeyword_module01.fs	both-reject divergent 0/1/3 at:module[0]/NestedModule@87,module[0]/nested@80/Let@144,module[0]/nested@87/Let@144
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/PermittedLocations/E_orderingOfAccessibilityKeyword_type01.fs	both-reject exact 2/2/3
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AllowNullLiteral.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_AttributeTargetIsMethod03.fs	both-reject outside-damage 5/5/7
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/E_VolatileField.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/EntryPoint/EntryPointAndAssemblyCulture.fs	non-utf8
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ExceptionDefinitions/E_BeginWithUppercase02.fsx	both-reject exact 1/1/2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ExceptionDefinitions/E_BeginWithUppercase03.fsx	both-reject exact 2/2/3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ExceptionDefinitions/E_BeginWithUppercase04.fsx	both-reject outside-damage 1/1/2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ExceptionDefinitions/E_ExnAsDiscriminatedUnion01.fsx	both-reject exact 1/1/2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImportDeclarations/E_openInTypeDecl.fs	both-reject divergent 1/1/2 at:module[0]/Let@225
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImportDeclarations/E_openInTypeDecl.fs	both-reject divergent 1/1/2 at:module[0]/Let@220
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ImportDeclarations/E_openModInFun.fs	both-reject outside-damage 1/1/1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/LetBindings/Basic/E_ErrorsforIncompleteTryWith.fs	both-reject outside-damage 1/1/2 beyond-fcs:2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/LetBindings/Basic/E_GenericTypeAnnotations01.fs	both-reject outside-damage 1/1/2
@@ -76,6 +79,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotation
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/E_QuotationOperators02.fs	both-reject exact 1/1/3
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/E_QuotationOperators03.fs	both-reject exact 1/1/3
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/ExpressionQuotations/Regressions/E_QuotationOperators04.fs	both-reject outside-damage 2/2/3
+tests/FSharp.Compiler.ComponentTests/Conformance/LexicalFiltering/OffsideExceptions/MultilineNestedTypeArguments.fs	both-reject outside-damage 1/1/1 beyond-fcs:3
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalFiltering/OffsideExceptions/RelaxWhitespace2.fs	we-reject-fcs-accepts outside-damage 344/344/346
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/AsDeclarations/SanityCheck02.fs	both-reject outside-damage 5/5/6
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/AutoProperties/E_IllegalName01.fs	both-reject outside-damage 1/1/1 beyond-fcs:1
@@ -83,12 +87,21 @@ tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/C
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/MemberDeclarations/E_PropertyInvalidGetter02.fs	we-accept-fcs-rejects exact 1/1/3
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/Misc/E_NoNestedTypes.fs	both-reject outside-damage 1/1/3
 tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/ClassTypes/Misc/E_ZeroArity.fs	both-reject outside-damage 4/4/5
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension01.fs	both-reject divergent 3/3/4 beyond-fcs:1 at:module[0]/Let@320,module[0]/Types@447
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension02.fs	both-reject divergent 3/3/4 beyond-fcs:1 at:module[0]/Let@355,module[0]/Types@510
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension03.fs	both-reject outside-damage 1/1/1 beyond-fcs:4
+tests/FSharp.Compiler.ComponentTests/Conformance/ObjectOrientedTypeDefinitions/TypeExtensions/basic/TupleTypeExtension04.fs	both-reject outside-damage 1/1/2
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Named/E_ActivePatterns01.fs	both-reject exact 2/2/9
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Record/E_SyntaxError01.fs	both-reject outside-damage 3/3/4
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/E_SyntaxError01.fs	both-reject exact 2/2/3
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/SimpleConstant/E_NoRangeConst01.fs	both-reject outside-damage 8/8/9
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/TypeConstraint/E_typeconstraint01.fs	both-reject outside-damage 4/4/5
 tests/FSharp.Compiler.ComponentTests/Conformance/PseudoCustomAttributes/AssemblyCopyright_001.fs	non-utf8
+tests/FSharp.Compiler.ComponentTests/Conformance/Spreads/RecordSpreads.fsx	both-reject divergent 10/10/11 beyond-fcs:28 at:module[0]/Let@529,module[0]/Let@1623,module[0]/Let@1719,module[0]/Let@2228,module[0]/Let@3572,module[0]/Types@3891,module[0]/Let@3922,module[0]/nested@2774/Expr@2984
+tests/FSharp.Compiler.ComponentTests/Conformance/Spreads/SpreadInlineLib.fs	both-reject outside-damage 2/2/3
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/BasicExtensionOperators.fs	range-divergent
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/MiniFSharpPlusExtensionSRTP.fs	both-reject divergent 34/35/36 beyond-fcs:155 at:module[0]/nested@2250/nested@19834/nested@19905/Expr@20614,module[0]/nested@2250/nested@19834/nested@19905/Expr@20797
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ScopeCapture.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase02.fsx	both-reject outside-damage 1/1/1
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase03.fsx	both-reject outside-damage 1/1/1
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase04.fsx	both-reject outside-damage 1/1/2
@@ -107,6 +120,36 @@ tests/FSharp.Compiler.ComponentTests/Conformance/UnitsOfMeasure/Parenthesis/E_In
 tests/FSharp.Compiler.ComponentTests/Conformance/UnitsOfMeasure/Parenthesis/E_IncompleteParens02.fsx	both-reject outside-damage 4/4/5
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Inlining/Match02.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/EmittedIL/QueryExpressionStepping/Utils.fs	non-utf8
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_CoercionsApplied.fs	both-reject exact 4/4/5
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_ExplicitShadowsSpread.fs	both-reject exact 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_ExtraFieldsAreIgnored.fs	both-reject exact 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NestedUpdates.fs	both-reject exact 3/3/4
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Explicit_Spread.fs	both-reject exact 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Explicit.fs	both-reject exact 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_NoOverlap_Spread_Spread.fs	both-reject exact 3/3/5
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_SpreadShadowsExplicit.fs	both-reject exact 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_SpreadShadowsSpread.fs	both-reject exact 3/3/5
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Anonymous_Structness.fs	both-reject exact 7/7/19
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_CoercionsApplied.fs	both-reject outside-damage 5/5/6
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_ExplicitShadowsSpread.fs	both-reject outside-damage 3/3/4
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_ExtraFieldsAreIgnored.fs	both-reject outside-damage 4/4/5
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NestedUpdates.fs	both-reject outside-damage 6/6/7
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NoOverlap_Explicit_Spread.fs	both-reject exact 5/5/7
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NoOverlap_SpreadFromAnon.fs	both-reject outside-damage 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NoOverlap_Spread_Explicit.fs	both-reject outside-damage 5/5/7
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_NoOverlap_Spread_Spread.fs	both-reject outside-damage 8/8/12
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsExplicit.fs	both-reject exact 3/3/4
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_SpreadShadowsSpread.fs	both-reject outside-damage 3/3/4
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Expression_Nominal_Structness.fs	both-reject outside-damage 7/7/15
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_AttributesAreShadowed.fs	both-reject outside-damage 4/4/5
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_ExplicitShadowsSpread.fs	both-reject outside-damage 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_Explicit_Spread.fs	both-reject outside-damage 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_Explicit_Spread_Generics.fs	both-reject outside-damage 3/3/4
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_SpreadFromAnon.fs	both-reject outside-damage 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_Spread_Explicit.fs	both-reject outside-damage 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_NoOverlap_Spread_Spread.fs	both-reject outside-damage 3/3/5
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsExplicit.fs	both-reject outside-damage 2/2/3
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Spreads/Type_SpreadShadowsSpread.fs	both-reject outside-damage 3/3/5
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DerivedType.fs	both-reject exact 3/3/4
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DoNotInlineX.fs	both-reject outside-damage 9/9/10
 tests/FSharp.Compiler.ComponentTests/InteractiveSession/ErrorTestCases/E_emptyRecord.fsx	both-reject exact 2/2/3
@@ -129,12 +172,12 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationF
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/CheckingOfImplementationFiles/NullAsTrueUnion01.fsi	range-divergent
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/basic/E_HashDirectives01.fs	both-reject exact 1/1/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/basic/E_HashDirectives02.fs	both-reject exact 1/1/1
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/basic/E_NamespaceAndModule01.fs	both-reject divergent 0/0/2 at:module[0]/Expr@345
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/basic/E_NamespaceAndModule01.fs	both-reject divergent 0/0/2 at:module[0]/Expr@344
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/basic/E_NamespaceAndModule02.fsi	both-reject outside-damage 0/0/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/global/E_AsModuleName.fsx	both-reject outside-damage 0/0/0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/global/E_InExceptionDecl.fsx	both-reject exact 1/1/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/NamespacesFragmentsAndImplementationFiles/global/E_IsAKeyword.fsx	both-reject outside-damage 1/1/2
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/SignatureFiles/E_MissingSourceFile02.fsi	both-reject divergent 3/3/4 at:module[0]/nested@432/Types@553,module[0]/nested@432/Exception@579,module[0]/nested@432/Val@641,module[0]/nested@432/Val@695,module[0]/nested@432/Val@754,module[0]/nested@432/Val@867,module[0]/nested@432/Val@978,module[0]/nested@432/Val@1083,+2#2bbe5bad
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/ImplementationFilesAndSignatureFiles/SignatureFiles/E_MissingSourceFile02.fsi	both-reject divergent 3/3/4 at:module[0]/nested@431/Types@551,module[0]/nested@431/Exception@577,module[0]/nested@431/Val@639,module[0]/nested@431/Val@693,module[0]/nested@431/Val@752,module[0]/nested@431/Val@865,module[0]/nested@431/Val@976,module[0]/nested@431/Val@1081,+2#30fd9e7e
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/Comments/E_IncompleteComment01.fs	both-reject outside-damage 2/2/3
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/Comments/E_IncompleteComment02.fs	both-reject exact 0/0/1
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/LexicalAnalysis/Comments/E_embeddedString005.fs	both-reject exact 0/0/1
@@ -198,8 +241,8 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/attrUni
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/attrUnionCaseDecl01b.fs	both-reject exact 1/1/3
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/braceExpr01.fs	both-reject outside-damage 0/0/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/braceExpr01b.fs	both-reject outside-damage 0/0/2
-tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/fileModuleImpl01.fs	both-reject divergent 0/0/2 at:module[0]/Attributes@141
-tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/fileModuleImpl01b.fs	both-reject divergent 0/0/2 at:module[0]/Attributes@212
+tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/fileModuleImpl01.fs	both-reject divergent 0/0/2 at:module[0]/Attributes@140
+tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/fileModuleImpl01b.fs	both-reject divergent 0/0/2 at:module[0]/Attributes@211
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/fileModuleImpl02.fs	both-reject outside-damage 0/0/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/fileModuleImpl02b.fs	both-reject outside-damage 0/0/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/NONTERM/fileModuleImpl04.fs	both-reject exact 1/1/3
@@ -231,7 +274,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/du
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/for_in01.fs	both-reject outside-damage 0/0/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/for_in_range01.fs	both-reject outside-damage 0/0/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/if01.fs	both-reject exact 0/0/2
-tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/match01.fs	both-reject divergent 0/0/2 at:module[0]/Expr@224
+tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/match01.fs	both-reject divergent 0/0/2 at:module[0]/Expr@223
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/try01.fs	both-reject exact 0/0/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/type_id_equal01.fsx	both-reject outside-damage 1/1/2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/ParsingAtEOF/type_id_equal02.fs	both-reject outside-damage 1/1/2
@@ -254,13 +297,13 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/E_productioncoverage01
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/E_productioncoverage03.fs	both-reject outside-damage 1/1/7
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/productioncoverage01.fs	we-reject-fcs-accepts outside-damage 27/27/28
 tests/FSharp.Core.UnitTests/FSharp.Core/ComparersRegression.fs	fcs-error
-tests/FSharp.Core.UnitTests/FSharp.Core/RecordTypes.fs	we-reject-fcs-accepts divergent 27/27/29 at:module[0]/Types@3353
+tests/FSharp.Core.UnitTests/FSharp.Core/RecordTypes.fs	we-reject-fcs-accepts divergent 27/27/29 at:module[0]/Types@3329
 tests/fsharp/core/attributes/test.fsx	range-divergent
-tests/fsharp/core/large/conditionals/LargeConditionals-maxtested.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@15035,module[0]/Expr@15086
-tests/fsharp/core/large/lets/LargeLets-500.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@14595,module[0]/Expr@14646
-tests/fsharp/core/large/lets/LargeLets-maxtested.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@22889,module[0]/Expr@22940
-tests/fsharp/core/large/mixed/LargeSequentialLet-500.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@26155,module[0]/Expr@26206
-tests/fsharp/core/large/mixed/LargeSequentialLet-maxtested.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@26155,module[0]/Expr@26206
+tests/fsharp/core/large/conditionals/LargeConditionals-maxtested.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@14619,module[0]/Expr@14670
+tests/fsharp/core/large/lets/LargeLets-500.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@14094,module[0]/Expr@14145
+tests/fsharp/core/large/lets/LargeLets-maxtested.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@22102,module[0]/Expr@22153
+tests/fsharp/core/large/mixed/LargeSequentialLet-500.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@25653,module[0]/Expr@25704
+tests/fsharp/core/large/mixed/LargeSequentialLet-maxtested.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@25653,module[0]/Expr@25704
 tests/fsharp/core/large/sequential/LargeSequential-maxtested.fs	fcs-error
 tests/fsharp/core/libtest/test.fsx	range-divergent
 tests/fsharp/core/load-script/loadfail1.fsx	both-reject exact 0/0/2
@@ -280,17 +323,16 @@ tests/fsharp/core/unicode/kanji-unicode-utf7-codepage-65000.fs	both-reject outsi
 tests/fsharp/regression/12322/test.fsx	we-reject-fcs-accepts divergent 7/493/494 at:module[0]/Open@6421,module[0]/Let@6435,module[0]/NestedModule@10558,module[0]/Expr@30992,module[0]/nested@10558/Let@10650,module[0]/nested@10558/Let@10669,module[0]/nested@10558/Let@10688,module[0]/nested@10558/Let@10707,+478#a36cd20f
 tests/fsharp/typecheck/sigs/neg01a.fs	both-reject outside-damage 7/7/8
 tests/fsharp/typecheck/sigs/neg01a.fsi	both-reject outside-damage 10/10/11
-tests/fsharp/typecheck/sigs/neg02.fs	both-reject divergent 1/1/2 at:module[0]/Types@79,module[0]/Types@145
+tests/fsharp/typecheck/sigs/neg02.fs	both-reject divergent 1/1/2 at:module[0]/Types@78,module[0]/Types@143
 tests/fsharp/typecheck/sigs/neg09.fsi	range-divergent
 tests/fsharp/typecheck/sigs/neg10.fs	range-divergent
 tests/fsharp/typecheck/sigs/neg104.fs	both-reject outside-damage 7/7/15
 tests/fsharp/typecheck/sigs/neg114.fs	both-reject outside-damage 0/0/3
 tests/fsharp/typecheck/sigs/neg115.fs	both-reject outside-damage 2/2/3
-tests/fsharp/typecheck/sigs/neg116.fs	range-divergent
 tests/fsharp/typecheck/sigs/neg13.fs	range-divergent
 tests/fsharp/typecheck/sigs/neg135.fs	both-reject outside-damage 1/1/2
 tests/fsharp/typecheck/sigs/neg19.fs	we-accept-fcs-rejects outside-damage 4/4/7
-tests/fsharp/typecheck/sigs/neg25.fs	we-reject-fcs-accepts divergent 60/63/65 at:module[0]/Types@5330,module[0]/Types@5472,module[0]/Let@5773,module[0]/nested@5286/Types@5330,module[0]/nested@5286/Types@5472,module[0]/nested@5286/Let@5773
+tests/fsharp/typecheck/sigs/neg25.fs	we-reject-fcs-accepts divergent 60/63/65 at:module[0]/Types@5294,module[0]/Types@5423,module[0]/Let@5724,module[0]/nested@5251/Types@5294,module[0]/nested@5251/Types@5423,module[0]/nested@5251/Let@5724
 tests/fsharp/typecheck/sigs/neg27.fs	both-reject outside-damage 1/1/3
 tests/fsharp/typecheck/sigs/neg27.fsi	both-reject outside-damage 1/1/3
 tests/fsharp/typecheck/sigs/neg29.fs	both-reject outside-damage 2/2/4
@@ -299,7 +341,7 @@ tests/fsharp/typecheck/sigs/neg35.fs	we-accept-fcs-rejects exact 2/2/10
 tests/fsharp/typecheck/sigs/neg38.fs	both-reject divergent 0/0/2 at:module[0]/Expr@22
 tests/fsharp/typecheck/sigs/neg39.fs	we-accept-fcs-rejects exact 0/0/2
 tests/fsharp/typecheck/sigs/neg40.fs	we-accept-fcs-rejects exact 1/1/4
-tests/fsharp/typecheck/sigs/neg41.fs	both-reject divergent 0/0/3 at:module[0]/Expr@24
+tests/fsharp/typecheck/sigs/neg41.fs	both-reject divergent 0/0/3 at:module[0]/Expr@23
 tests/fsharp/typecheck/sigs/neg42.fsi	both-reject outside-damage 0/0/3
 tests/fsharp/typecheck/sigs/neg43.fsi	range-divergent
 tests/fsharp/typecheck/sigs/neg64.fsx	both-reject outside-damage 15/15/16
@@ -365,11 +407,18 @@ tests/service/data/SyntaxTree/Expression/If 05.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Expression/If 06.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Expression/If 07.fs	both-reject exact 0/0/2
 tests/service/data/SyntaxTree/Expression/If 10.fs	both-reject exact 1/1/3
+tests/service/data/SyntaxTree/Expression/If 11.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Expression/If 12.fs	both-reject outside-damage 1/1/3
+tests/service/data/SyntaxTree/Expression/If 13.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Expression/If 14.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/Expression/Lambda - Missing expr 01.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Expression/Lambda - Missing expr 02.fs	both-reject exact 0/0/2
 tests/service/data/SyntaxTree/Expression/Lazy 03.fs	both-reject outside-damage 1/1/3
 tests/service/data/SyntaxTree/Expression/Let 02.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Expression/List - Comprehension 02.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Expression/Match - When 02.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Expression/Match - When 03.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Expression/Match - When 04.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Expression/Object - Class 04.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Expression/Object - Class 05.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Expression/Object - Class 06.fs	both-reject outside-damage 1/1/3
@@ -482,9 +531,14 @@ tests/service/data/SyntaxTree/MatchClause/Missing pat 03.fs	both-reject outside-
 tests/service/data/SyntaxTree/MatchClause/Missing pat 04.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/MatchClause/Missing pat 05.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/MatchClause/RangeOfSingleSynMatchClauseFollowedByBar.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Member/Abstract - Method 02.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Member/Abstract - Property 03.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Member/Abstract - Property 04.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Member/Abstract - Property 05.fs	both-reject outside-damage 2/2/3
+tests/service/data/SyntaxTree/Member/Abstract - Property 06.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Member/Abstract - Property 07.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Member/Abstract - Property 08.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Member/Abstract - Property 09.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/Member/Auto property 02.fs	both-reject outside-damage 1/1/3
 tests/service/data/SyntaxTree/Member/Auto property 03.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Member/Auto property 04.fs	we-reject-fcs-accepts outside-damage 2/2/3
@@ -610,6 +664,14 @@ tests/service/data/SyntaxTree/Pattern/As 12.fs	both-reject outside-damage 1/1/3
 tests/service/data/SyntaxTree/Pattern/Cons 02.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Pattern/Cons 03.fs	both-reject outside-damage 1/1/3
 tests/service/data/SyntaxTree/Pattern/Cons 04.fs	both-reject outside-damage 2/2/3
+tests/service/data/SyntaxTree/Pattern/Identifier 03.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Pattern/Identifier 04.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Pattern/Identifier 05.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Pattern/Identifier 06.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Pattern/Identifier 07.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Pattern/Identifier 08.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Pattern/Identifier 09.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Pattern/Identifier 10.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/Pattern/IsInst 02.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Pattern/IsInst 03.fs	both-reject exact 2/2/3
 tests/service/data/SyntaxTree/Pattern/IsInst 04.fs	both-reject exact 1/1/3
@@ -641,8 +703,18 @@ tests/service/data/SyntaxTree/Pattern/Typed - Missing type 11.fs	both-reject exa
 tests/service/data/SyntaxTree/Pattern/Typed - Missing type 12.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/SignatureType/NestedTypeHasStaticTypeAsLeadingKeyword.fsi	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/SimplePats/SimplePats - Recover 01.fs	both-reject outside-damage 1/1/5
+tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEquals.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEqualsExtendedMultiDollar.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEqualsTripleQuote.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEqualsVerbatim.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEqualsVerbatimAtDollar.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/String/SynExprInterpolatedStringAdjacentEqualsWithHole.fs	both-reject exact 2/2/3
 tests/service/data/SyntaxTree/SynIdent/IncompleteLongIdent 01.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/SynIdent/IncompleteLongIdent 02.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/SynTyparDecl/Constraint - Enum 01.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/SynTyparDecl/Constraint - Unknown identifier 01.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/SynTyparDecl/Constraint - Unknown identifier 02.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/SynTyparDecl/Constraint - Unknown identifier 03.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/SynType/Div 05.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/SynType/Div 06.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/SynType/Fun 03.fs	both-reject exact 1/1/2
@@ -652,6 +724,7 @@ tests/service/data/SyntaxTree/SynType/Fun 08.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/SynType/Fun 09.fs	both-reject exact 1/1/2
 tests/service/data/SyntaxTree/SynType/Fun 10.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/SynType/Named 08.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/SynType/SynTypeAppNestedMultilineClosingGreaterAligned.fs	both-reject outside-damage 1/1/1
 tests/service/data/SyntaxTree/SynType/Tuple - Nested 04.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/SynType/Tuple - Nested 05.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/SynType/Tuple - Nested 06.fs	both-reject outside-damage 1/1/2
@@ -709,14 +782,14 @@ tests/service/data/SyntaxTree/Type/Inline IL With Type 01.fs	we-accept-fcs-rejec
 tests/service/data/SyntaxTree/Type/Interface 05.fs	both-reject divergent 1/1/1 at:Module@0
 tests/service/data/SyntaxTree/Type/Interface 06.fs	both-reject divergent 1/1/1 at:Module@0
 tests/service/data/SyntaxTree/Type/Interface 07.fs	both-reject outside-damage 1/1/2
-tests/service/data/SyntaxTree/Type/Module After Do Binding 01.fs	both-reject divergent 1/2/4 at:module[0]/Let@135,module[0]/nested@115/Let@135
-tests/service/data/SyntaxTree/Type/Module After Inherit 01.fs	both-reject divergent 2/3/5 at:module[0]/Let@150,module[0]/nested@118/Let@150
-tests/service/data/SyntaxTree/Type/Module After Members 01.fs	both-reject divergent 1/2/4 at:module[0]/Let@182,module[0]/nested@150/Let@182
-tests/service/data/SyntaxTree/Type/Module After Static Members 01.fs	both-reject divergent 1/2/4 at:module[0]/Let@148,module[0]/nested@116/Let@148
-tests/service/data/SyntaxTree/Type/Module And Exception Interleaved With Members 01.fs	both-reject divergent 1/1/4 at:module[0]/Let@136,module[0]/nested@115/Let@136
+tests/service/data/SyntaxTree/Type/Module After Do Binding 01.fs	both-reject divergent 1/2/4 at:module[0]/Let@134,module[0]/nested@115/Let@134
+tests/service/data/SyntaxTree/Type/Module After Inherit 01.fs	both-reject divergent 2/3/5 at:module[0]/Let@145,module[0]/nested@114/Let@145
+tests/service/data/SyntaxTree/Type/Module After Members 01.fs	both-reject divergent 1/2/4 at:module[0]/Let@177,module[0]/nested@146/Let@177
+tests/service/data/SyntaxTree/Type/Module After Static Members 01.fs	both-reject divergent 1/2/4 at:module[0]/Let@143,module[0]/nested@112/Let@143
+tests/service/data/SyntaxTree/Type/Module And Exception Interleaved With Members 01.fs	both-reject divergent 1/1/4 at:module[0]/Let@135,module[0]/nested@115/Let@135
 tests/service/data/SyntaxTree/Type/Module And Type After Do Binding 01.fs	both-reject outside-damage 1/1/6
 tests/service/data/SyntaxTree/Type/Module And Type Inside Type 01.fs	both-reject outside-damage 1/1/5
-tests/service/data/SyntaxTree/Type/Module Between Constructors 01.fs	both-reject divergent 1/1/4 at:module[0]/Let@142,module[0]/nested@110/Let@142
+tests/service/data/SyntaxTree/Type/Module Between Constructors 01.fs	both-reject divergent 1/1/4 at:module[0]/Let@137,module[0]/nested@106/Let@137
 tests/service/data/SyntaxTree/Type/Module Inside Class 01.fs	both-reject divergent 1/2/4 at:module[0]/Let@118,module[0]/nested@98/Let@118
 tests/service/data/SyntaxTree/Type/Module Inside Class With Constructor 01.fs	both-reject outside-damage 1/1/4
 tests/service/data/SyntaxTree/Type/Module Inside Delegate 01.fs	both-reject divergent 1/2/4 at:module[0]/Let@144,module[0]/nested@113/Let@144
@@ -724,7 +797,7 @@ tests/service/data/SyntaxTree/Type/Module Inside Interface 01.fs	both-reject div
 tests/service/data/SyntaxTree/Type/Module Inside Interface End 01.fs	both-reject divergent 1/1/2 at:module[0]/Let@166
 tests/service/data/SyntaxTree/Type/Module Inside Nested Type 01.fs	both-reject exact 4/4/6
 tests/service/data/SyntaxTree/Type/Module Inside Record 01.fs	both-reject exact 2/2/4
-tests/service/data/SyntaxTree/Type/Module Inside Struct 01.fs	both-reject divergent 1/1/2 at:module[0]/Let@119
+tests/service/data/SyntaxTree/Type/Module Inside Struct 01.fs	both-reject divergent 1/1/2 at:module[0]/Let@118
 tests/service/data/SyntaxTree/Type/Module Inside Type With Augmentation 01.fs	both-reject exact 2/2/2
 tests/service/data/SyntaxTree/Type/Module Inside Union 01.fs	both-reject exact 2/2/4
 tests/service/data/SyntaxTree/Type/Multiple Invalid Constructs In Type 01.fs	both-reject exact 1/1/6
@@ -750,6 +823,11 @@ tests/service/data/SyntaxTree/Type/Record 04.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Type/Record 05.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/Type/Same Line Declarations 01.fs	we-reject-fcs-accepts outside-damage 3/3/5
 tests/service/data/SyntaxTree/Type/SynTypeTupleWithStructRecovery.fs	both-reject exact 1/1/2
+tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 01.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 02.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 03.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 04.fs	both-reject outside-damage 1/1/2
+tests/service/data/SyntaxTree/Type/TupleTypeExtensionRecovery 05.fs	both-reject outside-damage 1/1/2
 tests/service/data/SyntaxTree/Type/Type 01.fs	both-reject outside-damage 1/1/3
 tests/service/data/SyntaxTree/Type/Type 03.fs	both-reject exact 1/1/3
 tests/service/data/SyntaxTree/Type/Type 04.fs	both-reject exact 1/1/3
@@ -784,7 +862,7 @@ tests/service/data/SyntaxTree/UnionCase/Missing name 09.fs	both-reject exact 1/1
 tests/service/data/SyntaxTree/UnionCase/Recover Function Type 01.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/UnionCase/Recover Function Type 02.fs	both-reject outside-damage 2/2/3
 tests/service/data/SyntaxTree/UnionCase/Recover Function Type 03.fs	both-reject outside-damage 2/2/3
-tests/service/data/TestTP/ProvidedTypes.fs	we-reject-fcs-accepts divergent 534/1240/1242 at:module[0]/Types@118733,module[0]/Types@119623,module[0]/Types@119661,module[0]/Types@119715,module[0]/Types@120317,module[0]/Types@120595,module[0]/Types@120760,module[0]/Types@121869,+1404#e53eaa6b
+tests/service/data/TestTP/ProvidedTypes.fs	we-reject-fcs-accepts divergent 534/1240/1242 at:module[0]/Types@118451,module[0]/Types@119341,module[0]/Types@119379,module[0]/Types@119433,module[0]/Types@120035,module[0]/Types@120313,module[0]/Types@120478,module[0]/Types@121587,+1404#1f260250
 vsintegration/ItemTemplates/CodeFile/Template/File.fs	both-reject outside-damage 0/0/1
 vsintegration/ProjectTemplates/LibraryProject/Template/Library1.fs	both-reject outside-damage 0/0/1
 vsintegration/ProjectTemplates/LibraryProject/Template/Script.fsx	both-reject exact 2/2/3

@@ -283,6 +283,30 @@ const CATALOGUE: &[(&str, CatalogueStatus)] = &[
                      a type *is* an attribute; not yet.",
         },
     ),
+    (
+        "NotNullIfNotNullAttribute",
+        CatalogueStatus::Skipped {
+            reason: "Nullness flow on a method's return value (FCS's `NotNullIfNotNull` \
+                     feature, 11.0): it refines a call's inferred nullness, which no \
+                     surface we project carries.",
+        },
+    ),
+    (
+        "OverloadResolutionPriorityAttribute",
+        CatalogueStatus::Skipped {
+            reason: "Future slice: orders overload candidates under FCS's preview \
+                     `OverloadResolutionPriority` feature. Overload resolution reads \
+                     no priority yet, so it is not decoded.",
+        },
+    ),
+    (
+        "RequireNamedArgumentsAttribute",
+        CatalogueStatus::Skipped {
+            reason: "Call-site check under FCS's preview `RequireNamedArguments` feature \
+                     (a diagnostic when arguments are positional); changes no binding \
+                     or type we project.",
+        },
+    ),
     ("NotComputed", CatalogueStatus::Sentinel),
 ];
 

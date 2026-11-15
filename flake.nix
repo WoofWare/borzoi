@@ -21,21 +21,21 @@
     # (see the shellHook), so the tests need no on-disk checkout of the F#
     # compiler — bump the rev here to move the corpus.
     #
-    # This rev is the dotnet/fsharp source of SDK 10.0.301's F# compiler
-    # (built in dotnet/dotnet at e30a7bd5). Nothing checks it against the
-    # SDK the devshell provides, which moves with `nixpkgs`. To find the
-    # rev for the devshell's SDK, read it off the shipped compiler: the
+    # This rev is the dotnet/fsharp source of SDK 11.0.100's F# compiler
+    # (tag v15.2.101, built in dotnet/dotnet at 297acf93). Nothing checks it
+    # against the SDKs the devshell provides, which move with `nixpkgs`. To
+    # find the rev for an SDK, read it off the shipped compiler: the
     # informational version of `<sdk>/FSharp/FSharp.Compiler.Service.dll`
     # ends `+<sha>`, the dotnet/dotnet (VMR) commit the SDK was built
     # from, and that commit's `src/source-manifest.json` gives the
     # `fsharp` commit. (The `Microsoft.FSharp.Compiler` entry in a
     # dotnet/sdk tag's `eng/Version.Details.xml` can name an older VMR
     # commit than the one the release was built from, so it is not a
-    # substitute.) The corpus's own `global.json` then dictates which
-    # extra SDK feature band the devshell must combine in (see
-    # `dotnet-sdk` below).
+    # substitute.) The corpus's own `global.json` then dictates which SDK
+    # the tests that evaluate the corpus's projects need (see
+    # `dotnet-sdk-corpus` below).
     fsharp-src = {
-      url = "github:dotnet/fsharp/c3c01c991d17643700d343cee5c5a1e20c06ce03";
+      url = "github:dotnet/fsharp/142fe4e6a0b1cbef6f8e18e473e03b9137644cc0";
       flake = false;
     };
   };
@@ -198,13 +198,28 @@
         # build-sandbox use. `nix/deps.json` must cover every package a restore
         # under the default SDK pulls in, so regenerate it (`nix run
         # .#fetch-deps`) when that SDK moves; an incomplete closure fails the
-        # offline restore loudly. The second SDK is there for the F# compiler
-        # corpus (`fsharp-src`): it must lie in the feature band its
-        # `global.json` names, because that file's default `latestPatch`
-        # roll-forward never leaves the band.
+        # offline restore loudly. The second SDK is a second feature band for
+        # the per-SDK differentials to grade (`restore_cone_census` pins its
+        # cone under each installed SDK).
         dotnet-sdk = pkgs.dotnetCorePackages.combinePackages [
           pkgs.dotnet-sdk_10
           pkgs.dotnetCorePackages.sdk_10_0_1xx
+        ];
+
+        # A second dotnet root, never the default: `dotnet-sdk`'s SDKs plus
+        # SDK 11, exported as `BORZOI_DOTNET_ROOT_SDK11` for the tests that
+        # evaluate the F# compiler corpus's own projects
+        # (`fsproj_msbuild_corpus_diff`). The corpus's `global.json` asks for
+        # 11.0.100-rc.1 or later within 11.x (`latestMinor`), which no SDK in
+        # `dotnet-sdk` satisfies. SDK 11 stays out of `dotnet-sdk` itself:
+        # with no `global.json` above them, temporary fixtures and the project
+        # corpus cache would resolve it as the newest SDK, and the offline
+        # restores, the reference-pack choice and the net10 MSBuild oracle
+        # (which cannot load SDK 11's MSBuild) would all move with it.
+        dotnet-sdk-corpus = pkgs.dotnetCorePackages.combinePackages [
+          pkgs.dotnet-sdk_10
+          pkgs.dotnetCorePackages.sdk_10_0_1xx
+          pkgs.dotnetCorePackages.sdk_11_0_1xx
         ];
 
         # Offline NuGet store: a content-addressed closure of every package
@@ -370,6 +385,10 @@
             export CARGO_HOME=$cargoHome
 
             export DOTNET_ROOT=${dotnet-sdk}/share/dotnet
+            # Not on PATH and never DOTNET_ROOT: only the tests that evaluate
+            # the corpus's own projects point their children at it (see
+            # `dotnet-sdk-corpus` above).
+            export BORZOI_DOTNET_ROOT_SDK11=${dotnet-sdk-corpus}/share/dotnet
             export DOTNET_CLI_TELEMETRY_OPTOUT=1
             export DOTNET_NOLOGO=1
             export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1

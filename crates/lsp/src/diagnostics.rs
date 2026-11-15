@@ -342,8 +342,8 @@ mod tests {
     #[test]
     fn elif_feature_gate_threads_language_version() {
         // The resolved language version reaches the parser through the
-        // diagnostics path: under 10.0 (FCS's default) `#elif` draws the FS3350
-        // feature diagnostic; under 11.0 / preview it does not.
+        // diagnostics path: under 10.0 `#elif` draws the FS3350 feature diagnostic;
+        // under 11.0 (FCS's default) / preview it does not.
         let src = "#if FOO\n1\n#elif BAR\n2\n#endif\n";
         let feature_diags = |lang| {
             grouped_diagnostics(src, &no_symbols(), SourceKind::Implementation, lang)
@@ -353,7 +353,7 @@ mod tests {
                 .count()
         };
         assert_eq!(feature_diags(LanguageVersion::V10_0), 1);
-        assert_eq!(feature_diags(LanguageVersion::DEFAULT), 1);
+        assert_eq!(feature_diags(LanguageVersion::DEFAULT), 0);
         assert_eq!(feature_diags(LanguageVersion::V11_0), 0);
         assert_eq!(feature_diags(LanguageVersion::Preview), 0);
     }
@@ -362,7 +362,7 @@ mod tests {
     fn nullness_feature_gate_threads_language_version() {
         // A *typed-node* feature (nullness) reaches the editor through the same
         // path as the `#elif` trivia feature: under < 9.0 `string | null` draws
-        // the FS3350 feature diagnostic; at 9.0 / default (10.0) / preview it does
+        // the FS3350 feature diagnostic; at 9.0 / default (11.0) / preview it does
         // not. No LSP code is nullness-specific — the parser emits it and
         // `is_language_version_diagnostic` keeps it through the overlap dedup.
         let src = "let x : string | null = failwith \"\"\n";
