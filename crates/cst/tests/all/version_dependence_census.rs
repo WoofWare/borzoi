@@ -15,12 +15,15 @@
 //! A file's verdict is one letter per numbered version, oldest first (the
 //! manifest's `(columns)` line names them). A verdict with an `S` or an `R` is
 //! a version-dependent file: a parse at a guessed version may not read as one
-//! at the real version would, and `diagnostics_are_version_invariant` must say
-//! so. One with only `L`s is a file whose newer constructs are faithfully
-//! gated at older versions over an unchanged tree, and which a guess may read
-//! all the same. Every file whose verdict is not all `.` is listed in
-//! `tests/manifests/version_dependence_census.txt`, two-sided like the other
-//! corpus manifests:
+//! at the real version would. A guess is held to the versions from some
+//! numbered version up (the lower of the guess and the floor of the compiler
+//! that checks the file), and the letters from that column on say whether the
+//! file depends on the version there, as `diagnostics_are_invariant_over`
+//! must say. One with only `L`s is a file whose newer constructs are
+//! faithfully gated at older versions over an unchanged tree, and which a
+//! guess may read all the same. Every file whose verdict is not all `.` is
+//! listed in `tests/manifests/version_dependence_census.txt`, two-sided like
+//! the other corpus manifests:
 //!
 //! ```text
 //! BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-cst --test all version_dependence_census:: -- --ignored
@@ -34,8 +37,9 @@
 //!   feature table's `Reshape` and `Severity` rows) parse to the same tree
 //!   with the same recovery diagnostics, so no `Diagnose` gate moves either
 //!   corpus-wide;
-//! * `diagnostics_are_version_invariant`, which parses at two or three
-//!   versions only, agrees with the verdict read off all of them.
+//! * `diagnostics_are_invariant_over`, which parses at two or three
+//!   versions only, agrees with the verdict read off all of them, over the
+//!   range from every numbered version up to preview.
 //!
 //! Symbols are empty, as in `parser_corpus`.
 
@@ -46,7 +50,7 @@ use std::path::Path;
 use borzoi_cst::language_version::{LanguageFeature, LanguageVersion};
 use borzoi_cst::parser::{
     DiagnosticClass, FileKind, Parse, ParseDiagnostic, ParseOptions,
-    diagnostics_are_version_invariant, parse_with_options,
+    diagnostics_are_invariant_over, parse_with_options,
 };
 use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_oracle_harness::par_map::par_map;
@@ -170,14 +174,30 @@ fn census_file(path: &Path, src: &str, recovery_features: &[LanguageFeature]) ->
         }
     }
     let verdict: String = graded.iter().map(|p| grade(p, preview)).collect();
-    let dependent = verdict.contains(['S', 'R']);
-    if diagnostics_are_version_invariant(src, &symbols, file_kind) == dependent {
-        breaches.push(format!(
-            "diagnostics_are_version_invariant says {}, but the verdict is {verdict}",
-            !dependent
-        ));
+    // Every range a guessed reading is held to runs from a numbered version
+    // (the lower of the guess and the compiler's floor) to preview.
+    for from in GRADED {
+        let dependent = dependent_from(&verdict, from);
+        if diagnostics_are_invariant_over(src, &symbols, file_kind, from..=LanguageVersion::MAX)
+            == dependent
+        {
+            breaches.push(format!(
+                "diagnostics_are_invariant_over {from} up says {}, but the verdict is {verdict}",
+                !dependent
+            ));
+        }
     }
     Outcome::Graded { verdict, breaches }
+}
+
+/// Whether a verdict moves the tree or a `Recovery` diagnostic at `from` or any
+/// later version. Preview, the baseline, is one, so a move at any graded
+/// version before it is a difference within the range.
+fn dependent_from(verdict: &str, from: LanguageVersion) -> bool {
+    GRADED
+        .iter()
+        .zip(verdict.chars())
+        .any(|(&lang, c)| lang >= from && matches!(c, 'S' | 'R'))
 }
 
 #[test]
@@ -212,6 +232,8 @@ fn census() {
     ];
     let mut breaches = Vec::new();
     let (mut dependent, mut legality_only) = (0usize, 0usize);
+    // How many files depend on the version from each graded version up.
+    let mut dependent_from_each = [0usize; GRADED.len()];
     for (path, outcome) in files.iter().zip(outcomes) {
         let key = corpus_relative(&root, path);
         match outcome {
@@ -221,6 +243,9 @@ fn census() {
                 breaches: found,
             } => {
                 breaches.extend(found.into_iter().map(|b| format!("{key}: {b}")));
+                for (count, from) in dependent_from_each.iter_mut().zip(GRADED) {
+                    *count += usize::from(dependent_from(&verdict, from));
+                }
                 if verdict.contains(['S', 'R']) {
                     dependent += 1;
                 } else if verdict.contains('L') {
@@ -236,6 +261,15 @@ fn census() {
         "{} files | {dependent} version-dependent | {legality_only} differing in legality \
          diagnostics only",
         files.len()
+    );
+    eprintln!(
+        "version-dependent from each version up: {}",
+        GRADED
+            .iter()
+            .zip(dependent_from_each)
+            .map(|(from, count)| format!("{from}: {count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     assert!(
         breaches.is_empty(),

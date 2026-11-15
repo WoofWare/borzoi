@@ -1289,3 +1289,117 @@ fn a_global_carrier_reports_no_refusal() {
         );
     }
 }
+
+/// A project whose `<LangVersion>` the evaluation cannot pin parses at a
+/// guess, and the fold holds that guess to every version the project's compiler
+/// may check at: from its floor up, for every installed SDK and every
+/// environment the floor depends on. Two files, each version-dependent only
+/// below F# 8: `member _.M` (a recovery below F# 4.7), whose reading the fold
+/// keeps only where the compiler refuses every version below 8.0, and a
+/// closer whose tree moves across F# 6 (a shape band), which refuses the fold
+/// everywhere else. So a 10.0.1xx compiler, which checks at F# 4.6, keeps the
+/// whole ladder, and so does `SKIP_VERSION_SUPPORTED_CHECK=1`.
+#[test]
+fn a_guessed_version_is_held_to_the_versions_its_compiler_checks_at() {
+    const SELF_ID: &str = "module M\ntype T() =\n    member _.M = 1\n";
+    const RELAXED_CLOSER: &str = "module M\nlet x = (\n    1\n)\nlet y = 2\n";
+    let (mut enforcing, mut lifted) = (0, 0);
+    for compiler in installed_compilers() {
+        if compiler.sdk.is_prerelease() {
+            continue;
+        }
+        for (route, env, skipped) in environments() {
+            let fold = |source: &str| {
+                let dir = tempfile::tempdir().unwrap();
+                let fsproj = pinned_project(dir.path(), &compiler.sdk, None, source);
+                // A second write under a gate the evaluation cannot decide: the
+                // version is a guess, the compiler's default.
+                let text = host_fs::read_to_string(&fsproj).unwrap().replace(
+                    "</PropertyGroup>",
+                    r#"</PropertyGroup><PropertyGroup Condition="'$([System.Guid]::NewGuid())' == ''"><LangVersion>9.0</LangVersion></PropertyGroup>"#,
+                );
+                std::fs::write(&fsproj, &text).unwrap();
+                let mut workspace = Workspace::with_env(env.clone());
+                assert!(
+                    workspace
+                        .project(&fsproj)
+                        .unwrap()
+                        .property("LangVersion")
+                        .untrusted_cause()
+                        .is_some(),
+                    "the version is a guess"
+                );
+                let floor = workspace.compiler_floor_for_project(&fsproj);
+                let mut sema = borzoi::semantic::SemanticState::new();
+                let recovery = sema
+                    .parses_for_project(&fsproj, &mut workspace, &borzoi::vfs::Vfs::new())
+                    .map(|parses| parses.files[0].recovery.clone());
+                (floor, recovery)
+            };
+            let facts = SdkLanguageFacts::for_sdk(&compiler.sdk);
+            let expected_floor = match facts {
+                Some(facts) if !skipped => facts.floor,
+                _ => LanguageVersion::MIN,
+            };
+            let enforced = expected_floor >= LanguageVersion::V8_0;
+            if enforced {
+                enforcing += 1;
+            } else if facts.is_some() {
+                lifted += 1;
+            }
+            let (floor, self_id) = fold(SELF_ID);
+            let at = format!("SDK {} ({route})", compiler.sdk);
+            assert_eq!(floor, expected_floor, "{at}");
+            let self_id = self_id.unwrap_or_else(|| panic!("{at}: `member _.M` folds"));
+            assert_eq!(
+                self_id == borzoi_sema::SyntaxRecovery::Reported([].into()),
+                enforced,
+                "{at}: `member _.M` keeps its reading iff the compiler refuses F# 4.6: \
+                 {self_id:?}"
+            );
+            assert_eq!(
+                self_id == borzoi_sema::SyntaxRecovery::Unretained,
+                !enforced,
+                "{at}: {self_id:?}"
+            );
+            let (_, relaxed) = fold(RELAXED_CLOSER);
+            assert_eq!(
+                relaxed.is_some(),
+                enforced,
+                "{at}: a tree that moves only across F# 6 folds iff the compiler refuses \
+                 F# 6"
+            );
+        }
+    }
+    assert!(
+        enforcing > 0,
+        "no installed SDK enforces a floor of F# 8 to check the narrowed range with"
+    );
+    assert!(
+        lifted > 0,
+        "no installed graded SDK keeps the whole ladder to check it with"
+    );
+}
+
+/// The compiler inherits the build's environment unchanged: no F# file of a
+/// graded SDK hands the `Fsc` task an `EnvironmentVariables` (the `ToolTask`
+/// parameter that adds variables to the compiler's process), so
+/// `SKIP_VERSION_SUPPORTED_CHECK` reaches the compiler exactly when the
+/// build's environment holds it, which is what `ProjectCompiler::floor` reads.
+/// A project could pass one only by replacing `CoreCompile`, which
+/// `project_compiler` declines.
+#[test]
+fn the_compile_task_hands_the_compiler_no_environment_of_its_own() {
+    for compiler in graded_compilers() {
+        let sdk_dir = compiler.fsc.parent().unwrap().parent().unwrap();
+        for file in compiler_choice_files(sdk_dir) {
+            let text = host_fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+            assert!(
+                !text.contains("EnvironmentVariables"),
+                "{} sets the compiler's environment: `ProjectCompiler::floor` must read it",
+                file.display()
+            );
+        }
+    }
+}

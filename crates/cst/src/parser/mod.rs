@@ -38,7 +38,7 @@
 //!   so the lossless invariant holds.
 
 use std::collections::HashSet;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 use crate::directives::{PreprocError, Preprocessed, TriviaToken};
 use crate::language_version::{FcsEffect, LanguageFeature, LanguageVersion};
@@ -494,8 +494,30 @@ pub fn parse_with_options(source: &str, opts: ParseOptions<'_>) -> Parse {
 }
 
 /// Whether `source`'s tree and its [`DiagnosticClass::Recovery`] diagnostics
-/// are the same at every [`LanguageVersion`]: whether a parse at a guessed
-/// version reads, legality gates aside, as a parse at the real one would.
+/// are the same at every [`LanguageVersion`], [`LanguageVersion::MIN`] to
+/// [`LanguageVersion::MAX`]: [`diagnostics_are_invariant_over`] the whole
+/// ladder.
+pub fn diagnostics_are_version_invariant(
+    source: &str,
+    symbols: &HashSet<String>,
+    file_kind: FileKind,
+) -> bool {
+    diagnostics_are_invariant_over(
+        source,
+        symbols,
+        file_kind,
+        LanguageVersion::MIN..=LanguageVersion::MAX,
+    )
+}
+
+/// Whether `source`'s tree and its [`DiagnosticClass::Recovery`] diagnostics
+/// are the same at every [`LanguageVersion`] in `versions`: whether a parse at
+/// a guessed version in the range reads, legality gates aside, as a parse at
+/// the real one would, wherever in the range the real one lies. A caller asks
+/// it of the versions the compiler that checks the file may check at
+/// (`borzoi_sema::SyntaxRecovery::of_guessed_version`): the whole ladder
+/// ([`diagnostics_are_version_invariant`]) unless that compiler is known to
+/// refuse every version below some floor.
 ///
 /// The [`Legality`](DiagnosticClass::Legality) diagnostics are left out
 /// because they are the one version-dependent output that cannot change what a
@@ -509,7 +531,7 @@ pub fn parse_with_options(source: &str, opts: ParseOptions<'_>) -> Parse {
 /// answering it costs extra parses, and a field would charge every parse in
 /// the workspace for a verdict almost none of them read.
 ///
-/// Decided by **re-parsing at both ends of the ladder and comparing the
+/// Decided by **re-parsing at both ends of the range and comparing the
 /// output**, deliberately rather than by asking each version-gated producer
 /// whether it fired. Two review rounds each found a producer such an
 /// enumeration had missed — a gate whose diagnostic is *suppressed* at the
@@ -522,15 +544,17 @@ pub fn parse_with_options(source: &str, opts: ParseOptions<'_>) -> Parse {
 /// Two points suffice for the diagnostics because every version gate is a
 /// monotone threshold: a feature becomes available at some version and stays
 /// available. That is an argument rather than a mechanism, so it is checked by
-/// a property over *all* versions
+/// a property over every version of every range from a numbered version up to
+/// [`LanguageVersion::MAX`]
 /// (`shape_sensitivity::unset_diagnostics_flag_proves_version_invariance`).
 /// The tree needs no such argument: an unflagged
 /// [`Parse::shape_depends_on_language_version`] proves it the same at every
-/// version, and a flagged one is compared at the two ends and at every
-/// [`LanguageVersion::SHAPE_REPRESENTATIVES`] band between them, whose
-/// diagnostics are compared too.
+/// version, and a flagged one is compared at the two ends and at the
+/// [`LanguageVersion::SHAPE_REPRESENTATIVES`] of every band strictly between
+/// theirs, whose diagnostics are compared too.
 ///
-/// Costs two extra parses (three for a flagged source), so a caller that does
+/// Costs two extra parses (three for a flagged source whose range meets three
+/// bands), so a caller that does
 /// not need the verdict should not ask: it is worth paying only where a
 /// commitment rests on the diagnostics being the real build's, and the version
 /// is a guess.
@@ -547,10 +571,11 @@ pub fn parse_with_options(source: &str, opts: ParseOptions<'_>) -> Parse {
 /// is also exactly the reading this returns `false` for on its merits — it
 /// proves nothing about the other versions, so the caller must retain no
 /// diagnostics.
-pub fn diagnostics_are_version_invariant(
+pub fn diagnostics_are_invariant_over(
     source: &str,
     symbols: &HashSet<String>,
     file_kind: FileKind,
+    versions: RangeInclusive<LanguageVersion>,
 ) -> bool {
     let at = |lang| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -558,7 +583,7 @@ pub fn diagnostics_are_version_invariant(
         }))
         .ok()
     };
-    let (Some(lo), Some(hi)) = (at(LanguageVersion::MIN), at(LanguageVersion::MAX)) else {
+    let (Some(lo), Some(hi)) = (at(*versions.start()), at(*versions.end())) else {
         return false;
     };
     if !same_recovery_diagnostics(&lo, &hi) {
@@ -567,11 +592,14 @@ pub fn diagnostics_are_version_invariant(
     if !lo.shape_depends_on_language_version && !hi.shape_depends_on_language_version {
         return true;
     }
-    let ends = [lo.lang, hi.lang].map(LanguageVersion::shape_representative);
+    // Bands are contiguous runs of versions, ascending as their
+    // representatives do, so the bands strictly between the ends' are those
+    // whose representative lies strictly between theirs.
+    let [lo_band, hi_band] = [lo.lang, hi.lang].map(LanguageVersion::shape_representative);
     lo.root.structurally_eq(&hi.root)
         && LanguageVersion::SHAPE_REPRESENTATIVES
             .into_iter()
-            .filter(|lang| !ends.contains(lang))
+            .filter(|&band| lo_band < band && band < hi_band)
             .all(|lang| {
                 at(lang).is_some_and(|mid| {
                     same_recovery_diagnostics(&mid, &hi) && mid.root.structurally_eq(&hi.root)

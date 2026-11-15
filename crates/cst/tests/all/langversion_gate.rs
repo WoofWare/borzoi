@@ -211,6 +211,17 @@ mod diagnostics_version_dependence {
         )
     }
 
+    /// The verdict over `from` up to the top of the ladder: what a guess is
+    /// held to under a compiler that refuses every version below `from`.
+    fn dependent_from(source: &str, from: LanguageVersion) -> bool {
+        !borzoi_cst::parser::diagnostics_are_invariant_over(
+            source,
+            &HashSet::new(),
+            FileKind::Impl,
+            from..=LanguageVersion::MAX,
+        )
+    }
+
     fn parse_at(source: &str, lang: LanguageVersion) -> borzoi_cst::parser::Parse {
         parse_with_options(
             source,
@@ -362,8 +373,9 @@ mod diagnostics_version_dependence {
     /// parse error below F# 4.7, from which FCS recovers to a different tree
     /// (`SingleUnderscorePattern`, a `Reshape` gate). Its error is a
     /// `Recovery` one, so every file holding a `member _.M` is
-    /// version-dependent, and a guessed language version retains no
-    /// diagnostics for it: the LSP drops what it reads off a clean parse there
+    /// version-dependent on the ladder, and a guessed language version retains
+    /// no diagnostics for it unless the compiler that checks the file is known
+    /// to refuse F# 4.6: the LSP drops what it reads off a clean parse there
     /// (hover's binder types in an orphan buffer).
     #[test]
     fn an_underscore_rooted_pattern_is_version_dependent() {
@@ -383,5 +395,49 @@ mod diagnostics_version_dependence {
                 "{source:?} must be version-dependent"
             );
         }
+    }
+
+    /// Each of the ladder-dependent sources above whose every threshold lies
+    /// below F# 8 is invariant from F# 8 up: a guess under a compiler that
+    /// refuses every version below 8.0 keeps its reading. The ones whose
+    /// threshold lies at or above it stay dependent.
+    #[test]
+    fn a_threshold_below_the_range_leaves_the_source_invariant_over_it() {
+        for (source, from_eight) in [
+            ("module M\ntype T() =\n    member _.M = 1\n", false),
+            (
+                "module M\nlet f x =\n    match x with\n    | _.M -> 1\n    | _ -> 2\n",
+                false,
+            ),
+            ("let x = (\n    1\n)\nlet y = 2\n", false),
+            ("module M\nlet f (x : System.String | null) = 1\n", true),
+            ("module M\ntype Outer =\n    type Nested = int\n", true),
+        ] {
+            assert!(version_dependent(source), "{source:?} on the ladder");
+            assert_eq!(
+                dependent_from(source, LanguageVersion::V8_0),
+                from_eight,
+                "{source:?} from F# 8"
+            );
+        }
+    }
+
+    /// The range's lower end is compared, not only its upper: an undented body
+    /// is a warning below F# 8 and an error from it (`StrictIndentation`), so
+    /// the versions from 8.0 up agree among themselves and 7.0 does not.
+    #[test]
+    fn the_lower_end_of_the_range_is_compared() {
+        let source = "module M\nlet f (x: 'a -> 'a) =\nx\n";
+        assert_ne!(
+            parse_at(source, LanguageVersion::V7_0)
+                .recovery_errors()
+                .collect::<Vec<_>>(),
+            parse_at(source, LanguageVersion::V8_0)
+                .recovery_errors()
+                .collect::<Vec<_>>(),
+            "the gate must move a recovery error across F# 8"
+        );
+        assert!(!dependent_from(source, LanguageVersion::V8_0));
+        assert!(dependent_from(source, LanguageVersion::V7_0));
     }
 }

@@ -42,6 +42,7 @@ use borzoi_assembly::{
     SignatureUnknown, format_entity_header, format_fsharp_name, format_member,
     format_member_untyped, join_quoted,
 };
+use borzoi_cst::language_version::LanguageVersion;
 use borzoi_cst::parser::FileKind;
 use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{AstNode, ImplFile, SyntaxKind, SyntaxNode};
@@ -416,8 +417,19 @@ fn single_file_hover(
 ) -> Option<Hover> {
     let source = state.parse_buffer(uri, text, FileKind::Impl);
     let parse = source.parse()?;
-    let recovery =
-        SyntaxRecovery::of_guessed_version(parse, text, source.symbols(), FileKind::Impl);
+    // The whole ladder: no compiler is known to check this buffer. An orphan
+    // `.fs` file belongs to no build, and `dotnet fsi` runs a script with the
+    // SDK it resolves from its working directory, not the script's, so the
+    // SDK the file's directory resolves names no compiler that must check it.
+    // A project's own file that falls back here is held to the whole ladder
+    // too, which can only withhold a reading.
+    let recovery = SyntaxRecovery::of_guessed_version(
+        parse,
+        text,
+        source.symbols(),
+        FileKind::Impl,
+        LanguageVersion::MIN,
+    );
     let file = ImplFile::cast(parse.root.clone())?;
     // Single-file (orphan) hover: no project, so no referenced assemblies —
     // member-access typing has no env to resolve into and simply defers.

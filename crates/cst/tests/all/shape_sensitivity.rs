@@ -203,58 +203,81 @@ proptest! {
     /// The diagnostics counterpart of [`unset_flag_proves_version_invariance`],
     /// and the property the LSP's recovery reading trusts when a project's
     /// `LangVersion` provenance is unknowable: an invariant verdict from
-    /// `diagnostics_are_version_invariant` must **prove** the tree and the
-    /// recovery errors and warnings are identical at every language version.
+    /// `diagnostics_are_invariant_over` must **prove** the tree and the
+    /// recovery errors and warnings are identical at every language version
+    /// in its range. Every range a guessed reading is held to runs from a
+    /// numbered version (the lower of the guess and the compiler's floor) to
+    /// [`LanguageVersion::MAX`], so each such range is checked; the lowest is
+    /// the whole ladder (`diagnostics_are_version_invariant`).
     ///
     /// This is the guard the shape flag cannot be: a gate can move a recovery
     /// diagnostic without moving the tree (the nested-type FS0058), and only
     /// the legality diagnostics, which the verdict leaves out, may differ.
-    /// Checking every version rather than the two extremes the flag itself
+    /// Checking every version rather than the two ends the verdict itself
     /// compares keeps the property independent of the monotonicity argument
     /// that justifies looking at only two.
     #[test]
     fn unset_diagnostics_flag_proves_version_invariance(src in snippet()) {
-        const VERSIONS: &[LanguageVersion] = &[
-            LanguageVersion::V4_6,
-            LanguageVersion::V5_0,
-            LanguageVersion::V7_0,
-            LanguageVersion::V8_0,
-            LanguageVersion::V9_0,
-            LanguageVersion::V10_0,
-            LanguageVersion::V11_0,
-            LanguageVersion::Preview,
-        ];
-        if !borzoi_cst::parser::diagnostics_are_version_invariant(
-            &src,
-            &HashSet::new(),
-            FileKind::Impl,
-        ) {
-            return Ok(());
-        }
-        let baseline = parse_at(&src, LanguageVersion::DEFAULT);
-        for &lang in VERSIONS {
-            let p = parse_at(&src, lang);
-            prop_assert_eq!(
-                p.recovery_errors().collect::<Vec<_>>(),
-                baseline.recovery_errors().collect::<Vec<_>>(),
-                "an invariant verdict must prove the recovery errors are version-invariant, but {:?} differs at {}",
-                src,
-                lang
-            );
-            prop_assert_eq!(
-                p.recovery_warnings().collect::<Vec<_>>(),
-                baseline.recovery_warnings().collect::<Vec<_>>(),
-                "an invariant verdict must prove the recovery warnings are version-invariant, but {:?} differs at {}",
-                src,
-                lang
-            );
-            prop_assert_eq!(
-                tree_shape(&p),
-                tree_shape(&baseline),
-                "an invariant verdict must prove the tree is version-invariant, but {:?} differs at {}",
-                src,
-                lang
-            );
+        let every_version: Vec<LanguageVersion> = LanguageVersion::NUMBERED
+            .into_iter()
+            .chain([LanguageVersion::Preview])
+            .collect();
+        let parses: Vec<Parse> = every_version.iter().map(|&lang| parse_at(&src, lang)).collect();
+        prop_assert_eq!(
+            borzoi_cst::parser::diagnostics_are_version_invariant(
+                &src,
+                &HashSet::new(),
+                FileKind::Impl,
+            ),
+            borzoi_cst::parser::diagnostics_are_invariant_over(
+                &src,
+                &HashSet::new(),
+                FileKind::Impl,
+                LanguageVersion::MIN..=LanguageVersion::MAX,
+            ),
+            "the ladder's verdict is the verdict over the whole ladder, for {:?}",
+            src
+        );
+        for (start, &from) in LanguageVersion::NUMBERED.iter().enumerate() {
+            let range = from..=LanguageVersion::MAX;
+            if !borzoi_cst::parser::diagnostics_are_invariant_over(
+                &src,
+                &HashSet::new(),
+                FileKind::Impl,
+                range.clone(),
+            ) {
+                continue;
+            }
+            let baseline = parses.last().expect("the ladder is not empty");
+            for p in &parses[start..] {
+                prop_assert_eq!(
+                    p.recovery_errors().collect::<Vec<_>>(),
+                    baseline.recovery_errors().collect::<Vec<_>>(),
+                    "an invariant verdict over {:?} must prove the recovery errors are \
+                     version-invariant, but {:?} differs at {}",
+                    range,
+                    src,
+                    p.lang
+                );
+                prop_assert_eq!(
+                    p.recovery_warnings().collect::<Vec<_>>(),
+                    baseline.recovery_warnings().collect::<Vec<_>>(),
+                    "an invariant verdict over {:?} must prove the recovery warnings are \
+                     version-invariant, but {:?} differs at {}",
+                    range,
+                    src,
+                    p.lang
+                );
+                prop_assert_eq!(
+                    tree_shape(p),
+                    tree_shape(baseline),
+                    "an invariant verdict over {:?} must prove the tree is version-invariant, \
+                     but {:?} differs at {}",
+                    range,
+                    src,
+                    p.lang
+                );
+            }
         }
     }
 }
@@ -349,29 +372,35 @@ proptest! {
     /// Two endpoints decide the verdict, and the monotone-threshold argument
     /// covers *diagnostics* between them — it says nothing about a parser guard
     /// firing at an interior version only. So an invariant verdict must also
-    /// mean no version panics; otherwise the caller trusts a reading assembled
-    /// from versions it never checked.
+    /// mean no version in its range panics; otherwise the caller trusts a
+    /// reading assembled from versions it never checked. Checked over every
+    /// range a guessed reading is held to, from each numbered version up.
     #[test]
     fn an_invariant_verdict_means_no_version_panics(src in adversarial_soup()) {
-        let Ok(true) = catch_unwind_silent(|| {
-            borzoi_cst::parser::diagnostics_are_version_invariant(
-                &src,
-                &HashSet::new(),
-                FileKind::Impl,
-            )
-        }) else {
-            return Ok(());
-        };
-        let every_version = LanguageVersion::NUMBERED
-            .into_iter()
-            .chain([LanguageVersion::Preview]);
-        for lang in every_version {
-            prop_assert!(
-                catch_unwind_silent(|| parse_at(&src, lang)).is_ok(),
-                "verdict says invariant, but {:?} panics at {}",
-                src,
-                lang
-            );
+        for from in LanguageVersion::NUMBERED {
+            let Ok(true) = catch_unwind_silent(|| {
+                borzoi_cst::parser::diagnostics_are_invariant_over(
+                    &src,
+                    &HashSet::new(),
+                    FileKind::Impl,
+                    from..=LanguageVersion::MAX,
+                )
+            }) else {
+                continue;
+            };
+            let in_range = LanguageVersion::NUMBERED
+                .into_iter()
+                .chain([LanguageVersion::Preview])
+                .filter(|&lang| lang >= from);
+            for lang in in_range {
+                prop_assert!(
+                    catch_unwind_silent(|| parse_at(&src, lang)).is_ok(),
+                    "verdict from {} says invariant, but {:?} panics at {}",
+                    from,
+                    src,
+                    lang
+                );
+            }
         }
     }
 }

@@ -467,22 +467,47 @@ reports a `Legality` diagnostic naming its feature.
 
 ### D10. Version invariance compares Recovery only
 
-`SyntaxRecovery::of_guessed_version` (sema) keeps its full `[MIN, MAX]` range,
-and `SyntaxRecovery` reads only `Recovery` errors.
-`diagnostics_are_version_invariant` compares `Recovery` diagnostics at the two
-ends of the ladder and the tree: an unflagged
+`SyntaxRecovery::of_guessed_version` (sema) holds a reading taken at a guessed
+version to every version the build may check the file at, and `SyntaxRecovery`
+reads only `Recovery` errors. `diagnostics_are_invariant_over(range)` compares
+`Recovery` diagnostics at the two ends of the range and the tree: an unflagged
 `shape_depends_on_language_version` proves the tree the same everywhere, and a
 flagged one is compared at both ends and at every shape band between them. So a
 faithful legality gate (`#elif`, `_.M`, interpolated strings, `>|}`) does not
 make every file using the construct version-dependent. A `Reshape` gate
 (nullness below 9.0; `_.` patterns and `for _ =`, where FCS raises a parse
 error and recovers; `$$"""`, which FCS's lexer reads differently) is
-`Recovery` and stays version-dependent: every file holding a `member _.M` is
-one, so a guessed version retains no diagnostics for it. So does a tree the
-lex-filter reshapes with no diagnostic moving (a closer dedented to its
-`let`'s column, across F# 6).
+`Recovery` and makes its file version-dependent across the gate's threshold.
+So does a tree the lex-filter reshapes with no diagnostic moving (a closer
+dedented to its `let`'s column, across F# 6).
 
-Two checks hold this:
+**The range** is `[min(guess, floor), MAX]`, where `floor` is the oldest version
+the compiler that checks the file accepts. A compiler refuses every version
+below its floor (FS3880), so no build checks a file there, and a threshold
+below it (`member _.M`'s, F# 4.7) moves no reading the build makes. The guess
+is always in the range, because the reading is the one taken there: an
+untrusted pin of 7.0 stretches it down. The floor is not one constant: SDK
+10.0.112's compiler checks at F# 4.6, SDK 10.0.401's refuses everything below
+8.0, and `SKIP_VERSION_SUPPORTED_CHECK=1` in the compiler's environment lifts
+the refusal. So the LSP reads it off the project's compiler
+(`sdk_language::checked_floor`): the band row's graded floor
+(`SdkLanguageFacts::floor`) for a compiler `project_compiler` names, with a
+graded row, in a build environment that does not set the variable, and `MIN`
+(the whole ladder) for anything else: an unknown or ungraded compiler, a
+project that failed to evaluate, and every buffer single-file hover reads, the
+orphans among them. An orphan `.fs` file belongs to no build, and `dotnet fsi`
+resolves its SDK from the working directory rather than the script's, so the
+file's own directory names no compiler that must check it. A doubted
+`$(LangVersion)` does not move the floor: the guess exists because of that
+doubt, and whatever version the build hands the compiler, it refuses each one
+below its floor; the compiler reads nothing but the variable to lift it, and
+the SDK's `Fsc` task passes it no environment of its own
+(`sdk_language_diff::the_compile_task_hands_the_compiler_no_environment_of_its_own`).
+The project fold's shape gate checks the same range: a band wholly below the
+floor is no build's, so a file whose tree moves only there does not refuse the
+fold.
+
+Four checks hold this:
 
 - **The inference differential** (sema's `infer_legality_pin_diff`): for each
   gated `Legality` feature, a file with the construct inside an annotated
@@ -503,11 +528,28 @@ Two checks hold this:
   moved tree, a moved `Recovery` diagnostic, a moved `Legality` diagnostic
   only, or no change, and every file that moves pinned in
   `tests/manifests/version_dependence_census.txt`. On the pinned corpus
-  691 files are version-dependent and 274 move only in `Legality`
-  diagnostics, so a guessed version keeps their reading. The census also
-  asserts that two versions agreeing on every `Recovery`-class feature parse
-  every file identically, and that `diagnostics_are_version_invariant` agrees with the
-  verdict read off all ten versions.
+  754 files are version-dependent somewhere on the ladder, 152 of them from
+  8.0 up, and 387 move only in `Legality` diagnostics, so a guessed version
+  keeps their reading; under a compiler whose floor is 8.0 a guess also keeps
+  the reading of the 602 that move only below it. The census also asserts
+  that two versions agreeing on every `Recovery`-class feature parse every
+  file identically, and that `diagnostics_are_invariant_over` agrees with the
+  verdict read off all ten versions over the range from each numbered version
+  up.
+- **The range property** (cst's
+  `shape_sensitivity::unset_diagnostics_flag_proves_version_invariance`): on
+  generated sources, an invariant verdict over each of those ranges means
+  every version in it parses to the same tree with the same `Recovery`
+  diagnostics, and (`an_invariant_verdict_means_no_version_panics`) none of
+  them panics.
+- **The fold over each installed SDK** (the LSP crate's
+  `sdk_language_diff::a_guessed_version_is_held_to_the_versions_its_compiler_checks_at`):
+  a project pinned to each installed SDK by `global.json`, with a
+  `<LangVersion>` the evaluation cannot pin, evaluated with and without
+  `SKIP_VERSION_SUPPORTED_CHECK=1`. A `member _.M` file keeps its reading,
+  and a file whose tree moves only across F# 6 folds, exactly where the
+  compiler's graded floor is 8.0 and the variable is unset; under 10.0.1xx's
+  compiler and under the variable both are held to the whole ladder.
 
 ### D11. Feature flags and the remaining issue decisions
 
@@ -733,8 +775,8 @@ diagnostic for its feature" rather than "under a `Legality` one".
   is untrusted) and doubts the version as untrusted provenance does;
   `SKIP_VERSION_SUPPORTED_CHECK=1` in the build's environment lifts the floor,
   as the compiler does. The LSP crate's `sdk_language_diff` grades every
-  row against each installed SDK's `fsc.dll`. #732 can narrow a guessed
-  version's ladder by the same rows' floors. The compiler is taken to be the
+  row against each installed SDK's `fsc.dll`. A guessed version need only be
+  right from the same rows' floors up (D10). The compiler is taken to be the
   resolved SDK's own unless a replacement is visible outside the SDK; one
   hidden in an SDK-performed import a project property steers
   (`NuGetBuildTasksPackTargets`) or in a response file (`Directory.Build.rsp`)

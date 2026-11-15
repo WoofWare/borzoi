@@ -25,9 +25,10 @@
 //! with no floor: claiming an unknown compiler refuses a version would report a
 //! build failure that may not happen.
 //!
-//! The floor is also what #732 needs: a guessed version's invariance check
-//! may narrow its ladder to [`SdkLanguageFacts::floor`] only for an SDK that
-//! has a row, since a row's floor is graded and no row means the full ladder.
+//! The floor also bounds what a guessed version must get right: a reading
+//! taken at a guess need only be invariant from the floor of the compiler that
+//! checks the file up ([`checked_floor`]), and only a graded row has a floor
+//! above [`LanguageVersion::MIN`]; no row means the full ladder.
 //!
 //! # The boundary
 //!
@@ -247,6 +248,40 @@ pub struct ProjectCompiler {
     /// under which the compiler checks below its floor rather than refusing
     /// (FS3880).
     pub support_check_skipped: bool,
+}
+
+impl ProjectCompiler {
+    /// The oldest language version this compiler checks a file at: its
+    /// graded row's [`SdkLanguageFacts::floor`], below which it refuses the
+    /// version (FS3880) rather than check at it. [`LanguageVersion::MIN`] when
+    /// the build's environment lifts the floor (`SKIP_VERSION_SUPPORTED_CHECK=1`)
+    /// or the SDK has no row.
+    ///
+    /// A guessed language version need only be right from here up
+    /// ([`checked_floor`]): it is the only fact about the compiler a guess
+    /// leans on, and it rests on the compiler and its environment alone, never
+    /// on the version the build hands it. A doubted `$(LangVersion)` may name
+    /// any version, and `$(OtherFlags)` or a response file may pass another,
+    /// but the compiler refuses each below its floor all the same: it reads
+    /// nothing but the variable to lift the floor (`LanguageVersion.IsVersionSupported`),
+    /// and the SDK's `Fsc` task hands the compiler no environment of its own.
+    pub fn floor(&self) -> LanguageVersion {
+        if self.support_check_skipped {
+            return LanguageVersion::MIN;
+        }
+        SdkLanguageFacts::for_sdk(&self.sdk).map_or(LanguageVersion::MIN, |facts| facts.floor)
+    }
+}
+
+/// The oldest language version the compiler that builds a project checks a
+/// file at, where `compiler` is [`project_compiler`]'s answer: that compiler's
+/// [`ProjectCompiler::floor`], or [`LanguageVersion::MIN`] when it cannot be
+/// said. This is what a reading taken at a guessed version must be invariant
+/// from (`SyntaxRecovery::of_guessed_version`), so an unknown compiler, one
+/// with no graded row, and one with its floor lifted each leave the whole
+/// ladder to check.
+pub fn checked_floor(compiler: Option<&ProjectCompiler>) -> LanguageVersion {
+    compiler.map_or(LanguageVersion::MIN, ProjectCompiler::floor)
 }
 
 /// Whether `environment` lifts the compiler's support floor. The compiler reads
@@ -989,6 +1024,44 @@ mod tests {
             !project_compiler(&parsed, &HashMap::new(), &HashMap::new())
                 .unwrap()
                 .support_check_skipped
+        );
+    }
+
+    /// A guessed version need only be right from the compiler's floor up, and
+    /// the floor is above the bottom of the ladder only for a compiler with a
+    /// graded row that keeps it: 10.0.1xx's compiler checks at F# 4.6, and
+    /// `SKIP_VERSION_SUPPORTED_CHECK=1` lifts 10.0.4xx's.
+    #[test]
+    fn a_guess_is_held_to_the_floor_only_of_a_compiler_that_enforces_it() {
+        let floor = |version: &str, support_check_skipped| {
+            checked_floor(Some(&ProjectCompiler {
+                sdk: sdk(version),
+                support_check_skipped,
+            }))
+        };
+        assert_eq!(floor("10.0.401", false), V8_0);
+        assert_eq!(floor("10.0.499", false), V8_0);
+        assert_eq!(floor("10.0.401", true), LanguageVersion::MIN);
+        assert_eq!(floor("10.0.112", false), LanguageVersion::MIN);
+        for ungraded in ["10.0.300", "11.0.100", "9.0.100", "10.0.400-rc.1.1"] {
+            assert_eq!(floor(ungraded, false), LanguageVersion::MIN, "{ungraded}");
+        }
+        assert_eq!(checked_floor(None), LanguageVersion::MIN);
+        // Through the evaluation: the environment it saw decides.
+        let parsed = on_sdk("10.0.401");
+        let skipping =
+            HashMap::from([("SKIP_VERSION_SUPPORTED_CHECK".to_string(), "1".to_string())]);
+        for (environment, expected) in [(HashMap::new(), V8_0), (skipping, LanguageVersion::MIN)] {
+            assert_eq!(
+                checked_floor(project_compiler(&parsed, &environment, &HashMap::new()).as_ref()),
+                expected
+            );
+        }
+        assert_eq!(
+            checked_floor(
+                project_compiler(&on_sdk("10.0.112"), &HashMap::new(), &HashMap::new()).as_ref()
+            ),
+            LanguageVersion::MIN
         );
     }
 
