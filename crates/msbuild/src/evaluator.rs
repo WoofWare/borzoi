@@ -3531,13 +3531,21 @@ impl<'r> State<'r> {
     ///
     /// "Leans on" is about the *outcome*: see [`Self::condition_trust`].
     ///
-    /// A name whose write the walk refused reads as undefined here, but the
-    /// real build holds the value it computed, so a condition that rests on
-    /// one leans on a value that may differ too (#780).
+    /// A name whose write the walk refused, and which no later write bound,
+    /// reads as undefined here, but the real build holds the value it
+    /// computed, so a condition that rests on one leans on a value that may
+    /// differ too (#780). A refused name a later clean write bound holds a
+    /// value computed exactly (the mark outlives the overwrite for the splice
+    /// alone; [`Trust::refused`]).
     fn condition_reads_untrusted_value(&self, node: Node<'_, '_>) -> bool {
         attribute(node, "Condition").as_deref().is_some_and(|cond| {
-            let trust = self.condition_trust(cond, None);
-            trust.reference_is_untrusted() || trust.refused()
+            if self.condition_trust(cond, None).reference_is_untrusted() {
+                return true;
+            }
+            !self.condition_is_decided_exactly(cond, None, &|name| {
+                self.undefined_read_is_exact(name)
+            }) && properties::property_references(cond)
+                .any(|name| !self.lookup.is_bound(name) && self.trust_of(name).refused())
         })
     }
 
