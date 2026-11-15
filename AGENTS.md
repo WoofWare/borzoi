@@ -27,9 +27,9 @@ This is a Cargo workspace with nine members:
   `Parse::view::<syntax::vN::ParsedInput>()`. A facade owns every node type
   and enum of its version's surface; `tools/astgen` generates each from its
   lock (`crates/cst/facades/vN.lock`), and a version whose surface equals an
-  earlier one's is an alias of it. An unpublished facade's lock (`v11`,
-  `preview`) is derived from the union's and regenerated freely. The facades
-  up to `v10` are **published**: frozen, their locks astgen's input rather
+  earlier one's is an alias of it. The unpublished `preview` facade's lock is
+  derived from the union's and regenerated freely. The facades up to `v11`
+  are **published**: frozen, their locks astgen's input rather
   than its output, changing only by the additions
   `tools/ci/facade-lock-check.sh` allows, each distinct one with a frozen
   consumer fixture (`tests/all/facade_consumers/`) that must keep compiling.
