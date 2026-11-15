@@ -201,8 +201,8 @@ impl<'src> Parser<'src> {
     /// Consume the rest of an unfinished member as `ERROR`, the tokens FCS's
     /// error recovery discards after a member's `recover` arm (an abstract
     /// slot that stops after its keywords, name or `:`): everything up to the
-    /// next layout token, `;`, `;;`, closer or member keyword outside the
-    /// offside blocks the rest itself opens. Layout tokens are consumed zero-width, like
+    /// next layout token, `;`, `;;`, closer, or member or class-binding
+    /// keyword outside the offside blocks the rest itself opens. Layout tokens are consumed zero-width, like
     /// [`Self::skip_offside_block_as_error`]'s. A no-op when the member
     /// already ends at the cursor.
     ///
@@ -222,6 +222,23 @@ impl<'src> Parser<'src> {
         // which the lex filter's contexts no longer frame a next member.
         let mut crossed_layout = false;
         while let Some((res, _)) = self.peek() {
+            // A closer of the rest's own bracket that LexFilter swallowed is
+            // on the raw stream only: take it with its bracket, or it is left
+            // pending for whatever follows the member.
+            if brackets > 0
+                && let Some((Token::RParen | Token::RBrace, span)) =
+                    self.next_non_trivia_raw_at_pos_with_span()
+                && !self.filtered_stream_carries(span.start)
+            {
+                self.bump_swallowed_closer(
+                    SyntaxKind::ERROR,
+                    |t| matches!(t, Token::RParen | Token::RBrace),
+                    ")",
+                    "an unfinished member",
+                );
+                brackets -= 1;
+                continue;
+            }
             match res {
                 Ok(FilteredToken::Virtual(Virtual::BlockBegin)) => blocks += 1,
                 Ok(FilteredToken::Virtual(Virtual::BlockEnd)) if blocks > 0 => blocks -= 1,
@@ -239,7 +256,7 @@ impl<'src> Parser<'src> {
                 {
                     return;
                 }
-                // The next member's keyword, on the same line: FCS's error
+                // The next member's or class binding's keyword, on the same line: FCS's error
                 // recovery shifts it as the start of the next member. After a
                 // bracket, a layout token or a `with` of the rest's, the lex
                 // filter's contexts around the member are the rest's, not the
@@ -252,11 +269,14 @@ impl<'src> Parser<'src> {
                     | Token::Static
                     | Token::Val
                     | Token::New
-                    | Token::Inherit,
+                    | Token::Inherit
+                    | Token::Let
+                    | Token::Use
+                    | Token::Do,
                 ))
-                | Ok(FilteredToken::Virtual(Virtual::InterfaceMember))
-                    if brackets == 0 && !crossed_layout =>
-                {
+                | Ok(FilteredToken::Virtual(
+                    Virtual::InterfaceMember | Virtual::Let | Virtual::Do,
+                )) if brackets == 0 && !crossed_layout => {
                     return;
                 }
                 Ok(FilteredToken::Raw(

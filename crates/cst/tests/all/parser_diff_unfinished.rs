@@ -30,6 +30,17 @@ enum Want {
 /// would otherwise let the relation hold while we lose it. A listed cell that
 /// no longer diverges fails too, so the list cannot go stale.
 fn assert_cells(cells: impl IntoIterator<Item = (String, Want)>, diverging: &[&str]) {
+    let failures = check_cells(cells, diverging);
+    assert!(
+        failures.is_empty(),
+        "{} cells fail:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// [`assert_cells`]'s failures, one line each.
+fn check_cells(cells: impl IntoIterator<Item = (String, Want)>, diverging: &[&str]) -> Vec<String> {
     use crate::common::recovery::{fcs_units, grade, our_units};
     let mut failures = Vec::new();
     let mut unused: Vec<&str> = diverging.to_vec();
@@ -72,16 +83,12 @@ fn assert_cells(cells: impl IntoIterator<Item = (String, Want)>, diverging: &[&s
             }
         }
     }
-    assert!(
-        unused.is_empty(),
-        "listed cells the grid no longer generates: {unused:?}"
-    );
-    assert!(
-        failures.is_empty(),
-        "{} cells fail:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
+    if !unused.is_empty() {
+        failures.push(format!(
+            "listed cells the grid no longer generates: {unused:?}"
+        ));
+    }
+    failures
 }
 
 /// An abstract slot that stops after its keywords, its access or `inline`
@@ -191,6 +198,17 @@ fn recover_unfinished_abstract_slot_grid() {
 /// loss check cannot see one discarded with an unfinished member's rest. A
 /// tree the normaliser does not model counts no members.
 fn assert_members_survive(sources: &[String]) {
+    let lost = check_members_survive(sources);
+    assert!(
+        lost.is_empty(),
+        "{} types lose members FCS keeps:\n{}",
+        lost.len(),
+        lost.join("\n")
+    );
+}
+
+/// [`assert_members_survive`]'s failures, one line each.
+fn check_members_survive(sources: &[String]) -> Vec<String> {
     use crate::common::normalised_ast::{
         NormalisedDecl, NormalisedRoot, NormalisedTypeRepr, normalise_fcs_dump, normalise_parse,
     };
@@ -233,12 +251,7 @@ fn assert_members_survive(sources: &[String]) {
             lost.push(format!("{src:?}: FCS keeps {fcs} members, ours {ours}"));
         }
     }
-    assert!(
-        lost.is_empty(),
-        "{} types lose members FCS keeps:\n{}",
-        lost.len(),
-        lost.join("\n")
-    );
+    lost
 }
 
 /// A `when` with no guard (FCS's `parenPattern WHEN` recovery arms): before
@@ -462,4 +475,117 @@ fn recover_raw_let_after_a_binding_grid() {
         }
     }
     assert_cells(cells, &[]);
+}
+/// What follows an unfinished construct, systematically: each construct of
+/// the grids above (an unfinished slot in a type body, a binding whose
+/// right-hand side recovers in place) followed by each declaration or member
+/// a buffer may hold next, on the same line or on the next at several
+/// indents. Whatever the recovery, every unit FCS keeps should survive under
+/// its key, and the type keep as many members as FCS's. Most of the cells
+/// that do not are older than these ports (a raw `type` or `let` after a
+/// broken member, FCS's keeping a declaration its error state reached): each
+/// is pinned in `tests/manifests/unfinished_followers.txt`, and must be one
+/// where `main`'s parser fails too (`unfinished_followers.base.txt`).
+#[test]
+fn recover_followers_of_unfinished_constructs_grid() {
+    const SLOTS: &[&str] = &[
+        "abstract",
+        "abstract P",
+        "abstract P:",
+        "abstract (x)",
+        "abstract P 1",
+    ];
+    const MEMBER_FOLLOWERS: &[&str] = &[
+        "member _.Q = 1",
+        "let q = 1",
+        "do ()",
+        "with get",
+        "with get member _.Q = 1",
+        "interface I",
+        "inherit B()",
+        "static member S = 1",
+        "override _.O = 1",
+    ];
+    const DECL_FOLLOWERS: &[&str] = &[
+        "type S = int",
+        "module N = let n = 1",
+        "open System",
+        "exception E",
+        "[<A>] let q = 1",
+        "let y = 1",
+        "do ()",
+        "#nowarn \"1\"",
+    ];
+    const RHS: &[&str] = &[
+        "a",
+        "a *",
+        "if a * then 1 else 2",
+        "match a with | b when -> ()",
+        "f (a *) b",
+    ];
+    let mut cells = Vec::new();
+    let mut members = Vec::new();
+    for slot in SLOTS {
+        for next in MEMBER_FOLLOWERS {
+            for sep in [" ", "\n    ", "\n        "] {
+                let src = format!("module M\ntype T() =\n    {slot}{sep}{next}\nlet x = 1\n");
+                members.push(src.clone());
+                cells.push((src, Want::Agree));
+            }
+        }
+        for next in DECL_FOLLOWERS {
+            for sep in ["\n", "\n "] {
+                cells.push((
+                    format!("module M\ntype T() =\n    {slot}{sep}{next}\nlet x = 1\n"),
+                    Want::Agree,
+                ));
+            }
+        }
+    }
+    for rhs in RHS {
+        for next in DECL_FOLLOWERS {
+            for sep in ["\n", "\n ", "\n    "] {
+                cells.push((
+                    format!("module M\nlet x = {rhs}{sep}{next}\nlet z = 2\n"),
+                    Want::Agree,
+                ));
+                cells.push((
+                    format!("module M\nmodule A =\n    let x = {rhs}{}{next}\n    let z = 2\nlet w = 3\n", sep.replace('\n', "\n    ")),
+                    Want::Agree,
+                ));
+            }
+        }
+    }
+    use borzoi_oracle_harness::manifest::{Manifest, UPDATE_ENV};
+    let mut failures = check_members_survive(&members);
+    failures.extend(check_cells(cells, &[]));
+    // Each failure as a key spelled the same under any parser: the cell's
+    // source, then what fails.
+    let keys: Vec<String> = failures
+        .iter()
+        .map(|f| {
+            // `{src:?}: FCS keeps …` (a member), `{src:?} wants …` or
+            // `{src:?} loses <unit>`.
+            if let Some(end) = f.find("\": FCS keeps") {
+                return format!("{} | loses a member", &f[..=end]);
+            }
+            let end = f.find("\" ").expect("a failure starts with its source");
+            let what = &f[end + 2..];
+            let what = if what.starts_with("loses ") {
+                what.to_string()
+            } else {
+                "divergent".to_string()
+            };
+            format!("{} | {what}", &f[..=end])
+        })
+        .collect();
+    let actual = Manifest::from_entries(keys.clone()).expect("one line per key");
+    crate::common::corpus_manifest::check_manifest(
+        "unfinished_followers",
+        &actual,
+        &format!(
+            "{UPDATE_ENV}=1 nix develop -c cargo test -p borzoi-cst --test all parser_diff_unfinished::recover_followers"
+        ),
+    );
+    crate::common::corpus_manifest::check_no_worse_than_base("unfinished_followers", &keys, &[]);
 }

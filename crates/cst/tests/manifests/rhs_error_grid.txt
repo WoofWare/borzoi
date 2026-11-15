@@ -1,12 +1,7 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
 #   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-cst --test all parser_diff_recovery::recover_rhs_error_grid
-nested | (0 ) | between (*c*) exception E | loses `exception E`
-nested | (0 ) | between (*c*) module B = List | loses `module B = List`
 nested | (0 ) | between (*c*) module B =⏎    let w = 1 | loses `let w = 1`
-nested | (0 ) | between (*c*) module B =⏎    let w = 1 | loses `module B =`
-nested | (0 ) | between (*c*) open System | loses `open System`
-nested | (0 ) | between (*c*) type T = int | loses `type T = int`
 nested | (0 ) | between (*c*) w | loses `let a = (0 )`
 nested | (0 ) | between ; exception E | loses `let x = 1`
 nested | (0 ) | between ; let w = 1 | loses `let x = 1`
@@ -38,12 +33,7 @@ nested | (0 ) | between module B =⏎    let w = 1 | loses `module B =`
 nested | (0 ) | between open System | loses `let x = 1`
 nested | (0 ) | between open System | loses `open System`
 nested | (0 ) | between type T = int | loses `type T = int`
-nested | (0 ) | body (*c*) exception E | loses `exception E`
-nested | (0 ) | body (*c*) module B = List | loses `module B = List`
 nested | (0 ) | body (*c*) module B =⏎    let w = 1 | loses `let w = 1`
-nested | (0 ) | body (*c*) module B =⏎    let w = 1 | loses `module B =`
-nested | (0 ) | body (*c*) open System | loses `open System`
-nested | (0 ) | body (*c*) type T = int | loses `type T = int`
 nested | (0 ) | body (*c*) w | loses `let a = (0 )`
 nested | (0 ) | body [<A>] module B =⏎    let w = 1 | loses `let w = 1`
 nested | (0 ) | body [<A>] open System | loses `[<A>] open System`
@@ -59,28 +49,8 @@ nested | (0 ) | deeper ; module B =⏎    let w = 1 | loses `module B =`
 nested | (0 ) | deeper ; open System | loses `open System`
 nested | (0 ) | deeper ; type T = int | loses `type T = int`
 nested | (0 ) | deeper ; w | loses `w`
-nested | (0 ) | deeper [<A>] exception E | loses `[<A>] exception E`
-nested | (0 ) | deeper [<A>] let w = 1 | loses `[<A>] let w = 1`
-nested | (0 ) | deeper [<A>] module B =⏎    let w = 1 | loses `[<A>] module B =`
 nested | (0 ) | deeper [<A>] module B =⏎    let w = 1 | loses `let w = 1`
-nested | (0 ) | deeper [<A>] type T = int | loses `[<A>] type T = int`
-nested | (0 ) | deeper [<A>]⏎exception E | loses `[<A>]`
-nested | (0 ) | deeper [<A>]⏎let w = 1 | loses `[<A>]`
-nested | (0 ) | deeper [<A>]⏎module B =⏎    let w = 1 | loses `[<A>]`
-nested | (0 ) | deeper [<A>]⏎module B =⏎    let w = 1 | loses `let w = 1`
-nested | (0 ) | deeper [<A>]⏎type T = int | loses `[<A>]`
-nested | (0 ) | deeper exception E | loses `exception E`
-nested | (0 ) | deeper module B = List | loses `module B = List`
-nested | (0 ) | deeper module B =⏎    let w = 1 | loses `let w = 1`
-nested | (0 ) | deeper module B =⏎    let w = 1 | loses `module B =`
-nested | (0 ) | deeper open System | loses `open System`
-nested | (0 ) | deeper type T = int | loses `type T = int`
 nested | (0 ) | deeper w | loses `let a = (0 )`
-nested | (0 ) | outer (*c*) exception E | loses `exception E`
-nested | (0 ) | outer (*c*) module B = List | loses `module B = List`
-nested | (0 ) | outer (*c*) module B =⏎    let w = 1 | loses `module B =`
-nested | (0 ) | outer (*c*) open System | loses `open System`
-nested | (0 ) | outer (*c*) type T = int | loses `type T = int`
 nested | (0 ) | outer (*c*) w | loses `let a = (0 )`
 nested | (0 ) | outer ; exception E | loses `let x = 1`
 nested | (0 ) | outer ; let w = 1 | loses `let x = 1`
@@ -2675,18 +2645,12 @@ nested | 0 in | same-line open System | loses `open System`
 nested | 0 in | same-line type T = int | loses `let a = 0 in type T = int`
 nested | 0 in | same-line type T = int | loses `type T = int`
 nested | 0 type | between (*c*) exception E | loses `exception E`
-nested | 0 type | between (*c*) exception E | loses `type`
 nested | 0 type | between (*c*) let w = 1 | loses `type`
 nested | 0 type | between (*c*) module B = List | loses `module B = List`
-nested | 0 type | between (*c*) module B = List | loses `type`
 nested | 0 type | between (*c*) module B =⏎    let w = 1 | loses `let w = 1`
 nested | 0 type | between (*c*) module B =⏎    let w = 1 | loses `module B =`
-nested | 0 type | between (*c*) module B =⏎    let w = 1 | loses `type`
-nested | 0 type | between (*c*) open System | loses `open System`
 nested | 0 type | between (*c*) open System | loses `type`
 nested | 0 type | between (*c*) type T = int | loses `type T = int`
-nested | 0 type | between (*c*) type T = int | loses `type`
-nested | 0 type | between (*c*) w | loses `type`
 nested | 0 type | between ; exception E | loses `exception E`
 nested | 0 type | between ; exception E | loses `let x = 1`
 nested | 0 type | between ; exception E | loses `type`
@@ -2748,18 +2712,12 @@ nested | 0 type | between type T = int | loses `type T = int`
 nested | 0 type | between type T = int | loses `type`
 nested | 0 type | between w | loses `type`
 nested | 0 type | body (*c*) exception E | loses `exception E`
-nested | 0 type | body (*c*) exception E | loses `type`
 nested | 0 type | body (*c*) let w = 1 | loses `type`
 nested | 0 type | body (*c*) module B = List | loses `module B = List`
-nested | 0 type | body (*c*) module B = List | loses `type`
 nested | 0 type | body (*c*) module B =⏎    let w = 1 | loses `let w = 1`
 nested | 0 type | body (*c*) module B =⏎    let w = 1 | loses `module B =`
-nested | 0 type | body (*c*) module B =⏎    let w = 1 | loses `type`
-nested | 0 type | body (*c*) open System | loses `open System`
 nested | 0 type | body (*c*) open System | loses `type`
 nested | 0 type | body (*c*) type T = int | loses `type T = int`
-nested | 0 type | body (*c*) type T = int | loses `type`
-nested | 0 type | body (*c*) w | loses `type`
 nested | 0 type | body [<A>] module B =⏎    let w = 1 | loses `let w = 1`
 nested | 0 type | body let w = 1 | loses `type`
 nested | 0 type | body open System | loses `type`
@@ -2776,74 +2734,33 @@ nested | 0 type | deeper (*c*) open System | loses `type`
 nested | 0 type | deeper (*c*) type T = int | loses `type T = int`
 nested | 0 type | deeper (*c*) type T = int | loses `type`
 nested | 0 type | deeper (*c*) w | loses `type`
-nested | 0 type | deeper ; exception E | loses `exception E`
-nested | 0 type | deeper ; exception E | loses `type`
-nested | 0 type | deeper ; let w = 1 | loses `let w = 1`
-nested | 0 type | deeper ; let w = 1 | loses `type`
-nested | 0 type | deeper ; module B = List | loses `module B = List`
-nested | 0 type | deeper ; module B = List | loses `type`
-nested | 0 type | deeper ; module B =⏎    let w = 1 | loses `let w = 1`
-nested | 0 type | deeper ; module B =⏎    let w = 1 | loses `module B =`
-nested | 0 type | deeper ; module B =⏎    let w = 1 | loses `type`
-nested | 0 type | deeper ; open System | loses `open System`
-nested | 0 type | deeper ; open System | loses `type`
-nested | 0 type | deeper ; type T = int | loses `type T = int`
-nested | 0 type | deeper ; type T = int | loses `type`
-nested | 0 type | deeper ; w | loses `type`
-nested | 0 type | deeper ; w | loses `w`
 nested | 0 type | deeper [<A>] exception E | loses `exception E`
-nested | 0 type | deeper [<A>] exception E | loses `type`
 nested | 0 type | deeper [<A>] let w = 1 | loses `let w = 1`
-nested | 0 type | deeper [<A>] let w = 1 | loses `type`
 nested | 0 type | deeper [<A>] module B = List | loses `module B = List`
-nested | 0 type | deeper [<A>] module B = List | loses `type`
 nested | 0 type | deeper [<A>] module B =⏎    let w = 1 | loses `let w = 1`
 nested | 0 type | deeper [<A>] module B =⏎    let w = 1 | loses `module B =`
-nested | 0 type | deeper [<A>] module B =⏎    let w = 1 | loses `type`
 nested | 0 type | deeper [<A>] open System | loses `open System`
-nested | 0 type | deeper [<A>] open System | loses `type`
 nested | 0 type | deeper [<A>] type T = int | loses `type T = int`
-nested | 0 type | deeper [<A>] type T = int | loses `type`
-nested | 0 type | deeper [<A>] w | loses `type`
 nested | 0 type | deeper [<A>]⏎exception E | loses `exception E`
-nested | 0 type | deeper [<A>]⏎exception E | loses `type`
 nested | 0 type | deeper [<A>]⏎let w = 1 | loses `let w = 1`
-nested | 0 type | deeper [<A>]⏎let w = 1 | loses `type`
 nested | 0 type | deeper [<A>]⏎module B = List | loses `module B = List`
-nested | 0 type | deeper [<A>]⏎module B = List | loses `type`
 nested | 0 type | deeper [<A>]⏎module B =⏎    let w = 1 | loses `let w = 1`
 nested | 0 type | deeper [<A>]⏎module B =⏎    let w = 1 | loses `module B =`
-nested | 0 type | deeper [<A>]⏎module B =⏎    let w = 1 | loses `type`
 nested | 0 type | deeper [<A>]⏎open System | loses `open System`
-nested | 0 type | deeper [<A>]⏎open System | loses `type`
 nested | 0 type | deeper [<A>]⏎type T = int | loses `type T = int`
-nested | 0 type | deeper [<A>]⏎type T = int | loses `type`
-nested | 0 type | deeper [<A>]⏎w | loses `type`
 nested | 0 type | deeper exception E | loses `exception E`
-nested | 0 type | deeper exception E | loses `type`
 nested | 0 type | deeper let w = 1 | loses `type`
 nested | 0 type | deeper module B = List | loses `module B = List`
-nested | 0 type | deeper module B = List | loses `type`
 nested | 0 type | deeper module B =⏎    let w = 1 | loses `let w = 1`
 nested | 0 type | deeper module B =⏎    let w = 1 | loses `module B =`
-nested | 0 type | deeper module B =⏎    let w = 1 | loses `type`
-nested | 0 type | deeper open System | loses `open System`
 nested | 0 type | deeper open System | loses `type`
 nested | 0 type | deeper type T = int | loses `type T = int`
-nested | 0 type | deeper type T = int | loses `type`
-nested | 0 type | deeper w | loses `type`
 nested | 0 type | outer (*c*) exception E | loses `exception E`
-nested | 0 type | outer (*c*) exception E | loses `type`
 nested | 0 type | outer (*c*) let w = 1 | loses `type`
 nested | 0 type | outer (*c*) module B = List | loses `module B = List`
-nested | 0 type | outer (*c*) module B = List | loses `type`
 nested | 0 type | outer (*c*) module B =⏎    let w = 1 | loses `module B =`
-nested | 0 type | outer (*c*) module B =⏎    let w = 1 | loses `type`
-nested | 0 type | outer (*c*) open System | loses `open System`
 nested | 0 type | outer (*c*) open System | loses `type`
 nested | 0 type | outer (*c*) type T = int | loses `type T = int`
-nested | 0 type | outer (*c*) type T = int | loses `type`
-nested | 0 type | outer (*c*) w | loses `type`
 nested | 0 type | outer ; exception E | loses `let x = 1`
 nested | 0 type | outer ; let w = 1 | loses `let x = 1`
 nested | 0 type | outer ; module B = List | loses `let x = 1`
@@ -6794,12 +6711,7 @@ nested | begin 0 else 1 | same-line type T = int | loses `let z = 3`
 nested | begin 0 else 1 | same-line type T = int | loses `type T = int`
 nested | begin 0 else 1 | same-line w | loses `let x = 1`
 nested | begin 0 else 1 | same-line w | loses `let z = 3`
-nested | begin 0 end | between (*c*) exception E | loses `exception E`
-nested | begin 0 end | between (*c*) module B = List | loses `module B = List`
 nested | begin 0 end | between (*c*) module B =⏎    let w = 1 | loses `let w = 1`
-nested | begin 0 end | between (*c*) module B =⏎    let w = 1 | loses `module B =`
-nested | begin 0 end | between (*c*) open System | loses `open System`
-nested | begin 0 end | between (*c*) type T = int | loses `type T = int`
 nested | begin 0 end | between (*c*) w | loses `let a = begin 0 end`
 nested | begin 0 end | between ; exception E | loses `let x = 1`
 nested | begin 0 end | between ; let w = 1 | loses `let x = 1`
@@ -6831,12 +6743,7 @@ nested | begin 0 end | between module B =⏎    let w = 1 | loses `module B =`
 nested | begin 0 end | between open System | loses `let x = 1`
 nested | begin 0 end | between open System | loses `open System`
 nested | begin 0 end | between type T = int | loses `type T = int`
-nested | begin 0 end | body (*c*) exception E | loses `exception E`
-nested | begin 0 end | body (*c*) module B = List | loses `module B = List`
 nested | begin 0 end | body (*c*) module B =⏎    let w = 1 | loses `let w = 1`
-nested | begin 0 end | body (*c*) module B =⏎    let w = 1 | loses `module B =`
-nested | begin 0 end | body (*c*) open System | loses `open System`
-nested | begin 0 end | body (*c*) type T = int | loses `type T = int`
 nested | begin 0 end | body (*c*) w | loses `let a = begin 0 end`
 nested | begin 0 end | body [<A>] module B =⏎    let w = 1 | loses `let w = 1`
 nested | begin 0 end | body [<A>] open System | loses `[<A>] open System`
@@ -6852,28 +6759,8 @@ nested | begin 0 end | deeper ; module B =⏎    let w = 1 | loses `module B =`
 nested | begin 0 end | deeper ; open System | loses `open System`
 nested | begin 0 end | deeper ; type T = int | loses `type T = int`
 nested | begin 0 end | deeper ; w | loses `w`
-nested | begin 0 end | deeper [<A>] exception E | loses `[<A>] exception E`
-nested | begin 0 end | deeper [<A>] let w = 1 | loses `[<A>] let w = 1`
-nested | begin 0 end | deeper [<A>] module B =⏎    let w = 1 | loses `[<A>] module B =`
 nested | begin 0 end | deeper [<A>] module B =⏎    let w = 1 | loses `let w = 1`
-nested | begin 0 end | deeper [<A>] type T = int | loses `[<A>] type T = int`
-nested | begin 0 end | deeper [<A>]⏎exception E | loses `[<A>]`
-nested | begin 0 end | deeper [<A>]⏎let w = 1 | loses `[<A>]`
-nested | begin 0 end | deeper [<A>]⏎module B =⏎    let w = 1 | loses `[<A>]`
-nested | begin 0 end | deeper [<A>]⏎module B =⏎    let w = 1 | loses `let w = 1`
-nested | begin 0 end | deeper [<A>]⏎type T = int | loses `[<A>]`
-nested | begin 0 end | deeper exception E | loses `exception E`
-nested | begin 0 end | deeper module B = List | loses `module B = List`
-nested | begin 0 end | deeper module B =⏎    let w = 1 | loses `let w = 1`
-nested | begin 0 end | deeper module B =⏎    let w = 1 | loses `module B =`
-nested | begin 0 end | deeper open System | loses `open System`
-nested | begin 0 end | deeper type T = int | loses `type T = int`
 nested | begin 0 end | deeper w | loses `let a = begin 0 end`
-nested | begin 0 end | outer (*c*) exception E | loses `exception E`
-nested | begin 0 end | outer (*c*) module B = List | loses `module B = List`
-nested | begin 0 end | outer (*c*) module B =⏎    let w = 1 | loses `module B =`
-nested | begin 0 end | outer (*c*) open System | loses `open System`
-nested | begin 0 end | outer (*c*) type T = int | loses `type T = int`
 nested | begin 0 end | outer (*c*) w | loses `let a = begin 0 end`
 nested | begin 0 end | outer ; exception E | loses `let x = 1`
 nested | begin 0 end | outer ; let w = 1 | loses `let x = 1`
@@ -11749,12 +11636,7 @@ nested | try 0 with | _ -> } | same-line [<A>]⏎module B =⏎    let w = 1 | lo
 nested | try 0 with | _ -> } | same-line [<A>]⏎open System | loses `open System`
 nested | try 0 with | _ -> } | same-line [<A>]⏎type T = int | loses `type T = int`
 nested | try 0 with | _ -> } | same-line [<A>]⏎w | loses `let a = try 0 with | _ -> } [<A>]`
-top | (0 ) | body (*c*) exception E | loses `exception E`
-top | (0 ) | body (*c*) module B = List | loses `module B = List`
 top | (0 ) | body (*c*) module B =⏎    let w = 1 | loses `let w = 1`
-top | (0 ) | body (*c*) module B =⏎    let w = 1 | loses `module B =`
-top | (0 ) | body (*c*) open System | loses `open System`
-top | (0 ) | body (*c*) type T = int | loses `type T = int`
 top | (0 ) | body (*c*) w | loses `let a = (0 )`
 top | (0 ) | body [<A>] module B =⏎    let w = 1 | loses `let w = 1`
 top | (0 ) | body [<A>] open System | loses `[<A>] open System`
@@ -11770,22 +11652,7 @@ top | (0 ) | deeper ; module B =⏎    let w = 1 | loses `module B =`
 top | (0 ) | deeper ; open System | loses `open System`
 top | (0 ) | deeper ; type T = int | loses `type T = int`
 top | (0 ) | deeper ; w | loses `w`
-top | (0 ) | deeper [<A>] exception E | loses `[<A>] exception E`
-top | (0 ) | deeper [<A>] let w = 1 | loses `[<A>] let w = 1`
-top | (0 ) | deeper [<A>] module B =⏎    let w = 1 | loses `[<A>] module B =`
 top | (0 ) | deeper [<A>] module B =⏎    let w = 1 | loses `let w = 1`
-top | (0 ) | deeper [<A>] type T = int | loses `[<A>] type T = int`
-top | (0 ) | deeper [<A>]⏎exception E | loses `[<A>]`
-top | (0 ) | deeper [<A>]⏎let w = 1 | loses `[<A>]`
-top | (0 ) | deeper [<A>]⏎module B =⏎    let w = 1 | loses `[<A>]`
-top | (0 ) | deeper [<A>]⏎module B =⏎    let w = 1 | loses `let w = 1`
-top | (0 ) | deeper [<A>]⏎type T = int | loses `[<A>]`
-top | (0 ) | deeper exception E | loses `exception E`
-top | (0 ) | deeper module B = List | loses `module B = List`
-top | (0 ) | deeper module B =⏎    let w = 1 | loses `let w = 1`
-top | (0 ) | deeper module B =⏎    let w = 1 | loses `module B =`
-top | (0 ) | deeper open System | loses `open System`
-top | (0 ) | deeper type T = int | loses `type T = int`
 top | (0 ) | deeper w | loses `let a = (0 )`
 top | (0 ) | same-line (*c*) module B = List | loses `module B = List`
 top | (0 ) | same-line (*c*) module B =⏎    let w = 1 | loses `module B =`
@@ -13071,18 +12938,12 @@ top | 0 in | same-line open System | loses `open System`
 top | 0 in | same-line type T = int | loses `let a = 0 in type T = int`
 top | 0 in | same-line type T = int | loses `type T = int`
 top | 0 type | body (*c*) exception E | loses `exception E`
-top | 0 type | body (*c*) exception E | loses `type`
 top | 0 type | body (*c*) let w = 1 | loses `type`
 top | 0 type | body (*c*) module B = List | loses `module B = List`
-top | 0 type | body (*c*) module B = List | loses `type`
 top | 0 type | body (*c*) module B =⏎    let w = 1 | loses `let w = 1`
 top | 0 type | body (*c*) module B =⏎    let w = 1 | loses `module B =`
-top | 0 type | body (*c*) module B =⏎    let w = 1 | loses `type`
-top | 0 type | body (*c*) open System | loses `open System`
 top | 0 type | body (*c*) open System | loses `type`
 top | 0 type | body (*c*) type T = int | loses `type T = int`
-top | 0 type | body (*c*) type T = int | loses `type`
-top | 0 type | body (*c*) w | loses `type`
 top | 0 type | body let w = 1 | loses `type`
 top | 0 type | body open System | loses `type`
 top | 0 type | deeper (*c*) exception E | loses `exception E`
@@ -13098,62 +12959,27 @@ top | 0 type | deeper (*c*) open System | loses `type`
 top | 0 type | deeper (*c*) type T = int | loses `type T = int`
 top | 0 type | deeper (*c*) type T = int | loses `type`
 top | 0 type | deeper (*c*) w | loses `type`
-top | 0 type | deeper ; exception E | loses `exception E`
-top | 0 type | deeper ; exception E | loses `type`
-top | 0 type | deeper ; let w = 1 | loses `let w = 1`
-top | 0 type | deeper ; let w = 1 | loses `type`
-top | 0 type | deeper ; module B = List | loses `module B = List`
-top | 0 type | deeper ; module B = List | loses `type`
-top | 0 type | deeper ; module B =⏎    let w = 1 | loses `let w = 1`
-top | 0 type | deeper ; module B =⏎    let w = 1 | loses `module B =`
-top | 0 type | deeper ; module B =⏎    let w = 1 | loses `type`
-top | 0 type | deeper ; open System | loses `open System`
-top | 0 type | deeper ; open System | loses `type`
-top | 0 type | deeper ; type T = int | loses `type T = int`
-top | 0 type | deeper ; type T = int | loses `type`
-top | 0 type | deeper ; w | loses `type`
-top | 0 type | deeper ; w | loses `w`
 top | 0 type | deeper [<A>] exception E | loses `exception E`
-top | 0 type | deeper [<A>] exception E | loses `type`
 top | 0 type | deeper [<A>] let w = 1 | loses `let w = 1`
-top | 0 type | deeper [<A>] let w = 1 | loses `type`
 top | 0 type | deeper [<A>] module B = List | loses `module B = List`
-top | 0 type | deeper [<A>] module B = List | loses `type`
 top | 0 type | deeper [<A>] module B =⏎    let w = 1 | loses `let w = 1`
 top | 0 type | deeper [<A>] module B =⏎    let w = 1 | loses `module B =`
-top | 0 type | deeper [<A>] module B =⏎    let w = 1 | loses `type`
 top | 0 type | deeper [<A>] open System | loses `open System`
-top | 0 type | deeper [<A>] open System | loses `type`
 top | 0 type | deeper [<A>] type T = int | loses `type T = int`
-top | 0 type | deeper [<A>] type T = int | loses `type`
-top | 0 type | deeper [<A>] w | loses `type`
 top | 0 type | deeper [<A>]⏎exception E | loses `exception E`
-top | 0 type | deeper [<A>]⏎exception E | loses `type`
 top | 0 type | deeper [<A>]⏎let w = 1 | loses `let w = 1`
-top | 0 type | deeper [<A>]⏎let w = 1 | loses `type`
 top | 0 type | deeper [<A>]⏎module B = List | loses `module B = List`
-top | 0 type | deeper [<A>]⏎module B = List | loses `type`
 top | 0 type | deeper [<A>]⏎module B =⏎    let w = 1 | loses `let w = 1`
 top | 0 type | deeper [<A>]⏎module B =⏎    let w = 1 | loses `module B =`
-top | 0 type | deeper [<A>]⏎module B =⏎    let w = 1 | loses `type`
 top | 0 type | deeper [<A>]⏎open System | loses `open System`
-top | 0 type | deeper [<A>]⏎open System | loses `type`
 top | 0 type | deeper [<A>]⏎type T = int | loses `type T = int`
-top | 0 type | deeper [<A>]⏎type T = int | loses `type`
-top | 0 type | deeper [<A>]⏎w | loses `type`
 top | 0 type | deeper exception E | loses `exception E`
-top | 0 type | deeper exception E | loses `type`
 top | 0 type | deeper let w = 1 | loses `type`
 top | 0 type | deeper module B = List | loses `module B = List`
-top | 0 type | deeper module B = List | loses `type`
 top | 0 type | deeper module B =⏎    let w = 1 | loses `let w = 1`
 top | 0 type | deeper module B =⏎    let w = 1 | loses `module B =`
-top | 0 type | deeper module B =⏎    let w = 1 | loses `type`
-top | 0 type | deeper open System | loses `open System`
 top | 0 type | deeper open System | loses `type`
 top | 0 type | deeper type T = int | loses `type T = int`
-top | 0 type | deeper type T = int | loses `type`
-top | 0 type | deeper w | loses `type`
 top | 0 type | same-line (*c*) exception E | loses `exception E`
 top | 0 type | same-line (*c*) exception E | loses `type (*c*) exception E`
 top | 0 type | same-line (*c*) let w = 1 | loses `let w = 1`
@@ -15299,12 +15125,7 @@ top | begin 0 else 1 | same-line type T = int | loses `let z = 3`
 top | begin 0 else 1 | same-line type T = int | loses `type T = int`
 top | begin 0 else 1 | same-line w | loses `let x = 1`
 top | begin 0 else 1 | same-line w | loses `let z = 3`
-top | begin 0 end | body (*c*) exception E | loses `exception E`
-top | begin 0 end | body (*c*) module B = List | loses `module B = List`
 top | begin 0 end | body (*c*) module B =⏎    let w = 1 | loses `let w = 1`
-top | begin 0 end | body (*c*) module B =⏎    let w = 1 | loses `module B =`
-top | begin 0 end | body (*c*) open System | loses `open System`
-top | begin 0 end | body (*c*) type T = int | loses `type T = int`
 top | begin 0 end | body (*c*) w | loses `let a = begin 0 end`
 top | begin 0 end | body [<A>] module B =⏎    let w = 1 | loses `let w = 1`
 top | begin 0 end | body [<A>] open System | loses `[<A>] open System`
@@ -15320,22 +15141,7 @@ top | begin 0 end | deeper ; module B =⏎    let w = 1 | loses `module B =`
 top | begin 0 end | deeper ; open System | loses `open System`
 top | begin 0 end | deeper ; type T = int | loses `type T = int`
 top | begin 0 end | deeper ; w | loses `w`
-top | begin 0 end | deeper [<A>] exception E | loses `[<A>] exception E`
-top | begin 0 end | deeper [<A>] let w = 1 | loses `[<A>] let w = 1`
-top | begin 0 end | deeper [<A>] module B =⏎    let w = 1 | loses `[<A>] module B =`
 top | begin 0 end | deeper [<A>] module B =⏎    let w = 1 | loses `let w = 1`
-top | begin 0 end | deeper [<A>] type T = int | loses `[<A>] type T = int`
-top | begin 0 end | deeper [<A>]⏎exception E | loses `[<A>]`
-top | begin 0 end | deeper [<A>]⏎let w = 1 | loses `[<A>]`
-top | begin 0 end | deeper [<A>]⏎module B =⏎    let w = 1 | loses `[<A>]`
-top | begin 0 end | deeper [<A>]⏎module B =⏎    let w = 1 | loses `let w = 1`
-top | begin 0 end | deeper [<A>]⏎type T = int | loses `[<A>]`
-top | begin 0 end | deeper exception E | loses `exception E`
-top | begin 0 end | deeper module B = List | loses `module B = List`
-top | begin 0 end | deeper module B =⏎    let w = 1 | loses `let w = 1`
-top | begin 0 end | deeper module B =⏎    let w = 1 | loses `module B =`
-top | begin 0 end | deeper open System | loses `open System`
-top | begin 0 end | deeper type T = int | loses `type T = int`
 top | begin 0 end | deeper w | loses `let a = begin 0 end`
 top | begin 0 end | same-line (*c*) module B = List | loses `module B = List`
 top | begin 0 end | same-line (*c*) module B =⏎    let w = 1 | loses `module B =`

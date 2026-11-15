@@ -1176,11 +1176,19 @@ impl<'src> Parser<'src> {
                 span,
             });
         }
-        // A raw `let` (one LexFilter left unpromoted, on a line indented past
-        // the binding's) is a token FCS's parser can shift after `recover`,
-        // as the start of a module-level declaration, so panic mode discards
-        // nothing: the loop parses it.
-        if matches!(self.peek(), Some((Ok(FilteredToken::Raw(Token::Let)), _))) {
+        // A declaration keyword (a raw `let` LexFilter left unpromoted, on a
+        // line indented past the binding's, or a `type`/`module`/`open`/… one)
+        // is a token FCS's parser can shift after `recover`, as the start of a
+        // module-level declaration, so panic mode discards nothing: the loop
+        // parses it.
+        // LexFilter swallows a `type` or `module` keyword, which the loop reads
+        // off the raw stream.
+        if matches!(self.peek(), Some((Ok(FilteredToken::Raw(t)), _)) if super::decls::begins_module_decl(t))
+            || matches!(
+                self.next_non_trivia_raw_at_pos(),
+                Some(Token::Type | Token::Module)
+            )
+        {
             return true;
         }
         while let Some((res, _)) = self.peek().cloned() {

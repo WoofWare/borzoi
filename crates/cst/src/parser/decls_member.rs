@@ -1953,8 +1953,14 @@ impl<'src> Parser<'src> {
             });
             // FCS's `nameop opt_explicitValTyparDecls recover` arm: the slot
             // keeps its name, with a `FromParseError` type, and the rest of the
-            // member is discarded.
-            self.skip_unfinished_member_rest();
+            // member is discarded, short of a `with get, set` clause, which the
+            // slot still takes below.
+            if !matches!(
+                self.peek(),
+                Some((Ok(FilteredToken::Virtual(Virtual::With)), _))
+            ) {
+                self.skip_unfinished_member_rest();
+            }
         }
         self.builder.finish_node(); // VAL_SIG
         // Optional `with get[, set]` accessor clause (FCS's `classMemberSpfnGetSet`,

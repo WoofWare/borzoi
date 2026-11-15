@@ -198,7 +198,15 @@ parser sees it, so what follows the binding is recovered as after a clean
 one. In particular a raw `let` on a line indented past a module-level
 binding is FCS's next declaration: the binding's missing terminator is an
 error, but FCS's error recovery shifts the `let` rather than discarding it
-(`recover_raw_let_after_a_binding_grid`).
+(`recover_raw_let_after_a_binding_grid`), and so is any other declaration
+keyword there.
+
+`recover_followers_of_unfinished_constructs_grid` puts each construct
+before each member or declaration a buffer may hold next, and pins every
+cell where a unit FCS keeps is lost (or a type keeps fewer members than
+FCS's) in `tests/manifests/unfinished_followers.txt`. Each must be a cell
+where `main`'s parser fails too (`unfinished_followers.base.txt`); most
+predate the ports.
 
 Two placement families in the recovery grids stay pinned, since FCS's
 placement follows from its error states rather than from the layout:

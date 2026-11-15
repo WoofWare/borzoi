@@ -192,7 +192,7 @@ fn debris_brackets(
 
 /// Whether `t` begins a module-level declaration, which ends a stray token's
 /// debris outside any bracket (see [`Parser::consume_stray_debris`]).
-fn begins_module_decl(t: &Token<'_>) -> bool {
+pub(super) fn begins_module_decl(t: &Token<'_>) -> bool {
     matches!(
         t,
         Token::Let
