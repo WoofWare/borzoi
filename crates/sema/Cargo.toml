@@ -26,6 +26,11 @@ foldhash.workspace = true
 # the reusable core stays free of `tracing`; enabled transitively by the LSP's
 # `otel` feature (the only build that installs a subscriber to record them).
 otel = ["dep:tracing"]
+# Open a span around each `resolve_file` and around each of its phases
+# (`fold_counts`), so `borzoi`'s `edit_counts` example can count the work each
+# phase does. Off by default, as `otel` is: the spans cost a callsite check
+# each even with no subscriber.
+fold-counts = ["dep:tracing"]
 # The FCS-differential comparator (the `test_support` module): given one of our
 # resolutions and the oracle's structural name for the same use, decide whether
 # they name the same declaration. Two harnesses need it — `borzoi-corpus-diff`
@@ -41,8 +46,9 @@ borzoi-oracle-harness.workspace = true
 borzoi-stats.workspace = true
 # Self-reference activates `test-support` when building this crate for its own
 # integration tests, so they exercise the shared comparator without a
-# `--features` flag on the test command.
-borzoi-sema = { path = ".", features = ["test-support"] }
+# `--features` flag on the test command, and `fold-counts`, so the test of
+# the fold's phase spans runs.
+borzoi-sema = { path = ".", features = ["test-support", "fold-counts"] }
 proptest.workspace = true
 # Reads `Gen::infer_construct`'s arms for the expected-type alphabet
 # (`tests/all/infer_entry_order_diff.rs`).

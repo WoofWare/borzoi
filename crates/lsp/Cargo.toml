@@ -85,6 +85,10 @@ otel = [
     # `resolve_project`'s cost is attributable per Compile item in the trace.
     "borzoi-sema/otel",
 ]
+# Count each phase of each file the fold resolves, in the `edit_counts`
+# example (`borzoi_sema::fold_counts`). Measurement only: the observer's
+# own work adds to the rows it measures.
+fold-counts = ["borzoi-sema/fold-counts"]
 # Fetch non-embedded referenced-assembly source over the network (SourceLink) for
 # go-to-definition. In `default`, so it is on unless `--no-default-features`;
 # without it the source URL is surfaced for the client to open instead.

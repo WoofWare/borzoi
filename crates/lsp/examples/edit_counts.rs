@@ -176,6 +176,20 @@
 //!
 //! The **f.new** column counts the Compile-order folds the message computed
 //! (cold or incremental): a request the cached fold answers computes none.
+//!
+//! Built with the `fold-counts` feature (`--features fold-counts`), each row
+//! also splits what the fold's `resolve_file` calls cost into the phases
+//! `borzoi_sema::fold_counts` names, counted on the thread that resolves:
+//! **r.files** and **r.bytes** (the files resolved and their size),
+//! **r.total** (every `resolve_file`), **r.pre** (`Prescan::of`), **r.seed**
+//! (each block's implicit auto-opens), **r.earlier** (each block's re-entry of
+//! the file's earlier blocks), **r.start** (each block's re-entry of earlier
+//! files' contributions), **r.decls** (each block's declarations) and
+//! **r.rest** (the rest: resolver setup, `finish`, the loop). The observer's
+//! own work, two counter reads per span, adds to the row's other columns, so
+//! compare a `fold-counts` row only with another. With
+//! `EDIT_COUNTS_FOLD_FILES` set as well, every `resolve_file` prints its own
+//! split to stderr as it returns, in the same column order.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -193,6 +207,7 @@ use borzoi::server::{INPUT_BUFFER, SERVER_STACK_BYTES, State, run_inbox};
 use borzoi::uri::UriExt as _;
 use borzoi::workspace::Workspace;
 use borzoi_msbuild::ItemKind;
+use borzoi_sema::fold_counts::{FILE_SPAN, PHASE_SPANS};
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::{ClientCapabilities, Uri};
 use serde_json::{Value, json};
@@ -291,6 +306,25 @@ fn instructions() -> Option<(u64, u64)> {
     None
 }
 
+/// Instructions retired by the calling thread.
+#[cfg(target_os = "macos")]
+fn thread_instructions() -> Option<u64> {
+    unsafe extern "C" {
+        fn thread_selfcounts(kind: i32, buffer: *mut u64, bytes: usize) -> i32;
+    }
+    /// `thread_selfcounts`'s instructions-and-cycles request.
+    const THSC_CPI: i32 = 1;
+    let mut own = [0u64; 2];
+    // SAFETY: `own` holds the two counters `THSC_CPI` writes.
+    let rc = unsafe { thread_selfcounts(THSC_CPI, own.as_mut_ptr(), size_of_val(&own)) };
+    (rc == 0).then_some(own[0])
+}
+
+#[cfg(not(target_os = "macos"))]
+fn thread_instructions() -> Option<u64> {
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Which path a request took.
 // ---------------------------------------------------------------------------
@@ -371,6 +405,75 @@ const UNIT_SPANS: [&str; 9] = [
     "resolve_project",
     "infer_project",
 ];
+
+// ---------------------------------------------------------------------------
+// The fold's phases.
+// ---------------------------------------------------------------------------
+
+/// Whether the fold's phase spans are observed: only when sema opens them.
+const FOLD_COUNTS: bool = cfg!(feature = "fold-counts");
+
+/// The span id a fold span gets: [`FILE_SPAN`] the base, and each of
+/// [`PHASE_SPANS`] one more than the last.
+const FOLD_ID_BASE: u64 = 200;
+
+/// The fold spans by id, less [`FOLD_ID_BASE`].
+const FOLD_SPANS: [&str; 1 + PHASE_SPANS.len()] = [
+    FILE_SPAN,
+    PHASE_SPANS[0],
+    PHASE_SPANS[1],
+    PHASE_SPANS[2],
+    PHASE_SPANS[3],
+    PHASE_SPANS[4],
+];
+
+/// Files resolved, and their bytes, from each [`FILE_SPAN`].
+static FOLD_FILES: AtomicU64 = AtomicU64::new(0);
+static FOLD_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// The resolving thread's instructions inside each of [`FOLD_SPANS`], summed
+/// over every time it was entered.
+static FOLD_INSTRUCTIONS: [AtomicU64; FOLD_SPANS.len()] =
+    [const { AtomicU64::new(0) }; FOLD_SPANS.len()];
+
+/// The resolving thread's instruction count as each of [`FOLD_SPANS`] was
+/// last entered. No fold span nests in one of its own name.
+static FOLD_ENTERED: [AtomicU64; FOLD_SPANS.len()] =
+    [const { AtomicU64::new(0) }; FOLD_SPANS.len()];
+
+/// [`FOLD_INSTRUCTIONS`] as the current [`FILE_SPAN`] was entered, and its
+/// `bytes` field, for `EDIT_COUNTS_FOLD_FILES`.
+static FOLD_AT_FILE_START: [AtomicU64; FOLD_SPANS.len()] =
+    [const { AtomicU64::new(0) }; FOLD_SPANS.len()];
+static FOLD_FILE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Whether to print each file's split as it is resolved
+/// (`EDIT_COUNTS_FOLD_FILES`).
+static TRACE_FOLD_FILES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn trace_fold_files() -> bool {
+    *TRACE_FOLD_FILES.get_or_init(|| std::env::var_os("EDIT_COUNTS_FOLD_FILES").is_some())
+}
+
+/// One sample's fold counts (the files, their bytes, and the instructions
+/// inside each of [`FOLD_SPANS`]) with what the phases leave of the total
+/// appended: [`Cost::fold`]'s order. The remainder is taken per sample, as
+/// extrema over samples taken column by column would not leave one.
+fn with_rest(counts: [u64; 2 + FOLD_SPANS.len()]) -> [u64; 3 + FOLD_SPANS.len()] {
+    let [_, _, total, phases @ ..] = &counts;
+    let rest = total.saturating_sub(phases.iter().sum());
+    std::array::from_fn(|i| counts.get(i).copied().unwrap_or(rest))
+}
+
+/// The `r.` columns, from counts in [`Cost::fold`] order.
+fn fold_columns(fold: &[u64; 3 + FOLD_SPANS.len()]) -> String {
+    let [files, bytes, rest @ ..] = fold;
+    let mut out = format!("{files:>7} {bytes:>10}");
+    for count in rest {
+        out.push_str(&format!(" {count:>14}"));
+    }
+    out
+}
 
 /// Whether to print each unit span's instructions (`EDIT_COUNTS_UNITS`).
 static TRACE_UNITS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -556,6 +659,7 @@ impl tracing::Subscriber for FoldObserver {
     }
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
         (metadata.is_span() && trace_units() && UNIT_SPANS.contains(&metadata.name()))
+            || (metadata.is_span() && FOLD_COUNTS && FOLD_SPANS.contains(&metadata.name()))
             || (metadata.is_span()
                 && matches!(
                     metadata.name(),
@@ -568,6 +672,21 @@ impl tracing::Subscriber for FoldObserver {
                 ))
     }
     fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        if let Some(fold) = FOLD_SPANS
+            .iter()
+            .position(|name| *name == span.metadata().name())
+        {
+            if fold == 0 && counted() {
+                let mut bytes = EventFields::new(["bytes"]);
+                span.record(&mut bytes);
+                let [bytes] = bytes.values;
+                let bytes = bytes.expect("a file span carries `bytes`");
+                FOLD_FILES.fetch_add(1, Relaxed);
+                FOLD_BYTES.fetch_add(bytes, Relaxed);
+                FOLD_FILE_BYTES.store(bytes, Relaxed);
+            }
+            return tracing::span::Id::from_u64(FOLD_ID_BASE + fold as u64);
+        }
         let unit = UNIT_SPANS
             .iter()
             .position(|name| *name == span.metadata().name());
@@ -661,14 +780,45 @@ impl tracing::Subscriber for FoldObserver {
         }
     }
     fn enter(&self, id: &tracing::span::Id) {
-        if let Some(unit) = id.into_u64().checked_sub(UNIT_ID_BASE)
+        if let Some(fold) = fold_span(id) {
+            if counted()
+                && let Some(own) = thread_instructions()
+            {
+                if fold == 0 {
+                    for (start, total) in FOLD_AT_FILE_START.iter().zip(&FOLD_INSTRUCTIONS) {
+                        start.store(total.load(Relaxed), Relaxed);
+                    }
+                }
+                FOLD_ENTERED[fold].store(own, Relaxed);
+            }
+        } else if let Some(unit) = id.into_u64().checked_sub(UNIT_ID_BASE)
             && let Some((process, _)) = instructions()
         {
             UNIT_ENTERED[unit as usize].store(process, Relaxed);
         }
     }
     fn exit(&self, id: &tracing::span::Id) {
-        if let Some(unit) = id.into_u64().checked_sub(UNIT_ID_BASE)
+        if let Some(fold) = fold_span(id) {
+            if counted()
+                && let Some(own) = thread_instructions()
+            {
+                let entered = FOLD_ENTERED[fold].load(Relaxed);
+                FOLD_INSTRUCTIONS[fold].fetch_add(own.saturating_sub(entered), Relaxed);
+                if fold == 0 && trace_fold_files() {
+                    let mut file = [0; 2 + FOLD_SPANS.len()];
+                    file[0] = 1;
+                    file[1] = FOLD_FILE_BYTES.load(Relaxed);
+                    for (i, (start, total)) in FOLD_AT_FILE_START
+                        .iter()
+                        .zip(&FOLD_INSTRUCTIONS)
+                        .enumerate()
+                    {
+                        file[2 + i] = total.load(Relaxed) - start.load(Relaxed);
+                    }
+                    eprintln!("fold file {}", fold_columns(&with_rest(file)));
+                }
+            }
+        } else if let Some(unit) = id.into_u64().checked_sub(UNIT_ID_BASE)
             && let Some((process, _)) = instructions()
         {
             let entered = UNIT_ENTERED[unit as usize].load(Relaxed);
@@ -679,6 +829,12 @@ impl tracing::Subscriber for FoldObserver {
             );
         }
     }
+}
+
+/// Which of [`FOLD_SPANS`] a span id names, if any.
+fn fold_span(id: &tracing::span::Id) -> Option<usize> {
+    let fold = usize::try_from(id.into_u64().checked_sub(FOLD_ID_BASE)?).ok()?;
+    (fold < FOLD_SPANS.len()).then_some(fold)
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +926,10 @@ struct Cost {
     env_builds: u64,
     /// Cached envs resolved again ([`ENVS_RESOLVED_AGAIN`]).
     envs_resolved_again: u64,
+    /// The fold's files resolved ([`FOLD_FILES`]), their bytes
+    /// ([`FOLD_BYTES`]), the instructions inside each of [`FOLD_SPANS`], and
+    /// what the phases leave of the files' total ([`with_rest`]).
+    fold: [u64; 3 + FOLD_SPANS.len()],
 }
 
 impl Cost {
@@ -792,6 +952,7 @@ impl Cost {
             validation: std::array::from_fn(|i| self.validation[i] + other.validation[i]),
             env_builds: self.env_builds + other.env_builds,
             envs_resolved_again: self.envs_resolved_again + other.envs_resolved_again,
+            fold: std::array::from_fn(|i| self.fold[i] + other.fold[i]),
         }
     }
 }
@@ -809,6 +970,7 @@ struct Reading {
     validation: [u64; 13],
     env_builds: u64,
     envs_resolved_again: u64,
+    fold: [u64; 2 + FOLD_SPANS.len()],
 }
 
 impl Reading {
@@ -828,6 +990,11 @@ impl Reading {
             validation: std::array::from_fn(|i| VALIDATION[i].load(Relaxed)),
             env_builds: ENV_BUILDS.load(Relaxed),
             envs_resolved_again: ENVS_RESOLVED_AGAIN.load(Relaxed),
+            fold: std::array::from_fn(|i| match i {
+                0 => FOLD_FILES.load(Relaxed),
+                1 => FOLD_BYTES.load(Relaxed),
+                _ => FOLD_INSTRUCTIONS[i - 2].load(Relaxed),
+            }),
         }
     }
 
@@ -852,6 +1019,7 @@ impl Reading {
             validation: std::array::from_fn(|i| later.validation[i] - self.validation[i]),
             env_builds: later.env_builds - self.env_builds,
             envs_resolved_again: later.envs_resolved_again - self.envs_resolved_again,
+            fold: with_rest(std::array::from_fn(|i| later.fold[i] - self.fold[i])),
         }
     }
 }
@@ -1519,7 +1687,7 @@ fn columns(cost: &Cost) -> String {
         folded,
     ] = cost.validation;
     let [a_opens, a_stats, a_listings, a_canon, a_reads, a_unrecorded] = cost.env;
-    format!(
+    let mut out = format!(
         "{instructions:>14} {:>10} {:>13} {:>6} {:>6} {e_opens:>7} {e_stats:>7} {e_listings:>7} {e_canon:>7} {e_reads:>7} {v_opens:>7} {v_stats:>7} {v_listings:>7} {v_canon:>7} {o_listings:>7} {o_stats:>7} {parsed:>7} {reused:>7} {a_opens:>7} {a_stats:>7} {a_listings:>7} {a_canon:>7} {a_reads:>7} {a_unrecorded:>7} {:>7} {:>7} {av_opens:>7} {av_stats:>7} {av_listings:>7} {av_canon:>7} {folded:>7}",
         cost.allocations,
         cost.allocated_bytes,
@@ -1527,11 +1695,16 @@ fn columns(cost: &Cost) -> String {
         cost.stats,
         cost.env_builds,
         cost.envs_resolved_again,
-    )
+    );
+    if FOLD_COUNTS {
+        out.push(' ');
+        out.push_str(&fold_columns(&cost.fold));
+    }
+    out
 }
 
 fn header() -> String {
-    format!(
+    let mut out = format!(
         "{:<34} {:>14} {:>10} {:>13} {:>6} {:>6} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
         "message",
         "instructions",
@@ -1565,7 +1738,24 @@ fn header() -> String {
         "av.list",
         "av.canon",
         "f.new"
-    )
+    );
+    if FOLD_COUNTS {
+        out.push_str(&format!(
+            " {:>7} {:>10} {:>14}",
+            "r.files", "r.bytes", "r.total"
+        ));
+        for phase in [
+            "r.pre",
+            "r.seed",
+            "r.earlier",
+            "r.start",
+            "r.decls",
+            "r.rest",
+        ] {
+            out.push_str(&format!(" {phase:>14}"));
+        }
+    }
+    out
 }
 
 /// The cheapest and dearest of `costs`, counter by counter.
@@ -1585,6 +1775,7 @@ fn min_max(costs: &[Cost]) -> (Cost, Cost) {
             validation: std::array::from_fn(|i| f(a.validation[i], b.validation[i])),
             env_builds: f(a.env_builds, b.env_builds),
             envs_resolved_again: f(a.envs_resolved_again, b.envs_resolved_again),
+            fold: std::array::from_fn(|i| f(a.fold[i], b.fold[i])),
         })
     };
     (pick(u64::min), pick(u64::max))
