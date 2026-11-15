@@ -1792,7 +1792,6 @@ impl BlockedEditBand {
         println!("blocked-edit's band holds (it is measured to hold on a quiet machine)");
     }
 }
-}
 
 fn main() {
     CLIENT.set(true);
