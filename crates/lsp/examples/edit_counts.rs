@@ -362,12 +362,14 @@ fn trace_generation(what: &str, fields: &str) {
 /// that a notification runs to completion. With `EDIT_COUNTS_UNITS` set, each
 /// is given a span id of its own, and the instructions the process retired
 /// inside it are printed to stderr as it exits: what an edit arriving as the
-/// unit begins waits for. None of them nests in a span of its own name.
-const UNIT_SPANS: [&str; 10] = [
+/// unit begins waits for. None of them nests in a span of its own name. The
+/// parses of a project's Compile items are not one unit (a running request
+/// can stop before each item), so each item's parse is listed, not the span
+/// around them all.
+const UNIT_SPANS: [&str; 9] = [
     "lsp.notification",
     "publish_diagnostics",
     "evaluate_project",
-    "build_parses",
     "parse_compile_item",
     "resolve_references",
     "build_assembly_env",
