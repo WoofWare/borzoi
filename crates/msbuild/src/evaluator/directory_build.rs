@@ -149,8 +149,13 @@ pub(super) struct Bookkeeping {
     /// walk follows its imports and conditions as an ordinary import, so that
     /// doubting the file loses nothing it would do.
     doubted_writes: Vec<String>,
-    /// The import keys ([`import_dedup_key`]) a fallback walk registered.
-    doubted_imports: std::collections::HashSet<String>,
+    /// The import keys ([`import_dedup_key`]) a fallback walk registered, each
+    /// with the walk's number.
+    doubted_imports: std::collections::HashMap<String, usize>,
+    /// The numbers of the fallback walks the walk is inside, innermost last,
+    /// and how many have run.
+    doubted_walk: Vec<usize>,
+    doubted_walks: usize,
     /// Whether a fallback walked a file that contributes something.
     pub(super) contributed: bool,
     /// Whether a group the walk deferred while inside a fallback walk declares
@@ -173,8 +178,8 @@ impl Bookkeeping {
     /// Record the import of the file `key` names, if the walk is inside a
     /// fallback walk.
     pub(super) fn note_import(&mut self, key: &str) {
-        if self.fallback.is_some() {
-            self.doubted_imports.insert(key.to_owned());
+        if let Some(&walk) = self.doubted_walk.last() {
+            self.doubted_imports.insert(key.to_owned(), walk);
         }
     }
 }
@@ -182,12 +187,17 @@ impl Bookkeeping {
 /// An import of `path`, which the walk has already imported: a duplicate
 /// MSBuild skips, unless only a fallback walk imported it, which MSBuild may
 /// not have made. Then the walk imports it again, doubted, since MSBuild has
-/// imported it here or before, and the walk cannot tell which.
+/// imported it here or before, and the walk cannot tell which. Within the
+/// fallback walk that imported it, or one inside it, it is a duplicate like
+/// any other (a cycle); within another (one walking a file again, whose
+/// import of it is this one), it is not.
 pub(super) fn reimport_if_doubted(path: &Path, key: &str, state: &mut State<'_>) {
-    if state.directory_build.fallback.is_some()
-        || !state.directory_build.doubted_imports.contains(key)
-        || contributes_nothing(path, state)
-    {
+    let bookkeeping = &state.directory_build;
+    match bookkeeping.doubted_imports.get(key) {
+        Some(walk) if !bookkeeping.doubted_walk.contains(walk) => {}
+        _ => return,
+    }
+    if contributes_nothing(path, state) {
         return;
     }
     state.directory_build.doubted_imports.remove(key);
@@ -391,6 +401,9 @@ fn walk_doubted(kind: DirectoryBuildFile, file: &Path, state: &mut State<'_>) {
 /// and `project` the import's `Project` text.
 fn walk_doubted_as(root: UnpinnedRoot, project: &str, file: &Path, state: &mut State<'_>) {
     state.directory_build.contributed = true;
+    state.directory_build.doubted_walks += 1;
+    let walk = state.directory_build.doubted_walks;
+    state.directory_build.doubted_walk.push(walk);
     let saved_fallback = state.directory_build.fallback.replace(root.clone());
     let saved_references = std::mem::take(&mut state.directory_build.doubted_references);
     let saved_writes = std::mem::take(&mut state.directory_build.doubted_writes);
@@ -398,6 +411,7 @@ fn walk_doubted_as(root: UnpinnedRoot, project: &str, file: &Path, state: &mut S
     walk_external_file(file, 0..0, state);
     state.import_site_span = saved_span;
     state.directory_build.fallback = saved_fallback;
+    state.directory_build.doubted_walk.pop();
     let references = state.directory_build.doubted_references;
     state.directory_build.doubted_references |= saved_references;
     // MSBuild may not make any of these writes, so the value each name holds

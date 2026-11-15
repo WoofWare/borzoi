@@ -352,6 +352,91 @@ fn a_later_import_of_a_doubted_file_is_doubted_too() {
     );
 }
 
+/// The same through a child: the doubted file's own import is one MSBuild may
+/// not have made either, so walking the file again walks the child again.
+#[test]
+fn a_later_import_of_a_doubted_file_doubts_its_children_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let false_to_msbuild = "$([System.String]::IsNullOrWhiteSpace('no'))";
+    let block = COMMON_TARGETS_BLOCK.replace(
+        "Condition=\"'$(ImportDirectoryBuildTargets)' == 'true' and exists('$(DirectoryBuildTargetsPath)')\"",
+        &format!("Condition=\"{false_to_msbuild} and exists('$(DirectoryBuildTargetsPath)')\""),
+    );
+    let resolver = custom_sdk(
+        tmp.path(),
+        "<Project />\n",
+        &format!(
+            "<Project>\n{block}  <PropertyGroup><LangVersion>8.0</LangVersion></PropertyGroup>\n  \
+             <Import Project=\"$(DirectoryBuildTargetsPath)\" />\n</Project>\n"
+        ),
+        &[],
+    );
+    write_at(
+        tmp.path(),
+        "Directory.Build.targets",
+        "<Project><Import Project=\"$(MSBuildThisFileDirectory)child.props\" /></Project>",
+    );
+    write_at(
+        tmp.path(),
+        "child.props",
+        "<Project><PropertyGroup><LangVersion>preview</LangVersion></PropertyGroup></Project>",
+    );
+    let project = write_at(tmp.path(), "p.fsproj", "<Project Sdk=\"Custom\" />\n");
+    let parsed = parse_file_with_sdk_resolution(&project, resolver);
+    assert!(
+        untrusted(&parsed, "LangVersion"),
+        "MSBuild imports the child at the later import and ends with `preview`; the walk \
+         published {:?}",
+        property(&parsed, "LangVersion")
+    );
+}
+
+/// Walking a doubted file again ends, though the file and its child import
+/// each other: within the walk that walks it again, the cycle's back edge is
+/// a duplicate as MSBuild's is.
+#[test]
+fn walking_a_doubted_cycle_again_ends() {
+    let tmp = tempfile::tempdir().unwrap();
+    let false_to_msbuild = "$([System.String]::IsNullOrWhiteSpace('no'))";
+    let block = COMMON_TARGETS_BLOCK.replace(
+        "Condition=\"'$(ImportDirectoryBuildTargets)' == 'true' and exists('$(DirectoryBuildTargetsPath)')\"",
+        &format!("Condition=\"{false_to_msbuild} and exists('$(DirectoryBuildTargetsPath)')\""),
+    );
+    let resolver = custom_sdk(
+        tmp.path(),
+        "<Project />\n",
+        &format!(
+            "<Project>\n{block}  <Import Project=\"$(DirectoryBuildTargetsPath)\" />\n</Project>\n"
+        ),
+        &[],
+    );
+    write_at(
+        tmp.path(),
+        "Directory.Build.targets",
+        "<Project><Import Project=\"$(MSBuildThisFileDirectory)child.props\" /></Project>",
+    );
+    write_at(
+        tmp.path(),
+        "child.props",
+        "<Project><PropertyGroup><LangVersion>preview</LangVersion></PropertyGroup>\
+         <Import Project=\"$(MSBuildThisFileDirectory)Directory.Build.targets\" /></Project>",
+    );
+    let project = write_at(tmp.path(), "p.fsproj", "<Project Sdk=\"Custom\" />\n");
+    let parsed = parse_file_with_sdk_resolution(&project, resolver);
+    assert!(
+        !parsed.diagnostics.iter().any(|d| matches!(
+            d.kind,
+            DiagnosticKind::ImportFailed {
+                reason: ImportFailReason::DepthLimit { .. },
+                ..
+            }
+        )),
+        "{:?}",
+        parsed.diagnostics
+    );
+    assert!(untrusted(&parsed, "LangVersion"));
+}
+
 /// An import point decided on an undefined `TargetFramework` read is as exact
 /// as the walk's reads of it are: on the walk that reads it exactly (a
 /// project that builds its own framework), the point is decided.
