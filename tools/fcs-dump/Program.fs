@@ -5574,6 +5574,11 @@ let private projectSymbolUseCensus (u: FSharpSymbolUse) =
        IsMember = mb (fun m -> m.IsMember)
        IsInstance = mb (fun m -> m.IsInstanceMember)
        IsExtension = mb (fun m -> m.IsExtensionMember)
+       // A C#-style extension method's *declaration*: FCS reserves
+       // `IsExtensionMember` for an F# augmentation's (and for a use that
+       // resolved as an extension), so a `[<Extension>] static member`'s own
+       // record says so only through its attribute.
+       IsCSharpExtension = mb isCSharpExtensionMethod
        IsProperty = mb (fun m -> m.IsProperty)
        IsConstructor = mb (fun m -> m.IsConstructor)
        IsModuleValueOrMember = mb (fun m -> m.IsModuleValueOrMember)

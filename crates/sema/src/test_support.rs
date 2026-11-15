@@ -30,6 +30,19 @@ pub fn extension_gate_decline(
     crate::infer::ExtensionScope::of_tree(resolved, root).decline(env, name, is_static, at)
 }
 
+/// The extension-member names the file `resolved` (whose tree is `root`)
+/// may declare: what its tree declares, and what its damage may add.
+pub fn declared_extension_names(
+    resolved: &ResolvedFile,
+    root: &borzoi_cst::syntax::SyntaxNode,
+) -> crate::ExtensionNames {
+    let mut names = resolved.extension_names().clone();
+    if let Some(damage) = crate::resolve::damage(root, resolved.recovery()) {
+        names.absorb(&damage.names);
+    }
+    names
+}
+
 pub mod binder_completeness;
 pub mod entity_placement;
 pub mod names;

@@ -681,6 +681,11 @@ pub struct CensusUse {
     pub is_instance: bool,
     #[serde(rename = "IsExtension")]
     pub is_extension: bool,
+    /// Whether the member carries `[<Extension>]`: a C#-style extension
+    /// method's declaration, whose own record FCS does not flag
+    /// [`Self::is_extension`] (a use that resolved through it is).
+    #[serde(rename = "IsCSharpExtension")]
+    pub is_csharp_extension: bool,
     #[serde(rename = "IsConstructor")]
     pub is_constructor: bool,
     #[serde(rename = "IsModuleValueOrMember")]
@@ -1023,7 +1028,7 @@ pub fn classify_probe(index: usize) -> CensusUse {
         );
     }
     // Read by other consumers of the census, never by `classify`.
-    for flag in ["IsProperty", "IsValue", "IsFunction"] {
+    for flag in ["IsProperty", "IsValue", "IsFunction", "IsCSharpExtension"] {
         fields.insert(flag.into(), serde_json::json!(false));
     }
     serde_json::from_value(serde_json::Value::Object(fields))
