@@ -3682,10 +3682,10 @@ over the run's rounds (`BlockedEditPins` in
 
 The pins were measured on 2026-11-15 at a7148ddb4, on the build box, under
 `nix develop`, on private copies of the two corpus projects. They hold on
-macOS only, where the instruction counter exists, and on a machine like that
-one. The counts include kernel instructions, which differ by machine and
-rise when other processes' file activity recycles the projects' vnodes
-("Kernel instructions"), so the bands are set from two conditions:
+macOS only, where the instruction counter exists, and on a quiet machine
+like that one. The counts include kernel instructions, which differ by
+machine and rise when other processes' file activity recycles the projects'
+vnodes ("Kernel instructions"), so the bands are set from two conditions:
 
 | `blocked-edit` minima per run (five rounds each) | quiet box (load 1 to 5), 5 runs | loaded box (load 14 to 180), 8 runs |
 |---|---:|---:|
@@ -3702,13 +3702,59 @@ round, and the part after the edit at 8.6 M to 9.1 M in every round. On
 the loaded box every run's fewest `stat`s in a window were a quiet run's
 (294 and 309), so the minima rose by the kernel's share, not by a
 confirmation asking the SDK's reads again (some rounds did, after another
-job's Nix store write; a minimum is unaffected unless every round does); one run's part after the
-edit reached 27.7 M and the re-evaluation 9.9% over its pin, which set the
-bands at 30 M and 15%. A regression of either kind the pins exist for still
-fails on a quiet machine: a new evaluation's first confirmation that shares
-no witnesses adds about 45 M after the edit, and the re-evaluation moved by
-tens of millions with each change to it so far. No CI job runs
-`edit_counts`, so a pin is checked when someone runs it.
+job's Nix store write; a minimum is unaffected unless every round does).
+One run's part after the edit reached 27.7 M and the re-evaluation 9.9%
+over its pin, which set the bands at 30 M and 15%. Under the heaviest load
+they still fail: a run at load about 100 waited 46 M after the edit with
+its file-system counts exactly those of a quiet run. So a band's failure on
+a loaded machine is read beside a run of the base commit on the same
+machine. On a quiet machine a regression of either kind the bands exist for
+fails them: a new evaluation's first confirmation that shares no witnesses
+adds about 45 M after the edit (with sharing planted out, 60 M and 64 M),
+and the re-evaluation moved by tens of millions with each change to it so
+far. No CI job runs `edit_counts`, so a pin is checked when someone runs it.
+
+**The script assumes a single-pass project.** It holds the server at the
+first evaluation pass of each round's re-evaluation. A multi-target project
+evaluates twice, the outer pass and the pass for the target it selects, so
+"before the edit" would be the outer pass alone and the rest would land in
+the part after the edit. Both measured projects are single-pass; when the
+cold `didOpen E` runs more than one pass, the run says so loudly and does
+not fail, since the bands then do not measure what they name.
+
+**The file-system counts, for reference.** In the same runs these counts did
+not depend on load, and are recorded here as reference values, not as
+pins:
+
+| | WoofWare.Incremental | WoofWare.PawPrint.Domain |
+|---|---:|---:|
+| each re-evaluation, and the cold first evaluation: opens, `stat`s, listings, canonicalisations, distinct reads | 114, 175, 34, 153, 476 | 115, 176, 34, 155, 480 |
+| a steady confirmation of the evaluation (`v.stat`, a generation of `didChange E` + `diagnostic E` alone) | 135 | 140 |
+| a round's confirming generations: the stopped request's, then each later one | 24, 135, 135, 135 | 29, 140, 140, 140 |
+
+The re-evaluation's counts were the same in every round of 20 runs of
+WoofWare.Incremental and 19 of WoofWare.PawPrint.Domain, quiet and loaded.
+A round's confirmations were those above in every round that met no Nix
+store write; a round that met one asked the SDK's reads again (1,922 `stat`s
+per confirming generation). The absolute counts are facts about where the
+project is, not about the server alone: a copy at the same depth under
+other names counts the same; one two directories deeper counts 179 `stat`s
+in each evaluation, 137 in a steady confirmation and 26 in the stopped
+request's, since MSBuild probes every ancestor for its `Directory.Build`
+files and a confirmation stamps every directory a read resolves through; a
+path reached through a symlink also walks its target's directories
+(`ReadChecks::resolution`); and a multi-target project's first evaluation
+counts both passes.
+
+What the confirmation row shows, that the new evaluation's first
+confirmation costs exactly a steady one because it shares the dropped
+evaluation's witnesses, is held by the suite, on fixtures shaped for it and
+on every platform CI runs:
+`workspace::tests::validation::a_project_evaluated_again_starts_with_the_dropped_ones_witnesses`
+and `semantic::tests::an_env_resolved_again_starts_with_the_witnesses_it_shares`.
+With witness sharing planted out (`ReadChecks::check` never handing out a
+held check), both fail, and in `blocked-edit` the new evaluation's first
+confirmation asked 2,239 and 2,280 `stat`s.
 
 **What an edit arriving inside each unit waits for.** These are measured
 worst cases, not pins. A running request stops only between units (below),
