@@ -49,4 +49,16 @@ fn main() {
              derives) by appending them to its lock; `facade::opt_in` lists them"
         );
     }
+    // Nor does it offer an enum its lock never declared, or what names one:
+    // that is no divergence, and no lock line can add it.
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for (module, _) in generation.not_offered {
+        *counts.entry(module).or_default() += 1;
+    }
+    for (module, n) in counts {
+        println!(
+            "note: the frozen `{module}` facade does not offer {n} union line(s) of or naming \
+             an enum its lock never declared (`Generation::not_offered`)"
+        );
+    }
 }

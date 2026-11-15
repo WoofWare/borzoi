@@ -33,7 +33,8 @@ This is a Cargo workspace with nine members:
   than its output, changing only by the additions
   `tools/ci/facade-lock-check.sh` allows, each distinct one with a frozen
   consumer fixture (`tests/all/facade_consumers/`) that must keep compiling.
-  A union accessor or derive added later is opt-in for a frozen facade, but
+  A union accessor or derive added later is opt-in for a frozen facade, and
+  an enum it never declared (with what names it) is simply not offered, but
   a union change that would break one or open a hole in it fails astgen until
   the lock takes it or `ACCEPTED_DIVERGENCES` records why not; see "Publishing a
   facade" in `docs/ast-versioning-plan.md`, which is also the runbook for

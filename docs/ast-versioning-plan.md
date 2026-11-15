@@ -223,15 +223,27 @@ A frozen lock is still held to the surface its version would derive today,
 on the principle that a published facade never breaks, not that it keeps up
 with the union. On every generation astgen derives it and compares:
 
-- A derived **accessor** or **derive** the lock lacks is *opt-in*: leaving it
-  out breaks no caller and leaves no node unreadable, so the frozen facade
-  simply does not offer it until someone appends the line. Routine work that
-  adds union accessors touches no frozen lock; the generator prints a count
-  of what each frozen facade may opt into (`facade::opt_in`).
+- A derived **accessor** or **derive** the lock lacks, naming only types the
+  lock declares, is *opt-in*: leaving it out breaks no caller and leaves no
+  node unreadable, so the frozen facade simply does not offer it until
+  someone appends the line, which leaves the lock coherent. Routine work
+  that adds union accessors touches no frozen lock; the generator prints a
+  count of what each frozen facade may opt into (`facade::opt_in`).
+- A derived **enum** or **value enum** the lock does not declare at all (no
+  line of that name, and no acceptance of the facade naming it) is *not
+  offered*, and nor is an accessor or derive naming it. No consumer of the
+  frozen facade can have matched an enum it never had, and the nodes the
+  enum holds stay readable through the accessors the lock already has (one
+  that stops being derived fails, below). A lock gains no `enum` or `value`
+  line, so the new enum is not opt-in either: it belongs to the facades
+  derived or published after it. The generator counts these lines apart
+  (`Generation::not_offered`). This is how records came to read their
+  fields and spreads as one item enum (`items()`, over `RecordExprItem`)
+  without touching a published facade.
 - Everything that would break the frozen facade or open a hole fails:
   a derived **kind** the lock does not cast (a new kind for one of its nodes,
   or a new node type), whose nodes would read as holes no gate covers; a
-  new **variant** of a frozen enum or value enum; a line **locked but no
+  new **variant** of an enum or value enum the lock declares; a line **locked but no
   longer derived** (an accessor whose union delegate is gone or changed
   shape, a kind gone or moved to another node); and a frozen **alias**
   whose version's surface no longer equals its head's. Each must be
@@ -275,12 +287,16 @@ Checks:
 4. The **synthetic-feature test** (astgen's
    `a_new_language_version_leaves_every_published_facade_byte_identical`):
    in memory, a feature at a new "12.0" whose one `Kind` is a new expression,
-   added to the table, the union and the version list, and a new union
-   accessor on a node every facade has. Every published facade's code, lock
-   and fixture regenerate byte-identically and nothing fails; each frozen
-   head may opt into the accessor; the new facade's surface is the one before
-   plus exactly that variant, and preview's its own plus the variant and the
-   accessor. It is the compiler upgrade in miniature, run on every change.
+   added to the table, the union and the version list; a new union accessor
+   on a node every facade has; and two new enums, a dispatch enum over an old
+   node and the new one and a value enum, each returned by a new accessor.
+   Every published facade's code, lock and fixture regenerate
+   byte-identically and nothing fails; each frozen head may opt into the
+   accessor and does not offer the new enums, and appending all it may opt
+   into leaves its lock coherent; the new facade's surface is the one the
+   version before derives plus exactly the new kind's lines, and preview's
+   its own plus all of it. It is the compiler upgrade in miniature, run on
+   every change.
 5. Its twin for a compiler that deletes a feature (astgen's
    `a_retired_feature_leaves_every_facade_byte_identical`). In memory, the
    table with every retirement cleared is the baseline. Against it, three
@@ -318,7 +334,9 @@ check treats them as a publication. A published alias needs a published head.
 derive the union gained after its publication. `cargo run -p borzoi-astgen
 --example generate` prints how many lines each frozen facade may opt into, and
 `facade::opt_in` lists them; to offer one, copy it into the lock in its sorted
-place and regenerate (the fixture stays as it is). Nothing requires it.
+place and regenerate (the fixture stays as it is). Nothing requires it. An
+enum the frozen lock never declared, and whatever names it, is not on offer
+(`Generation::not_offered`): no lock line can add it.
 
 **Evolving a published facade.** When astgen fails on a frozen facade's
 divergence, it lists each line under what can be done with it:
@@ -326,9 +344,11 @@ divergence, it lists each line under what can be done with it:
 - *A kind it would read as a hole*: a new kind for one of its nodes, or a new
   node type. Append it to the lock (an allowed addition, which every consumer
   survives), or accept it with the reason.
-- *No allowed evolution adds it*: a new variant of a frozen enum. The frozen
-  facade does not get it, and the node reads there as an absent child. Record
-  it in `ACCEPTED_DIVERGENCES` with the reason.
+- *No allowed evolution adds it*: a new variant of an enum the frozen lock
+  declares. The frozen facade does not get it, and the node reads there as
+  an absent child. Record it in `ACCEPTED_DIVERGENCES` with the reason. (A
+  variant of an enum the lock does not declare at all is no divergence: the
+  frozen facade does not offer that enum.)
 - *Locked but no longer derived*: the union or the table moved something the
   frozen facade keeps. If the union still backs it, the facade keeps reading
   it; accept it with the reason. If the union accessor was renamed, give the
@@ -779,10 +799,11 @@ diagnostic for its feature" rather than "under a `Legality` one".
   `RecordSpreads` row live with a parse-phase `Legality` gate held to FCS's
   check, and FCS's error forms (a spread with no source, before `with`, and
   `...e` anywhere else as an `ERROR` node standing for its
-  `ArbitraryAfterError`). The union reads a record's spreads as
-  `spreads()`, each with its index among the bindings: an ordered item enum
-  over `RecordField` would be a new enum in every frozen facade, which
-  astgen blocks as it does a new variant.
+  `ArbitraryAfterError`). The union reads a record's fields and spreads in
+  source order as `items()`, over the item enums `RecordExprItem` and
+  `RecordReprItem`; `fields()` stays. An enum no frozen lock declares is
+  not offered there rather than blocked (step 4c, D6), so the item enums
+  touch no published facade.
 - **PR 8, step 4b — tuple type extensions**: `TUPLE_TYPE_EXTENSION_HEAD`
   (`type (A * B) with …`, `type struct (A * B) with …`, and FCS's silent
   recoveries `(A *)` and `struct (A)`), standing in a `TYPE_DEFN` for its
@@ -790,6 +811,13 @@ diagnostic for its feature" rather than "under a `Legality` one".
   `ExtensionConstraintSolutions` row live with a parse-phase `Legality` gate
   held to FCS's check. Sema declines such a definition's members and holds
   its head's type variables as opaque binders.
+- **PR 8, step 4c — a new enum is absent from frozen facades**: astgen's
+  `head_drift` takes a derived enum or value enum that a frozen lock does
+  not declare for no drift: it and whatever names it are not offered there
+  (D6). Records read their fields and spreads in source order as
+  `items()` over `RecordExprItem` and `RecordReprItem`, in place of the
+  indexed `spreads()`; `fields()` stays. The synthetic-feature test adds a
+  new dispatch enum and value enum to its new version.
 
 ## PR sequence
 
@@ -827,7 +855,8 @@ diagnostic for its feature" rather than "under a `Legality` one".
       projection rework and the ungated lexer and parser changes. *Landed*
       (3a). The recovery ports follow (3b).
    4. New syntax, each a kind and a gate: record spreads (4a) and tuple-type
-      extensions (4b). *Landed.*
+      extensions (4b). *Landed.* A new enum is absent from the frozen
+      facades, which lets records read their items as one enum (4c).
    5. `v11` published ([Publishing a facade](#publishing-a-facade)).
    6. SDK 11 the devshell default, at GA.
 

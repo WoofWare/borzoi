@@ -14,7 +14,9 @@
 //! ([`crate::consumer`]) is never rewritten either. Each generation still
 //! derives the surface the version would have today and holds the frozen lock
 //! to it ([`facade_locks`]): an accessor or derive the union has gained is
-//! the frozen facade's to opt into ([`is_opt_in`]), and any other difference,
+//! the frozen facade's to opt into ([`is_opt_in`]), an enum the frozen lock
+//! does not declare at all is one it does not offer
+//! ([`Generation::not_offered`]), and any other difference,
 //! which would break the facade or leave a hole in it, fails, naming each
 //! line, until the lock takes it or [`ACCEPTED_DIVERGENCES`] records why the
 //! frozen facade keeps its surface. `tools/ci/facade-lock-check.sh`
@@ -202,8 +204,17 @@ pub struct Generation {
     pub standings: Vec<Standing>,
     /// `(module, line)`: each line a frozen head facade may opt into
     /// ([`is_opt_in`]) by appending it to its lock, which it does not offer
-    /// until then.
+    /// until then. Appending every one leaves the lock coherent.
     pub opt_in: Vec<(String, Line)>,
+    /// `(module, line)`: each line derived for a frozen head facade that it
+    /// does not offer and cannot take: a variant of a dispatch or value enum
+    /// the frozen lock does not declare at all (a new enum), and a derive or
+    /// accessor naming a type the lock does not declare. No divergence: no
+    /// caller of the frozen facade can have matched an enum it never had, and
+    /// a lock gains no `enum` or `value` line (`tools/ci/facade-lock-check.sh`),
+    /// so a new enum is offered only by the facades derived or published after
+    /// it. Disjoint from [`Self::opt_in`].
+    pub not_offered: Vec<(String, Line)>,
     /// `(module, line)`: each divergence of a frozen facade that
     /// [`ACCEPTED_DIVERGENCES`] accepts. The property suite exempts what each
     /// one touches from the facade's comparison with the union and the table
@@ -315,7 +326,10 @@ enum Drift {
     /// would read through it as holes no gate diagnostic covers.
     Hole,
     /// Derived but not locked, and no allowed evolution adds it: a new
-    /// variant of an exhaustively matched enum.
+    /// variant of an enum the frozen lock declares, which its consumers
+    /// match exhaustively. (A variant of an enum the lock does not declare at
+    /// all is no drift: the frozen facade does not offer that enum,
+    /// [`Generation::not_offered`].)
     Blocked,
     /// Locked but no longer derived.
     Departed,
@@ -337,11 +351,21 @@ pub fn is_allowed_addition(line: &Line) -> bool {
 
 /// Whether a line derived for a frozen facade but missing from its lock is
 /// the facade's to opt into, rather than a divergence: a new accessor or a
-/// new trait on a value enum. Leaving it out breaks no caller and leaves no
-/// node unreadable; the frozen facade just does not offer it until the line
-/// is appended. A new kind is not opt-in: left out, it is a hole.
-pub fn is_opt_in(line: &Line) -> bool {
-    matches!(line, Line::Accessor { .. } | Line::Derive { .. })
+/// new trait on a value enum, naming only types the lock declares
+/// (`locked`). Leaving it out breaks no caller and leaves no node
+/// unreadable; the frozen facade just does not offer it until the line is
+/// appended, which leaves the lock coherent. A derive or accessor naming a
+/// type the lock does not declare cannot be appended, and is not offered
+/// ([`Generation::not_offered`]). A new kind is not opt-in: left out, it is
+/// a hole.
+pub fn is_opt_in(line: &Line, locked: &Names) -> bool {
+    match line {
+        Line::Derive { name, .. } => locked.values.contains(name),
+        Line::Accessor { owner, shape, .. } => {
+            locked.nodes.contains(owner) && locked.resolves(shape)
+        }
+        _ => false,
+    }
 }
 
 /// An accessor line a frozen lock keeps for a renamed union accessor: its
@@ -350,26 +374,75 @@ fn is_compat_line(line: &Line) -> bool {
     matches!(line, Line::Accessor { name, delegate: Some(d), .. } if d != name)
 }
 
+/// How the frozen head facade's `locked` surface and today's `derived` one
+/// differ ([`head_drift`]).
+struct HeadDrift {
+    /// Each divergence.
+    drift: Vec<(Line, Drift)>,
+    /// The derived lines the facade may opt into ([`is_opt_in`]).
+    opt_in: Vec<Line>,
+    /// The derived lines it does not offer ([`Generation::not_offered`]).
+    not_offered: Vec<Line>,
+}
+
 /// The divergence of the frozen head facade's `locked` surface from today's
-/// `derived` one, and the derived lines it may opt into ([`is_opt_in`]).
-fn head_drift(locked: &Lock, derived: &Lock) -> (Vec<(Line, Drift)>, Vec<Line>) {
-    let mut drift = Vec::new();
-    let mut opt_in = Vec::new();
+/// `derived` one, the derived lines it may opt into ([`is_opt_in`]), and
+/// those it does not offer. A variant of a dispatch or value enum `locked`
+/// does not declare is not offered, unless an acceptance of the facade names
+/// that enum (`accepted_enums`): an enum whose lines are accepted one by one
+/// stays a divergence, so each further variant needs an acceptance too.
+fn head_drift(locked: &Lock, derived: &Lock, accepted_enums: &BTreeSet<String>) -> HeadDrift {
+    let names = locked.names();
+    let new_enum = |name: &String| {
+        !names.nodes.contains(name)
+            && !names.enums.contains(name)
+            && !names.values.contains(name)
+            && !accepted_enums.contains(name)
+    };
+    let mut out = HeadDrift {
+        drift: Vec::new(),
+        opt_in: Vec::new(),
+        not_offered: Vec::new(),
+    };
     for line in derived.lines.difference(&locked.lines) {
-        if is_opt_in(line) {
-            opt_in.push(line.clone());
-        } else if matches!(line, Line::Node { .. }) {
-            drift.push((line.clone(), Drift::Hole));
-        } else {
-            drift.push((line.clone(), Drift::Blocked));
+        match line {
+            Line::Node { .. } => out.drift.push((line.clone(), Drift::Hole)),
+            Line::Enum { name, .. } | Line::Value { name, .. } if new_enum(name) => {
+                out.not_offered.push(line.clone());
+            }
+            Line::Enum { .. } | Line::Value { .. } | Line::AliasOf { .. } => {
+                out.drift.push((line.clone(), Drift::Blocked));
+            }
+            Line::Derive { .. } | Line::Accessor { .. } => {
+                if is_opt_in(line, &names) {
+                    out.opt_in.push(line.clone());
+                } else {
+                    out.not_offered.push(line.clone());
+                }
+            }
         }
     }
     for line in locked.lines.difference(&derived.lines) {
         if !is_compat_line(line) {
-            drift.push((line.clone(), Drift::Departed));
+            out.drift.push((line.clone(), Drift::Departed));
         }
     }
-    (drift, opt_in)
+    out
+}
+
+/// The dispatch and value enums the accepted divergences of `module` name:
+/// each `enum` or `value` line's enum.
+fn accepted_enums(accepted: &[Accepted], module: &str) -> BTreeSet<String> {
+    accepted
+        .iter()
+        .filter(|a| a.module == module)
+        .filter_map(|a| lock::parse(a.line).ok())
+        .flat_map(|l| l.lines)
+        .filter_map(|line| match line {
+            Line::Enum { name, .. } | Line::Value { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The explanation a frozen facade's unaccepted divergence fails with.
@@ -397,8 +470,8 @@ fn drift_report(version: &Version, alias_of: Option<&str>, drift: &[(Line, Drift
         ),
         (
             Drift::Blocked,
-            "derived but not locked; no allowed evolution adds it (a new variant breaks \
-             every exhaustive match on its enum):",
+            "derived but not locked; no allowed evolution adds it (a new variant of an \
+             enum the lock declares breaks every exhaustive match on it):",
         ),
         (Drift::Departed, "locked but no longer derived:"),
         (Drift::AliasBroken, "in one surface and not the other:"),
@@ -436,8 +509,9 @@ fn drift_report(version: &Version, alias_of: Option<&str>, drift: &[(Line, Drift
 /// facade's lock is held to today's derivation: a frozen head's to its own
 /// version's, every difference appended to the lock or accepted
 /// ([`Accepted`]) except the lines it may opt into ([`is_opt_in`]), which
-/// [`Generation::opt_in`] lists; a frozen alias's derived surface to its
-/// head's.
+/// [`Generation::opt_in`] lists, and the new enums and what names them, which
+/// it does not offer ([`Generation::not_offered`]); a frozen alias's derived
+/// surface to its head's.
 pub fn facade_locks(inputs: &Inputs<'_>) -> Result<Generation, String> {
     let Inputs {
         rows,
@@ -461,6 +535,7 @@ pub fn facade_locks(inputs: &Inputs<'_>) -> Result<Generation, String> {
     let mut used_acceptances: BTreeSet<(String, String)> = BTreeSet::new();
     let mut reports: Vec<String> = Vec::new();
     let mut opt_in: Vec<(String, Line)> = Vec::new();
+    let mut not_offered: Vec<(String, Line)> = Vec::new();
     let mut accepted_lines: Vec<(String, Line)> = Vec::new();
     // The module, lock and standing of the current run of equal surfaces.
     let mut head: Option<(String, Lock, Standing)> = None;
@@ -560,9 +635,11 @@ pub fn facade_locks(inputs: &Inputs<'_>) -> Result<Generation, String> {
                     }
                 }
                 None => {
-                    let (drift, lines) = head_drift(&lock, &derived);
-                    opt_in.extend(lines.into_iter().map(|l| (module.clone(), l)));
-                    drift
+                    let head =
+                        head_drift(&lock, &derived, &accepted_enums(freeze.accepted, &module));
+                    opt_in.extend(head.opt_in.into_iter().map(|l| (module.clone(), l)));
+                    not_offered.extend(head.not_offered.into_iter().map(|l| (module.clone(), l)));
+                    head.drift
                 }
             };
             let unaccepted: Vec<(Line, Drift)> = drift
@@ -613,6 +690,7 @@ pub fn facade_locks(inputs: &Inputs<'_>) -> Result<Generation, String> {
             locks,
             standings,
             opt_in,
+            not_offered,
             accepted: accepted_lines,
         })
     } else {
@@ -1925,6 +2003,143 @@ mod tests {
         disk
     }
 
+    /// Union lines for two new enums, as a change modelling a construct adds
+    /// them: a dispatch enum `SyntheticItem` over the existing `old_node`
+    /// (and over `new_node`, if any), a value enum `SyntheticValue` (one
+    /// variant carrying the dispatch enum) with two derives, and an accessor
+    /// on `ParenType` returning each.
+    fn new_enum_lines(old_node: &str, new_node: Option<&str>) -> BTreeSet<Line> {
+        let s = String::from;
+        let mut lines: BTreeSet<Line> = [
+            Line::Enum {
+                name: s("SyntheticItem"),
+                variant: s("Old"),
+                node: s(old_node),
+            },
+            Line::Value {
+                name: s("SyntheticValue"),
+                variant: s("Plain"),
+                payload: Payload::Unit,
+            },
+            Line::Value {
+                name: s("SyntheticValue"),
+                variant: s("Item"),
+                payload: Payload::Tuple(vec![Shape::One(Elem::Enum(s("SyntheticItem")))]),
+            },
+            Line::Derive {
+                name: s("SyntheticValue"),
+                trait_: s("Debug"),
+            },
+            Line::Derive {
+                name: s("SyntheticValue"),
+                trait_: s("Clone"),
+            },
+            Line::Accessor {
+                owner: s("ParenType"),
+                name: s("synthetic_items"),
+                shape: Shape::Iter(Elem::Enum(s("SyntheticItem"))),
+                delegate: None,
+            },
+            Line::Accessor {
+                owner: s("ParenType"),
+                name: s("synthetic_value"),
+                shape: Shape::Option(Elem::Value(s("SyntheticValue"))),
+                delegate: None,
+            },
+        ]
+        .into();
+        if let Some(node) = new_node {
+            lines.insert(Line::Enum {
+                name: s("SyntheticItem"),
+                variant: s("New"),
+                node: s(node),
+            });
+        }
+        lines
+    }
+
+    /// `line` as a derived facade's lock spells it: an accessor delegates to
+    /// the union accessor of its own name.
+    fn delegated(line: &Line) -> Line {
+        match line {
+            Line::Accessor {
+                owner, name, shape, ..
+            } => Line::Accessor {
+                owner: owner.clone(),
+                name: name.clone(),
+                shape: shape.clone(),
+                delegate: Some(name.clone()),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// The lines of `list` for `module`.
+    fn lines_of(list: &[(String, Line)], module: &str) -> BTreeSet<Line> {
+        list.iter()
+            .filter(|(m, _)| m == module)
+            .map(|(_, l)| l.clone())
+            .collect()
+    }
+
+    /// Every module `g` lists an `opt_in` or `not_offered` line for is a
+    /// frozen head facade; its two lists are disjoint; and appending every
+    /// `opt_in` line to its lock leaves the lock coherent.
+    fn assert_offers_are_appendable(g: &Generation) {
+        let heads: BTreeMap<String, &Lock> = g
+            .locks
+            .iter()
+            .zip(&g.standings)
+            .filter(|((_, l), s)| **s == Standing::Frozen && l.alias_of().is_none())
+            .map(|((v, l), _)| (v.module(), l))
+            .collect();
+        for (module, _) in g.opt_in.iter().chain(&g.not_offered) {
+            assert!(heads.contains_key(module), "{module} is no frozen head");
+        }
+        for (module, lock) in heads {
+            let opt_in = lines_of(&g.opt_in, &module);
+            let not_offered = lines_of(&g.not_offered, &module);
+            let both: Vec<&Line> = opt_in.intersection(&not_offered).collect();
+            assert!(both.is_empty(), "{module}: {both:?} is both");
+            let mut appended = lock.clone();
+            appended.lines.extend(opt_in);
+            assert_eq!(appended.check(), Vec::<String>::new(), "{module}");
+        }
+    }
+
+    /// The checked-in generation's offers are appendable.
+    #[test]
+    fn the_checked_in_offers_are_appendable() {
+        let g = checked_in_generation(&features::feature_table(), &union())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_offers_are_appendable(&g);
+    }
+
+    /// Every accessor and derive a frozen lock names is one it could opt
+    /// into: with all of them removed, each comes back as `opt_in` and none
+    /// as `not_offered`, and appending them restores the lock.
+    #[test]
+    fn every_locked_accessor_and_derive_is_an_offer() {
+        let rows = features::feature_table();
+        let union = union();
+        let mut removed = BTreeSet::new();
+        let disk = v8_disk(|lock| {
+            lock.lines.retain(|l| {
+                let keep = !matches!(l, Line::Accessor { .. } | Line::Derive { .. });
+                if !keep {
+                    removed.insert(l.clone());
+                }
+                keep
+            });
+        });
+        assert!(removed.len() > 100, "{}", removed.len());
+        let g =
+            generation(&rows, &union, freeze(UP_TO_V8, 1), &disk).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(lines_of(&g.opt_in, "v8"), removed);
+        assert_eq!(lines_of(&g.not_offered, "v8"), BTreeSet::new());
+        assert_offers_are_appendable(&g);
+    }
+
     fn some_accessor(lock: &Lock) -> Line {
         lock.lines
             .iter()
@@ -2016,6 +2231,47 @@ mod tests {
             reason: "test",
         }];
         assert!(run(&union, &disk, &accepted).is_ok());
+
+        // The union grew enums the frozen locks never declared: a dispatch
+        // enum over a node they have, a value enum, and accessors returning
+        // each. That is no divergence, unlike the new variant of `Expr`
+        // above: no frozen head offers any of it, or may opt into it.
+        let fresh = new_enum_lines("AppExpr", None);
+        let mut grown = union.clone();
+        grown.lines.extend(fresh.iter().cloned());
+        let g = run(&grown, &clean, &[]).unwrap_or_else(|e| panic!("{e}"));
+        let expected: BTreeSet<Line> = fresh.iter().map(delegated).collect();
+        for module in ["v4_6", "v5", "v8"] {
+            assert_eq!(lines_of(&g.not_offered, module), expected, "{module}");
+            assert_eq!(lines_of(&g.opt_in, module), BTreeSet::new(), "{module}");
+        }
+        assert_offers_are_appendable(&g);
+        // An enum an acceptance names stays a divergence: its lines are
+        // accepted one by one, so the acceptance is not stale, and each
+        // further variant needs one too.
+        let accepted_enum = [Accepted {
+            module: "v8",
+            line: "enum\tSyntheticItem\tOld\tAppExpr",
+            reason: "test",
+        }];
+        let g = run(&grown, &clean, &accepted_enum).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            !lines_of(&g.not_offered, "v8")
+                .iter()
+                .any(|l| matches!(l, Line::Enum { .. })),
+            "{:?}",
+            g.not_offered
+        );
+        let mut two = grown.clone();
+        two.lines.insert(Line::Enum {
+            name: "SyntheticItem".to_string(),
+            variant: "Paren".to_string(),
+            node: "ParenExpr".to_string(),
+        });
+        let e = run(&two, &clean, &accepted_enum).unwrap_err();
+        assert!(e.contains("enum\tSyntheticItem\tParen\tParenExpr"), "{e}");
+        assert!(run(&two, &clean, &[]).is_ok());
+
         // The acceptance reaches the property suite: the generated table
         // exempts the variant's kind in `v8`, and in no other facade.
         let out = outputs_with(
@@ -2205,12 +2461,15 @@ mod tests {
     }
 
     /// The extensibility proof in miniature: a new language version, 12.0,
-    /// whose one feature introduces one new kind of expression, and a new
-    /// union accessor on a node every facade has. Every published facade's
-    /// generated files are byte-identical with and without them, nothing
-    /// fails, and each frozen head may opt into the accessor; the new
-    /// facade's surface is the latest one's plus exactly that variant, and
-    /// preview's is its own plus the variant and the accessor.
+    /// whose one feature introduces one new kind of expression; a new union
+    /// accessor on a node every facade has; and two new enums, a dispatch
+    /// enum over an old node and the new one and a value enum, each returned
+    /// by a new accessor. Every published facade's generated files are
+    /// byte-identical with and without them, and nothing fails. Each frozen
+    /// head may opt into the accessor and does not offer the new enums. The
+    /// new facade's surface is the one the latest numbered version derives
+    /// plus exactly the new kind's lines, and preview's is its own plus all
+    /// of it.
     #[test]
     fn a_new_language_version_leaves_every_published_facade_byte_identical() {
         let rows = features::feature_table();
@@ -2232,6 +2491,11 @@ mod tests {
             display_name: "synthetic feature".to_string(),
             notes: String::new(),
         });
+        let new_variant = Line::Enum {
+            name: "SyntheticItem".to_string(),
+            variant: "New".to_string(),
+            node: "SyntheticExpr".to_string(),
+        };
         let added: BTreeSet<Line> = [
             Line::Node {
                 node: "SyntheticExpr".to_string(),
@@ -2242,10 +2506,13 @@ mod tests {
                 variant: "Synthetic".to_string(),
                 node: "SyntheticExpr".to_string(),
             },
+            new_variant.clone(),
         ]
         .into();
+        let new_enums = new_enum_lines("AppExpr", Some("SyntheticExpr"));
         let mut fake_union = union.clone();
         fake_union.lines.extend(added.iter().cloned());
+        fake_union.lines.extend(new_enums.iter().cloned());
         let accessor = |delegate: Option<String>| Line::Accessor {
             owner: "ParenType".to_string(),
             name: "synthetic_child".to_string(),
@@ -2293,21 +2560,24 @@ mod tests {
         };
         let real_generation = generation_of(&rows, &union, &versions);
         let fake_generation = generation_of(&fake_rows, &fake_union, &fake_versions);
-        // The new facade against the latest numbered one, and preview against
-        // itself without the new version.
-        for (module, generation, against) in [
-            (
-                "v12",
-                &fake_generation,
-                versions[versions.len() - 2].module(),
-            ),
-            ("preview", &real_generation, "preview".to_string()),
+        let new_enums_derived: BTreeSet<Line> = new_enums.iter().map(delegated).collect();
+        // The new facade against what the latest numbered version derives
+        // from the same union (frozen or not), and preview against itself
+        // without the new version.
+        let latest = derived_lock(
+            &fake_union,
+            &fake_rows,
+            versions[versions.len() - 2].decimal,
+        );
+        for (module, before) in [
+            ("v12", &latest),
+            ("preview", resolved(&real_generation, "preview")),
         ] {
             let lock = resolved(&fake_generation, module);
-            let before = resolved(generation, &against);
             let mut expected = added.clone();
             if module == "preview" {
                 expected.insert(accessor(Some("synthetic_child".to_string())));
+                expected.extend(new_enums_derived.iter().cloned());
             }
             assert_eq!(
                 lock.lines
@@ -2318,8 +2588,22 @@ mod tests {
                 "{module}"
             );
             assert!(before.lines.is_subset(&lock.lines), "{module}");
+            assert!(new_enums_derived.is_subset(&lock.lines), "{module}");
         }
-        assert!(fake[&v12.code_path()].contains("Synthetic(SyntheticExpr)"));
+        let v12_code = &fake[&v12.code_path()];
+        for needle in [
+            "Synthetic(SyntheticExpr)",
+            "Old(AppExpr)",
+            "New(SyntheticExpr)",
+            "pub enum SyntheticValue",
+            "pub fn synthetic_items(",
+            "pub fn synthetic_value(",
+        ] {
+            assert!(
+                v12_code.contains(needle),
+                "the v12 facade has no {needle:?}"
+            );
+        }
         let frozen_heads: BTreeSet<String> = fake_generation
             .locks
             .iter()
@@ -2327,14 +2611,27 @@ mod tests {
             .filter(|((_, l), s)| **s == Standing::Frozen && l.alias_of().is_none())
             .map(|((v, _), _)| v.module())
             .collect();
-        let offered: BTreeSet<String> = fake_generation
-            .opt_in
-            .iter()
-            .filter(|(_, l)| *l == accessor(Some("synthetic_child".to_string())))
-            .map(|(m, _)| m.clone())
-            .collect();
         assert!(!frozen_heads.is_empty());
-        assert_eq!(offered, frozen_heads);
+        let mut not_offered = new_enums_derived.clone();
+        not_offered.remove(&new_variant);
+        for module in &frozen_heads {
+            let opt_in = lines_of(&fake_generation.opt_in, module);
+            assert!(
+                opt_in.contains(&accessor(Some("synthetic_child".to_string()))),
+                "{module}"
+            );
+            assert!(opt_in.is_disjoint(&new_enums_derived), "{module}");
+            // What it does not offer grows by exactly the new enums' lines
+            // over its surface.
+            let mut expected = lines_of(&real_generation.not_offered, module);
+            expected.extend(not_offered.iter().cloned());
+            assert_eq!(
+                lines_of(&fake_generation.not_offered, module),
+                expected,
+                "{module}"
+            );
+        }
+        assert_offers_are_appendable(&fake_generation);
     }
 
     /// The synthetic-feature test's twin for a compiler that *deletes* a

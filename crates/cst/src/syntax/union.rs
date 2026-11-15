@@ -50,20 +50,6 @@ fn token(parent: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxToken> {
         .find(|t| t.kind() == kind)
 }
 
-/// Helper: each child node `S` of `parent` with its index among `parent`'s
-/// child nodes of the `items` kinds (a record's fields and spreads together).
-/// `S` casts one of those kinds.
-fn indexed_items<'a, S: AstNode + 'a>(
-    parent: &'a SyntaxNode,
-    items: [SyntaxKind; 2],
-) -> impl Iterator<Item = (usize, S)> + 'a {
-    parent
-        .children()
-        .filter(move |n| items.contains(&n.kind()))
-        .enumerate()
-        .filter_map(|(i, n)| S::cast(n).map(|s| (i, s)))
-}
-
 /// `true` for an `ELIF_TOK`-headed nested `IF_THEN_ELSE_EXPR` — an `elif`
 /// branch, which occupies an enclosing `if`'s else slot. Distinct from a nested
 /// `if` headed by `IF_TOK` (`if a then if p then q`), which is itself the
@@ -596,24 +582,18 @@ impl DelegateRepr {
 
 impl RecordRepr {
     /// The record's fields in source order — FCS's
-    /// `SynTypeDefnSimpleRepr.Record.recordFields`.
+    /// `SynTypeDefnSimpleRepr.Record.recordFields`, the fields of
+    /// [`Self::items`].
     pub fn fields(&self) -> impl Iterator<Item = RecordFieldDecl> + '_ {
         accessor!("RecordRepr::fields");
         children(&self.0)
     }
 
-    /// Each spread `...T` with its index among the record's fields and
-    /// spreads in source order: FCS's `recordFieldsAndSpreads` is
-    /// [`Self::fields`] and these, interleaved by that index.
-    pub fn spreads(&self) -> impl Iterator<Item = (usize, RecordSpreadDecl)> + '_ {
-        accessor!("RecordRepr::spreads");
-        indexed_items(
-            &self.0,
-            [
-                SyntaxKind::RECORD_FIELD_DECL,
-                SyntaxKind::RECORD_SPREAD_DECL,
-            ],
-        )
+    /// The record's fields and spreads `...T` in source order — FCS's
+    /// `recordFieldsAndSpreads`.
+    pub fn items(&self) -> impl Iterator<Item = RecordReprItem> + '_ {
+        accessor!("RecordRepr::items");
+        children(&self.0)
     }
 }
 
@@ -3846,21 +3826,17 @@ impl RecordExpr {
     }
 
     /// The field bindings in source order — FCS's `SynExpr.Record.recordFields`
-    /// less its spreads, which are [`Self::spreads`].
+    /// less its spreads: the fields of [`Self::items`].
     pub fn fields(&self) -> impl Iterator<Item = RecordField> + '_ {
         accessor!("RecordExpr::fields");
         children(&self.0)
     }
 
-    /// Each spread `...e` with its index among the record's bindings, its
-    /// fields and spreads in source order: FCS's `recordFields` is
-    /// [`Self::fields`] and these, interleaved by that index.
-    pub fn spreads(&self) -> impl Iterator<Item = (usize, RecordSpread)> + '_ {
-        accessor!("RecordExpr::spreads");
-        indexed_items(
-            &self.0,
-            [SyntaxKind::RECORD_FIELD, SyntaxKind::RECORD_SPREAD],
-        )
+    /// The record's bindings in source order, its fields and spreads `...e`
+    /// — FCS's `SynExpr.Record.recordFields`.
+    pub fn items(&self) -> impl Iterator<Item = RecordExprItem> + '_ {
+        accessor!("RecordExpr::items");
+        children(&self.0)
     }
 }
 
@@ -3877,24 +3853,20 @@ impl AnonRecdExpr {
     }
 
     /// The field bindings in source order — FCS's
-    /// `SynExpr.AnonRecd.recordFields` less its spreads, which are
-    /// [`Self::spreads`]. Reuses [`RecordField`] (the same `RECORD_FIELD` node
+    /// `SynExpr.AnonRecd.recordFields` less its spreads: the fields of
+    /// [`Self::items`]. Reuses [`RecordField`] (the same `RECORD_FIELD` node
     /// the regular record uses).
     pub fn fields(&self) -> impl Iterator<Item = RecordField> + '_ {
         accessor!("AnonRecdExpr::fields");
         children(&self.0)
     }
 
-    /// Each spread `...e` with its index among the record's bindings, its
-    /// fields and spreads in source order: FCS's `recordFields` is
-    /// [`Self::fields`] and these, interleaved by that index. Mirrors
-    /// [`RecordExpr::spreads`].
-    pub fn spreads(&self) -> impl Iterator<Item = (usize, RecordSpread)> + '_ {
-        accessor!("AnonRecdExpr::spreads");
-        indexed_items(
-            &self.0,
-            [SyntaxKind::RECORD_FIELD, SyntaxKind::RECORD_SPREAD],
-        )
+    /// The record's bindings in source order, its fields and spreads `...e`
+    /// — FCS's `SynExpr.AnonRecd.recordFields`. Mirrors
+    /// [`RecordExpr::items`].
+    pub fn items(&self) -> impl Iterator<Item = RecordExprItem> + '_ {
+        accessor!("AnonRecdExpr::items");
+        children(&self.0)
     }
 
     /// `true` for the `struct {| … |}` form — FCS's `SynExpr.AnonRecd.isStruct`.

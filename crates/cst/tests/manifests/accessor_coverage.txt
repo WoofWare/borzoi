@@ -13,7 +13,7 @@ AndsPat::operands
 AnonRecdExpr::copy_source
 AnonRecdExpr::fields
 AnonRecdExpr::is_struct
-AnonRecdExpr::spreads
+AnonRecdExpr::items
 AnonRecdType::fields
 AnonRecdType::is_struct
 AnonRecdTypeField::ident
@@ -268,7 +268,7 @@ RationalConstRational::numerator
 RecordExpr::copy_source
 RecordExpr::fields
 RecordExpr::inherit
-RecordExpr::spreads
+RecordExpr::items
 RecordField::field_name
 RecordField::value
 RecordFieldDecl::attributes
@@ -279,7 +279,7 @@ RecordPat::fields
 RecordPatField::name
 RecordPatField::pat
 RecordRepr::fields
-RecordRepr::spreads
+RecordRepr::items
 RecordSpread::expr
 RecordSpreadDecl::ty
 SequentialExpr::statements

@@ -58,7 +58,7 @@
 use crate::hash::{HashMap, HashSet};
 
 use borzoi_cst::syntax::{
-    AstNode, NestedModuleDecl, SyntaxToken, TextRange, TypeDefn, TypeDefnRepr,
+    AstNode, NestedModuleDecl, RecordReprItem, SyntaxToken, TextRange, TypeDefn, TypeDefnRepr,
 };
 
 use super::contributors::RequireQualifiedAccess;
@@ -143,7 +143,10 @@ impl Resolver<'_> {
         // does not read: the record may declare any label, and a later spread
         // may replace an explicit field of the same name. So every entry it
         // makes declines, and one more answers every label.
-        let spread = repr.spreads().next().map(|(_, s)| s.syntax().text_range());
+        let spread = repr.items().find_map(|item| match item {
+            RecordReprItem::Spread(s) => Some(s.syntax().text_range()),
+            RecordReprItem::Field(_) => None,
+        });
         let certain = certain && spread.is_none();
         let fields: Vec<(String, TextRange)> = repr
             .fields()

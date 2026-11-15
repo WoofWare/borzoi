@@ -502,8 +502,8 @@ use borzoi_cst::syntax::{
     AppExpr, AstNode, AttributeList, Binding, ConstExpr, DotGetExpr, Expr, FunExpr, IfThenElseExpr,
     ImplFile, LetDecl, LetOrUseExpr, LongIdent, LongIdentExpr, LongIdentPat, MatchExpr, MemberDefn,
     ModuleOrNamespace, ModuleOrNamespaceKind, NamedPat, NestedModuleDecl, ParenPat, Pat,
-    RecordRepr, SequentialExpr, SyntaxKind, SyntaxNode, SyntaxToken, TupleSegment, Type, TypeDefn,
-    TypeDefnRepr, UnionRepr, VarType,
+    RecordRepr, RecordReprItem, SequentialExpr, SyntaxKind, SyntaxNode, SyntaxToken, TupleSegment,
+    Type, TypeDefn, TypeDefnRepr, UnionRepr, VarType,
 };
 
 use crate::assembly_env::{AssemblyEnv, EntityHandle, MemberIndex};

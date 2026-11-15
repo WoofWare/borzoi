@@ -7240,6 +7240,8 @@ pub const FACADES: &[FacadeCase] = &[
             cast_case!(v11, ParsedInput),
             cast_case!(v11, Pat),
             cast_case!(v11, RationalConst),
+            cast_case!(v11, RecordExprItem),
+            cast_case!(v11, RecordReprItem),
             cast_case!(v11, SigDecl),
             cast_case!(v11, Type),
             cast_case!(v11, TypeDefnRepr),
@@ -7309,10 +7311,10 @@ pub const FACADES: &[FacadeCase] = &[
             accessor_case!(
                 v11,
                 AnonRecdExpr,
-                spreads,
-                spreads,
+                items,
+                items,
                 iter,
-                "iter (usize, node RecordSpread)"
+                "iter enum RecordExprItem"
             ),
             accessor_case!(
                 v11,
@@ -8376,10 +8378,10 @@ pub const FACADES: &[FacadeCase] = &[
             accessor_case!(
                 v11,
                 RecordExpr,
-                spreads,
-                spreads,
+                items,
+                items,
                 iter,
-                "iter (usize, node RecordSpread)"
+                "iter enum RecordExprItem"
             ),
             accessor_case!(
                 v11,
@@ -8429,10 +8431,10 @@ pub const FACADES: &[FacadeCase] = &[
             accessor_case!(
                 v11,
                 RecordRepr,
-                spreads,
-                spreads,
+                items,
+                items,
                 iter,
-                "iter (usize, node RecordSpreadDecl)"
+                "iter enum RecordReprItem"
             ),
             accessor_case!(v11, RecordSpread, expr, expr, one, "option enum Expr"),
             accessor_case!(v11, RecordSpreadDecl, ty, ty, one, "option enum Type"),
@@ -9044,6 +9046,8 @@ pub const FACADES: &[FacadeCase] = &[
             cast_case!(preview, ParsedInput),
             cast_case!(preview, Pat),
             cast_case!(preview, RationalConst),
+            cast_case!(preview, RecordExprItem),
+            cast_case!(preview, RecordReprItem),
             cast_case!(preview, SigDecl),
             cast_case!(preview, Type),
             cast_case!(preview, TypeDefnRepr),
@@ -9113,10 +9117,10 @@ pub const FACADES: &[FacadeCase] = &[
             accessor_case!(
                 preview,
                 AnonRecdExpr,
-                spreads,
-                spreads,
+                items,
+                items,
                 iter,
-                "iter (usize, node RecordSpread)"
+                "iter enum RecordExprItem"
             ),
             accessor_case!(
                 preview,
@@ -10405,10 +10409,10 @@ pub const FACADES: &[FacadeCase] = &[
             accessor_case!(
                 preview,
                 RecordExpr,
-                spreads,
-                spreads,
+                items,
+                items,
                 iter,
-                "iter (usize, node RecordSpread)"
+                "iter enum RecordExprItem"
             ),
             accessor_case!(
                 preview,
@@ -10465,10 +10469,10 @@ pub const FACADES: &[FacadeCase] = &[
             accessor_case!(
                 preview,
                 RecordRepr,
-                spreads,
-                spreads,
+                items,
+                items,
                 iter,
-                "iter (usize, node RecordSpreadDecl)"
+                "iter enum RecordReprItem"
             ),
             accessor_case!(preview, RecordSpread, expr, expr, one, "option enum Expr"),
             accessor_case!(preview, RecordSpreadDecl, ty, ty, one, "option enum Type"),

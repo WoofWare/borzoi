@@ -620,7 +620,10 @@ impl<'a> FileFacts<'a> {
         let Some(members) = members else {
             return HashMap::default();
         };
-        if repr.spreads().next().is_some() {
+        if repr
+            .items()
+            .any(|item| matches!(item, RecordReprItem::Spread(_)))
+        {
             return HashMap::default();
         }
         // A label declared twice is an error FCS recovers from by keeping

@@ -963,8 +963,9 @@ pub const DECL_ENUMS: &[Enum] = &[
     },
 ];
 
-/// The *standalone* nodes: newtypes no dispatch enum holds, which accessors
-/// return directly. Grouped by the part of the tree they sit in.
+/// The *standalone* nodes: newtypes no category's dispatch enum holds, which
+/// accessors return directly or through [`STANDALONE_ENUMS`]. Grouped by the
+/// part of the tree they sit in.
 pub const STANDALONE_NODES: &[Node] = &[
     // Files and their modules.
     Node {
@@ -1101,12 +1102,23 @@ pub const STANDALONE_NODES: &[Node] = &[
     },
 ];
 
-/// The standalone category's one dispatch enum: a parse's root, FCS's
-/// `ParsedInput`. A facade's is what `Parse::view` returns.
-pub const STANDALONE_ENUMS: &[Enum] = &[Enum {
-    name: "ParsedInput",
-    variants: &[("ImplFile", "ImplFile"), ("SigFile", "SigFile")],
-}];
+/// The standalone category's dispatch enums: a parse's root, FCS's
+/// `ParsedInput` (a facade's is what `Parse::view` returns), and the items of
+/// a record, its fields and spreads in source order.
+pub const STANDALONE_ENUMS: &[Enum] = &[
+    Enum {
+        name: "ParsedInput",
+        variants: &[("ImplFile", "ImplFile"), ("SigFile", "SigFile")],
+    },
+    Enum {
+        name: "RecordExprItem",
+        variants: &[("Field", "RecordField"), ("Spread", "RecordSpread")],
+    },
+    Enum {
+        name: "RecordReprItem",
+        variants: &[("Field", "RecordFieldDecl"), ("Spread", "RecordSpreadDecl")],
+    },
+];
 
 /// Derives of a fieldless value enum that is also hashed.
 const COPY_HASH: &[&str] = &["Debug", "Clone", "Copy", "PartialEq", "Eq", "Hash"];

@@ -978,6 +978,83 @@ impl RationalConst {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RecordExprItem {
+    Field(RecordField),
+    Spread(RecordSpread),
+}
+
+impl AstNode for RecordExprItem {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(kind, SyntaxKind::RECORD_FIELD | SyntaxKind::RECORD_SPREAD)
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::RECORD_FIELD => RecordField::cast(node).map(RecordExprItem::Field),
+            SyntaxKind::RECORD_SPREAD => RecordSpread::cast(node).map(RecordExprItem::Spread),
+            _ => None,
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            RecordExprItem::Field(n) => n.syntax(),
+            RecordExprItem::Spread(n) => n.syntax(),
+        }
+    }
+}
+
+impl RecordExprItem {
+    /// This value as the union's [`RecordExprItem`](crate::syntax::RecordExprItem).
+    #[cfg(feature = "unstable-union")]
+    pub fn to_union(&self) -> u::RecordExprItem {
+        match self {
+            RecordExprItem::Field(n) => u::RecordExprItem::Field(n.to_union()),
+            RecordExprItem::Spread(n) => u::RecordExprItem::Spread(n.to_union()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RecordReprItem {
+    Field(RecordFieldDecl),
+    Spread(RecordSpreadDecl),
+}
+
+impl AstNode for RecordReprItem {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::RECORD_FIELD_DECL | SyntaxKind::RECORD_SPREAD_DECL
+        )
+    }
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::RECORD_FIELD_DECL => RecordFieldDecl::cast(node).map(RecordReprItem::Field),
+            SyntaxKind::RECORD_SPREAD_DECL => {
+                RecordSpreadDecl::cast(node).map(RecordReprItem::Spread)
+            }
+            _ => None,
+        }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            RecordReprItem::Field(n) => n.syntax(),
+            RecordReprItem::Spread(n) => n.syntax(),
+        }
+    }
+}
+
+impl RecordReprItem {
+    /// This value as the union's [`RecordReprItem`](crate::syntax::RecordReprItem).
+    #[cfg(feature = "unstable-union")]
+    pub fn to_union(&self) -> u::RecordReprItem {
+        match self {
+            RecordReprItem::Field(n) => u::RecordReprItem::Field(n.to_union()),
+            RecordReprItem::Spread(n) => u::RecordReprItem::Spread(n.to_union()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SigDecl {
     Exception(ExceptionDefnDecl),
     HashDirective(HashDirectiveDecl),
@@ -2328,6 +2405,17 @@ impl RecordExpr {
     }
 }
 
+impl RecordExprItem {
+    pub(crate) fn from_union(value: u::RecordExprItem) -> Option<Self> {
+        Some(match value {
+            u::RecordExprItem::Field(n) => RecordExprItem::Field(RecordField::from_union(n)?),
+            u::RecordExprItem::Spread(n) => RecordExprItem::Spread(RecordSpread::from_union(n)?),
+            #[allow(unreachable_patterns)]
+            _ => return None,
+        })
+    }
+}
+
 impl RecordField {
     pub(crate) fn from_union(node: u::RecordField) -> Option<Self> {
         Self::can_cast(node.syntax().kind()).then_some(Self(node))
@@ -2349,6 +2437,19 @@ impl RecordPat {
 impl RecordPatField {
     pub(crate) fn from_union(node: u::RecordPatField) -> Option<Self> {
         Self::can_cast(node.syntax().kind()).then_some(Self(node))
+    }
+}
+
+impl RecordReprItem {
+    pub(crate) fn from_union(value: u::RecordReprItem) -> Option<Self> {
+        Some(match value {
+            u::RecordReprItem::Field(n) => RecordReprItem::Field(RecordFieldDecl::from_union(n)?),
+            u::RecordReprItem::Spread(n) => {
+                RecordReprItem::Spread(RecordSpreadDecl::from_union(n)?)
+            }
+            #[allow(unreachable_patterns)]
+            _ => return None,
+        })
     }
 }
 
@@ -2865,10 +2966,8 @@ impl AnonRecdExpr {
     pub fn is_struct(&self) -> bool {
         self.0.is_struct()
     }
-    pub fn spreads(&self) -> impl Iterator<Item = (usize, RecordSpread)> + '_ {
-        self.0
-            .spreads()
-            .filter_map(|(x0, x1)| Some((x0, RecordSpread::from_union(x1)?)))
+    pub fn items(&self) -> impl Iterator<Item = RecordExprItem> + '_ {
+        self.0.items().filter_map(RecordExprItem::from_union)
     }
 }
 
@@ -4033,10 +4132,8 @@ impl RecordExpr {
     pub fn inherit(&self) -> Option<InheritMember> {
         self.0.inherit().and_then(InheritMember::from_union)
     }
-    pub fn spreads(&self) -> impl Iterator<Item = (usize, RecordSpread)> + '_ {
-        self.0
-            .spreads()
-            .filter_map(|(x0, x1)| Some((x0, RecordSpread::from_union(x1)?)))
+    pub fn items(&self) -> impl Iterator<Item = RecordExprItem> + '_ {
+        self.0.items().filter_map(RecordExprItem::from_union)
     }
 }
 
@@ -4083,10 +4180,8 @@ impl RecordRepr {
     pub fn fields(&self) -> impl Iterator<Item = RecordFieldDecl> + '_ {
         self.0.fields().filter_map(RecordFieldDecl::from_union)
     }
-    pub fn spreads(&self) -> impl Iterator<Item = (usize, RecordSpreadDecl)> + '_ {
-        self.0
-            .spreads()
-            .filter_map(|(x0, x1)| Some((x0, RecordSpreadDecl::from_union(x1)?)))
+    pub fn items(&self) -> impl Iterator<Item = RecordReprItem> + '_ {
+        self.0.items().filter_map(RecordReprItem::from_union)
     }
 }
 
