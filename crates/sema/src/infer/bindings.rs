@@ -19,7 +19,12 @@ impl<'a> Gen<'a> {
     /// A `let` FCS drops unchecked, directly in a namespace
     /// ([`crate::resolve::dropped_in_namespace`]), is not walked: FCS types
     /// nothing in it.
-    pub(super) fn walk(&mut self, file: &ImplFile) {
+    ///
+    /// Returns the declaration holding the file's first recovery when that is
+    /// a member access whose member is not written (`s.`), for
+    /// [`Self::finish`] to walk for its receiver types alone; like every
+    /// declaration from the first recovery on, it is not typed here.
+    pub(super) fn walk(&mut self, file: &ImplFile) -> Option<Damaged> {
         let dropped = crate::resolve::dropped_in_namespace(file);
         for node in file.syntax().descendants() {
             if let Some(let_decl) = LetDecl::cast(node)
@@ -28,6 +33,19 @@ impl<'a> Gen<'a> {
                 self.let_binding(&let_decl);
             }
         }
+        let dot = self
+            .facts
+            .resolved
+            .recovery()
+            .first_is_trailing_dot(file.syntax())?;
+        let decl = dot.parent()?.ancestors().find_map(LetDecl::cast)?;
+        if dropped.contains(&decl.syntax().text_range()) {
+            return None;
+        }
+        Some(Damaged {
+            decl,
+            dot: dot.text_range(),
+        })
     }
 
     /// A `let`/`let rec` declaration. Only ordinary `LET_DECL`s reach here, not
@@ -116,7 +134,7 @@ impl<'a> Gen<'a> {
     }
 
     /// Type one module-level `let` declaration ([`Self::let_binding`]).
-    fn type_let_decl(&mut self, let_decl: &LetDecl) {
+    pub(super) fn type_let_decl(&mut self, let_decl: &LetDecl) {
         // A recursive group (`let rec … and …`) is solved as a unit: a sibling
         // binding's constraints can flow back to a binder, so a literal RHS is
         // *not* isolated and its type may be retargeted. Defer the whole group

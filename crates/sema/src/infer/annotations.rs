@@ -100,7 +100,7 @@ impl<'a> FileFacts<'a> {
         // which is free on a clean parse (the empty-span case answers without
         // touching the tree) and a short ancestor climb per node on a file that
         // did error — where there is nothing to commit anyway.
-        if !self.resolved.recovery().declaration_is_intact(ty.syntax()) {
+        if !self.resolved.recovery().node_is_intact(ty.syntax()) {
             return None;
         }
         match ty {

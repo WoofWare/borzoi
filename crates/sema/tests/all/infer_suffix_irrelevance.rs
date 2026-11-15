@@ -56,7 +56,8 @@
 //!   `P'`, after the cut included, FCS has, the same.
 //! - [`prefix_commits_agree_across_holes`] (no oracle): `P'` under every hole
 //!   commits the same in the prefix — expression and binder types, member
-//!   resolutions, `(expr).Member` receiver types.
+//!   resolutions, receiver types at each access
+//!   ([`InferredFile::receiver_type_at`]).
 //! - [`prefix_accesses_agree_across_suffixes`] (no oracle): the member
 //!   resolutions and receiver types inside the prefix are the same under the
 //!   original suffix and every hole. FCS decides an access at the access.
@@ -85,7 +86,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
 use borzoi_cst::parser::parse;
-use borzoi_cst::syntax::{AstNode, ImplFile, SyntaxKind, TextRange};
+use borzoi_cst::syntax::{AstNode, ImplFile, TextRange};
 use borzoi_sema::{
     AssemblyEnv, Incomplete, InferredFile, PrecedingTypes, ProjectItems, Resolution, ResolvedFile,
     SyntaxRecovery, infer_file, resolve_file,
@@ -566,7 +567,7 @@ fn infer_src(src: &str) -> (ImplFile, ResolvedFile, InferredFile) {
 
 fn infer_program(program: &Program) -> Inferred {
     let env = full_bcl_env();
-    let (file, resolved, inferred) = infer_src(&program.src);
+    let (_, resolved, inferred) = infer_src(&program.src);
     let mut all = Commits::default();
     for (r, t) in inferred.types() {
         all.types.insert(span(*r), t.render(env));
@@ -578,14 +579,8 @@ fn infer_program(program: &Program) -> Inferred {
     for (r, res) in inferred.member_resolutions() {
         all.members.insert(span(*r), spell_resolution(env, *res));
     }
-    for node in file
-        .syntax()
-        .descendants()
-        .filter(|n| n.kind() == SyntaxKind::DOT_GET_EXPR)
-    {
-        if let Some(t) = inferred.dot_get_receiver_type(node.text_range()) {
-            all.receivers.insert(span(node.text_range()), t.render(env));
-        }
+    for (dot, t) in inferred.receiver_types() {
+        all.receivers.insert(span(dot), t.render(env));
     }
     let census = inferred.incompleteness();
     let h = header_census_len();
@@ -1089,11 +1084,12 @@ fn oracle_free(files: usize, with_holes: bool) -> (Vec<Violation>, Vec<Violation
                 }
                 for &hole in &variants {
                     let h = inferred.all.region(hole, lo, hi);
-                    for (cat, l, r) in [
-                        ("member", &p.members, &h.members),
-                        ("receiver", &p.receivers, &h.receivers),
+                    for (cat, key, l, r) in [
+                        ("member", "member-access", &p.members, &h.members),
+                        ("receiver", "receiver-access", &p.receivers, &h.receivers),
                     ] {
                         *tally.compared.entry("access").or_default() += l.len().max(r.len());
+                        *tally.compared.entry(key).or_default() += l.len().max(r.len());
                         compare_table(cat, l, r, base, hole, base, &mut accesses);
                     }
                 }
@@ -1144,6 +1140,10 @@ fn prefix_accesses_agree_across_suffixes() {
     assert!(
         tally.compared.get("access").copied().unwrap_or(0) >= 100,
         "too few prefix accesses compared to be evidence: {tally:?}"
+    );
+    assert!(
+        tally.compared.get("receiver-access").copied().unwrap_or(0) >= 100,
+        "too few prefix receiver types compared to be evidence: {tally:?}"
     );
 }
 

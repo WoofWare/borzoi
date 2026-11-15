@@ -142,7 +142,7 @@ impl<'a> Gen<'a> {
         // where FCS never checks it. So a pattern is read only when nothing up
         // to it recovered ([`crate::recovery::SyntaxRecovery::clean_through`]).
         let recovery = self.facts.resolved.recovery();
-        if !recovery.declaration_is_intact(pat.syntax()) || !recovery.clean_through(pat.syntax()) {
+        if !recovery.node_is_intact(pat.syntax()) || !recovery.clean_through(pat.syntax()) {
             return Err(Incomplete::Recovery);
         }
         let named_def = |named: &NamedPat| {

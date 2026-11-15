@@ -28,7 +28,7 @@
 //! recovered declaration are output like any other.
 //!
 //! Each inference is spelled ([`dump_file`]) as its expression types, binder
-//! types, member resolutions, `(expr).Member` receiver types, incompleteness
+//! types, member resolutions, receiver types at each access, incompleteness
 //! census, type-budget verdict, deepest expression walk and refused equalities
 //! ([`InferredFile::refused_equalities`]), each type through
 //! [`spelled_debug`] and each table sorted by range. [`InferredFile::type_walks`]
@@ -71,7 +71,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use borzoi_cst::parser::parse_with_symbols;
-use borzoi_cst::syntax::{AstNode, ImplFile, SigFile, SyntaxKind, SyntaxNode};
+use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
 use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_oracle_harness::panic_silence::silence_panics_here;
 use borzoi_oracle_harness::par_map::par_map;
@@ -114,13 +114,10 @@ fn spell_resolution(env: &AssemblyEnv, res: Resolution) -> String {
 }
 
 /// One inference, spelled: every table sorted by range, so the text depends
-/// only on what was inferred.
-///
-/// `root` is the file's tree, which supplies the `(expr).Member` accesses
-/// whose receiver types [`InferredFile::dot_get_receiver_type`] is asked for.
+/// only on what was inferred. A receiver type
+/// ([`InferredFile::receiver_type_at`]) is keyed by its dot's range.
 pub fn dump_file(
     env: &AssemblyEnv,
-    root: &SyntaxNode,
     resolved: &ResolvedFile,
     inferred: &InferredFile,
 ) -> (String, usize) {
@@ -168,18 +165,11 @@ pub fn dump_file(
     for ((s, e), m) in &members {
         writeln!(out, "  {s}-{e} {m}").unwrap();
     }
-    let mut receivers: Vec<_> = root
-        .descendants()
-        .filter(|n| n.kind() == SyntaxKind::DOT_GET_EXPR)
-        .filter_map(|n| {
-            let range = n.text_range();
-            inferred
-                .dot_get_receiver_type(range)
-                .map(|t| (at(range), spell(env, *t)))
-        })
+    let mut receivers: Vec<_> = inferred
+        .receiver_types()
+        .map(|(dot, t)| (at(dot), spell(env, *t)))
         .collect();
     receivers.sort();
-    receivers.dedup();
     writeln!(out, "receivers").unwrap();
     for ((s, e), t) in &receivers {
         writeln!(out, "  {s}-{e} {t}").unwrap();
@@ -304,7 +294,7 @@ fn dump_alone(env: &'static AssemblyEnv, path: PathBuf) -> Dumped {
             .expect("one name per file");
             let inferred =
                 infer_named_file(&file, &resolved, env, &PrecedingTypes::default(), &name);
-            let (text, commits) = dump_file(env, file.syntax(), &resolved, &inferred);
+            let (text, commits) = dump_file(env, &resolved, &inferred);
             Dumped::Text { text, commits }
         }))
         .unwrap_or(Dumped::Panicked)
@@ -348,9 +338,8 @@ fn dump_directory(env: &'static AssemblyEnv, paths: Vec<PathBuf>) -> Vec<(PathBu
                 .filter(|(_, p)| p.extension().is_some_and(|e| e == "fs"))
                 .map(|(i, p)| {
                     let dumped = match (&trees[i], inferred.file(i)) {
-                        (SourceFile::Impl(file), Some(inf)) => {
-                            let (mut text, commits) =
-                                dump_file(env, file.syntax(), resolved.file(i), inf);
+                        (SourceFile::Impl(_), Some(inf)) => {
+                            let (mut text, commits) = dump_file(env, resolved.file(i), inf);
                             text.push_str(&dump_exports(env, resolved.file(i), &inferred));
                             Dumped::Text { text, commits }
                         }
@@ -531,7 +520,7 @@ fn every_section_of_the_dump_is_live() {
     let file = ImplFile::cast(parsed.root).expect("impl root");
     let resolved = resolve_file(&file, &ProjectItems::default(), env, &recovery);
     let inferred = borzoi_sema::infer_file(&file, &resolved, env, &PrecedingTypes::default());
-    let (text, commits) = dump_file(env, file.syntax(), &resolved, &inferred);
+    let (text, commits) = dump_file(env, &resolved, &inferred);
     let section = |name: &str| -> Vec<&str> {
         text.lines()
             .skip_while(|l| *l != name)
