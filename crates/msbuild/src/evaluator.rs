@@ -2472,7 +2472,7 @@ impl<'r> State<'r> {
         let trust = self.trust_of(path_name);
         let cause = match (trust.unpinned(), trust.stale()) {
             (Some(root), _) => OpacityCause::Gate(root.clone()),
-            (None, Some(stale)) => stale.clone(),
+            (None, Some(stale)) => (**stale).clone(),
             (None, None) => OpacityCause::Unentered(format!(
                 "the Directory.Build import that `$({path_name})` governs"
             )),
@@ -3429,7 +3429,8 @@ impl<'r> State<'r> {
     /// reserved name or a caller global cannot be rewritten by any file, so
     /// neither goes stale.
     fn latch_walk_opaque(&mut self, cause: OpacityCause) {
-        self.lookup.go_stale(&cause, &self.protected);
+        self.lookup
+            .go_stale(&std::sync::Arc::new(cause.clone()), &self.protected);
         if self.walk_opaque.is_none() {
             self.walk_opaque = Some(cause);
         }

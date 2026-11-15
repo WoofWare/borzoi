@@ -38,6 +38,7 @@
 //! answer is certain ([`Trust::of_exact_decision`]).
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::diagnostic::{DiagnosticKind, DiagnosticOrigin};
 
@@ -204,6 +205,11 @@ pub(crate) struct TrustShape {
     stale: bool,
 }
 
+/// The opacity a stale value rests on, shared: one latch marks every value
+/// bound at the time, so each holds the same cause rather than a copy of its
+/// text (a cause may carry a whole condition).
+pub(crate) type StaleCause = Arc<OpacityCause>;
+
 /// The four forward-uncertainty channels for one property name.
 ///
 /// [`Trust::CERTAIN`] is the identity of the join ([`Trust::join_all`],
@@ -217,7 +223,7 @@ pub(crate) struct Trust {
     unpinned: Option<UnpinnedRoot>,
     sdk_package: Option<SdkPackagePropertyTaint>,
     refused: bool,
-    stale: Option<OpacityCause>,
+    stale: Option<StaleCause>,
 }
 
 impl Trust {
@@ -427,7 +433,7 @@ impl Trust {
     /// the real SDK chain most values are bound before some opacity, so those
     /// readers would decline wholesale. That trade-off, and what it costs, is
     /// measured in the plan.
-    pub(crate) fn stale(&self) -> Option<&OpacityCause> {
+    pub(crate) fn stale(&self) -> Option<&StaleCause> {
         self.stale.as_ref()
     }
 
@@ -492,9 +498,9 @@ impl Trust {
 
     /// Mark this trust stale under `cause` unless it already is: what passing
     /// content the walk cannot see does to a value already bound.
-    pub(in crate::properties) fn go_stale(&mut self, cause: &OpacityCause) {
+    pub(in crate::properties) fn go_stale(&mut self, cause: &StaleCause) {
         if self.stale.is_none() {
-            self.stale = Some(cause.clone());
+            self.stale = Some(Arc::clone(cause));
         }
     }
 }
@@ -535,7 +541,7 @@ pub(crate) enum RefusedOutcome {
 /// What a single property write does to the stale channel.
 pub(crate) enum StaleOutcome {
     /// The new value rests on a stale one: record the opacity behind it.
-    Set(OpacityCause),
+    Set(StaleCause),
     /// The new value rests on nothing stale, under a gate that decided — it is
     /// the real build's value as of this write.
     Clear,
@@ -550,7 +556,7 @@ impl StaleOutcome {
     /// fresh value under a gate that may be wrong leaves the old mark, since
     /// the old value may stand.
     pub(crate) fn after_write(
-        stale_by: Option<OpacityCause>,
+        stale_by: Option<StaleCause>,
         write_condition_maybe_wrong: bool,
     ) -> Self {
         match stale_by {
@@ -663,8 +669,8 @@ mod tests {
             })
     }
 
-    fn opacity_strategy() -> impl Strategy<Value = OpacityCause> {
-        "[ab]".prop_map(OpacityCause::Unentered)
+    fn opacity_strategy() -> impl Strategy<Value = StaleCause> {
+        "[ab]".prop_map(|cause| Arc::new(OpacityCause::Unentered(cause)))
     }
 
     /// A deliberately tiny alphabet: the interesting cases are the ones where
@@ -813,7 +819,7 @@ mod tests {
                 unpinned: None,
                 sdk_package: None,
                 refused: false,
-                stale: Some(OpacityCause::Unentered("x".into())),
+                stale: Some(Arc::new(OpacityCause::Unentered("x".into()))),
             };
             prop_assert!(!staleness_alone.reference_is_untrusted());
             prop_assert!(staleness_alone.untrusted_cause().is_none());
@@ -851,7 +857,7 @@ mod tests {
                 taint: TaintOutcome::Keep,
                 unpinned: UnpinnedOutcome::Keep,
                 refused: RefusedOutcome::Keep,
-                stale: StaleOutcome::Set(OpacityCause::Unentered("x".into())),
+                stale: StaleOutcome::Set(Arc::new(OpacityCause::Unentered("x".into()))),
             },
         ] {
             assert!(
@@ -873,7 +879,7 @@ mod tests {
             }),
             unpinned: UnpinnedOutcome::Set(UnpinnedRoot::undefined("X", None)),
             refused: RefusedOutcome::Set,
-            stale: StaleOutcome::Set(OpacityCause::Unentered("x".into())),
+            stale: StaleOutcome::Set(Arc::new(OpacityCause::Unentered("x".into()))),
         });
         assert_eq!(
             dirty.shape(),

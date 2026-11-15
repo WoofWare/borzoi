@@ -301,7 +301,7 @@ impl PropertyMap {
     /// global, which no file can write.
     pub(crate) fn go_stale(
         &mut self,
-        cause: &trust::OpacityCause,
+        cause: &trust::StaleCause,
         protected: &std::collections::HashSet<String>,
     ) {
         for (lower, entry) in &mut self.inner {

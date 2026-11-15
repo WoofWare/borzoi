@@ -546,12 +546,17 @@ fn check(
         // that differs in whether the spliced file joined is the splice's own
         // decision, which must hold.
         let a_stale_read_outside_the_splice = matches!(undecided_construct, Undecided::Import)
-            && match (fact, disagreeing.as_ref()) {
-                (Fact::CompileItems, Some((_, Some(world)))) => {
+            && match fact {
+                // Every world that commits must agree with the claim on
+                // whether the spliced file joined, not only the first that
+                // disagrees on something else.
+                Fact::CompileItems => {
                     let spliced = |set: &[String]| set.iter().any(|s| s.contains(SPLICED_FILE));
-                    spliced(claim) == spliced(world)
+                    !world_committed.is_empty()
+                        && world_committed
+                            .iter()
+                            .all(|world| spliced(world) == spliced(claim))
                 }
-                (Fact::CompileItems, _) => false,
                 _ => true,
             };
         if a_stale_read_outside_the_splice {
