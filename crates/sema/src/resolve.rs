@@ -104,6 +104,16 @@ use state::{
     Resolver, implicit_open_groups, implicit_open_namespaces, implicit_shortening_prefixes,
 };
 
+/// `$body`, inside the `fold-counts` span `crate::fold_counts::$span` when that
+/// feature is on. The value is `$body`'s; the span closes once it is computed.
+macro_rules! fold_phase {
+    ($span:ident, $body:expr) => {{
+        #[cfg(feature = "fold-counts")]
+        let _phase = tracing::trace_span!(crate::fold_counts::$span).entered();
+        $body
+    }};
+}
+
 /// Resolve every name use in `file` to its defining binder — within this file,
 /// through `preceding` to module-qualified bindings of earlier Compile-order
 /// files, and through `assemblies` to fully-qualified types/members of
@@ -119,13 +129,22 @@ pub fn resolve_file(
     assemblies: &AssemblyEnv,
     recovery: &SyntaxRecovery,
 ) -> ResolvedFile {
+    #[cfg(feature = "fold-counts")]
+    let _file_span = tracing::trace_span!(
+        crate::fold_counts::FILE_SPAN,
+        bytes = u64::from(u32::from(file.syntax().text_range().len()))
+    )
+    .entered();
     // Coarse phase spans (otel only) so a slow `resolve_file` on a large file
     // splits into resolver setup / the declaration walk / finish. Each guard is
     // dropped at its boundary so the phases sequence rather than nest; the whole
     // scaffolding is `#[cfg]`'d out (and `tracing`-free) in the default build.
     #[cfg(feature = "otel")]
     let _phase = tracing::info_span!("resolver_new").entered();
-    let prescan = prescan::Prescan::of(file, preceding, assemblies);
+    let prescan = fold_phase!(
+        PRESCAN_SPAN,
+        prescan::Prescan::of(file, preceding, assemblies)
+    );
     let mut r = Resolver::new(preceding, assemblies, &prescan, recovery);
     #[cfg(feature = "otel")]
     drop(_phase);
@@ -312,16 +331,19 @@ pub fn resolve_file(
         // same-named `namespace N` block re-takes the bindings of the earlier
         // ones, which FCS adds after its implicit opens, so they must keep
         // winning over the seed.
-        let retained = r.lexical.module_frame().len();
-        r.fold_implicit_union_cases(true);
-        for ns in implicit_open_namespaces(r.assemblies) {
-            // Implicit auto-opens precede every declaration: slot position 0.
-            r.open_auto_open_modules_in(&ns, 0, true);
-        }
-        r.fold_implicit_union_cases(false);
-        let seeded = r.lexical.module_frame().len() - retained;
-        r.lexical.module_frame().rotate_tail_right(0, seeded);
-        r.earlier_block_contributions(seeded);
+        let seeded = fold_phase!(IMPLICIT_SEED_SPAN, {
+            let retained = r.lexical.module_frame().len();
+            r.fold_implicit_union_cases(true);
+            for ns in implicit_open_namespaces(r.assemblies) {
+                // Implicit auto-opens precede every declaration: slot position 0.
+                r.open_auto_open_modules_in(&ns, 0, true);
+            }
+            r.fold_implicit_union_cases(false);
+            let seeded = r.lexical.module_frame().len() - retained;
+            r.lexical.module_frame().rotate_tail_right(0, seeded);
+            seeded
+        });
+        fold_phase!(EARLIER_BLOCKS_SPAN, r.earlier_block_contributions(seeded));
         // …then what earlier files put in the root scope, and the block's
         // **own** enclosing namespace, which FCS opens implicitly as well
         // (`ImplicitlyOpenOwnNamespace`) — that is how a referenced assembly's
@@ -329,14 +351,16 @@ pub fn resolve_file(
         // declares `namespace N` and opens nothing. After the implicit
         // auto-opens, matching FCS's order: those are applied when the CCU is
         // added, before any block env exists.
-        r.block_start_contributions(&module);
+        fold_phase!(BLOCK_START_SPAN, r.block_start_contributions(&module));
         // EX-3 §2(d): the block header's own attributes (`[<AutoOpen>] module
         // Test`) resolve in the block's opening scope — the implicit auto-opens
         // just seeded, no explicit `open` yet — which is FCS's env for them.
         r.resolve_attribute_lists(module.attributes());
-        for decl in module.decls() {
-            r.module_decl(&decl);
-        }
+        fold_phase!(DECLARATIONS_SPAN, {
+            for decl in module.decls() {
+                r.module_decl(&decl);
+            }
+        });
         if matches!(module.kind(), ModuleOrNamespaceKind::GlobalNamespace)
             && r.scope.latest_open_pos != 0
         {

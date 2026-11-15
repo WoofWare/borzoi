@@ -1,6 +1,7 @@
 # Resolve what a request reads: declaration surfaces, and bodies on demand
 
-> **Status (2026-11-15).** Plan written; no stage implemented. The counts
+> **Status (2026-11-15).** Stage 0 landed: `edit_counts --features
+> fold-counts` splits each row's `resolve_file` work by phase. The counts
 > below were taken at 5536f10b (`origin/main`) with the throwaway spike
 > described under "Measurements", on WoofWare.PawPrint2 at 91e869b4.
 
@@ -79,7 +80,8 @@ switch re-runs the fold without the spike and compares the two:
 
 Per-file and per-phase counts come from `thread_selfcounts` around
 `resolve_file` and its phases, over files 2–238 (7.49 MB; the target is
-excluded):
+excluded). Stage 0's harness reports the same split
+(`--features fold-counts`, and `EDIT_COUNTS_FOLD_FILES=1` for each file's):
 
 | phase | today | earlier bodies skipped |
 |---|---:|---:|
@@ -313,7 +315,14 @@ prints them when the feature is on. Instruction counts need macOS, as
 
 **Oracle**: it reproduces the "Measurements" table's "today" column on
 WoofWare.PawPrint2 at 91e869b4, within the noise of the rows that read no
-files.
+files. A unit test holds that every phase span opens directly inside the
+file's span and that each block opens its four, which the harness's
+"rest" column relies on.
+
+**Measured** at 765e3335: total 6,759 M, `Prescan::of` 528 M, seed 174 M,
+earlier blocks 23 M, block start 1,128 M, declarations 4,842 M, rest 64 M.
+The rest is 12 M above the spike's; the observer's own counter reads land
+there, and they are the likely difference.
 
 ### Stage 1: two id spaces
 

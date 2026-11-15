@@ -38,6 +38,7 @@ mod assembly_env;
 mod binders;
 mod def;
 mod diagnostics;
+pub mod fold_counts;
 mod function_ty;
 pub mod hash;
 mod infer;
