@@ -9,9 +9,9 @@
 use super::*;
 use borzoi_msbuild::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
-    CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause, DiagnosticKind,
-    DiagnosticOrigin, ImplicitImportKind, ImportFailReason, ParsedProject,
-    StructuralCompileItemUncertainty,
+    CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause,
+    DefineConstantsUncertaintyCauseKind, DiagnosticKind, DiagnosticOrigin, ImplicitImportKind,
+    ImportFailReason, ParsedProject, StructuralCompileItemUncertainty,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -223,17 +223,24 @@ mod properties {
                         .collect();
                     parsed.define_constants_uncertainties = define_idx
                         .into_iter()
-                        .filter_map(|i| match &causes[i] {
-                            CompileItemUncertaintyCauseKind::Diagnostic(kind) => {
-                                Some(DefineConstantsUncertaintyCause {
-                                    kind: kind.clone(),
-                                    span: 0..1,
-                                    origin: origin.clone(),
-                                })
-                            }
-                            // The define axis has no structural or stale arm.
-                            CompileItemUncertaintyCauseKind::Structural(_)
-                            | CompileItemUncertaintyCauseKind::StaleValue { .. } => None,
+                        .filter_map(|i| {
+                            let kind = match &causes[i] {
+                                CompileItemUncertaintyCauseKind::Diagnostic(kind) => {
+                                    DefineConstantsUncertaintyCauseKind::Diagnostic(kind.clone())
+                                }
+                                CompileItemUncertaintyCauseKind::Structural(structural) => {
+                                    DefineConstantsUncertaintyCauseKind::HiddenContent(
+                                        UntrustedCause::Unentered(format!("{structural:?}")),
+                                    )
+                                }
+                                // The define axis has no stale arm.
+                                CompileItemUncertaintyCauseKind::StaleValue { .. } => return None,
+                            };
+                            Some(DefineConstantsUncertaintyCause {
+                                kind,
+                                span: 0..1,
+                                origin: origin.clone(),
+                            })
                         })
                         .collect();
                     parsed.compile_condition_uncertainties = cond_kinds
@@ -512,9 +519,9 @@ fn define_uncertainty_alone_declines_and_explains() {
     let mut parsed = certain_project();
     parsed.define_constants_uncertain = true;
     parsed.define_constants_uncertainties = vec![DefineConstantsUncertaintyCause {
-        kind: DiagnosticKind::UndefinedProperty {
+        kind: DefineConstantsUncertaintyCauseKind::Diagnostic(DiagnosticKind::UndefinedProperty {
             name: "TargetFramework".to_string(),
-        },
+        }),
         span: 0..1,
         origin: DiagnosticOrigin::Imported,
     }];
@@ -522,6 +529,24 @@ fn define_uncertainty_alone_declines_and_explains() {
     let message = message_for(&parsed).expect("a declined fold is reported");
     assert!(message.contains("#if"), "{message}");
     assert!(message.contains("TargetFramework"), "{message}");
+}
+
+/// Content the evaluation could not see withdraws the `#if` symbols, and the
+/// message names what it could not see.
+#[test]
+fn hidden_content_explains_a_define_withdrawal() {
+    let mut parsed = certain_project();
+    parsed.define_constants_uncertain = true;
+    parsed.define_constants_uncertainties = vec![DefineConstantsUncertaintyCause {
+        kind: DefineConstantsUncertaintyCauseKind::HiddenContent(UntrustedCause::Unmodelled(
+            "$([System.String]::IsNullOrWhiteSpace(''))".to_string(),
+        )),
+        span: 0..1,
+        origin: DiagnosticOrigin::Imported,
+    }];
+    let message = message_for(&parsed).expect("a declined fold is reported");
+    assert!(message.contains("#if"), "{message}");
+    assert!(message.contains("IsNullOrWhiteSpace"), "{message}");
 }
 
 /// The reference axis records no causes of its own at most of its sites. It

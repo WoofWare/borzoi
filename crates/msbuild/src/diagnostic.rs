@@ -475,26 +475,33 @@ impl StructuralCompileItemUncertainty {
 /// One concrete reason the evaluated `DefineConstants` set is not trustworthy —
 /// the explaining channel for [`crate::ParsedProject::define_constants_uncertain`],
 /// in the mould of [`CompileItemUncertaintyCause`].
-///
-/// The define axis has no structural arm, unlike its Compile and package twins:
-/// a dropped `<Import>`/`<Choose>`/SDK is not by itself define uncertainty (a
-/// file we never read cannot have written `<DefineConstants>` under our nose —
-/// if it could have, the read that would have seen it is the diagnostic
-/// recorded here). So the cause is always a [`DiagnosticKind`] raised while
-/// resolving a user-authored `<DefineConstants>` write or the condition gating
-/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefineConstantsUncertaintyCause {
-    /// The diagnostic raised in define context — an undefined property in the
-    /// gating condition, an unsupported condition or property expression, an
-    /// unexpanded item/metadata reference in the value.
-    pub kind: DiagnosticKind,
+    pub kind: DefineConstantsUncertaintyCauseKind,
     /// Byte span of the causal construct in the entry project's source,
     /// remapped to the `<Import>` site for imported files.
     pub span: Range<usize>,
     /// Whether the causal construct lives in the entry project or an imported
     /// file.
     pub origin: DiagnosticOrigin,
+}
+
+/// What made the define set untrustworthy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefineConstantsUncertaintyCauseKind {
+    /// A diagnostic raised while resolving a user-authored `<DefineConstants>`
+    /// write or the condition gating it: an undefined property in the gating
+    /// condition, an unsupported condition or property expression, an
+    /// unexpanded item/metadata reference in the value.
+    Diagnostic(DiagnosticKind),
+    /// Content the walk did not enter, described as
+    /// [`crate::ParsedProject::hidden_content`] describes it. It may write
+    /// `DefineConstants` or import a user file that does, and no later read
+    /// need see that write: it may be the last, and the
+    /// `$(DefineConstants);FOO` append reads its own name without doubting the
+    /// set. So the set is withdrawn wherever the content is, in an SDK file as
+    /// in a user's (#843, #862).
+    HiddenContent(crate::UntrustedCause),
 }
 
 /// One concrete reason the captured package/framework reference set is not

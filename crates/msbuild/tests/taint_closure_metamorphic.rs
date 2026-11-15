@@ -498,9 +498,10 @@ fn check(
         // reader trusts it: a measured trade-off
         // (`docs/msbuild-value-carried-provenance-plan.md`, "#614: what each
         // rule costs"), tracked as #792. So a stale read reaching any other
-        // fact is counted, not failed, and the Compile items must hold.
-        let a_stale_read_by_a_trusting_reader =
-            matches!(undecided_construct, Undecided::Import) && !matches!(fact, Fact::CompileItems);
+        // fact is counted, not failed, and the Compile items must hold. So must
+        // the define set, which hidden content withdraws outright (#843, #862).
+        let a_stale_read_by_a_trusting_reader = matches!(undecided_construct, Undecided::Import)
+            && !matches!(fact, Fact::CompileItems | Fact::DefineConstants);
         if a_stale_read_by_a_trusting_reader {
             census.stale_reads += 1;
             continue;
@@ -1126,6 +1127,137 @@ fn a_value_with_two_doubts_keeps_both_through_every_reader() {
             ("DefineConstants", 190),
         ],
     );
+}
+
+/// #843 and #862, exhaustively: content the walk cannot see that writes the
+/// define set, or does not. The hidden file is imported under an undecidable
+/// gate from `Sdk.props` or from the top of the project body, and is the SDK's
+/// own file or the user's; `Sdk.props` may write `DefineConstants` before it;
+/// the hidden file writes it as a literal, appends to it, or writes something
+/// else; the body leaves it alone, appends to it (the self-append whose read
+/// #843 exempted), overwrites it, or writes it under a condition that reads it.
+/// The worlds are the hidden file taken and left out, and a define set the
+/// walk calls certain must be the same in both.
+#[test]
+fn hidden_content_withdraws_the_define_set() {
+    const BEFORE: &[&str] = &["", "<DefineConstants>S</DefineConstants>"];
+    const HIDDEN: &[&str] = &[
+        "<DefineConstants>H</DefineConstants>",
+        "<DefineConstants>$(DefineConstants);H</DefineConstants>",
+        "<Other>H</Other>",
+    ];
+    const BODY: &[&str] = &[
+        "",
+        "<DefineConstants>$(DefineConstants);B</DefineConstants>",
+        "<DefineConstants>B</DefineConstants>",
+        "<DefineConstants Condition=\"'$(DefineConstants)' == ''\">B</DefineConstants>",
+    ];
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = host_fs::canonicalize(dir.path()).unwrap();
+    let sdk = root.join("sdks").join(OPACITY_SDK);
+    std::fs::create_dir_all(&sdk).unwrap();
+    std::fs::write(sdk.join("Sdk.targets"), "<Project />").unwrap();
+    let project = root.join("Demo.fsproj");
+    let group = |text: &str| format!("  <PropertyGroup>{text}</PropertyGroup>\n");
+    let mut census = Census::default();
+    for from_body in [false, true] {
+        for hidden_in_sdk in [false, true] {
+            let hidden_path = if hidden_in_sdk {
+                sdk.join("Hidden.props")
+            } else {
+                root.join("Hidden.props")
+            };
+            for before in BEFORE {
+                for hidden in HIDDEN {
+                    for body in BODY {
+                        let render = |variant: &Variant| {
+                            let import = match variant {
+                                Variant::Omitted => String::new(),
+                                Variant::Undecided(_) => format!(
+                                    "  <Import Project=\"{}\" Condition=\"{}\" />\n",
+                                    hidden_path.display(),
+                                    xml_escape(UNDECIDABLE)
+                                ),
+                                _ => {
+                                    format!("  <Import Project=\"{}\" />\n", hidden_path.display())
+                                }
+                            };
+                            let (sdk_import, body_import) = if from_body {
+                                (String::new(), import)
+                            } else {
+                                (import, String::new())
+                            };
+                            let sdk_props =
+                                format!("<Project>\n{}{sdk_import}</Project>\n", group(before));
+                            let text = format!(
+                                "<Project Sdk=\"{OPACITY_SDK}\">\n{body_import}{}</Project>\n",
+                                group(body)
+                            );
+                            (sdk_props, text)
+                        };
+                        let evaluate = |(sdk_props, text): &(String, String)| {
+                            std::fs::write(sdk.join("Sdk.props"), sdk_props).unwrap();
+                            std::fs::write(
+                                &hidden_path,
+                                format!("<Project>{}</Project>", group(hidden)),
+                            )
+                            .unwrap();
+                            let sdk = sdk.clone();
+                            let resolver =
+                                move |name: &str, _: &borzoi_msbuild::observed::Observer| {
+                                    if name.eq_ignore_ascii_case(OPACITY_SDK) {
+                                        Ok(SdkResolution::Single(SdkPaths {
+                                            root: sdk.clone(),
+                                            props: sdk.join("Sdk.props"),
+                                            targets: sdk.join("Sdk.targets"),
+                                        }))
+                                    } else {
+                                        Err(SdkResolveError::NotFound)
+                                    }
+                                };
+                            parse_fsproj_with_imports(
+                                text,
+                                &project,
+                                &HashMap::new(),
+                                &HashMap::new(),
+                                Some(&resolver),
+                                None,
+                            )
+                            .expect("generated documents are well-formed")
+                        };
+                        let worlds: Vec<(String, Facts)> = [Variant::Taken, Variant::Omitted]
+                            .into_iter()
+                            .map(|variant| {
+                                let files = render(&variant);
+                                (format!("{variant:?}"), facts(&evaluate(&files), &[]))
+                            })
+                            .collect();
+                        let files = render(&Variant::Undecided(Wrap::ElementCondition));
+                        let undecided = facts(&evaluate(&files), &[]);
+                        let text = format!(
+                            "--- Sdk.props ---\n{}--- {} ---\n<Project>{}</Project>\n--- body ---\n{}",
+                            files.0,
+                            hidden_path.display(),
+                            group(hidden),
+                            files.1
+                        );
+                        check(
+                            &mut census,
+                            &text,
+                            &undecided,
+                            &worlds,
+                            Undecided::Import,
+                            "hidden defines",
+                        );
+                        std::fs::remove_file(&hidden_path).unwrap();
+                    }
+                }
+            }
+        }
+    }
+    census.print("hidden content and the define set");
+    // About half what the grid produces.
+    assert_sound(&census, &[("DefineConstants", 20)]);
 }
 
 // The defects the gate found, each pinned as the answer it should give, and

@@ -38,8 +38,9 @@ pub mod test_support;
 
 pub use diagnostic::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
-    CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause, Diagnostic, DiagnosticKind,
-    DiagnosticOrigin, ImplicitImportKind, ImportFailReason, PackageReferenceUncertaintyCause,
+    CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause,
+    DefineConstantsUncertaintyCauseKind, Diagnostic, DiagnosticKind, DiagnosticOrigin,
+    ImplicitImportKind, ImportFailReason, PackageReferenceUncertaintyCause,
     PackageReferenceUncertaintyCauseKind, Rejection, RejectionCause, RejectionCertainty,
     StructuralCompileItemUncertainty, StructuralPackageReferenceUncertainty, UnloadableImport,
 };
@@ -617,8 +618,9 @@ pub struct ParsedProject {
     /// not follow, or one whose gate it could not decide), or `None` when it
     /// entered everything the build imports. Content it did not see may define
     /// anything, so [`Self::foreign_definitions`] is complete only when this is
-    /// `None`, and [`Self::items_uncertain`] and
-    /// [`Self::project_references_uncertain`] are `true` whenever it is `Some`.
+    /// `None`, and [`Self::items_uncertain`],
+    /// [`Self::project_references_uncertain`] and
+    /// [`Self::define_constants_uncertain`] are `true` whenever it is `Some`.
     pub hidden_content: Option<UntrustedCause>,
     /// Why MSBuild may reject the whole project, or `None` when nothing the
     /// walk passed could make it. MSBuild's rejection is total: the build has
@@ -769,18 +771,32 @@ pub struct ParsedProject {
     /// is causally tied to package/framework-reference uncertainty.
     pub package_reference_uncertainties: Vec<PackageReferenceUncertaintyCause>,
     /// `true` if the evaluated [`Self::define_constants`] may diverge from
-    /// MSBuild — a *user-authored* `<DefineConstants>` write (or the
-    /// `<PropertyGroup>` condition gating one) relied on a property we couldn't
-    /// resolve (e.g. a `'$(TargetFramework)' == …`-conditioned define in a
-    /// multi-targeted project). The preprocessor-symbol analogue of
-    /// [`Self::items_uncertain`]: a consumer that folds files under these `#if`
-    /// symbols (cross-file name resolution) should refuse and fall back when
-    /// this is set, since the wrong branches would otherwise be taken.
+    /// MSBuild, for one of two reasons:
     ///
-    /// Like `items_uncertain`, uncertainty *inside the SDK's own files* is
-    /// tolerated — we already don't model the framework defines (`NET6_0`, …)
-    /// the SDK injects in targets, so our `define_constants` is a consistent
-    /// (if framework-define-free) view rather than a per-branch-corrupt one.
+    /// - a *user-authored* `<DefineConstants>` write (or the `<PropertyGroup>`
+    ///   condition gating one) relied on a property we couldn't resolve (e.g. a
+    ///   `'$(TargetFramework)' == …`-conditioned define in a multi-targeted
+    ///   project);
+    /// - the walk passed content it did not enter ([`Self::hidden_content`]),
+    ///   in an SDK file as in a user's. That content may write
+    ///   `DefineConstants` or import a user file that does, and no later read
+    ///   need see the write: it may be the last, and the
+    ///   `$(DefineConstants);FOO` append reads its own name without doubting
+    ///   the set (#843, #862). So this is `true` whenever `hidden_content` is
+    ///   `Some`, as [`Self::items_uncertain`] is.
+    ///
+    /// The preprocessor-symbol analogue of [`Self::items_uncertain`]: a
+    /// consumer that folds files under these `#if` symbols (cross-file name
+    /// resolution) should refuse and fall back when this is set, since the
+    /// wrong branches would otherwise be taken.
+    ///
+    /// Uncertainty in a write *inside the SDK's own files* that the walk
+    /// entered is tolerated — we already don't model the framework defines
+    /// (`NET6_0`, …) the SDK injects in targets, so our `define_constants` is a
+    /// consistent (if framework-define-free) view rather than a
+    /// per-branch-corrupt one. A `$(DefineConstants)` append's own read is
+    /// that view too: undefined in it, unless the walk has hidden content
+    /// that may have written it.
     ///
     /// **Accepted limitation — SDK-supplied defines are not modelled.** Because
     /// we never run SDK targets, the standard SDK F# defines (`DEBUG`/`TRACE`,
@@ -795,14 +811,15 @@ pub struct ParsedProject {
     /// deliberately accept the bounded divergence instead — it is consistent
     /// across single-file and cross-file resolution. Only *user-authored*
     /// define uncertainty (an unevaluable condition, an unsupported/`@()`/`%()`
-    /// value reference) is flagged.
+    /// value reference) and hidden content are flagged.
     pub define_constants_uncertain: bool,
     /// Concrete events that made [`Self::define_constants_uncertain`] true —
     /// the define-axis twin of [`Self::compile_item_uncertainties`], and the
     /// only channel that can say *why* the `#if` symbol set is untrusted.
     ///
-    /// The flag is raised at exactly one site (a diagnostic pushed while in
-    /// define context), which pushes here at the same moment, so
+    /// The flag is raised at exactly two sites (a diagnostic pushed while in
+    /// define context, and the walk's first latch of hidden content), each of
+    /// which pushes here at the same moment, so
     /// `define_constants_uncertain == !define_constants_uncertainties.is_empty()`
     /// holds by construction; `define_uncertainty_and_its_causes_agree` pins it.
     pub define_constants_uncertainties: Vec<DefineConstantsUncertaintyCause>,

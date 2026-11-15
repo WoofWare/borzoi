@@ -601,7 +601,7 @@ fn whole_evaluation_uncertain(kind: DirectoryBuildFile, state: &mut State<'_>) {
 /// [`whole_evaluation_uncertain`] for an import whose `Project` text is
 /// `project`, its products carrying `root`.
 fn everything_uncertain(project: &str, root: UnpinnedRoot, state: &mut State<'_>) {
-    state.latch_walk_opaque(OpacityCause::Gate(root.clone()));
+    state.latch_walk_opaque(OpacityCause::Gate(root.clone()), 0..0);
     let names: Vec<String> = state.lookup.canonical_keys().map(str::to_owned).collect();
     for name in names {
         if !state.protected.contains(&name.to_ascii_lowercase()) {

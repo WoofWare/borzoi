@@ -1081,9 +1081,11 @@ fn define_constants_uncertainty_records_its_cause() {
         .map(|c| c.kind.clone())
         .collect();
     assert!(
-        kinds.contains(&crate::DiagnosticKind::UndefinedProperty {
-            name: "RoslynTargetsPath".to_string()
-        }),
+        kinds.contains(&crate::DefineConstantsUncertaintyCauseKind::Diagnostic(
+            crate::DiagnosticKind::UndefinedProperty {
+                name: "RoslynTargetsPath".to_string()
+            }
+        )),
         "the gating condition's undefined property is the cause; got {kinds:?}"
     );
     assert!(

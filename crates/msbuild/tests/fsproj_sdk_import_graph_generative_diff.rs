@@ -46,13 +46,16 @@
 //! target table names the last file that ran; a user's file also contributes a
 //! Compile item. Every file also declares a `<ProjectReference>` of its own,
 //! and a user's file other than the project removes the project's, so content
-//! that runs after the body changes the list. All four are graded with the
-//! oracle's `evaluated` op, certain-implies-exact: a property the walk commits
-//! (a trusted value, or a trusted "unset") must be MSBuild's, a target read the
+//! that runs after the body changes the list. Every file also appends a define
+//! of its own to `DefineConstants`. All five are graded with the oracle's
+//! `evaluated` op, certain-implies-exact: a property the walk commits (a
+//! trusted value, or a trusted "unset") must be MSBuild's, a target read the
 //! probe calls exact must name the element MSBuild keeps, and a Compile set the
-//! walk calls certain (`items_uncertain` false, what the LSP folds) and a
+//! walk calls certain (`items_uncertain` false, what the LSP folds), a
 //! reference list it calls certain (`project_references_uncertain` false, the
-//! LSP's project graph) must be MSBuild's, file for file and in order.
+//! LSP's project graph) and a define set it calls certain
+//! (`define_constants_uncertain` false, the `#if` symbols the LSP parses
+//! under) must be MSBuild's, entry for entry and in order.
 //!
 //! A project MSBuild rejects is graded too: any value the walk commits for it
 //! is a divergence.
@@ -386,7 +389,7 @@ struct Case {
 }
 
 /// The properties every case reads back.
-const PROPERTIES: [&str; 21] = [
+const PROPERTIES: [&str; 22] = [
     "Seen",
     "SeenChild",
     "SeenGrandchild",
@@ -397,6 +400,7 @@ const PROPERTIES: [&str; 21] = [
     "Repeat1Child",
     "Repeat1Grandchild",
     "Trace",
+    "DefineConstants",
     "BodySaw",
     "InDbp",
     "InDbt",
@@ -767,7 +771,10 @@ fn render_undecided(case: &Case, site: UndecidedSite) -> String {
 /// ([`BODY_REFERENCE`]). So a user's file that runs after the body strips it,
 /// which no SDK file here does: the project's reference survives exactly when
 /// no such file runs (#848). An SDK's files contribute no Compile item, so
-/// that the Compile set logs the user's files alone.
+/// that the Compile set logs the user's files alone. Every file appends the
+/// define `D_<marker>`, so the define set logs which files ran too, the SDK's
+/// own among them: content the walk cannot see may write a define whether it
+/// is an SDK's file or a user's (#843, #862).
 fn tracer(marker: &str) -> String {
     let user = if SDK_MARKERS.contains(&marker) {
         String::new()
@@ -780,7 +787,8 @@ fn tracer(marker: &str) -> String {
         format!("    <Compile Include=\"{marker}.fs\" />\n{remove}")
     };
     format!(
-        "  <PropertyGroup>\n    <Trace>$(Trace);{marker}</Trace>\n  </PropertyGroup>\n  \
+        "  <PropertyGroup>\n    <Trace>$(Trace);{marker}</Trace>\n    \
+         <DefineConstants>$(DefineConstants);D_{marker}</DefineConstants>\n  </PropertyGroup>\n  \
          <ItemGroup>\n    <ProjectReference Include=\"refs/{marker}.fsproj\" />\n{user}  \
          </ItemGroup>\n  <Target Name=\"T\" />\n  <Target Name=\"T_{marker}\" />\n"
     )
@@ -1194,8 +1202,8 @@ enum Family {
     /// inexact (#791). It holds #820's remainder too: an import point in
     /// content the walk cannot see whose failure ([`PointDoubt::GateOr`] over
     /// a missing file) makes MSBuild reject an evaluation the walk cannot know
-    /// is rejected. Covers property findings only: the Compile set must still
-    /// be uncertain.
+    /// is rejected. Covers property findings only: the Compile set, the reference list
+    /// and the define set must still be uncertain.
     UndecidedImportHidesWrites,
 }
 
@@ -1344,6 +1352,7 @@ enum FindingKind {
     Target,
     Compile,
     References,
+    Defines,
 }
 
 /// What one case came to.
@@ -1365,6 +1374,12 @@ struct Outcome {
     /// Of those, whether MSBuild's list holds the project's own reference: no
     /// file that runs after the body stripped it.
     body_reference_kept: bool,
+    /// The walk called the define set certain (and MSBuild accepted the
+    /// project).
+    certain_defines: bool,
+    /// Of those, whether MSBuild's set holds a define from a user's file
+    /// other than the project.
+    other_user_define: bool,
     /// Whether MSBuild imported `Directory.Build.props` and `.targets`, read
     /// off the markers they write.
     msbuild_imported: Option<(bool, bool)>,
@@ -1507,6 +1522,14 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 kind: FindingKind::References,
             });
         }
+        if !parsed.define_constants_uncertain {
+            outcome.findings.push(Finding {
+                what: "define_constants".to_owned(),
+                ours: "a certain define set".to_owned(),
+                theirs: "a rejected project".to_owned(),
+                kind: FindingKind::Defines,
+            });
+        }
         for name in PROPERTIES {
             if let read @ (PropertyRead::Value(_) | PropertyRead::Unset) = &ours.properties[name] {
                 outcome.findings.push(Finding {
@@ -1608,6 +1631,33 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 ours: format!("{ours:?}"),
                 theirs: format!("{theirs:?}"),
                 kind: FindingKind::References,
+            });
+        }
+    }
+    // So must a define set the walk calls certain: the LSP parses every file
+    // under it. MSBuild's list is its `DefineConstants` split on semicolons,
+    // empty entries dropped; no marker needs escaping.
+    if !parsed.define_constants_uncertain {
+        outcome.certain_defines = true;
+        let theirs: Vec<String> = theirs["properties"]["DefineConstants"]
+            .as_str()
+            .unwrap_or_default()
+            .split(';')
+            .map(str::trim)
+            .filter(|define| !define.is_empty())
+            .map(str::to_owned)
+            .collect();
+        outcome.other_user_define = theirs.iter().any(|define| {
+            define
+                .strip_prefix("D_")
+                .is_some_and(|marker| marker != "body" && !SDK_MARKERS.contains(&marker))
+        });
+        if parsed.define_constants != theirs {
+            outcome.findings.push(Finding {
+                what: "define_constants".to_owned(),
+                ours: format!("{:?}", parsed.define_constants),
+                theirs: format!("{theirs:?}"),
+                kind: FindingKind::Defines,
             });
         }
     }
@@ -1753,6 +1803,10 @@ struct Report {
     /// Cases whose reference list the walk called certain, each graded, by
     /// whether MSBuild kept the project's own reference.
     certain_references: BTreeMap<bool, usize>,
+    /// Cases whose define set the walk called certain, each graded, by
+    /// whether MSBuild's set holds a define from a user's file other than the
+    /// project.
+    certain_defines: BTreeMap<bool, usize>,
     /// Cases in no known family, which the sweep grades in full.
     outside_families: usize,
     /// Of those, how often MSBuild imported `(Directory.Build.props,
@@ -1815,6 +1869,12 @@ fn sweep(seed: u64, cases: usize) -> Report {
                 .entry(outcome.body_reference_kept)
                 .or_default() += 1;
         }
+        if outcome.certain_defines {
+            *report
+                .certain_defines
+                .entry(outcome.other_user_define)
+                .or_default() += 1;
+        }
         if families.is_empty() {
             report.outside_families += 1;
             if let Some(imported) = outcome.msbuild_imported {
@@ -1849,14 +1909,16 @@ fn assert_clean(report: &Report) {
     eprintln!(
         "sdk import graph: {} cases, {} rejected, {} committed property reads, \
          {} exact target reads, {} certain Compile sets, certain reference lists by whether \
-         MSBuild kept the project's own: {:?}; {} cases outside every family, MSBuild's \
-         (props, targets) imports among them: {:?}; known-family cases with findings: {:?}",
+         MSBuild kept the project's own: {:?}, certain define sets by whether another user's \
+         file defined one: {:?}; {} cases outside every family, MSBuild's (props, targets) \
+         imports among them: {:?}; known-family cases with findings: {:?}",
         report.cases,
         report.rejected,
         report.committed_properties,
         report.exact_targets,
         report.certain_compile,
         report.certain_references,
+        report.certain_defines,
         report.outside_families,
         report.outside_imports,
         report.explained
@@ -1925,6 +1987,18 @@ fn the_import_graph_is_exact_or_declined() {
             n >= 30,
             "only {n} certain reference lists in which MSBuild {} the project's own",
             if kept { "kept" } else { "stripped" }
+        );
+    }
+    // The define axis grades sets both ways: ones a user's file other than the
+    // project wrote into (a `Directory.Build.*` file, or a file a re-import
+    // reached) and ones only the SDK and the project did, so a walk that
+    // declined every set another file touches would fail here.
+    for other in [true, false] {
+        let n = report.certain_defines.get(&other).copied().unwrap_or(0);
+        assert!(
+            n >= 40,
+            "only {n} certain define sets {} a define from another user's file",
+            if other { "with" } else { "without" }
         );
     }
     // MSBuild rejects only the dangling-symlink imports and the SDK-qualified
@@ -2099,9 +2173,10 @@ fn a_point_after_a_hidden_import_of_its_file_commits_no_order() {
     );
 }
 
-/// Grade `case`'s item lists alone: MSBuild accepts the project, and the walk
-/// publishes MSBuild's Compile set and reference list, or declines each. What
-/// the hidden import writes is [`Family::UndecidedImportHidesWrites`]'s (#791).
+/// Grade `case`'s item lists and define set alone: MSBuild accepts the
+/// project, and the walk publishes MSBuild's Compile set, reference list and
+/// define set, or declines each. What the hidden import writes is otherwise
+/// [`Family::UndecidedImportHidesWrites`]'s (#791).
 fn assert_items_exact_or_declined(case: &Case) {
     let mut shared = Shared::new();
     let (outcome, describe) = evaluate(&mut shared, case);
@@ -2112,7 +2187,12 @@ fn assert_items_exact_or_declined(case: &Case) {
     let items: Vec<&Finding> = outcome
         .findings
         .iter()
-        .filter(|f| matches!(f.kind, FindingKind::Compile | FindingKind::References))
+        .filter(|f| {
+            matches!(
+                f.kind,
+                FindingKind::Compile | FindingKind::References | FindingKind::Defines
+            )
+        })
         .collect();
     assert!(items.is_empty(), "{items:#?}\n{describe}");
 }
@@ -2164,6 +2244,21 @@ fn a_hidden_sdk_import_of_a_user_file_after_the_body_commits_no_reference_list()
             ..Case::usual()
         });
     }
+}
+
+/// #862: with no `Directory.Build.*` file the point withdraws nothing, and
+/// the SDK's own `Behind.props`, which appends `D_behindp`, is imported only
+/// under a gate the walk cannot decide. MSBuild's define set holds it; the
+/// walk must not publish one without it as certain, though the hidden file is
+/// the SDK's.
+#[test]
+fn a_hidden_sdk_file_commits_no_define_set() {
+    assert_items_exact_or_declined(&Case {
+        props_point: PropsPoint::BehindUndecidedImport,
+        props: Props::default(),
+        targets_present: false,
+        ..Case::usual()
+    });
 }
 
 /// #821: with no `Directory.Build.*` file the point withdraws nothing, and

@@ -163,7 +163,11 @@ pins this). Probe the specific property before assuming either way.
 Two patterns that work:
 
 - **A user-authored-only channel.** `define_constants_uncertain` sets
-  `!in_sdk_subtree` at every set site.
+  `!in_sdk_subtree` at every diagnostic set site. The provenance gate covers
+  content the walk *entered*, never content it could not see: a hidden SDK
+  import may reach a user file, so every opacity latch withdraws the define
+  set, the Compile set and the reference list wherever it is (#843, #862,
+  #821, #848), and `into_project` asserts all three.
 - **A consequence-side flag**, computed where the uncertain value is consumed —
   often cheaper *and* exact, and it still earns its place where the generic
   mark is rare: an untrusted `LangVersion` would otherwise refuse every file

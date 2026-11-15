@@ -20,6 +20,7 @@ use crate::observed::reuse::same_as_reference;
 use crate::observed::{ImportDocuments, Observer};
 
 mod cycles_and_failures;
+mod defines_uncertain;
 mod directory_build;
 mod directory_build_import_point;
 mod directory_build_position;

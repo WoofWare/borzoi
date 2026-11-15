@@ -37,10 +37,15 @@
 > P2″ precision items; P1′.
 >
 > **Known wrong commits, reproducible, not fixed:** #792 (a stale value
-> published as trusted by a reader other than the import points and the
-> Compile items), set aside by the metamorphic gate with its count pinned, and
-> #843 (the `DefineConstants` self-append exemption reading a define a user
-> import under an undecided gate may supply as absent). #782 (a single-witness
+> published as trusted by a reader other than the import points, the
+> Compile items and the define set), set aside by the metamorphic gate with
+> its count pinned. #843 (the `DefineConstants` self-append exemption reading
+> a define a user import under an undecided gate may supply as absent) and
+> #862 (hidden content never doubting the define set) are fixed by
+> withdrawing the define set wherever the walk passes content it could not
+> see, as the Compile set is: `define_constants_uncertain` holds whenever
+> `hidden_content` is `Some`, and the self-append's own read is exempt only
+> while the walk has hidden nothing. #782 (a single-witness
 > root let the self-append exemption drop a cause) is fixed: the exemption is
 > decided at the value's own read, never on a re-surfaced root, and
 > `a_value_with_two_doubts_keeps_both_through_every_reader` holds every reader
@@ -1124,12 +1129,15 @@ No condition reading a stale value is decided exactly, so there is no
 the walk is opaque, where `condition_is_decided_exactly` vouches for nothing.
 
 The other readers stay as they are, each for a reason recorded on #792: the
-user `DefineConstants` write (zero cost, but the tier's `define_constants`
-cases come from SDK writes, which `define_context` leaves out, so no test can
-see it fail), and the published properties,
-`target_name` and the final `DefineConstants` (sound declines that cost the LSP
+published properties and `target_name` (sound declines that cost the LSP
 its reference set on most SDK projects, because content after the body is
-hidden there; a decision for the project owner).
+hidden there; a decision for the project owner). The define set no longer
+reads a stale value: #843 and #862 withdraw it on every opacity latch,
+which costs nothing the LSP folds, since the Compile set is withdrawn on the
+same latch. The opacity tier fails a define set that differs from a world's,
+and `hidden_content_withdraws_the_define_set` grids the hidden file's place
+(SDK or user, imported from `Sdk.props` or the body) against what it and the
+body write.
 
 The opacity tier now holds the Compile items wholly: a Compile set that differs
 from a world's is a violation whatever the difference, not only when it is in
@@ -1396,7 +1404,7 @@ coexist with it?** Each site now says so at the read, in a comment beside a
 | `into_project`: CPM override | `CentralPackageVersionOverrideEnabled` | conservative by construction | coexists |
 | `into_project`: `DirectoryPackagesPropsPath` | — | none needed | no consumer to protect (P2′) |
 | `into_project`: `properties`, `LangVersion`, `OtherFlags` | published values | `property_reads` beside them (P4 step 1); for `LangVersion`, also `shape_depends_on_language_version` in the LSP | **coexists** — the case question 1 anticipated |
-| `into_project`: `DefineConstants` | published list | `define_constants_uncertain` | coexists (consequence-side, user-authored only) |
+| `into_project`: `DefineConstants` | published list | `define_constants_uncertain` | coexists (consequence-side: user-authored writes, and hidden content wherever it is) |
 | `into_project`: `TargetFrameworks` | published list | none: the TFM-invariant intersection trusts no branch | coexists |
 | `expr.rs`: `MSBuildDisableFeaturesFromVersion`, `MSBuildThisFileDirectory` | inside an expansion | `Reads` | **replaces**: carried with no code at the site |
 | `condition.rs`: every operand | inside a condition | the whole-tree scan (`condition_trust`) | coexists by necessity: Bucket B — an evaluation-order read set under-reports a short-circuiting condition |
