@@ -3347,13 +3347,14 @@ impl<'a> Resolver<'a> {
     /// other type of the name could find anything:
     ///
     /// * `T` is no module alias, so the types tried are those named `T`;
-    /// * the project declares no type named `T` but the found union: an
-    ///   earlier file's is the file's only declaration of the name and every
-    ///   earlier file's is at its path, placed; this file's is the project's
-    ///   only one, exceptions included;
+    /// * the project declares no type named `T` but the found union: for an
+    ///   earlier file's, this file declares none and every earlier file's
+    ///   declaration of the name is placed at its path and arity (a signature
+    ///   and its implementation); this file's is the project's only one,
+    ///   exceptions included;
     /// * every referenced assembly's type named `T` under a prefix the type
     ///   walk visits finds nothing named `C`
-    ///   ([`AssemblyEnv::pattern_lookup_in_type_finds_nothing`]), and no
+    ///   ([`AssemblyEnv::pattern_lookup_in_type_finds_nothing`](crate::AssemblyEnv::pattern_lookup_in_type_finds_nothing)), and no
     ///   surface the walk cannot enumerate (an `[<AutoOpen>]` one, a dropped
     ///   type, an open's unenumerable residue) may supply another.
     pub(super) fn namesake_declined_case_head_binds(
@@ -3372,10 +3373,14 @@ impl<'a> Resolver<'a> {
             FoundUnion::EarlierFile(type_path) => {
                 type_path.last().map(String::as_str) == Some(type_name)
                     && !self.prescan.own_type_simple_names.contains(type_name)
+                    // Two arities at one path are two types; one arity twice is
+                    // a signature and its implementation.
                     && earlier.is_some_and(|decls| {
-                        decls
-                            .iter()
-                            .all(|d| d.path.as_deref() == Some(type_path) && d.arity.is_some())
+                        let arity = decls.first().and_then(|d| d.arity);
+                        arity.is_some()
+                            && decls
+                                .iter()
+                                .all(|d| d.path.as_deref() == Some(type_path) && d.arity == arity)
                     })
             }
             FoundUnion::InFile => {
@@ -3416,7 +3421,7 @@ impl<'a> Resolver<'a> {
 
     /// Whether `res` names a union case — not an enum case, an exception
     /// constructor or anything else: this file's def by its kind, an export by
-    /// its [`CaseKind`](super::model::CaseKind), this file's or an earlier
+    /// its [`CaseKind`], this file's or an earlier
     /// one's ([`ProjectItems::is_union_case_item`](super::model::ProjectItems::is_union_case_item)).
     fn resolves_to_union_case(&self, res: Resolution) -> bool {
         match res {

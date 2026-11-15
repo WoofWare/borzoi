@@ -421,6 +421,21 @@ const NAMESAKE_CELLS: &[ProjectCell] = &[
         binder: Expect::Opaque,
     },
     ProjectCell {
+        // A record of the union's name and path, at another arity, is
+        // another type: FCS tries it first.
+        id: "project_namesake_record_field_at_the_same_path",
+        earlier: &[
+            (
+                "NamesakeA.fs",
+                "namespace N\ntype T<'a> =\n    | C of 'a\n    | D\n",
+            ),
+            ("NamesakeB.fs", "namespace N\ntype T = { C: int }\n"),
+        ],
+        prelude: "module P\nopen N\nlet x = \"outer\"\n",
+        template: "let f (b: N.T<int>) =\n    match b with\n    | T.C «x» -> ignore ‹x›\n    | _ -> ()\n",
+        binder: Expect::Abandoned,
+    },
+    ProjectCell {
         // The union is this file's, so the guard declines it in-file.
         id: "in_file_union_assembly_namesake_lacks_the_case_name",
         earlier: &[],
@@ -462,102 +477,257 @@ fn range_of(start: usize, end: usize) -> TextRange {
     )
 }
 
-/// Each [`NAMESAKE_CELLS`] cell checked as a project against `uses-project`,
-/// under the reference assemblies: FCS checks against the BCL, which holds
-/// the namesakes, so an environment without them would answer another
-/// question.
+/// What [`check_project_cell`] observed of a cell's binder.
+struct Observed {
+    fcs_binds: bool,
+    walk_interns: bool,
+}
+
+/// Check one multi-file cell against `uses-project`, under the reference
+/// assemblies: FCS checks against the BCL, which holds the assembly
+/// namesakes, so an environment without them would answer another question.
+///
+/// `expect` pins the binder; `None` only holds the walk to
+/// certain-implies-exact: it interns the binder only where FCS binds it, and
+/// commits no use to anything but what FCS declares. Binder completeness
+/// holds either way.
+fn check_project_cell(
+    id: &str,
+    earlier: &[(&str, &str)],
+    prelude: &str,
+    template: &str,
+    expect: Option<Expect>,
+    failures: &mut Vec<String>,
+) -> Observed {
+    let (src, binders, uses) = materialise(template);
+    let src = format!("{prelude}{}", &src[PRELUDE.len()..]);
+    let shift = |r: &TextRange| {
+        let at = |o: borzoi_cst::syntax::TextSize| usize::from(o) - PRELUDE.len() + prelude.len();
+        range_of(at(r.start()), at(r.end()))
+    };
+    let [binder] = binders.iter().map(shift).collect::<Vec<_>>()[..] else {
+        panic!("{id}: one binder per cell");
+    };
+    let uses: Vec<TextRange> = uses.iter().map(shift).collect();
+    let mut files: Vec<(&str, &str)> = earlier.to_vec();
+    files.push(("NamesakeUse.fs", &src));
+    let (root, written) = temp_fs_tree(&format!("namesake_head_{id}"), &files);
+    let paths: Vec<&Path> = written.iter().map(|(p, _)| p.as_path()).collect();
+    let fcs = parse_fcs_uses_project(&invoke_fcs_dump_project_with_refs(&paths, &[]), &written);
+    let _ = std::fs::remove_dir_all(&root);
+    let last = written.len() - 1;
+    let use_file = written[last].0.file_name();
+    let file = fcs
+        .iter()
+        .find(|f| f.path.file_name() == use_file)
+        .expect("the use file's uses");
+    let proj = resolve_project_files(&project(&files), full_bcl_env());
+    let rf = proj.file(last);
+
+    let oracle_binders = project_oracle_binders(file);
+    let oracle = oracle_binders
+        .iter()
+        .find(|b| b.range == binder && b.introduces_a_name());
+    let walk_interns = rf.defs().any(|d| d.range == binder);
+    match (expect, oracle) {
+        (None, None) if walk_interns => failures.push(format!(
+            "{id}: FCS abandons {binder:?}, but the walk interns it"
+        )),
+        (None, _) => {}
+        (Some(Expect::Abandoned), Some(_)) => failures.push(format!(
+            "{id}: FCS binds {binder:?}, which the cell says it abandons"
+        )),
+        (Some(Expect::Abandoned), None) => {
+            if walk_interns || !rf.opaque_binders().contains(&binder) {
+                failures.push(format!(
+                    "{id}: FCS abandons {binder:?}, but the walk does not decline it"
+                ));
+            }
+        }
+        (Some(_), None) => failures.push(format!(
+            "{id}: FCS does not bind {binder:?}, which the cell says it does"
+        )),
+        (Some(expect), Some(oracle)) => {
+            let want = if expect == Expect::Interned {
+                BinderVerdict::Interned
+            } else {
+                BinderVerdict::Opaque
+            };
+            let got = binder_verdict(rf, oracle);
+            if got != want {
+                failures.push(format!(
+                    "{id}: {binder:?} pinned {want:?}, observed {got:?}"
+                ));
+            }
+        }
+    }
+    // An interned binder's uses commit to it; no use commits to anything but
+    // what FCS declares.
+    for &u in &uses {
+        let oracle_decl = file
+            .uses
+            .iter()
+            .find(|o| range_of(o.start, o.end) == u)
+            .and_then(|o| o.decl.as_ref())
+            .filter(|d| d.file.file_name() == use_file)
+            .map(|d| range_of(d.start, d.end));
+        match rf.resolution_at(u) {
+            None | Some(Resolution::Deferred(_)) if !walk_interns => {}
+            Some(res)
+                if oracle_decl.is_some()
+                    && rf.resolved_def(res).map(|d| d.range) == oracle_decl => {}
+            other => failures.push(format!(
+                "{id}: the use at {u:?} gives {other:?}; FCS declares it at {oracle_decl:?}"
+            )),
+        }
+    }
+    failures.extend(unmodelled_project_binder_failures(
+        id, &proj, &written, &fcs,
+    ));
+    Observed {
+        fcs_binds: oracle.is_some(),
+        walk_interns,
+    }
+}
+
 #[test]
 fn binders_under_a_namesake_declined_head_follow_fcs() {
-    let env = full_bcl_env();
     let mut failures = Vec::new();
     for cell in NAMESAKE_CELLS {
-        let (src, binders, uses) = materialise(cell.template);
-        let src = format!("{}{}", cell.prelude, &src[PRELUDE.len()..]);
-        let shift = |r: &TextRange| {
-            let at = |o: borzoi_cst::syntax::TextSize| {
-                usize::from(o) - PRELUDE.len() + cell.prelude.len()
-            };
-            range_of(at(r.start()), at(r.end()))
-        };
-        let [binder] = binders.iter().map(shift).collect::<Vec<_>>()[..] else {
-            panic!("{}: one binder per cell", cell.id);
-        };
-        let uses: Vec<TextRange> = uses.iter().map(shift).collect();
-        let mut files: Vec<(&str, &str)> = cell.earlier.to_vec();
-        files.push(("NamesakeUse.fs", &src));
-        let (root, written) = temp_fs_tree(&format!("namesake_head_{}", cell.id), &files);
-        let paths: Vec<&Path> = written.iter().map(|(p, _)| p.as_path()).collect();
-        let fcs = parse_fcs_uses_project(&invoke_fcs_dump_project_with_refs(&paths, &[]), &written);
-        let _ = std::fs::remove_dir_all(&root);
-        let last = written.len() - 1;
-        let use_file = written[last].0.file_name();
-        let file = fcs
-            .iter()
-            .find(|f| f.path.file_name() == use_file)
-            .expect("the use file's uses");
-        let proj = resolve_project_files(&project(&files), env);
-        let rf = proj.file(last);
-
-        let oracle_binders = project_oracle_binders(file);
-        let oracle = oracle_binders
-            .iter()
-            .find(|b| b.range == binder && b.introduces_a_name());
-        match (cell.binder, oracle) {
-            (Expect::Abandoned, Some(_)) => failures.push(format!(
-                "{}: FCS binds {binder:?}, which the cell says it abandons",
-                cell.id
-            )),
-            (Expect::Abandoned, None) => {
-                if rf.defs().any(|d| d.range == binder) || !rf.opaque_binders().contains(&binder) {
-                    failures.push(format!(
-                        "{}: FCS abandons {binder:?}, but the walk does not decline it",
-                        cell.id
-                    ));
-                }
-            }
-            (_, None) => failures.push(format!(
-                "{}: FCS does not bind {binder:?}, which the cell says it does",
-                cell.id
-            )),
-            (expect, Some(oracle)) => {
-                let want = if expect == Expect::Interned {
-                    BinderVerdict::Interned
-                } else {
-                    BinderVerdict::Opaque
-                };
-                let got = binder_verdict(rf, oracle);
-                if got != want {
-                    failures.push(format!(
-                        "{}: {binder:?} pinned {want:?}, observed {got:?}",
-                        cell.id
-                    ));
-                }
-            }
-        }
-        // An interned binder's uses commit to it; no use commits to anything
-        // but what FCS declares.
-        for &u in &uses {
-            let oracle_decl = file
-                .uses
-                .iter()
-                .find(|o| range_of(o.start, o.end) == u)
-                .and_then(|o| o.decl.as_ref())
-                .filter(|d| d.file.file_name() == use_file)
-                .map(|d| range_of(d.start, d.end));
-            match rf.resolution_at(u) {
-                None | Some(Resolution::Deferred(_)) if cell.binder != Expect::Interned => {}
-                Some(res)
-                    if oracle_decl.is_some()
-                        && rf.resolved_def(res).map(|d| d.range) == oracle_decl => {}
-                other => failures.push(format!(
-                    "{}: the use at {u:?} gives {other:?}; FCS declares it at {oracle_decl:?}",
-                    cell.id
-                )),
-            }
-        }
-        failures.extend(unmodelled_project_binder_failures(
-            cell.id, &proj, &written, &fcs,
-        ));
+        check_project_cell(
+            cell.id,
+            cell.earlier,
+            cell.prelude,
+            cell.template,
+            Some(cell.binder),
+            &mut failures,
+        );
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The union every [`NAMESAKE_GRID_COMPETITORS`] cell's head can read:
+/// `N0.T<'a>`, owning `C`.
+const GRID_UNION: (&str, &str) = (
+    "GridUnion.fs",
+    "namespace N0\ntype T<'a> =\n    | C of 'a\n    | D\n",
+);
+
+/// Another project declaration of the name `T`, each a different thing FCS's
+/// lookup of `C` in it can find: nothing, a union case, a property, a record
+/// or class field, an exception field, or (through an abbreviation) the
+/// union itself. Each is declared in every [`Place`].
+const NAMESAKE_GRID_COMPETITORS: &[(&str, &str)] = &[
+    ("none", ""),
+    ("record", "type T = { C: int }"),
+    ("generic_record", "type T<'a, 'b> = { C: 'a }"),
+    (
+        "union_with_the_case",
+        "type T<'a, 'b> =\n    | C of 'b\n    | E",
+    ),
+    (
+        "union_without_the_case",
+        "type T =\n    | E of int\n    | F",
+    ),
+    ("static_property", "type T =\n    static member C = 1"),
+    (
+        "static_field",
+        "type T() =\n    [<DefaultValue>]\n    static val mutable private C: int",
+    ),
+    ("exception_field", "exception T of C: int"),
+    ("abbreviation_of_the_union", "type T = N0.T<int>"),
+];
+
+/// Where a [`NAMESAKE_GRID_COMPETITORS`] declaration sits, relative to the
+/// use file's `open N0`.
+#[derive(Clone, Copy, Debug)]
+enum Place {
+    /// An earlier file's, in `N0` itself.
+    EarlierSameNamespace,
+    /// An earlier file's, in `N1`, opened after `N0`.
+    EarlierOpenedAfter,
+    /// An earlier file's, in `N1`, opened before `N0`.
+    EarlierOpenedBefore,
+    /// The use file's, in a module opened after `N0`.
+    LocalOpenedAfter,
+    /// The use file's, in a module opened before `N0`.
+    LocalOpenedBefore,
+}
+
+/// Every [`NAMESAKE_GRID_COMPETITORS`] declaration in every [`Place`], held
+/// to certain-implies-exact: the walk commits the binder under `T.C` only
+/// where FCS binds it. Where FCS's answer turns on which type it tries
+/// first, the walk must decline; the grid checks that it does without
+/// naming the cells.
+#[test]
+fn binders_under_namesake_grid_heads_are_certain() {
+    let mut failures = Vec::new();
+    let (mut cells, mut fcs_binds, mut walk_interns) = (0, 0, 0);
+    for &(competitor, decl) in NAMESAKE_GRID_COMPETITORS {
+        let places: &[Place] = if decl.is_empty() {
+            &[Place::EarlierSameNamespace]
+        } else {
+            &[
+                Place::EarlierSameNamespace,
+                Place::EarlierOpenedAfter,
+                Place::EarlierOpenedBefore,
+                Place::LocalOpenedAfter,
+                Place::LocalOpenedBefore,
+            ]
+        };
+        for &place in places {
+            let id = format!("{competitor}_{place:?}");
+            let namespace = match place {
+                Place::EarlierOpenedAfter | Place::EarlierOpenedBefore => "N1",
+                _ => "N0",
+            };
+            let competitor_file = format!("namespace {namespace}\n{decl}\n");
+            let mut earlier = vec![GRID_UNION];
+            let local = format!("module Local =\n{}\n", indent(decl));
+            let opens = match place {
+                Place::EarlierSameNamespace => "open N0\n".to_string(),
+                Place::EarlierOpenedAfter => "open N0\nopen N1\n".to_string(),
+                Place::EarlierOpenedBefore => "open N1\nopen N0\n".to_string(),
+                Place::LocalOpenedAfter => format!("open N0\n{local}open Local\n"),
+                Place::LocalOpenedBefore => format!("{local}open Local\nopen N0\n"),
+            };
+            if !decl.is_empty()
+                && matches!(
+                    place,
+                    Place::EarlierSameNamespace
+                        | Place::EarlierOpenedAfter
+                        | Place::EarlierOpenedBefore
+                )
+            {
+                earlier.push(("GridCompetitor.fs", competitor_file.as_str()));
+            }
+            let prelude = format!("module P\n{opens}let x = \"outer\"\n");
+            let observed = check_project_cell(
+                &id,
+                &earlier,
+                &prelude,
+                "let f (b: N0.T<int>) =\n    match b with\n    | T.C «x» -> ignore ‹x›\n    | _ -> ()\n",
+                None,
+                &mut failures,
+            );
+            cells += 1;
+            fcs_binds += usize::from(observed.fcs_binds);
+            walk_interns += usize::from(observed.walk_interns);
+        }
+    }
+    eprintln!(
+        "namesake grid: {cells} cells, FCS binds {fcs_binds}, the walk interns {walk_interns}"
+    );
+    // Liveness: the rule commits somewhere, so certain-implies-exact is not
+    // passing vacuously.
+    assert!(walk_interns > 0, "the grid commits no binder");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `decl` indented one level, to sit in a module.
+fn indent(decl: &str) -> String {
+    decl.lines()
+        .map(|l| format!("    {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
