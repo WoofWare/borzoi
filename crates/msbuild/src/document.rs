@@ -139,9 +139,9 @@ fn read_attribute<'a>(raw: &'a str, normalised: &'a str) -> Cow<'a, str> {
 ///
 /// `None` for a node that is not text, and for one holding a CDATA section,
 /// which `roxmltree` merges into the adjacent text while keeping only the
-/// first piece's range. The reading is checked against `roxmltree`'s with
-/// every line end taken out of both, so anything else it reads apart declines
-/// too.
+/// first piece's range (`element_content` reads such an element from its
+/// source). The reading is checked against `roxmltree`'s with every line
+/// end taken out of both, so anything else it reads apart declines too.
 pub fn text<'a>(node: Node<'a, '_>) -> Option<Cow<'a, str>> {
     if !node.is_text() {
         return None;
@@ -158,6 +158,22 @@ pub fn text<'a>(node: Node<'a, '_>) -> Option<Cow<'a, str>> {
     if !raw.contains(['&', '\r']) {
         return (raw == folded_by_roxmltree).then_some(Cow::Borrowed(folded_by_roxmltree));
     }
+    let value = decode(raw);
+    // Which line ends `roxmltree` folds turns on what follows them, a
+    // reference's character included, so the check leaves them out.
+    (without_line_ends(&value) == without_line_ends(folded_by_roxmltree)).then_some(value)
+}
+
+/// `text` with every line end taken out.
+fn without_line_ends(text: &str) -> String {
+    text.replace(['\r', '\n'], "")
+}
+
+/// Text from a document [`parse`] admitted, its references decoded.
+fn decode(raw: &str) -> Cow<'_, str> {
+    if !raw.contains('&') {
+        return Cow::Borrowed(raw);
+    }
     let mut value = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(c) = rest.chars().next() {
@@ -170,11 +186,258 @@ pub fn text<'a>(node: Node<'a, '_>) -> Option<Cow<'a, str>> {
             rest = &rest[c.len_utf8()..];
         }
     }
-    // Which line ends `roxmltree` folds turns on what follows them, a
-    // reference's character included, so the check leaves them out.
-    let without_line_ends = |text: &str| text.replace(['\r', '\n'], "");
-    (without_line_ends(&value) == without_line_ends(folded_by_roxmltree))
-        .then_some(Cow::Owned(value))
+    Cow::Owned(value)
+}
+
+/// One child of an element as MSBuild's XML reader reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Content<'a> {
+    /// Text, its references decoded and its line ends as written. It is
+    /// `whitespace` when it is nothing but XML whitespace, which the reader
+    /// reports as a whitespace node.
+    Text {
+        value: Cow<'a, str>,
+        whitespace: bool,
+    },
+    /// A CDATA section's content, verbatim.
+    CData(&'a str),
+    /// A comment's content, verbatim.
+    Comment(&'a str),
+}
+
+/// Whether `text` is nothing but XML whitespace: space, tab, CR and LF (a
+/// non-breaking space is content).
+fn is_xml_whitespace(text: &str) -> bool {
+    text.bytes()
+        .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+}
+
+/// A piece of content markup as it stands in the source: text, or a CDATA
+/// section's or a comment's content.
+enum Piece<'a> {
+    Text(&'a str),
+    CData(&'a str),
+    Comment(&'a str),
+}
+
+/// `inner`, content holding no element or processing instruction, cut into
+/// its pieces. `None` for any other markup, for a section that is not
+/// closed, and for a comment holding `--` (which XML forbids): an element's
+/// content in a document [`parse`] admitted has none of them, and a fragment
+/// holding one is not well formed.
+fn pieces(inner: &str) -> Option<Vec<Piece<'_>>> {
+    let mut out = Vec::new();
+    let mut rest = inner;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("<!--") {
+            // A comment ends at its first `--`, which must be followed by `>`.
+            let end = after.find("--")?;
+            if !after[end + 2..].starts_with('>') {
+                return None;
+            }
+            out.push(Piece::Comment(&after[..end]));
+            rest = &after[end + 3..];
+        } else if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            let end = after.find("]]>")?;
+            out.push(Piece::CData(&after[..end]));
+            rest = &after[end + 3..];
+        } else if rest.starts_with('<') {
+            return None;
+        } else {
+            let end = rest.find('<').unwrap_or(rest.len());
+            out.push(Piece::Text(&rest[..end]));
+            rest = &rest[end..];
+        }
+    }
+    Some(out)
+}
+
+/// The children of `element` as MSBuild's XML reader reports them, in order:
+/// text, CDATA sections and comments. Each run of text that is nothing but
+/// literal XML whitespace is dropped, as MSBuild, which loads a project
+/// without preserving whitespace, drops it.
+///
+/// `roxmltree` merges a CDATA section into the text beside it and keeps only
+/// the first piece's range, so this reads the element's source. The reading
+/// is checked against `roxmltree`'s with every line end taken out of both
+/// (`roxmltree` folds them, where MSBuild reads them as written; see
+/// [`text`]).
+///
+/// `None` for an element holding an element or a processing instruction, and
+/// for text whose decoded value is XML whitespace while its source is not
+/// (`&#32;`): MSBuild keeps some such spellings and drops others (`&#32;` and
+/// `&#9;` are kept, `&#x20;` dropped; `dotnet msbuild` 10.0), so neither
+/// reading predicts it.
+pub(crate) fn element_content<'input>(element: Node<'_, 'input>) -> Option<Vec<Content<'input>>> {
+    if element
+        .children()
+        .any(|child| child.is_element() || child.is_pi())
+    {
+        return None;
+    }
+    if !element.has_children() {
+        return Some(Vec::new());
+    }
+    let source: &'input str = element.document().input_text();
+    let whole = &source[element.range()];
+    // The start tag ends at the first `>` outside an attribute's quotes; the
+    // end tag starts at the last `</`, as nothing follows it but its name.
+    let mut quote = None;
+    let mut start = None;
+    for (at, byte) in whole.bytes().enumerate() {
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if matches!(byte, b'"' | b'\'') => quote = Some(byte),
+            None if byte == b'>' => {
+                start = Some(at + 1);
+                break;
+            }
+            None => {}
+        }
+    }
+    let end = whole.rfind("</")?;
+    let inner = whole.get(start?..end)?;
+    let mut content = Vec::new();
+    // Every text and CDATA section as read here, to check against roxmltree.
+    let mut ours = String::new();
+    for piece in pieces(inner)? {
+        match piece {
+            Piece::Text(raw) => {
+                let value = decode(raw);
+                ours.push_str(&value);
+                if is_xml_whitespace(raw) {
+                    continue;
+                }
+                if !value.is_empty() && is_xml_whitespace(&value) {
+                    return None;
+                }
+                content.push(Content::Text {
+                    value,
+                    whitespace: false,
+                });
+            }
+            Piece::CData(text) => {
+                ours.push_str(text);
+                content.push(Content::CData(text));
+            }
+            Piece::Comment(text) => content.push(Content::Comment(text)),
+        }
+    }
+    #[allow(clippy::disallowed_methods)] // roxmltree's folded reading, to check ours by
+    let theirs: String = element
+        .children()
+        .filter(Node::is_text)
+        .filter_map(|n| n.text())
+        .collect();
+    (without_line_ends(&ours) == without_line_ends(&theirs)).then_some(content)
+}
+
+/// The children MSBuild reads from `fragment`, a value it stores as an
+/// element's content: `Utilities.SetXmlNodeInnerContents` parses a value
+/// holding a `<` as XML, keeping its whitespace, and stores it as text where
+/// that fails.
+///
+/// `None` unless the fragment certainly parses and holds only text, CDATA
+/// sections and comments, so for a fragment holding an element, a processing
+/// instruction, a `&` (whose reading turns on whether it starts a reference,
+/// and to what), `]]>` in text, or a malformed comment or section.
+pub(crate) fn fragment_content(fragment: &str) -> Option<Vec<Content<'_>>> {
+    pieces(fragment)?
+        .into_iter()
+        .map(|piece| match piece {
+            Piece::Text(text) if text.contains('&') || text.contains("]]>") => None,
+            Piece::Text(text) => Some(Content::Text {
+                value: Cow::Borrowed(text),
+                whitespace: is_xml_whitespace(text),
+            }),
+            Piece::CData(text) => Some(Content::CData(text)),
+            Piece::Comment(text) => Some(Content::Comment(text)),
+        })
+        .collect()
+}
+
+/// What MSBuild reads from an element whose children are `children`
+/// (`Utilities.GetXmlNodeInnerContents`): its inner text or its inner XML.
+///
+/// - No children, or one whitespace node, read as `""`; one text or CDATA
+///   section reads as its value.
+/// - Otherwise the inner text (every text and CDATA section, concatenated)
+///   where the inner XML holds no markup but comments, or starts with a CDATA
+///   section after any leading whitespace (.NET's `char.IsWhiteSpace`, the
+///   set [`char::is_whitespace`] tests).
+/// - Otherwise the inner XML: each text with `&`, `<` and `>` spelt as
+///   entities and each CDATA section and comment re-spelt around its content,
+///   everything else as it is (`XmlTextWriter`).
+///
+/// Pinned against `dotnet msbuild` 10.0 in `fsproj_property_table_diff`.
+/// `None` where the inner XML would spell a character as a reference
+/// (`XmlTextWriter` writes U+0001 as `&#x1;`); no document [`parse`] admits
+/// holds one.
+pub(crate) fn inner_contents(children: &[Content<'_>]) -> Option<String> {
+    let inner_text = || {
+        children
+            .iter()
+            .filter_map(|child| match child {
+                Content::Text { value, .. } => Some(&**value),
+                Content::CData(text) => Some(*text),
+                Content::Comment(_) => None,
+            })
+            .collect::<String>()
+    };
+    match children {
+        []
+        | [
+            Content::Text {
+                whitespace: true, ..
+            },
+        ] => return Some(String::new()),
+        [Content::Text { value, .. }] => return Some(value.to_string()),
+        [Content::CData(text)] => return Some((*text).to_owned()),
+        _ => {}
+    }
+    // The inner XML's markup is its comments and CDATA sections, and only a
+    // CDATA section is markup other than a comment.
+    if !children.iter().any(|c| matches!(c, Content::CData(_))) {
+        return Some(inner_text());
+    }
+    let starts_with_cdata = children
+        .iter()
+        .find(|child| {
+            !matches!(child, Content::Text { value, .. } if value.chars().all(char::is_whitespace))
+        })
+        .is_some_and(|child| matches!(child, Content::CData(_)));
+    if starts_with_cdata {
+        return Some(inner_text());
+    }
+    let mut xml = String::new();
+    for child in children {
+        match child {
+            Content::Text { value, .. } => {
+                for c in value.chars() {
+                    match c {
+                        '&' => xml.push_str("&amp;"),
+                        '<' => xml.push_str("&lt;"),
+                        '>' => xml.push_str("&gt;"),
+                        '\t' | '\n' | '\r' => xml.push(c),
+                        c if c < ' ' || matches!(c, '\u{fffe}' | '\u{ffff}') => return None,
+                        c => xml.push(c),
+                    }
+                }
+            }
+            Content::CData(text) => {
+                xml.push_str("<![CDATA[");
+                xml.push_str(text);
+                xml.push_str("]]>");
+            }
+            Content::Comment(text) => {
+                xml.push_str("<!--");
+                xml.push_str(text);
+                xml.push_str("-->");
+            }
+        }
+    }
+    Some(xml)
 }
 
 /// The reference that `rest` starts with, decoded, and the text after it.
@@ -471,6 +734,168 @@ mod tests {
             let source = format!("<A>{}</A>", spelt.join("<!-- c\r\n -->"));
             let doc = parse(&source).unwrap();
             proptest::prop_assert_eq!(element_text(doc.root_element()), Some(value));
+        }
+    }
+
+    /// A piece of element content the generator below writes.
+    #[derive(Clone, Debug)]
+    enum Written {
+        /// Characters, each with how [`spell`] spells it.
+        Text(Vec<(char, u8)>),
+        Comment(String),
+        CData(String),
+    }
+
+    fn written() -> impl proptest::strategy::Strategy<Value = Written> {
+        let text_chars = vec![
+            'a',
+            ' ',
+            '\t',
+            '\n',
+            '\r',
+            '<',
+            '>',
+            '&',
+            '"',
+            ']',
+            '\u{a0}',
+            '\u{85}',
+            '\u{1d11e}',
+        ];
+        let markup_chars = vec![
+            'a', ' ', '\r', '\n', '<', '>', '&', '!', '-', '[', ']', '/', '?', '\u{e9}',
+        ];
+        proptest::prop_oneof![
+            proptest::collection::vec((proptest::sample::select(text_chars), 0u8..3), 0..6)
+                .prop_map(Written::Text),
+            proptest::collection::vec(proptest::sample::select(markup_chars.clone()), 0..6)
+                .prop_map(|cs| cs.into_iter().collect::<String>())
+                .prop_filter("a comment holds no `--` and ends in no `-`", |c| {
+                    !c.contains("--") && !c.ends_with('-')
+                })
+                .prop_map(Written::Comment),
+            proptest::collection::vec(proptest::sample::select(markup_chars), 0..6)
+                .prop_map(|cs| cs.into_iter().collect::<String>())
+                .prop_filter("a CDATA section holds no `]]>`", |c| !c.contains("]]>"))
+                .prop_map(Written::CData),
+        ]
+    }
+
+    proptest::proptest! {
+        /// Any content of text (each character spelt any legal way), comments
+        /// and CDATA sections, written into an element, reads back as the
+        /// pieces written: adjacent text as one run, a run of literal XML
+        /// whitespace dropped, and a run of whitespace spelt otherwise
+        /// declined. So the reading of the element's source agrees with
+        /// roxmltree's throughout.
+        #[test]
+        fn element_content_reads_back_what_was_written(
+            written in proptest::collection::vec(written(), 0..6),
+            attribute in proptest::sample::select(vec!["", " a='>'", " b=\"'>\" c='\"'"]),
+        ) {
+            let mut source = format!("<A{attribute}>");
+            // Each piece expected, as its kind and its text.
+            let mut expected = Some(Vec::new());
+            // The run of text being written: its value and its spelling.
+            let mut run = (String::new(), String::new());
+            let mut spelt_text = String::new();
+            let end_run = |run: &mut (String, String), expected: &mut Option<Vec<(&str, String)>>| {
+                let (value, spelt) = std::mem::take(run);
+                if spelt.is_empty() || is_xml_whitespace(&spelt) {
+                    return;
+                }
+                if is_xml_whitespace(&value) {
+                    *expected = None;
+                }
+                if let Some(expected) = expected {
+                    expected.push(("text", value));
+                }
+            };
+            for piece in &written {
+                match piece {
+                    Written::Text(chars) => {
+                        for (c, how) in chars {
+                            let spelt = spell(*c, *how, '\0');
+                            source.push_str(&spelt);
+                            run.0.push(*c);
+                            run.1.push_str(&spelt);
+                        }
+                    }
+                    Written::Comment(text) | Written::CData(text) => {
+                        spelt_text.push_str(&run.1);
+                        end_run(&mut run, &mut expected);
+                        let (kind, open, close) = match piece {
+                            Written::Comment(_) => ("comment", "<!--", "-->"),
+                            _ => ("cdata", "<![CDATA[", "]]>"),
+                        };
+                        source.push_str(&format!("{open}{text}{close}"));
+                        if let Some(expected) = &mut expected {
+                            expected.push((kind, text.clone()));
+                        }
+                    }
+                }
+            }
+            spelt_text.push_str(&run.1);
+            end_run(&mut run, &mut expected);
+            source.push_str("</A>");
+            let Ok(doc) = parse(&source) else {
+                // Text may not hold `]]>`.
+                proptest::prop_assert!(spelt_text.contains("]]>"), "{:?}", source);
+                return Ok(());
+            };
+            let read = element_content(doc.root_element()).map(|content| {
+                content
+                    .into_iter()
+                    .map(|piece| match piece {
+                        Content::Text { value, whitespace } => {
+                            assert!(!whitespace);
+                            ("text", value.into_owned())
+                        }
+                        Content::Comment(text) => ("comment", text.to_owned()),
+                        Content::CData(text) => ("cdata", text.to_owned()),
+                    })
+                    .collect::<Vec<_>>()
+            });
+            proptest::prop_assert_eq!(read, expected, "{:?}", source);
+        }
+    }
+
+    /// The fragments an attribute may hold: each reads as the pieces MSBuild
+    /// parses from it, its whitespace kept; and each the parse may refuse, or
+    /// whose reading turns on a reference, declines.
+    #[test]
+    fn fragment_content_reads_only_what_certainly_parses() {
+        let text = |value: &'static str| Content::Text {
+            value: Cow::Borrowed(value),
+            whitespace: is_xml_whitespace(value),
+        };
+        for (fragment, expected) in [
+            ("<![CDATA[a]]>", vec![Content::CData("a")]),
+            (
+                " <!--c--> y",
+                vec![text(" "), Content::Comment("c"), text(" y")],
+            ),
+            (
+                "x>y<![CDATA[<!--]]>",
+                vec![text("x>y"), Content::CData("<!--")],
+            ),
+            ("<!---->", vec![Content::Comment("")]),
+        ] {
+            assert_eq!(fragment_content(fragment), Some(expected), "{fragment:?}");
+        }
+        for fragment in [
+            "a<b",
+            "<x/>",
+            "<?p q?>",
+            "<!--a--b-->",
+            "<!--a--->",
+            "<!--",
+            "<![CDATA[",
+            "a&b<!--c-->",
+            "a&amp;<!--c-->",
+            "a]]><!--c-->",
+        ] {
+            assert_eq!(fragment_content(fragment), None, "{fragment:?}");
         }
     }
 

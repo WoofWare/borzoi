@@ -4126,7 +4126,7 @@ fn walk_property_child_inner(
     // — distinct from "undefined", and used in real projects to clear an
     // inherited value.
     let Some(raw) = collect_element_text(node) else {
-        // A body we cannot model (CDATA, entity-encoded whitespace). Same
+        // A body we cannot model (entity-encoded whitespace, an element). Same
         // treatment as an unevaluable expansion below: drop any prior binding
         // rather than let a stale value stand in for a write whose result we
         // don't know, and unpin the name so every later read re-surfaces it.
@@ -6504,18 +6504,15 @@ fn contains_metadata_reference(s: &str) -> bool {
     s.contains("%(")
 }
 
-/// Concatenate every text child of `node`, matching MSBuild's "element's
-/// full inner text" rule. roxmltree splits the children whenever a
-/// comment, processing instruction, or CDATA boundary intervenes, and
-/// [`Node::text`] only exposes the first text child — so a value of the
-/// form `A<!-- … -->B` would silently lose the `B` half. Iterating every
-/// text child preserves the whole value. Each child is read as MSBuild reads
-/// it ([`crate::document::text`]): references decoded, and line ends as
-/// written, so `a<CR><LF>b` is four characters.
+/// The body of `node` as MSBuild reads it (`Utilities.GetXmlNodeInnerContents`
+/// over the children its XML reader reports, [`crate::document::element_content`]
+/// and [`crate::document::inner_contents`]). Each text is read with its
+/// references decoded and its line ends as written, so `a<CR><LF>b` is four
+/// characters.
 ///
-/// A text child that is *literally* nothing but XML whitespace in the source is
-/// **insignificant** and contributes nothing, matching MSBuild's XML layer.
-/// This is a per-text-node rule, not a whole-value one, and all of it is pinned
+/// A run of text that is *literally* nothing but XML whitespace in the source
+/// is **insignificant** and contributes nothing, matching MSBuild's XML layer.
+/// This is a per-run rule, not a whole-value one, and all of it is pinned
 /// against `dotnet msbuild` 10.0.301 (2026-07-11):
 ///
 /// - `<P> </P>`, a tab-only body and a CRLF-only body → `""` (so
@@ -6523,10 +6520,10 @@ fn contains_metadata_reference(s: &str) -> bool {
 /// - `<Q>  x  </Q>` → `"  x  "`: padding around content stays verbatim, and
 ///   so does a line break in it, `<Q><CR><LF>  x<CR><LF></Q>` reading as
 ///   seven characters.
-/// - `<R>  <!-- c -->x</R>` → `"x"`: a comment splits the text children, and
-///   the whitespace-only one drops on its own — which is why the test must be
-///   per-node (a whole-value collapse would wrongly keep `"  x"` here).
-///   Each surviving child keeps its own line ends: `a<CR><!-- c --><LF>b` is
+/// - `<R>  <!-- c -->x</R>` → `"x"`: a comment splits the text, and the
+///   whitespace-only run drops on its own — which is why the test must be
+///   per-run (a whole-value collapse would wrongly keep `"  x"` here). Each
+///   surviving run keeps its own line ends: `a<CR><!-- c --><LF>b` is
 ///   `a<CR><LF>b`.
 /// - `<P> $(Undefined) </P>` → `"  "`: the rule is pre-expansion, and is not
 ///   re-applied to an expansion result.
@@ -6535,51 +6532,31 @@ fn contains_metadata_reference(s: &str) -> bool {
 /// content (`&#160;` has length 1) — so this must not use `char::is_whitespace`,
 /// which is Unicode-wide.
 ///
+/// A CDATA section's content is read verbatim. A body of text and comments
+/// alone reads as its text; one holding a CDATA section reads as its text too
+/// when the section is all of it or comes first (after Unicode whitespace,
+/// .NET's `TrimStart`), and as its inner XML otherwise (`dotnet msbuild`
+/// 10.0):
+///
+/// - ` <![CDATA[ ]]> ` → `" "`; `<![CDATA[a]]>x<!-- c -->` → `"ax"`;
+///   `&#160;<![CDATA[a]]>x` → `"\u{a0}ax"`.
+/// - `x<![CDATA[y]]>`, `<!-- c --><![CDATA[y]]>` → themselves, and
+///   `x>y<![CDATA[z]]>` → `"x&gt;y<![CDATA[z]]>"`: each text re-escaped, and
+///   whitespace-only runs dropped from between the pieces.
+///
 /// Returns `None` for the shapes whose value we cannot derive, so callers
 /// degrade rather than commit a guess:
 ///
-/// - **Any CDATA in the body.** roxmltree exposes CDATA as a text node *and*
-///   merges it with adjacent literal text, truncating the merged node's source
-///   range — so `<P> <![CDATA[ ]]> </P>` (MSBuild: `" "` — the literal
-///   whitespace insignificant, the CDATA space kept) is indistinguishable in
-///   the decoded view from `<P>   </P>` (MSBuild: `""`). CDATA in a property
-///   body is vanishingly rare: one file in the entire SDK chain, zero in the
-///   F# corpus, and that one is an `@(…)`-bearing value that already degrades.
-/// - **Entity-encoded whitespace** (a text node whose *decoded* value is all
-///   whitespace but whose source is not, e.g. `&#32;`). MSBuild is inconsistent
-///   here — `&#32;` and `&#9;` are kept (length 1) while `&#x20;` is dropped
-///   (length 0) — so neither the source nor the decoded test predicts it, and
-///   we decline rather than pick a side.
+/// - **Entity-encoded whitespace** (a run whose *decoded* value is all
+///   whitespace but whose source is not, e.g. `&#32;`). MSBuild is
+///   inconsistent here — `&#32;` and `&#9;` are kept (length 1) while
+///   `&#x20;` is dropped (length 0) — so neither the source nor the decoded
+///   test predicts it, and we decline rather than pick a side.
 /// - **An element or processing instruction in the body.** MSBuild then reads
-///   the body's inner XML (`Utilities.GetXmlNodeInnerContents`):
-///   `<P>a<?p q?>b</P>` is `a<?p q?>b`, where the text alone is `ab`.
+///   the body's inner XML, which re-spells the markup: `<P>a<x/>b</P>` is
+///   `a<x />b`, where the text alone is `ab`.
 fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
-    let source = node.document().input_text();
-    // Element-level check: a merged text node's own range would not reveal the
-    // CDATA (roxmltree truncates it to the first chunk), so ask the element.
-    if source[node.range()].contains("<![CDATA[") {
-        return None;
-    }
-    let is_xml_ws = |b: u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
-    let mut out = String::new();
-    for child in node.children() {
-        if child.is_element() || child.is_pi() {
-            return None;
-        }
-        if !child.is_text() {
-            continue;
-        }
-        let text = crate::document::text(child)?;
-        if !text.is_empty() && text.bytes().all(is_xml_ws) {
-            if source[child.range()].bytes().all(is_xml_ws) {
-                // Insignificant literal whitespace: contributes nothing.
-                continue;
-            }
-            return None;
-        }
-        out.push_str(&text);
-    }
-    Some(out)
+    crate::document::inner_contents(&crate::document::element_content(node)?)
 }
 
 #[cfg(test)]

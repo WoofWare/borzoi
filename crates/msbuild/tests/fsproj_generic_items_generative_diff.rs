@@ -73,7 +73,7 @@ const INCLUDES: [&str; 14] = [
 /// What an `Exclude` names: MSBuild matches it by normalised path.
 const EXCLUDES: [&str; 6] = ["a", "./a", "A", "b;x%3By", "\\tmp\\foo", "$(Name)"];
 /// Values for a metadata attribute.
-const VALUES: [&str; 17] = [
+const VALUES: [&str; 19] = [
     "1.0",
     "$(Name)",
     "pre$(Name)post",
@@ -95,13 +95,19 @@ const VALUES: [&str; 17] = [
     "a\tb",
     "line\nbreak",
     "&lt;![CDATA[c]]&gt;",
+    // Parsed as XML, as they hold a `<`, and read back as inner XML: a
+    // comment or text before the section keeps it spelt as written.
+    " &lt;!--c--&gt;&lt;![CDATA[c]]&gt;",
+    "x&lt;![CDATA[c]]&gt;",
 ];
 /// Bodies for a metadata child element: the attribute values, and what only
 /// element content can hold.
-const BODIES: [&str; 8] = [
+const BODIES: [&str; 10] = [
     "<nested>hello</nested>",
     "<!-- c -->x",
     "<![CDATA[ c ]]>",
+    "<![CDATA[c]]>x<!-- d -->",
+    "x<![CDATA[c]]>",
     "a<!-- c -->b",
     "\n      spread\n    ",
     "a<?thing b?>c",
