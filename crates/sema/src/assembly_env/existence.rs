@@ -103,8 +103,13 @@ impl ExistenceSet {
     }
 
     fn add_path(&mut self, path: Vec<String>, child: Option<Child>) {
-        for k in 0..=path.len() {
-            self.prefixes.insert(path[..k].to_vec());
+        // Longest first: every prefix of a held path is held, so the first
+        // one already present ends the walk, and a wide tree costs one insert
+        // per new prefix rather than one per prefix per path.
+        for k in (0..=path.len()).rev() {
+            if !self.prefixes.insert(path[..k].to_vec()) {
+                break;
+            }
         }
         if let Some(child) = child {
             let parent = path[..path.len() - 1].to_vec();

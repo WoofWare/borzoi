@@ -24,6 +24,8 @@
 //! A pickle that exists but cannot be read gives [`PickleLayer::Unreadable`],
 //! never an empty layer.
 
+use crate::ImportError;
+use crate::ecma335_assembly::MAX_NESTING_DEPTH;
 use crate::fsharp_pickle::model::{
     IsType, PickledAttribute, PickledCcu, PickledEntity, PickledExnRepr, PickledTcRef, TyparKind,
 };
@@ -130,8 +132,10 @@ const EXTENSION: [&str; 4] = [
     "ExtensionAttribute",
 ];
 
-/// The `TypeDef` layer of `image`.
-pub(crate) fn il_rows(image: &Image) -> Vec<IlTypeRow> {
+/// The `TypeDef` layer of `image`, or a refusal when a row's `NestedClass`
+/// chain is deeper than [`MAX_NESTING_DEPTH`]: a cycle, or corrupt metadata
+/// no compiler writes, whose paths would cost memory cubic in the table.
+pub(crate) fn il_rows(image: &Image) -> Result<Vec<IlTypeRow>, ImportError> {
     image
         .type_defs
         .iter()
@@ -139,16 +143,22 @@ pub(crate) fn il_rows(image: &Image) -> Vec<IlTypeRow> {
         .map(|(i, td)| {
             let mut enclosing = Vec::new();
             let mut outermost = i;
-            let mut guard = 0usize;
             while let Some(TypeDefId(parent)) = image.type_defs[outermost].enclosing {
-                outermost = parent as usize;
-                enclosing.push(image.type_defs[outermost].name.name.clone());
-                guard += 1;
-                // A `NestedClass` cycle is malformed metadata; stop rather
-                // than spin. The row is still reported.
-                if guard > image.type_defs.len() {
-                    break;
+                if enclosing.len() >= MAX_NESTING_DEPTH {
+                    return Err(ImportError::UnsupportedEcmaLayout {
+                        detail: format!(
+                            "TypeDef row {i}'s nesting chain is cyclic or deeper than \
+                             {MAX_NESTING_DEPTH}"
+                        ),
+                    });
                 }
+                outermost = parent as usize;
+                let Some(encloser) = image.type_defs.get(outermost) else {
+                    return Err(ImportError::UnsupportedEcmaLayout {
+                        detail: format!("TypeDef row {i} is nested in a missing row {outermost}"),
+                    });
+                };
+                enclosing.push(encloser.name.name.clone());
             }
             enclosing.reverse();
             let namespace = &image.type_defs[outermost].name.namespace;
@@ -178,7 +188,7 @@ pub(crate) fn il_rows(image: &Image) -> Vec<IlTypeRow> {
                     Err(_) => unreadable_attribute = true,
                 }
             }
-            IlTypeRow {
+            Ok(IlTypeRow {
                 namespace: split_namespace(namespace),
                 enclosing,
                 name: td.name.name.clone(),
@@ -186,7 +196,7 @@ pub(crate) fn il_rows(image: &Image) -> Vec<IlTypeRow> {
                 auto_open,
                 extension,
                 unreadable_attribute,
-            }
+            })
         })
         .collect()
 }
@@ -234,8 +244,13 @@ pub(crate) fn pickled_rows(pickled: &PickledCcu) -> Result<Vec<PickledEntityRow>
     {
         // A valid entity graph is a tree whose depth the tycon table bounds;
         // deeper is a cycle.
-        if depth > pickled.tables.tycons.len() {
-            return Err(format!("the pickle's entity graph cycles at stamp {stamp}"));
+        // A valid entity graph is a tree whose depth no compiler takes past
+        // the projector's own bound; deeper is a cycle or corrupt, and its
+        // paths would cost memory cubic in the depth.
+        if depth > MAX_NESTING_DEPTH {
+            return Err(format!(
+                "the pickle's entity graph is cyclic or deeper than {MAX_NESTING_DEPTH} at stamp {stamp}"
+            ));
         }
         let entity = pickled
             .tables

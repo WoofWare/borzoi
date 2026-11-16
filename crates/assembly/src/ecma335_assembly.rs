@@ -803,7 +803,7 @@ impl Ecma335Assembly {
     /// its `TypeDef` table and its host F# signature pickle with no projection
     /// in between ([`crate::existence`]).
     pub fn existence_index(&self) -> Result<crate::ExistenceIndex, ImportError> {
-        let il = crate::existence::il_rows(&self.image);
+        let il = crate::existence::il_rows(&self.image)?;
         let pickle = if self.fsharp_interface_data_version()?.is_none() {
             crate::PickleLayer::NotFSharp
         } else {
@@ -906,7 +906,7 @@ enum FSharpReading {
 /// native-stack growth of the recursion as well as catching the cycle: a count-
 /// based bound would still recurse thousands deep on a large assembly before
 /// tripping and could overflow the stack first.
-const MAX_NESTING_DEPTH: usize = 128;
+pub(crate) const MAX_NESTING_DEPTH: usize = 128;
 
 /// The members projected from a single type: the ones we kept, plus the ones we
 /// dropped (with why). Per the reader plan's "bound uncertainty", a member
@@ -6335,6 +6335,15 @@ mod tests {
 
         // A `TypeDef` `enclosing` self-loop (row 0 is its own encloser).
         view.image.type_defs[0].enclosing = Some(TypeDefId(0));
+        // The existence index refuses it rather than build paths the length
+        // of the table for every row.
+        assert!(
+            matches!(
+                view.existence_index(),
+                Err(ImportError::UnsupportedEcmaLayout { ref detail }) if detail.contains("cyclic")
+            ),
+            "a cyclic TypeDef nesting chain must fail the existence index"
+        );
         match view
             .qualified_typedef_name(0)
             .expect_err("a cyclic TypeDef enclosing chain must be refused")
