@@ -39,7 +39,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$repo"
 
-steps=(resolution corpus-diff-tests assembly-projection restore-graph restore-cone xml-doc-source)
+steps=(resolution corpus-diff-tests assembly-projection existence-index restore-graph restore-cone xml-doc-source)
 
 # Each step is a single command, so its status is the step's.
 run_step() { # name
@@ -104,6 +104,22 @@ run_step() { # name
       nix develop --command env \
         BORZOI_DLL_SWEEP_ROOT="$RUNNER_TEMP/project-corpus-packages" \
         cargo test -p borzoi-assembly --test all projection_skip_sweep:: \
+        -- --ignored --nocapture
+      ;;
+    existence-index)
+      # The existence index (`borzoi_assembly::existence`) of every assembly
+      # in the same package cache, held row for row to FCS's view of it and to
+      # a System.Reflection.Metadata walk of its TypeDef table: the rows the
+      # extension gate's existence questions read, at every accessibility.
+      # Measured 2026-11-16: 1124 assemblies, ~75 s. The floor catches a
+      # mistyped or unrestored root, as `assembly-projection`'s does; like
+      # that sweep it pins no manifest, since a local packages folder may hold
+      # more than one pin's restores.
+      nix develop --command env \
+        BORZOI_EXISTENCE_SWEEP_ROOT="$RUNNER_TEMP/project-corpus-packages" \
+        BORZOI_EXISTENCE_SWEEP_MIN=1000 \
+        cargo test -p borzoi-sema --test all \
+        assembly_entities_diff::the_existence_index_is_what_both_readers_report_over_a_package_cache \
         -- --ignored --nocapture
       ;;
     restore-graph)

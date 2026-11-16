@@ -7462,6 +7462,314 @@ let private errorRecords (diagnostics: FSharp.Compiler.Diagnostics.FSharpDiagnos
     |> Array.filter (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
     |> Array.map (fun d -> {| Line = d.StartLine; Code = d.ErrorNumber; Message = d.Message |})
 
+// ============================================================================
+// Assembly entity census (`assembly-entities` batch kind)
+// ============================================================================
+
+/// One FCS entity row of the `assembly-entities` census: every non-namespace
+/// entity of a referenced assembly, at every accessibility.
+type private AssemblyEntityRow =
+    { Namespace: string
+      Enclosing: string[]
+      LogicalName: string
+      CompiledName: string
+      Kind: string
+      Access: string
+      AutoOpen: bool
+      Extension: bool }
+
+/// The `assembly-entities` kind's spelling of an entity's kind, tested in a
+/// fixed order: an F# module, an abbreviation, an exception declaration, a
+/// unit of measure, and anything else is a type.
+let private assemblyEntityKind (e: FSharpEntity) : string =
+    if e.IsFSharpModule then "module"
+    elif e.IsFSharpAbbreviation then "abbreviation"
+    elif e.IsFSharpExceptionDeclaration then "exception"
+    elif e.IsMeasure then "measure"
+    else "type"
+
+/// The `assembly-entities` kind's spelling of an accessibility. FCS's
+/// `Protected` is spelled out rather than folded into another bucket, so a
+/// consumer sees it if it ever appears.
+let private assemblyEntityAccess (a: FSharpAccessibility) : string =
+    if a.IsPublic then "public"
+    elif a.IsInternal then "internal"
+    elif a.IsPrivate then "private"
+    elif a.IsProtected then "protected"
+    else failwith "FSharpAccessibility is none of Public/Internal/Private/Protected"
+
+/// Whether `e` carries an attribute whose type's *logical* path, its access
+/// path and logical name (`Microsoft.FSharp.Core.AutoOpenAttribute`), is
+/// `logicalPath`. The logical path, not `TryFullName`'s compiled one: an F#
+/// attribute `OtherAttribute` with `[<CompiledName("AutoOpenAttribute")>]` in
+/// `Microsoft.FSharp.Core` compiles to the name FSharp.Core's attribute has, and
+/// is not that attribute.
+let private entityHasAttribute (logicalPath: string) (e: FSharpEntity) : bool =
+    e.Attributes
+    |> Seq.exists (fun a ->
+        let t = a.AttributeType
+        t.AccessPath + "." + t.LogicalName = logicalPath)
+
+/// Walk `entities` (an assembly's `Contents.Entities`, or a `NestedEntities`
+/// list) depth first, appending one row per non-namespace entity FCS
+/// surfaces to `rows`, whatever its accessibility, nested entities included.
+/// `enclosing` is the logical names of the enclosing non-namespace
+/// entities, innermost first; `ns` is the outermost one's namespace, `None`
+/// when there is none to inherit. `FSharpAssemblySignature.Entities` flattens
+/// namespaces away, so a top-level entity reads its own `Namespace`, and a
+/// nested one inherits it.
+///
+/// A property read that throws drops that entity's row and records why in
+/// `readErrors`, naming the entity; its nested entities are still walked when
+/// they can be placed, and recorded as dropped when they cannot. A dropped
+/// row is therefore never silent.
+///
+/// This is a top-level function rather than a closure inside the batch loop:
+/// a deeply nested closure there trips a JSON recursion limit in a bridge
+/// test that reads this file.
+let rec private collectAssemblyEntityRows
+    (ns: string option)
+    (enclosing: string list)
+    (entities: System.Collections.Generic.IList<FSharpEntity>)
+    (rows: System.Collections.Generic.List<AssemblyEntityRow>)
+    (readErrors: System.Collections.Generic.List<string>)
+    : unit =
+    let where (name: string) =
+        sprintf "%s/%s (namespace %s)" (String.Join("/", List.rev enclosing)) name (Option.defaultValue "?" ns)
+    for e in entities do
+        let name =
+            try Some e.LogicalName
+            with ex ->
+                readErrors.Add(sprintf "%s: LogicalName: %s" (where "?") ex.Message)
+                None
+        let isNamespace =
+            try Ok e.IsNamespace
+            with ex -> Error ex.Message
+        let shown = Option.defaultValue "?" name
+        match isNamespace with
+        | Error msg -> readErrors.Add(sprintf "%s: IsNamespace: %s" (where shown) msg)
+        | Ok isNs ->
+            let read (field: string) (f: unit -> 'T) : 'T option =
+                try Some(f ())
+                with ex ->
+                    readErrors.Add(sprintf "%s: %s: %s" (where shown) field ex.Message)
+                    None
+            let ownNs =
+                match ns with
+                | Some inherited -> Some inherited
+                | None when isNs -> None
+                | None -> read "Namespace" (fun () -> Option.defaultValue "" e.Namespace)
+            if not isNs then
+                let compiledName = read "CompiledName" (fun () -> e.CompiledName)
+                let kind = read "Kind" (fun () -> assemblyEntityKind e)
+                let access = read "Accessibility" (fun () -> assemblyEntityAccess e.Accessibility)
+                let autoOpen =
+                    read "AutoOpen" (fun () -> entityHasAttribute "Microsoft.FSharp.Core.AutoOpenAttribute" e)
+                let extension =
+                    read "Extension" (fun () ->
+                        entityHasAttribute "System.Runtime.CompilerServices.ExtensionAttribute" e)
+                match ownNs, name, compiledName, kind, access, autoOpen, extension with
+                | Some namespc, Some n, Some c, Some k, Some a, Some ao, Some ext ->
+                    rows.Add
+                        { Namespace = namespc
+                          Enclosing = List.rev enclosing |> List.toArray
+                          LogicalName = n
+                          CompiledName = c
+                          Kind = k
+                          Access = a
+                          AutoOpen = ao
+                          Extension = ext }
+                | _ -> ()
+            let nested =
+                try Ok e.NestedEntities
+                with ex -> Error ex.Message
+            match nested with
+            | Error msg -> readErrors.Add(sprintf "%s: NestedEntities: %s" (where shown) msg)
+            | Ok children ->
+                if isNs then
+                    collectAssemblyEntityRows None enclosing children rows readErrors
+                else
+                    match ownNs, name with
+                    | Some _, Some n -> collectAssemblyEntityRows ownNs (n :: enclosing) children rows readErrors
+                    // The namespace or name read failed, and is recorded: the
+                    // children cannot be placed, so each is recorded as dropped.
+                    | _ ->
+                        for c in children do
+                            let childName =
+                                try c.LogicalName
+                                with _ -> "?"
+                            readErrors.Add(sprintf "%s/%s: dropped, enclosing entity unplaceable" (where shown) childName)
+
+/// One IL row of the `assembly-entities` census: a `TypeDefinition`, read
+/// straight from metadata.
+type private IlTypeDefRow =
+    { Namespace: string
+      Enclosing: string[]
+      Name: string
+      Visibility: string
+      AutoOpen: bool
+      Extension: bool
+      UnreadableAttribute: bool }
+
+/// The name of a type's `TypeAttributes.VisibilityMask` value.
+let private ilVisibilityName (attrs: TypeAttributes) : string =
+    match attrs &&& TypeAttributes.VisibilityMask with
+    | TypeAttributes.NotPublic -> "NotPublic"
+    | TypeAttributes.Public -> "Public"
+    | TypeAttributes.NestedPublic -> "NestedPublic"
+    | TypeAttributes.NestedPrivate -> "NestedPrivate"
+    | TypeAttributes.NestedFamily -> "NestedFamily"
+    | TypeAttributes.NestedAssembly -> "NestedAssembly"
+    | TypeAttributes.NestedFamANDAssem -> "NestedFamANDAssem"
+    | TypeAttributes.NestedFamORAssem -> "NestedFamORAssem"
+    | other -> failwithf "visibility %A is outside VisibilityMask's eight values" other
+
+/// The (namespace, name) of a custom attribute's type, read from its
+/// constructor: a `MemberReference` whose parent is a `TypeReference` or a
+/// `TypeDefinition`, or a `MethodDefinition` whose declaring type is a
+/// `TypeDefinition`. `None` for any other shape (a generic attribute's
+/// `TypeSpecification` parent, say).
+let private ilAttributeTypeName
+    (md: System.Reflection.Metadata.MetadataReader)
+    (handle: System.Reflection.Metadata.CustomAttributeHandle)
+    : (string * string) option =
+    let attr = md.GetCustomAttribute handle
+    let ctor = attr.Constructor
+    match ctor.Kind with
+    | System.Reflection.Metadata.HandleKind.MemberReference ->
+        let mr =
+            md.GetMemberReference(System.Reflection.Metadata.MemberReferenceHandle.op_Explicit ctor)
+        match mr.Parent.Kind with
+        | System.Reflection.Metadata.HandleKind.TypeReference ->
+            let tr =
+                md.GetTypeReference(System.Reflection.Metadata.TypeReferenceHandle.op_Explicit mr.Parent)
+            Some(md.GetString tr.Namespace, md.GetString tr.Name)
+        | System.Reflection.Metadata.HandleKind.TypeDefinition ->
+            let td =
+                md.GetTypeDefinition(System.Reflection.Metadata.TypeDefinitionHandle.op_Explicit mr.Parent)
+            Some(md.GetString td.Namespace, md.GetString td.Name)
+        | _ -> None
+    | System.Reflection.Metadata.HandleKind.MethodDefinition ->
+        let m =
+            md.GetMethodDefinition(System.Reflection.Metadata.MethodDefinitionHandle.op_Explicit ctor)
+        let td = md.GetTypeDefinition(m.GetDeclaringType())
+        Some(md.GetString td.Namespace, md.GetString td.Name)
+    | _ -> None
+
+/// The namespace and enclosing type names (outermost first) of `td`: a nested
+/// type's namespace is its outermost enclosing type's.
+let rec private ilTypeDefPlace
+    (md: System.Reflection.Metadata.MetadataReader)
+    (td: System.Reflection.Metadata.TypeDefinition)
+    (acc: string list)
+    : string * string list =
+    let parent = td.GetDeclaringType()
+    if parent.IsNil then
+        md.GetString td.Namespace, acc
+    else
+        let p = md.GetTypeDefinition parent
+        ilTypeDefPlace md p (md.GetString p.Name :: acc)
+
+/// Every `TypeDefinition` row of the assembly at `path`, `<Module>` and nested
+/// types included, read with `System.Reflection.Metadata`: a reader
+/// independent of FCS's.
+let private ilTypeDefRows (path: string) : IlTypeDefRow[] =
+    use stream = File.OpenRead path
+    use pe = new System.Reflection.PortableExecutable.PEReader(stream)
+    let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
+    [| for h in md.TypeDefinitions do
+           let td = md.GetTypeDefinition h
+           let ns, enclosing = ilTypeDefPlace md td []
+           let names = [ for ca in td.GetCustomAttributes() -> ilAttributeTypeName md ca ]
+           let has (n: string) (t: string) = names |> List.contains (Some(n, t))
+           { Namespace = ns
+             Enclosing = List.toArray enclosing
+             Name = md.GetString td.Name
+             Visibility = ilVisibilityName td.Attributes
+             AutoOpen = has "Microsoft.FSharp.Core" "AutoOpenAttribute"
+             Extension = has "System.Runtime.CompilerServices" "ExtensionAttribute"
+             UnreadableAttribute = names |> List.exists Option.isNone } |]
+
+/// The `assembly-entities` report for one referenced file: FCS's entities (when
+/// FCS loaded the file as one of `checkResults`' referenced assemblies) and an
+/// independent IL reader's `TypeDefinition` rows.
+let private assemblyEntitiesOf (checkResults: FSharpCheckFileResults) (file: string) =
+    let absolute = Path.GetFullPath file
+    let fcs =
+        try
+            let target =
+                checkResults.ProjectContext.GetReferencedAssemblies()
+                |> List.tryFind (fun a ->
+                    match a.FileName with
+                    | Some f -> String.Equals(Path.GetFullPath f, absolute, StringComparison.OrdinalIgnoreCase)
+                    | None -> false)
+            match target with
+            | None ->
+                {| Seen = false
+                   Error = (null: string | null)
+                   Entities = [||]
+                   ReadErrors = [||] |}
+            | Some asm ->
+                let rows = System.Collections.Generic.List<AssemblyEntityRow>()
+                let readErrors = System.Collections.Generic.List<string>()
+                collectAssemblyEntityRows None [] asm.Contents.Entities rows readErrors
+                {| Seen = true
+                   Error = null
+                   Entities = rows.ToArray()
+                   ReadErrors = readErrors.ToArray() |}
+        with ex ->
+            {| Seen = false
+               Error = ex.Message
+               Entities = [||]
+               ReadErrors = [||] |}
+    let il =
+        try
+            {| Error = (null: string | null)
+               Rows = ilTypeDefRows absolute |}
+        with ex ->
+            {| Error = ex.Message; Rows = [||] |}
+    {| File = absolute; Fcs = fcs; Il = il |}
+
+/// Whether the assembly at `path` embeds an F# signature resource: the pickle
+/// whose entities `assembly-entities` grades through FCS. Unreadable counts
+/// as no.
+let private carriesFSharpSignature (path: string) : bool =
+    try
+        use stream = File.OpenRead path
+        use pe = new System.Reflection.PortableExecutable.PEReader(stream)
+        let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
+        md.ManifestResources
+        |> Seq.exists (fun h ->
+            md.GetString(md.GetManifestResource(h).Name).StartsWith("FSharpSignature", StringComparison.Ordinal))
+    with _ -> false
+
+/// For an `assembly-entities` request, `switches` (a script's options) without
+/// any reference whose file name is a requested F# assembly's; any other
+/// `kind`'s switches unchanged. FCS would load a script reference of the same
+/// name (the implicit FSharp.Core, say) in preference to the appended
+/// request, leaving the requested pickle unread. Only an F# assembly's FCS
+/// view is graded, and replacing a framework reference with an older facade
+/// of the same name (netstandard.library's `System.Runtime.dll`) aborts the
+/// check, so no other reference is replaced.
+///
+/// Top-level, and applied inside an existing binding rather than a new `let` in the batch loop,
+/// for the reason [`collectAssemblyEntityRows`] gives: every `let` in that
+/// loop's sequence nests the rest of it one level deeper in the AST.
+let private dropScriptRefsNamedLike (kind: string) (refs: string list) (switches: string[]) : string[] =
+    if kind <> "assembly-entities" then switches else
+    let requested =
+        refs
+        |> List.filter (fun r -> carriesFSharpSignature (r.Trim()))
+        |> List.map (fun r -> Path.GetFileName(r.Trim()))
+    let referencedFile (o: string) =
+        if o.StartsWith("-r:") || o.StartsWith("/r:") then Some(o.Substring 3)
+        elif o.StartsWith("--reference:") then Some(o.Substring "--reference:".Length)
+        else None
+    let isRequested (p: string) =
+        let name = Path.GetFileName p
+        requested |> List.exists (fun r -> String.Equals(r, name, StringComparison.OrdinalIgnoreCase))
+    switches |> Array.filter (fun o -> not (referencedFile o |> Option.exists isRequested))
+
 /// Resident, multi-projection single-file oracle: the amortised-startup engine
 /// behind `sema`'s per-case differential loops (`resolve_diff`, `infer_*_diff`,
 /// `attr_resolution_diff`, `overloads_oracle`, …). Each of those otherwise spawns
@@ -7550,7 +7858,8 @@ let private fileBatchCore () =
                         not (o.StartsWith("--langversion:") || o.StartsWith("/langversion:")))
             let opts =
                 { opts0 with
-                    OtherOptions = Array.concat [ scriptSwitches; refArgs; langVersionArgs ] }
+                    OtherOptions =
+                        Array.concat [ dropScriptRefsNamedLike kind refs scriptSwitches; refArgs; langVersionArgs ] }
             let blocking =
                 scriptDiags
                 |> List.filter (fun d ->
@@ -7621,6 +7930,12 @@ let private fileBatchCore () =
             | "overloads" ->
                 let calls = collectOverloads (implFile ())
                 JsonSerializer.Serialize({| File = absolute; Calls = calls; Errors = errorLines () |}, compact)
+            | "assembly-entities" ->
+                // Every entity each of `refs` declares, at every
+                // accessibility: FCS's view of the loaded assembly and an
+                // independent IL reader's TypeDefinition rows. Batch-only.
+                let assemblies = refs |> List.map (assemblyEntitiesOf checkResults) |> List.toArray
+                JsonSerializer.Serialize({| Assemblies = assemblies |}, compact)
             | other ->
                 failwithf "unknown kind %s" other
         with ex ->

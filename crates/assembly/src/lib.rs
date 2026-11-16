@@ -26,6 +26,7 @@ pub mod display;
 pub mod doc_id;
 mod ecma335_assembly;
 mod error;
+pub mod existence;
 pub mod fsharp_pickle;
 mod fsharp_pickle_merge;
 mod fsharp_resource;
@@ -50,6 +51,9 @@ pub use display::{
 // The public ECMA-335 assembly view, backed by the in-crate reader.
 pub use ecma335_assembly::Ecma335Assembly;
 pub use error::ImportError;
+pub use existence::{
+    ExistenceIndex, IlTypeRow, IlVisibility, PickleLayer, PickledEntityKind, PickledEntityRow,
+};
 pub use fsharp_pickle::{CcuRef, PickledCcu, PickledHeader, PickledNleRef, unpickle_signature};
 pub use fsharp_pickle_merge::{ModuleMemberTarget, ModuleMemberVal, collect_module_member_targets};
 pub use model::{

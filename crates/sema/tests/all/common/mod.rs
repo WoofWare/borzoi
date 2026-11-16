@@ -11,6 +11,7 @@
 
 #![allow(dead_code)] // each importer uses a different subset.
 
+pub mod assembly_entities;
 pub mod companion_corpus;
 pub mod corpus_manifest;
 pub mod edit_script;
@@ -1664,6 +1665,47 @@ pub fn ensure_abbrev_fixture_built() -> &'static Path {
                 .join("Release")
                 .join("net10.0")
                 .join("SemaFSharpAbbrevFixture.dll")
+        })
+        .as_path()
+}
+
+/// Build the existence fixture (`tests/fixtures/existence_env`, assembly
+/// `SemaExistenceFixture.dll`), which declares every entity kind at every
+/// accessibility, once per test binary, and return its `.dll` path.
+pub fn ensure_existence_fixture_built() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let project =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/existence_env");
+            let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
+            dotnet_build(&project, "dotnet build existence fixture");
+            project
+                .join("bin")
+                .join("Release")
+                .join("net10.0")
+                .join("SemaExistenceFixture.dll")
+        })
+        .as_path()
+}
+
+/// Emit `MemberRefAttr.dll` (`tests/fixtures/memberref_attr/emit.fsx`) once
+/// per test binary and return its path: a type whose custom attribute's
+/// constructor is a `MemberRef` on a `TypeDef` of the same assembly, which
+/// ECMA-335 allows and no compiler here writes.
+pub fn ensure_memberref_attr_dll_built() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/memberref_attr/emit.fsx");
+            let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("MemberRefAttr.dll");
+            let mut cmd = Command::new("dotnet");
+            cmd.args(["fsi", "--exec"]).arg(&script).arg(&out);
+            BoundedCommand::new(cmd)
+                .timeout(BUILD_TIMEOUT)
+                .run_ok("emit MemberRefAttr.dll");
+            out
         })
         .as_path()
 }

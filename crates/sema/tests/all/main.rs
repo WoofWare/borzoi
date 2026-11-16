@@ -16,6 +16,8 @@ mod common;
 mod abbreviation_case_diff;
 mod ancestor_namespace_grid;
 mod assembly_container_precedence_grid;
+mod assembly_entities_diff;
+mod assembly_entities_oracle;
 mod assembly_env;
 mod assembly_union_case_table;
 mod attr_resolution_diff;
