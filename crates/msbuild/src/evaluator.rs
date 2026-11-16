@@ -5524,7 +5524,11 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
         return;
     };
-    let expansion = state.expand(raw_path, node.range());
+    // MSBuild turns each `\` of the attribute as written into `/`
+    // (`ProjectImportElement.Project`'s `FixFilePath`) before it expands it,
+    // so only a `\` a property or an escape supplies survives expansion.
+    let fixed_raw = raw_path.replace('\\', "/");
+    let expansion = state.expand(&fixed_raw, node.range());
     if expansion.had_issue() || expansion.unpinned_root.is_some() {
         // The expanded path has residual `$(...)`, substituted to "", or
         // leaned on an *unpinned* property (a value the property pass could
@@ -5601,16 +5605,45 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // ([`Escaped::is_filespec_wildcard`]). So a glob's decoded pattern has
         // no `*`/`?` that was data.
         //
-        // Backslash-to-forward-slash normalisation matches what
-        // `push_include_entry` does for `Include` attributes; MSBuild accepts
-        // both on either platform.
-        let normalised = segment.unescape().replace('\\', "/");
+        // A `\` written in the attribute is already `/` (`fixed_raw`); one a
+        // property or an escape supplies is still `\` here.
+        let decoded = segment.unescape();
         if segment.is_filespec_wildcard() {
-            follow_wildcard_import(&normalised, current_file_dir, node.range(), state);
+            follow_wildcard_import(
+                &decoded.replace('\\', "/"),
+                current_file_dir,
+                node.range(),
+                state,
+            );
             continue;
         }
-        let path = current_file_dir.join(normalised);
-        walk_external_file(&path, node.range(), state);
+        // An escaped separator (`%2f`, `%5c`) is data when MSBuild decides
+        // the path's structure and collapses `..` (`.%5c./..` pops `.\.`
+        // whole), and the walk cannot say which file that names; decline,
+        // as an SDK import does.
+        if has_escaped_separator(segment.as_escaped()) {
+            decline_import_path(node, raw_path, "an escaped path separator", state);
+            continue;
+        }
+        let path = if decoded.contains('\\') {
+            // A `\` a property supplied (the SDK's own
+            // `$(MSBuildThisFileDirectory)..\..\…`) goes through MSBuild's Unix
+            // path adjustment, which the walk does not model (#903). The walk
+            // opens the path with each `\` a `/`, as the file system resolves
+            // it, and claims neither that MSBuild certainly reaches what it
+            // finds there nor that MSBuild fails to load it.
+            let path = current_file_dir.join(decoded.replace('\\', "/"));
+            let saved_path_certain = std::mem::take(&mut state.taken_import_path_certain);
+            state.reach_doubted += 1;
+            walk_import_file(&path, node.range(), false, state);
+            state.reach_doubted -= 1;
+            state.taken_import_path_certain = saved_path_certain;
+            path
+        } else {
+            let path = import_open_path(&current_file_dir.join(&decoded), true);
+            walk_external_file(&path, node.range(), state);
+            path
+        };
         // Record NuGet's central-package import point by its *shape* —
         // membership in `walked_files` afterwards means the walk genuinely
         // entered the file, on this import or an earlier one (failed
@@ -5644,6 +5677,34 @@ fn sdk_project_in_alphabet(escaped: &str, unescaped: &str) -> bool {
         && unescaped
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '/' | '\\'))
+}
+
+/// Decline the plain import at `node`, whose `Project` is `raw_path`, for
+/// `why`: MSBuild may load another file than the walk would, or none.
+fn decline_import_path(node: Node<'_, '_>, raw_path: &str, why: &str, state: &mut State<'_>) {
+    state.push(
+        DiagnosticKind::UnsupportedConstruct {
+            element: format!("Import Project={raw_path:?} ({why})"),
+        },
+        node.range(),
+    );
+    state.mark_structural_skip(
+        StructuralCompileItemUncertainty::ImportProjectUnresolved {
+            project: raw_path.to_string(),
+        },
+        node.range(),
+    );
+    state.note_unloadable_import(node, crate::UnloadableImport::PathUndecided);
+}
+
+/// Whether `escaped`, an import path in MSBuild's escaped domain, holds an
+/// escaped separator (`%2f` or `%5c`, either case).
+fn has_escaped_separator(escaped: &str) -> bool {
+    escaped.match_indices('%').any(|(at, _)| {
+        escaped
+            .get(at..at + 3)
+            .is_some_and(|e| e.eq_ignore_ascii_case("%2f") || e.eq_ignore_ascii_case("%5c"))
+    })
 }
 
 /// What `Path.Combine(root, Project)` appends to an SDK root, for a `Project`
@@ -5938,14 +5999,32 @@ fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
 }
 
 fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
+    walk_import_file(path, span, true, state);
+}
+
+/// The path [`walk_import_file`] opens for `path`: collapsed as text when
+/// `collapse` says and nothing that fails it in MSBuild would be erased.
+fn import_open_path(path: &Path, collapse: bool) -> PathBuf {
+    let text = path.as_os_str().as_encoded_bytes();
+    if collapse && !text.contains(&0) && !matches!(text.last(), Some(b'/' | b'\\')) {
+        std::path::absolute(path).map_or_else(|_| path.to_path_buf(), |p| normalise(&p))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// [`walk_external_file`], collapsing `path` first only when `collapse` says.
+fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut State<'_>) {
     // MSBuild opens an import at its path collapsed as text
     // (`FileUtilities.NormalizePath`, which is `GetFullPath`): `..` pops the
     // segment before it whatever that segment links to, so `link/../a.props`
     // is the `a.props` beside `link`, never the one beside `link`'s target.
     // The file's identity (`MSBuildThisFile*`, nested imports' directory) is
-    // that collapsed path too.
-    let collapsed =
-        std::path::absolute(path).map_or_else(|_| path.to_path_buf(), |p| normalise(&p));
+    // that collapsed path too. Collapsing would erase what fails the path in
+    // MSBuild: a trailing separator, which names a directory no import loads
+    // (MSB4019), and a NUL anywhere (MSB4102). Such a path is opened as
+    // written, and fails as it does in MSBuild.
+    let collapsed = import_open_path(path, collapse);
     let path = collapsed.as_path();
     // MSBuild's duplicate-import skip: an import that resolves to an
     // already-imported path (same lexically-normalised, case-insensitive

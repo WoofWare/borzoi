@@ -703,3 +703,25 @@ fn an_import_through_a_missing_directory_msbuild_collapses_loads() {
     assert_eq!(parsed.rejection, None);
     assert_eq!(parsed.property("After"), PropertyRead::Value("1".into()));
 }
+
+#[test]
+fn an_import_msbuild_fails_before_it_collapses_the_path_is_withdrawn() {
+    // A trailing separator names a directory (MSB4019), and a NUL fails the
+    // path (MSB4102), though collapsing either away would name `E.props`.
+    for import in [
+        "<Import Project=\"E.props/\" />",
+        "<Import Project=\"E.props/./\" />",
+        "<Import Project=\"bad%00/../E.props\" />",
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let project_path = project(
+            &tmp,
+            &format!("  {import}"),
+            &[(
+                "proj/E.props",
+                "<Project><PropertyGroup><Alpha>1</Alpha></PropertyGroup></Project>",
+            )],
+        );
+        assert_withdrawn(&parse_file(&project_path), &["Before", "After", "Alpha"]);
+    }
+}

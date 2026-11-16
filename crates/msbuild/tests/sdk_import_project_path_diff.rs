@@ -19,6 +19,10 @@
 //! -getProperty:Seen` grades a whole project; we must commit (no diagnostic)
 //! and agree exactly.
 //!
+//! Each generator runs the same spellings through a plain `<Import Project="P"/>`
+//! too, from a project in the SDK's directory: MSBuild normalises that path
+//! the same way, and the walk opens what it names.
+//!
 //! Runs under `nix develop` like the sibling `dotnet msbuild` differentials.
 
 use std::collections::HashMap;
@@ -213,23 +217,37 @@ fn msbuild_seen(proj: &Path, env: &HashMap<String, String>) -> Result<String, St
     }
 }
 
-/// Write a project importing each of `imports` from `MySdk`, and evaluate it
-/// both ways.
+/// How a generated project imports a spelling.
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    /// `<Import Sdk="MySdk" Project="…"/>`, from `<root>/proj/p.proj`.
+    Sdk,
+    /// `<Import Project="…"/>`, from a project in the SDK's `Sdk/`
+    /// directory, so that a relative spelling names the same file.
+    Plain,
+}
+
+const KINDS: [Kind; 2] = [Kind::Sdk, Kind::Plain];
+
+/// Write a project importing each of `imports` as `kind` says, and evaluate
+/// it both ways.
 fn evaluate_both(
     layout: &Layout,
+    kind: Kind,
     imports: &[String],
 ) -> (
     String,
     borzoi_msbuild::ParsedProject,
     Result<String, String>,
 ) {
-    evaluate_both_after(layout, "", imports)
+    evaluate_both_after(layout, kind, "", imports)
 }
 
 /// [`evaluate_both`], with `prelude` (property groups the imports read)
 /// written before the imports.
 fn evaluate_both_after(
     layout: &Layout,
+    kind: Kind,
     prelude: &str,
     imports: &[String],
 ) -> (
@@ -239,10 +257,16 @@ fn evaluate_both_after(
 ) {
     let body: String = imports
         .iter()
-        .map(|p| format!("  <Import Sdk=\"MySdk\" Project=\"{p}\" />\n"))
+        .map(|p| match kind {
+            Kind::Sdk => format!("  <Import Sdk=\"MySdk\" Project=\"{p}\" />\n"),
+            Kind::Plain => format!("  <Import Project=\"{p}\" />\n"),
+        })
         .collect();
     let xml = format!("<Project>\n{prelude}{body}</Project>\n");
-    let proj_dir = layout.root.join("proj");
+    let proj_dir = match kind {
+        Kind::Sdk => layout.root.join("proj"),
+        Kind::Plain => layout.sdk_root(),
+    };
     std::fs::create_dir_all(&proj_dir).expect("mkdir proj");
     let proj = proj_dir.join("p.proj");
     std::fs::write(&proj, &xml).expect("write project");
@@ -302,7 +326,7 @@ fn assert_certain_implies_exact(
     }
 }
 
-fn check_seed(seed: u64) {
+fn check_seed(seed: u64, kind: Kind) {
     let layout = Layout::new();
     let mut rng = SplitMix64(seed);
     let imports: Vec<String> = (0..IMPORTS_PER_PROJECT)
@@ -311,8 +335,8 @@ fn check_seed(seed: u64) {
             respell(&mut rng, &layout, components, false)
         })
         .collect();
-    let (xml, parsed, theirs) = evaluate_both(&layout, &imports);
-    let label = format!("seed {seed}");
+    let (xml, parsed, theirs) = evaluate_both(&layout, kind, &imports);
+    let label = format!("{kind:?} seed {seed}");
     assert!(
         theirs.is_ok(),
         "{label}: every spelling names a file, yet MSBuild failed:\n{xml}\n{theirs:?}"
@@ -322,8 +346,10 @@ fn check_seed(seed: u64) {
 
 #[test]
 fn sdk_import_project_paths_resolve_as_msbuild_does() {
-    for seed in 0..4 {
-        check_seed(seed);
+    for kind in KINDS {
+        for seed in 0..4 {
+            check_seed(seed, kind);
+        }
     }
 }
 
@@ -331,8 +357,10 @@ fn sdk_import_project_paths_resolve_as_msbuild_does() {
 #[ignore = "soak: fresh seed, BORZOI_MSBUILD_SOAK_SEED / _CASES"]
 fn sdk_import_project_paths_soak() {
     let (seed, cases) = common::soak_parameters("sdk_import_project_paths", 20);
-    for case in 0..cases as u64 {
-        check_seed(seed.wrapping_add(case));
+    for kind in KINDS {
+        for case in 0..cases as u64 {
+            check_seed(seed.wrapping_add(case), kind);
+        }
     }
 }
 
@@ -362,14 +390,14 @@ fn respell_with_tail(rng: &mut SplitMix64, layout: &Layout) -> (String, bool) {
 
 /// One import per project: an import MSBuild fails fails the whole
 /// evaluation, so the verdict is per spelling.
-fn check_tail_cases(seed: u64, cases: usize) -> (usize, usize) {
+fn check_tail_cases(seed: u64, cases: usize, kind: Kind) -> (usize, usize) {
     let layout = Layout::new();
     let mut rng = SplitMix64(seed);
     let (mut imported, mut failed) = (0, 0);
     for case in 0..cases {
         let (import, in_domain) = respell_with_tail(&mut rng, &layout);
-        let (xml, parsed, theirs) = evaluate_both(&layout, std::slice::from_ref(&import));
-        let label = format!("seed {seed} case {case}");
+        let (xml, parsed, theirs) = evaluate_both(&layout, kind, std::slice::from_ref(&import));
+        let label = format!("{kind:?} seed {seed} case {case}");
         if assert_certain_implies_exact(&label, &xml, &parsed, theirs, in_domain) {
             imported += 1;
         } else {
@@ -381,12 +409,14 @@ fn check_tail_cases(seed: u64, cases: usize) -> (usize, usize) {
 
 #[test]
 fn sdk_import_project_path_tails_resolve_as_msbuild_does() {
-    let (imported, failed) = check_tail_cases(0, 16);
-    // Both verdicts must occur, or the generator stopped reaching one side.
-    assert!(
-        imported > 0 && failed > 0,
-        "imported {imported}, failed {failed}"
-    );
+    for kind in KINDS {
+        let (imported, failed) = check_tail_cases(0, 16, kind);
+        // Both verdicts must occur, or the generator stopped reaching one side.
+        assert!(
+            imported > 0 && failed > 0,
+            "{kind:?}: imported {imported}, failed {failed}"
+        );
+    }
 }
 
 /// A respelling (with or without a tail) split at a random point, one side
@@ -394,7 +424,7 @@ fn sdk_import_project_path_tails_resolve_as_msbuild_does() {
 /// directory to the attribute as written, before expanding it, so a rooted
 /// spelling that starts inside `$(P)` is appended to the SDK directory, while
 /// one written rooted names its own file.
-fn check_property_cases(seed: u64, cases: usize) -> (usize, usize) {
+fn check_property_cases(seed: u64, cases: usize, kind: Kind) -> (usize, usize) {
     let layout = Layout::new();
     let mut rng = SplitMix64(seed);
     let (mut imported, mut failed) = (0, 0);
@@ -410,10 +440,16 @@ fn check_property_cases(seed: u64, cases: usize) -> (usize, usize) {
         } else {
             (rest, format!("{first}$(P)"))
         };
+        // A `\` a property supplies to a plain import goes through MSBuild's
+        // Unix path adjustment, which the walk does not model (#903).
+        let value = match kind {
+            Kind::Sdk => value.to_owned(),
+            Kind::Plain => value.replace('\\', "/"),
+        };
         let prelude = format!("  <PropertyGroup><P>{value}</P></PropertyGroup>\n");
         let (xml, parsed, theirs) =
-            evaluate_both_after(&layout, &prelude, std::slice::from_ref(&attribute));
-        let label = format!("seed {seed} case {case}");
+            evaluate_both_after(&layout, kind, &prelude, std::slice::from_ref(&attribute));
+        let label = format!("{kind:?} seed {seed} case {case}");
         if assert_certain_implies_exact(&label, &xml, &parsed, theirs, in_domain) {
             imported += 1;
         } else {
@@ -425,11 +461,13 @@ fn check_property_cases(seed: u64, cases: usize) -> (usize, usize) {
 
 #[test]
 fn sdk_import_project_paths_through_a_property_resolve_as_msbuild_does() {
-    let (imported, failed) = check_property_cases(0, 16);
-    assert!(
-        imported > 0 && failed > 0,
-        "imported {imported}, failed {failed}"
-    );
+    for kind in KINDS {
+        let (imported, failed) = check_property_cases(0, 16, kind);
+        assert!(
+            imported > 0 && failed > 0,
+            "{kind:?}: imported {imported}, failed {failed}"
+        );
+    }
 }
 
 /// The shape that found the raw-text join: a property holding an absolute
@@ -441,12 +479,13 @@ fn an_absolute_path_through_a_property_is_appended_to_the_sdk_directory() {
     let absolute = layout.sdk_root().join("E.props");
     let absolute = absolute.to_string_lossy();
     let prelude = format!("  <PropertyGroup><P>{absolute}</P></PropertyGroup>\n");
-    let (xml, parsed, theirs) = evaluate_both_after(&layout, &prelude, &["$(P)".to_string()]);
+    let (xml, parsed, theirs) =
+        evaluate_both_after(&layout, Kind::Sdk, &prelude, &["$(P)".to_string()]);
     assert!(
         !assert_certain_implies_exact("via $(P)", &xml, &parsed, theirs, true),
         "MSBuild imported {absolute} through $(P)"
     );
-    let (xml, parsed, theirs) = evaluate_both(&layout, &[absolute.into_owned()]);
+    let (xml, parsed, theirs) = evaluate_both(&layout, Kind::Sdk, &[absolute.into_owned()]);
     assert!(assert_certain_implies_exact(
         "written", &xml, &parsed, theirs, true
     ));
@@ -456,8 +495,10 @@ fn an_absolute_path_through_a_property_is_appended_to_the_sdk_directory() {
 #[ignore = "soak: fresh seed, BORZOI_MSBUILD_SOAK_SEED / _CASES"]
 fn sdk_import_project_paths_through_a_property_soak() {
     let (seed, cases) = common::soak_parameters("sdk_import_project_paths_property", 40);
-    let (imported, failed) = check_property_cases(seed, cases);
-    println!("imported {imported}, failed {failed}");
+    for kind in KINDS {
+        let (imported, failed) = check_property_cases(seed, cases, kind);
+        println!("{kind:?}: imported {imported}, failed {failed}");
+    }
 }
 
 /// Spellings outside the modelled domain whose `..` erases a segment MSBuild
@@ -481,9 +522,17 @@ fn sdk_import_project_paths_outside_the_domain_never_commit_wrongly() {
         "sub%5c../E.props",
         "sub%2f../E.props",
     ] {
-        let import = import.to_string();
-        let (xml, parsed, theirs) = evaluate_both(&layout, std::slice::from_ref(&import));
-        assert_certain_implies_exact(&import, &xml, &parsed, theirs, false);
+        for kind in KINDS {
+            let import = import.to_string();
+            let (xml, parsed, theirs) = evaluate_both(&layout, kind, std::slice::from_ref(&import));
+            assert_certain_implies_exact(
+                &format!("{kind:?} {import}"),
+                &xml,
+                &parsed,
+                theirs,
+                false,
+            );
+        }
     }
 }
 
@@ -495,7 +544,8 @@ fn sdk_roots_msbuild_would_reparse_never_commit_wrongly() {
         let layout = Layout::under(parent);
         for import in ["E.props", "../targets/T.props", "../../../../E.props"] {
             let import = import.to_string();
-            let (xml, parsed, theirs) = evaluate_both(&layout, std::slice::from_ref(&import));
+            let (xml, parsed, theirs) =
+                evaluate_both(&layout, Kind::Sdk, std::slice::from_ref(&import));
             assert_certain_implies_exact(
                 &format!("{parent:?} {import}"),
                 &xml,
@@ -511,8 +561,10 @@ fn sdk_roots_msbuild_would_reparse_never_commit_wrongly() {
 #[ignore = "soak: fresh seed, BORZOI_MSBUILD_SOAK_SEED / _CASES"]
 fn sdk_import_project_path_tails_soak() {
     let (seed, cases) = common::soak_parameters("sdk_import_project_path_tails", 40);
-    let (imported, failed) = check_tail_cases(seed, cases);
-    println!("imported {imported}, failed {failed}");
+    for kind in KINDS {
+        let (imported, failed) = check_tail_cases(seed, cases, kind);
+        println!("{kind:?}: imported {imported}, failed {failed}");
+    }
 }
 
 /// The real Web SDK: `Sdk.Server.targets` imports
