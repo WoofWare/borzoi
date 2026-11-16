@@ -4277,7 +4277,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/Parsing01.fs	kept=2 dr
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/Parsing02.fs	kept=4 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/UseStatementCallDisposeOnNullValue01.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/UserCodeSnippet01.fs	kept=1 dropped=1
-tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/productioncoverage01.fs	parse errors
+tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/productioncoverage01.fs	kept=20 dropped=7
 tests/FSharp.Compiler.LanguageServer.Tests/Protocol.fs	kept=11 dropped=6
 tests/FSharp.Compiler.Private.Scripting.UnitTests/CompletionTests.fs	kept=4 dropped=1
 tests/FSharp.Compiler.Private.Scripting.UnitTests/DependencyManagerInteractiveTests.fs	kept=14 dropped=3
@@ -4812,7 +4812,7 @@ tests/fsharp/core/printf/test.fsx	kept=279 dropped=30
 tests/fsharp/core/printing/preludePrintSize1000.fsx	kept=1 dropped=0
 tests/fsharp/core/printing/preludePrintSize200.fsx	kept=1 dropped=0
 tests/fsharp/core/printing/preludeShowDeclarationValuesFalse.fsx	kept=1 dropped=0
-tests/fsharp/core/printing/test.fsx	parse errors
+tests/fsharp/core/printing/test.fsx	kept=400 dropped=151
 tests/fsharp/core/printing/testLoadFile.fsx	kept=8 dropped=2
 tests/fsharp/core/printing/testLoadFile2.fsx	kept=8 dropped=2
 tests/fsharp/core/queriesCustomQueryOps/negativetest.fsx	kept=1 dropped=8
