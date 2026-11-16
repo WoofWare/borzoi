@@ -122,7 +122,7 @@ use super::properties::trust::{
 use super::rejection;
 use super::{
     CurrentFile, State, StructuralCompileItemUncertainty, canonicalise_or_normalise,
-    condition_exists, condition_has_exists_for_property, import_dedup_key,
+    condition_exists, condition_has_exists_for_property, import_dedup_key, import_open_path,
     simple_property_reference, walk_external_file,
 };
 
@@ -766,9 +766,11 @@ fn withdraw_facets(project: &str, root: UnpinnedRoot, references: bool, state: &
 /// Whether the file at `path` writes nothing: a `<Project>` with no attribute
 /// but a namespace and no element child. Anything else may write a property,
 /// declare an item, import a file, define a target, or decide one; a file that
-/// does not read or parse is no file to call empty.
+/// does not read or parse is no file to call empty. The file is the one an
+/// import of `path` opens ([`import_open_path`]), not the one the file system
+/// reaches by resolving a link before a `..`.
 fn contributes_nothing(path: &Path, state: &State<'_>) -> bool {
-    let canon = canonicalise_or_normalise(state.observer, path);
+    let canon = canonicalise_or_normalise(state.observer, &import_open_path(path, true));
     let Ok(Ok(parsed)) = observed::read_document(state.observer, &canon) else {
         return false;
     };
@@ -779,7 +781,11 @@ fn contributes_nothing(path: &Path, state: &State<'_>) -> bool {
 }
 
 /// The file the path property names, resolved against `dir` as an import
-/// there resolves it.
+/// there resolves it and spelled as the import opens it
+/// ([`import_open_path`]): `..` collapsed as text, so that `link/../f` is the
+/// `f` beside `link`. Every question the point asks of its file (whether it
+/// exists, whether it is the default, what it contributes, which import it
+/// duplicates) is asked of that one spelling, the walk's own.
 fn point_path(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf> {
     // A point of use: trimmed in the domain (an escaped `%20` is filename
     // data, not padding). Its trust is the caller's to judge.
@@ -792,11 +798,12 @@ fn point_path(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf>
     }
     let normalised = trimmed.replace('\\', "/");
     let path = Path::new(&normalised);
-    Some(if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
         dir.join(path)
-    })
+    };
+    Some(import_open_path(&joined, true))
 }
 
 /// Whether the path property names at most one file: a value that is no list

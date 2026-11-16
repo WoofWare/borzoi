@@ -291,6 +291,51 @@ fn a_later_import_of_a_doubted_file_is_doubted_too() {
     );
 }
 
+/// The point's path goes through a directory link and `..`, which MSBuild
+/// collapses as text: the file beside the link, not the empty decoy beside
+/// the link's target. The doubted walk is of the file MSBuild opens, so the
+/// later import of it, which MSBuild skips as a duplicate, is doubted too
+/// (#924).
+#[cfg(unix)]
+#[test]
+fn a_doubted_point_through_a_link_and_dot_dot_doubts_the_file_msbuild_opens() {
+    let tmp = tempfile::tempdir().unwrap();
+    let block = COMMON_TARGETS_BLOCK.replace(
+        "Condition=\"'$(ImportDirectoryBuildTargets)' == 'true' and exists('$(DirectoryBuildTargetsPath)')\"",
+        &format!("Condition=\"{UNDECIDABLE} and exists('$(DirectoryBuildTargetsPath)')\""),
+    );
+    assert_ne!(block, COMMON_TARGETS_BLOCK);
+    let resolver = custom_sdk(
+        tmp.path(),
+        "<Project />\n",
+        &format!(
+            "<Project>\n  <PropertyGroup>\n    <DirectoryBuildTargetsPath>\
+             $(MSBuildProjectDirectory)/far/../Directory.Build.targets</DirectoryBuildTargetsPath>\n  \
+             </PropertyGroup>\n{block}  \
+             <PropertyGroup><LangVersion>8.0</LangVersion></PropertyGroup>\n  \
+             <Import Project=\"$(MSBuildProjectDirectory)/Directory.Build.targets\" />\n</Project>\n"
+        ),
+        &[],
+    );
+    write_at(
+        tmp.path(),
+        "Directory.Build.targets",
+        "<Project><PropertyGroup><LangVersion>preview</LangVersion></PropertyGroup></Project>",
+    );
+    // `far/..` is the project's directory to MSBuild and `decoy` to the file
+    // system, where the file is an empty project.
+    write_at(tmp.path(), "decoy/Directory.Build.targets", "<Project />\n");
+    write_at(tmp.path(), "decoy/x/keep", "");
+    std::os::unix::fs::symlink("decoy/x", tmp.path().join("far")).unwrap();
+    let project = write_at(tmp.path(), "p.fsproj", "<Project Sdk=\"Custom\" />\n");
+    let parsed = parse_file_with_sdk_resolution(&project, resolver);
+    assert!(
+        untrusted(&parsed, "LangVersion"),
+        "MSBuild imports the file at the point and ends with `8.0`; the walk published {:?}",
+        property(&parsed, "LangVersion")
+    );
+}
+
 /// The same through a child: the doubted file's own import is one MSBuild may
 /// not have made either, so walking the file again walks the child again.
 #[test]
