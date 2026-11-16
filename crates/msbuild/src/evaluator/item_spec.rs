@@ -55,6 +55,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::observed::{self, EntryKind, Observer};
+use crate::properties::path_fixup::{self, UnixPathProbe};
 
 /// Whether `identity` is inside the domain both functions share (see the
 /// module docs).
@@ -156,33 +157,16 @@ pub(super) fn include_spelling<'a>(raw: &str, expanded: &'a str) -> Option<Cow<'
     if raw.contains("$(") {
         return None;
     }
-    if ["$(", "@(", "\\\\"].iter().any(|p| expanded.starts_with(p)) {
+    // `None`: a spec MSBuild never touches (`$(`, `@(`, `\\`).
+    let Some(collapsed) = path_fixup::worlds(expanded) else {
         return unchanged;
-    }
-    let mut collapsed = String::with_capacity(expanded.len());
-    for c in expanded.chars() {
-        let slash = matches!(c, '/' | '\\');
-        if !(slash && collapsed.ends_with('/')) {
-            collapsed.push(if slash { '/' } else { c });
-        }
-    }
-    let unquoted = ['\'', '"']
-        .iter()
-        .find_map(|q| {
-            collapsed
-                .strip_prefix(*q)
-                .and_then(|rest| rest.strip_suffix(*q))
-                .filter(|inner| !inner.is_empty())
-        })
-        .unwrap_or(&collapsed);
-    let first = unquoted.chars().next().map_or(0, char::len_utf8);
-    match unquoted[first..].find('/') {
-        Some(at) => match &unquoted[..first + at] {
-            "." | ".." => Some(Cow::Owned(collapsed)),
-            _ => None,
-        },
-        None if unquoted.starts_with('/') => None,
-        None => unchanged,
+    };
+    match path_fixup::unix_path_probe(&collapsed) {
+        UnixPathProbe::Exists => Some(Cow::Owned(collapsed)),
+        UnixPathProbe::Absent => unchanged,
+        UnixPathProbe::Directory(_)
+        | UnixPathProbe::FileOrDirectory(_)
+        | UnixPathProbe::WorkingDirectory => None,
     }
 }
 

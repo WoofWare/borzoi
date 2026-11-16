@@ -629,6 +629,16 @@ fn may_load_nothing(
     }
     // Its trust is judged just above, name by name.
     let value = expansion.value.ignoring_trust();
+    // A `\` a property supplied that MSBuild's Unix path adjustment may keep
+    // can name a file the walk does not (`adjustment_settles`), and `Exists`
+    // collapses its argument otherwise than the import does, so a gate that
+    // requires the file does not guard this one.
+    let mut rewrites = None;
+    if value.split_list().any(|segment| {
+        !super::adjustment_settles(value.as_escaped(), &segment, &mut rewrites, state.observer)
+    }) {
+        return Some(UnloadableImport::PathUndecided);
+    }
     if requires_own_file {
         let whole = current_file_dir.join(value.unescape().replace('\\', "/"));
         if value.trimmed_unescaped().is_empty()
