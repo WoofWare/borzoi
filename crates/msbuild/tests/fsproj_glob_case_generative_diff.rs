@@ -149,7 +149,7 @@ const WILD: &[&str] = &[
 const NAME: &[&str] = &[
     "*.fs", "*.FS", "A*", "a*.fs", "a.fs", "A.FS", "b.fs", "B.FS", "?.fs", "*", "*.*", "d.fs",
     "D.FS", "in.fs", "IN.FS", "i*.fs", "I*.fs", "k.fs", "K.fs", "**", "up.fs", "UP.FS", "a*.*",
-    "A*.*", "a?b.fs",
+    "A*.*", "a?b.fs", "*.*.*",
 ];
 
 /// Non-ASCII file names, outside the allow-list, drawn now and then.
@@ -438,6 +438,13 @@ fn case_corners() {
             Some("**/a?b.fs"),
         ),
         corner(&["sub/a/b.fs"], "s*/a?b.fs", None),
+        // An exclude based above the include's walk root is matched by its
+        // regular expression alone, so its `?` crosses a separator there.
+        corner(&["sub/a/b.fs"], "sub/**/B.fs", Some("s*/a?b.fs")),
+        corner(&["sub/a/b.fs"], "sub/**/B.fs", Some("S*/A?B/*.fs")),
+        // `*.*.*` reads as `*.*` there, which still needs a dot.
+        corner(&["sub/noext"], "s*/*.*.*", None),
+        corner(&["sub/noext", "sub/x.fs"], "sub/*", Some("s*/*.*.*")),
         // `i` and `I` where no regular expression compares them.
         corner(&["sub/x/bi.fs"], "**/*.fs", Some("**/BI.fs")),
         corner(&["sub/x/bi.fs"], "sub/x/*.fs", Some("sub/x/BI.fs")),
