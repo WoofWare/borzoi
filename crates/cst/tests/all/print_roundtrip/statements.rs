@@ -13,8 +13,8 @@
 
 use borzoi_print::names::{Ident, LongIdent, ValueName};
 use borzoi_print::tree::{
-    BangKind, Binding, BindingHead, Comp, CompClause, Expr, ForDirection, ForSource, ImplFile,
-    LetBindings, ModuleDecl, Pat, Range, Stmt,
+    BangBinding, BangKind, Binding, BindingHead, Comp, CompClause, CompItem, Expr, ForDirection,
+    ForSource, ImplFile, LetBindings, ModuleDecl, Pat, Range, Stmt,
 };
 use borzoi_print::vec::Vec1;
 use borzoi_print::version::{Gate, Preview, V4_6, Version};
@@ -35,7 +35,15 @@ fn var(s: &str) -> Pat {
 }
 
 fn last<V: Version>(s: Stmt<V>) -> Comp<V> {
-    Comp::Last(s)
+    Comp::stmt(s)
+}
+
+/// `item`, then `last`.
+fn then<V: Version>(item: CompItem<V>, last: Stmt<V>) -> Comp<V> {
+    Comp {
+        init: vec![item],
+        last,
+    }
 }
 
 fn clauses<V: Version>(body: &Comp<V>) -> Vec1<CompClause<V>> {
@@ -133,36 +141,34 @@ fn simple<V: Version>() -> Vec<Stmt<V>> {
 /// Bodies worth nesting: each statement shape alone and followed by another,
 /// and each kind of binding over a statement.
 fn bodies<V: Version>() -> Vec<Comp<V>> {
-    let inner = last(Stmt::Return(name("r")));
+    let r = || Stmt::Return(name("r"));
     let mut shapes = simple::<V>();
-    shapes.extend(statements(&inner));
+    shapes.extend(statements(&last(r())));
     let mut out = Vec::new();
     for s in shapes {
-        out.push(Comp::Then(s.clone(), Box::new(inner.clone())));
+        out.push(then(CompItem::Stmt(s.clone()), r()));
         out.push(last(s));
     }
-    let x = || {
-        Box::new(Binding {
-            attributes: Vec::new(),
-            is_inline: false,
-            head: BindingHead::Name {
-                is_mutable: false,
-                access: None,
-                name: ValueName::Ident(ident("x")),
-            },
-            body: name("v"),
-        })
+    let x = || Binding {
+        attributes: Vec::new(),
+        is_inline: false,
+        head: BindingHead::Name {
+            is_mutable: false,
+            access: None,
+            name: ValueName::Ident(ident("x")),
+        },
+        body: name("v"),
     };
-    out.push(Comp::Let(LetBindings::NonRec(x()), Box::new(inner.clone())));
-    out.push(Comp::Use(x(), Box::new(inner.clone())));
+    out.push(then(CompItem::Let(LetBindings::NonRec(Box::new(x()))), r()));
+    out.push(then(CompItem::Use(x()), r()));
     for kind in [BangKind::Let, BangKind::Use] {
-        out.push(Comp::Bang {
+        let bang = BangBinding {
             kind,
             pat: var("x"),
             value: name("v"),
             ands: Vec::new(),
-            rest: Box::new(inner.clone()),
-        });
+        };
+        out.push(then(CompItem::Bang(bang), r()));
     }
     out
 }
@@ -203,8 +209,8 @@ fn every_statement_nests<V: Version>() {
     let mut files = Vec::new();
     for body in bodies::<V>() {
         for outer in statements(&body) {
-            let after = last(Stmt::Return(name("z")));
-            files.extend(self::files(Comp::Then(outer.clone(), Box::new(after))));
+            let after = Stmt::Return(name("z"));
+            files.extend(self::files(then(CompItem::Stmt(outer.clone()), after)));
             files.extend(self::files(last(outer)));
         }
     }

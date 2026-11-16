@@ -420,46 +420,65 @@ pub enum Expr<V: Version> {
     },
 }
 
-/// A computation expression's body: statements one after another, each
-/// binding scoping over the statements after it, as F# nests them.
+/// A computation expression's body: statements and bindings one after
+/// another, ending in a statement. Each binding scopes over everything after
+/// it, which is how F# nests a block's bindings; the tree keeps the block
+/// flat, so a long body (a list literal's elements) is a vector, not a chain.
 ///
 /// Its statements are not expressions. F#'s checker translates a body by its
 /// shape, and refuses a control construct in parentheses ("this construct is
 /// ambiguous"), so the printer writes statements bare, one per line, and keeps
 /// only their operands in parentheses.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Comp<V: Version> {
-    /// The last statement.
-    Last(Stmt<V>),
-    /// A statement, then the rest.
-    Then(Stmt<V>, Box<Comp<V>>),
-    /// `let …`, then the rest.
-    Let(LetBindings<V>, Box<Comp<V>>),
-    /// `use p = e`, then the rest.
-    Use(Box<Binding<V>>, Box<Comp<V>>),
-    /// `let! p = e` or `use! p = e`, any `and! q = f`, then the rest.
-    Bang {
-        kind: BangKind,
-        pat: Pat,
-        value: Expr<V>,
-        ands: Vec<AndBang<V>>,
-        rest: Box<Comp<V>>,
-    },
+pub struct Comp<V: Version> {
+    /// What comes before the last statement.
+    pub init: Vec<CompItem<V>>,
+    pub last: Stmt<V>,
 }
 
 impl<V: Version> Comp<V> {
+    /// A body of one statement.
+    pub fn stmt(last: Stmt<V>) -> Self {
+        Comp {
+            init: Vec::new(),
+            last,
+        }
+    }
+
     /// `a; b; …`: each item an expression statement, as a list literal's
     /// elements are.
     pub fn exprs(items: crate::vec::Vec1<Expr<V>>) -> Self {
         let mut items = items.into_vec();
-        let last = items.pop().expect("non-empty");
-        items
-            .into_iter()
-            .rev()
-            .fold(Comp::Last(Stmt::Expr(last)), |rest, e| {
-                Comp::Then(Stmt::Expr(e), Box::new(rest))
-            })
+        let last = Stmt::Expr(items.pop().expect("non-empty"));
+        Comp {
+            init: items
+                .into_iter()
+                .map(|e| CompItem::Stmt(Stmt::Expr(e)))
+                .collect(),
+            last,
+        }
     }
+}
+
+/// A statement or binding of a [`Comp`] before its last statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompItem<V: Version> {
+    Stmt(Stmt<V>),
+    /// `let …`
+    Let(LetBindings<V>),
+    /// `use p = e`
+    Use(Binding<V>),
+    /// `let! p = e` or `use! p = e`, and any `and! q = f`.
+    Bang(BangBinding<V>),
+}
+
+/// `let! p = e` or `use! p = e`, and any `and! q = f`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BangBinding<V: Version> {
+    pub kind: BangKind,
+    pub pat: Pat,
+    pub value: Expr<V>,
+    pub ands: Vec<AndBang<V>>,
 }
 
 /// Whether a bang binding is `let!` or `use!`.

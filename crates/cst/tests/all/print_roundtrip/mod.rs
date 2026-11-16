@@ -183,6 +183,7 @@ mod generated {
     use proptest::prelude::*;
 
     use super::{generate, round_trips_at};
+    use crate::common::fcs_record::on_deep_stack;
 
     /// `default` cases per run, or `BORZOI_PRINT_CASES`. The leaves filter
     /// candidate names through the names' constructors, and a run draws
@@ -201,9 +202,11 @@ mod generated {
 
     /// A tree at `V`, checked at `V` and at the newest version, `preview`:
     /// every version from `V` on must read it the same way, and each gate is a
-    /// threshold, so the two ends stand for the range.
+    /// threshold, so the two ends stand for the range. On a deep stack, as a
+    /// generated tree's record can be deeper than a test thread reads.
     fn check<V: Version>(file: &borzoi_print::tree::ImplFile<V>) -> Result<(), TestCaseError> {
-        round_trips_at(file, &[V::LANGUAGE, LanguageVersion::MAX]).map_err(TestCaseError::fail)
+        on_deep_stack(|| round_trips_at(file, &[V::LANGUAGE, LanguageVersion::MAX]))
+            .map_err(TestCaseError::fail)
     }
 
     /// One module per version, each with the normal run and its deep twin.

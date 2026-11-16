@@ -11,10 +11,11 @@
 
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
-    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, BangKind, Binding, BindingHead,
-    Comp, CompClause, Const, Expr, Float32, Float64, ForDirection, ForSource, ImplFile,
-    LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace, NamespaceName, NestedModule, Pat,
-    Range, RecordField, Stmt, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
+    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, BangBinding, BangKind, Binding,
+    BindingHead, Comp, CompClause, CompItem, Const, Expr, Float32, Float64, ForDirection,
+    ForSource, ImplFile, LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace,
+    NamespaceName, NestedModule, Pat, Range, RecordField, Stmt, Type, TypeDefn, TypeRepr,
+    UnionCase, UnionField,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -409,7 +410,7 @@ fn comp<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Comp<V>> {
     .boxed();
     simple
         .clone()
-        .prop_map(Comp::Last)
+        .prop_map(Comp::stmt)
         .prop_recursive(3, 12, 3, move |inner| {
             let e = expr.clone();
             let c = inner.clone().prop_map(Box::new);
@@ -497,27 +498,26 @@ fn comp<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Comp<V>> {
                 .boxed(),
                 None => Just(Vec::new()).boxed(),
             };
-            prop_oneof![
-                3 => stmt.clone().prop_map(Comp::Last),
-                3 => (stmt, c.clone()).prop_map(|(s, rest)| Comp::Then(s, rest)),
-                1 => (let_bindings(e.clone()), c.clone()).prop_map(|(b, rest)| Comp::Let(b, rest)),
-                1 => (binding(e.clone()), c.clone())
-                    .prop_map(|(b, rest)| Comp::Use(Box::new(b), rest)),
+            let item = prop_oneof![
+                4 => stmt.clone().prop_map(CompItem::Stmt),
+                1 => let_bindings(e.clone()).prop_map(CompItem::Let),
+                1 => binding(e.clone()).prop_map(CompItem::Use),
                 2 => (
                     prop_oneof![Just(BangKind::Let), Just(BangKind::Use)],
                     pat(),
                     e,
                     ands,
-                    c,
                 )
-                    .prop_map(|(kind, pat, value, ands, rest)| Comp::Bang {
-                        kind,
-                        pat,
-                        value,
-                        ands,
-                        rest,
+                    .prop_map(|(kind, pat, value, ands)| {
+                        CompItem::Bang(BangBinding {
+                            kind,
+                            pat,
+                            value,
+                            ands,
+                        })
                     }),
-            ]
+            ];
+            (prop::collection::vec(item, 0..=3), stmt).prop_map(|(init, last)| Comp { init, last })
         })
         .boxed()
 }

@@ -19,10 +19,11 @@
 
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
-    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, BangKind, Binding, BindingHead,
-    Comp, CompClause, Const, Expr, Float32, Float64, ForDirection, ForSource, ImplFile,
-    LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace, NamespaceName, NestedModule, Pat,
-    Range, RecordField, Stmt, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
+    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, BangBinding, BangKind, Binding,
+    BindingHead, Comp, CompClause, CompItem, Const, Expr, Float32, Float64, ForDirection,
+    ForSource, ImplFile, LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace,
+    NamespaceName, NestedModule, Pat, Range, RecordField, Stmt, Type, TypeDefn, TypeRepr,
+    UnionCase, UnionField,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -740,79 +741,90 @@ fn args<V: Version>(elements: &[NormalisedExpr]) -> L<Args<V>> {
 }
 
 /// A computation expression's body. FCS nests a binding over the statements
-/// after it, and flattens the rest of a sequence; a binding before the end of
-/// a sequence scopes over less than the rest of the block, which the tree
+/// after it, and flattens the rest of a sequence; the tree keeps the block
+/// flat, each binding scoping over what follows it. A binding before the end
+/// of a sequence scopes over less than the rest of the block, which the tree
 /// cannot say.
 fn comp<V: Version>(e: &NormalisedExpr) -> L<Comp<V>> {
     use NormalisedExpr as N;
+    let mut init = Vec::new();
+    let mut e = e;
+    loop {
+        match e {
+            N::Sequential(items) => {
+                let (last, before) = items.split_last().ok_or(Decline("empty sequential"))?;
+                for item in before {
+                    if let N::LetOrUse { .. } = item {
+                        return decline("comp: binding scoped short of the block");
+                    }
+                    init.push(CompItem::Stmt(stmt(item)?));
+                }
+                e = last;
+            }
+            N::LetOrUse {
+                is_rec,
+                bindings,
+                body,
+            } => {
+                init.push(comp_binding(*is_rec, bindings)?);
+                e = body;
+            }
+            other => {
+                return Ok(Comp {
+                    init,
+                    last: stmt(other)?,
+                });
+            }
+        }
+    }
+}
+
+/// A computation expression's binding group.
+fn comp_binding<V: Version>(is_rec: bool, bindings: &[NormalisedBinding]) -> L<CompItem<V>> {
     use NormalisedLeadingKeyword as K;
-    Ok(match e {
-        N::Sequential(items) => {
-            let (last, init) = items.split_last().ok_or(Decline("empty sequential"))?;
-            let mut acc = comp(last)?;
-            for item in init.iter().rev() {
-                if let N::LetOrUse { .. } = item {
-                    return decline("comp: binding scoped short of the block");
-                }
-                acc = Comp::Then(stmt(item)?, Box::new(acc));
-            }
-            acc
-        }
-        N::LetOrUse {
-            is_rec,
-            bindings,
-            body,
-        } => {
-            let rest = Box::new(comp(body)?);
-            let [first, others @ ..] = bindings.as_slice() else {
-                return decline("comp: binding group without bindings");
+    let [first, others @ ..] = bindings else {
+        return decline("comp: binding group without bindings");
+    };
+    Ok(match first.leading_keyword {
+        K::Let | K::LetRec => CompItem::Let(let_bindings(is_rec, bindings)?),
+        K::Use if !is_rec && others.is_empty() => CompItem::Use(binding_body(first)?),
+        K::LetBang | K::UseBang => {
+            let simple = |b: &NormalisedBinding| {
+                b.attributes.is_empty()
+                    && !b.is_mutable
+                    && !b.is_inline
+                    && b.access.is_none()
+                    && b.self_id.is_none()
             };
-            match first.leading_keyword {
-                K::Let | K::LetRec => Comp::Let(let_bindings(*is_rec, bindings)?, rest),
-                K::Use if !*is_rec && others.is_empty() => {
-                    Comp::Use(Box::new(binding_body(first)?), rest)
-                }
-                K::LetBang | K::UseBang => {
-                    let simple = |b: &NormalisedBinding| {
-                        b.attributes.is_empty()
-                            && !b.is_mutable
-                            && !b.is_inline
-                            && b.access.is_none()
-                            && b.self_id.is_none()
-                    };
-                    if *is_rec || !bindings.iter().all(simple) {
-                        return decline("comp: bang binding with modifiers");
-                    }
-                    let ands = others
-                        .iter()
-                        .map(|b| {
-                            if b.leading_keyword != K::AndBang {
-                                return decline("comp: bang group keyword");
-                            }
-                            Ok(AndBang {
-                                gate: V::AndBang::WITNESS
-                                    .ok_or(Decline("comp: and! before its version"))?,
-                                pat: pat(&b.pat)?,
-                                value: expr(&b.expr)?,
-                            })
-                        })
-                        .collect::<L<Vec<_>>>()?;
-                    Comp::Bang {
-                        kind: if first.leading_keyword == K::LetBang {
-                            BangKind::Let
-                        } else {
-                            BangKind::Use
-                        },
-                        pat: pat(&first.pat)?,
-                        value: expr(&first.expr)?,
-                        ands,
-                        rest,
-                    }
-                }
-                _ => return decline("comp: binding keyword"),
+            if is_rec || !bindings.iter().all(simple) {
+                return decline("comp: bang binding with modifiers");
             }
+            let ands = others
+                .iter()
+                .map(|b| {
+                    if b.leading_keyword != K::AndBang {
+                        return decline("comp: bang group keyword");
+                    }
+                    Ok(AndBang {
+                        gate: V::AndBang::WITNESS
+                            .ok_or(Decline("comp: and! before its version"))?,
+                        pat: pat(&b.pat)?,
+                        value: expr(&b.expr)?,
+                    })
+                })
+                .collect::<L<Vec<_>>>()?;
+            CompItem::Bang(BangBinding {
+                kind: if first.leading_keyword == K::LetBang {
+                    BangKind::Let
+                } else {
+                    BangKind::Use
+                },
+                pat: pat(&first.pat)?,
+                value: expr(&first.expr)?,
+                ands,
+            })
         }
-        other => Comp::Last(stmt(other)?),
+        _ => return decline("comp: binding keyword"),
     })
 }
 

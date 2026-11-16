@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cf64b085ae62c2f1b426e7372a00e4843db86277f263f2593e5cbfd8c2a91e38 # a record deeper than serde_json's default 128 levels

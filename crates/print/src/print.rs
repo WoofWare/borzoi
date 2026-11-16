@@ -27,7 +27,7 @@
 use crate::names::{Ident, LongIdent, Operator, TyparName, ValueName};
 use crate::tree::{
     Access, Args, Attribute, AttributeArgs, BangKind, Binding, BindingHead, Comp, CompClause,
-    Const, Expr, ForDirection, ForSource, ImplFile, LetBindings, MatchClause, ModuleDecl,
+    CompItem, Const, Expr, ForDirection, ForSource, ImplFile, LetBindings, MatchClause, ModuleDecl,
     NamespaceName, NestedModule, Pat, Range, Stmt, Type, TypeDefn, TypeRepr, UnionCase,
 };
 use crate::version::Version;
@@ -39,7 +39,17 @@ use crate::version::Version;
 /// line, and expressions use the verbose forms (`let … in`, `do … done`); the
 /// module docs of the printer say why each choice is made.
 pub fn print_impl_file<V: Version>(file: &ImplFile<V>) -> String {
-    let mut p = Printer { out: String::new() };
+    print_file(file).out
+}
+
+fn print_file<V: Version>(file: &ImplFile<V>) -> Printer {
+    let mut p = Printer {
+        out: String::new(),
+        counted: 0,
+        column_at_counted: 0,
+        #[cfg(test)]
+        scanned: 0,
+    };
     match file {
         ImplFile::AnonModule(decls) => p.decls(decls, 0),
         ImplFile::NamedModule(m) => {
@@ -70,11 +80,19 @@ pub fn print_impl_file<V: Version>(file: &ImplFile<V>) -> String {
             }
         }
     }
-    p.out
+    p
 }
 
 struct Printer {
     out: String,
+    /// How far into `out` [`Printer::column`] has counted, and the column at
+    /// that point: each character is counted once, so asking the column at
+    /// every statement of a long line stays linear.
+    counted: usize,
+    column_at_counted: usize,
+    /// How many bytes [`Printer::column`] has scanned in all.
+    #[cfg(test)]
+    scanned: usize,
 }
 
 impl Printer {
@@ -151,9 +169,18 @@ impl Printer {
 
     /// The column the next character lands in, in UTF-16 code units, which is
     /// how FCS's offside rule counts.
-    fn column(&self) -> usize {
-        let line_start = self.out.rfind('\n').map_or(0, |i| i + 1);
-        self.out[line_start..].encode_utf16().count()
+    fn column(&mut self) -> usize {
+        let fresh = &self.out[self.counted..];
+        #[cfg(test)]
+        {
+            self.scanned += fresh.len();
+        }
+        self.column_at_counted = match fresh.rfind('\n') {
+            Some(i) => fresh[i + 1..].encode_utf16().count(),
+            None => self.column_at_counted + fresh.encode_utf16().count(),
+        };
+        self.counted = self.out.len();
+        self.column_at_counted
     }
 
     /// A `let` group. Each `and` starts a line in the `let`'s column: on the
@@ -576,61 +603,47 @@ impl Printer {
     /// statements by layout, and by nothing else that keeps them statements.
     fn comp<V: Version>(&mut self, c: &Comp<V>) {
         let column = self.column();
-        let mut c = c;
-        loop {
-            match c {
-                Comp::Last(s) => return self.stmt(s),
-                Comp::Then(s, rest) => {
-                    self.stmt(s);
-                    c = rest;
-                    // Between two expression statements, each parenthesised,
-                    // `;` is unambiguous, so a list literal stays on its line.
-                    if let (
-                        Stmt::Expr(_),
-                        Comp::Then(Stmt::Expr(_), _) | Comp::Last(Stmt::Expr(_)),
-                    ) = (s, &**rest)
-                    {
-                        self.out.push_str("; ");
-                        continue;
-                    }
-                }
-                Comp::Let(bindings, rest) => {
-                    self.let_bindings(bindings);
-                    c = rest;
-                }
-                Comp::Use(b, rest) => {
+        for (i, item) in c.init.iter().enumerate() {
+            match item {
+                CompItem::Stmt(s) => self.stmt(s),
+                CompItem::Let(bindings) => self.let_bindings(bindings),
+                CompItem::Use(b) => {
                     self.out.push_str("use");
                     self.binding(b);
-                    c = rest;
                 }
-                Comp::Bang {
-                    kind,
-                    pat,
-                    value,
-                    ands,
-                    rest,
-                } => {
-                    self.out.push_str(match kind {
+                CompItem::Bang(b) => {
+                    self.out.push_str(match b.kind {
                         BangKind::Let => "let! ",
                         BangKind::Use => "use! ",
                     });
-                    self.pat(pat);
+                    self.pat(&b.pat);
                     self.out.push_str(" = ");
-                    self.expr(value);
+                    self.expr(&b.value);
                     // Like `and` after `let rec`, `and!` starts a line in its
                     // `let!`'s column.
-                    for and in ands {
+                    for and in &b.ands {
                         self.newline_at(column);
                         self.out.push_str("and! ");
                         self.pat(&and.pat);
                         self.out.push_str(" = ");
                         self.expr(&and.value);
                     }
-                    c = rest;
                 }
             }
-            self.newline_at(column);
+            // Between two expression statements, each parenthesised, `;` is
+            // unambiguous, so a list literal stays on its line.
+            let next = match c.init.get(i + 1) {
+                Some(CompItem::Stmt(s)) => Some(s),
+                Some(_) => None,
+                None => Some(&c.last),
+            };
+            if let (CompItem::Stmt(Stmt::Expr(_)), Some(Stmt::Expr(_))) = (item, next) {
+                self.out.push_str("; ");
+            } else {
+                self.newline_at(column);
+            }
         }
+        self.stmt(&c.last);
     }
 
     /// A statement. A construct of several parts puts each later part
@@ -659,9 +672,12 @@ impl Printer {
                 self.comp(then_branch);
                 if let Some(e) = else_branch {
                     self.newline_at(column);
-                    if let Comp::Last(Stmt::IfThenElse { .. })
-                    | Comp::Then(Stmt::IfThenElse { .. }, _) = &**e
-                    {
+                    let first = match e.init.first() {
+                        Some(CompItem::Stmt(s)) => Some(s),
+                        Some(_) => None,
+                        None => Some(&e.last),
+                    };
+                    if let Some(Stmt::IfThenElse { .. }) = first {
                         // F# reads `else if` on one line as `elif`, whose
                         // context is the `else`'s column, so the branch's later
                         // statements, in the `if`'s, would be misread.
@@ -1033,7 +1049,9 @@ mod tests {
 
     type Args = crate::tree::Args<DefaultVersion>;
     type Binding = crate::tree::Binding<DefaultVersion>;
+    type BangBinding = crate::tree::BangBinding<DefaultVersion>;
     type Comp = crate::tree::Comp<DefaultVersion>;
+    type CompItem = crate::tree::CompItem<DefaultVersion>;
     type Stmt = crate::tree::Stmt<DefaultVersion>;
     type Expr = crate::tree::Expr<DefaultVersion>;
     type ImplFile = crate::tree::ImplFile<DefaultVersion>;
@@ -1181,7 +1199,7 @@ mod tests {
     }
 
     fn ret(s: &str) -> Comp {
-        Comp::Last(Stmt::Return(name(s)))
+        Comp::stmt(Stmt::Return(name(s)))
     }
 
     fn computation(body: Comp) -> Expr {
@@ -1193,12 +1211,17 @@ mod tests {
 
     #[test]
     fn a_computation_expressions_statements_are_bare_and_one_per_line() {
-        let body = Comp::Bang {
-            kind: BangKind::Let,
-            pat: Pat::Name(LongIdent::single(id("x"))),
-            value: name("a"),
-            ands: Vec::new(),
-            rest: Box::new(Comp::Then(Stmt::DoBang(name("b")), Box::new(ret("x")))),
+        let body = Comp {
+            init: vec![
+                CompItem::Bang(BangBinding {
+                    kind: BangKind::Let,
+                    pat: Pat::Name(LongIdent::single(id("x"))),
+                    value: name("a"),
+                    ands: Vec::new(),
+                }),
+                CompItem::Stmt(Stmt::DoBang(name("b"))),
+            ],
+            last: Stmt::Return(name("x")),
         };
         assert_eq!(
             let_x(computation(body)),
@@ -1213,10 +1236,13 @@ mod tests {
             then_branch: Box::new(ret("a")),
             else_branch: None,
         };
-        let body = Comp::Last(Stmt::IfThenElse {
+        let body = Comp::stmt(Stmt::IfThenElse {
             cond: name("c"),
-            then_branch: Box::new(Comp::Last(inner_if.clone())),
-            else_branch: Some(Box::new(Comp::Then(inner_if, Box::new(ret("b"))))),
+            then_branch: Box::new(Comp::stmt(inner_if.clone())),
+            else_branch: Some(Box::new(Comp {
+                init: vec![CompItem::Stmt(inner_if)],
+                last: Stmt::Return(name("b")),
+            })),
         });
         // The outer `else` is not the inner `if`'s, and the second branch's
         // `if` is not an `elif`.
@@ -1233,19 +1259,46 @@ mod tests {
             vec![name("b")],
         )))));
         assert_eq!(let_x(literal), "let x = ([(a); (b)])\n");
-        let comprehension = Expr::Array(Some(Box::new(Comp::Last(Stmt::ForEach {
+        let comprehension = Expr::Array(Some(Box::new(Comp::stmt(Stmt::ForEach {
             pat: Pat::Name(LongIdent::single(id("y"))),
             source: ForSource::Expr(name("ys")),
-            body: Box::new(Comp::Then(
-                Stmt::Yield(name("y")),
-                Box::new(Comp::Last(Stmt::Expr(name("z")))),
-            )),
+            body: Box::new(Comp {
+                init: vec![CompItem::Stmt(Stmt::Yield(name("y")))],
+                last: Stmt::Expr(name("z")),
+            }),
         }))));
         assert_eq!(
             let_x(comprehension),
             "let x = ([|for (y) in (ys) do yield (y)\n                              (z) done|])\n"
         );
         assert_eq!(let_x(Expr::Array(None)), "let x = ([||])\n");
+    }
+
+    /// A list literal of `n` integers.
+    fn long_list(n: i32) -> Expr {
+        let items = (1..n).map(|i| Expr::Const(Const::Int32(i))).collect();
+        Expr::List(Some(Box::new(Comp::exprs(Vec1::new(
+            Expr::Const(Const::Int32(0)),
+            items,
+        )))))
+    }
+
+    #[test]
+    fn a_long_list_drops_on_a_small_stack() {
+        let list = long_list(256_000);
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || drop(list))
+            .expect("spawn")
+            .join()
+            .expect("the drop does not overflow");
+    }
+
+    #[test]
+    fn the_column_is_counted_once_per_character() {
+        let file = ImplFile::AnonModule(vec![ModuleDecl::Expr(long_list(20_000))]);
+        let p = super::print_file(&file);
+        assert!(p.scanned <= p.out.len(), "{} of {}", p.scanned, p.out.len());
     }
 
     #[test]

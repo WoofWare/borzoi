@@ -14,8 +14,8 @@ use borzoi_cst::language_version::FcsStage;
 use borzoi_print::names::{Ident, LongIdent, ValueName};
 use borzoi_print::print_impl_file;
 use borzoi_print::tree::{
-    AndBang, BangKind, Binding, BindingHead, Comp, Expr, ImplFile, LetBindings, ModuleDecl, Pat,
-    Stmt,
+    AndBang, BangBinding, BangKind, Binding, BindingHead, Comp, CompItem, Expr, ImplFile,
+    LetBindings, ModuleDecl, Pat, Stmt,
 };
 use borzoi_print::vec::Vec1;
 use borzoi_print::version::{
@@ -24,6 +24,7 @@ use borzoi_print::version::{
 
 use super::{fcs_record_at, round_trips_at};
 use crate::common::fcs_all_diagnostics;
+use crate::common::fcs_record::on_deep_stack;
 
 fn ident(s: &str) -> Ident {
     Ident::new(s).expect("an identifier")
@@ -108,22 +109,24 @@ fn cases() -> Vec<(LanguageFeature, GateCase)> {
             };
             gate_is_exact::<V5_0>(
                 LanguageFeature::AndBang,
-                &let_x(computation(Comp::Bang {
-                    kind: BangKind::Let,
-                    pat: Pat::Name(LongIdent::single(ident("x"))),
-                    value: name("a"),
-                    ands: vec![and],
-                    rest: Box::new(Comp::Last(Stmt::Return(name("x")))),
+                &let_x(computation(Comp {
+                    init: vec![CompItem::Bang(BangBinding {
+                        kind: BangKind::Let,
+                        pat: Pat::Name(LongIdent::single(ident("x"))),
+                        value: name("a"),
+                        ands: vec![and],
+                    })],
+                    last: Stmt::Return(name("x")),
                 })),
             )
         }),
         (LanguageFeature::WhileBang, || {
             gate_is_exact::<V8_0>(
                 LanguageFeature::WhileBang,
-                &let_x(computation(Comp::Last(Stmt::WhileBang {
+                &let_x(computation(Comp::stmt(Stmt::WhileBang {
                     gate: Available,
                     cond: name("c"),
-                    body: Box::new(Comp::Last(Stmt::DoBang(name("a")))),
+                    body: Box::new(Comp::stmt(Stmt::DoBang(name("a")))),
                 }))),
             )
         }),
@@ -155,7 +158,11 @@ fn every_gate_has_a_case() {
 fn every_gate_is_rejected_below_its_version() {
     let failures: Vec<String> = cases()
         .into_iter()
-        .filter_map(|(feature, case)| case().err().map(|e| format!("{feature:?}: {e}")))
+        .filter_map(|(feature, case)| {
+            on_deep_stack(case)
+                .err()
+                .map(|e| format!("{feature:?}: {e}"))
+        })
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
