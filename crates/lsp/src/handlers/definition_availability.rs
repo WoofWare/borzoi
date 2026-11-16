@@ -46,9 +46,10 @@ pub enum UnavailableReason {
     /// ([`DeferredReason::ShadowableType`]) — so we decline rather than guess.
     ShadowableType,
     /// The name *did* resolve into a referenced assembly, but one of the
-    /// project's referenced DLLs could not be read at all
-    /// ([`DeferredReason::IncompleteAssemblies`]), so nothing read out of the
-    /// others is provably the right target. The user's code is fine; the
+    /// project's referenced DLLs could not be read at all, or may grant the
+    /// project its internals (`InternalsVisibleTo`), which the analyzer does
+    /// not read ([`DeferredReason::IncompleteAssemblies`]), so nothing read
+    /// out of the assemblies is provably the right target. The user's code is fine; the
     /// analyzer's view of the project is not — which is why this is worth
     /// distinguishing from an ordinary unresolved access.
     IncompleteAssemblies,
@@ -128,10 +129,11 @@ impl UnavailableReason {
                  it declines to guess which type it refers to."
             }
             UnavailableReason::IncompleteAssemblies => {
-                "One of this project's referenced assemblies couldn't be read, so any name that \
-                 resolves into a referenced assembly could be shadowed by something in the one \
-                 that's missing — the analyzer declines all of them rather than guess. The \
-                 server log names the DLL."
+                "One of this project's referenced assemblies couldn't be read, or may grant this \
+                 project its internals (InternalsVisibleTo), which the analyzer does not read. \
+                 Either way any name that resolves into a referenced assembly could be shadowed \
+                 by something the analyzer cannot see, so it declines all of them rather than \
+                 guess. The server log names the DLL."
             }
             UnavailableReason::Unresolved => {
                 "This name resolves to nothing in any scope or import the analyzer models."

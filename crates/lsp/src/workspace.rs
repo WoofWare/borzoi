@@ -71,6 +71,7 @@ use crate::sdk_language::LangVersionSelection;
 use crate::semantic::ProjectId;
 use crate::tfm_policy::{self, caller_owns_target_framework, seed_target_framework_global};
 use borzoi_msbuild::ItemMetadataValue;
+use borzoi_sema::ConsumerName;
 
 const COMPILED: &str = "COMPILED";
 const EDITING: &str = "EDITING";
@@ -2440,10 +2441,160 @@ fn fsproj_entries(dir: &Path, observation: &Observation) -> Vec<PathBuf> {
 /// ([`ItemMetadataValue::Unknown`]) — locating an output DLL by a guessed
 /// name can fold a stale or unrelated assembly.
 fn evaluated_output_name(path: &Path, evaluated: &EvaluatedProject) -> Option<String> {
-    match &evaluated.parsed.target_name {
+    output_name_of(path, &evaluated.parsed)
+}
+
+/// [`evaluated_output_name`] of one evaluation's result.
+fn output_name_of(path: &Path, parsed: &ParsedProject) -> Option<String> {
+    match &parsed.target_name {
         ItemMetadataValue::Known(Some(name)) => Some(name.clone()),
         ItemMetadataValue::Known(None) => Some(path.file_stem()?.to_string_lossy().into_owned()),
         ItemMetadataValue::Unknown => None,
+    }
+}
+
+/// [`assembly_name_of`] the evaluation, for
+/// [`ProjectNode::assembly_name`](crate::project_graph::ProjectNode::assembly_name).
+fn evaluated_assembly_name(path: &Path, evaluated: &EvaluatedProject) -> ConsumerName {
+    assembly_name_of(path, &evaluated.parsed)
+}
+
+/// The name FCS gives the assembly the project at `path` compiles to, from
+/// one evaluation of it: the name of the file the `Fsc` task's `-o:` names,
+/// up to its last dot (`TcConfigBuilder.DecideNames`).
+///
+/// Known only inside the domain where that file is the SDK's
+/// `$(TargetName)$(TargetExt)` with both values trusted: the name is literal
+/// (no wildcard or list separator for the item it lands in to expand), the
+/// extension is `.dll` or `.exe`, no document outside the SDK runs build
+/// code or chooses the targets a build runs, writes the
+/// `IntermediateAssembly` item (whose path is the `-o:`) or one of those
+/// properties, and the walk entered everything the build reads; and
+/// `$(OtherFlags)`, which `Fsc` appends after its own `-o:`, is trusted and
+/// spells no output switch. Anything else is [`ConsumerName::Unknown`]: the
+/// compiled name could be any name (#1007).
+pub fn assembly_name_of(path: &Path, parsed: &ParsedProject) -> ConsumerName {
+    let Some(base) = output_name_of(path, parsed) else {
+        return ConsumerName::Unknown;
+    };
+    if base.is_empty() || base.contains(['/', '\\']) {
+        return ConsumerName::Unknown;
+    }
+    let ext_certified = matches!(
+        parsed.property("TargetExt"),
+        borzoi_msbuild::PropertyRead::Value(ext) if ext == ".dll" || ext == ".exe"
+    );
+    let flags_certified = match parsed.property("OtherFlags") {
+        borzoi_msbuild::PropertyRead::Unset => true,
+        borzoi_msbuild::PropertyRead::Value(flags) => !may_name_an_output(&flags),
+        _ => false,
+    };
+    let overridden = [&parsed.foreign_definitions, &parsed.workload_definitions]
+        .iter()
+        .any(|defs| {
+            defs.defines_item("IntermediateAssembly")
+                || defs.defines_target("CoreCompile")
+                || defs.defines_task("Fsc")
+                || !defs.target_selections.is_empty()
+                // A compiler other than the SDK's, which may write any `-o:`,
+                // or a reshaped target graph (`sdk_language`'s selectors).
+                || crate::sdk_language::COMPILER_SELECTORS
+                    .iter()
+                    .any(|name| defs.defines_property(name))
+                || defs.defines_property_where(|name| name.ends_with("dependson"))
+                || ["TargetName", "TargetExt", "AssemblyName", "OtherFlags"]
+                    .iter()
+                    .any(|p| defs.writes_property_at_build_time(p))
+        });
+    // As for the compiler's own provenance (`sdk_language`): build code from
+    // outside the SDK may build the project again under other properties,
+    // and content the walk did not enter may do anything.
+    let build_unknown = parsed.foreign_definitions.defines_build_code()
+        || parsed.hidden_content.is_some()
+        || !parsed.sdk_files_imported_from_outside.is_empty();
+    // The SDK expands the name inside an item's `Include`, where a wildcard
+    // matches files and a `;` splits it.
+    let literal = !base.contains(['*', '?', ';', '%', '$', '@']);
+    if !ext_certified || !flags_certified || overridden || build_unknown || !literal {
+        return ConsumerName::Unknown;
+    }
+    // The extension is one dot and no separator, so the name is the base.
+    ConsumerName::Known(base)
+}
+
+/// Whether compiler switches `flags` may set the output file: a switch (a
+/// token starting `-` or `/`, split at white space outside double quotes and
+/// with its quotes removed, as the `Fsc` task does) named `o` or `out`
+/// (`-o:F`, `--out:F`, `/out:F`, `-o F`; fsc's switch names are
+/// case-sensitive, and `-O` optimises). Anything the split is not certain of
+/// (an unbalanced quote, a single quote, or a `$`, `@` or `%` MSBuild might
+/// yet rewrite) may.
+fn may_name_an_output(flags: &str) -> bool {
+    if flags.contains(['$', '@', '%', '\'']) {
+        return true;
+    }
+    // Split at white space outside double quotes, as the task does, then
+    // drop the quotes; a switch is a token starting `-` or `/`.
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in flags.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if quoted {
+        // An unbalanced quote: the split is not certain.
+        return true;
+    }
+    tokens.push(current);
+    tokens.iter().any(|token| {
+        let Some(switch) = token.strip_prefix(['-', '/']) else {
+            return false;
+        };
+        let name = switch
+            .trim_start_matches('-')
+            .split([':', '='])
+            .next()
+            .unwrap_or("");
+        name == "o" || name == "out"
+    })
+}
+
+#[cfg(test)]
+mod output_switch_tests {
+    use super::may_name_an_output;
+
+    #[test]
+    fn output_switches_are_found_in_every_spelling() {
+        for flags in [
+            "-o:Friend.dll",
+            "--out:Friend.dll",
+            "/out:Friend.dll",
+            "--warnon:3390 -o Friend.dll",
+            "\"--out:a b.dll\"",
+            "--o\"\"ut:Friend.dll",
+            "$(Extra)",
+        ] {
+            assert!(may_name_an_output(flags), "{flags:?}");
+        }
+        for flags in [
+            "",
+            "-O",
+            "--optimize+",
+            "--warnon:3390",
+            "--nowarn:44 --define:OUTER",
+            "--doc:\"API out docs.xml\"",
+            "out",
+        ] {
+            assert!(!may_name_an_output(flags), "{flags:?}");
+        }
     }
 }
 
@@ -2547,6 +2698,7 @@ fn resolve_node_uncached(
             edges: outer_edges,
             tfm: NodeTfm::Unresolved,
             output_name: None,
+            assembly_name: ConsumerName::Unknown,
             references_uncertain: outer_suppressed,
         };
     }
@@ -2558,6 +2710,7 @@ fn resolve_node_uncached(
                 None => NodeTfm::NoneDeclared,
             },
             output_name: evaluated_output_name(path, outer),
+            assembly_name: evaluated_assembly_name(path, outer),
             references_uncertain: outer_suppressed,
         };
     }
@@ -2577,6 +2730,7 @@ fn resolve_node_uncached(
             edges: outer_edges,
             tfm: NodeTfm::Unresolved,
             output_name: None,
+            assembly_name: ConsumerName::Unknown,
             references_uncertain: outer_suppressed,
         };
     }
@@ -2587,6 +2741,7 @@ fn resolve_node_uncached(
             edges: outer_edges,
             tfm: NodeTfm::Known(body.clone()),
             output_name: evaluated_output_name(path, outer),
+            assembly_name: evaluated_assembly_name(path, outer),
             references_uncertain: outer_suppressed,
         };
     }
@@ -2616,6 +2771,11 @@ fn resolve_node_uncached(
             output_name: names_the_build
                 .then(|| evaluated_output_name(path, outer))
                 .flatten(),
+            assembly_name: if names_the_build {
+                evaluated_assembly_name(path, outer)
+            } else {
+                ConsumerName::Unknown
+            },
             tfm,
             references_uncertain: outer_suppressed,
         };
@@ -2633,6 +2793,7 @@ fn resolve_node_uncached(
                     edges: outer_edges,
                     tfm: NodeTfm::Known(current.clone()),
                     output_name: evaluated_output_name(path, outer),
+                    assembly_name: evaluated_assembly_name(path, outer),
                     references_uncertain: outer_suppressed,
                 };
             }
@@ -2648,6 +2809,7 @@ fn resolve_node_uncached(
                     edges: edges_of(&inner, purpose, is_entry),
                     tfm: NodeTfm::Unresolved,
                     output_name: None,
+                    assembly_name: ConsumerName::Unknown,
                     references_uncertain: references_suppressed(&inner, purpose),
                 },
                 Some(inner) => NodeResult::Resolved {
@@ -2656,6 +2818,7 @@ fn resolve_node_uncached(
                     // The name must come from the same (inner) evaluation as
                     // the edges: `<AssemblyName>` may itself be TFM-gated.
                     output_name: evaluated_output_name(path, &inner),
+                    assembly_name: evaluated_assembly_name(path, &inner),
                     // The inner evaluation is where these edges came from,
                     // so it is the one whose suppression applies.
                     references_uncertain: references_suppressed(&inner, purpose),
@@ -2680,6 +2843,7 @@ fn resolve_node_uncached(
             edges: outer_edges,
             tfm: NodeTfm::Unresolved,
             output_name: None,
+            assembly_name: ConsumerName::Unknown,
             references_uncertain: outer_suppressed,
         },
         GraphWalkPurpose::CompileClosure => {
@@ -2704,6 +2868,7 @@ fn resolve_node_uncached(
                         edges: Vec::new(),
                         tfm: NodeTfm::Unresolved,
                         output_name: None,
+                        assembly_name: ConsumerName::Unknown,
                         // A branch we could not evaluate takes the whole
                         // intersection with it, so the emptied list is a
                         // suppression like any other — not a project that
@@ -2746,6 +2911,7 @@ fn resolve_node_uncached(
                 edges: surviving,
                 tfm: NodeTfm::Unresolved,
                 output_name: None,
+                assembly_name: ConsumerName::Unknown,
                 references_uncertain: any_suppressed,
             }
         }

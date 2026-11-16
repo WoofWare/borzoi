@@ -1171,6 +1171,10 @@ impl EcmaView for DroppingView<'_> {
     fn doc_id_dialect(&self) -> Result<borzoi_assembly::doc_id::DocIdDialect, ImportError> {
         self.inner.doc_id_dialect()
     }
+
+    fn friend_declarations(&self) -> borzoi_assembly::FriendDeclarations {
+        self.inner.friend_declarations()
+    }
 }
 
 /// The env of the SDK's core references and the fixture, the reader made to
@@ -1193,6 +1197,11 @@ fn env_of(fixture: &Path, drop: Vec<(Vec<String>, &'static str)>) -> AssemblyEnv
         .into_iter()
         .map(|inner| DroppingView { inner, drop: &drop })
         .collect();
+    // Built for a consumer the fixtures do not name, although the oracle's
+    // calling projects are their friends. The gate under test reads every
+    // accessibility whatever the friendship, and an env built for a friend
+    // withdraws every assembly-rooted reading (`friend_assembly_grid`), which
+    // would leave the gate's verdicts on the control calls unobservable.
     AssemblyEnv::from_views(&views).expect("build the grid's env")
 }
 

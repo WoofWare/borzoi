@@ -198,6 +198,10 @@ impl EcmaView for Ecma335Assembly {
             .collect())
     }
 
+    fn friend_declarations(&self) -> crate::FriendDeclarations {
+        crate::friends::read(&self.image)
+    }
+
     fn doc_id_dialect(&self) -> Result<DocIdDialect, ImportError> {
         // Three marks, any one sufficient: the assembly-level interface-data
         // attribute, an F# compiler resource (one of the reserved signature or

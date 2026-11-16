@@ -3059,6 +3059,7 @@ fn a_non_authoritative_module_still_contests_a_type_position() {
         doc_id_dialect: None,
         has_assembly_references: None,
         qualified_names: None,
+        friendship: borzoi_sema::Friendship::No,
     };
     let env = AssemblyEnv::from_assemblies_with_projection_knowability(vec![
         input("class.dll", vec![class_color], false),
@@ -6004,6 +6005,7 @@ fn non_authoritative_assembly_declines_module_classification() {
                 doc_id_dialect: None,
                 has_assembly_references: None,
                 qualified_names: None,
+                friendship: borzoi_sema::Friendship::No,
             },
         ])
     };
@@ -6064,6 +6066,7 @@ fn module_leaf_filter_honours_signature_authority() {
                 doc_id_dialect: None,
                 has_assembly_references: None,
                 qualified_names: None,
+                friendship: borzoi_sema::Friendship::No,
             },
         ])
     };
@@ -6153,6 +6156,7 @@ fn non_authoritative_module_uses_the_type_rule_for_qualified_ownership() {
                 doc_id_dialect: None,
                 has_assembly_references: None,
                 qualified_names: None,
+                friendship: borzoi_sema::Friendship::No,
             },
         ])
     };

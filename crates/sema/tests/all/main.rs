@@ -45,6 +45,7 @@ mod extension_visibility_matrix;
 mod fcs_dump_refs_absolute;
 mod fcs_dump_sdk_resolution;
 mod fcs_dump_tolerance;
+mod friend_assembly_grid;
 mod fsharp_member_diff;
 mod il_type_definition;
 mod implicit_namespace_matrix;

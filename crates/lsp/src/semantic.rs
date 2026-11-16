@@ -27,8 +27,8 @@ use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
 use borzoi_msbuild::ItemKind;
 use borzoi_msbuild::observed::{self as msbuild_observed, EntryKind, Observer, ReadSet};
 use borzoi_sema::{
-    AbbreviationVisibility, AssemblyEnv, InferredProject, ProjectFile, ResolvedProject, SourceFile,
-    SyntaxRecovery,
+    AbbreviationVisibility, AssemblyEnv, ConsumerName, Friendship, InferredProject, ProjectFile,
+    ResolvedProject, SourceFile, SyntaxRecovery,
 };
 
 use crate::assembly_cache::AssemblyCache;
@@ -125,6 +125,12 @@ struct ReferencedAssemblyProjection {
     has_assembly_references: Option<bool>,
     /// `EcmaView::qualified_names`; `None` when unread.
     qualified_names: Option<Vec<String>>,
+    /// What the DLL's `[<assembly: InternalsVisibleTo>]` attributes name
+    /// (`EcmaView::friend_declarations`), which decides, per consuming
+    /// project, whether the env's public view of it is the project's
+    /// ([`borzoi_sema::Friendship`]). No `serde(default)`, for the reason
+    /// above: a default would claim the DLL names no friend.
+    friend_declarations: borzoi_assembly::FriendDeclarations,
 }
 
 /// Why one referenced DLL contributed nothing to the [`AssemblyEnv`]. The two
@@ -2960,6 +2966,12 @@ struct EnvInputs {
     /// name, in a namespace this project shares
     /// (`AssemblyEnv::mark_references_not_built`).
     not_built: bool,
+    /// [`ReferenceSet::consumer`]: whether each DLL's public view is the
+    /// project's turns on it ([`borzoi_sema::Friendship`]). With no DLL the
+    /// env does not depend on it, so it is [`ConsumerName::Unknown`] there:
+    /// a resolution that declines (and so names no consumer) builds the same
+    /// env as one that resolved to no DLL.
+    consumer: ConsumerName,
 }
 
 impl EnvInputs {
@@ -2968,6 +2980,11 @@ impl EnvInputs {
             dlls: refs.dlls.clone(),
             incomplete: refs.unread().next().is_some(),
             not_built: refs.not_built().next().is_some(),
+            consumer: if refs.dlls.is_empty() {
+                ConsumerName::Unknown
+            } else {
+                refs.consumer.clone()
+            },
         }
     }
 }
@@ -3017,8 +3034,12 @@ fn build_env(
     cache: &AssemblyCache,
     observer: &Observer,
 ) -> (AssemblyEnv, Vec<PathBuf>) {
-    let (mut env, kept) =
-        build_env_from_dll_paths(inputs.dlls.iter().map(PathBuf::as_path), cache, observer);
+    let (mut env, kept) = build_env_from_dll_paths(
+        inputs.dlls.iter().map(PathBuf::as_path),
+        &inputs.consumer,
+        cache,
+        observer,
+    );
     if inputs.incomplete {
         // Both marks, exactly as `build_env_from_dll_paths` applies them to the
         // equivalent whole-DLL loss. An unread reference could carry an
@@ -3108,6 +3129,9 @@ struct ReferenceSet {
     /// The package folders the assets file the packages came from names
     /// ([`crate::project_assets::ResolvedAssemblies::package_folders`]).
     package_folders: Vec<PathBuf>,
+    /// The name of the assembly the project compiles to, against which each
+    /// reference's friend declarations are read ([`GraphRefTargets::entry_assembly_name`]).
+    consumer: ConsumerName,
 }
 
 impl ReferenceSet {
@@ -3123,6 +3147,7 @@ impl ReferenceSet {
             retryable,
             unrecorded: Vec::new(),
             package_folders: Vec::new(),
+            consumer: ConsumerName::Unknown,
         }
     }
 
@@ -3180,7 +3205,7 @@ fn edge_dlls(edges: &[ReferenceEdge]) -> Vec<PathBuf> {
 /// **parsed** `<ProjectReference>` graph (plan E1: the parsed edge set is
 /// authoritative; `project.assets.json` is a post-restore artifact that can
 /// lag the fsproj in both directions and never supplies edges).
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct GraphRefTargets {
     /// Every `.fsproj` node in the entry's transitive F# closure, excluding
     /// the entry itself — each contributes its built output DLL, located
@@ -3203,6 +3228,11 @@ struct GraphRefTargets {
     /// assemblies is missing, which is exactly the claim the incompleteness
     /// mark needs.
     suppressed: Vec<PathBuf>,
+    /// The name of the assembly the entry compiles to
+    /// ([`crate::project_graph::ProjectNode::assembly_name`]), which a
+    /// referenced assembly's `InternalsVisibleTo` is matched against.
+    /// Unknown when the walk could not pin it, or did not reach the entry.
+    entry_assembly_name: ConsumerName,
 }
 
 /// One F# node of the closure, as the env fold consumes it: the
@@ -3231,6 +3261,17 @@ struct FsharpRefTarget {
 /// *problems* (cycles, missing targets, unsupported kinds) are the
 /// diagnostics layer's business, not the fold's: a problematic target is
 /// simply not a node, so nothing here is fabricated from it.
+impl Default for GraphRefTargets {
+    fn default() -> Self {
+        GraphRefTargets {
+            fsharp: Vec::new(),
+            csharp: Vec::new(),
+            suppressed: Vec::new(),
+            entry_assembly_name: ConsumerName::Unknown,
+        }
+    }
+}
+
 fn graph_ref_targets(graph: &ProjectGraph, entry: &Path, observer: &Observer) -> GraphRefTargets {
     let entry_key = lexically_normalize(entry);
     let mut targets = GraphRefTargets::default();
@@ -3242,7 +3283,9 @@ fn graph_ref_targets(graph: &ProjectGraph, entry: &Path, observer: &Observer) ->
                 if node.references_uncertain {
                     targets.suppressed.push(canonicalise(&node.path, observer));
                 }
-                if !paths_equal(&node.path, &entry_key) {
+                if paths_equal(&node.path, &entry_key) {
+                    targets.entry_assembly_name = node.assembly_name.clone();
+                } else {
                     targets.fsharp.push(FsharpRefTarget {
                         path: canonicalise(&node.path, observer),
                         tfm: node.tfm.clone(),
@@ -3520,6 +3563,7 @@ fn resolve_reference_dlls(
         retryable,
         unrecorded,
         package_folders: resolved.package_folders,
+        consumer: ref_targets.entry_assembly_name.clone(),
     };
     ReferenceSet {
         retryable: set.retryable || set.has_transient_failure(),
@@ -4241,6 +4285,7 @@ fn unified_reference_keep_mask(identities: &[Option<AssemblyIdentity>]) -> Vec<b
 /// abbreviation-target chase from that gate until this was shared).
 pub fn build_env_from_dll_paths<'a>(
     dlls: impl Iterator<Item = &'a Path>,
+    consumer: &ConsumerName,
     cache: &AssemblyCache,
     observer: &Observer,
 ) -> (AssemblyEnv, Vec<PathBuf>) {
@@ -4414,6 +4459,18 @@ pub fn build_env_from_dll_paths<'a>(
         .into_iter()
         .map(|(_, path, projection)| {
             let visibility = projection.abbreviation_visibility();
+            let friendship = Friendship::of(&projection.friend_declarations, consumer);
+            if friendship.may_see_internals() {
+                // The env grades the DLL's non-public surface as unread, which
+                // withdraws every assembly-rooted reading the project makes.
+                tracing::warn!(
+                    dll = %path.display(),
+                    consumer = ?consumer,
+                    friendship = ?friendship,
+                    "a referenced assembly may grant this project its internals \
+                     (InternalsVisibleTo); its assembly readings decline"
+                );
+            }
             borzoi_sema::AssemblyProjectionInput {
                 path,
                 existence: match projection.existence {
@@ -4430,6 +4487,7 @@ pub fn build_env_from_dll_paths<'a>(
                 doc_id_dialect: projection.doc_id_dialect,
                 has_assembly_references: projection.has_assembly_references,
                 qualified_names: projection.qualified_names,
+                friendship,
             }
         })
         .collect();
@@ -4651,6 +4709,12 @@ fn enumerate_view_catching<V: EcmaView>(
                 catch_reader_panic(path, "qualified_names", || view.qualified_names()).flatten();
             // Unreadable degrades to unknown: the gate then declines every
             // existence question this DLL could answer.
+            // A reader panic degrades to unread: any project may be a friend.
+            let friend_declarations =
+                catch_reader_panic(path, "friend_declarations", || view.friend_declarations())
+                    .unwrap_or_else(|| {
+                        borzoi_assembly::FriendDeclarations::unread("the reader panicked")
+                    });
             let existence = catch_reader_panic(path, "existence_index", || view.existence_index())
                 .and_then(|r| match r {
                     Ok(index) => Some(index),
@@ -4680,6 +4744,7 @@ fn enumerate_view_catching<V: EcmaView>(
                 doc_id_dialect,
                 has_assembly_references,
                 qualified_names,
+                friend_declarations,
             })
         }
         Err(err) => {
@@ -4919,6 +4984,7 @@ mod tests {
 
         let (_, kept) = build_env_from_dll_paths(
             [unreadable.as_path(), native.as_path()].into_iter(),
+            &ConsumerName::Known(ConsumerName::PROBE.to_string()),
             &AssemblyCache::disabled(),
             &borzoi_msbuild::observed::Observer::new(),
         );
@@ -6616,6 +6682,7 @@ mod tests {
             references: Vec::new(),
             tfm: crate::project_graph::NodeTfm::NotEvaluated,
             output_name: None,
+            assembly_name: ConsumerName::Unknown,
             references_uncertain: false,
         }
     }
@@ -6651,6 +6718,38 @@ mod tests {
             }]
         );
         assert_eq!(targets.csharp, vec![PathBuf::from("/p/CsLib/CsLib.csproj")]);
+    }
+
+    /// The entry's own assembly name, and only the entry's, is the name
+    /// each reference's friend declarations are read against: a
+    /// dependency's name is never mistaken for it.
+    #[test]
+    fn graph_ref_targets_take_the_consumer_name_from_the_entry() {
+        let entry = Path::new("/p/App/App.fsproj");
+        let named = |path: &Path, name: ConsumerName| crate::project_graph::ProjectNode {
+            assembly_name: name,
+            ..graph_node(path, ProjectKind::FSharp)
+        };
+        let graph = |entry_name: ConsumerName| ProjectGraph {
+            nodes: vec![
+                named(
+                    Path::new("/p/LibA/LibA.fsproj"),
+                    ConsumerName::Known("LibA".to_string()),
+                ),
+                named(entry, entry_name),
+            ],
+            problems: vec![],
+        };
+        let observer = borzoi_msbuild::observed::Observer::new();
+        for name in [
+            ConsumerName::Known("App.Renamed".to_string()),
+            ConsumerName::Unknown,
+        ] {
+            assert_eq!(
+                graph_ref_targets(&graph(name.clone()), entry, &observer).entry_assembly_name,
+                name
+            );
+        }
     }
 
     /// Targets are canonicalised so lookups into the assets-derived
@@ -7263,6 +7362,7 @@ mod tests {
             retryable: false,
             unrecorded: Vec::new(),
             package_folders: Vec::new(),
+            consumer: ConsumerName::Unknown,
         };
         assert_eq!(set.unread().count(), 1);
         assert!(
@@ -7284,6 +7384,7 @@ mod tests {
             retryable: false,
             unrecorded: Vec::new(),
             package_folders: Vec::new(),
+            consumer: ConsumerName::Unknown,
         };
         assert_eq!(set.unread().count(), 1);
         assert!(!set.has_transient_failure());
@@ -7510,6 +7611,7 @@ mod tests {
             retryable: false,
             unrecorded: Vec::new(),
             package_folders: Vec::new(),
+            consumer: ConsumerName::Unknown,
         };
         assert_eq!(
             set.unread().collect::<Vec<_>>(),
@@ -7544,6 +7646,7 @@ mod tests {
             retryable: false,
             unrecorded: Vec::new(),
             package_folders: Vec::new(),
+            consumer: ConsumerName::Unknown,
         };
 
         let unbuilt = set(vec![edge("A.fsproj", ReferenceOutcome::NotBuilt)]);
@@ -8489,6 +8592,9 @@ mod tests {
         fn doc_id_dialect(&self) -> Result<borzoi_assembly::doc_id::DocIdDialect, ImportError> {
             Ok(borzoi_assembly::doc_id::DocIdDialect::Metadata)
         }
+        fn friend_declarations(&self) -> borzoi_assembly::FriendDeclarations {
+            borzoi_assembly::FriendDeclarations::default()
+        }
 
         fn fsharp_resources(&self) -> Result<Vec<FSharpResource>, ImportError> {
             Ok(vec![])
@@ -8733,6 +8839,7 @@ mod tests {
 
         let (env, _) = build_env_from_dll_paths(
             [native.as_path()].into_iter(),
+            &ConsumerName::Known(ConsumerName::PROBE.to_string()),
             &AssemblyCache::disabled(),
             &borzoi_msbuild::observed::Observer::new(),
         );
@@ -8747,6 +8854,7 @@ mod tests {
         std::fs::write(&unreadable, b"MZ but nothing else").unwrap();
         let (env, _) = build_env_from_dll_paths(
             [native.as_path(), unreadable.as_path()].into_iter(),
+            &ConsumerName::Known(ConsumerName::PROBE.to_string()),
             &AssemblyCache::disabled(),
             &borzoi_msbuild::observed::Observer::new(),
         );

@@ -96,6 +96,7 @@ pub fn build_env(
 ) -> (Arc<AssemblyEnv>, Vec<PathBuf>) {
     let (env, kept) = build_env_from_dll_paths(
         references.iter().map(PathBuf::as_path),
+        &borzoi_sema::ConsumerName::Known(borzoi_sema::ConsumerName::PROBE.to_string()),
         cache,
         &borzoi_msbuild::observed::Observer::new(),
     );

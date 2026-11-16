@@ -2975,10 +2975,12 @@ pub enum DeferredReason {
     ShadowableType,
     /// A name that **did** resolve into a referenced assembly, demoted because
     /// the env's projection is incomplete: some DLL is present that it could not
-    /// read at all ([`AssemblyEnv::identities_incomplete`]).
+    /// read at all, or some assembly may see the consumer as a friend, whose
+    /// non-public surface the lookups skip
+    /// ([`AssemblyEnv::public_view_incomplete`]).
     ///
     /// Nothing read out of the assemblies is provably unshadowed in that state.
-    /// The missing DLL could declare a type that collides with the one we
+    /// The missing DLL (or the friend's internals) could declare a type that collides with the one we
     /// reached, could carry an assembly-level `[<AutoOpen>]` bringing names into
     /// the namespace we resolved through, and could itself be the CCU a pickled
     /// reference names. None of that is visible to a resolver that never saw it,
@@ -3047,13 +3049,16 @@ impl Resolution {
     /// This resolution with an **assembly-rooted** reading — the variants
     /// that name something in a referenced assembly — demoted to
     /// [`DeferredReason::IncompleteAssemblies`]. Everything else is returned
-    /// unchanged: an in-file binder cannot be shadowed by anything an assembly
-    /// declares, and a decline is already a decline.
+    /// unchanged, a decline being already a decline. An in-file binder is not
+    /// covered: an `open` after its declaration may shadow it with an entity
+    /// the env cannot see, which the friend grading answers by marking the
+    /// friend's containers (`AssemblyEnv::mark_friend_surfaces_unread`) and an
+    /// unread reference does not yet answer at all (#1000).
     ///
     /// The single definition of what the seal *does*, so the phases that apply
     /// it (`Resolver::finish` for its two maps, inference's for its one) cannot
     /// drift apart on which variants count. Callers decide *whether* to seal, by
-    /// asking [`AssemblyEnv::identities_incomplete`]; **any future map of
+    /// asking [`AssemblyEnv::public_view_incomplete`]; **any future map of
     /// `Resolution` must be swept the same way**, since a consumer reading it
     /// would otherwise see a claim the rest of the file has withdrawn.
     pub(crate) fn sealed_under_incomplete_projection(self) -> Resolution {

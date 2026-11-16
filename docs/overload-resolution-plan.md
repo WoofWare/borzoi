@@ -216,8 +216,17 @@ across levels — needs cross-assembly `TypeRef` identity (OV-3) and metadata
 in-scope extension member of the name may exist, tested by *presence* not
 enumeration (OV-6): the pickle-name–derived extension-member index (OV-0.5),
 C#-style `[<Extension>]` attribute-read, in-project augmentations, and any opaque
-`open`/auto-open surface all defer wholesale; (5) **accessibility** public-only
-(`InternalsVisibleTo` unmodelled, sound because FCS filters at enumeration).
+`open`/auto-open surface all defer wholesale; (5) **accessibility** public-only,
+which is the consumer's view only of an assembly that provably does not name
+it as a friend. FCS filters at enumeration by the consumer's access rights,
+and an `[<assembly: InternalsVisibleTo>]` naming the consumer widens them to
+the assembly's internal members (`AddNonLocalCcu`, `CheckDeclarations.fs:325`;
+`IsILMemberAccessible`, `AccessibilityLogic.fs:70`), so an internal overload
+of a friend joins the candidate set. The env grades a friend's, or a possible
+friend's, non-public surface as unread
+(`AssemblyEnv::public_view_incomplete`, `borzoi_sema::Friendship`), which
+withdraws every commit into the assemblies; `friend_assembly_grid` holds that
+to FCS.
 
 ### 4.2 `may_apply` — the over-approximation (candidate elimination)
 

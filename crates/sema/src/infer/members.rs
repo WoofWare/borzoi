@@ -1204,7 +1204,7 @@ impl<'a> Gen<'a> {
             env.entity(decl).kind,
             EntityKind::Record | EntityKind::Union | EntityKind::Exception
         );
-        !fsharp_field_carrier && !env.identities_incomplete()
+        !fsharp_field_carrier && !env.public_view_incomplete()
     }
 
     /// A member's type `ty`, declared by `decl`, as inference reads it: F#'s
@@ -1220,7 +1220,7 @@ impl<'a> Gen<'a> {
     /// downstream can tell it apart from a type owing the assemblies nothing.
     fn readable_member_type(&self, decl: EntityHandle, ty: &TypeRef) -> Option<Ty> {
         let env = self.facts.env;
-        if env.identities_incomplete() {
+        if env.public_view_incomplete() {
             return None;
         }
         if matches!(ty, TypeRef::Primitive(Primitive::Void)) {

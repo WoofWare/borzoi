@@ -1229,6 +1229,7 @@ pub fn doc_key_env_of(
                 doc_id_dialect: Some(dialect),
                 has_assembly_references: None,
                 qualified_names: None,
+                friendship: borzoi_sema::Friendship::No,
             },
         )
         .collect();

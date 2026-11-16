@@ -32,6 +32,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::paths::lexically_normalize;
+use borzoi_sema::ConsumerName;
 
 /// How a referenced project file is classified, by extension (case-insensitive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +124,8 @@ pub enum NodeResult {
         /// See [`ProjectNode::output_name`]; from the same evaluation the
         /// TFM verdict came from.
         output_name: Option<String>,
+        /// See [`ProjectNode::assembly_name`]; from the same evaluation.
+        assembly_name: ConsumerName,
         /// See [`ProjectNode::references_uncertain`].
         references_uncertain: bool,
     },
@@ -139,6 +142,7 @@ impl NodeResult {
             edges,
             tfm: NodeTfm::NotEvaluated,
             output_name: None,
+            assembly_name: ConsumerName::Unknown,
             references_uncertain: false,
         }
     }
@@ -168,6 +172,10 @@ pub struct ProjectNode {
     /// `<AssemblyName>` may leave a stale stem-named DLL on disk, and
     /// folding it would fabricate.
     pub output_name: Option<String>,
+    /// The name FCS gives the assembly this node compiles to, from the same
+    /// evaluation as [`Self::output_name`] (and unknown wherever that is):
+    /// what a referenced assembly's `InternalsVisibleTo` is matched against.
+    pub assembly_name: ConsumerName,
     /// Whether this node's `<ProjectReference>` list was **suppressed** rather
     /// than empty: the evaluator could not trust it
     /// ([`borzoi_msbuild::ParsedProject::project_references_uncertain`] — an
@@ -295,6 +303,7 @@ impl Builder {
                 edges: references,
                 tfm,
                 output_name,
+                assembly_name,
                 references_uncertain,
             } => {
                 let key = lexically_normalize(path);
@@ -306,6 +315,7 @@ impl Builder {
                     references: references.clone(),
                     tfm,
                     output_name,
+                    assembly_name,
                     references_uncertain,
                 });
                 for edge in references {
@@ -379,6 +389,7 @@ impl Builder {
                         references: Vec::new(),
                         tfm: NodeTfm::NotEvaluated,
                         output_name: None,
+                        assembly_name: ConsumerName::Unknown,
                         references_uncertain: false,
                     });
                 }
@@ -422,6 +433,7 @@ impl Builder {
                         edges: references,
                         tfm,
                         output_name,
+                        assembly_name,
                         references_uncertain: _,
                     } => {
                         self.visited.insert(key.clone());
@@ -431,6 +443,7 @@ impl Builder {
                             references,
                             tfm,
                             output_name,
+                            assembly_name,
                             // Reached only through an output-only edge, whose
                             // whole point is that this target's references do
                             // *not* flow to the consumer — MSBuild keeps them
@@ -661,6 +674,7 @@ mod tests {
             edges,
             tfm: NodeTfm::NotEvaluated,
             output_name: None,
+            assembly_name: ConsumerName::Unknown,
             references_uncertain: true,
         };
 

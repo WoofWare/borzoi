@@ -1081,6 +1081,7 @@ fn every_alias_use_agrees_with_fcs_under_every_reference_set() {
         }
         let (env, kept) = build_env_from_dll_paths(
             ours_refs.iter().map(PathBuf::as_path),
+            &borzoi_sema::ConsumerName::Known(borzoi_sema::ConsumerName::PROBE.to_string()),
             &cache,
             &borzoi_msbuild::observed::Observer::new(),
         );

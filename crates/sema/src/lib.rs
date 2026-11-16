@@ -58,9 +58,10 @@ mod ty;
 mod unify;
 
 pub use assembly_env::{
-    AbbreviationVisibility, AssemblyEnv, AssemblyProjectionInput, EntityHandle, ExistenceInput,
-    ExtensionMembers, IlTypeDefinition, MemberIndex, OpenFoldName, OpenFoldSpace, OpenFoldSurface,
-    OpenFoldTarget, StaticLookup, UnionCaseIndex, ValueSurface, fsharp_core_intrinsic_tycons,
+    AbbreviationVisibility, AssemblyEnv, AssemblyProjectionInput, ConsumerName, EntityHandle,
+    ExistenceInput, ExtensionMembers, Friendship, IlTypeDefinition, MemberIndex, OpenFoldName,
+    OpenFoldSpace, OpenFoldSurface, OpenFoldTarget, StaticLookup, UnionCaseIndex, ValueSurface,
+    fsharp_core_intrinsic_tycons,
 };
 pub use binders::{BinderRole, PatternName, pattern_names};
 pub use def::{Def, DefId, DefKind, DefSpace, SemanticClass};

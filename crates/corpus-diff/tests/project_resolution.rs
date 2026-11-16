@@ -152,6 +152,7 @@ fn synthetic_loaded_project(src: &str, env: AssemblyEnv) -> LoadedProject {
         fcs_extra_refs: Vec::new(),
         define_constants: Vec::new(),
         lang_version: None,
+        assembly_name: None,
     }
 }
 
@@ -208,6 +209,7 @@ fn synthetic_multi_file_project(items: &[(&str, &str)]) -> LoadedProject {
         fcs_extra_refs: Vec::new(),
         define_constants: Vec::new(),
         lang_version: None,
+        assembly_name: None,
     }
 }
 

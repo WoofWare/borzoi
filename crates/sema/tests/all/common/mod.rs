@@ -498,6 +498,19 @@ pub fn invoke_fcs_dump_project(paths: &[&Path]) -> String {
 /// caller that sets them (the corpus-diff / LSP consumers do — this sema harness
 /// does not, but the helper must not silently drop them).
 pub fn invoke_fcs_dump_project_with_refs(paths: &[&Path], refs: &[&Path]) -> String {
+    invoke_fcs_dump_project_named(paths, refs, None)
+}
+
+/// [`invoke_fcs_dump_project_with_refs`] checking the project as the assembly
+/// `assembly_name` (`-o:<name>.dll`). FCS matches a referenced assembly's
+/// `[<assembly: InternalsVisibleTo>]` against the checked assembly's name, which
+/// it otherwise takes from the last source file's, so a harness grading friend
+/// access passes it.
+pub fn invoke_fcs_dump_project_named(
+    paths: &[&Path],
+    refs: &[&Path],
+    assembly_name: Option<&str>,
+) -> String {
     let mut request = serde_json::json!({
         "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "refs": refs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
@@ -516,6 +529,9 @@ pub fn invoke_fcs_dump_project_with_refs(paths: &[&Path], refs: &[&Path]) -> Str
         if !lang.is_empty() {
             request["langversion"] = serde_json::json!(lang);
         }
+    }
+    if let Some(name) = assembly_name {
+        request["assemblyName"] = serde_json::json!(name);
     }
     let line = fcs_project_batch_pool().request(&request.to_string());
     reject_batch_error(&line, "uses-project");
@@ -2510,6 +2526,29 @@ fn build_generated_fixture(dir: &str, dll: &str, source: Vec<String>) -> PathBuf
         .join("Release")
         .join("net10.0")
         .join(format!("{dll}.dll"))
+}
+
+/// Build the C# fixture project `tests/fixtures/<dir>` from `source` (written
+/// as its `Generated.cs`, never checked in) and return its `<dll>.dll`. The
+/// caller holds the result for the binary's lifetime, as
+/// [`build_generated_fixture`]'s callers do.
+pub fn build_generated_cs_fixture(dir: &str, dll: &str, source: &str) -> PathBuf {
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(dir);
+    let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
+    std::fs::write(project.join("Generated.cs"), source).expect("write Generated.cs");
+    dotnet_build(&project, &format!("dotnet build {dir}"));
+    project
+        .join("bin")
+        .join("Release")
+        .join("net10.0")
+        .join(format!("{dll}.dll"))
+}
+
+/// [`build_generated_fixture`], for a caller outside this module.
+pub fn build_generated_fs_fixture(dir: &str, dll: &str, source: Vec<String>) -> PathBuf {
+    build_generated_fixture(dir, dll, source)
 }
 
 /// [`ensure_ext_assembly_grid_built`] for the cells an assembly-level

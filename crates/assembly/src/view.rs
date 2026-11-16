@@ -14,6 +14,7 @@
 
 use crate::ImportError;
 use crate::doc_id::DocIdDialect;
+use crate::friends::FriendDeclarations;
 use crate::model::{AssemblyIdentity, AssemblyProjectionSkips, Entity, TypeForwarder};
 
 /// Implemented by [`crate::Ecma335Assembly`] (over the in-crate reader's owned
@@ -125,6 +126,14 @@ pub trait EcmaView {
     /// No default: a backend that answered [`DocIdDialect::Metadata`] without
     /// looking would hand an F# member another member's documentation.
     fn doc_id_dialect(&self) -> Result<DocIdDialect, ImportError>;
+
+    /// The assemblies this one names as friends
+    /// (`[<assembly: InternalsVisibleTo>]`, [`crate::friends`]). A backend
+    /// that cannot read them returns [`FriendDeclarations::unread`].
+    ///
+    /// No default: an empty answer claims no assembly sees this one's
+    /// internals, which decides what a referencing assembly's names bind to.
+    fn friend_declarations(&self) -> FriendDeclarations;
 }
 
 /// A managed resource carrying F# compiler data. Returned by

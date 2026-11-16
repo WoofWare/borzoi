@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- One of the F# referenced assemblies of `friend_assembly_grid`. Its
+       `Generated*.fs` are emitted by the test from the grid's cells and are
+       not checked in: one namespace per cell, holding the cell's entity
+       (internal in a friendship variant, public in the rival). -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>FriendGridUnparsed</AssemblyName>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Generated*.fs" />
+  </ItemGroup>
+
+</Project>

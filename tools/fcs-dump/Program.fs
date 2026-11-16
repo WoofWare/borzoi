@@ -6272,6 +6272,21 @@ let private scriptOptionsBatch () =
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
+/// The `-o:` switch naming the checked assembly `assemblyName`, beside the
+/// first source file (FCS checks without writing it), or none.
+let private outputArgs (assemblyName: string option) (firstPath: string) : string[] =
+    match assemblyName with
+    | None -> [||]
+    | Some name ->
+        let dir = Option.ofObj (Path.GetDirectoryName(firstPath)) |> Option.defaultValue "."
+        [| "-o:" + Path.Combine(dir, name + ".dll") |]
+
+/// `switches` without an output switch when [`outputArgs`] supplies one.
+let private withoutOutput (assemblyName: string option) (switches: string[]) : string[] =
+    match assemblyName with
+    | None -> switches
+    | Some _ -> switches |> Array.filter (fun o -> not (o.StartsWith("-o:") || o.StartsWith("--out:")))
+
 /// Project-aware sibling of `dumpUses`: type-check an ordered set of source
 /// files as a *single project* (not isolated scripts), so name resolution sees
 /// cross-file declarations. Reads absolute source paths from stdin, one per
@@ -6311,6 +6326,13 @@ let private scriptOptionsBatch () =
 /// `System.IO.FileSystem`, and the differential recorded a divergence for a
 /// resolution both sides had right. A caller whose refs merely *supplement* the
 /// SDK's (the fixture harnesses) must leave it off.
+///
+/// `assemblyName` names the assembly being checked, as `-o:<name>.dll`. FCS
+/// takes the compiled assembly's name from the output file's name, and without
+/// one from the last source file's, and that name is what an
+/// `[<assembly: InternalsVisibleTo>]` in a referenced assembly is matched
+/// against (`AddNonLocalCcu`). A caller grading friend access must pass it, or
+/// no reference ever names the project as a friend.
 let private usesProjectFiles
     (checker: FSharpChecker)
     (paths: string[])
@@ -6318,6 +6340,7 @@ let private usesProjectFiles
     (exclusiveRefs: bool)
     (defineArgs: string[])
     (langVersionArgs: string[])
+    (assemblyName: string option)
     =
     let scriptOpts, scriptDiags =
         projectScriptOptions
@@ -6356,7 +6379,7 @@ let private usesProjectFiles
                     [| "--noframework" |]
                 else
                     [||]
-            Array.concat [ switches; framework; refArgs; defineArgs; langVersionArgs ]
+            Array.concat [ withoutOutput assemblyName switches; framework; refArgs; defineArgs; langVersionArgs; outputArgs assemblyName paths.[0] ]
 
     let projOpts =
         { scriptOpts with
@@ -6433,8 +6456,15 @@ let private dumpUsesProject () =
         | Some _
         | None -> false
 
+    // `BORZOI_FCS_ASSEMBLY_NAME`: the checked assembly's name (see
+    // [`usesProjectFiles`]). The resident sibling takes it per request.
+    let assemblyName =
+        Option.ofObj (Environment.GetEnvironmentVariable "BORZOI_FCS_ASSEMBLY_NAME")
+        |> Option.filter (fun s -> s <> "")
+
     let checker = FSharpChecker.Create()
-    let files = usesProjectFiles checker paths (extraRefArgs ()) exclusiveRefs defineArgs langVersionArgs
+    let files =
+        usesProjectFiles checker paths (extraRefArgs ()) exclusiveRefs defineArgs langVersionArgs assemblyName
     let payload = {| Files = files |}
     let json = JsonSerializer.Serialize(payload, buildOptions ())
     Console.Out.Write(json)
@@ -6447,7 +6477,8 @@ let private dumpUsesProject () =
 /// `dotnet fcs-dump uses-project` per project and pay the .NET + FCS cold-start
 /// every time. One JSON request per stdin line —
 /// `{ "paths": [<abs .fs>…], "refs": [<dll>…], "defines": [<sym>…],
-/// "langversion": <token|null>, "exclusiveRefs": <bool> }`, Compile order
+/// "langversion": <token|null>, "exclusiveRefs": <bool>,
+/// "assemblyName": <name|absent> }`, Compile order
 /// preserved — and one compact
 /// `{ "Files": [ { Path, Diagnostics, Uses } … ] }` response line: the SAME
 /// payload the one-shot emits (compact rather than indented; the `serde_json`
@@ -6478,8 +6509,12 @@ let private usesProjectBatchCore () =
                 match root.TryGetProperty("exclusiveRefs") with
                 | true, v when v.ValueKind = JsonValueKind.True -> true
                 | _ -> false
+            let assemblyName =
+                match root.TryGetProperty("assemblyName") with
+                | true, v when v.ValueKind = JsonValueKind.String -> Option.ofObj (v.GetString())
+                | _ -> None
             let files =
-                usesProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs
+                usesProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs assemblyName
             JsonSerializer.Serialize({| Files = files |}, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)

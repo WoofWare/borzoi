@@ -43,3 +43,5 @@ crates/sema/tests/fixtures/ext_assembly_grid_env/Generated*.fs
 crates/sema/tests/fixtures/ext_assembly_grid_internal_env/Generated*.fs
 crates/sema/tests/fixtures/ext_assembly_grid_auto_env/Generated*.fs
 crates/sema/tests/fixtures/ext_assembly_grid_auto_internal_env/Generated*.fs
+crates/sema/tests/fixtures/friend_grid_*_env/Generated*.fs
+crates/sema/tests/fixtures/friend_grid_cs_*_env/Generated.cs

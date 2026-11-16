@@ -2352,7 +2352,7 @@ impl<'a> Resolver<'a> {
     /// is not: that one holds only while somebody keeps finding all the sites,
     /// and `Resolution` is recorded into two maps here and a third in inference.
     fn seal_assembly_readings(&mut self) {
-        if !self.assemblies.identities_incomplete() {
+        if !self.assemblies.public_view_incomplete() {
             return;
         }
         // The census follows the seal. A sealed occurrence is a decline the

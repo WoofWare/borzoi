@@ -27,6 +27,7 @@ pub mod doc_id;
 mod ecma335_assembly;
 mod error;
 pub mod existence;
+pub mod friends;
 pub mod fsharp_pickle;
 mod fsharp_pickle_merge;
 mod fsharp_resource;
@@ -55,6 +56,7 @@ pub use existence::{
     ExistenceIndex, ExtensionRow, IlTypeRow, IlVisibility, IndexLayer, PickleLayer,
     PickledEntityKind, PickledEntityRow,
 };
+pub use friends::{FriendDeclarations, FriendEntry};
 pub use fsharp_pickle::{CcuRef, PickledCcu, PickledHeader, PickledNleRef, unpickle_signature};
 pub use fsharp_pickle_merge::{ModuleMemberTarget, ModuleMemberVal, collect_module_member_targets};
 pub use model::{

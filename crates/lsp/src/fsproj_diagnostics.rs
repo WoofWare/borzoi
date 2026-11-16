@@ -2687,6 +2687,7 @@ mod tests {
             kind: ProjectKind::FSharp,
             tfm: NodeTfm::NotEvaluated,
             output_name: None,
+            assembly_name: borzoi_sema::ConsumerName::Unknown,
             references_uncertain: false,
             references: targets
                 .iter()
@@ -2720,6 +2721,7 @@ mod tests {
                 kind: ProjectKind::FSharp,
                 tfm: NodeTfm::NotEvaluated,
                 output_name: None,
+                assembly_name: borzoi_sema::ConsumerName::Unknown,
                 references_uncertain: false,
                 references: vec![Edge {
                     target: pb("/p/B.fsproj"),
@@ -2756,6 +2758,7 @@ mod tests {
                 kind: ProjectKind::FSharp,
                 tfm: NodeTfm::NotEvaluated,
                 output_name: None,
+                assembly_name: borzoi_sema::ConsumerName::Unknown,
                 references_uncertain: false,
                 references: vec![Edge {
                     target: pb("/p/B.fsproj"),
@@ -2780,6 +2783,7 @@ mod tests {
             kind: ProjectKind::FSharp,
             tfm: NodeTfm::NotEvaluated,
             output_name: None,
+            assembly_name: borzoi_sema::ConsumerName::Unknown,
             references_uncertain: false,
             references: vec![Edge {
                 target: pb("/p/A.fsproj"),
@@ -2808,6 +2812,7 @@ mod tests {
                 kind: ProjectKind::FSharp,
                 tfm: NodeTfm::NotEvaluated,
                 output_name: None,
+                assembly_name: borzoi_sema::ConsumerName::Unknown,
                 references_uncertain: false,
                 references: vec![
                     Edge {
@@ -2847,6 +2852,7 @@ mod tests {
                 kind: ProjectKind::FSharp,
                 tfm: NodeTfm::NotEvaluated,
                 output_name: None,
+                assembly_name: borzoi_sema::ConsumerName::Unknown,
                 references_uncertain: false,
                 references: vec![Edge {
                     target: pb("/p/B.fsproj"),

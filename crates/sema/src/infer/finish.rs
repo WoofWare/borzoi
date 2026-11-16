@@ -203,7 +203,7 @@ impl<'a> Gen<'a> {
         // variable open, and the ground-only read-off above turns open into
         // silence — while a literal's type, owing the assemblies nothing, is
         // untouched.
-        if facts.env.identities_incomplete() {
+        if facts.env.public_view_incomplete() {
             for res in member_resolutions.values_mut() {
                 *res = res.sealed_under_incomplete_projection();
             }

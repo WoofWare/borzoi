@@ -3204,7 +3204,7 @@ impl<'a> Resolver<'a> {
         if candidate.arity != arity || self.prescan.own_type_simple_names.contains(name) {
             return decline(DeclineCause::EarlierTypeNameReused);
         }
-        if self.assemblies.identities_incomplete()
+        if self.assemblies.public_view_incomplete()
             || !self.assemblies_provably_lack_module_path(namespace)
         {
             return decline(DeclineCause::EarlierTypeNamespaceShared);
@@ -3497,7 +3497,7 @@ impl<'a> Resolver<'a> {
         let names = [type_name.to_string()];
         project_only_found
             && !self.assemblies.retained_auto_open_is_uncertain()
-            && !self.assemblies.identities_incomplete()
+            && !self.assemblies.public_view_incomplete()
             && !self.assemblies.manifest_auto_open_surface_declares(
                 type_name,
                 ManifestSurfacePosition::TypeAnyArity,

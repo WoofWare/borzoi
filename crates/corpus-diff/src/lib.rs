@@ -73,6 +73,12 @@ pub struct LoadedProject {
     pub fcs_extra_refs: Vec<PathBuf>,
     pub define_constants: Vec<String>,
     pub lang_version: Option<String>,
+    /// The name of the assembly the project compiles to
+    /// (`borzoi::workspace::assembly_name_of`; `None` unless known), which
+    /// the oracle checks it as. A referenced assembly's `InternalsVisibleTo` is
+    /// matched against it, and without it FCS names the project after its
+    /// last source file.
+    pub assembly_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -329,6 +335,13 @@ pub fn load_lsp_project_with_options(
 
     let define_constants = parsed.define_constants.clone();
     let lang_version = parsed.lang_version.clone();
+    // The verdict the LSP reads friend declarations against. A name it does
+    // not know is not handed to the oracle; our side then grades every
+    // reference that may name the project as a possible friend.
+    let assembly_name = match borzoi::workspace::assembly_name_of(project, &parsed) {
+        borzoi_sema::ConsumerName::Known(name) => Some(name),
+        borzoi_sema::ConsumerName::Unknown => None,
+    };
     let (fcs_extra_refs, project_assets) = fcs_extra_refs(project, &mut workspace, &mut semantic)?;
     let parses = semantic
         .parses_for_project(project, &mut workspace, &docs)
@@ -355,6 +368,7 @@ pub fn load_lsp_project_with_options(
         fcs_extra_refs,
         define_constants,
         lang_version,
+        assembly_name,
     })
 }
 
@@ -800,6 +814,7 @@ impl UsesProjectOracle {
             // reference set — FCS aborts — so the mode needs a set to be
             // exclusive about.
             "exclusiveRefs": !loaded.fcs_extra_refs.is_empty(),
+            "assemblyName": loaded.assembly_name,
         });
         if self.child.is_none() {
             self.child = Some(spawn_uses_project_batch()?);

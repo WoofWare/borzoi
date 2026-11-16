@@ -31,11 +31,13 @@ use crate::resolve::{ActivePatternShape, DeclineCause};
 use crate::ty::TyTable;
 
 pub(crate) mod existence;
+mod friendship;
 mod il_types;
 mod type_index;
 
 pub use existence::ExistenceInput;
 use existence::ExistenceSet;
+pub use friendship::{ConsumerName, Friendship};
 
 pub use il_types::IlTypeDefinition;
 use type_index::TypeIndex;
@@ -1069,6 +1071,12 @@ pub struct AssemblyEnv {
     /// #150 / codex P2). The runtime env supplies every identity and skips no
     /// loadable DLL, so this stays `false` there.
     assembly_identities_incomplete: bool,
+    /// Whether some referenced assembly may see the consumer as a friend
+    /// ([`AssemblyProjectionInput::friendship`] is not [`Friendship::No`]),
+    /// so that its non-public entities are in the consumer's name
+    /// environment while every lookup here reads its public view. Set at
+    /// construction; read through [`Self::public_view_incomplete`].
+    friend_internals_unread: bool,
     /// Every **top-level** type's handle, in interning order. Whole-environment
     /// operations use this; exact namespace/name queries use
     /// [`Self::types_by_namespace`]. Both collections keep *all* handles at a
@@ -1312,6 +1320,123 @@ pub fn fsharp_core_intrinsic_tycons() -> &'static HashSet<String> {
 type MeasureHeadCache =
     std::sync::Arc<std::sync::RwLock<HashMap<(EntityHandle, NamedTypeHead), bool>>>;
 
+/// The containers of the assemblies that may see the consumer as a friend,
+/// gathered as the env is built ([`AssemblyEnv::mark_friend_surfaces_unread`]).
+///
+/// A container is any path an `open` may name and a friend's hidden names
+/// may sit directly in: a namespace, and the path of each type and module.
+/// They come from the assembly's existence index, which reads every
+/// accessibility (an internal abbreviation exists only in the pickle, and the
+/// projection leaves out an internal union representation's cases), under
+/// every spelling a path may use: metadata names with and without their
+/// arity suffix, logical and compiled names. Marking a path no `open` can
+/// name costs nothing.
+#[derive(Default)]
+struct FriendSurfaces {
+    any: bool,
+    /// Some friend's index was not read: its containers are known only as
+    /// far as its projected entities go.
+    unread: bool,
+    /// Each path once, however many entities share it.
+    containers: std::collections::BTreeSet<Vec<String>>,
+}
+
+impl FriendSurfaces {
+    fn add(&mut self, existence: &ExistenceInput, roots: &[Entity]) {
+        self.any = true;
+        match existence {
+            ExistenceInput::Read(index) => self.add_index(index),
+            ExistenceInput::Synthetic => self.add_entities(roots),
+            ExistenceInput::Unread => {
+                self.unread = true;
+                self.add_entities(roots);
+            }
+        }
+    }
+
+    /// Push `namespace`, and `namespace` extended by each prefix of
+    /// `enclosing` then by each spelling of the entity's own name.
+    fn push_paths(&mut self, namespace: &[String], enclosing: &[String], own: &[&str]) {
+        // The namespace's ancestors need no mark of their own: a dropped type
+        // in `FG.C1` already makes an `open FG` read `C1` as uncertain
+        // (`prefixes_a_dropped_type_namespace`), which
+        // `friend_assembly_grid`'s `ParentNamespace` cells hold. The root is
+        // a container only of what the assembly declares directly in it,
+        // since every `open` splits at it.
+        let mut path = namespace.to_vec();
+        self.containers.insert(path.clone());
+        for link in enclosing {
+            path.push(link.clone());
+            self.containers.insert(path.clone());
+        }
+        for name in own {
+            let mut own_path = path.clone();
+            own_path.push((*name).to_string());
+            self.containers.insert(own_path);
+        }
+    }
+
+    fn add_index(&mut self, index: &borzoi_assembly::ExistenceIndex) {
+        // A metadata name less its generic arity suffix.
+        fn bare(name: &str) -> &str {
+            name.split_once('`').map_or(name, |(head, _)| head)
+        }
+        for row in &index.il {
+            // The module's pseudo-type holds the module's globals, which no
+            // F# name reaches: it is no evidence of a name at the root.
+            if row.name == "<Module>" && row.namespace.is_empty() && row.enclosing.is_empty() {
+                continue;
+            }
+            let enclosing: Vec<String> =
+                row.enclosing.iter().map(|n| bare(n).to_string()).collect();
+            self.push_paths(&row.namespace, &row.enclosing, &[]);
+            self.push_paths(&row.namespace, &enclosing, &[&row.name, bare(&row.name)]);
+        }
+        match &index.pickle {
+            borzoi_assembly::PickleLayer::Read(rows) => {
+                for row in rows {
+                    if row.kind == borzoi_assembly::PickledEntityKind::Namespace {
+                        // A namespace fragment holds names; it is not one
+                        // its parent's `open` brings into scope.
+                        let mut path = row.namespace.clone();
+                        path.push(row.logical_name.clone());
+                        self.containers.insert(path);
+                        continue;
+                    }
+                    self.push_paths(
+                        &row.namespace,
+                        &row.enclosing,
+                        &[&row.logical_name, &row.compiled_name],
+                    );
+                }
+            }
+            borzoi_assembly::PickleLayer::NotFSharp => {}
+            // What the pickle declares beyond the `TypeDef` rows is unknown.
+            borzoi_assembly::PickleLayer::Unreadable(_) => self.unread = true,
+        }
+    }
+
+    fn add_entities(&mut self, roots: &[Entity]) {
+        fn walk(
+            out: &mut FriendSurfaces,
+            namespace: &[String],
+            chain: &mut Vec<String>,
+            e: &Entity,
+        ) {
+            let own = e.source_name.as_deref().unwrap_or(&e.name).to_string();
+            out.push_paths(namespace, chain, &[&own, &e.name]);
+            chain.push(own);
+            for nested in &e.nested_types {
+                walk(out, namespace, chain, nested);
+            }
+            chain.pop();
+        }
+        for root in roots {
+            walk(self, &root.namespace, &mut Vec::new(), root);
+        }
+    }
+}
+
 /// One referenced assembly as
 /// [`AssemblyEnv::from_assemblies_with_projection_knowability`] takes it.
 pub struct AssemblyProjectionInput {
@@ -1348,6 +1473,11 @@ pub struct AssemblyProjectionInput {
     /// [`borzoi_assembly::EcmaView::qualified_names`]; `None` when
     /// not read.
     pub qualified_names: Option<Vec<String>>,
+    /// Whether the consumer is a friend of this assembly
+    /// ([`Friendship::of`] over [`borzoi_assembly::EcmaView::friend_declarations`]).
+    /// Anything but [`Friendship::No`] grades the env's public view as
+    /// incomplete ([`AssemblyEnv::public_view_incomplete`]).
+    pub friendship: Friendship,
 }
 
 /// How [`AssemblyEnv::abbreviation_target_at_path_splits`] finds the top-level
@@ -1719,6 +1849,13 @@ impl AssemblyEnv {
                         doc_id_dialect: None,
                         has_assembly_references: None,
                         qualified_names: None,
+                        // Entities handed in directly come with no manifest
+                        // to declare a friend: these constructors serve
+                        // hand-built and test inputs, and claim none. A host
+                        // projecting a real DLL builds through
+                        // `from_assemblies_with_projection_knowability`,
+                        // which requires the verdict, or `from_views_as`.
+                        friendship: Friendship::No,
                     }
                 })
                 .collect(),
@@ -1744,6 +1881,7 @@ impl AssemblyEnv {
             Entity,
         )> = Vec::new();
         let mut auto_opens: Vec<(AssemblyId, String, Vec<String>)> = Vec::new();
+        let mut friends = FriendSurfaces::default();
         for input in assemblies {
             let AssemblyProjectionInput {
                 path,
@@ -1758,10 +1896,14 @@ impl AssemblyEnv {
                 doc_id_dialect,
                 has_assembly_references,
                 qualified_names,
+                friendship,
             } = input;
             let id = AssemblyId(
                 u32::try_from(env.assemblies.len()).expect("more than u32::MAX assemblies"),
             );
+            if friendship.may_see_internals() {
+                friends.add(&existence, &roots);
+            }
             env.assemblies.push(Some(path));
             if let Some(dialect) = doc_id_dialect {
                 env.assembly_doc_id_dialects.insert(id, dialect);
@@ -1817,7 +1959,39 @@ impl AssemblyEnv {
         env.qualified_names_read = qualified_read;
         env.index_roots(tagged);
         env.record_assembly_auto_opens(auto_opens);
+        env.mark_friend_surfaces_unread(friends);
         env
+    }
+
+    /// Grade the non-public surface of the assemblies `friends` collected
+    /// (those that may see the consumer as a friend,
+    /// [`Friendship::may_see_internals`]) as unread, in the two ways the env
+    /// records an unread entity.
+    ///
+    /// - [`Self::public_view_incomplete`]: every reading that lands in an
+    ///   assembly is withdrawn, since a friend's internal entity may shadow
+    ///   it.
+    /// - A dropped type ([`Self::mark_namespace_dropped_type`]) in every
+    ///   container of each such assembly ([`FriendSurfaces`]). FCS folds a
+    ///   friend's internal entities, values and union cases into an `open` of
+    ///   their container, where they shadow what the file declared before the
+    ///   `open`; a container holding a dropped type is one whose `open` the
+    ///   resolver knows may bring names it cannot list.
+    fn mark_friend_surfaces_unread(&mut self, friends: FriendSurfaces) {
+        if !friends.any {
+            return;
+        }
+        self.friend_internals_unread = true;
+        let mut containers = friends.containers;
+        if friends.unread {
+            // Some friend's containers are not all known (its index, or its
+            // pickle, was not read): the extension gate's existence questions
+            // decline, and the root is marked, which every `open`'s path
+            // splits at, so every `open` may shadow what came before it.
+            self.existence.mark_unknowable();
+            containers.insert(Vec::new());
+        }
+        self.mark_namespaces_dropped_types(containers);
     }
 
     /// The name-indexing fold shared by [`Self::from_entities`] and
@@ -2053,18 +2227,42 @@ impl AssemblyEnv {
     /// Propagates the first [`ImportError`] from any view. Each view gets its
     /// own `AssemblyId` (with no source path — [`Self::assembly_path`] stays
     /// `None`) so the AutoOpen deref can tell same-named views apart.
+    ///
+    /// The consumer is [`ConsumerName::PROBE`]: a name no certified friend
+    /// declaration spells, which is what an FCS-graded harness's probe
+    /// project is (the oracle names it after a temporary file). A harness
+    /// whose referenced assemblies name its project as a friend says so
+    /// through [`Self::from_views_as`].
     pub fn from_views<V: EcmaView>(views: &[V]) -> Result<Self, ImportError> {
+        Self::from_views_as(views, &ConsumerName::Known(ConsumerName::PROBE.to_string()))
+    }
+
+    /// [`Self::from_views`] for a consumer of the given name, which decides
+    /// each view's [`Friendship`].
+    pub fn from_views_as<V: EcmaView>(
+        views: &[V],
+        consumer: &ConsumerName,
+    ) -> Result<Self, ImportError> {
         let mut env = AssemblyEnv::default();
         let mut qualified_read = true;
         let mut tagged = Vec::new();
         let mut auto_opens = Vec::new();
         let mut dropped_namespaces = Vec::new();
         let mut unreadable_namespaces: Vec<Vec<String>> = Vec::new();
+        let mut friends = FriendSurfaces::default();
         for view in views {
+            let friendship = Friendship::of(&view.friend_declarations(), consumer);
             let (roots, skips) = view.enumerate_type_defs_with_skips()?;
-            match view.existence_index() {
-                Ok(index) => env.existence.add(&ExistenceInput::Read(index), &[]),
-                Err(_) => env.existence.mark_unknowable(),
+            let existence = match view.existence_index() {
+                Ok(index) => ExistenceInput::Read(index),
+                Err(_) => ExistenceInput::Unread,
+            };
+            if friendship.may_see_internals() {
+                friends.add(&existence, &roots);
+            }
+            match existence {
+                ExistenceInput::Read(index) => env.existence.add(&ExistenceInput::Read(index), &[]),
+                _ => env.existence.mark_unknowable(),
             }
             let visibility = if skips.fsharp_abbreviations_unknowable {
                 AbbreviationVisibility::Unknowable
@@ -2128,6 +2326,7 @@ impl AssemblyEnv {
         for namespace in unreadable_namespaces {
             env.mark_namespace_unreadable_attribute(namespace);
         }
+        env.mark_friend_surfaces_unread(friends);
         Ok(env)
     }
 
@@ -4401,13 +4600,14 @@ impl AssemblyEnv {
     /// read, so that no attribute spelling can be taken at its word. An F#
     /// abbreviation lives in its assembly's signature pickle, so one can be
     /// missing only where the env lost part of what an assembly declares:
-    /// a DLL the host skipped whole ([`Self::identities_incomplete`]), a
+    /// a DLL the host skipped whole or a friend's non-public surface
+    /// ([`Self::public_view_incomplete`]), a
     /// pickle that could not be decoded ([`Self::unknowable_abbreviation_namespaces`]),
     /// or a type the projection dropped ([`Self::namespaces_with_dropped_types`]).
     /// A dropped *member* ([`borzoi_assembly::Entity::skipped_members`]) hides
     /// no abbreviation, since an abbreviation is an entity of its own.
     fn abbreviations_may_be_unread(&self) -> bool {
-        self.assembly_identities_incomplete
+        self.public_view_incomplete()
             || !self.unknowable_abbreviation_namespaces.is_empty()
             || !self.namespaces_with_dropped_types.is_empty()
     }
@@ -5295,7 +5495,7 @@ impl AssemblyEnv {
                 // referenced F# assembly declares it, or the env would.
                 None if matches!(base, TypeRef::Named { namespace, name, .. }
                     if namespace.len() == 1 && namespace[0] == "System" && name == "Object")
-                    && !self.identities_incomplete()
+                    && !self.public_view_incomplete()
                     && !self.namespace_has_dropped_type(&[String::from("System")]) =>
                 {
                     return out;
@@ -5427,6 +5627,23 @@ impl AssemblyEnv {
         self.assembly_identities_incomplete
     }
 
+    /// Whether some entity the consumer can name may be missing from what
+    /// the env's lookups read: an assembly the env cannot name
+    /// ([`Self::identities_incomplete`]), or the non-public surface of an
+    /// assembly that may see the consumer as a friend, which the lookups'
+    /// public view skips while FCS adds it to the consumer's name
+    /// environment (see [`Friendship`]). Either may declare a type, module or
+    /// value that shadows what was read, so nothing read out of the
+    /// assemblies is provably the consumer's binding, and every
+    /// assembly-rooted reading is withdrawn
+    /// (`Resolution::sealed_under_incomplete_projection`).
+    ///
+    /// The existence index and the extension gate are not affected by the
+    /// second cause: they read every accessibility already.
+    pub fn public_view_incomplete(&self) -> bool {
+        self.assembly_identities_incomplete || self.friend_internals_unread
+    }
+
     /// Mark the env's loaded-DLL **identity set incomplete** — the host skipped a
     /// DLL it could not project at all, so its manifest name is unregistered.
     /// That name could collide with a referenced CCU, so the abbreviation-target
@@ -5461,12 +5678,20 @@ impl AssemblyEnv {
     /// (the LSP), which observes the drop. `namespace` is the dropped type's
     /// enclosing namespace (empty for a root-namespace type).
     pub fn mark_namespace_dropped_type(&mut self, namespace: Vec<String>) {
-        for len in 0..=namespace.len() {
-            self.dropped_type_namespace_prefixes
-                .insert(&self.names, &namespace[..len]);
+        self.mark_namespaces_dropped_types(std::iter::once(namespace));
+    }
+
+    /// [`Self::mark_namespace_dropped_type`] for each of `namespaces`, with
+    /// the memos dropped once rather than once per namespace.
+    fn mark_namespaces_dropped_types(&mut self, namespaces: impl IntoIterator<Item = Vec<String>>) {
+        for namespace in namespaces {
+            for len in 0..=namespace.len() {
+                self.dropped_type_namespace_prefixes
+                    .insert(&self.names, &namespace[..len]);
+            }
+            self.namespaces_with_dropped_types
+                .insert(&self.names, &namespace);
         }
-        self.namespaces_with_dropped_types
-            .insert(&self.names, &namespace);
         self.seeded_entries = self.entry_count();
         // The core library is named only over a `System` with no drop.
         self.core_library = Default::default();
@@ -8623,6 +8848,9 @@ pub(crate) mod from_views_tests {
         fn doc_id_dialect(&self) -> Result<borzoi_assembly::doc_id::DocIdDialect, ImportError> {
             Ok(borzoi_assembly::doc_id::DocIdDialect::Metadata)
         }
+        fn friend_declarations(&self) -> borzoi_assembly::FriendDeclarations {
+            borzoi_assembly::FriendDeclarations::default()
+        }
 
         fn fsharp_resources(&self) -> Result<Vec<FSharpResource>, ImportError> {
             Ok(vec![])
@@ -8709,6 +8937,9 @@ pub(crate) mod from_views_tests {
         }
         fn doc_id_dialect(&self) -> Result<borzoi_assembly::doc_id::DocIdDialect, ImportError> {
             Ok(borzoi_assembly::doc_id::DocIdDialect::Metadata)
+        }
+        fn friend_declarations(&self) -> borzoi_assembly::FriendDeclarations {
+            borzoi_assembly::FriendDeclarations::default()
         }
 
         fn fsharp_resources(&self) -> Result<Vec<FSharpResource>, ImportError> {
@@ -9868,6 +10099,7 @@ pub(crate) mod from_views_tests {
             doc_id_dialect: None,
             has_assembly_references: None,
             qualified_names: None,
+            friendship: super::Friendship::No,
         };
         let env = AssemblyEnv::from_assemblies_with_projection_knowability(vec![
             input("Contributor.dll", vec![widget, marker]),
@@ -10022,6 +10254,7 @@ pub(crate) mod from_views_tests {
             doc_id_dialect: None,
             has_assembly_references: None,
             qualified_names: None,
+            friendship: super::Friendship::No,
         }
     }
 
