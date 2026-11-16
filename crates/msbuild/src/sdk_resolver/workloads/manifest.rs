@@ -1,5 +1,5 @@
 //! Whether the workload resolver loads a set of resolved manifests without
-//! throwing.
+//! throwing, and the packs it composes from them.
 //!
 //! The auto-import locator asks the workload resolver for installed SDK packs,
 //! and that first reads every resolved `WorkloadManifest.json`
@@ -7,10 +7,10 @@
 //! value outside its grammar), with the localization catalog for the process's
 //! UI culture, and then composes them (`WorkloadResolver.ComposeWorkloadManifests`,
 //! which throws on a workload or pack two manifests define, and on a
-//! `depends-on` it cannot meet). Any throw fails the resolution, so an empty
+//! `depends-on` it cannot meet). Any throw fails the resolution, so an
 //! answer is exact only where none can happen.
 //!
-//! [`check_manifests_load`] certifies a strict subset of what loads, and
+//! [`load_manifests`] certifies a strict subset of what loads, and
 //! declines everything else: a document the strict JSON reader refuses (so
 //! comments, which the reference skips, decline too; trailing commas, which
 //! real manifests carry, are read as the reference reads them), an
@@ -41,15 +41,60 @@ struct Facts {
     /// The workloads it defines, each with whether it is concrete and of the
     /// `dev` kind (so needs a description), and its description.
     workloads: Vec<(String, Option<String>)>,
-    packs: Vec<String>,
+    /// The packs it defines, in document order.
+    packs: Vec<Pack>,
     depends_on: Vec<(String, String)>,
 }
 
-/// Decline unless the workload resolver certainly loads `manifests`.
-pub(super) fn check_manifests_load(
+/// `WorkloadPackKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PackKind {
+    Sdk,
+    Framework,
+    Library,
+    Template,
+    Tool,
+}
+
+/// One pack a manifest defines (`ReadWorkloadPack`).
+#[derive(Clone, Debug)]
+pub(super) struct Pack {
+    /// The id as the manifest spells it, which the pack path keeps.
+    pub(super) id: String,
+    pub(super) version: String,
+    pub(super) kind: PackKind,
+    /// `alias-to`: runtime identifier to the pack id it stands for there, in
+    /// document order, keys distinct. Empty when absent, as an empty map is to
+    /// `WorkloadPack.IsAlias`.
+    pub(super) alias_to: Vec<(String, String)>,
+}
+
+impl Pack {
+    /// `WorkloadResolver.ResolveId`: a pack that is no alias is its own id;
+    /// an alias is the target of the first of `runtime_identifiers` its map
+    /// names (an ordinal lookup), or nothing, when it names none.
+    pub(super) fn resolved_id(&self, runtime_identifiers: &[String]) -> Option<&str> {
+        if self.alias_to.is_empty() {
+            return Some(&self.id);
+        }
+        runtime_identifiers.iter().find_map(|rid| {
+            self.alias_to
+                .iter()
+                .find(|(key, _)| key == rid)
+                .map(|(_, target)| target.as_str())
+        })
+    }
+}
+
+/// Every pack of `manifests`, in the order the workload resolver composes
+/// them (`ComposeWorkloadManifests` fills a dictionary manifest by manifest,
+/// each manifest's packs in document order, and nothing is removed from it, so
+/// its enumeration is that insertion order), or the decline unless the
+/// workload resolver certainly loads `manifests`.
+pub(super) fn load_manifests(
     manifests: &[Resolved<'_>],
     observer: &Observer,
-) -> Result<(), SdkResolveError> {
+) -> Result<Vec<Pack>, SdkResolveError> {
     let mut all: Vec<(&Resolved<'_>, Facts)> = Vec::new();
     for manifest in manifests {
         let path = manifest.directory.join("WorkloadManifest.json");
@@ -82,7 +127,8 @@ pub(super) fn check_manifests_load(
         }
         all.push((manifest, facts));
     }
-    compose(&all)
+    compose(&all)?;
+    Ok(all.into_iter().flat_map(|(_, facts)| facts.packs).collect())
 }
 
 /// The entries of every localization catalog in `{directory}/localize` that a
@@ -202,9 +248,9 @@ fn compose(all: &[(&Resolved<'_>, Facts)]) -> Result<(), SdkResolveError> {
             workloads.push(key);
         }
         for pack in &facts.packs {
-            let key = pack.to_ascii_lowercase();
+            let key = pack.id.to_ascii_lowercase();
             if packs.contains(&key) {
-                return decline(format!("pack {pack} is defined twice"));
+                return decline(format!("pack {} is defined twice", pack.id));
             }
             packs.push(key);
         }
@@ -460,11 +506,14 @@ fn read_manifest(text: &str) -> Result<Facts, &'static str> {
                     if !is_id(id) {
                         return Err("a pack id we do not certify");
                     }
-                    if facts.packs.iter().any(|seen| seen.eq_ignore_ascii_case(id)) {
+                    if facts
+                        .packs
+                        .iter()
+                        .any(|seen| seen.id.eq_ignore_ascii_case(id))
+                    {
                         return Err("a pack defined twice");
                     }
-                    read_pack(pack)?;
-                    facts.packs.push(id.clone());
+                    facts.packs.push(read_pack(id, pack)?);
                 }
             }
             // Skipped whatever it holds.
@@ -534,37 +583,47 @@ fn read_workload(value: &JsonValue) -> Result<Option<String>, &'static str> {
     }
 }
 
-/// `ReadWorkloadPack`.
-fn read_pack(value: &JsonValue) -> Result<(), &'static str> {
+/// `ReadWorkloadPack` of the pack `id`. The kind is `Enum.TryParse`'s,
+/// ignoring case, of a name alone (it also takes numbers and lists of names,
+/// which are not certified).
+fn read_pack(id: &str, value: &JsonValue) -> Result<Pack, &'static str> {
     let entries = fields(value, &["version", "kind", "alias-to"])?;
-    let (mut version, mut kind) = (false, false);
+    let (mut version, mut kind, mut alias_to) = (None, None, Vec::new());
     for (name, value) in entries {
         match name {
-            "version" => {
-                string(value)?;
-                version = true;
-            }
+            "version" => version = Some(string(value)?.to_owned()),
             "kind" => {
-                if which(
-                    string(value)?,
-                    &["sdk", "framework", "library", "template", "tool"],
-                )
-                .is_none()
-                {
-                    return Err("a pack kind we do not certify");
-                }
-                kind = true;
+                kind = Some(
+                    match which(
+                        string(value)?,
+                        &["sdk", "framework", "library", "template", "tool"],
+                    ) {
+                        Some("sdk") => PackKind::Sdk,
+                        Some("framework") => PackKind::Framework,
+                        Some("library") => PackKind::Library,
+                        Some("template") => PackKind::Template,
+                        Some(_) => PackKind::Tool,
+                        None => return Err("a pack kind we do not certify"),
+                    },
+                );
             }
             "alias-to" => {
-                string_map(value, false, is_id)?;
+                alias_to = string_map(value, false, is_id)?
+                    .into_iter()
+                    .map(|(key, target)| (key.to_owned(), target.to_owned()))
+                    .collect();
             }
             _ => unreachable!("`fields` admits only the names it is given"),
         }
     }
-    if version && kind {
-        Ok(())
-    } else {
-        Err("a pack without a version or a kind")
+    match (version, kind) {
+        (Some(version), Some(kind)) => Ok(Pack {
+            id: id.to_owned(),
+            version,
+            kind,
+            alias_to,
+        }),
+        _ => Err("a pack without a version or a kind"),
     }
 }
 

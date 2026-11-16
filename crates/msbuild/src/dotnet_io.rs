@@ -58,6 +58,15 @@ pub(crate) fn file_exists(observer: &Observer, path: &Path) -> bool {
     }
 }
 
+/// `Directory.Exists(path)` for a rooted `path`: `stat`, which follows a
+/// link, finds a directory there.
+pub(crate) fn directory_exists(observer: &Observer, path: &Path) -> bool {
+    let Some((full, _)) = full_path(path) else {
+        return false;
+    };
+    observed::kind(observer, &full) == Ok(EntryKind::Dir)
+}
+
 /// `Path.GetFullPath(path)` for a rooted `path`, as the path to ask the file
 /// system about, and whether the full form ends in a separator. `None` for an
 /// unrooted `path` (it would resolve against the process's working directory)
