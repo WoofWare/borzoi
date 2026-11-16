@@ -1370,7 +1370,13 @@ impl<'a> Resolver<'a> {
                     //   and no dropped type there)
                     //   and whose values the walk can list (an abbreviation, or a
                     //   module a later reading cannot see through, is not): it
-                    //   brings nothing beyond the project's names.
+                    //   brings nothing beyond the project's names;
+                    //
+                    // and every relative or shortened reading of the path holds
+                    // nothing in the assemblies, of any accessibility: the
+                    // interpretations above come through the public view, which
+                    // cannot see a friend assembly's internal-only container at
+                    // such a reading (`open_certify`).
                     //
                     // Every other `open` is **unenumerated**, and the gate declines
                     // every call in the file: an assembly module (#794 PR 2b), a
@@ -1410,6 +1416,15 @@ impl<'a> Resolver<'a> {
                                 || names_uncovered_dropped_path
                                 || names_unlent_module
                                 || unmodelled,
+                            rooted,
+                            head_is_alias: self.lexical_alias_target(&path[0]).is_some(),
+                            open_prefixes: self
+                                .scope
+                                .open_shortening_prefixes
+                                .iter()
+                                .map(|p| p.path.as_slice())
+                                .collect(),
+                            container_path: &self.lexical.container_path,
                         };
                         match open_certify::certify(&facts, self.assemblies.extension_view()) {
                             Some(namespace) => self.out.open_extension_namespaces.push(namespace),

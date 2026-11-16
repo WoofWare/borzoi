@@ -147,7 +147,7 @@ enum Home {
     /// `module internal Exts`, the fixture granting the calling project
     /// friendship (`InternalsVisibleTo`).
     InternalModule,
-    /// `namespace G.C<n>.Hidden`, holding internal extension holders only
+    /// `namespace G.C<n>.Hidden<n>`, holding internal extension holders only
     /// (an internal C#-style container, or an internal `[<AutoOpen>]`
     /// module), so name resolution sees no namespace there at all.
     HiddenNamespace,
@@ -155,6 +155,15 @@ enum Home {
     /// holds nothing but them, which the visibility perturbation turns
     /// internal-only.
     SoleNamespace,
+    /// `module Hidden<n>` inside an internal `[<AutoOpen>] module Auto<n>` of
+    /// `namespace G.C<n>`: opening the namespace (or declaring a file in it)
+    /// makes `Hidden<n>` answer to its short name, through a module name
+    /// resolution cannot see. The query of `G.C<n>`, which covers its whole
+    /// tree, answers for the call too, so only the classification pins what
+    /// the certification makes of it.
+    HiddenAuto,
+    /// [`Home::HiddenAuto`] with `Auto<n>` public.
+    SoleAuto,
     Nested,
     AutoOpen,
     Rqa,
@@ -204,14 +213,22 @@ enum Reach {
     /// `open G.C<n>.Exts` of an assembly module whose path an earlier
     /// project file declares as a *namespace*.
     SharedNamespaceOverModule,
-    /// `open G.C<n>.Hidden` of an assembly namespace holding internal
+    /// `open G.C<n>.Hidden<n>` of an assembly namespace holding internal
     /// extensions only, whose path an earlier project file declares as a
     /// *module*.
     SharedModuleOverNamespace,
+    /// `namespace G.C<n>`, then `open Hidden<n>`, where an earlier project
+    /// file declares a root module `Hidden<n>`: the written path names the
+    /// project module, and the relative reading (`G.C<n>.Hidden<n>`) names
+    /// the cell's hidden home.
+    RelativeEnclosingOverRoot,
+    /// [`Reach::RelativeEnclosingOverRoot`] from a top-level module, the
+    /// relative reading through `open G.C<n>`.
+    RelativeOpenedOverRoot,
 }
 
 impl Reach {
-    const ALL: [Reach; 17] = [
+    const ALL: [Reach; 19] = [
         Reach::OpenNamespace,
         Reach::GlobalNamespace,
         Reach::RelativeNamespace,
@@ -229,6 +246,8 @@ impl Reach {
         Reach::SharedModuleRelative,
         Reach::SharedNamespaceOverModule,
         Reach::SharedModuleOverNamespace,
+        Reach::RelativeEnclosingOverRoot,
+        Reach::RelativeOpenedOverRoot,
     ];
 
     /// Whether the reach goes through a module, which needs a module home
@@ -324,10 +343,22 @@ impl Cell {
                     && matches!(self.renamed, Renamed::No | Renamed::Shared)
                     && self.target == Target::Receiver
                     && self.container != Container::Generic));
-        // The hidden namespace is reached only through the project module
-        // that shares its path, and that reach needs it.
-        let sole = matches!(self.home, Home::HiddenNamespace | Home::SoleNamespace);
-        let hidden = sole == (self.reach == Reach::SharedModuleOverNamespace)
+        // A hidden home is reached only through a project module that shares
+        // its path or its short name, and those reaches need one. The auto
+        // module's path is not one an `open` can write in full.
+        let sole = matches!(
+            self.home,
+            Home::HiddenNamespace | Home::SoleNamespace | Home::HiddenAuto | Home::SoleAuto
+        );
+        let over_project_module = matches!(
+            self.reach,
+            Reach::SharedModuleOverNamespace
+                | Reach::RelativeEnclosingOverRoot
+                | Reach::RelativeOpenedOverRoot
+        );
+        let auto = matches!(self.home, Home::HiddenAuto | Home::SoleAuto);
+        let hidden = sole == over_project_module
+            && !(auto && self.reach == Reach::SharedModuleOverNamespace)
             && (!sole
                 || (matches!(self.style, Style::CsMarked | Style::FsOptional)
                     && self.kind == Kind::Method
@@ -380,7 +411,11 @@ impl Cell {
     /// The module path holding the extension, if any.
     fn module_path(self) -> Option<&'static str> {
         match self.home {
-            Home::Namespace | Home::HiddenNamespace | Home::SoleNamespace => None,
+            Home::Namespace
+            | Home::HiddenNamespace
+            | Home::SoleNamespace
+            | Home::HiddenAuto
+            | Home::SoleAuto => None,
             Home::Module | Home::InternalModule | Home::AutoOpen | Home::Rqa => Some("Exts"),
             Home::Nested => Some("Outer.Exts"),
         }
@@ -394,6 +429,7 @@ impl Cell {
                 Style::FsOptional => "Exts",
                 _ => "Holder",
             },
+            Home::HiddenAuto | Home::SoleAuto => "Auto",
             Home::Module | Home::InternalModule | Home::AutoOpen | Home::Rqa => "Exts",
             Home::Nested => "Outer",
         }
@@ -430,6 +466,8 @@ impl Cell {
                                     Home::InternalModule,
                                     Home::HiddenNamespace,
                                     Home::SoleNamespace,
+                                    Home::HiddenAuto,
+                                    Home::SoleAuto,
                                     Home::Nested,
                                     Home::AutoOpen,
                                     Home::Rqa,
@@ -607,7 +645,7 @@ fn cell_source(n: usize, cell: Cell) -> String {
         }
         Home::HiddenNamespace | Home::SoleNamespace => {
             // Its own namespace, with the receiver's types written in full.
-            out.push(format!("namespace {}.Hidden", namespace(n)));
+            out.push(format!("namespace {}.Hidden{n}", namespace(n)));
             out.push(String::new());
             let ns = namespace(n);
             let internal = if cell.home == Home::HiddenNamespace {
@@ -630,6 +668,17 @@ fn cell_source(n: usize, cell: Cell) -> String {
             } else {
                 out.extend(body);
             }
+        }
+        Home::HiddenAuto | Home::SoleAuto => {
+            let internal = if cell.home == Home::HiddenAuto {
+                "internal "
+            } else {
+                ""
+            };
+            out.push("[<AutoOpen>]".to_string());
+            out.push(format!("module {internal}Auto{n} ="));
+            out.push(format!("    module Hidden{n} ="));
+            out.extend(indent(body, 8));
         }
         Home::AutoOpen => {
             out.push("[<AutoOpen>]".to_string());
@@ -679,7 +728,12 @@ fn internalize(block: String) -> String {
         .map(|l| {
             let trimmed = l.trim_start();
             let indent = &l[..l.len() - trimmed.len()];
-            for holder in ["type Holder", "module Exts =", "module Outer ="] {
+            for holder in [
+                "type Holder",
+                "module Exts =",
+                "module Outer =",
+                "module Auto",
+            ] {
                 if let Some(rest) = trimmed.strip_prefix(holder) {
                     let keyword = holder.split(' ').next().expect("a keyword");
                     let name = &holder[keyword.len() + 1..];
@@ -765,7 +819,9 @@ fn use_source(n: usize, cell: Cell) -> (String, Probe) {
         Reach::OpenModule | Reach::SharedModule | Reach::SharedNamespaceOverModule => {
             top(format!("open {ns}.{}", module()))
         }
-        Reach::SharedModuleOverNamespace => top(format!("open {ns}.Hidden")),
+        Reach::SharedModuleOverNamespace => top(format!("open {ns}.Hidden{n}")),
+        Reach::RelativeEnclosingOverRoot => nested(&ns, format!("open Hidden{n}")),
+        Reach::RelativeOpenedOverRoot => top(format!("open {ns}\nopen Hidden{n}")),
         Reach::GlobalModule => top(format!("open global.{ns}.{}", module())),
         Reach::RelativeModule => top(format!("open {ns}\nopen {}", module())),
         Reach::EnclosingRelativeModule => nested(&ns, format!("open {}", module())),
@@ -789,7 +845,8 @@ fn use_source(n: usize, cell: Cell) -> (String, Probe) {
 /// Whether the extension gate must read the calling file's `open` as
 /// enumerated: only inside the certified domain (an `open` whose written
 /// path is a namespace, read at that path, no split of which holds a
-/// dropped type). Every other form is unenumerated, and a file with no
+/// dropped type, and whose every other candidate reading holds nothing in
+/// the assemblies). Every other form is unenumerated, and a file with no
 /// `open` has none to read.
 fn certified(cell: Cell) -> bool {
     match cell.reach {
@@ -810,7 +867,10 @@ fn shared_source(n: usize, cell: Cell) -> Option<String> {
             "namespace {ns}\nmodule Shared{n} =\n    let v{n} = 1\n"
         )),
         Reach::SharedModuleOverNamespace => Some(format!(
-            "namespace {ns}\nmodule Hidden =\n    let v{n} = 1\n"
+            "namespace {ns}\nmodule Hidden{n} =\n    let v{n} = 1\n"
+        )),
+        Reach::RelativeEnclosingOverRoot | Reach::RelativeOpenedOverRoot => Some(format!(
+            "namespace global\nmodule Hidden{n} =\n    let v{n} = 1\n"
         )),
         Reach::SharedNamespaceOverModule => Some(format!(
             "namespace {ns}.{}\nmodule SharedNs{n} =\n    let v{n} = 1\n",
@@ -1089,10 +1149,13 @@ fn every_extension_fcs_reads_in_the_assembly_is_projected() {
     );
 }
 
+/// One calling project: its `(path, source)` files and, per calling file,
+/// its index and the call's method name.
+type CallingProject = (Vec<(String, String)>, Vec<(usize, String)>);
+
 /// The calling projects of `cells`, each a chunk of at most [`CHUNK`]
-/// calling files after the earlier file their reaches share: per chunk, the
-/// sources and, per calling file, its index and the call's method name.
-fn calling_projects(cells: &[(usize, Cell)]) -> Vec<(Vec<(String, String)>, Vec<(usize, String)>)> {
+/// calling files after the earlier file their reaches share.
+fn calling_projects(cells: &[(usize, Cell)]) -> Vec<CallingProject> {
     cells
         .chunks(CHUNK)
         .map(|chunk| {
@@ -1119,10 +1182,7 @@ fn calling_projects(cells: &[(usize, Cell)]) -> Vec<(Vec<(String, String)>, Vec<
 /// Whether the gate declines each call of `project` with `env`'s assemblies
 /// in scope, resolving it without inference (the gate reads resolution
 /// alone).
-fn gate_declines(
-    env: &AssemblyEnv,
-    project: &(Vec<(String, String)>, Vec<(usize, String)>),
-) -> Vec<bool> {
+fn gate_declines(env: &AssemblyEnv, project: &CallingProject) -> Vec<bool> {
     let (sources, calls) = project;
     let parsed: Vec<(ImplFile, SyntaxRecovery)> = sources
         .iter()

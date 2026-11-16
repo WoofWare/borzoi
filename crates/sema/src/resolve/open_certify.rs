@@ -13,7 +13,17 @@
 //!   does. What the assemblies bring is then exactly the contents of the
 //!   namespace at the written path, which the gate asks about directly
 //!   ([`ExtensionView::extension_named_in_scope`]), whatever the resolver made
-//!   of the path.
+//!   of the path;
+//! - and every **other reading** F# could give the path holds nothing in the
+//!   assemblies, of any accessibility. Unless the path is `global.`-rooted,
+//!   FCS also reads it relative to each enclosing container and to each
+//!   container an earlier `open` lent (the implicit opens included), and
+//!   through the `[<AutoOpen>]` modules either holds. The resolver lists
+//!   those readings through the public view, so a friend assembly's
+//!   internal-only namespace or module at one is missing from its
+//!   interpretations; [`certify`] asks the [`ExtensionView`] about each
+//!   instead ([`other_readings_hold_nothing`]). A module abbreviation at the
+//!   path's head is a reading it cannot bound, and declines.
 //!
 //! Every other `open` is unenumerated and declines every call. The assembly
 //! side is read only through an [`ExtensionView`], which holds no lookup
@@ -48,6 +58,17 @@ pub(super) struct OpenFacts<'a> {
     /// prefix, a dropped type the path names, a module only an auto-open
     /// lends a short name, an unmodelled assembly type).
     pub(super) walk_uncertain: bool,
+    /// The path was written `global.`-rooted, so F# reads it at the root
+    /// alone.
+    pub(super) rooted: bool,
+    /// The path's head is a module abbreviation in scope.
+    pub(super) head_is_alias: bool,
+    /// Every container an earlier `open` in scope lent its contents' short
+    /// names from, the implicit opens included.
+    pub(super) open_prefixes: Vec<&'a [String]>,
+    /// The enclosing containers, outermost first: namespace segments, then
+    /// module segments.
+    pub(super) container_path: &'a [String],
 }
 
 /// The namespace whose assembly content an enumerated `open` brings, or
@@ -67,7 +88,50 @@ pub(super) fn certify(facts: &OpenFacts<'_>, assemblies: ExtensionView<'_>) -> O
         Interpretation::ProjectModule { path, listable } => path == written && listable,
         Interpretation::AssemblyModule => false,
     });
-    project_side_certain.then(|| written.to_vec())
+    (project_side_certain && other_readings_hold_nothing(facts, assemblies))
+        .then(|| written.to_vec())
+}
+
+/// Whether no reading of the written path but the root one can find
+/// anything in the assemblies, whatever its accessibility: for each base a
+/// relative reading starts from (each container an `open` lent, and each
+/// enclosing container), nothing at the base followed by the path, and no
+/// `[<AutoOpen>]` chain under the base lending the path's head as a short
+/// name. Every enclosing
+/// container is a base, the outer namespaces included, which bounds FCS's
+/// reading from above; nothing at a container means nothing under it, so
+/// the walk stops at the first.
+fn other_readings_hold_nothing(facts: &OpenFacts<'_>, assemblies: ExtensionView<'_>) -> bool {
+    if facts.rooted {
+        return true;
+    }
+    if facts.head_is_alias {
+        return false;
+    }
+    let written = facts.written;
+    let head = &written[0];
+    let reading_holds_nothing = |base: &[String]| {
+        let mut full = base.to_vec();
+        full.extend_from_slice(written);
+        assemblies.holds_nothing_at(&full) && !assemblies.lends_a_short_name_under(base, head)
+    };
+    if !facts
+        .open_prefixes
+        .iter()
+        .all(|base| reading_holds_nothing(base))
+    {
+        return false;
+    }
+    for k in 1..=facts.container_path.len() {
+        let base = &facts.container_path[..k];
+        if assemblies.holds_nothing_at(base) {
+            break;
+        }
+        if !reading_holds_nothing(base) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -89,6 +153,10 @@ mod tests {
             written: written.as_slice(),
             interpretations,
             walk_uncertain,
+            rooted: false,
+            head_is_alias: false,
+            open_prefixes: Vec::new(),
+            container_path: &[],
         };
         let namespace = Interpretation::Namespace { path: &written };
         let module = Interpretation::ProjectModule {

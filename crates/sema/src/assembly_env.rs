@@ -203,6 +203,89 @@ impl ExtensionView<'_> {
     pub(crate) fn any_split_has_a_dropped_type(self, path: &[String]) -> bool {
         self.0.any_split_of_a_module_path_has_a_dropped_type(path)
     }
+
+    /// Whether the referenced assemblies hold nothing, of any accessibility,
+    /// at or under `path`: no namespace at or under it, no entity at it (a
+    /// top-level entity at a split of it whose nested entities continue to
+    /// its end), and no dropped type that could be either. Nothing at `path`
+    /// means nothing at any extension of it.
+    pub(crate) fn holds_nothing_at(self, path: &[String]) -> bool {
+        let names = self.0.names();
+        !self.0.namespace_paths.contains_path(names, path)
+            && !self.0.prefixes_a_dropped_type_namespace(path)
+            && self.entities_at(path).is_empty()
+            && !self.any_split_has_a_dropped_type(path)
+    }
+
+    /// The entities, of any accessibility, that `path` names as a module
+    /// path: for each split, the top-level entities there, followed down
+    /// through their nested entities by the rest of the path.
+    fn entities_at(self, path: &[String]) -> Vec<EntityHandle> {
+        let mut out = Vec::new();
+        for k in 0..path.len() {
+            let mut level: Vec<EntityHandle> = self.0.types_named(&path[..k], &path[k]).to_vec();
+            for segment in &path[k + 1..] {
+                level = level
+                    .iter()
+                    .flat_map(|&h| self.0.children(h).iter().copied())
+                    .filter(|&c| self.0.entity_answers_to(c, segment))
+                    .collect();
+            }
+            out.extend(level);
+        }
+        out
+    }
+
+    /// Whether opening `path` may lend `name` as a short name through an
+    /// `[<AutoOpen>]` chain, whatever the chain's accessibility: some child
+    /// answering to `name` of an auto-open module that is a top-level entity
+    /// of namespace `path`, or a child of the entity `path` names as a module
+    /// path, or (transitively) a child of such a module. A dropped type in a
+    /// namespace along `path` answers `true`, and in a namespace where the
+    /// reader met an attribute it cannot name (which may be the
+    /// `[<AutoOpen>]`) every entity counts as auto-open.
+    pub(crate) fn lends_a_short_name_under(self, path: &[String], name: &str) -> bool {
+        if self.any_split_has_a_dropped_type(path) {
+            return true;
+        }
+        // Each link, with whether its namespace has an unreadable attribute.
+        let links = |h: EntityHandle, doubt: bool| {
+            self.0
+                .children(h)
+                .iter()
+                .copied()
+                .filter(move |&c| doubt || self.0.entity(c).is_auto_open)
+                .map(move |c| (c, doubt))
+        };
+        let doubt = self.0.namespace_has_unreadable_attribute(path);
+        let mut stack: Vec<(EntityHandle, bool)> = self
+            .0
+            .types_in_namespace(path)
+            .iter()
+            .copied()
+            .filter(|&h| doubt || self.0.entity(h).is_auto_open)
+            .map(|h| (h, doubt))
+            .collect();
+        // An entity at the module path lives in the namespace of the split it
+        // starts from; doubt every link when any of those namespaces is in
+        // doubt.
+        let doubt = (0..path.len()).any(|k| self.0.namespace_has_unreadable_attribute(&path[..k]));
+        for h in self.entities_at(path) {
+            stack.extend(links(h, doubt));
+        }
+        while let Some((h, doubt)) = stack.pop() {
+            if self
+                .0
+                .children(h)
+                .iter()
+                .any(|&c| self.0.entity_answers_to(c, name))
+            {
+                return true;
+            }
+            stack.extend(links(h, doubt));
+        }
+        false
+    }
 }
 
 /// The accessor spellings an F# property or event compiles to.
@@ -1056,6 +1139,11 @@ pub struct AssemblyEnv {
     /// when at least one public top-level type exists, matching
     /// [`Self::has_namespace`]'s historical empty-path behaviour.
     public_namespace_paths: PathIdSet,
+    /// Every prefix of a namespace containing a top-level type of any
+    /// accessibility, the empty prefix included. What the extension gate's
+    /// [`ExtensionView`] asks: a friend assembly's internal-only namespace
+    /// is one F# opens.
+    namespace_paths: PathIdSet,
     /// **Namespace** paths the referenced assemblies' assembly-level
     /// `[<assembly: AutoOpen("…")>]` attributes implicitly open — what drives
     /// the resolver's implicit opens (plan
@@ -1560,6 +1648,7 @@ impl AssemblyEnv {
             auto_open_modules: self.auto_open_modules.rekey(from, &names),
             auto_open_module_paths: self.auto_open_module_paths.rekey(from, &names),
             public_namespace_paths: self.public_namespace_paths.rekey(from, &names),
+            namespace_paths: self.namespace_paths.rekey(from, &names),
             namespaces_with_dropped_types: self.namespaces_with_dropped_types.rekey(from, &names),
             dropped_type_namespace_prefixes: self
                 .dropped_type_namespace_prefixes
@@ -1854,8 +1943,10 @@ impl AssemblyEnv {
                 &key.1,
                 handle,
             );
-            if is_public {
-                for length in 0..=namespace.len() {
+            for length in 0..=namespace.len() {
+                self.namespace_paths
+                    .insert(&self.names, &namespace[..length]);
+                if is_public {
                     self.public_namespace_paths
                         .insert(&self.names, &namespace[..length]);
                 }
@@ -5766,6 +5857,20 @@ impl AssemblyEnv {
         self.children(handle)
             .iter()
             .any(|&c| self.entity_tree_has_extension_named(c, name, is_static))
+    }
+
+    /// Whether the entity `handle` may answer to `name` in source, whatever
+    /// its accessibility: by its F# source name, its metadata name, or that
+    /// name less a generic arity (`` `1 ``) or a companion module's `Module`
+    /// suffix.
+    fn entity_answers_to(&self, handle: EntityHandle, name: &str) -> bool {
+        let e = self.entity(handle);
+        let il = e.name.as_str();
+        let bare = il.split('`').next().unwrap_or(il);
+        e.source_name.as_deref() == Some(name)
+            || il == name
+            || bare == name
+            || bare.strip_suffix("Module") == Some(name)
     }
 
     /// The handles of `handle`'s nested types, in declaration order.
@@ -12080,6 +12185,69 @@ pub(crate) fn is_array_tycon_path(path: &[String]) -> bool {
         && shape.starts_with('[')
         && shape.ends_with(']')
         && shape[1..shape.len() - 1].chars().all(|ch| ch == ',')
+}
+
+#[cfg(test)]
+mod extension_view_tests {
+    use super::AssemblyEnv;
+    use super::from_views_tests::module_entity;
+    use borzoi_assembly::Access;
+
+    fn segs(path: &str) -> Vec<String> {
+        path.split('.').map(str::to_owned).collect()
+    }
+
+    /// `A.M` (internal) holds an auto-open `Inner` (internal) holding
+    /// `Hidden`, and `A.N` holds only an internal module: what the view
+    /// reports reads no accessibility, and an entity at a split of a path
+    /// holds something at the path only if its nested entities reach it.
+    fn env(inner_auto_open: bool) -> AssemblyEnv {
+        let mut hidden = module_entity("Lib", &[], "Hidden");
+        hidden.access = Access::Internal;
+        let mut inner = module_entity("Lib", &[], "Inner");
+        inner.access = Access::Internal;
+        inner.is_auto_open = inner_auto_open;
+        inner.nested_types = vec![hidden];
+        let mut m = module_entity("Lib", &["A"], "M");
+        m.access = Access::Internal;
+        m.nested_types = vec![inner];
+        let mut only = module_entity("Lib", &["A", "N"], "Only");
+        only.access = Access::Internal;
+        AssemblyEnv::from_entities(vec![m, only])
+    }
+
+    #[test]
+    fn the_view_reads_what_a_path_reaches_whatever_its_accessibility() {
+        let whole = env(true);
+        let view = whole.extension_view();
+        for (path, nothing) in [
+            ("A", false),
+            ("A.M", false),
+            ("A.M.Inner", false),
+            ("A.M.Inner.Hidden", false),
+            ("A.N", false),
+            ("A.N.Only", false),
+            // An entity at a split whose nested entities stop short.
+            ("A.M.X", true),
+            ("A.M.Inner.X", true),
+            ("A.N.X", true),
+            ("B", true),
+            ("B.M", true),
+        ] {
+            assert_eq!(view.holds_nothing_at(&segs(path)), nothing, "{path}");
+        }
+        assert!(view.lends_a_short_name_under(&segs("A.M"), "Hidden"));
+        assert!(!view.lends_a_short_name_under(&segs("A.M"), "Other"));
+        // `M` is no auto-open module, so opening `A` lends nothing of it.
+        assert!(!view.lends_a_short_name_under(&segs("A"), "Inner"));
+        assert!(!view.lends_a_short_name_under(&segs("A"), "Hidden"));
+        let plain = env(false);
+        assert!(
+            !plain
+                .extension_view()
+                .lends_a_short_name_under(&segs("A.M"), "Hidden")
+        );
+    }
 }
 
 #[cfg(test)]
