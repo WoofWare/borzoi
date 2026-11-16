@@ -189,6 +189,15 @@ fn decode(raw: &str) -> Cow<'_, str> {
     Cow::Owned(value)
 }
 
+/// The namespace the `xml` prefix is bound to, which `xml:space` is in.
+const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+
+/// `node`'s `xml:space` attribute, if it has one.
+pub(crate) fn xml_space<'a, 'input>(node: Node<'a, 'input>) -> Option<Attribute<'a, 'input>> {
+    node.attributes()
+        .find(|a| a.namespace() == Some(XML_NAMESPACE) && a.name() == "space")
+}
+
 /// One child of an element as MSBuild's XML reader reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Content<'a> {
@@ -278,11 +287,24 @@ fn run_is_whitespace_node(raw: &str, value: &str) -> bool {
 /// (`roxmltree` folds them, where MSBuild reads them as written; see
 /// [`text`]).
 ///
-/// `None` for an element holding an element or a processing instruction.
+/// `None` for an element holding an element or a processing instruction, and
+/// for one in the scope of an `xml:space` attribute other than `default`:
+/// under `xml:space="preserve"` the reader reports whitespace as
+/// significant, so MSBuild keeps it
+/// (`<Project xml:space="preserve"><PropertyGroup><P>&#x20;` reads `P` as
+/// `" "`; `dotnet msbuild` 10.0).
 pub(crate) fn element_content<'input>(element: Node<'_, 'input>) -> Option<Vec<Content<'input>>> {
     if element
         .children()
         .any(|child| child.is_element() || child.is_pi())
+    {
+        return None;
+    }
+    // The nearest `xml:space` in scope decides how whitespace is read.
+    if element
+        .ancestors()
+        .find_map(xml_space)
+        .is_some_and(|space| space.value() != "default")
     {
         return None;
     }

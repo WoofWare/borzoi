@@ -1375,6 +1375,45 @@ fn cdata_sweep(seed: u64, cases: usize) {
     }
 }
 
+/// Bodies in the scope of `xml:space` on the project element, the one element
+/// MSBuild's loader allows it on. Under `preserve` the reader reports
+/// whitespace as significant, so MSBuild keeps whitespace a body would
+/// otherwise drop, and refuses a project whose containers hold whitespace
+/// between their elements (MSB4067, `<#significant-whitespace>`). Each body,
+/// fixed and generated, is diffed in a compact document MSBuild loads and in
+/// an indented one, under `preserve` and `default`.
+#[test]
+fn bodies_under_xml_space_are_exact_or_declined() {
+    let mut oracle = Oracle::spawn();
+    let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
+    let mut rng = SplitMix64(0x5ace_5ace);
+    let mut bodies: Vec<String> = BODIES.iter().map(|b| (*b).to_owned()).collect();
+    bodies.extend((0..100).map(|_| gen_cdata_body(&mut rng)));
+    let (mut loaded, mut committed) = (0usize, 0usize);
+    for body in &bodies {
+        for space in ["preserve", "default"] {
+            for xml in [
+                format!(
+                    "<Project xml:space=\"{space}\"><PropertyGroup><Alpha>{body}</Alpha>\
+                     <Beta>[$(Alpha)]</Beta><Gamma>g</Gamma></PropertyGroup></Project>"
+                ),
+                format!(
+                    "<Project xml:space=\"{space}\">\n  <PropertyGroup>\n    <Alpha>{body}</Alpha>\n    \
+                     <Gamma>g</Gamma>\n  </PropertyGroup>\n</Project>\n"
+                ),
+            ] {
+                loaded += usize::from(oracle.project(&xml, &names, None, &[]).is_some());
+                committed += check_names_at_path(&mut oracle, &xml, &names, None).len();
+            }
+        }
+    }
+    eprintln!("xml:space documents: {loaded} loaded by MSBuild, {committed} values committed");
+    assert!(
+        loaded >= bodies.len(),
+        "too few documents loaded ({loaded})"
+    );
+}
+
 /// `<Choose>` nesting around MSBuild's ceiling. MSBuild's loader refuses a
 /// `<Choose>` nested more than `ProjectParser.MaximumChooseNesting` (50) deep
 /// (`ChooseOverflow`), so the whole project fails to load; one level less

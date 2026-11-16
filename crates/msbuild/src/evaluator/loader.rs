@@ -48,13 +48,31 @@ pub(super) struct Violation {
 
 /// The first rule of MSBuild's loader that the file whose root element is
 /// `root` breaks. With `relax`, every relaxable violation is skipped, an
-/// unrecognised child with all it holds.
+/// unrecognised child with all it holds. A file that breaks none but keeps
+/// whitespace ([`whitespace_kept`]) may yet be refused.
 pub(super) fn first_violation(root: Node<'_, '_>, relax: bool) -> Option<Violation> {
     let mut loader = Loader {
         relax,
         seen_extensions: false,
     };
-    loader.root(root).err()
+    loader.root(root).err().or_else(|| whitespace_kept(root))
+}
+
+/// Doubt over a file whose root asks for whitespace to be kept, by an
+/// `xml:space` attribute that is not `default`. Under `preserve` the reader
+/// reports whitespace as significant, which every rule above takes for
+/// skippable: MSBuild then refuses whitespace between elements (MSB4067, an
+/// unrecognised `<#significant-whitespace>`), and evaluates a file without
+/// any keeping the whitespace in its bodies (`dotnet msbuild` 10.0). Neither
+/// is modelled, so the violation is never sure.
+fn whitespace_kept(root: Node<'_, '_>) -> Option<Violation> {
+    let space = crate::document::xml_space(root).filter(|a| a.value() != "default")?;
+    Some(Violation {
+        error: LoadTimeError::WhitespaceKept,
+        span: space.range(),
+        relaxable: false,
+        sure: false,
+    })
 }
 
 /// The deepest `<Choose>` nesting MSBuild loads (`MaximumChooseNesting`).

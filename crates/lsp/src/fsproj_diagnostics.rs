@@ -951,6 +951,9 @@ pub(crate) fn load_time_error_text(error: &LoadTimeError) -> String {
             format!("an element named `{name}`, which no property, item or metadatum may be")
         }
         LoadTimeError::Malformed { element, rule } => format!("a `<{element}>` with {rule}"),
+        LoadTimeError::WhitespaceKept => {
+            "an `xml:space` on `<Project>` that keeps whitespace".to_string()
+        }
     }
 }
 
