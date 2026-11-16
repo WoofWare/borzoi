@@ -271,12 +271,6 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
                 .filter(|e| e.excludes_from_globs())
                 .any(|e| e.unescape().contains('?'));
         each_file(&listing, "", &mut |rel| {
-            if rel.contains('\\') {
-                return Err(GlobDecline::OutsideModelledShape {
-                    spec: rel.to_string(),
-                    shape: Unmodelled::BackslashInName,
-                });
-            }
             let shape = match unmodelled_shape(rel) {
                 Some(Unmodelled::NonAscii) if !question && !rel.contains(FOLDED_ONTO_ASCII) => {
                     unmodelled_shape(&rel.replace(|c: char| !c.is_ascii(), "x"))
@@ -608,6 +602,15 @@ impl Lister<'_> {
                 _ => continue,
             };
             let name = entry.name.to_string_lossy().into_owned();
+            // A `\` is a separator to the file matcher, so a name holding one
+            // is several names to it, or, at its end, leaves one empty, which
+            // `IsMatch` refuses with an internal error.
+            if name.contains('\\') {
+                return Err(GlobDecline::OutsideModelledShape {
+                    spec: entry.path.to_string_lossy().into_owned(),
+                    shape: Unmodelled::BackslashInName,
+                });
+            }
             if !is_dir {
                 listing.files.push(name);
                 continue;
@@ -1397,6 +1400,17 @@ mod tests {
             })
         ));
         assert_eq!(try_resolve(tmp.path(), "*.fs", &[]), Ok(4));
+        // An empty directory too: one ending in `\` would hand `IsMatch` an
+        // empty name.
+        fs::remove_file(tmp.path().join("sub/a\\b.fs")).unwrap();
+        fs::create_dir(tmp.path().join("sub/empty\\")).unwrap();
+        assert!(matches!(
+            try_resolve(tmp.path(), "**/*.fs", &["**/.*/**"]),
+            Err(GlobDecline::OutsideModelledShape {
+                shape: Unmodelled::BackslashInName,
+                ..
+            })
+        ));
     }
 
     #[cfg(unix)]
