@@ -675,6 +675,45 @@ fn binders_under_a_namesake_declined_head_follow_fcs() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A referenced assembly the env could not project may declare a namesake
+/// that finds the case, so the binder the first [`NAMESAKE_CELLS`] cell
+/// commits declines under an env that lacks one. FCS reads every assembly,
+/// so this is the walk alone.
+#[test]
+fn an_unprojected_assembly_withholds_namesake_declined_binders() {
+    let cell = &NAMESAKE_CELLS[0];
+    assert_eq!(cell.binder, Expect::Interned, "{}: the control", cell.id);
+    let (src, binders, _) = materialise(cell.template);
+    let src = format!("{}{}", cell.prelude, &src[PRELUDE.len()..]);
+    let [binder] = binders[..] else {
+        panic!("{}: one binder", cell.id);
+    };
+    let at = |o: borzoi_cst::syntax::TextSize| {
+        ((usize::from(o) - PRELUDE.len() + cell.prelude.len()) as u32).into()
+    };
+    let binder = TextRange::new(at(binder.start()), at(binder.end()));
+    let mut files: Vec<(&str, &str)> = cell.earlier.to_vec();
+    files.push(("NamesakeUse.fs", &src));
+    let interns = |env: &AssemblyEnv| {
+        let proj = resolve_project_files(&project(&files), env);
+        let rf = proj.file(files.len() - 1);
+        let interned = rf.defs().any(|d| d.range == binder);
+        assert!(
+            interned || rf.opaque_binders().contains(&binder),
+            "{}: {binder:?} is neither interned nor declined",
+            cell.id
+        );
+        interned
+    };
+    assert!(interns(full_bcl_env()), "control: the binder commits");
+    let mut skipped = full_bcl_env().clone();
+    skipped.mark_extension_surface_unknowable();
+    assert!(!interns(&skipped), "an assembly projection was skipped");
+    let mut unnamed = full_bcl_env().clone();
+    unnamed.mark_referenced_assemblies_incomplete();
+    assert!(!interns(&unnamed), "a referenced assembly is unnamed");
+}
+
 /// The union every [`NAMESAKE_GRID_COMPETITORS`] cell's head can read:
 /// `N0.T<'a>`, owning `C`.
 const GRID_UNION: (&str, &str) = (

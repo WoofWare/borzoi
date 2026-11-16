@@ -3382,7 +3382,8 @@ impl<'a> Resolver<'a> {
     ///   walk visits finds nothing named `C`
     ///   ([`AssemblyEnv::pattern_lookup_in_type_finds_nothing`](crate::AssemblyEnv::pattern_lookup_in_type_finds_nothing)), and no
     ///   surface the walk cannot enumerate (an `[<AutoOpen>]` one, a dropped
-    ///   type, an open's unenumerable residue) may supply another.
+    ///   type, an open's unenumerable residue, a referenced assembly whose
+    ///   projection was skipped whole) may supply another.
     pub(super) fn namesake_declined_case_head_binds(
         &self,
         type_name: &str,
@@ -3420,8 +3421,8 @@ impl<'a> Resolver<'a> {
         };
         let names = [type_name.to_string()];
         project_only_found
-            && !self.assemblies.manifest_auto_open_target_is_uncertain()
-            && !self.assemblies.contested_auto_open_is_uncertain()
+            && !self.assemblies.retained_auto_open_is_uncertain()
+            && !self.assemblies.identities_incomplete()
             && !self.assemblies.manifest_auto_open_surface_declares(
                 type_name,
                 ManifestSurfacePosition::TypeAnyArity,
