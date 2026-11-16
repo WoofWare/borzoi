@@ -3875,7 +3875,7 @@ fn append_inference_demand_census(path: &Path, loaded: &LoadedProject) {
 }
 
 /// The distribution of the inference demand census at `path`
-/// ([`append_inference_demand_census`]): for each file with a prefix, the
+/// (`append_inference_demand_census`): for each file with a prefix, the
 /// share of its prefix its inference needs, by files and by bytes, as
 /// quantiles over every file, rendered for a reader.
 ///

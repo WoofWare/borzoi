@@ -18,8 +18,9 @@ use crate::{AssemblyEnv, InferredProject, ItemId, ProjectFile, Resolution, Resol
 
 /// Where the whole-prefix facts stop being a fold over declarations: the
 /// first file whose declared types, cases, records or constructor names
-/// differ between [`crate::infer_project`]'s fold (`inferred`) and a fold
-/// that builds each file's declared facts without walking it, described;
+/// differ between [`crate::infer_project()`]'s fold (`inferred`) and a fold
+/// that builds each file's declared facts from its surface walk, which
+/// never meets a body, without inferring it, described;
 /// `None` when no file's do.
 pub fn whole_prefix_facts_divergence(
     files: &[ProjectFile],
