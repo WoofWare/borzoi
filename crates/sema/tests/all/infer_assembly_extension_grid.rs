@@ -178,6 +178,11 @@ enum Home {
     /// `[<assembly: AutoOpen("G.C<n>.AutoMod<n>")>]` opens wherever the
     /// assembly is referenced: a module-shaped assembly auto-open.
     AssemblyAutoOpen,
+    /// `namespace Microsoft.Hidden<n>`, the assembly carrying
+    /// `[<assembly: AutoOpen("Microsoft")>]`: an auto-opened namespace
+    /// another assembly (FSharp.Core) also declares, which name resolution
+    /// records as contested rather than opened.
+    ContestedAutoOpen,
     Nested,
     AutoOpen,
     Rqa,
@@ -242,10 +247,15 @@ enum Reach {
     /// No `open`: the call reaches the extension only through an
     /// assembly-level auto-open.
     AssemblyAutoOpenOnly,
+    /// `open Hidden<n>` from a top-level module, an earlier project file
+    /// declaring a root module `Hidden<n>`: the written path names the
+    /// project module, and the reading relative to the auto-opened
+    /// `Microsoft` names the cell's home.
+    RelativeOverRootViaAutoOpen,
 }
 
 impl Reach {
-    const ALL: [Reach; 20] = [
+    const ALL: [Reach; 21] = [
         Reach::OpenNamespace,
         Reach::GlobalNamespace,
         Reach::RelativeNamespace,
@@ -266,6 +276,7 @@ impl Reach {
         Reach::RelativeEnclosingOverRoot,
         Reach::RelativeOpenedOverRoot,
         Reach::AssemblyAutoOpenOnly,
+        Reach::RelativeOverRootViaAutoOpen,
     ];
 
     /// Whether the reach goes through a module, which needs a module home
@@ -428,9 +439,11 @@ impl Cell {
                 && self.container == Container::Plain
                 && self.target == Target::Receiver
                 && self.drop == Drop::No);
-        let assembly_auto_open = (self.home == Home::AssemblyAutoOpen)
-            == (self.reach == Reach::AssemblyAutoOpenOnly)
-            && (self.home != Home::AssemblyAutoOpen
+        let contested = (self.home == Home::ContestedAutoOpen)
+            == (self.reach == Reach::RelativeOverRootViaAutoOpen);
+        let assembly_auto_open = contested
+            && (self.home == Home::AssemblyAutoOpen) == (self.reach == Reach::AssemblyAutoOpenOnly)
+            && (!matches!(self.home, Home::AssemblyAutoOpen | Home::ContestedAutoOpen)
                 || (self.style == Style::CsMarked
                     && self.kind == Kind::Method
                     && self.attr_on == AttrOn::Member
@@ -480,7 +493,8 @@ impl Cell {
             | Home::SoleNamespace
             | Home::HiddenAuto
             | Home::SoleAuto
-            | Home::AssemblyAutoOpen => None,
+            | Home::AssemblyAutoOpen
+            | Home::ContestedAutoOpen => None,
             Home::Module | Home::InternalModule | Home::AutoOpen | Home::Rqa => Some("Exts"),
             Home::Nested => Some("Outer.Exts"),
         }
@@ -496,6 +510,7 @@ impl Cell {
             },
             Home::HiddenAuto | Home::SoleAuto => "Auto",
             Home::AssemblyAutoOpen => "AutoMod",
+            Home::ContestedAutoOpen => "Holder",
             Home::Module | Home::InternalModule | Home::AutoOpen | Home::Rqa => "Exts",
             Home::Nested => "Outer",
         }
@@ -537,6 +552,7 @@ impl Cell {
                                     Home::HiddenAuto,
                                     Home::SoleAuto,
                                     Home::AssemblyAutoOpen,
+                                    Home::ContestedAutoOpen,
                                     Home::Nested,
                                     Home::AutoOpen,
                                     Home::Rqa,
@@ -753,9 +769,13 @@ fn cell_source(n: usize, cell: Cell) -> String {
             out.push("module internal Exts =".to_string());
             out.extend(indent(body, 4));
         }
-        Home::HiddenNamespace | Home::SoleNamespace => {
+        Home::HiddenNamespace | Home::SoleNamespace | Home::ContestedAutoOpen => {
             // Its own namespace, with the receiver's types written in full.
-            out.push(format!("namespace {}.Hidden{n}", namespace(n)));
+            if cell.home == Home::ContestedAutoOpen {
+                out.push(format!("namespace Microsoft.Hidden{n}"));
+            } else {
+                out.push(format!("namespace {}.Hidden{n}", namespace(n)));
+            }
             out.push(String::new());
             let ns = namespace(n);
             let internal = if cell.home == Home::HiddenNamespace {
@@ -825,7 +845,7 @@ enum Assembly {
 
 impl Cell {
     fn assembly(self) -> Assembly {
-        if self.home == Home::AssemblyAutoOpen {
+        if matches!(self.home, Home::AssemblyAutoOpen | Home::ContestedAutoOpen) {
             Assembly::AutoOpen
         } else {
             Assembly::Main
@@ -922,6 +942,12 @@ fn fixture_source(cells: &[Cell], internal: bool, assembly: Assembly) -> Vec<Str
                 )
             }),
     );
+    if cells
+        .iter()
+        .any(|c| c.home == Home::ContestedAutoOpen && c.assembly() == assembly)
+    {
+        out.push("    [<assembly: AutoOpen(\"Microsoft\")>]".to_string());
+    }
     out.push("    do ()".to_string());
     let header = out.join("\n") + "\n";
     let blocks: Vec<String> = cells
@@ -977,6 +1003,7 @@ fn use_source(n: usize, cell: Cell) -> (String, Probe) {
         Reach::RelativeEnclosingOverRoot => nested(&ns, format!("open Hidden{n}")),
         Reach::RelativeOpenedOverRoot => top(format!("open {ns}\nopen Hidden{n}")),
         Reach::AssemblyAutoOpenOnly => top(String::new()),
+        Reach::RelativeOverRootViaAutoOpen => top(format!("open Hidden{n}")),
         Reach::GlobalModule => top(format!("open global.{ns}.{}", module())),
         Reach::RelativeModule => top(format!("open {ns}\nopen {}", module())),
         Reach::EnclosingRelativeModule => nested(&ns, format!("open {}", module())),
@@ -1027,7 +1054,9 @@ fn shared_source(n: usize, cell: Cell) -> Option<String> {
         Reach::SharedModuleOverNamespace => Some(format!(
             "namespace {ns}\nmodule Hidden{n} =\n    let v{n} = 1\n"
         )),
-        Reach::RelativeEnclosingOverRoot | Reach::RelativeOpenedOverRoot => Some(format!(
+        Reach::RelativeEnclosingOverRoot
+        | Reach::RelativeOpenedOverRoot
+        | Reach::RelativeOverRootViaAutoOpen => Some(format!(
             "namespace global\nmodule Hidden{n} =\n    let v{n} = 1\n"
         )),
         Reach::SharedNamespaceOverModule => Some(format!(

@@ -196,7 +196,7 @@ impl ExtensionView<'_> {
         in_scope_namespaces
             .iter()
             .chain(&self.0.effective_implicit_open_namespace_paths())
-            .chain(&self.0.assembly_auto_open_paths)
+            .chain(existence.auto_open_bases())
             .any(|ns| existence.lends_extensions_through_an_abbreviation(ns))
             || self
                 .0
@@ -1097,11 +1097,6 @@ pub struct AssemblyEnv {
     /// veto skips such entries; the extension gate deliberately still folds
     /// them (over-deferring is its safe direction).
     auto_open_module_handles: Vec<(EntityHandle, bool)>,
-    /// Every assembly-level `[<assembly: AutoOpen("…")>]` path, whatever it
-    /// names (a namespace, a module, nothing the projection holds): the
-    /// containers the extension gate asks the existence set about beside the
-    /// opened namespaces.
-    assembly_auto_open_paths: Vec<Vec<String>>,
     /// The assembly-level auto-opens [`Self::record_assembly_auto_opens`]
     /// **dropped** as *contested* — a namespace declared by more than one
     /// referenced assembly (narrowing 1), which sema's path-based (assembly-blind)
@@ -2172,7 +2167,7 @@ impl AssemblyEnv {
                 if segments.iter().any(String::is_empty) {
                     continue;
                 }
-                self.assembly_auto_open_paths.push(segments.clone());
+                self.existence.add_auto_open_base(segments.clone());
                 if let Some((handle, effectively_public)) =
                     self.assembly_entity_at_path(contributor, &segments)
                 {

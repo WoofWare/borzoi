@@ -66,6 +66,11 @@ pub struct ExistenceSet {
     /// namespace and each enclosing module's path. Each brings its target's
     /// extensions wherever the container is opened.
     abbreviation_lenders: HashSet<Vec<String>>,
+    /// Every assembly-level `[<assembly: AutoOpen("…")>]` path, whatever it
+    /// names and whether or not name resolution opens it (a namespace another
+    /// assembly also declares is contested, and not opened there): each is a
+    /// container whose contents answer to short names in every file.
+    auto_open_bases: Vec<Vec<String>>,
     /// Some assembly's declarations are unknown.
     unknowable: bool,
 }
@@ -101,6 +106,19 @@ impl ExistenceSet {
     /// Record that some assembly's declarations are unknown.
     pub(crate) fn mark_unknowable(&mut self) {
         self.unknowable = true;
+    }
+
+    /// Record an assembly-level auto-open path (FSharp.Core's implicit
+    /// `Microsoft` included).
+    pub(crate) fn add_auto_open_base(&mut self, path: Vec<String>) {
+        if !self.auto_open_bases.contains(&path) {
+            self.auto_open_bases.push(path);
+        }
+    }
+
+    /// Every assembly-level auto-open path ([`Self::add_auto_open_base`]).
+    pub(crate) fn auto_open_bases(&self) -> &[Vec<String>] {
+        &self.auto_open_bases
     }
 
     fn add_path(&mut self, path: Vec<String>, child: Option<Child>) {

@@ -113,11 +113,15 @@ fn other_readings_hold_nothing(facts: &OpenFacts<'_>, assemblies: &ExistenceSet)
         full.extend_from_slice(written);
         assemblies.holds_nothing_at(&full) && !assemblies.lends_a_short_name_under(base, head)
     };
-    if !facts
+    // The containers an earlier `open` lent, and every assembly-level
+    // auto-open, opened or contested: the resolver's prefixes leave out a
+    // namespace auto-open another assembly also declares.
+    let mut lent = facts
         .open_prefixes
         .iter()
-        .all(|base| reading_holds_nothing(base))
-    {
+        .copied()
+        .chain(assemblies.auto_open_bases().iter().map(Vec::as_slice));
+    if !lent.all(reading_holds_nothing) {
         return false;
     }
     for k in 1..=facts.container_path.len() {
