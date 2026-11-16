@@ -935,6 +935,22 @@ pub(crate) fn load_time_error_text(error: &LoadTimeError) -> String {
         }
         LoadTimeError::ImportWithoutProject => "an `<Import>` with no `Project`".to_string(),
         LoadTimeError::MalformedChoose => "a malformed `<Choose>`".to_string(),
+        LoadTimeError::ReservedItemName { name } => {
+            format!("an item or metadatum named `{name}`, a name MSBuild reserves")
+        }
+        LoadTimeError::ReservedMetadata { name } => {
+            format!("a metadatum named `{name}`, an item-spec modifier")
+        }
+        LoadTimeError::UnrecognizedAttribute { element, attribute } => {
+            format!("an attribute `{attribute}` that `<{element}>` does not take")
+        }
+        LoadTimeError::UnrecognizedChild { parent, child } => {
+            format!("a `{child}` that `<{parent}>` does not take")
+        }
+        LoadTimeError::InvalidName { name } => {
+            format!("an element named `{name}`, which no property, item or metadatum may be")
+        }
+        LoadTimeError::Malformed { element, rule } => format!("a `<{element}>` with {rule}"),
     }
 }
 

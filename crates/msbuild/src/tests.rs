@@ -1553,10 +1553,18 @@ fn compile_update_with_include_emits_diagnostic_and_skips_item() {
 </Project>"#;
     let p = parse(src);
     assert!(p.items.is_empty());
+    // MSBuild refuses an item with both at load time (MSB4115).
     assert!(matches!(
-        p.diagnostics[0].kind,
-        DiagnosticKind::UnsupportedItemOperation { .. }
+        &p.diagnostics[0].kind,
+        DiagnosticKind::Rejected {
+            cause: crate::RejectionCause::LoadTime(crate::LoadTimeError::ItemWithoutSpec { .. })
+        }
     ));
+    assert!(
+        p.diagnostics
+            .iter()
+            .any(|d| matches!(d.kind, DiagnosticKind::UnsupportedItemOperation { .. }))
+    );
 }
 
 #[test]
@@ -1893,9 +1901,19 @@ fn import_group_with_unknown_child_flags_unsupported_construct() {
     let p = parse(src);
     assert_eq!(
         diag_kinds(&p.diagnostics),
-        [&DiagnosticKind::UnsupportedConstruct {
-            element: "Whatever".to_string()
-        }]
+        [
+            // MSB4067 at load time; possible only, as the pure walker cannot
+            // look for a parse configuration that may relax it.
+            &DiagnosticKind::MayBeRejected {
+                cause: crate::RejectionCause::LoadTime(crate::LoadTimeError::UnrecognizedChild {
+                    parent: "ImportGroup".to_string(),
+                    child: "Whatever".to_string()
+                })
+            },
+            &DiagnosticKind::UnsupportedConstruct {
+                element: "Whatever".to_string()
+            }
+        ]
     );
     assert!(p.is_partial);
 }
@@ -2944,9 +2962,17 @@ fn dotted_reference_is_member_access_not_a_property_name() {
     assert!(p.items.is_empty(), "{:?}", p.items);
     assert_eq!(
         diag_kinds(&p.diagnostics),
-        [&DiagnosticKind::UnsupportedPropertyExpression {
-            expression: "$(Out.Dir)".to_string()
-        }]
+        [
+            // MSB5016 at load time.
+            &DiagnosticKind::Rejected {
+                cause: crate::RejectionCause::LoadTime(crate::LoadTimeError::InvalidName {
+                    name: "Out.Dir".to_string()
+                })
+            },
+            &DiagnosticKind::UnsupportedPropertyExpression {
+                expression: "$(Out.Dir)".to_string()
+            }
+        ]
     );
     assert!(p.is_partial);
 }

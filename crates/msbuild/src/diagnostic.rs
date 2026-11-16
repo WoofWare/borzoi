@@ -284,24 +284,44 @@ pub enum RejectionCause {
     LoadTime(LoadTimeError),
 }
 
-/// A construct MSBuild refuses when it loads a file (#888).
+/// A construct MSBuild's loader (`ProjectParser`) refuses when it loads a
+/// file (#888, #917). Element and attribute names are as MSBuild reads them,
+/// prefix included.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadTimeError {
-    /// A property element named for a reserved property (any case), or for
-    /// one of the elements MSBuild reserves (exact case): MSB4004. A
-    /// property in a `<Target>` counts too.
+    /// A property element (or a task output's `PropertyName`) named for a
+    /// reserved property (any case), or for one of the names MSBuild reserves
+    /// for its own elements (exact case): MSB4004.
     ReservedProperty { name: String },
-    /// An item whose `Include`, `Update` or `Remove` is present and empty
-    /// (MSB4035, in a `<Target>` too), or, outside a `<Target>`, an item with
-    /// none of the three (MSB4232). `item` is its type.
+    /// An item type, or an item's metadatum, named for one of the names
+    /// MSBuild reserves for its own elements (MSB4117, MSB4033).
+    ReservedItemName { name: String },
+    /// A metadatum named for an item-spec modifier (`FullPath`, `Filename`,
+    /// …, any case): MSB4033.
+    ReservedMetadata { name: String },
+    /// An item without a usable `Include`, `Update` or `Remove`: one present
+    /// and empty (MSB4035), more than one (MSB4115), or, outside a `<Target>`,
+    /// none (MSB4232). `item` is its type.
     ItemWithoutSpec { item: String },
     /// An `<Import>` whose `Project` is absent or empty: MSB4035.
     ImportWithoutProject,
-    /// A `<Choose>` MSBuild's loader refuses: no `<When>` (MSB4085), a
-    /// `<When>` without a `Condition` (MSB4035), an `<Otherwise>` out of
-    /// place (MSB4082, MSB4084), or an element or attribute it does not
-    /// allow (MSB4067, MSB4066), at any depth.
+    /// A `<Choose>` whose structure MSBuild refuses: no `<When>` (MSB4085), a
+    /// `<When>` without a `Condition` (MSB4035), an `<Otherwise>` out of place
+    /// (MSB4082, MSB4084), or nested past MSBuild's ceiling.
     MalformedChoose,
+    /// An attribute `element` does not take: MSB4066.
+    UnrecognizedAttribute { element: String, attribute: String },
+    /// A child `parent` does not take: MSB4067. Text that is not whitespace
+    /// is `#text`, a CDATA section `#cdata-section`, and a processing
+    /// instruction its target.
+    UnrecognizedChild { parent: String, child: String },
+    /// An element named with a character MSBuild does not allow in a
+    /// property, item or metadatum name: MSB5016.
+    InvalidName { name: String },
+    /// Any other rule of the loader `element` breaks, as `rule` says: a
+    /// required attribute missing or empty, two of a child it takes once, an
+    /// `<OnError>` before other content, and the like.
+    Malformed { element: String, rule: &'static str },
 }
 
 /// Why an import may load no file.
