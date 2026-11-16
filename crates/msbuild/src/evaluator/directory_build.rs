@@ -51,7 +51,9 @@
 //!
 //! **Followed imports.** An import the walk followed on a gate it could not
 //! decide is a doubted walk too ([`within_followed_import`], #791), with the
-//! item facets left to the gate's own withdrawal. A later import of a file
+//! item facets left to the gate's own withdrawal. So is every import the walk
+//! makes once it is opaque: content it could not see may already have made
+//! that import, and MSBuild then skips it as a duplicate (#891). A later import of a file
 //! such a walk made is not walked again, as one a fallback walk made is: the
 //! whole evaluation is uncertain from there ([`doubted_duplicate`]).
 //!

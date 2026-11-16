@@ -259,3 +259,33 @@ fn a_later_import_of_a_followed_file_may_reach_files_the_first_did_not() {
         parsed.property("Result")
     );
 }
+
+/// Hidden content may already have imported `Inner.props`, and MSBuild then
+/// skips the import after it as a duplicate: what the file writes there is not
+/// published, and neither is a name the body wrote that it overwrites (#891).
+#[test]
+fn an_import_after_hidden_content_may_be_a_duplicate_of_a_hidden_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_at(tmp.path(), "Inner.props", INNER);
+    let parsed = parse(
+        tmp.path(),
+        &format!(
+            "{}  <PropertyGroup>\n    <DefineConstants>middle</DefineConstants>\n    \
+             <Untouched>1</Untouched>\n  </PropertyGroup>\n  \
+             <Import Project=\"Inner.props\" />\n",
+            hidden_import()
+        ),
+    );
+    for name in ["DefineConstants", "FromInner"] {
+        assert!(
+            matches!(parsed.property(name), PropertyRead::Untrusted(_)),
+            "{name}: {:?}",
+            parsed.property(name)
+        );
+    }
+    assert_eq!(
+        parsed.property("Untouched"),
+        PropertyRead::Value("1".into()),
+        "a name the later import does not write is the body's"
+    );
+}

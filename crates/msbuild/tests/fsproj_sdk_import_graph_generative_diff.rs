@@ -1351,15 +1351,6 @@ fn render(case: &Case, sdk: &str) -> Rendered {
 /// MSBuild's (#677).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Family {
-    /// An import the walk does not make, or cannot know MSBuild makes, is of
-    /// a file that an import the walk does make names again: a hidden repeat,
-    /// or any content the walk cannot see
-    /// ([`Case::hides_content_from_the_walk`]) in a case that names a file
-    /// twice. MSBuild skips the later import as a duplicate when the
-    /// earlier one was made; the walk makes it, and publishes what the file
-    /// writes there as trusted (#891). Covers property findings only: the Compile set, the reference
-    /// list and the define set must still be uncertain.
-    HiddenImportMakesALaterOneADuplicate,
     /// #820's remainder: an import point in or after content the walk cannot
     /// see whose failure ([`PointDoubt::GateOr`] over a missing file) makes
     /// MSBuild reject an evaluation the walk cannot know is rejected. Covers findings
@@ -1367,21 +1358,13 @@ enum Family {
     HiddenPointRejectsTheProject,
 }
 
-const KNOWN_DIVERGENCES: &[Family] = &[
-    Family::HiddenImportMakesALaterOneADuplicate,
-    Family::HiddenPointRejectsTheProject,
-];
+const KNOWN_DIVERGENCES: &[Family] = &[Family::HiddenPointRejectsTheProject];
 
 impl Family {
     /// Whether `case` is in the family: decided from the case's shape alone,
     /// never from how the walk answered it.
     fn contains(self, case: &Case) -> bool {
         match self {
-            Family::HiddenImportMakesALaterOneADuplicate => {
-                case.has_hidden_repeat()
-                    || (case.hides_content_from_the_walk()
-                        && !(case.repeats.is_empty() && case.reimports.is_empty()))
-            }
             Family::HiddenPointRejectsTheProject => {
                 case.point_doubt == PointDoubt::GateOr && case.hides_content_from_the_walk()
             }
@@ -1391,7 +1374,6 @@ impl Family {
     /// Whether the family explains `finding`, in a case it contains.
     fn covers(self, finding: &Finding) -> bool {
         match self {
-            Family::HiddenImportMakesALaterOneADuplicate => finding.kind == FindingKind::Property,
             Family::HiddenPointRejectsTheProject => finding.theirs == "a rejected project",
         }
     }
@@ -1400,42 +1382,16 @@ impl Family {
     /// asserts still diverges.
     fn witness(self) -> Case {
         match self {
-            // MSBuild runs `child` once, in `Sdk.props` behind the import the
-            // walk cannot decide, and skips the body's import of it; the walk
-            // makes the body's, and publishes what it leaves in `Seen`.
-            Family::HiddenImportMakesALaterOneADuplicate => Case {
-                props_point: PropsPoint::Absent,
-                targets_point: TargetsPoint::Absent,
-                props: Props::default(),
-                targets_present: false,
-                repeat_which: Which::Props,
-                repeats: vec![
-                    Repeat {
-                        target: RepeatTarget::Child,
-                        site: RepeatSite::HiddenBeforePoint,
-                    },
-                    Repeat {
-                        target: RepeatTarget::Child,
-                        site: RepeatSite::Body,
-                    },
-                ],
-                ..Case::usual()
-            },
             // The targets point is behind an import the walk cannot decide,
             // and imports its path whether or not the file exists. `Sdk.targets`
-            // imports the props file again after it, by a link, and the walk
-            // commits what that import writes.
+            // sets `Seen` after it, a literal the walk commits.
             Family::HiddenPointRejectsTheProject => Case {
-                form: Form::ExplicitImports,
-                props_point: PropsPoint::InSdkFile,
                 targets_point: TargetsPoint::BehindUndecidedImport,
                 targets_present: false,
                 point_doubt: PointDoubt::GateOr,
-                reimports: vec![Reimport {
-                    which: Which::Props,
-                    spelling: Spelling::FileLink,
-                    shape: Shape::Literal,
-                    site: Site::SdkTargets,
+                repeats: vec![Repeat {
+                    target: RepeatTarget::File,
+                    site: RepeatSite::SdkAfterPoint,
                 }],
                 ..Case::usual()
             },

@@ -148,7 +148,9 @@ and at the end of the walk, where `read_property` publishes a stale value as
 unset after hidden content) (#792). A write made inside an import the
 walk followed on a gate it could not decide is unpinned with that gate's root
 when the import returns, and an import made inside it is not a certain
-duplicate later (#791).
+duplicate later (#791). An import made after hidden content is treated the
+same way: that content may already have made it, so MSBuild may skip it as a
+duplicate (#891).
 `reference_is_untrusted` and `untrusted_cause` leave staleness out on purpose:
 they serve the mid-walk condition decisions, where
 `condition_is_decided_exactly` already vouches for nothing once the walk is
