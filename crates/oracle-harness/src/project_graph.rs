@@ -490,13 +490,27 @@ impl ProjectGraphFixture {
     }
 
     /// Check `check` with every project it reaches passed from source, each
-    /// checked with its own defines and its own references.
+    /// checked with its own defines.
+    ///
+    /// Each project references its whole [`closure`](Self::closure), not just
+    /// the projects it names: the SDK hands a build every transitive project
+    /// reference (as [`Self::dll_request`] hands the DLLs), and FCS does not
+    /// infer one from a referenced project's own `FSharpReference`s, so a
+    /// project naming only its direct references would fail with FS0074
+    /// where its build succeeds.
     pub fn source_request(&self, check: &PlainName) -> GraphRequest {
         let projects = self
             .closure(check)
             .into_iter()
             .chain(std::iter::once(self.project(check)))
-            .map(|p| self.graph_project(p, Vec::new(), p.project_refs.clone()))
+            .map(|p| {
+                let reached = self
+                    .closure(&p.name)
+                    .into_iter()
+                    .map(|q| q.name.clone())
+                    .collect();
+                self.graph_project(p, Vec::new(), reached)
+            })
             .collect();
         GraphRequest::new(projects, check.clone()).expect("a materialised fixture is a graph")
     }
@@ -771,6 +785,38 @@ mod tests {
         assert_eq!(source.projects()[0].defines, ["LIB_ONLY"]);
         assert_eq!(source.projects()[1].project_refs, [name("Lib")]);
         assert!(source.projects()[1].paths[0].starts_with(fixture.root()));
+    }
+
+    /// A source request references each project's whole closure, as its
+    /// build does: C → B → A gives C both.
+    #[test]
+    fn a_source_request_references_the_transitive_closure() {
+        let p = |n: &str, refs: &[&str]| FixtureProject {
+            name: name(n),
+            files: vec![FixtureFile {
+                name: format!("{n}.fs"),
+                text: format!("module {n}\n"),
+            }],
+            project_refs: refs.iter().map(|r| name(r)).collect(),
+            defines: Vec::new(),
+        };
+        let fixture =
+            ProjectGraphFixture::materialise(vec![p("A", &[]), p("B", &["A"]), p("C", &["B"])])
+                .expect("a graph");
+        let request = fixture.source_request(&name("C"));
+        let refs: BTreeMap<&str, Vec<&str>> = request
+            .projects()
+            .iter()
+            .map(|g| {
+                (
+                    g.id.as_str(),
+                    g.project_refs.iter().map(PlainName::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(refs["C"], ["A", "B"]);
+        assert_eq!(refs["B"], ["A"]);
+        assert_eq!(refs["A"], Vec::<&str>::new());
     }
 
     #[test]

@@ -174,6 +174,9 @@ pub struct Case {
     pub files: Vec<AFile>,
     pub ivt: Ivt,
     pub assembly_auto_open: Option<String>,
+    /// A project between A and B: B references only it, and reaches A
+    /// transitively, as the SDK passes every transitive reference.
+    pub middle: Option<String>,
     /// Paths B opens, in order.
     pub opens: Vec<String>,
     /// Lines of B's body.
@@ -473,6 +476,7 @@ pub fn generate(seed: u64, index: usize) -> Case {
         files,
         ivt,
         assembly_auto_open: None,
+        middle: None,
         opens: Vec::new(),
         uses: Vec::new(),
     };
@@ -487,6 +491,9 @@ pub fn generate(seed: u64, index: usize) -> Case {
     }
     case.opens = opens;
     case.uses = consumer_uses(&case, &mut rng);
+    if rng.chance(40) {
+        case.middle = Some(format!("Mid{index}"));
+    }
     case
 }
 
@@ -909,7 +916,10 @@ pub fn library_files(case: &Case) -> Vec<(String, String)> {
     }
     out.push((
         "Anchor.fs".to_owned(),
-        format!("module {}\n\nlet anchor = 1\n", anchor_module(case)),
+        format!(
+            "module {}\n\nlet anchor = 1\n\ntype Token = Token of int\n",
+            anchor_module(case)
+        ),
     ));
     for f in &case.files {
         let mut implementation = String::new();
@@ -952,6 +962,17 @@ pub fn anchor_module(case: &Case) -> String {
     format!("{}Anchor", case.library)
 }
 
+/// The middle project's one file, when the case has one: a value of A's
+/// anchor type.
+pub fn middle_files(case: &Case) -> Option<(String, Vec<(String, String)>)> {
+    let middle = case.middle.as_ref()?;
+    let text = format!(
+        "module {middle}\n\nlet token = {}.Token 1\n",
+        anchor_module(case)
+    );
+    Some((middle.clone(), vec![("Middle.fs".to_owned(), text)]))
+}
+
 /// The first line of B's body: the use of the anchor.
 pub const ANCHOR_USE: &str = "let anchorUse = ";
 
@@ -963,6 +984,16 @@ pub fn consumer_files(case: &Case) -> Vec<(String, String)> {
     }
     writeln!(text).expect("write to a String");
     writeln!(text, "{ANCHOR_USE}{}.anchor", anchor_module(case)).expect("write to a String");
+    if let Some(middle) = &case.middle {
+        // A value of A's type, reached through the middle project: FCS needs
+        // A referenced to read it.
+        writeln!(
+            text,
+            "let throughMiddle = match {middle}.token with {}.Token n -> n",
+            anchor_module(case)
+        )
+        .expect("write to a String");
+    }
     for u in &case.uses {
         writeln!(text, "{u}").expect("write to a String");
     }
@@ -1038,6 +1069,9 @@ pub fn kinds(case: &Case) -> BTreeSet<&'static str> {
                 }
             }
         }
+    }
+    if case.middle.is_some() {
+        out.insert("transitive reference through a middle project");
     }
     if case.assembly_auto_open.is_some() {
         out.insert("assembly-level auto-open");

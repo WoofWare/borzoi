@@ -7,7 +7,7 @@
 //! sources instead. This puts
 //! each dependent project through the LSP's runtime path and grades it against
 //! FCS with every F# reference passed from source
-//! ([`ProjectGraphOracle`](crate::ProjectGraphOracle)), counting what B commits
+//! ([`ProjectGraphOracle`]), counting what B commits
 //! correctly, what it declines and what it gets wrong, and, separately, the
 //! uses FCS binds into a referenced project.
 //!
@@ -25,6 +25,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use borzoi::project_deferral::FoldOutcome;
+use borzoi::project_graph::ProjectKind;
 use borzoi::semantic::ProjectId;
 use borzoi::workspace::Workspace;
 use borzoi_msbuild::{ItemMetadataValue, ParsedProject};
@@ -77,20 +78,15 @@ pub enum NotBuiltReport {
     },
 }
 
-/// The plain name `fcs-dump` accepts for `s`: its characters outside
-/// [`PlainName`]'s alphabet replaced.
-fn plain(s: &str) -> PlainName {
-    let mapped: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    PlainName::new(if mapped.is_empty() { "_" } else { &mapped }).expect("mapped to a plain name")
+/// `project`'s assembly name as a [`PlainName`], the oracle's domain, which
+/// is both its project id and the assembly name FCS checks it as. `Err` names
+/// a project outside that domain: renaming it would check a different
+/// assembly, and every `InternalsVisibleTo` naming the real one would miss.
+fn oracle_name(project: &Path, parsed: &ParsedProject) -> Result<(PlainName, bool), String> {
+    let (name, trusted) = assembly_name(project, parsed);
+    PlainName::new(&name).map(|n| (n, trusted)).map_err(|_| {
+        format!("its assembly name {name:?} is outside the oracle's plain-name domain")
+    })
 }
 
 /// The assembly name `parsed` builds, and whether it is trusted.
@@ -108,22 +104,32 @@ fn assembly_name(project: &Path, parsed: &ParsedProject) -> (String, bool) {
     }
 }
 
-/// `parsed`'s F# project references, canonicalised.
-fn fsharp_references(parsed: &ParsedProject) -> Vec<PathBuf> {
-    parsed
-        .project_references
+fn canonical(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The F# projects `project` compiles against, as the LSP's env fold walks
+/// them ([`Workspace::project_graph_with_producer_tfms`]): only edges that
+/// contribute to compilation (a `ReferenceOutputAssembly="false"` edge does
+/// not), transitive edges followed except through an edge that excludes them,
+/// canonicalised, `project` itself excluded. `true` when some node's
+/// reference list was suppressed as untrusted, so the set may be short.
+fn compile_closure(workspace: &Workspace, project: &Path) -> (Vec<PathBuf>, bool) {
+    let graph = workspace.project_graph_with_producer_tfms(
+        project,
+        &BTreeMap::new(),
+        &borzoi_msbuild::observed::Observer::new(),
+    );
+    let entry = canonical(project);
+    let suppressed = graph.nodes.iter().any(|n| n.references_uncertain);
+    let closure = graph
+        .nodes
         .iter()
-        .filter(|r| {
-            r.include
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("fsproj"))
-        })
-        .map(|r| {
-            r.include
-                .canonicalize()
-                .unwrap_or_else(|_| r.include.clone())
-        })
-        .collect()
+        .filter(|n| n.kind == ProjectKind::FSharp)
+        .map(|n| canonical(&n.path))
+        .filter(|p| *p != entry)
+        .collect();
+    (closure, suppressed)
 }
 
 /// Measure the dependent project `project`.
@@ -146,41 +152,51 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
     let Some(parsed) = workspace.project(project).cloned() else {
         return skipped("its evaluation failed".to_owned());
     };
+    let (check, _) = match oracle_name(project, &parsed) {
+        Ok(name) => name,
+        Err(why) => return skipped(why),
+    };
 
-    // The referenced closure, in dependency order.
-    let mut order: Vec<PathBuf> = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut stack: Vec<(PathBuf, bool)> = fsharp_references(&parsed)
-        .into_iter()
-        .rev()
-        .map(|p| (p, false))
-        .collect();
-    while let Some((p, expanded)) = stack.pop() {
-        if expanded {
-            order.push(p);
+    // Every project the request needs: B's compile closure, and each of
+    // those projects' own (which an output-only edge leaves out of B's).
+    let (b_closure, b_suppressed) = compile_closure(&workspace, project);
+    let mut closures: BTreeMap<PathBuf, (Vec<PathBuf>, bool)> = BTreeMap::new();
+    let mut pending: Vec<PathBuf> = b_closure.clone();
+    while let Some(a) = pending.pop() {
+        if closures.contains_key(&a) {
             continue;
         }
-        if !seen.insert(p.clone()) {
-            continue;
-        }
-        stack.push((p.clone(), true));
-        if let Some(r) = workspace.project(&p).cloned() {
-            for q in fsharp_references(&r).into_iter().rev() {
-                if !seen.contains(&q) {
-                    stack.push((q, false));
-                }
-            }
-        }
+        let (closure, suppressed) = compile_closure(&workspace, &a);
+        pending.extend(
+            closure
+                .iter()
+                .filter(|q| !closures.contains_key(*q))
+                .cloned(),
+        );
+        closures.insert(a, (closure, suppressed));
     }
 
     let mut ids: BTreeMap<PathBuf, PlainName> = BTreeMap::new();
-    let mut graph = Vec::new();
-    let mut referenced = Vec::new();
-    for a in &order {
+    let mut parsed_refs: BTreeMap<PathBuf, ParsedProject> = BTreeMap::new();
+    for a in closures.keys() {
         let Some(parsed_a) = workspace.project(a).cloned() else {
             return skipped(format!("its reference {} did not evaluate", a.display()));
         };
-        let (name, name_trusted) = assembly_name(a, &parsed_a);
+        match oracle_name(a, &parsed_a) {
+            Ok((id, _)) => ids.insert(a.clone(), id),
+            Err(why) => return skipped(format!("its reference {}: {why}", a.display())),
+        };
+        parsed_refs.insert(a.clone(), parsed_a);
+    }
+    let ids_of = |closure: &[PathBuf]| -> Vec<PlainName> {
+        closure.iter().filter_map(|p| ids.get(p).cloned()).collect()
+    };
+
+    let mut graph = Vec::new();
+    let mut referenced = Vec::new();
+    for (a, parsed_a) in &parsed_refs {
+        let (name, name_trusted) = assembly_name(a, parsed_a);
+        let (closure, suppressed) = &closures[a];
         let mut unreadable = Vec::new();
         if parsed_a.items_uncertain {
             unreadable.push("untrusted Compile set".to_owned());
@@ -188,7 +204,7 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
         if parsed_a.define_constants_uncertain {
             unreadable.push("untrusted defines".to_owned());
         }
-        if parsed_a.project_references_uncertain {
+        if parsed_a.project_references_uncertain || *suppressed {
             unreadable.push("untrusted project references".to_owned());
         }
         if parsed_a.target_frameworks.len() > 1 {
@@ -236,12 +252,7 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
         let tfm = workspace.served_tfm_for_project(a);
         let (refs, _) =
             semantic.env_reference_dlls_for_project(a, dotnet_root.as_deref(), &tfm, &workspace);
-        let id = plain(&name);
-        ids.insert(a.clone(), id.clone());
-        let project_refs = fsharp_references(&parsed_a)
-            .iter()
-            .filter_map(|r| ids.get(r).cloned())
-            .collect();
+        let id = ids[a].clone();
         graph.push(GraphProject {
             id: id.clone(),
             assembly_name: id,
@@ -250,7 +261,7 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
             refs,
             defines: parsed_a.define_constants.clone(),
             lang_version: parsed_a.lang_version.clone(),
-            project_refs,
+            project_refs: ids_of(closure),
         });
         referenced.push(ReferencedProject {
             project: a.clone(),
@@ -261,8 +272,6 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
         });
     }
 
-    let (name, _) = assembly_name(project, &parsed);
-    let check = plain(&name);
     graph.push(GraphProject {
         id: check.clone(),
         assembly_name: check.clone(),
@@ -271,11 +280,11 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
         defines: loaded.define_constants.clone(),
         lang_version: loaded.lang_version.clone(),
         exclusive_refs: !loaded.fcs_extra_refs.is_empty(),
-        project_refs: fsharp_references(&parsed)
-            .iter()
-            .filter_map(|r| ids.get(r).cloned())
-            .collect(),
+        project_refs: ids_of(&b_closure),
     });
+    if b_suppressed {
+        return skipped("its compile closure has an untrusted reference list".to_owned());
+    }
     let request = match GraphRequest::new(graph, check) {
         Ok(r) => r,
         Err(e) => return skipped(format!("its graph is not one FCS checks: {e}")),
@@ -288,8 +297,12 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
         Ok(r) => r,
         Err(e) => return skipped(format!("unreadable FCS answer: {e}")),
     };
-    for (r, answer) in referenced.iter_mut().zip(&response.referenced) {
-        r.fcs_errors = answer.errors().count();
+    for r in &mut referenced {
+        r.fcs_errors = response
+            .referenced
+            .iter()
+            .find(|answer| answer.assembly_name == r.assembly_name)
+            .map_or(0, |answer| answer.errors().count());
     }
     let sources: Vec<_> = loaded
         .parses
