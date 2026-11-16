@@ -143,6 +143,8 @@ pub fn walk(
     state
         .foreign_definitions
         .record_document(root, project_path);
+    // MSBuild loads the project before it evaluates any of it.
+    rejection::judge_load_time(root, &mut state);
     // SDK resolution requires IO, which the pure walker doesn't do.
     // Surface the attribute so the caller knows the result may be
     // incomplete (Compile defaults, etc.). Mirrors what
@@ -222,6 +224,9 @@ pub fn walk_with_imports<'r>(
     state
         .foreign_definitions
         .record_document(root, project_path);
+    // MSBuild loads the project before it evaluates any of it, or
+    // resolves its SDK.
+    rejection::judge_load_time(root, &mut state);
     // Seed `imports_seen` with the entry project so an import that names
     // the entry — directly or through a chain — is skipped the way
     // MSBuild skips it (warning MSB4210, "attempting to import itself";
@@ -3831,7 +3836,8 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
 
 /// Whether a `<Choose>` subtree is shaped the way MSBuild's loader
 /// requires: one or more `<When>`s each with a non-empty `Condition`
-/// (MSB4035 calls an empty one out explicitly), at most one
+/// (MSB4035 calls an empty one out explicitly; a blank one loads, and
+/// MSBuild throws on it only where it evaluates it, MSB4092), at most one
 /// `<Otherwise>` and only in last position, no attribute beyond the
 /// recognized set (`<Choose>` and `<Otherwise>` take *none* — even
 /// `Label` is MSB4066 there, pinned; `<When>` takes `Condition` and
@@ -3893,7 +3899,7 @@ fn choose_shape_is_valid_at(node: Node<'_, '_>, nesting: usize) -> bool {
                     || !attrs_ok(child, true)
                     || attribute(child, "Condition")
                         .as_deref()
-                        .is_none_or(|c| c.trim().is_empty())
+                        .is_none_or(|c| c.is_empty())
                 {
                     return false;
                 }
@@ -6437,6 +6443,8 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     // calls re-enter this same function, so the duplicate-import skip,
     // depth limits, and the import-site span pin (already `Some` here
     // for any descent beyond the first) all just work.
+    // MSBuild loads the file before it evaluates any of it.
+    rejection::judge_load_time(doc.root_element(), state);
     latch_default_targets(doc.root_element(), state);
     // The file's own imports say for themselves how they name their paths;
     // its implicit SDK imports are not explicit imports.

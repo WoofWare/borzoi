@@ -993,6 +993,11 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
             "the condition `{condition}`, which MSBuild cannot evaluate, so MSBuild {rejects} \
              the whole project"
         ),
+        RejectionCause::LoadTime(error) => format!(
+            "{}, which MSBuild refuses when it loads the file, so MSBuild {rejects} the whole \
+             project",
+            crate::fsproj_diagnostics::load_time_error_text(error)
+        ),
     }
 }
 

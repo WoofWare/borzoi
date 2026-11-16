@@ -42,8 +42,8 @@ use std::path::{Path, PathBuf};
 use lsp_types::{Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, Range};
 
 use borzoi_msbuild::{
-    DiagnosticKind, DiagnosticOrigin, GlobResolver, ImportFailReason, ParseError, RejectionCause,
-    ResolvedItem, SdkResolver, SdkVersion, UnloadableImport, VersionSpec,
+    DiagnosticKind, DiagnosticOrigin, GlobResolver, ImportFailReason, LoadTimeError, ParseError,
+    RejectionCause, ResolvedItem, SdkResolver, SdkVersion, UnloadableImport, VersionSpec,
     parse_fsproj_with_imports,
 };
 
@@ -924,6 +924,20 @@ fn message(kind: &DiagnosticKind, discovery_failure: Option<&DiscoveryError>) ->
     }
 }
 
+/// What a [`LoadTimeError`] names, as a noun phrase.
+pub(crate) fn load_time_error_text(error: &LoadTimeError) -> String {
+    match error {
+        LoadTimeError::ReservedProperty { name } => {
+            format!("a write to the reserved name `{name}`")
+        }
+        LoadTimeError::ItemWithoutSpec { item } => {
+            format!("a `<{item}>` item with an empty or missing `Include`, `Update` or `Remove`")
+        }
+        LoadTimeError::ImportWithoutProject => "an `<Import>` with no `Project`".to_string(),
+        LoadTimeError::MalformedChoose => "a malformed `<Choose>`".to_string(),
+    }
+}
+
 /// The message for a construct that makes MSBuild reject the project
 /// (`certain`), or that may.
 fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
@@ -960,6 +974,14 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
             format!(
                 "MSBuild {rejects} this project: it cannot evaluate the condition `{condition}` \
                  — no evaluated value is trusted"
+            )
+        }
+        RejectionCause::LoadTime(error) => {
+            let rejects = if certain { "rejects" } else { "may reject" };
+            format!(
+                "MSBuild {rejects} this project: a file it loads holds {}, which it refuses \
+                 before evaluating anything — no evaluated value is trusted",
+                load_time_error_text(error)
             )
         }
     }

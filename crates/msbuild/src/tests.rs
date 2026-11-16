@@ -2902,21 +2902,22 @@ fn protected_write_with_unsupported_condition_emits_no_diagnostic() {
 
 #[test]
 fn protected_write_with_unsupported_value_emits_no_diagnostic() {
-    // Same principle, value side. If the caller has reserved a
-    // property name, the project's write to that name is wholly
-    // discarded — the value's expansion is irrelevant. Don't bill
-    // the project for an UnsupportedPropertyExpression MSBuild would
-    // never have evaluated.
+    // Same principle, value side. If the caller has supplied a global
+    // property, the project's write to that name is wholly discarded —
+    // the value's expansion is irrelevant. Don't bill the project for an
+    // UnsupportedPropertyExpression MSBuild would never have evaluated. (A
+    // write to a *reserved* name is no such discard: MSBuild refuses the
+    // file, MSB4004.)
     let src = r#"<Project>
   <PropertyGroup>
-    <MSBuildProjectName>$([System.IO.Path]::Combine('x', 'y'))</MSBuildProjectName>
+    <G>$([System.IO.Path]::Combine('x', 'y'))</G>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="$(MSBuildProjectName).fs" />
+    <Compile Include="$(G).fs" />
   </ItemGroup>
 </Project>"#;
-    let p = parse(src);
-    assert_eq!(paths(&p.items), [Path::new("/repo/proj/Demo.fs")]);
+    let p = parse_with(src, &[("G", "Given")]);
+    assert_eq!(paths(&p.items), [Path::new("/repo/proj/Given.fs")]);
     assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
     assert!(!p.is_partial);
 }

@@ -40,7 +40,9 @@ mod common;
 use std::collections::HashMap;
 
 use crate::common::parse_fsproj_with_imports;
-use borzoi_msbuild::{ParsedProject, resolve_sdk, workloads};
+use borzoi_msbuild::{
+    LoadTimeError, ParsedProject, RejectionCause, RejectionCertainty, resolve_sdk, workloads,
+};
 use tempfile::TempDir;
 
 /// Parse `body` with the real SDK resolver, so `seed_toolset_properties` runs.
@@ -122,21 +124,25 @@ fn an_overridable_toolset_seed_keeps_a_refused_writes_uncertainty() {
 }
 
 #[test]
-fn a_reserved_toolset_seed_discards_a_refused_writes_uncertainty() {
-    // The mirror. MSBuild answers a write here with MSB4004 and keeps its own
-    // value, so whether *we* could decide the condition changes nothing about
-    // the real build's value — and carrying the mark would be a decline bought
-    // for no risk at all.
+fn a_write_to_a_reserved_toolset_name_rejects_the_project() {
+    // The mirror. MSBuild refuses a file that writes a reserved name, whatever
+    // the write's condition holds (MSB4004, #888), so the project has no
+    // evaluation and the seed is withdrawn with everything else.
     let parsed = parse_with_real_sdk(&refused_write_before_the_sdk("MSBuildToolsPath"));
+    let rejection = parsed
+        .rejection
+        .as_ref()
+        .expect("MSB4004 rejects the project");
+    assert_eq!(rejection.certainty, RejectionCertainty::Certain);
     assert!(
-        !parsed
-            .property("MSBuildToolsPath")
-            .untrusted_cause()
-            .is_some(),
-        "MSBuildToolsPath is reserved (MSB4004), so a refused project write to \
-         it says nothing about the real build's value and must not taint the \
-         toolset seed",
+        matches!(
+            &rejection.cause,
+            RejectionCause::LoadTime(LoadTimeError::ReservedProperty { name })
+                if name == "MSBuildToolsPath"
+        ),
+        "{rejection:#?}"
     );
+    assert!(!parsed.property("MSBuildToolsPath").is_exact());
 }
 
 /// The other way a slot can be taken before the first SDK resolves: an import

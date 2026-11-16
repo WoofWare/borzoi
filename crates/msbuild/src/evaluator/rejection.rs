@@ -86,14 +86,14 @@ use roxmltree::Node;
 use crate::diagnostic::ImportFailReason;
 use crate::document::attribute;
 use crate::imports::normalise;
-use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
+use crate::{LoadTimeError, Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 
 use super::item_pass::expand_silent;
 use super::observed::{self, EntryKind};
 use super::{
-    SdkResolution, State, condition, condition_exists, directory_build, import_dedup_key,
-    properties, sdk_import_path, sdk_project_in_alphabet, sdk_project_under_root,
-    sdk_root_is_reparsed,
+    MAXIMUM_CHOOSE_NESTING, SdkResolution, State, condition, condition_exists, directory_build,
+    import_dedup_key, is_msbuild_reserved_name, properties, sdk_import_path,
+    sdk_project_in_alphabet, sdk_project_under_root, sdk_root_is_reparsed,
 };
 
 impl State<'_> {
@@ -225,6 +225,226 @@ pub(super) fn illegal_condition_at(
         },
         span,
     );
+}
+
+/// Judge the file whose root element is `root`, which the walk is entering,
+/// for a construct MSBuild refuses when it loads the file (#888). MSBuild
+/// parses the whole file before it evaluates any of it, so no condition in
+/// the file matters, nor whether the walk later reaches the construct: the
+/// rejection is certain wherever MSBuild certainly loads the file, which is
+/// where the walk reaches the file's own import for certain.
+pub(super) fn judge_load_time(root: Node<'_, '_>, state: &mut State<'_>) {
+    if let Some((error, span, refused)) = first_load_time_error(root) {
+        state.note_rejection(
+            certain_if(refused == Refused::Certainly && reach_is_certain(state)),
+            RejectionCause::LoadTime(error),
+            span,
+        );
+    }
+}
+
+/// The elements MSBuild reserves as property names, in exact case (MSB4004;
+/// probed, `dotnet msbuild` 10.0, where `Import`, `ItemDefinitionGroup`,
+/// `Project`, `Sdk`, `Parameter`, `ParameterGroup` and `Task` load, and so do
+/// `choose` and `propertygroup`).
+const RESERVED_ELEMENT_NAMES: [&str; 11] = [
+    "Choose",
+    "When",
+    "Otherwise",
+    "PropertyGroup",
+    "ItemGroup",
+    "Target",
+    "UsingTask",
+    "ProjectExtensions",
+    "Output",
+    "OnError",
+    "ImportGroup",
+];
+
+/// How sure the load-time judgement is that MSBuild refuses a construct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refused {
+    Certainly,
+    /// It holds text that MSBuild's whitespace classification may not skip.
+    Perhaps,
+}
+
+/// The first construct in document order under `root` that MSBuild refuses
+/// at load time, or may, and its span. Only the elements MSBuild parses are
+/// looked in: a `<ProjectExtensions>` holds whatever XML it likes.
+fn first_load_time_error(root: Node<'_, '_>) -> Option<(LoadTimeError, Range<usize>, Refused)> {
+    let certainly = |found: Option<(LoadTimeError, Range<usize>)>| {
+        found.map(|(e, s)| (e, s, Refused::Certainly))
+    };
+    root.children()
+        .filter(Node::is_element)
+        .find_map(|child| match child.tag_name().name() {
+            "PropertyGroup" => certainly(reserved_property(child)),
+            "ItemGroup" => certainly(item_without_spec(child, false)),
+            "Import" => certainly(import_without_project(child)),
+            "ImportGroup" => certainly(
+                child
+                    .children()
+                    .filter(|c| c.is_element() && c.has_tag_name("Import"))
+                    .find_map(import_without_project),
+            ),
+            "Choose" => match choose_refused(child, 1) {
+                Some(refused) => Some((LoadTimeError::MalformedChoose, child.range(), refused)),
+                None => certainly(choose_load_time_error(child)),
+            },
+            "Target" => certainly(child.children().filter(Node::is_element).find_map(|c| {
+                match c.tag_name().name() {
+                    "PropertyGroup" => reserved_property(c),
+                    "ItemGroup" => item_without_spec(c, true),
+                    _ => None,
+                }
+            })),
+            _ => None,
+        })
+}
+
+/// Whether MSBuild's loader refuses the `<Choose>` at `choose`, which has
+/// `nesting` `<Choose>` elements on its path, itself included: `None` when it
+/// loads. Each rule is probed (`dotnet msbuild` 10.0) and pinned in the
+/// property-table differential: a `<Choose>` takes no attribute (MSB4066) and
+/// holds at least one `<When>` (MSB4085), then at most one `<Otherwise>`
+/// (MSB4082, MSB4084), which takes no attribute either; a `<When>` needs a
+/// non-empty `Condition` (MSB4035) and takes any other attribute; a branch
+/// holds only `<PropertyGroup>`, `<ItemGroup>`, `<ItemDefinitionGroup>` and
+/// `<Choose>` elements (MSB4067), nested no deeper than
+/// [`MAXIMUM_CHOOSE_NESTING`]; and no text but whitespace stands among them
+/// (MSB4067). MSBuild skips whitespace by its own classification, Unicode's
+/// included, so text refuses for certain only with a visible ASCII character
+/// in it, and only perhaps with another character that is not whitespace, or
+/// as a CDATA section, which the reader declines. What the branch's own groups
+/// hold is the rest of the loader's schema (#917), which this does not judge.
+/// Narrower than [`super::choose_shape_is_valid`], which the walk declines on.
+fn choose_refused(choose: Node<'_, '_>, nesting: usize) -> Option<Refused> {
+    let has_attributes = |node: Node<'_, '_>| node.attributes().any(|a| a.namespace().is_none());
+    // The text directly in `node`: `Some(true)` when it refuses for certain,
+    // `Some(false)` when perhaps.
+    let text_refuses = |node: Node<'_, '_>| {
+        let mut verdict = None;
+        for text in node.children().filter(|n| n.is_text()) {
+            match crate::document::text(text) {
+                Some(t) if t.chars().any(|c| c.is_ascii_graphic()) => return Some(true),
+                Some(t) if t.chars().all(char::is_whitespace) => {}
+                _ => verdict = Some(false),
+            }
+        }
+        verdict
+    };
+    let mut perhaps = false;
+    if nesting > MAXIMUM_CHOOSE_NESTING || has_attributes(choose) {
+        return Some(Refused::Certainly);
+    }
+    match text_refuses(choose) {
+        Some(true) => return Some(Refused::Certainly),
+        Some(false) => perhaps = true,
+        None => {}
+    }
+    let (mut saw_when, mut saw_otherwise) = (false, false);
+    for branch in choose.children().filter(Node::is_element) {
+        match branch.tag_name().name() {
+            "When" => {
+                if saw_otherwise || attribute(branch, "Condition").is_none_or(|c| c.is_empty()) {
+                    return Some(Refused::Certainly);
+                }
+                saw_when = true;
+            }
+            "Otherwise" => {
+                if saw_otherwise || !saw_when || has_attributes(branch) {
+                    return Some(Refused::Certainly);
+                }
+                saw_otherwise = true;
+            }
+            _ => return Some(Refused::Certainly),
+        }
+        match text_refuses(branch) {
+            Some(true) => return Some(Refused::Certainly),
+            Some(false) => perhaps = true,
+            None => {}
+        }
+        for group in branch.children().filter(Node::is_element) {
+            match group.tag_name().name() {
+                "PropertyGroup" | "ItemGroup" | "ItemDefinitionGroup" => {}
+                "Choose" => match choose_refused(group, nesting + 1) {
+                    Some(Refused::Certainly) => return Some(Refused::Certainly),
+                    Some(Refused::Perhaps) => perhaps = true,
+                    None => {}
+                },
+                _ => return Some(Refused::Certainly),
+            }
+        }
+    }
+    if !saw_when {
+        Some(Refused::Certainly)
+    } else if perhaps {
+        Some(Refused::Perhaps)
+    } else {
+        None
+    }
+}
+
+/// [`first_load_time_error`] within the branches of `choose`, a `<Choose>`
+/// MSBuild's loader accepts (so nested no deeper than it loads).
+fn choose_load_time_error(choose: Node<'_, '_>) -> Option<(LoadTimeError, Range<usize>)> {
+    choose
+        .children()
+        .filter(Node::is_element)
+        .flat_map(|branch| branch.children().filter(Node::is_element))
+        .find_map(|group| match group.tag_name().name() {
+            "PropertyGroup" => reserved_property(group),
+            "ItemGroup" => item_without_spec(group, false),
+            "Choose" => choose_load_time_error(group),
+            _ => None,
+        })
+}
+
+/// The first property of the `<PropertyGroup>` at `group` named for a
+/// reserved property or element.
+fn reserved_property(group: Node<'_, '_>) -> Option<(LoadTimeError, Range<usize>)> {
+    group.children().filter(Node::is_element).find_map(|p| {
+        let name = p.tag_name().name();
+        (is_msbuild_reserved_name(&name.to_ascii_lowercase())
+            || RESERVED_ELEMENT_NAMES.contains(&name))
+        .then(|| {
+            (
+                LoadTimeError::ReservedProperty {
+                    name: name.to_owned(),
+                },
+                p.range(),
+            )
+        })
+    })
+}
+
+/// The first item of the `<ItemGroup>` at `group` whose `Include`, `Update`
+/// or `Remove` is empty, or, outside a target (`!in_target`), that has none.
+fn item_without_spec(
+    group: Node<'_, '_>,
+    in_target: bool,
+) -> Option<(LoadTimeError, Range<usize>)> {
+    group.children().filter(Node::is_element).find_map(|item| {
+        let specs = ["Include", "Update", "Remove"].map(|name| attribute(item, name));
+        let empty = specs.iter().flatten().any(|spec| spec.is_empty());
+        let none = specs.iter().all(Option::is_none);
+        (empty || (none && !in_target)).then(|| {
+            (
+                LoadTimeError::ItemWithoutSpec {
+                    item: item.tag_name().name().to_owned(),
+                },
+                item.range(),
+            )
+        })
+    })
+}
+
+/// The `<Import>` at `import`, when its `Project` is absent or empty.
+fn import_without_project(import: Node<'_, '_>) -> Option<(LoadTimeError, Range<usize>)> {
+    attribute(import, "Project")
+        .is_none_or(|project| project.is_empty())
+        .then(|| (LoadTimeError::ImportWithoutProject, import.range()))
 }
 
 /// What a judged condition decides about the constructs under it.
