@@ -32,6 +32,15 @@
 //! include declines wherever case would decide it, which this harness then
 //! checks the same way.
 //!
+//! Now and then a disk also holds symbolic links to directories: to the
+//! project directory, to its parent, to the project directory spelt in upper
+//! case, below it, and outside it. MSBuild skips such a directory when the
+//! link's target contains it, comparing by its temp directory's case
+//! sensitivity, so a link to a case variant of an ancestor is walked by an
+//! oracle whose temp directory is case-sensitive (Linux) and skipped by one
+//! whose is not (macOS). The resolver must decline wherever that could move
+//! what it selects.
+//!
 //! Inputs are a fixed-seed sweep, so a failure reproduces exactly.
 
 mod common;
@@ -155,12 +164,42 @@ const NAME: &[&str] = &[
 /// Non-ASCII file names, outside the allow-list, drawn now and then.
 const RARE_NAME: &[&str] = &["\u{e9}.fs", "\u{c9}.fs"];
 
-fn gen_fragment(rng: &mut SplitMix64) -> String {
+/// Where a generated symbolic link points.
+#[derive(Clone, Copy, Debug)]
+enum LinkTarget {
+    /// The project directory.
+    Root,
+    /// The project directory spelt with its name in upper case: on a
+    /// case-sensitive file system a directory of its own, holding a file.
+    RootUpper,
+    /// The project directory's parent, written relative to the link.
+    Parent,
+    /// `sub`, below the link's own directory.
+    Sub,
+    /// A directory beside the project directory, holding a file.
+    Outside,
+}
+
+/// Links a disk holds a random selection of, now and then, by path below the
+/// project directory.
+const LINKS: &[(&str, LinkTarget)] = &[
+    ("sub/up", LinkTarget::Root),
+    ("sub/upper", LinkTarget::RootUpper),
+    ("sub/Deep/top", LinkTarget::Parent),
+    ("lk", LinkTarget::Sub),
+    ("sub/Deep/out", LinkTarget::Outside),
+];
+
+/// One spec fragment. `links` draws the link dimension apart from `rng`, so
+/// adding it moved no other draw.
+fn gen_fragment(rng: &mut SplitMix64, links: &mut SplitMix64) -> String {
     let fixed = if rng.below(8) == 0 {
         rng.pick(RARE_FIXED)
     } else {
         rng.pick(FIXED)
     };
+    // Now and then a fixed directory that is a link, where the disk holds it.
+    let fixed = if links.below(16) == 0 { "lk" } else { fixed };
     let name = if rng.below(12) == 0 {
         rng.pick(RARE_NAME)
     } else {
@@ -174,30 +213,44 @@ fn gen_fragment(rng: &mut SplitMix64) -> String {
         .join("/")
 }
 
-fn gen_spec(rng: &mut SplitMix64) -> String {
+fn gen_spec(rng: &mut SplitMix64, links: &mut SplitMix64) -> String {
     (0..1 + rng.below(2))
-        .map(|_| gen_fragment(rng))
+        .map(|_| gen_fragment(rng, links))
         .collect::<Vec<_>>()
         .join(";")
 }
 
 struct Fixture {
     files: Vec<&'static str>,
+    links: Vec<(&'static str, LinkTarget)>,
     include: String,
     exclude: Option<String>,
 }
 
 impl Fixture {
-    fn generate(rng: &mut SplitMix64) -> Fixture {
+    /// A fixture, its link dimension drawn from `links` (see [`gen_fragment`]).
+    fn generate(rng: &mut SplitMix64, links: &mut SplitMix64) -> Fixture {
         let mut files = BASE_FILES.to_vec();
         files.extend(EXTRAS.iter().filter(|_| rng.below(4) == 0));
         if rng.below(6) == 0 {
             files.push(rng.pick(NON_ASCII));
         }
+        let linked = if links.below(4) == 0 {
+            LINKS
+                .iter()
+                .copied()
+                .filter(|_| links.below(2) == 0)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let include = gen_spec(rng, links);
+        let exclude = (rng.below(3) != 0).then(|| gen_spec(rng, links));
         Fixture {
             files,
-            include: gen_spec(rng),
-            exclude: (rng.below(3) != 0).then(|| gen_spec(rng)),
+            links: linked,
+            include,
+            exclude,
         }
     }
 
@@ -270,6 +323,30 @@ fn check(oracles: &mut [Oracle; 2], fixture: &Fixture) -> Outcome {
             std::fs::write(path, "module M\n").expect("write source");
         }
     }
+    #[cfg(unix)]
+    for (path, target) in &fixture.links {
+        use borzoi_msbuild::observed::host_fs::HostPath;
+        let target = match target {
+            LinkTarget::Root => root.clone(),
+            LinkTarget::RootUpper => {
+                let upper = root.with_file_name("PROJ");
+                if !upper.host_exists() {
+                    std::fs::create_dir_all(&upper).expect("mkdir");
+                    std::fs::write(upper.join("v.fs"), "module M\n").expect("write source");
+                }
+                upper
+            }
+            LinkTarget::Parent => std::path::PathBuf::from("../../.."),
+            LinkTarget::Sub => root.join("sub"),
+            LinkTarget::Outside => {
+                let outside = root.with_file_name("outside");
+                std::fs::create_dir_all(&outside).expect("mkdir");
+                std::fs::write(outside.join("o.fs"), "module M\n").expect("write source");
+                outside
+            }
+        };
+        std::os::unix::fs::symlink(target, root.join(path)).expect("symlink");
+    }
     let proj = root.join("Demo.fsproj");
     let xml = fixture.xml(&root.to_string_lossy().to_ascii_uppercase());
     std::fs::write(&proj, &xml).expect("write project");
@@ -322,8 +399,9 @@ fn check(oracles: &mut [Oracle; 2], fixture: &Fixture) -> Outcome {
             .collect();
         assert_eq!(
             ours, theirs,
-            "certain-implies-exact violated under the {culture} culture.\ndisk: {:?}\nproject:\n{xml}",
-            fixture.files
+            "certain-implies-exact violated under the {culture} culture.\ndisk: {:?}\nlinks: {:?}\n\
+             project:\n{xml}",
+            fixture.files, fixture.links
         );
     }
     Outcome::Committed
@@ -366,6 +444,7 @@ fn case_corners() {
     const TABLE: &[&str] = &["a.fs", "b.fs", "sub/a.fs"];
     let corner = |files: &[&'static str], include: &str, exclude: Option<&str>| Fixture {
         files: files.to_vec(),
+        links: Vec::new(),
         include: include.to_string(),
         exclude: exclude.map(str::to_string),
     };
@@ -524,6 +603,67 @@ fn case_corners() {
     }
 }
 
+/// Links to directories, on every host: a glob that selects through one
+/// declines, as whether MSBuild skips it turns on what the walk does not see
+/// (the link to the upper-case spelling is walked by an oracle whose temp
+/// directory is case-sensitive and skipped by one whose is not); one that
+/// never enters it commits.
+#[cfg(unix)]
+#[test]
+fn link_corners() {
+    let mut oracles = oracles();
+    const TABLE: &[&str] = &["a.fs", "b.fs", "sub/a.fs"];
+    let linked = |links: &[(&'static str, LinkTarget)], include: &str| Fixture {
+        files: TABLE.to_vec(),
+        links: links.to_vec(),
+        include: include.to_string(),
+        exclude: None,
+    };
+    let cases = [
+        (
+            linked(&[("sub/up", LinkTarget::Root)], "sub/*/*.fs"),
+            "SymlinkedDirectory",
+        ),
+        (
+            linked(&[("sub/upper", LinkTarget::RootUpper)], "sub/*/*.fs"),
+            "SymlinkedDirectory",
+        ),
+        (
+            linked(&[("lk", LinkTarget::Sub)], "lk/*.fs"),
+            "SymlinkedDirectory",
+        ),
+        (
+            linked(&[("sub/out", LinkTarget::Outside)], "**/*.fs"),
+            "SymlinkedDirectory",
+        ),
+        (
+            linked(&[("sub/up", LinkTarget::Root)], "**/*.fs"),
+            "SymlinkCycle",
+        ),
+    ];
+    for (fixture, reason) in &cases {
+        assert_eq!(
+            check(&mut oracles, fixture),
+            Outcome::ResolverDeclined(reason.to_string()),
+            "links: {:?}\n{}",
+            fixture.links,
+            fixture.xml(ROOT_UPPER)
+        );
+    }
+    for fixture in [
+        linked(&[("sub/up", LinkTarget::Root)], "*.fs;sub/*.fs"),
+        linked(&[("sub/out", LinkTarget::Outside)], "sub/**/*.fsi"),
+    ] {
+        assert_eq!(
+            check(&mut oracles, &fixture),
+            Outcome::Committed,
+            "links: {:?}\n{}",
+            fixture.links,
+            fixture.xml(ROOT_UPPER)
+        );
+    }
+}
+
 /// The sweep. Every case that commits is checked against both oracles; the
 /// floors keep a decline-everything model from passing vacuously, and the
 /// census says where the declines come from.
@@ -543,24 +683,34 @@ fn generated_case_variants_soak() {
 fn sweep(seed: u64, cases: usize) {
     let mut oracles = oracles();
     let mut rng = SplitMix64(seed);
-    let mut committed = 0usize;
-    let mut committed_upper = 0usize;
+    let mut links = SplitMix64(seed ^ 0x0959_11a5);
+    // The floors measure the case dimension, over the disks without links;
+    // the link dimension has its own.
+    let (mut unlinked, mut committed, mut committed_upper) = (0usize, 0usize, 0usize);
+    let (mut committed_linked, mut declined_through_link) = (0usize, 0usize);
     let mut census: BTreeMap<String, usize> = BTreeMap::new();
     let mut declined_outside_resolver = Vec::new();
     for _ in 0..cases {
-        let fixture = Fixture::generate(&mut rng);
+        let fixture = Fixture::generate(&mut rng, &mut links);
+        let linked = !fixture.links.is_empty();
+        unlinked += usize::from(!linked);
         match check(&mut oracles, &fixture) {
+            Outcome::Committed if linked => committed_linked += 1,
             Outcome::Committed => {
                 committed += 1;
                 committed_upper += usize::from(fixture.spells_upper_case());
             }
-            Outcome::ResolverDeclined(reason) => *census.entry(reason).or_default() += 1,
+            Outcome::ResolverDeclined(reason) => {
+                declined_through_link += usize::from(reason == "SymlinkedDirectory");
+                *census.entry(reason).or_default() += 1;
+            }
             Outcome::Declined => declined_outside_resolver.push(fixture.xml(ROOT_UPPER)),
         }
     }
     eprintln!(
-        "glob case variants: {committed}/{cases} committed ({committed_upper} spelling upper \
-         case); declines by reason: {census:?}"
+        "glob case variants: {committed}/{unlinked} committed without links ({committed_upper} \
+         spelling upper case), {committed_linked}/{} with; declines by reason: {census:?}",
+        cases - unlinked
     );
     assert!(
         declined_outside_resolver.is_empty(),
@@ -568,14 +718,21 @@ fn sweep(seed: u64, cases: usize) {
         declined_outside_resolver.len(),
         declined_outside_resolver[0]
     );
+    // A link the glob selects nothing through costs nothing, and one it
+    // selects through declines.
+    assert!(
+        committed_linked > 0 && declined_through_link > 0,
+        "the link dimension committed {committed_linked} and declined through a link \
+         {declined_through_link} times"
+    );
     if MODELLED {
         assert!(
-            committed * 100 >= cases * 50,
-            "only {committed}/{cases} committed"
+            committed * 100 >= unlinked * 50,
+            "only {committed}/{unlinked} committed"
         );
         assert!(
-            committed_upper * 100 >= cases * 25,
-            "only {committed_upper}/{cases} committed with an upper-case spelling"
+            committed_upper * 100 >= unlinked * 25,
+            "only {committed_upper}/{unlinked} committed with an upper-case spelling"
         );
     }
 }
