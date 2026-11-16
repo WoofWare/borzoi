@@ -121,7 +121,13 @@ fn assert_scratch_matches_obj(project: &Path) {
         .to_string();
 
     // Scratch side first, so it runs against an un-restored project (no obj/).
-    let restored = restore_to_scratch(project, &root, &served, Some(workspace.env()));
+    let restored = restore_to_scratch(
+        project,
+        &root,
+        &served,
+        Some(workspace.env()),
+        &borzoi_msbuild::observed::Observer::new(),
+    );
     // B₁ runs in shadow on every restore. Under the host's own environment it
     // may decline (its user config, say) or not be asked (a CLI language
     // other than English hides which NuGet ran), but it must not contradict

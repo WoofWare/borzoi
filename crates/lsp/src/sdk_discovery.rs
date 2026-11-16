@@ -80,7 +80,7 @@ use borzoi_nuget::settings::{
 
 /// NuGet's settings loading, asking through an [`Observer`]: each query is
 /// recorded with its answer, as an evaluation's own are.
-struct ObservedSettings<'a>(&'a Observer);
+pub(crate) struct ObservedSettings<'a>(pub(crate) &'a Observer);
 
 impl SettingsFs for ObservedSettings<'_> {
     fn metadata(&self, path: &Path) -> std::io::Result<borzoi_nuget::settings::Metadata> {

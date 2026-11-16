@@ -3357,7 +3357,13 @@ fn resolve_reference_dlls(
         if restore_env.is_some() {
             unrecorded.push(UNRECORDED_RESTORE);
         }
-        match restore_to_scratch_assemblies(project, dotnet_root, target_framework, restore_env) {
+        match restore_to_scratch_assemblies(
+            project,
+            dotnet_root,
+            target_framework,
+            restore_env,
+            observer,
+        ) {
             RestoreOutcome::Resolved(resolved) => resolved,
             RestoreOutcome::Declined => {
                 tracing::info!(

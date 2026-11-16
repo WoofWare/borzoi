@@ -127,7 +127,13 @@ fn restore_hazard(
     let dotnet = dotnet_root();
 
     let before = tree_snapshot(root);
-    let outcome = restore_to_scratch_assemblies(&fsproj, &dotnet, &served, Some(workspace.env()));
+    let outcome = restore_to_scratch_assemblies(
+        &fsproj,
+        &dotnet,
+        &served,
+        Some(workspace.env()),
+        &borzoi_msbuild::observed::Observer::new(),
+    );
     let after = tree_snapshot(root);
 
     assert_eq!(

@@ -87,6 +87,15 @@
 //!   is run from. A project file that is itself a symlink, in a real directory,
 //!   restores whole.
 //! - **Bounded.** It runs under [`BoundedCommand`] with a deadline as a backstop.
+//! - **Inputs recorded, the child's reads not.** Everything deciding whether
+//!   and how to restore (the project's real directory, a `packages.lock.json`
+//!   beside it, NuGet's settings as far as the global packages folder, and
+//!   whether that folder lies in the source tree) is asked through the
+//!   caller's observer (`restore_inputs`), so the env built from the
+//!   restore confirms it in every generation like any other read. What the
+//!   `dotnet restore` child reads is not observed, and its scratch output is
+//!   gone once this returns (`Unobserved::Restore`): the env names the
+//!   restore as an unrecorded reader, which keeps it event-driven for that.
 //!
 //! These isolation guarantees are enforced through MSBuild global properties, so
 //! they hold for well-behaved projects but are **not** a security boundary. The
@@ -119,6 +128,7 @@
 //! responsive) with only the shell around it changing.
 
 use crate::observed::Unobserved;
+use borzoi_msbuild::observed::Observer;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -128,13 +138,14 @@ use std::time::Duration;
 
 use borzoi_spawn::BoundedCommand;
 
-use borzoi_nuget::settings::{FolderOrigin, GlobalPackagesFolder, global_packages_folder};
+use borzoi_msbuild::observed as msbuild_observed;
+use borzoi_nuget::settings::{FolderOrigin, GlobalPackagesFolder, global_packages_folder_with};
 
 use crate::paths::{lexically_normalize, paths_equal};
 use crate::project_assets::{
     ResolvedAssemblies, resolve_assemblies_for_tfm, resolve_assemblies_root_only,
 };
-use crate::sdk_discovery::SdkDiscoveryEnv;
+use crate::sdk_discovery::{ObservedSettings, SdkDiscoveryEnv};
 use crate::workspace::ServedTfm;
 use borzoi_nuget::dgspec::NuGetIdentity;
 use shadow::{RestoreRecord, ShadowVerdict};
@@ -227,13 +238,27 @@ impl Drop for ScratchDir {
 /// / differential surface, which assumes an already-restored project); then this
 /// declines. `Some(env)` supplies the SDK-discovery environment the subprocess
 /// runs under (cache root, dotnet root, PATH, MSBuild-visible variables).
+///
+/// What deciding whether and how to restore reads (the project's real
+/// directory, a `packages.lock.json` beside it, NuGet's settings as far as
+/// the global packages folder, and where that folder lies) is asked through
+/// `observer` (`restore_inputs`). What the `dotnet restore` child reads is
+/// not: the caller records that a restore answered
+/// (`semantic::EnvReads::unrecorded`).
 pub fn restore_to_scratch_assemblies(
     project: &Path,
     dotnet_root: &Path,
     target_framework: &ServedTfm,
     restore_env: Option<&SdkDiscoveryEnv>,
+    observer: &Observer,
 ) -> RestoreOutcome {
-    let restored = restore_to_scratch(project, dotnet_root, target_framework, restore_env);
+    let restored = restore_to_scratch(
+        project,
+        dotnet_root,
+        target_framework,
+        restore_env,
+        observer,
+    );
     if let Some(shadow) = &restored.shadow {
         log_shadow(project, shadow);
     }
@@ -308,6 +333,7 @@ pub fn restore_to_scratch(
     dotnet_root: &Path,
     target_framework: &ServedTfm,
     restore_env: Option<&SdkDiscoveryEnv>,
+    observer: &Observer,
 ) -> ScratchRestore {
     let outcome = |outcome| ScratchRestore {
         outcome,
@@ -317,7 +343,7 @@ pub fn restore_to_scratch(
         return outcome(RestoreOutcome::Declined);
     };
 
-    let Some(inputs) = restore_inputs(project, env) else {
+    let Some(inputs) = restore_inputs(project, env, observer) else {
         return outcome(RestoreOutcome::Declined);
     };
     let project = inputs.project.as_path();
@@ -509,9 +535,14 @@ struct RestoreInputs {
 }
 
 /// The inputs of an offline restore of `project`, or `None` if the project
-/// must not be restored here.
-fn restore_inputs(project: &Path, env: &SdkDiscoveryEnv) -> Option<RestoreInputs> {
-    let Some(project) = in_its_real_directory(project) else {
+/// must not be restored here. Every file-system query deciding it is asked
+/// through `observer`, so a read set holding it confirms the decision.
+fn restore_inputs(
+    project: &Path,
+    env: &SdkDiscoveryEnv,
+    observer: &Observer,
+) -> Option<RestoreInputs> {
+    let Some(project) = in_its_real_directory(project, observer) else {
         tracing::info!(
             project = %project.display(),
             "on-demand restore declined: the project's directory is not spelt by its real path, \
@@ -532,7 +563,7 @@ fn restore_inputs(project: &Path, env: &SdkDiscoveryEnv) -> Option<RestoreInputs
     // sibling path is the overwhelmingly common lock-file location.
     if project
         .parent()
-        .is_some_and(|dir| Unobserved::Restore.is_file(dir.join("packages.lock.json")))
+        .is_some_and(|dir| msbuild_observed::is_file(observer, &dir.join("packages.lock.json")))
     {
         tracing::info!(
             project = %project.display(),
@@ -544,7 +575,11 @@ fn restore_inputs(project: &Path, env: &SdkDiscoveryEnv) -> Option<RestoreInputs
     // The package folder NuGet itself would use, under exactly the
     // environment the restore runs in (see the module docs).
     let directory = project.parent()?;
-    let packages = match global_packages_folder(directory, &restore_environment(env)) {
+    let packages = match global_packages_folder_with(
+        directory,
+        &restore_environment(env),
+        &ObservedSettings(observer),
+    ) {
         Ok(packages) => packages,
         Err(decline) => {
             tracing::info!(
@@ -562,11 +597,11 @@ fn restore_inputs(project: &Path, env: &SdkDiscoveryEnv) -> Option<RestoreInputs
     let tree = match &packages.origin {
         FolderOrigin::Config { file } => file
             .parent()
-            .filter(|folder| is_within(directory, folder))
+            .filter(|folder| is_within(directory, folder, observer))
             .unwrap_or(directory),
         FolderOrigin::Environment | FolderOrigin::Default => directory,
     };
-    if is_within(&packages.folder, tree) {
+    if is_within(&packages.folder, tree, observer) {
         tracing::info!(
             project = %project.display(),
             folder = %packages.folder.display(),
@@ -591,8 +626,8 @@ fn restore_inputs(project: &Path, env: &SdkDiscoveryEnv) -> Option<RestoreInputs
 
 /// Whether `path` is `directory` or beneath it, lexically or once the part of
 /// `path` that exists is resolved through its symbolic links. A path that
-/// cannot be resolved counts as inside.
-fn is_within(path: &Path, directory: &Path) -> bool {
+/// cannot be resolved counts as inside. Asks through `observer`.
+fn is_within(path: &Path, directory: &Path, observer: &Observer) -> bool {
     let under = |path: &Path, directory: &Path| {
         path.ancestors()
             .any(|ancestor| paths_equal(ancestor, directory))
@@ -602,13 +637,13 @@ fn is_within(path: &Path, directory: &Path) -> bool {
     }
     let Some(existing) = path
         .ancestors()
-        .find(|ancestor| Unobserved::Restore.exists(ancestor))
+        .find(|ancestor| msbuild_observed::exists(observer, ancestor))
     else {
         return true;
     };
     let (Ok(real), Ok(real_directory)) = (
-        Unobserved::Restore.canonicalize(existing),
-        Unobserved::Restore.canonicalize(directory),
+        msbuild_observed::canonicalize(observer, existing),
+        msbuild_observed::canonicalize(observer, directory),
     ) else {
         return true;
     };
@@ -681,11 +716,11 @@ fn loads_the_modelled_config_files(text: &str, inputs: &RestoreInputs) -> bool {
 /// file itself may be a symlink, which MSBuild evaluates beside the link.
 /// `None` otherwise, or if the directory does not resolve. The result is in
 /// ordinary form (see [`without_verbatim_prefix`]), the form MSBuild is
-/// handed.
-fn in_its_real_directory(project: &Path) -> Option<PathBuf> {
+/// handed. Asks through `observer`.
+fn in_its_real_directory(project: &Path, observer: &Observer) -> Option<PathBuf> {
     let spelt = ordinary(lexically_normalize(&std::path::absolute(project).ok()?));
     let directory = spelt.parent()?;
-    let real = ordinary(Unobserved::Restore.canonicalize(directory).ok()?);
+    let real = ordinary(msbuild_observed::canonicalize(observer, directory).ok()?);
     paths_equal(&real, directory).then_some(spelt)
 }
 
@@ -756,7 +791,8 @@ pub fn restore_graph(
     env: &SdkDiscoveryEnv,
     source: RestoreGraphSource,
 ) -> RestoreGraph {
-    let Some(inputs) = restore_inputs(project, env) else {
+    // An oracle's single run: nothing confirms what it read.
+    let Some(inputs) = restore_inputs(project, env, &Observer::new()) else {
         return RestoreGraph::Declined;
     };
     let project = inputs.project.as_path();
@@ -1074,6 +1110,341 @@ mod tests {
     use super::{override_variable, without_verbatim_prefix};
     use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
+
+    // Unix only: its trees hold symlinks, and NuGet's settings decline a
+    // Windows host outright.
+    #[cfg(unix)]
+    mod inputs_read_set {
+        //! The inputs probe ([`super::super::restore_inputs`]) records what
+        //! it reads in the observer it is handed, and the record is sound.
+        //!
+        //! Over generated trees (a project whose directory is reached
+        //! directly or through a symlink, with or without a
+        //! `packages.lock.json`; `NuGet.Config` files in the project's
+        //! directory, the repository's and the user's, each choosing a global
+        //! packages folder inside the repository, outside it, relative to
+        //! itself, or none; and `NUGET_PACKAGES` set inside the repository,
+        //! outside it, or not at all), the read-set soundness sweep perturbs
+        //! every file and link under the tree one at a time, and creates each
+        //! config and lock file the probe looks for. Whenever every answer in
+        //! the read set still stands, probing again decides the same: the
+        //! same project, folder, origin and config files, or the same
+        //! decline. An env built through an on-demand restore carries this
+        //! read set, so a change to any of these with no watch event reaches
+        //! it.
+        use super::super::restore_inputs;
+        use crate::sdk_discovery::SdkDiscoveryEnv;
+        use borzoi_msbuild::observed::Observer;
+        use borzoi_msbuild::observed::soundness::{Edit, Perturbation, Why, sweep_with};
+        use proptest::prelude::*;
+        use std::path::{Path, PathBuf};
+
+        /// What a config file says of the global packages folder.
+        #[derive(Clone, Copy, Debug)]
+        enum Folder {
+            /// Nothing: the file exists without the key.
+            Unset,
+            /// `packages`, relative to the config file's directory.
+            Relative,
+            /// An absolute path outside the repository.
+            Outside,
+            /// An absolute path inside the repository.
+            Inside,
+            /// An absolute path outside the repository by its spelling, which
+            /// a symlink leads into the project's directory.
+            Linked,
+        }
+
+        #[derive(Clone, Debug)]
+        struct Tree {
+            project_config: Option<Folder>,
+            repo_config: Option<Folder>,
+            user_config: Option<Folder>,
+            /// `NUGET_PACKAGES`: inside the repository when `true`.
+            environment: Option<bool>,
+            lock: bool,
+            linked: bool,
+        }
+
+        fn folder() -> impl Strategy<Value = Folder> {
+            prop_oneof![
+                Just(Folder::Unset),
+                Just(Folder::Relative),
+                Just(Folder::Outside),
+                Just(Folder::Inside),
+                Just(Folder::Linked),
+            ]
+        }
+
+        fn tree() -> impl Strategy<Value = Tree> {
+            (
+                prop::option::of(folder()),
+                prop::option::of(folder()),
+                prop::option::of(folder()),
+                prop::option::of(any::<bool>()),
+                any::<bool>(),
+                any::<bool>(),
+            )
+                .prop_map(
+                    |(project_config, repo_config, user_config, environment, lock, linked)| {
+                        // On macOS NuGet's walk is answered by the identity
+                        // of each spelling of a config file it finds, which
+                        // never holds while the file's stamp is racy, and a
+                        // sweep restores what it perturbs by writing it
+                        // again. So there a tree starts with no config in the
+                        // walk, and the sweep creates them (Linux, where one
+                        // spelling asks no identity, starts with them too).
+                        let walk =
+                            |folder: Option<Folder>| folder.filter(|_| !cfg!(target_os = "macos"));
+                        Tree {
+                            project_config: walk(project_config),
+                            repo_config: walk(repo_config),
+                            user_config,
+                            environment,
+                            lock,
+                            linked,
+                        }
+                    },
+                )
+        }
+
+        fn config(folder: Folder, root: &Path) -> String {
+            let add = |value: String| {
+                format!("    <add key=\"globalPackagesFolder\" value=\"{value}\" />\n")
+            };
+            let key = match folder {
+                Folder::Unset => String::new(),
+                Folder::Relative => add("packages".to_owned()),
+                Folder::Outside => add(root.join("cache").display().to_string()),
+                Folder::Inside => add(root.join("repo/.packages").display().to_string()),
+                Folder::Linked => add(root.join("linked-cache/packages").display().to_string()),
+            };
+            format!("<configuration>\n  <config>\n{key}  </config>\n</configuration>\n")
+        }
+
+        fn write(path: &Path, text: &str) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+
+        /// Lay `tree` out under `root`, returning the project's path (through
+        /// the link when `tree.linked`) and the environment to probe under.
+        fn lay_out(tree: &Tree, root: &Path) -> (PathBuf, SdkDiscoveryEnv) {
+            let dir = root.join("repo/src/App");
+            write(&dir.join("App.fsproj"), "<Project />\n");
+            if tree.lock {
+                write(&dir.join("packages.lock.json"), "{}\n");
+            }
+            let home = root.join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::create_dir_all(dir.join("pkgs")).unwrap();
+            std::os::unix::fs::symlink(dir.join("pkgs"), root.join("linked-cache")).unwrap();
+            for (folder, path) in [
+                (tree.project_config, dir.join("NuGet.Config")),
+                (tree.repo_config, root.join("repo/NuGet.Config")),
+                (tree.user_config, home.join(".nuget/NuGet/NuGet.Config")),
+            ] {
+                if let Some(folder) = folder {
+                    write(&path, &config(folder, root));
+                }
+            }
+            let project = if tree.linked {
+                std::os::unix::fs::symlink(&dir, root.join("link")).unwrap();
+                root.join("link/App.fsproj")
+            } else {
+                dir.join("App.fsproj")
+            };
+            let env = SdkDiscoveryEnv {
+                home_dir: Some(home),
+                nuget_packages_dir: tree.environment.map(|inside| {
+                    if inside {
+                        root.join("repo/.env-packages")
+                    } else {
+                        root.join("env-packages")
+                    }
+                }),
+                ..SdkDiscoveryEnv::default()
+            };
+            (project, env)
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+
+            #[test]
+            fn every_input_the_probe_decides_by_is_in_its_read_set(tree in tree()) {
+                sweep(&tree);
+            }
+        }
+
+        /// [`every_input_the_probe_decides_by_is_in_its_read_set`] over every
+        /// tree with one setting: each folder each config can choose, and each
+        /// `NUGET_PACKAGES`, with and without a lock file, reached directly
+        /// and through a link. The generated trees combine them.
+        #[test]
+        fn every_single_setting_tree_s_read_set_is_sound() {
+            let none = Tree {
+                project_config: None,
+                repo_config: None,
+                user_config: None,
+                environment: None,
+                lock: false,
+                linked: false,
+            };
+            let folders = [
+                Folder::Unset,
+                Folder::Relative,
+                Folder::Outside,
+                Folder::Inside,
+                Folder::Linked,
+            ];
+            let mut trees = vec![none.clone()];
+            for folder in folders {
+                trees.push(Tree {
+                    user_config: Some(folder),
+                    ..none.clone()
+                });
+                if !cfg!(target_os = "macos") {
+                    trees.push(Tree {
+                        project_config: Some(folder),
+                        ..none.clone()
+                    });
+                    trees.push(Tree {
+                        repo_config: Some(folder),
+                        ..none.clone()
+                    });
+                }
+            }
+            trees.push(Tree {
+                environment: Some(true),
+                ..none.clone()
+            });
+            trees.push(Tree {
+                environment: Some(false),
+                ..none.clone()
+            });
+            for tree in trees {
+                for (lock, linked) in [(false, false), (true, false), (false, true), (true, true)] {
+                    sweep(&Tree {
+                        lock,
+                        linked,
+                        ..tree.clone()
+                    });
+                }
+            }
+        }
+
+        /// Sweep the probe's read set over `tree` (see the module docs).
+        fn sweep(tree: &Tree) {
+            {
+                let tmp = tempfile::TempDir::new().unwrap();
+                let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+                let (project, env) = lay_out(tree, &root);
+                let dir = root.join("repo/src/App");
+                let compute = || {
+                    let observer = Observer::new();
+                    let decided = restore_inputs(&project, &env, &observer)
+                        .map(|inputs| (inputs.project, inputs.packages));
+                    (decided, observer.finish().0)
+                };
+                let created = |path: PathBuf, text: String| Perturbation {
+                    why: Why::Extra,
+                    edits: vec![Edit::Write(path, text.into_bytes())],
+                };
+                let extras = [
+                    created(dir.join("packages.lock.json"), "{}\n".to_owned()),
+                    created(dir.join("NuGet.Config"), config(Folder::Outside, &root)),
+                    created(
+                        root.join("repo/NuGet.Config"),
+                        config(Folder::Relative, &root),
+                    ),
+                    // Another spelling, where no config lies to collide with
+                    // on a case-insensitive volume.
+                    created(
+                        root.join("repo/src/nuget.config"),
+                        config(Folder::Inside, &root),
+                    ),
+                    created(
+                        root.join("home/.nuget/NuGet/NuGet.Config"),
+                        config(Folder::Outside, &root),
+                    ),
+                    Perturbation {
+                        why: Why::Extra,
+                        edits: vec![Edit::Delete(root.join("repo/src/App"))],
+                    },
+                    // The link into the project's directory retargeted to a
+                    // directory outside the repository, as empty as the one
+                    // it named: every path through it exists or not as
+                    // before, and only where it leads has moved.
+                    Perturbation {
+                        why: Why::Extra,
+                        edits: vec![
+                            Edit::Write(root.join("outside/.keep"), Vec::new()),
+                            Edit::Link(root.join("linked-cache"), root.join("outside")),
+                        ],
+                    },
+                    // The project's directory made a symlink to a copy
+                    // elsewhere, or, through the link, made a real one.
+                    if tree.linked {
+                        Perturbation {
+                            why: Why::Extra,
+                            edits: vec![
+                                Edit::Delete(root.join("link")),
+                                Edit::Write(
+                                    root.join("link/App.fsproj"),
+                                    b"<Project />\n".to_vec(),
+                                ),
+                            ],
+                        }
+                    } else {
+                        Perturbation {
+                            why: Why::Extra,
+                            edits: vec![
+                                Edit::Write(
+                                    root.join("elsewhere/App.fsproj"),
+                                    b"<Project />\n".to_vec(),
+                                ),
+                                Edit::Delete(dir.clone()),
+                                Edit::Link(dir.clone(), root.join("elsewhere")),
+                            ],
+                        }
+                    },
+                ];
+                let tally = sweep_with(&root, &compute, &extras);
+                assert!(tally.made.values().sum::<usize>() > 0);
+            }
+        }
+
+        /// Each input the probe decides by, moved on its own, moves the
+        /// decision (so the generated sweep's agreement is not vacuous): a
+        /// lock file created, and a project config choosing a folder inside
+        /// the project's directory.
+        #[test]
+        fn the_probes_inputs_move_its_decision() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+            let tree = Tree {
+                project_config: None,
+                repo_config: None,
+                user_config: None,
+                environment: None,
+                lock: false,
+                linked: false,
+            };
+            let (project, env) = lay_out(&tree, &root);
+            let decide = || restore_inputs(&project, &env, &Observer::new()).is_some();
+            assert!(decide(), "precondition: the plain project is restored");
+            let dir = root.join("repo/src/App");
+            write(&dir.join("packages.lock.json"), "{}\n");
+            assert!(!decide(), "a lock file declines");
+            std::fs::remove_file(dir.join("packages.lock.json")).unwrap();
+            write(&dir.join("NuGet.Config"), &config(Folder::Relative, &root));
+            assert!(
+                !decide(),
+                "a folder inside the project's directory declines"
+            );
+        }
+    }
 
     #[test]
     fn an_override_replaces_every_spelling_only_where_case_is_ignored() {
