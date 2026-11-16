@@ -81,6 +81,12 @@ fn writes(name: &str, value: &str) -> String {
 fn sdk_files(root: &Path, version: &str) -> Vec<(PathBuf, String)> {
     let sdk = root.join(format!("dotnet/sdk/{version}/Sdks/Fake.Sdk/Sdk"));
     vec![
+        // The `dotnet.dll` the .NET host requires before it counts the version
+        // (`crate::test_support::install_host_sdk_dir`).
+        (
+            root.join(format!("dotnet/sdk/{version}/dotnet.dll")),
+            String::new(),
+        ),
         (
             sdk.join("Sdk.props"),
             format!(
@@ -354,6 +360,17 @@ fn a_full_world_records_every_kind_of_query() {
         &source,
         Through::Reusing(&RefCell::default()),
     );
+    // The world's SDK must resolve, or its reads are not in the set.
+    assert!(
+        !parsed.diagnostics.iter().any(|d| matches!(
+            d.kind,
+            DiagnosticKind::SdkNotFound { .. }
+                | DiagnosticKind::SdkVersionNotSatisfied { .. }
+                | DiagnosticKind::SdkResolutionUnsupported { .. }
+        )),
+        "the world's SDK did not resolve: {:#?}",
+        parsed.diagnostics
+    );
     let read_set: &ReadSet = &parsed.read_set;
     let has =
         |pred: &dyn Fn(&Observation) -> bool| read_set.reads().iter().any(|r| pred(&r.observation));
@@ -391,6 +408,7 @@ fn a_file_read_as_text_and_as_xml_is_read_once() {
             let root = canon(tmp.path());
             let dotnet = root.join("dotnet");
             let list = write_at(&dotnet, "sdk/10.0.100/KnownWorkloadManifests.txt", known);
+            crate::test_support::install_host_sdk_dir(&dotnet.join("sdk/10.0.100"));
             let import = format!(r#"<Import Project="{}" />"#, list.display());
             let (first, second) = if locator_first {
                 (LOCATOR, import.as_str())
@@ -427,6 +445,18 @@ fn a_file_read_as_text_and_as_xml_is_read_once() {
                     .expect("well-formed XML parses")
             });
             let case = format!("known list {known:?}, locator first: {locator_first}");
+            // The locator must find its host SDK, or the text read this test
+            // is about never happens. (It may decline after the read: a known
+            // list of `<Project />` names an id it does not certify.)
+            assert!(
+                !parsed.diagnostics.iter().any(|d| matches!(
+                    d.kind,
+                    DiagnosticKind::SdkNotFound { .. }
+                        | DiagnosticKind::SdkVersionNotSatisfied { .. }
+                )),
+                "{case}: the locator found no host SDK: {:#?}",
+                parsed.diagnostics
+            );
             let texts_of_list: Vec<_> = parsed
                 .read_set
                 .reads()

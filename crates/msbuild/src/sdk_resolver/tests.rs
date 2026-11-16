@@ -15,15 +15,18 @@ use super::{SdkVersion, locate_dotnet_sdk};
 use crate::sdk_resolver::SdkResolveError;
 use crate::{DiagnosticKind, parse_fsproj_with_imports};
 
+/// `{dotnet_root}/sdk/{version}/Sdks/{sdk_name}/Sdk`, in an SDK version
+/// directory the .NET host counts as installed (`install_host_sdk_dir`).
+fn host_sdk_root(dotnet_root: &Path, version: &str, sdk_name: &str) -> std::path::PathBuf {
+    let version_dir = dotnet_root.join("sdk").join(version);
+    crate::test_support::install_host_sdk_dir(&version_dir);
+    version_dir.join("Sdks").join(sdk_name).join("Sdk")
+}
+
 /// Create `{dotnet_root}/sdk/{version}/Sdks/{sdk_name}/Sdk/Sdk.props` and
 /// `Sdk.targets` (both empty). Returns the inner `Sdk/` directory.
 fn install_sdk(dotnet_root: &Path, version: &str, sdk_name: &str) -> std::path::PathBuf {
-    let sdk_root = dotnet_root
-        .join("sdk")
-        .join(version)
-        .join("Sdks")
-        .join(sdk_name)
-        .join("Sdk");
+    let sdk_root = host_sdk_root(dotnet_root, version, sdk_name);
     fs::create_dir_all(&sdk_root).unwrap();
     fs::write(sdk_root.join("Sdk.props"), "<Project/>").unwrap();
     fs::write(sdk_root.join("Sdk.targets"), "<Project/>").unwrap();
@@ -204,13 +207,7 @@ fn missing_targets_in_the_selected_sdk_declines() {
     let tmp = TempDir::new().unwrap();
     install_sdk(tmp.path(), "8.0.100", "Microsoft.NET.Sdk");
 
-    let broken = tmp
-        .path()
-        .join("sdk")
-        .join("9.0.100")
-        .join("Sdks")
-        .join("Microsoft.NET.Sdk")
-        .join("Sdk");
+    let broken = host_sdk_root(tmp.path(), "9.0.100", "Microsoft.NET.Sdk");
     fs::create_dir_all(&broken).unwrap();
     fs::write(broken.join("Sdk.props"), "<Project/>").unwrap();
 
@@ -783,13 +780,7 @@ fn end_to_end_resolver_splices_sdk_imports() {
     // we'd see an `UndefinedProperty` diagnostic and the Compile
     // item path would be literally `$(SdkSeed).fs`.
     let dotnet = TempDir::new().unwrap();
-    let sdk_root = dotnet
-        .path()
-        .join("sdk")
-        .join("8.0.401")
-        .join("Sdks")
-        .join("Microsoft.NET.Sdk")
-        .join("Sdk");
+    let sdk_root = host_sdk_root(dotnet.path(), "8.0.401", "Microsoft.NET.Sdk");
     fs::create_dir_all(&sdk_root).unwrap();
     fs::write(
         sdk_root.join("Sdk.props"),
@@ -849,13 +840,7 @@ fn end_to_end_resolver_splices_variant_sdk() {
     // skip the splice here. The seed-property trick lets us detect
     // that without depending on Web-specific MSBuild semantics.
     let dotnet = TempDir::new().unwrap();
-    let sdk_root = dotnet
-        .path()
-        .join("sdk")
-        .join("8.0.401")
-        .join("Sdks")
-        .join("Microsoft.NET.Sdk.Web")
-        .join("Sdk");
+    let sdk_root = host_sdk_root(dotnet.path(), "8.0.401", "Microsoft.NET.Sdk.Web");
     fs::create_dir_all(&sdk_root).unwrap();
     fs::write(
         sdk_root.join("Sdk.props"),

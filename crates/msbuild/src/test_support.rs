@@ -156,3 +156,30 @@ pub fn parse_fsproj_reads(
     let reads = walked.reads.expect("a probed walk answers its probe");
     Ok((walked.project, reads))
 }
+
+/// Make `version_dir` (`{dotnet_root}/sdk/{version}`) an SDK the .NET host
+/// counts as installed: the directory, and the `dotnet.dll` hostfxr requires
+/// in it before it will run or select it (see the SDK resolver's
+/// `host_sdk_versions`). Every fake dotnet root in the test suites lays its
+/// SDK version directories out through this, so a test that builds one
+/// models an install hostfxr would see.
+pub fn install_host_sdk_dir(version_dir: &std::path::Path) {
+    std::fs::create_dir_all(version_dir).expect("create the SDK version directory");
+    std::fs::write(version_dir.join("dotnet.dll"), "").expect("write the SDK's dotnet.dll");
+}
+
+/// [`install_host_sdk_dir`] for the SDK version directory holding `sdk_root`,
+/// a `{dotnet_root}/sdk/{version}/Sdks/{name}/Sdk` directory.
+pub fn install_host_sdk_of(sdk_root: &std::path::Path) {
+    let version_dir = sdk_root
+        .ancestors()
+        .nth(3)
+        .filter(|dir| dir.parent().is_some_and(|sdk| sdk.ends_with("sdk")))
+        .unwrap_or_else(|| {
+            panic!(
+                "{} is no {{dotnet_root}}/sdk/{{version}}/Sdks/{{name}}/Sdk",
+                sdk_root.display()
+            )
+        });
+    install_host_sdk_dir(version_dir);
+}

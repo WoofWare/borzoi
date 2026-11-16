@@ -327,13 +327,14 @@ fn sdk_paths(root: PathBuf) -> SdkPaths {
     }
 }
 
-/// The installed SDK versions under `{dotnet_root}/sdk`: every entry whose
-/// name parses as a version and that is a directory or a link to one (Nix's
-/// wrapped .NET links each `sdk/{version}`). Empty when `sdk/` cannot be
-/// listed.
-///
-/// hostfxr also passes over a version directory without a `dotnet.dll`,
-/// which this does not model (#910).
+/// The installed SDK versions under `{dotnet_root}/sdk`, as hostfxr counts
+/// them: every entry whose name parses as a version, that is a directory or
+/// a link to one (Nix's wrapped .NET links each `sdk/{version}`), and that
+/// holds a `dotnet.dll` `access(F_OK)` finds. That follows links and asks
+/// nothing of the entry's kind, so a directory, a socket or a FIFO of that
+/// name counts and a dangling link does not ([`observed::exists`];
+/// `sdk_directory_probe_diff` grades it against hostfxr's trace). Empty when
+/// `sdk/` cannot be listed.
 fn host_sdk_versions(dotnet_root: &Path, observer: &Observer) -> Vec<(SdkVersion, PathBuf)> {
     let Ok(entries) = observed::read_dir(observer, &dotnet_root.join("sdk")) else {
         return Vec::new();
@@ -343,7 +344,9 @@ fn host_sdk_versions(dotnet_root: &Path, observer: &Observer) -> Vec<(SdkVersion
         let Some(version) = entry.name.to_str().and_then(SdkVersion::parse) else {
             continue;
         };
-        if observed::is_dir(observer, &entry.path) {
+        if observed::is_dir(observer, &entry.path)
+            && observed::exists(observer, &entry.path.join("dotnet.dll"))
+        {
             out.push((version, entry.path));
         }
     }
