@@ -13,7 +13,7 @@
 //! min>max ordering check wearing a costume — the fixed corpus never
 //! paired a dots-zero star with a large-enough max). On failure it prints
 //! the seed; reproduce with `BORZOI_NUGET_SOAK_SEED=<seed>`.
-//! `BORZOI_NUGET_SOAK_VERSIONS` / `_RANGES` scale the volume.
+//! `BORZOI_NUGET_SOAK_VERSIONS` / `_RANGES` / `_FRAMEWORKS` scale the volume.
 //!
 //! Checks are the high-signal subset (acceptance, normalised strings,
 //! float behaviour, cmp/eq/satisfies); the fixed-seed tests remain the
@@ -59,7 +59,14 @@ fn fresh_seed_soak_agrees_with_oracle() {
     });
     let n_versions = env_u64("BORZOI_NUGET_SOAK_VERSIONS", 100_000) as usize;
     let n_ranges = env_u64("BORZOI_NUGET_SOAK_RANGES", 70_000) as usize;
-    println!("soak seed: {seed} (versions={n_versions}, ranges={n_ranges})");
+    let n_frameworks = env_u64("BORZOI_NUGET_SOAK_FRAMEWORKS", 20_000) as usize;
+    println!(
+        "soak seed: {seed} (versions={n_versions}, ranges={n_ranges}, frameworks={n_frameworks})"
+    );
+    let _replay = crate::common::ReplayOnPanic(format!(
+        "BORZOI_NUGET_SOAK_SEED={seed} BORZOI_NUGET_SOAK_VERSIONS={n_versions} \
+         BORZOI_NUGET_SOAK_RANGES={n_ranges} BORZOI_NUGET_SOAK_FRAMEWORKS={n_frameworks}"
+    ));
 
     let mut rng = SplitMix64(seed);
     let mut oracle = Oracle::spawn();
@@ -171,7 +178,6 @@ fn fresh_seed_soak_agrees_with_oracle() {
     // Frameworks: mutated-zoo parse (both entry points), random compat
     // pairs, random nearest sets — same checks as framework_diff, fresh
     // inputs.
-    let n_frameworks = env_u64("BORZOI_NUGET_SOAK_FRAMEWORKS", 20_000) as usize;
     let mut fw_inputs: Vec<String> = Vec::new();
     for _ in 0..n_frameworks {
         fw_inputs.push(gen_framework_string(&mut rng));
