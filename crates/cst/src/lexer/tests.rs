@@ -887,3 +887,23 @@ fn extended_interp_trailing_b_is_separate_ident() {
         ]
     );
 }
+
+/// A long run of ignored operator characters lexes in time linear in its
+/// length: the driver's operator lookahead from each `..` or `?` token in the
+/// run is answered once for the whole run, not rescanned from every token.
+/// Rescanned, the 2 MB here take minutes; linear, well under a second.
+#[test]
+fn a_long_run_of_ignored_operator_characters_lexes_in_linear_time() {
+    for unit in ["..", "?", ".?", "..$", "..:"] {
+        let src = unit.repeat(2_000_000 / unit.len());
+        let started = std::time::Instant::now();
+        let count = lex(&src).count();
+        let elapsed = started.elapsed();
+        assert!(count > 0);
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "lexing {} bytes of {unit:?} took {elapsed:?}",
+            src.len()
+        );
+    }
+}
