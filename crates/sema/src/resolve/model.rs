@@ -1146,6 +1146,18 @@ impl ProjectItems {
         keep: impl Fn(&ExportRecord) -> bool,
     ) -> Option<ItemId> {
         let history = self.value_exports.get(names, path)?;
+        self.opened_member_in(history, path, site, file, keep)
+    }
+
+    /// [`Self::opened_member`], given `path`'s export history.
+    fn opened_member_in(
+        &self,
+        history: &[ExportRecord],
+        path: &[String],
+        site: &[String],
+        file: Option<usize>,
+        keep: impl Fn(&ExportRecord) -> bool,
+    ) -> Option<ItemId> {
         history
             .iter()
             .enumerate()
@@ -1300,6 +1312,10 @@ impl ProjectItems {
     /// ([`Self::opened_member`]), so a name whose only exports are inaccessible
     /// `private` ones is omitted (it stays invisible to the `open`), and a public
     /// export shadowed by a later inaccessible `private` is recovered.
+    ///
+    /// [`Self::direct_children`] is what the walk calls; this is its
+    /// reference, which a debug build checks it against.
+    #[cfg(any(test, debug_assertions))]
     pub(super) fn direct_value_children(
         &self,
         names: &NameTable,
@@ -1307,6 +1323,68 @@ impl ProjectItems {
         site: &[String],
     ) -> Vec<(String, ItemId)> {
         self.opened_children(names, module_path, site, None, |r| !r.pattern_only)
+    }
+
+    /// What an `open` of `module_path` from `site` binds of the earlier
+    /// files' exports directly under it: [`Self::direct_value_children`],
+    /// [`Self::direct_constructor_children`], and the names among them for
+    /// which [`Self::module_value_may_be_constant_pattern`] holds.
+    ///
+    /// One pass over the path's children, each export history read from the
+    /// parent index where it was found: the three answers ask the same
+    /// histories, and the per-name forms look each one up again by its full
+    /// path. A debug build checks the pass against them.
+    pub(super) fn direct_children(
+        &self,
+        names: &NameTable,
+        module_path: &[String],
+        site: &[String],
+    ) -> DirectChildren {
+        let mut path = module_path.to_vec();
+        path.push(String::new());
+        let mut out = DirectChildren::default();
+        for (name, history) in self
+            .value_exports
+            .children(names, PathKey::of(names, module_path))
+        {
+            let name = names.text(name);
+            let slot = path.last_mut().expect("the child's slot");
+            slot.clear();
+            slot.push_str(name);
+            if let Some(id) = self.opened_member_in(history, &path, site, None, |r| !r.pattern_only)
+            {
+                out.values.push((name.to_string(), id));
+            }
+            if let Some(id) = self.opened_member_in(history, &path, site, None, |r| r.is_case) {
+                out.ctors.push((name.to_string(), id));
+            }
+            if self.history_may_be_constant_pattern(history, &path, site) {
+                out.constant_patterns.insert(name.to_string());
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(
+                out.values,
+                self.direct_value_children(names, module_path, site),
+                "direct values under {module_path:?} from {site:?}"
+            );
+            assert_eq!(
+                out.ctors,
+                self.direct_constructor_children(names, module_path, site),
+                "direct constructors under {module_path:?} from {site:?}"
+            );
+            for (name, _) in out.values.iter().chain(&out.ctors) {
+                let mut path = module_path.to_vec();
+                path.push(name.clone());
+                assert_eq!(
+                    out.constant_patterns.contains(name),
+                    self.module_value_may_be_constant_pattern(names, &path, site),
+                    "constant pattern at {path:?} from {site:?}"
+                );
+            }
+        }
+        out
     }
 
     /// Whether an assembly reading of the qualified path `names` is withheld
@@ -1820,11 +1898,22 @@ impl ProjectItems {
         path: &[String],
         site: &[String],
     ) -> bool {
-        self.value_exports.get(names, path).is_some_and(|history| {
-            history.iter().any(|rec| {
-                self.attributed_value_ids.contains(&rec.id)
-                    && accessible_from(rec.access_root_len, path, site)
-            })
+        self.value_exports
+            .get(names, path)
+            .is_some_and(|history| self.history_may_be_constant_pattern(history, path, site))
+    }
+
+    /// [`Self::module_value_may_be_constant_pattern`], given `path`'s export
+    /// history.
+    fn history_may_be_constant_pattern(
+        &self,
+        history: &[ExportRecord],
+        path: &[String],
+        site: &[String],
+    ) -> bool {
+        history.iter().any(|rec| {
+            self.attributed_value_ids.contains(&rec.id)
+                && accessible_from(rec.access_root_len, path, site)
         })
     }
 
@@ -1835,6 +1924,10 @@ impl ProjectItems {
     /// case an `open` binds ([`Self::opened_member`]), so a case shadowed at
     /// its path by an ordinary `let` value is still enumerated (the constructor
     /// namespace, live in pattern position).
+    ///
+    /// [`Self::direct_children`] is what the walk calls; this is its
+    /// reference, which a debug build checks it against.
+    #[cfg(any(test, debug_assertions))]
     pub(super) fn direct_constructor_children(
         &self,
         names: &NameTable,
@@ -2414,6 +2507,22 @@ pub(super) fn is_directly_in(path: &[String], namespace: &[String]) -> bool {
 /// `k`-segment access-root prefix — F#'s `private` visibility, inherited from
 /// the declaring value/type/module and oracle-pinned. `k` is always a valid
 /// prefix length of `path` (the access-root is a proper prefix — a container).
+/// What an `open` of a module path binds of the earlier files' exports
+/// directly under it ([`ProjectItems::direct_children`]).
+#[derive(Debug, Default)]
+pub(super) struct DirectChildren {
+    /// The value each name binds in expression position, in the order the
+    /// names were first exported ([`ProjectItems::direct_value_children`]).
+    pub(super) values: Vec<(String, ItemId)>,
+    /// The case each name binds in pattern position, in the same order
+    /// ([`ProjectItems::direct_constructor_children`]).
+    pub(super) ctors: Vec<(String, ItemId)>,
+    /// The names that export an attributed value accessible from the site, a
+    /// maybe-literal that contests the pattern namespace
+    /// ([`ProjectItems::module_value_may_be_constant_pattern`]).
+    pub(super) constant_patterns: HashSet<String>,
+}
+
 pub(super) fn accessible_from(
     access_root_len: Option<usize>,
     path: &[String],

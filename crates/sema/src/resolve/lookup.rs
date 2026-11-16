@@ -16,8 +16,9 @@ use crate::names::{NameKey, PathId, PathKey, Segments};
 use super::contributors::{Contribution, contribution_marks};
 use super::id_text;
 use super::model::{
-    CaseKind, DeclOrder, DeclineCause, DeclineSite, DeclineTier, DeferredReason, ItemId,
-    MemberDeclarations, OpenOpacity, OpenTrace, QualifiedMember, Resolution, SlotClass, TypeSlot,
+    CaseKind, DeclOrder, DeclineCause, DeclineSite, DeclineTier, DeferredReason, DirectChildren,
+    ItemId, MemberDeclarations, OpenOpacity, OpenTrace, QualifiedMember, Resolution, SlotClass,
+    TypeSlot,
 };
 use super::open_scope::{OpacityLevels, PrefixRef};
 use super::state::{
@@ -251,6 +252,20 @@ where
         }
     }
     collided
+}
+
+/// Which earlier-file members [`Resolver::open_module_values`] folds.
+#[derive(Clone, Copy)]
+pub(super) enum OpenedMembers<'c> {
+    /// The latest accessible export of each name across every earlier file,
+    /// already read for the open's site
+    /// ([`ProjectItems::direct_children`](super::model::ProjectItems::direct_children)).
+    Every(&'c DirectChildren),
+    /// The members the module declares in this one Compile-order file: a
+    /// single `[<AutoOpen>]` fragment reached by opening the enclosing
+    /// namespace, so a plain augmentation (a different file) or a later-file
+    /// redefinition contributes nothing (Stage 5).
+    Fragment(usize),
 }
 
 /// What an `[<AutoOpen>]` submodule fold contributes for one name, split by the
@@ -1913,21 +1928,21 @@ impl<'a> Resolver<'a> {
     /// current file's index, [`ProjectItems::num_files`](super::model::ProjectItems::num_files)), overriding earlier
     /// files. Accessibility (own-/inherited-`private`) is filtered exactly as the
     /// open-fold does, so an inaccessible name never enters the straddle contest.
-    fn direct_tier_ids_at(&self, path: &[String]) -> HashMap<String, (ItemId, usize)> {
-        let site: &[String] = &self.lexical.container_path;
+    ///
+    /// `children` is what the earlier files export directly under `path`, as
+    /// seen from this block ([`ProjectItems::direct_children`](super::model::ProjectItems::direct_children)).
+    fn direct_tier_ids_at(
+        &self,
+        path: &[String],
+        children: &DirectChildren,
+    ) -> HashMap<String, (ItemId, usize)> {
         let mut out: HashMap<String, (ItemId, usize)> = HashMap::default();
-        for (name, id) in self
-            .preceding
-            .direct_value_children(self.assemblies.names(), path, site)
-        {
-            out.insert(name, (id, self.preceding.file_of(id)));
+        for (name, id) in &children.values {
+            out.insert(name.clone(), (*id, self.preceding.file_of(*id)));
         }
-        for (name, id) in
-            self.preceding
-                .direct_constructor_children(self.assemblies.names(), path, site)
-        {
-            out.entry(name)
-                .or_insert_with(|| (id, self.preceding.file_of(id)));
+        for (name, id) in &children.ctors {
+            out.entry(name.clone())
+                .or_insert_with(|| (*id, self.preceding.file_of(*id)));
         }
         let current = self.preceding.num_files();
         let names = self.assemblies.names();
@@ -2427,19 +2442,17 @@ impl<'a> Resolver<'a> {
     /// means an empty / submodule-only module or a module *alias* (whose target we
     /// cannot see), which the caller treats fully conservatively.
     ///
-    /// `fragment_file` restricts the fold to the members `module_path` declares in
-    /// **one** Compile-order file — set by
-    /// [`open_project_namespace_values`](Self::open_project_namespace_values) when
-    /// folding a single `[<AutoOpen>]` fragment reached implicitly by opening the
-    /// enclosing namespace, so a plain augmentation (a different file) or a
-    /// later-file redefinition contributes nothing (Stage 5). A plain, explicit
-    /// `open M` passes `None` (every member of every fragment folds).
+    /// `members` says which earlier-file members fold ([`OpenedMembers`]).
     pub(super) fn open_module_values(
         &mut self,
         module_path: &[String],
         open_pos: u32,
-        fragment_file: Option<usize>,
+        members: OpenedMembers<'_>,
     ) -> usize {
+        let fragment_file = match members {
+            OpenedMembers::Every(_) => None,
+            OpenedMembers::Fragment(file) => Some(file),
+        };
         // Collect first — the scans borrow `self.items` / `self.preceding`
         // immutably, while the push below borrows `self.scopes` mutably.
         let generation = self.scope.open_generation;
@@ -2561,54 +2574,56 @@ impl<'a> Resolver<'a> {
         // member nor substitutes its own. A current-file fragment
         // (`f == current_file`) has no earlier-file members, so both sets are empty
         // (its members come from the same-file pass above).
-        let (value_children, ctor_children) = match fragment_file {
-            None => (
-                self.preceding
-                    .direct_value_children(self.assemblies.names(), module_path, site),
-                self.preceding.direct_constructor_children(
+        let fragment_children;
+        let (value_children, ctor_children): (&[_], &[_]) = match members {
+            OpenedMembers::Every(children) => (&children.values, &children.ctors),
+            OpenedMembers::Fragment(f) if f < current_file => {
+                fragment_children = (
+                    self.preceding.fragment_value_children(
+                        self.assemblies.names(),
+                        module_path,
+                        f,
+                        site,
+                    ),
+                    self.preceding.fragment_constructor_children(
+                        self.assemblies.names(),
+                        module_path,
+                        f,
+                        site,
+                    ),
+                );
+                (&fragment_children.0, &fragment_children.1)
+            }
+            OpenedMembers::Fragment(_) => (&[], &[]),
+        };
+        // Whether a cross-file member's path exports a maybe-literal value
+        // ([`ProjectItems::module_value_may_be_constant_pattern`](super::model::ProjectItems::module_value_may_be_constant_pattern)),
+        // which the direct children's pass has already answered.
+        let cross_file_constant = |name: &str| match members {
+            OpenedMembers::Every(children) => children.constant_patterns.contains(name),
+            OpenedMembers::Fragment(_) => {
+                let mut q = module_path.to_vec();
+                q.push(name.to_string());
+                self.preceding.module_value_may_be_constant_pattern(
                     self.assemblies.names(),
-                    module_path,
+                    &q,
                     site,
-                ),
-            ),
-            Some(f) if f < current_file => (
-                self.preceding.fragment_value_children(
-                    self.assemblies.names(),
-                    module_path,
-                    f,
-                    site,
-                ),
-                self.preceding.fragment_constructor_children(
-                    self.assemblies.names(),
-                    module_path,
-                    f,
-                    site,
-                ),
-            ),
-            Some(_) => (Vec::new(), Vec::new()),
+                )
+            }
         };
         // Cross-file *value* pass (for expression position), dedup against
         // `seen_values`.
-        for (name, id) in value_children {
+        for &(ref name, id) in value_children {
             if seen_values.insert(name.clone()) {
-                if self.preceding.is_case_item(id) {
-                    let mut q = module_path.to_vec();
-                    q.push(name.clone());
-                    if hidden
-                        || constant_names.contains(&name)
-                        || self.preceding.module_value_may_be_constant_pattern(
-                            self.assemblies.names(),
-                            &q,
-                            site,
-                        )
-                    {
-                        suppressed.push(id);
-                    }
+                if self.preceding.is_case_item(id)
+                    && (hidden || constant_names.contains(name) || cross_file_constant(name))
+                {
+                    suppressed.push(id);
                 }
                 pushed_normal.insert(id);
                 let mut entry = ScopeEntry::opened(
                     self.assemblies.names(),
-                    &name,
+                    name,
                     Resolution::Item(id),
                     generation,
                     open_pos,
@@ -2624,23 +2639,14 @@ impl<'a> Resolver<'a> {
         // and not shadowed by a same-file case (`seen_ctors`). A hidden module's
         // pattern entries are suppressed too (High-1: an unenumerable active pattern
         // could shadow them).
-        for (name, id) in ctor_children {
-            if !seen_ctors.contains(&name) && pushed_normal.insert(id) {
-                let mut q = module_path.to_vec();
-                q.push(name.clone());
-                if hidden
-                    || constant_names.contains(&name)
-                    || self.preceding.module_value_may_be_constant_pattern(
-                        self.assemblies.names(),
-                        &q,
-                        site,
-                    )
-                {
+        for &(ref name, id) in ctor_children {
+            if !seen_ctors.contains(name) && pushed_normal.insert(id) {
+                if hidden || constant_names.contains(name) || cross_file_constant(name) {
                     suppressed.push(id);
                 }
                 entries.push(ScopeEntry::opened_pattern_only(
                     self.assemblies.names(),
-                    &name,
+                    name,
                     Resolution::Item(id),
                     generation,
                     open_pos,
@@ -2868,8 +2874,13 @@ impl<'a> Resolver<'a> {
         // fragments.
         let is_namespace = self.is_project_namespace_path(namespace);
         self.push_signatured_slot_marks(namespace, open_pos);
+        let children = self.preceding.direct_children(
+            self.assemblies.names(),
+            namespace,
+            &self.lexical.container_path,
+        );
         let direct_tier = if is_namespace {
-            self.direct_tier_ids_at(namespace)
+            self.direct_tier_ids_at(namespace, &children)
         } else {
             HashMap::default()
         };
@@ -2982,7 +2993,8 @@ impl<'a> Resolver<'a> {
         // matching FCS's latest-file rule without any per-path re-push. (The old
         // per-module-path recursion folded all of a module's members at the
         // module's list position, mis-ordering multi-file/nested fragments.)
-        let mut count = self.open_module_values(namespace, open_pos, None);
+        let mut count =
+            self.open_module_values(namespace, open_pos, OpenedMembers::Every(&children));
         let fragments = self.auto_open_fragments_reachable(namespace);
         // A fragment is reached by its attribute's spelling, which proves
         // nothing once written names cannot be trusted (a project type
@@ -3055,7 +3067,8 @@ impl<'a> Resolver<'a> {
             if self.module_has_hidden_values(&frag_path) {
                 self.scope.open_generation += 1;
             }
-            count += self.open_module_values(&frag_path, open_pos, Some(frag_file));
+            count +=
+                self.open_module_values(&frag_path, open_pos, OpenedMembers::Fragment(frag_file));
         }
         // The namespace's types of a file later than every fragment's.
         for (name, _) in own_types {
