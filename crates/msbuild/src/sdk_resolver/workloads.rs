@@ -95,6 +95,7 @@ use crate::dotnet_io;
 use crate::observed::{self, EntryKind, Failure, Observer};
 
 mod feature_band;
+mod manifest;
 use feature_band::FeatureBand;
 
 pub const WORKLOAD_MANIFEST_TARGETS_LOCATOR: &str =
@@ -255,7 +256,8 @@ pub fn resolve_workload_locator(
         // skipped, not an error. A special file there is declined: MSBuild's
         // import of a FIFO never returns, and neither would the walk's.
         let mut with_targets = Vec::new();
-        for dir in manifest_roots {
+        for resolved in manifest_roots {
+            let dir = resolved.directory;
             let targets = dir.join("WorkloadManifest.targets");
             if !dotnet_io::file_exists(observer, &targets) {
                 continue;
@@ -274,9 +276,9 @@ pub fn resolve_workload_locator(
     // The auto-import locator asks the workload resolver for installed packs,
     // which first opens and parses every resolved manifest. A manifest that
     // is no regular file (a dangling link, a socket) throws there, and a FIFO
-    // blocks for good.
-    for dir in &manifest_roots {
-        let manifest = dir.join("WorkloadManifest.json");
+    // blocks for good; one it cannot read or compose throws too.
+    for resolved in &manifest_roots {
+        let manifest = resolved.directory.join("WorkloadManifest.json");
         if !observed::is_file(observer, &manifest) {
             return Err(unsupported(format!(
                 "the workload resolver would open a manifest that is no regular file: {}",
@@ -284,6 +286,14 @@ pub fn resolve_workload_locator(
             )));
         }
     }
+    let resolved: Vec<manifest::Resolved<'_>> = manifest_roots
+        .iter()
+        .map(|m| manifest::Resolved {
+            id: &m.id,
+            directory: &m.directory,
+        })
+        .collect();
+    manifest::check_manifests_load(&resolved, observer)?;
 
     // Auto-import locator: MSBuild returns the `{pack}/Sdk` folder of
     // every *installed* SDK-kind workload pack whose
@@ -557,7 +567,7 @@ fn enumerate_manifest_roots(
     band: &FeatureBand,
     roots: &WorkloadRoots,
     observer: &Observer,
-) -> Result<Vec<PathBuf>, SdkResolveError> {
+) -> Result<Vec<ResolvedManifest>, SdkResolveError> {
     let band_name = band.to_string();
     // Known-id list: `KnownWorkloadManifests.txt`, falling back to the
     // older `IncludedWorkloadManifests.txt`, each tried where CLR
@@ -577,19 +587,30 @@ fn enumerate_manifest_roots(
         }
         let contents = read_existing_text(&path, observer)?;
         // Upstream reads this with `File.ReadAllLines`, whose BOM-detecting
-        // `StreamReader` consumes a leading UTF-8 BOM. Rust's `read_to_string`
-        // keeps it, and `str::trim` does *not* remove U+FEFF (no longer
-        // White_Space), so without this the first id would carry the BOM and
-        // fail its lookup / safe-id check, degrading a valid layout.
+        // `StreamReader` consumes a leading UTF-8 BOM, and keeps every
+        // non-empty line as it is, untrimmed.
         let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
-        known_ids = Some(
-            contents
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned)
-                .collect(),
-        );
+        let ids = read_all_lines(contents)
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        // The known ids are keyed case-sensitively for their order but
+        // matched against the manifests case-insensitively, so two spellings
+        // of one id would make the outcome hang on dictionary order; and only
+        // on ASCII is `OrdinalIgnoreCase` ASCII case folding.
+        for (i, id) in ids.iter().enumerate() {
+            if !id.is_ascii()
+                || ids[..i]
+                    .iter()
+                    .any(|seen| seen != id && seen.eq_ignore_ascii_case(id))
+            {
+                return Err(unsupported(format!(
+                    "a known manifest id we cannot fold, or spelled two ways: {id:?}"
+                )));
+            }
+        }
+        known_ids = Some(ids);
         break;
     }
 
@@ -615,10 +636,31 @@ fn enumerate_manifest_roots(
             };
             // First insertion wins: `manifest_roots()` yields highest precedence
             // first, so a later (lower-precedence) root never displaces a name a
-            // higher root already claimed — resolvable or not.
-            winners
-                .entry(id.to_ascii_lowercase())
-                .or_insert_with(|| (id, entry.path));
+            // higher root already claimed — resolvable or not. Two spellings
+            // of one name in one band directory are both listed upstream, in
+            // the file system's order, and the last overwrites the first; that
+            // order is not ours to see. An id only ASCII folding certainly
+            // matches as `OrdinalIgnoreCase` does.
+            if !id.is_ascii() {
+                return Err(unsupported(format!(
+                    "a manifest id directory with a non-ASCII name: {}",
+                    entry.path.display()
+                )));
+            }
+            match winners.get(&id.to_ascii_lowercase()) {
+                Some((seen, seen_path))
+                    if seen != &id && seen_path.parent() == entry.path.parent() =>
+                {
+                    return Err(unsupported(format!(
+                        "manifest id directories spelled two ways in {}",
+                        band_dir.display()
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    winners.insert(id.to_ascii_lowercase(), (id, entry.path));
+                }
+            }
         }
     }
     let mut found: HashMap<String, ResolvedManifest> = HashMap::new();
@@ -721,26 +763,30 @@ fn enumerate_manifest_roots(
     }
 
     // Stable order: known-list line order first, then the rest
-    // alphabetically (ordinal, case-insensitive).
-    let known_order: HashMap<String, usize> = known_ids
+    // alphabetically. The known order is a case-sensitive dictionary from
+    // each line to its index among the kept lines, a repeated line keeping
+    // its last; a manifest is looked up in it by the id it is named by. The
+    // rest compare as `OrdinalIgnoreCase` does, which folds to upper case, so
+    // `_` sorts after every letter.
+    let known_order: HashMap<&str, usize> = known_ids
         .as_deref()
         .unwrap_or(&[])
         .iter()
         .enumerate()
-        .map(|(index, id)| (id.to_ascii_lowercase(), index))
+        .map(|(index, id)| (id.as_str(), index))
         .collect();
     let mut manifests: Vec<ResolvedManifest> = found.into_values().collect();
     manifests.sort_by(|a, b| {
-        let ka = known_order.get(&a.id.to_ascii_lowercase());
-        let kb = known_order.get(&b.id.to_ascii_lowercase());
+        let ka = known_order.get(a.id.as_str());
+        let kb = known_order.get(b.id.as_str());
         match (ka, kb) {
             (Some(x), Some(y)) => x.cmp(y),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.id.to_ascii_lowercase().cmp(&b.id.to_ascii_lowercase()),
+            (None, None) => a.id.to_ascii_uppercase().cmp(&b.id.to_ascii_uppercase()),
         }
     });
-    Ok(manifests.into_iter().map(|m| m.directory).collect())
+    Ok(manifests)
 }
 
 /// The feature band that `SdkDirectoryWorkloadManifestProvider` scans for
@@ -985,6 +1031,27 @@ fn resolve_manifest_directory(
         return Ok(Some(id_dir.to_path_buf()));
     }
     Ok(None)
+}
+
+/// `File.ReadAllLines`' lines: split at `\r\n`, `\r` or `\n`, with no empty
+/// line after a final separator.
+fn read_all_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        match rest.find(['\r', '\n']) {
+            Some(at) => {
+                lines.push(&rest[..at]);
+                let skip = if rest[at..].starts_with("\r\n") { 2 } else { 1 };
+                rest = &rest[at + skip..];
+            }
+            None => {
+                lines.push(rest);
+                rest = "";
+            }
+        }
+    }
+    lines
 }
 
 /// Ids MSBuild skips wherever encountered: the hardcoded outdated set

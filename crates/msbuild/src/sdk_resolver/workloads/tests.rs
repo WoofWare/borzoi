@@ -17,6 +17,10 @@ use crate::SdkResolution;
 const TARGETS: &str = super::WORKLOAD_MANIFEST_TARGETS_LOCATOR;
 const AUTO: &str = super::WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR;
 
+/// The smallest manifest the workload resolver loads: `version` is its one
+/// required key.
+const MANIFEST: &str = r#"{"version": "1.0.0"}"#;
+
 fn no_user_env() -> WorkloadEnvironment<'static> {
     WorkloadEnvironment {
         user_dotnet_root: None,
@@ -44,7 +48,7 @@ fn host_sdk(root: &Path, version: &str, known: &[&str]) -> PathBuf {
 /// with both the json and targets files.
 fn manifest(root: &Path, band: &str, id: &str, version: &str) -> PathBuf {
     let dir = root.join("sdk-manifests").join(band).join(id).join(version);
-    write(&dir.join("WorkloadManifest.json"), "{}");
+    write(&dir.join("WorkloadManifest.json"), MANIFEST);
     write(&dir.join("WorkloadManifest.targets"), "<Project/>");
     dir
 }
@@ -93,7 +97,7 @@ fn flat_manifest_layout_resolves_to_id_dir() {
         .join("sdk-manifests")
         .join("10.0.100")
         .join("flat.workload");
-    write(&id_dir.join("WorkloadManifest.json"), "{}");
+    write(&id_dir.join("WorkloadManifest.json"), MANIFEST);
     write(&id_dir.join("WorkloadManifest.targets"), "<Project/>");
 
     let result = resolve_targets(root, &version_dir, &no_user_env()).unwrap();
@@ -182,7 +186,7 @@ fn manifest_without_targets_file_is_silently_excluded() {
         .join("10.0.100")
         .join("w.workload")
         .join("1.0.0");
-    write(&dir.join("WorkloadManifest.json"), "{}");
+    write(&dir.join("WorkloadManifest.json"), MANIFEST);
     // No WorkloadManifest.targets.
 
     let result = resolve_targets(root, &version_dir, &no_user_env()).unwrap();
@@ -593,7 +597,7 @@ fn symlinked_manifest_id_directory_is_followed_like_get_directories() {
     // The real manifest content lives outside sdk-manifests; the id directory in
     // the host band is a symlink to it.
     let real = root.join("real-w");
-    write(&real.join("1.0.0/WorkloadManifest.json"), "{}");
+    write(&real.join("1.0.0/WorkloadManifest.json"), MANIFEST);
     write(&real.join("1.0.0/WorkloadManifest.targets"), "<Project/>");
     fs::create_dir_all(root.join("sdk-manifests/10.0.300")).unwrap();
     std::os::unix::fs::symlink(&real, root.join("sdk-manifests/10.0.300/w.workload")).unwrap();

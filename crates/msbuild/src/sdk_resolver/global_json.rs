@@ -295,6 +295,27 @@ pub fn parse_global_json(text: &str) -> Result<GlobalJson, GlobalJsonError> {
 /// the parser would otherwise skip as whitespace while `System.Text.Json`
 /// throws on it.
 pub(super) fn parse_json_string_map(text: &str) -> Option<Vec<(String, String)>> {
+    let JsonValue::Object(entries) = parse_strict_json(text)? else {
+        return None;
+    };
+    entries
+        .into_iter()
+        .map(|(key, value)| match value {
+            JsonValue::String(value) => Some((key, value)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Parse a whole JSON document as `System.Text.Json` would read it, or `None`.
+///
+/// A `None` claims nothing, so this may be stricter than the reference (which
+/// skips comments and allows trailing commas) but never more lenient: it
+/// refuses trailing commas, comments, trailing input after the value, and a
+/// form feed anywhere, which the parser would otherwise skip as whitespace
+/// while `System.Text.Json` throws on it. A leading UTF-8 BOM is skipped, as
+/// the readers that call this skip it.
+pub(super) fn parse_strict_json(text: &str) -> Option<JsonValue> {
     if text.contains('\u{c}') {
         return None;
     }
@@ -305,16 +326,7 @@ pub(super) fn parse_json_string_map(text: &str) -> Option<Vec<(String, String)>>
     if parser.pos < parser.src.len() {
         return None;
     }
-    let JsonValue::Object(entries) = value else {
-        return None;
-    };
-    entries
-        .into_iter()
-        .map(|(key, value)| match value {
-            JsonValue::String(value) => Some((key, value)),
-            _ => None,
-        })
-        .collect()
+    Some(value)
 }
 
 /// Transcription of the *effect* of
@@ -659,7 +671,7 @@ fn parse_roll_forward(value: &str) -> Option<RollForward> {
 /// out of `global.json` we'd thread the value through here, but today
 /// every typed field is a string, bool, or nested object.
 #[derive(Debug, Clone, PartialEq)]
-enum JsonValue {
+pub(super) enum JsonValue {
     String(String),
     Bool(bool),
     Object(Vec<(String, JsonValue)>),
