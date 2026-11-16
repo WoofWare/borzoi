@@ -7698,6 +7698,9 @@ mod tests {
                                 b"<Project><PropertyGroup><DefineConstants>NEWER</DefineConstants></PropertyGroup></Project>".to_vec(),
                             ),
                             Edit::Write(newer.join("Sdk.targets"), b"<Project />".to_vec()),
+                            // The `dotnet.dll` the .NET host requires before it
+                            // counts the version.
+                            Edit::Write(root.join("dotnet/sdk/10.0.200/dotnet.dll"), Vec::new()),
                         ],
                     },
                     Perturbation {
