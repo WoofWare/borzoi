@@ -91,6 +91,8 @@ mod output;
 mod path_set;
 mod prescan;
 mod state;
+#[cfg(feature = "surface-reference")]
+mod surface_reference;
 mod types;
 mod unknowables;
 mod windows;
@@ -130,6 +132,45 @@ pub fn resolve_file(
     assemblies: &AssemblyEnv,
     recovery: &SyntaxRecovery,
 ) -> ResolvedFile {
+    let resolved = walk_file(file, preceding, assemblies, recovery, Walk::Full);
+    #[cfg(feature = "surface-reference")]
+    surface_reference::assert_surface_walk_agrees(file, preceding, assemblies, recovery, &resolved);
+    resolved
+}
+
+/// What `file` contributes to later files, as [`resolve_file`] would publish
+/// it, from a walk that skips every expression.
+///
+/// The surface is the same as the full walk's, field for field, for every file
+/// and entering state: nothing a later file reads may depend on an expression.
+/// Under the `surface-reference` feature every [`resolve_file`] checks that.
+pub fn surface_file(
+    file: &ImplFile,
+    preceding: &ProjectItems,
+    assemblies: &AssemblyEnv,
+    recovery: &SyntaxRecovery,
+) -> FileSurface {
+    walk_file(file, preceding, assemblies, recovery, Walk::Surface).surface
+}
+
+/// Whether a walk descends into expressions ([`Resolver::walk`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Walk {
+    /// Every expression: the walk [`resolve_file`] publishes.
+    Full,
+    /// No expression: the walk [`surface_file`] publishes. Everything outside
+    /// an expression is walked as [`Walk::Full`] walks it.
+    Surface,
+}
+
+/// The walk behind [`resolve_file`] and [`surface_file`].
+fn walk_file(
+    file: &ImplFile,
+    preceding: &ProjectItems,
+    assemblies: &AssemblyEnv,
+    recovery: &SyntaxRecovery,
+    walk: Walk,
+) -> ResolvedFile {
     #[cfg(feature = "fold-counts")]
     let _file_span = tracing::trace_span!(
         crate::fold_counts::FILE_SPAN,
@@ -146,7 +187,7 @@ pub fn resolve_file(
         PRESCAN_SPAN,
         prescan::Prescan::of(file, preceding, assemblies)
     );
-    let mut r = Resolver::new(preceding, assemblies, &prescan, recovery);
+    let mut r = Resolver::new(preceding, assemblies, &prescan, recovery, walk);
     #[cfg(feature = "otel")]
     drop(_phase);
     #[cfg(feature = "otel")]
@@ -2055,8 +2096,10 @@ impl<'a> Resolver<'a> {
         assemblies: &'a AssemblyEnv,
         prescan: &'a Prescan,
         recovery: &'a SyntaxRecovery,
+        walk: Walk,
     ) -> Self {
         Resolver {
+            walk,
             preceding,
             assemblies,
             item_base: preceding.next_base(),

@@ -5,6 +5,13 @@ edition = "2024"
 license.workspace = true
 publish = false
 
+[features]
+# Every file the folds resolve also runs the surface walk, and the run panics
+# unless the two surfaces agree (`borzoi-sema`'s feature of the same name). The
+# whole-project gate turns it on; `stats.yml`'s measurement over the same
+# corpus does not, so its series measures the walk the server runs.
+surface-reference = ["borzoi-sema/surface-reference"]
+
 [dependencies]
 borzoi.workspace = true
 # The parse tree the handler differential's perturbation finds comments and

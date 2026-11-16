@@ -38,6 +38,12 @@ fold-counts = ["dep:tracing"]
 # other, so it lives below both. Off by default: nothing at runtime compares
 # against an oracle.
 test-support = []
+# Every `resolve_file` also runs the surface walk (`surface_file`) on the same
+# file and entering state, and panics unless the two publish the same
+# `FileSurface` (`docs/resolve-what-a-request-reads-plan.md`, D3). On in this
+# crate's tests and the whole-project gate's, never in a build that serves
+# requests: it doubles the declaration walk.
+surface-reference = []
 
 [dev-dependencies]
 borzoi-oracle-harness.workspace = true
@@ -46,9 +52,10 @@ borzoi-oracle-harness.workspace = true
 borzoi-stats.workspace = true
 # Self-reference activates `test-support` when building this crate for its own
 # integration tests, so they exercise the shared comparator without a
-# `--features` flag on the test command, and `fold-counts`, so the test of
-# the fold's phase spans runs.
-borzoi-sema = { path = ".", features = ["test-support", "fold-counts"] }
+# `--features` flag on the test command; `fold-counts`, so the test of the
+# fold's phase spans runs; and `surface-reference`, so every file a test
+# resolves checks its surface walk.
+borzoi-sema = { path = ".", features = ["test-support", "fold-counts", "surface-reference"] }
 proptest.workspace = true
 # Reads `Gen::infer_construct`'s arms for the expected-type alphabet
 # (`tests/all/infer_entry_order_diff.rs`).

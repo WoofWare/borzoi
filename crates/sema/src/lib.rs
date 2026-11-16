@@ -83,7 +83,7 @@ pub use resolve::{
     ResolvedProject, SourceFile, resolve_file, resolve_project, resolve_project_files,
     resolve_project_files_incremental, resolve_project_files_prefix,
     resolve_project_files_prefix_incremental, resolve_project_incremental,
-    resolve_project_incremental_with_reuse, signature_partners,
+    resolve_project_incremental_with_reuse, signature_partners, surface_file,
 };
 // The path-labelled fold variants exist only in profiling builds; the LSP calls
 // them (in place of the prefix fold variants) to tag each file's span with its

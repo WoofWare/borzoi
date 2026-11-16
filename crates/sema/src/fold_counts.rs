@@ -174,20 +174,28 @@ mod tests {
         });
         let seen = recorder.0.lock().unwrap();
         assert!(seen.open.is_empty(), "every span closed");
-        assert_eq!(seen.bytes, [src.len() as u64]);
+        // Under `surface-reference`, `resolve_file` walks the file twice,
+        // the full walk and then the surface walk, each its own file span.
+        let walks = if cfg!(feature = "surface-reference") {
+            2
+        } else {
+            1
+        };
+        assert_eq!(seen.bytes, vec![src.len() as u64; walks]);
         let block = [
             IMPLICIT_SEED_SPAN,
             EARLIER_BLOCKS_SPAN,
             BLOCK_START_SPAN,
             DECLARATIONS_SPAN,
         ];
-        let expected: Vec<(&str, Vec<&str>)> = std::iter::once((FILE_SPAN, vec![]))
-            .chain(
-                std::iter::once(PRESCAN_SPAN)
-                    .chain(block)
-                    .chain(block)
-                    .map(|phase| (phase, vec![FILE_SPAN])),
-            )
+        let one_walk = std::iter::once((FILE_SPAN, vec![])).chain(
+            std::iter::once(PRESCAN_SPAN)
+                .chain(block)
+                .chain(block)
+                .map(|phase| (phase, vec![FILE_SPAN])),
+        );
+        let expected: Vec<(&str, Vec<&str>)> = std::iter::repeat_n(one_walk, walks)
+            .flat_map(|walk| walk.clone())
             .collect();
         assert_eq!(seen.entered, expected);
     }

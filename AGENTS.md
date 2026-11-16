@@ -292,6 +292,13 @@ This is a Cargo workspace with nine members:
   `borzoi-assembly` entity model. Depends on `borzoi-cst` and
   `borzoi-assembly`. Differentially tested against FCS; consumed by the
   LSP at runtime (`crates/lsp/src/semantic.rs`).
+  What a file contributes to later files is its `FileSurface`, and
+  `surface_file` computes it with a walk that skips every expression. Under
+  the `surface-reference` feature (on in sema's tests, and in the
+  whole-project gate through `borzoi-corpus-diff`'s feature of that name)
+  every `resolve_file` also runs that walk and panics unless the two
+  surfaces are equal, so a surface field that a body decides fails wherever
+  a file is resolved.
   The use differentials only see a binder the walk missed when some graded
   use sits in its scope with an outer target to commit to, so **binder
   completeness** checks the binders themselves
