@@ -1707,7 +1707,7 @@ fn a_resolved_closure_reads_only_the_dependency_lists_of_the_versions_it_rejecte
                 }
                 let identity = PackageIdentity::new(id(&pkg.id), version(&pkg.version));
                 let nuspec = PackagePaths::new(root.path(), &identity).nuspec_path;
-                let contents = fs::read(&nuspec).expect("nuspec");
+                let contents = crate::common::host_fs::read(&nuspec).expect("nuspec");
                 fs::remove_file(&nuspec).expect("remove nuspec");
 
                 match resolve() {

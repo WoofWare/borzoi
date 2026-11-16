@@ -133,7 +133,8 @@ pub trait SettingsFs {
     /// Asked only of spellings [`Self::metadata`] found to be files, and only
     /// where more than one is.
     fn identity(&self, path: &Path) -> std::io::Result<(u64, u64)>;
-    /// [`std::fs::read`].
+    /// [`std::fs::read`], failing a path that names no regular file rather
+    /// than opening it: a FIFO's open waits for a writer that may never come.
     fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
     /// [`std::fs::read_dir`], read to the end: each entry, or why it could
     /// not be read. The order is not significant.
@@ -192,7 +193,7 @@ impl SettingsFs for HostFs {
     }
 
     fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        std::fs::read(path)
+        crate::regular_file::read(path)
     }
 
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::io::Result<DirEntry>>> {
@@ -1076,5 +1077,28 @@ mod tests {
         assert_eq!(expand("a%A").as_deref(), Some("a%A"));
         assert_eq!(expand("%A%/%U%").as_deref(), Some("x/%U%"));
         assert_eq!(expand("%%"), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod fifo_tests {
+    use super::*;
+    use crate::regular_file::tests::{make_fifo, within_deadline};
+
+    /// The host's read of a settings file that is a FIFO, or a link to one,
+    /// fails without opening it, which would wait for a writer. Run under a
+    /// deadline, so that an open fails the test rather than hangs it.
+    #[test]
+    fn the_host_never_opens_a_fifo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        make_fifo(&dir.join("NuGet.Config"));
+        std::os::unix::fs::symlink(dir.join("NuGet.Config"), dir.join("linked.config")).unwrap();
+        within_deadline("reading a FIFO", move || {
+            for name in ["NuGet.Config", "linked.config"] {
+                let error = HostFs.read(&dir.join(name)).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{name}");
+            }
+        });
     }
 }

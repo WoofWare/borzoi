@@ -799,7 +799,7 @@ fn check_metadata(
             package: Box::new(identity.clone()),
             decline,
         };
-        let bytes = std::fs::read(&package.paths.nuspec_path).map_err(|source| {
+        let bytes = crate::regular_file::read(&package.paths.nuspec_path).map_err(|source| {
             DgSpecResolveDecline::PackageRead {
                 target_alias: target_alias.to_owned(),
                 package: Box::new(identity.clone()),
@@ -930,7 +930,7 @@ fn check_sources(
 /// throws on a marker without a content hash, or with a null one, which the
 /// package readers, checking only that the marker exists, cannot see.
 fn commit_marker_is_admitted(marker: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(marker) else {
+    let Ok(text) = crate::regular_file::read_to_string(marker) else {
         return false;
     };
     // The dgspec's reader, which keeps a repeated key: restore reads every
@@ -1266,7 +1266,7 @@ pub(super) fn config_is_admitted(path: &Path) -> bool {
     fn trimmed_and_present(value: &str) -> bool {
         !value.is_empty() && value.trim() == value
     }
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(text) = crate::regular_file::read_to_string(path) else {
         return false;
     };
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
@@ -1856,4 +1856,58 @@ fn audit_is_off(audit: Option<&RestoreAuditProperties>) -> bool {
     enable_audit
         .as_deref()
         .is_some_and(|value| value.eq_ignore_ascii_case("false"))
+}
+
+#[cfg(all(test, unix))]
+mod fifo_tests {
+    use super::*;
+    use crate::package::{PackageId, PackageIdentity, PackageReadError, read_installed_package};
+    use crate::regular_file::tests::{make_fifo, within_deadline};
+    use crate::version::NuGetVersion;
+
+    /// Where a package's commit marker, its nuspec or a config file is a
+    /// FIFO, or a link to one, each reader declines without opening it: an
+    /// open of a FIFO waits for a writer that never comes. Run under a
+    /// deadline, so that an open fails the test rather than hangs it.
+    #[test]
+    fn a_fifo_where_a_file_is_read_declines() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        make_fifo(&root.join("pipe"));
+        std::os::unix::fs::symlink(root.join("pipe"), root.join("link")).unwrap();
+        let package = |marker_is_fifo: bool| {
+            let dir = root.join(format!("{marker_is_fifo}/fsharp.core/1.0.0"));
+            std::fs::create_dir_all(&dir).unwrap();
+            if marker_is_fifo {
+                make_fifo(&dir.join(".nupkg.metadata"));
+            } else {
+                std::fs::write(dir.join(".nupkg.metadata"), r#"{"contentHash":""}"#).unwrap();
+            }
+            make_fifo(&dir.join("fsharp.core.nuspec"));
+            dir.parent().unwrap().parent().unwrap().to_path_buf()
+        };
+        let (with_marker, with_fifo_marker) = (package(false), package(true));
+        within_deadline("reading FIFOs", move || {
+            for name in ["pipe", "link"] {
+                assert!(!commit_marker_is_admitted(&root.join(name)), "{name}");
+                assert!(!config_is_admitted(&root.join(name)), "{name}");
+            }
+            let identity = || {
+                PackageIdentity::new(
+                    PackageId::parse("FSharp.Core").unwrap(),
+                    NuGetVersion::parse("1.0.0").unwrap(),
+                )
+            };
+            let read = read_installed_package(&with_marker, identity());
+            assert!(
+                matches!(read, Err(PackageReadError::MissingNuspec { .. })),
+                "{read:?}"
+            );
+            let read = read_installed_package(&with_fifo_marker, identity());
+            assert!(
+                matches!(read, Err(PackageReadError::NotInstalled { .. })),
+                "{read:?}"
+            );
+        });
+    }
 }

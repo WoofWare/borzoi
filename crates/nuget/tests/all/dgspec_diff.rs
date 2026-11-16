@@ -1422,7 +1422,7 @@ fn real_dgspecs_sweep() {
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
     let mut violations = Vec::new();
     for file in &files {
-        let Ok(text) = std::fs::read_to_string(file) else {
+        let Ok(text) = crate::common::host_fs::read_to_string(file) else {
             continue;
         };
         match grade(&mut oracles, &text) {

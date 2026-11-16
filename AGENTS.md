@@ -248,7 +248,10 @@ This is a Cargo workspace with nine members:
   dropping and grouping are modelled once, as text, and never re-derived as
   values. It shares B₁'s verified list.
   Self-contained: depends only
-  on `roxmltree` and `serde`/`serde_json`.
+  on `roxmltree` and `serde`/`serde_json`. It reads a file whole only through
+  `regular_file`, which declines a path that names no regular file rather than
+  open it (a FIFO's open waits for a writer); its `clippy.toml` bans the other
+  opens, and test code reads through `tests/all/common/host_fs.rs`.
   Differentially tested against the real NuGet client libraries via
   `tools/nuget-oracle` — a test-only JSONL batch oracle in the same mould as
   `tools/fcs-dump`; it is never a runtime dependency of the LSP. The oracle

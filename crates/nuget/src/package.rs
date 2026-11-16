@@ -717,10 +717,11 @@ pub fn read_installed_package(
     };
     paths.nuspec_path = nuspec_path;
 
-    let bytes = std::fs::read(&paths.nuspec_path).map_err(|source| PackageReadError::Io {
-        path: paths.nuspec_path.clone(),
-        source,
-    })?;
+    let bytes =
+        crate::regular_file::read(&paths.nuspec_path).map_err(|source| PackageReadError::Io {
+            path: paths.nuspec_path.clone(),
+            source,
+        })?;
     let text = decode_nuspec_bytes(&bytes).map_err(|source| PackageReadError::Io {
         path: paths.nuspec_path.clone(),
         source,

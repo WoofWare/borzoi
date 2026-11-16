@@ -447,7 +447,7 @@ fn restore(
 
     let assets_path = project_dir.join("obj").join("project.assets.json");
     let assets: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&assets_path).expect("restore wrote project.assets.json"),
+        &crate::common::host_fs::read(&assets_path).expect("restore wrote project.assets.json"),
     )
     .expect("project.assets.json is JSON");
 
