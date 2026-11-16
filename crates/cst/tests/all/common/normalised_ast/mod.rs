@@ -57,7 +57,8 @@ pub(super) fn canonicalise_scrutinee(scrutinee: model::NormalisedExpr) -> model:
 pub use self::{
     decode::{collapse_interp_brace_digraphs, collapse_triple_interp_brace_digraphs},
     from_cst::{
-        impl_decl_unit, impl_module_header, normalise_parse, sig_decl_unit, sig_module_header,
+        fun_body_scaffold, impl_decl_unit, impl_module_header, normalise_const_lit,
+        normalise_parse, sig_decl_unit, sig_module_header,
     },
     from_fcs::{
         fcs_impl_decl_unit, fcs_impl_module_header, fcs_sig_decl_unit, fcs_sig_module_header,

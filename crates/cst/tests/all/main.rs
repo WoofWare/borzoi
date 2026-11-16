@@ -118,6 +118,7 @@ mod parser_diff_when_constraints;
 mod parser_ifdef;
 mod parser_panic_sweep;
 mod parser_tree_height;
+mod print_roundtrip;
 mod recovery_sweep;
 mod shape_sensitivity;
 mod token_table_reference;

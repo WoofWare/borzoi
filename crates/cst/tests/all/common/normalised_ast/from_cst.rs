@@ -2692,6 +2692,19 @@ fn normalise_fun(f: &FunExpr, counter: &mut u32) -> NormalisedExpr {
     }
 }
 
+/// What [`normalise_fun`] makes of a `fun` with `args` around `body`: `body`
+/// wrapped in the `match` FCS's parser scaffolds for each parameter that is
+/// not a simple pattern. A reader of the currency that wants the lambda's
+/// written body peels exactly this scaffold off (`print_roundtrip`'s lowering).
+/// The scaffold's `_argN` scrutinees are canonicalised, so the counter's start
+/// does not matter.
+pub fn fun_body_scaffold(args: &[NormalisedPat], body: NormalisedExpr) -> NormalisedExpr {
+    let mut counter = 0;
+    args.iter()
+        .rev()
+        .fold(body, |acc, arg| lower_fun_arg(arg, &mut counter, acc))
+}
+
 /// Project a surface `MATCH_EXPR` to [`NormalisedExpr::Match`] — FCS's
 /// `SynExpr.Match(_, scrutinee, clauses, _, _)` (`SyntaxTree.fsi:728`).
 /// The `match` node itself claims no `_argN` slot, but its scrutinee and
@@ -4256,7 +4269,7 @@ fn normalise_measure(m: &Measure) -> NormalisedMeasure {
 /// pattern-side equivalent (for `CONST_PAT`). Decodes the literal
 /// token's text + kind to a `NormalisedConst`. Both surfaces produce
 /// the same FCS `SynConst` payload, so the projection is identical.
-fn normalise_const_lit(lit: &SyntaxToken) -> NormalisedConst {
+pub fn normalise_const_lit(lit: &SyntaxToken) -> NormalisedConst {
     let text = lit.text();
     // Signed kinds use `as uN as iN` so a hex/oct/bin body's bit
     // pattern reinterprets as two's complement (e.g. `0xFFy` → `-1`,
