@@ -9,12 +9,23 @@ use crate::vec::Vec1;
 /// one must be quoted (``` ``type`` ```). The reserved words (`params`,
 /// `virtual`, …) lex as identifiers with warning FS0046, so they are quoted too.
 ///
-/// `borzoi-cst`'s tests hold this to the lexer: every word the lexer lexes as
-/// anything but an identifier, and every reserved word, must be here.
+/// FCS's keyword table also spells some of its internal tokens as words
+/// (`__token_OEND`), which lex as those tokens. `borzoi-cst`'s tests hold this
+/// list to that table, read from the pinned compiler source, and to our own
+/// lexer's keywords, by printing each in every position a name takes.
 pub(crate) const QUOTED_WORDS: &[&str] = &[
     "__LINE__",
     "__SOURCE_DIRECTORY__",
     "__SOURCE_FILE__",
+    "__token_OBLOCKSEP",
+    "__token_ODECLEND",
+    "__token_ODO",
+    "__token_OELSE",
+    "__token_OEND",
+    "__token_OLET",
+    "__token_OTHEN",
+    "__token_OWITH",
+    "__token_constraint",
     "abstract",
     "and",
     "as",

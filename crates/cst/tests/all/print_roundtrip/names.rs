@@ -10,99 +10,35 @@ use borzoi_print::tree::{
 use borzoi_print::vec::Vec1;
 
 use super::round_trips;
-use crate::common::par_map;
+use crate::common::{corpus_root, par_map};
 
-/// FCS's keyword table (`LexHelpers.fs`, `keywordList`), the reserved words
-/// included, less its internal `__token_*` entries.
-const FCS_KEYWORDS: &[&str] = &[
-    "abstract",
-    "and",
-    "as",
-    "assert",
-    "base",
-    "begin",
-    "class",
-    "const",
-    "default",
-    "delegate",
-    "do",
-    "done",
-    "downcast",
-    "downto",
-    "elif",
-    "else",
-    "end",
-    "exception",
-    "extern",
-    "false",
-    "finally",
-    "fixed",
-    "for",
-    "fun",
-    "function",
-    "global",
-    "if",
-    "in",
-    "inherit",
-    "inline",
-    "interface",
-    "internal",
-    "lazy",
-    "let",
-    "match",
-    "member",
-    "mod",
-    "module",
-    "mutable",
-    "namespace",
-    "new",
-    "null",
-    "of",
-    "open",
-    "or",
-    "override",
-    "private",
-    "public",
-    "rec",
-    "return",
-    "sig",
-    "static",
-    "struct",
-    "then",
-    "to",
-    "true",
-    "try",
-    "type",
-    "upcast",
-    "use",
-    "val",
-    "void",
-    "when",
-    "while",
-    "with",
-    "yield",
-    "_",
-    "break",
-    "checked",
-    "component",
-    "constraint",
-    "continue",
-    "fori",
-    "include",
-    "mixin",
-    "parallel",
-    "params",
-    "process",
-    "protected",
-    "pure",
-    "sealed",
-    "trait",
-    "tailcall",
-    "virtual",
-    "__SOURCE_DIRECTORY__",
-    "__SOURCE_FILE__",
-    "__LINE__",
-];
+/// Every word FCS's lexer treats as other than a plain identifier, read from
+/// the pinned compiler source's `LexHelpers.fs`: each string literal from its
+/// keyword table (`keywordList`, the reserved words and the internal
+/// `__token_*` spellings included) through `KeywordOrIdentifierToken` (the
+/// `__SOURCE_FILE__` family). Reading it rather than copying it keeps the
+/// list from drifting when the corpus moves.
+fn fcs_keywords() -> Vec<String> {
+    let path = corpus_root().join("src/Compiler/SyntaxTree/LexHelpers.fs");
+    let src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let start = src
+        .find("let private keywordList")
+        .expect("LexHelpers.fs defines keywordList");
+    let function = src[start..]
+        .find("let KeywordOrIdentifierToken")
+        .expect("LexHelpers.fs defines KeywordOrIdentifierToken")
+        + start;
+    let end = src[function + 1..]
+        .find("\n    let ")
+        .map_or(src.len(), |i| i + function + 1);
+    src[start..end]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
 
 /// Words F# once reserved and later released, which lex as identifiers.
 const RELEASED_WORDS: &[&str] = &[
@@ -305,18 +241,20 @@ fn report(failures: Vec<String>) {
 
 #[test]
 fn every_keyword_round_trips_in_every_name_position() {
-    let mut words: Vec<String> = FCS_KEYWORDS
-        .iter()
-        .chain(RELEASED_WORDS)
-        .map(|w| (*w).to_owned())
+    let fcs = fcs_keywords();
+    for expected in ["type", "params", "__token_OEND", "__SOURCE_FILE__"] {
+        assert!(
+            fcs.iter().any(|w| w == expected),
+            "the keyword list read from LexHelpers.fs has lost {expected:?}: {fcs:?}"
+        );
+    }
+    let mut words: Vec<String> = fcs
+        .into_iter()
+        .chain(RELEASED_WORDS.iter().map(|w| (*w).to_owned()))
         .chain(lexer_words())
         .collect();
     words.sort();
     words.dedup();
-    assert!(
-        words.iter().any(|w| w == "__SOURCE_FILE__") && words.len() > 90,
-        "the word list has lost its keywords: {words:?}"
-    );
     let failures = par_map(words.len(), |i| {
         let w = &words[i];
         let mut why = Vec::new();
