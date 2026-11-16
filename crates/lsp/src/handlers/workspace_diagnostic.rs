@@ -61,7 +61,7 @@ use crate::handlers::preferred_uri;
 use crate::paths::{lexically_normalize, path_dedup_key};
 use crate::pull::{workspace_entry, workspace_unchanged};
 use crate::server::State;
-use crate::workspace::ProjectsGeneration;
+use crate::workspace::{ProjectsGeneration, ShownBuffers};
 
 /// A `workspace/diagnostic` sweep in progress. Enumerates every `.fsproj`
 /// under the client's workspace roots plus the source files in their
@@ -113,6 +113,8 @@ enum Phase {
         /// The [`path_dedup_key`]s already reported.
         seen: HashSet<String>,
         items: Vec<WorkspaceDocumentDiagnosticReport>,
+        /// What `items`' diagnostics read for open `.fsproj` buffers.
+        shown: ShownBuffers,
     },
 }
 
@@ -120,7 +122,12 @@ enum Phase {
 pub enum Step {
     /// More work remains.
     Pending(Sweep),
-    Done(WorkspaceDiagnosticReportResult),
+    /// The report, and what its diagnostics read for open `.fsproj` buffers,
+    /// which the response sending it carries.
+    Done {
+        report: WorkspaceDiagnosticReportResult,
+        shown: ShownBuffers,
+    },
 }
 
 impl Sweep {
@@ -216,6 +223,7 @@ impl Sweep {
                         linking,
                         seen: HashSet::new(),
                         items: Vec::new(),
+                        shown: ShownBuffers::default(),
                     }
                 }
             },
@@ -224,20 +232,30 @@ impl Sweep {
                 linking,
                 mut seen,
                 mut items,
+                mut shown,
             } => match files.next() {
                 Some(path) => {
-                    items.extend(diagnose(state, &previous, &linking, &mut seen, &path));
+                    if let Some((item, read)) =
+                        diagnose(state, &previous, &linking, &mut seen, &path)
+                    {
+                        items.push(item);
+                        shown = shown.and(read);
+                    }
                     Phase::Diagnose {
                         files,
                         linking,
                         seen,
                         items,
+                        shown,
                     }
                 }
                 None => {
-                    return Step::Done(WorkspaceDiagnosticReportResult::Report(
-                        WorkspaceDiagnosticReport { items },
-                    ));
+                    return Step::Done {
+                        report: WorkspaceDiagnosticReportResult::Report(
+                            WorkspaceDiagnosticReport { items },
+                        ),
+                        shown,
+                    };
                 }
             },
         };
@@ -249,15 +267,16 @@ impl Sweep {
     }
 }
 
-/// The report entry for one enumerated file, or `None` when it is a duplicate
-/// of a file already reported or has no URI.
+/// The report entry for one enumerated file, with what its diagnostics read
+/// for an open `.fsproj` buffer, or `None` when it is a duplicate of a file
+/// already reported or has no URI.
 fn diagnose(
     state: &mut State,
     previous: &HashMap<String, String>,
     linking: &HashMap<String, PathBuf>,
     seen: &mut HashSet<String>,
     path: &Path,
-) -> Option<WorkspaceDocumentDiagnosticReport> {
+) -> Option<(WorkspaceDocumentDiagnosticReport, ShownBuffers)> {
     // One report per physical file: a file linked into several projects (or
     // spelled with different case on a case-insensitive platform) is reported
     // once. Dedup on the platform-aware path key *before* building a URI, so
@@ -277,8 +296,14 @@ fn diagnose(
     // has no such hint, degrades to the implicit set (see `diagnose_file`).
     let linked = linking.get(&dedup_key).map(PathBuf::as_path);
     Some(match diagnose_file(state, &uri, prev, linked) {
-        FileOutcome::Unchanged(result_id) => workspace_unchanged(uri, result_id),
-        FileOutcome::Full { groups, result_id } => workspace_entry(uri, groups, result_id),
+        FileOutcome::Unchanged(result_id) => {
+            (workspace_unchanged(uri, result_id), ShownBuffers::default())
+        }
+        FileOutcome::Full {
+            groups,
+            result_id,
+            shown,
+        } => (workspace_entry(uri, groups, result_id), shown),
     })
 }
 
@@ -378,7 +403,7 @@ mod tests {
         loop {
             match sweep.step(state) {
                 Step::Pending(next) => sweep = next,
-                Step::Done(report) => return report,
+                Step::Done { report, .. } => return report,
             }
         }
     }
@@ -950,9 +975,9 @@ mod tests {
                     linking.get(&dedup_key).map(PathBuf::as_path),
                 ) {
                     FileOutcome::Unchanged(result_id) => workspace_unchanged(uri, result_id),
-                    FileOutcome::Full { groups, result_id } => {
-                        workspace_entry(uri, groups, result_id)
-                    }
+                    FileOutcome::Full {
+                        groups, result_id, ..
+                    } => workspace_entry(uri, groups, result_id),
                 };
                 items.push(entry);
             }
@@ -1179,7 +1204,7 @@ mod tests {
                 match step(&mut state, sweep) {
                     Step::Pending(next) => sweep = next,
                     // Finished before the change: nothing was in flight.
-                    Step::Done(_) => return Ok(()),
+                    Step::Done { .. } => return Ok(()),
                 }
             }
 
@@ -1196,7 +1221,7 @@ mod tests {
             let report = loop {
                 match step(&mut state, sweep) {
                     Step::Pending(next) => sweep = next,
-                    Step::Done(report) => break report,
+                    Step::Done { report, .. } => break report,
                 }
             };
 

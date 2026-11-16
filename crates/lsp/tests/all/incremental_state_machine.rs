@@ -90,7 +90,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use borzoi::inbox::{CHECKPOINT_EVENT, InboxSender, STOPPED_EVENT};
+use borzoi::inbox::{CHECKPOINT_EVENT, IDLE_EVENT, InboxSender, STOPPED_EVENT, SWEEP_REPORT_EVENT};
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::server::{State, run_inbox};
 use borzoi::workspace::Workspace;
@@ -575,6 +575,35 @@ enum Cmd {
     /// version is [`InputClass::InstalledVersionContents`] instead
     /// ([`World::install`]). Only pinned scripts use it.
     Install(&'static str, String),
+    /// A pull client's `workspace/diagnostic`, run to its report, with these
+    /// files written (or, with no content, deleted) behind the server's back
+    /// as the sweep's step of the given number begins ([`Hooks`]), or, for
+    /// no number, once its report is ready and before it is sent (after
+    /// every file it diagnosed), or after the report if the sweep is done
+    /// before the step numbered. The report's items for
+    /// open `.fsproj` documents are what the client then shows (a source's
+    /// is diagnosed under the context of a project that links it, which a
+    /// document pull need not share), and what it shows is
+    /// compared with fresh sessions once the server is idle. Skipped in a
+    /// push session, or one without [`Hooks`].
+    Sweep(Option<u8>, Vec<(FileId, Option<Content>)>),
+    /// A pull client's `textDocument/diagnostic` of an open document,
+    /// cancelled at the request's checkpoint of the given number (counted
+    /// from 0) if it reaches that many: the request then stops there, and is
+    /// answered `RequestCancelled`, so the client keeps what it showed. What
+    /// it shows is compared with fresh sessions once the server is idle.
+    /// Skipped in a push session, one without [`Hooks`], or for a document not
+    /// open.
+    CancelledPull(FileId, u8),
+    /// From now on, a pull client takes its open `.fsproj` buffers'
+    /// diagnostics from `workspace/diagnostic` sweeps rather than document
+    /// pulls, as a client that shows a project's diagnostics from its
+    /// workspace pull does: every re-pull of diagnostics runs a sweep and
+    /// shows its items for the open project files. A project file the sweep
+    /// does not find on disk, and every source, is still pulled as a
+    /// document (a sweep diagnoses a source under its linking project's
+    /// context, which a document pull need not share).
+    SweepProjects,
     /// Make the project directory's `obj` what [`ObjLink`] names, replacing
     /// what is there (a real `obj` is deleted with its assets file), and
     /// queue a watch event for its assets file as an
@@ -621,6 +650,23 @@ impl fmt::Debug for Cmd {
             Cmd::Delete(file) => write!(f, "Delete({file:?})"),
             Cmd::Touch(proj, touch) => write!(f, "Touch({:?}, {touch:?})", FileId::Proj(*proj)),
             Cmd::Relink(proj, to) => write!(f, "Relink({}/obj, {to:?})", proj.dir()),
+            Cmd::Sweep(at, changes) => {
+                let changes: Vec<String> = changes
+                    .iter()
+                    .map(|(file, content)| match content {
+                        Some(c) => format!("Write({file:?}, {:?})", c.render(*file)),
+                        None => format!("Delete({file:?})"),
+                    })
+                    .collect();
+                match at {
+                    Some(at) => write!(f, "Sweep(at step {at}, {changes:?})"),
+                    None => write!(f, "Sweep(at the report, {changes:?})"),
+                }
+            }
+            Cmd::CancelledPull(file, at) => {
+                write!(f, "CancelledPull({file:?}, at checkpoint {at})")
+            }
+            Cmd::SweepProjects => f.write_str("SweepProjects"),
             Cmd::Flush => f.write_str("Flush"),
             Cmd::Check => f.write_str("Check"),
             Cmd::Peek(src) => write!(f, "Peek({:?})", FileId::Src(*src)),
@@ -1028,8 +1074,9 @@ fn project_file_strategy() -> impl Strategy<Value = FileId> {
 
 /// Commands that write project files and sources behind the server's back
 /// and never deliver the watch events, and comparisons are frequent. Only
-/// sources are opened: a write while a `.fsproj` buffer is open is
-/// [`InputClass::FsprojBufferInputs`], which would suspend comparisons.
+/// sources are opened, so every project write is
+/// [`InputClass::ProjectFiles`];
+/// [`unwatched_fsproj_buffer_cmd_strategy`] opens project files.
 fn unwatched_project_cmd_strategy() -> impl Strategy<Value = Cmd> {
     prop_oneof![
         3 => source_file_strategy().prop_map(Cmd::Open),
@@ -1044,6 +1091,134 @@ fn unwatched_project_cmd_strategy() -> impl Strategy<Value = Cmd> {
         4 => Just(Cmd::Check),
         3 => src_strategy().prop_map(Cmd::Peek),
     ]
+}
+
+/// A `.fsproj` the generator may open as a buffer.
+fn fsproj_buffer_strategy() -> impl Strategy<Value = FileId> {
+    prop_oneof![
+        1 => Just(FileId::Proj(Proj::O)),
+        3 => Just(FileId::Proj(Proj::P)),
+        2 => Just(FileId::Proj(Proj::Q)),
+    ]
+}
+
+/// Commands that open and edit `.fsproj` buffers, and write and delete
+/// project files and sources behind the server's back, never delivering the
+/// watch events, and comparisons are frequent: every such write is an input
+/// to an open buffer's diagnostics ([`InputClass::FsprojBufferInputs`]).
+fn unwatched_fsproj_buffer_cmd_strategy() -> impl Strategy<Value = Cmd> {
+    prop_oneof![
+        3 => fsproj_buffer_strategy().prop_map(Cmd::Open),
+        2 => source_file_strategy().prop_map(Cmd::Open),
+        2 => with_content(fsproj_buffer_strategy()).prop_map(|(f, c)| Cmd::Edit(f, c)),
+        1 => fsproj_buffer_strategy().prop_map(Cmd::Close),
+        1 => fsproj_buffer_strategy().prop_map(Cmd::Save),
+        5 => with_content(project_file_strategy()).prop_map(|(f, c)| Cmd::Write(f, c)),
+        2 => project_file_strategy().prop_map(Cmd::Delete),
+        2 => (proj_strategy(), touch_strategy()).prop_map(|(p, t)| Cmd::Touch(p, t)),
+        2 => with_content(source_file_strategy()).prop_map(|(f, c)| Cmd::Write(f, c)),
+        1 => source_file_strategy().prop_map(Cmd::Delete),
+        4 => Just(Cmd::Check),
+        2 => src_strategy().prop_map(Cmd::Peek),
+    ]
+}
+
+/// A file a sweep's step may write or delete behind the server's back: any
+/// whose change the server notices on its own, so the comparison after the
+/// sweep is made.
+fn sweep_change_strategy() -> impl Strategy<Value = (FileId, Option<Content>)> {
+    let file = prop_oneof![
+        3 => Just(FileId::Props),
+        2 => Just(FileId::Proj(Proj::P)),
+        1 => Just(FileId::Proj(Proj::Q)),
+        2 => source_file_strategy(),
+        1 => Just(FileId::Assets(Proj::P)),
+    ];
+    file.prop_flat_map(|file| {
+        prop_oneof![
+            3 => content_for(file).prop_map(Some),
+            1 => Just(None),
+        ]
+        .prop_map(move |content| (file, content))
+    })
+}
+
+/// A pull client's commands that run `workspace/diagnostic` sweeps, with
+/// files changing between their steps, and pulls cancelled while they run,
+/// among `.fsproj` buffers and sources opened and edited and files written
+/// behind the server's back, never delivering the watch events.
+fn delivery_cmd_strategy() -> impl Strategy<Value = Cmd> {
+    let open_file = prop_oneof![fsproj_buffer_strategy(), source_file_strategy()];
+    prop_oneof![
+        // A sweep over the generated world reads a few directories,
+        // evaluates each project, then diagnoses each file, in a dozen steps
+        // or so, so a change may land in any pass: before a buffer is
+        // diagnosed, after it and before the report, or after the report.
+        3 => (
+            prop_oneof![2 => (0u8..16).prop_map(Some), 1 => Just(None)],
+            prop::collection::vec(sweep_change_strategy(), 1..3),
+        )
+            .prop_map(|(at, changes)| Cmd::Sweep(at, changes)),
+        3 => (open_file.clone(), 0u8..4).prop_map(|(file, at)| Cmd::CancelledPull(file, at)),
+        2 => fsproj_buffer_strategy().prop_map(Cmd::Open),
+        2 => source_file_strategy().prop_map(Cmd::Open),
+        3 => with_content(fsproj_buffer_strategy()).prop_map(|(f, c)| Cmd::Edit(f, c)),
+        1 => open_file.prop_map(Cmd::Close),
+        3 => with_content(project_file_strategy()).prop_map(|(f, c)| Cmd::Write(f, c)),
+        1 => project_file_strategy().prop_map(Cmd::Delete),
+        2 => with_content(source_file_strategy()).prop_map(|(f, c)| Cmd::Write(f, c)),
+        2 => Just(Cmd::Check),
+        1 => src_strategy().prop_map(Cmd::Peek),
+        1 => Just(Cmd::SweepProjects),
+    ]
+}
+
+/// One delivery of an open `.fsproj` buffer's diagnostics with something
+/// they read moving around it, the shape every route by which what the
+/// client shows and what the server confirms can part takes: `P.fsproj` is
+/// opened and edited to import `common.props`, so the client shows
+/// diagnostics that read it, and then `common.props` is deleted (or
+/// written) behind the server's back either just before a pull of the
+/// buffer that is cancelled while it runs, or as a `workspace/diagnostic`
+/// sweep runs (before or after it diagnoses the buffer, or once its report
+/// is ready). The client shows the project's diagnostics from sweeps in some
+/// of them ([`Cmd::SweepProjects`]). Random commands come before and
+/// between, so the scenario starts from whatever state they left.
+fn buffer_delivery_scenario() -> impl Strategy<Value = Vec<Cmd>> {
+    let importing = project_strategy(Proj::P, Damage::None).prop_map(|mut p| {
+        p.import_props = true;
+        Content::Project(p)
+    });
+    let change = prop_oneof![
+        3 => Just(None),
+        1 => props_strategy().prop_map(|p| Some(Content::Props(p))),
+    ];
+    let route = prop_oneof![
+        (0u8..4).prop_map(|at| (None, Some(at))),
+        prop_oneof![2 => (0u8..16).prop_map(Some), 1 => Just(None)].prop_map(|at| (Some(at), None)),
+    ];
+    (importing, change, route, any::<bool>()).prop_map(|(edit, change, route, sweep_projects)| {
+        let mut cmds = Vec::new();
+        if sweep_projects {
+            cmds.push(Cmd::SweepProjects);
+        }
+        cmds.push(Cmd::Open(FileId::Proj(Proj::P)));
+        cmds.push(Cmd::Edit(FileId::Proj(Proj::P), edit));
+        match route {
+            (Some(at), _) => cmds.push(Cmd::Sweep(at, vec![(FileId::Props, change)])),
+            (None, at) => {
+                cmds.push(match change {
+                    Some(content) => Cmd::Write(FileId::Props, content),
+                    None => Cmd::Delete(FileId::Props),
+                });
+                cmds.push(Cmd::CancelledPull(
+                    FileId::Proj(Proj::P),
+                    at.expect("a cancelled pull's checkpoint"),
+                ));
+            }
+        }
+        cmds
+    })
 }
 
 /// Commands that create and delete projects behind the server's back, most
@@ -1131,7 +1306,19 @@ fn case_strategy_with(
     cmds: BoxedStrategy<Cmd>,
     opened: BoxedStrategy<FileId>,
 ) -> impl Strategy<Value = Case> {
-    let mode = prop_oneof![Just(Mode::Push), Just(Mode::Pull)];
+    case_strategy_in(
+        prop_oneof![Just(Mode::Push), Just(Mode::Pull)].boxed(),
+        cmds,
+        opened,
+    )
+}
+
+/// [`case_strategy_with`], in a mode `mode` draws.
+fn case_strategy_in(
+    mode: BoxedStrategy<Mode>,
+    cmds: BoxedStrategy<Cmd>,
+    opened: BoxedStrategy<FileId>,
+) -> impl Strategy<Value = Case> {
     // A healthy world (see `Damage`): every source and `common.props` exist,
     // `P.fsproj` always and the other projects often, and most projects are
     // restored. Commands then delete, break and reorder it.
@@ -1232,6 +1419,13 @@ struct Client {
     /// A `workspace/semanticTokens/refresh` arrived since the last re-pull.
     token_refresh_owed: bool,
     refreshes_seen: usize,
+    /// A hooked session's handle on its [`Hooks`].
+    hooks: Option<HookHandle>,
+    /// How many messages this client has sent the server.
+    sent: std::cell::Cell<u64>,
+    /// Whether open `.fsproj` buffers' diagnostics come from sweeps
+    /// ([`Cmd::SweepProjects`]).
+    sweep_projects: bool,
 }
 
 /// A `tracing` subscriber on the server thread that sends a notification the
@@ -1288,19 +1482,217 @@ impl tracing::Subscriber for StopAt {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
+/// The name of the span the loop enters around each step of a
+/// `workspace/diagnostic` sweep.
+const SWEEP_SPAN: &str = "lsp.workspace_diagnostic.sweep";
+
+/// The sweep step number of [`HookPlan::sweep`] that stands for the moment a
+/// sweep's report is ready, before it is sent ([`SWEEP_REPORT_EVENT`]):
+/// after every file it diagnosed.
+const AT_REPORT: u32 = u32::MAX;
+
+/// What a hooked session's server thread is to do ([`Hooks`]), armed by the
+/// test thread before the request it is for.
+#[derive(Default)]
+struct HookPlan {
+    /// Send `$/cancelRequest` for this request at the checkpoint this many
+    /// checkpoints after the plan is armed.
+    cancel: Option<(RequestId, u32)>,
+    /// Whether the cancellation was sent.
+    cancelled: bool,
+    /// Make these disk changes (a write, or with no bytes a delete) as the
+    /// in-flight sweep's step of this number begins.
+    sweep: Option<(u32, DiskChanges)>,
+    /// The sweep steps begun since the plan was armed.
+    sweep_steps: u32,
+    /// Whether the sweep's changes were made.
+    sweep_applied: bool,
+}
+
+/// What a hooked session shares between the test thread and its server
+/// thread's [`Hooks`]: the plan, how many messages the hooks have handed to
+/// the loop themselves, and how many messages the loop had taken from its
+/// inbox when it last went idle ([`IDLE_EVENT`]).
+#[derive(Clone, Default)]
+struct HookHandle {
+    plan: std::sync::Arc<std::sync::Mutex<HookPlan>>,
+    injected: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    idle: std::sync::Arc<(std::sync::Mutex<Option<u64>>, std::sync::Condvar)>,
+}
+
+impl HookHandle {
+    /// Wait until the loop goes idle, or is idle, having taken at least
+    /// `received` messages from its inbox: it has handled them all, and sent
+    /// everything it owed for them.
+    fn wait_idle_having(&self, received: u64) {
+        let (lock, wake) = &*self.idle;
+        let guard = lock.lock().unwrap();
+        let (guard, timeout) = wake
+            .wait_timeout_while(guard, RECV_TIMEOUT, |idle| {
+                idle.is_none_or(|taken| taken < received)
+            })
+            .unwrap();
+        assert!(
+            !timeout.timed_out(),
+            "the server never went idle having taken {received} messages ({:?})",
+            *guard
+        );
+    }
+}
+
+/// Reads the `received` field of an [`IDLE_EVENT`].
+#[derive(Default)]
+struct ReceivedField(Option<u64>);
+
+impl tracing::field::Visit for ReceivedField {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "received" {
+            self.0 = Some(value);
+        }
+    }
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
+/// A `tracing` subscriber on a hooked session's server thread: it counts
+/// the loop's idle waits ([`IDLE_EVENT`]), makes a sweep's planned disk
+/// changes as the planned step begins ([`SWEEP_SPAN`]), and sends a planned
+/// `$/cancelRequest` at the planned checkpoint ([`CHECKPOINT_EVENT`]),
+/// synchronously, so the running request stops at that very checkpoint.
+struct Hooks {
+    handle: HookHandle,
+    input: InboxSender,
+    sweep_spans: std::sync::Mutex<BTreeSet<u64>>,
+    next_span: std::sync::atomic::AtomicU64,
+}
+
+impl tracing::Subscriber for Hooks {
+    fn register_callsite(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        if self.enabled(metadata) {
+            tracing::subscriber::Interest::always()
+        } else {
+            tracing::subscriber::Interest::sometimes()
+        }
+    }
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        (metadata.is_event()
+            && matches!(
+                metadata.name(),
+                CHECKPOINT_EVENT | IDLE_EVENT | SWEEP_REPORT_EVENT
+            ))
+            || (metadata.is_span() && metadata.name() == SWEEP_SPAN)
+    }
+    fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        let id = 1 + self
+            .next_span
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attributes.metadata().name() == SWEEP_SPAN {
+            self.sweep_spans.lock().unwrap().insert(id);
+        }
+        tracing::span::Id::from_u64(id)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if event.metadata().name() == IDLE_EVENT {
+            let mut received = ReceivedField::default();
+            event.record(&mut received);
+            let received = received
+                .0
+                .expect("an idle event says how many messages it took");
+            let (lock, wake) = &*self.handle.idle;
+            *lock.lock().unwrap() = Some(received);
+            wake.notify_all();
+            return;
+        }
+        let mut plan = self.handle.plan.lock().unwrap();
+        if event.metadata().name() == SWEEP_REPORT_EVENT {
+            if plan.sweep.as_ref().is_some_and(|(at, _)| *at == AT_REPORT) {
+                let (_, changes) = plan.sweep.take().expect("checked");
+                apply_disk_changes(&changes);
+                plan.sweep_applied = true;
+            }
+            return;
+        }
+        let Some((id, at)) = plan.cancel.as_mut() else {
+            return;
+        };
+        if *at > 0 {
+            *at -= 1;
+            return;
+        }
+        let id = id.clone();
+        plan.cancel = None;
+        plan.cancelled = true;
+        self.handle
+            .injected
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.input
+            .send(Message::Notification(Notification {
+                method: "$/cancelRequest".to_string(),
+                params: json!({ "id": id }),
+            }))
+            .expect("the inbox is alive");
+    }
+    fn enter(&self, span: &tracing::span::Id) {
+        if !self.sweep_spans.lock().unwrap().contains(&span.into_u64()) {
+            return;
+        }
+        let mut plan = self.handle.plan.lock().unwrap();
+        let step = plan.sweep_steps;
+        plan.sweep_steps += 1;
+        if plan.sweep.as_ref().is_some_and(|(at, _)| *at == step) {
+            let (_, changes) = plan.sweep.take().expect("checked");
+            apply_disk_changes(&changes);
+            plan.sweep_applied = true;
+        }
+    }
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Files to write, each with its bytes, or with none to delete.
+type DiskChanges = Vec<(PathBuf, Option<Vec<u8>>)>;
+
+/// Make `changes`: write each file (creating its directory), or with no
+/// bytes delete it.
+fn apply_disk_changes(changes: &[(PathBuf, Option<Vec<u8>>)]) {
+    for (path, bytes) in changes {
+        match bytes {
+            Some(bytes) => {
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, bytes).unwrap();
+            }
+            None => {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+/// How a session's server thread is instrumented.
+enum Instrument {
+    None,
+    /// [`StopAt`].
+    StopAt(
+        BTreeSet<u32>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ),
+    /// [`Hooks`].
+    Hooks(HookHandle),
+}
+
 impl Client {
     fn start(root: &Path, mode: Mode) -> Self {
-        Client::start_stopping(root, mode, BTreeSet::new(), Default::default())
+        Client::start_with(root, mode, Instrument::None)
     }
 
-    /// A session whose requests stop at the checkpoints numbered in `stops`
-    /// ([`StopAt`]), each counted in `stopped`.
-    fn start_stopping(
-        root: &Path,
-        mode: Mode,
-        stops: BTreeSet<u32>,
-        stopped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) -> Self {
+    fn start_with(root: &Path, mode: Mode, instrument: Instrument) -> Self {
+        let hooks = match &instrument {
+            Instrument::Hooks(handle) => Some(handle.clone()),
+            _ => None,
+        };
         let (server, conn) = Connection::memory();
         let root = root.to_path_buf();
         // The loop's inbox, fed from the connection as the server's own input
@@ -1329,22 +1721,36 @@ impl Client {
             });
             state.set_client_capabilities(mode.caps());
             state.set_workspace_roots(vec![root]);
-            // A session that stops nothing installs no subscriber, so the
+            // A session with no instrument installs no subscriber, so the
             // fresh sessions a comparison starts never wait for the
             // long-lived one's ([`crate::common::with_subscriber`]).
-            if stops.is_empty() {
-                run_inbox(&server, inbox, state, None).expect("server loop ends cleanly");
-                return;
+            match instrument {
+                Instrument::None => {
+                    run_inbox(&server, inbox, state, None).expect("server loop ends cleanly");
+                }
+                Instrument::StopAt(at, stopped) => {
+                    let subscriber = StopAt {
+                        at,
+                        passed: Default::default(),
+                        input,
+                        stopped,
+                    };
+                    crate::common::with_subscriber(subscriber, || {
+                        run_inbox(&server, inbox, state, None).expect("server loop ends cleanly")
+                    });
+                }
+                Instrument::Hooks(handle) => {
+                    let subscriber = Hooks {
+                        handle,
+                        input,
+                        sweep_spans: Default::default(),
+                        next_span: Default::default(),
+                    };
+                    crate::common::with_subscriber(subscriber, || {
+                        run_inbox(&server, inbox, state, None).expect("server loop ends cleanly")
+                    });
+                }
             }
-            let subscriber = StopAt {
-                at: stops,
-                passed: Default::default(),
-                input,
-                stopped,
-            };
-            crate::common::with_subscriber(subscriber, || {
-                run_inbox(&server, inbox, state, None).expect("server loop ends cleanly")
-            });
         });
         Client {
             conn,
@@ -1357,10 +1763,14 @@ impl Client {
             diagnostic_refresh_owed: false,
             token_refresh_owed: false,
             refreshes_seen: 0,
+            sent: std::cell::Cell::new(0),
+            sweep_projects: false,
+            hooks,
         }
     }
 
     fn notify(&self, method: &str, params: Value) {
+        self.sent.set(self.sent.get() + 1);
         self.conn
             .sender
             .send(Message::Notification(Notification {
@@ -1394,6 +1804,7 @@ impl Client {
                     }
                     _ => {}
                 }
+                self.sent.set(self.sent.get() + 1);
                 self.conn
                     .sender
                     .send(Message::Response(Response {
@@ -1411,6 +1822,7 @@ impl Client {
     fn request(&mut self, method: &str, params: Value) -> Value {
         let id = RequestId::from(format!("t{}", self.next_id));
         self.next_id += 1;
+        self.sent.set(self.sent.get() + 1);
         self.conn
             .sender
             .send(Message::Request(Request {
@@ -1449,6 +1861,11 @@ impl Client {
             // An unknown method is answered `MethodNotFound` without touching
             // any cache: a pure ordering barrier.
             self.request("borzoi-test/barrier", Value::Null);
+            // The barrier's step goes on after its answer is sent, and may
+            // send a refresh then: a hooked session waits for the loop to go
+            // idle, so nothing the step owed is still to come when the script
+            // goes on.
+            self.wait_idle_and_absorb();
             if self.refreshes_seen == before {
                 return;
             }
@@ -1475,42 +1892,115 @@ impl Client {
             if !repull_all_diags && repull_tokens.is_empty() {
                 return;
             }
-            if self.mode == Mode::Pull && repull_all_diags {
-                for uri in open {
-                    let previous = self.pulled.get(uri).and_then(|(id, _)| id.clone());
-                    let resp = self.request(
-                        "textDocument/diagnostic",
-                        json!({ "textDocument": { "uri": uri }, "previousResultId": previous }),
-                    );
-                    let report = &resp["result"];
-                    match report["kind"].as_str() {
-                        Some("unchanged") => {
-                            let (_, items) = self
-                                .pulled
-                                .remove(uri)
-                                .expect("`unchanged` answers only an echoed resultId");
-                            let id = report["resultId"].as_str().map(str::to_string);
-                            self.pulled.insert(uri.clone(), (id, items));
-                        }
-                        _ => {
-                            let id = report["resultId"].as_str().map(str::to_string);
-                            self.pulled
-                                .insert(uri.clone(), (id, report["items"].clone()));
-                        }
-                    }
-                }
-            }
+            self.repull(open, repull_all_diags, std::mem::take(&mut repull_tokens));
             repull_all_diags = false;
-            for uri in std::mem::take(&mut repull_tokens) {
-                let resp = self.request(
-                    "textDocument/semanticTokens/full",
-                    json!({ "textDocument": { "uri": uri } }),
-                );
-                self.tokens.insert(uri, resp);
-            }
             self.settle();
         }
         panic!("re-pulls kept releasing refreshes after {MAX_SETTLE_ROUNDS} rounds");
+    }
+
+    /// Pull every open document's diagnostics (in a pull session) when
+    /// `diagnostics`, and the semantic tokens of each of `tokens`.
+    fn repull(&mut self, open: &BTreeSet<String>, diagnostics: bool, tokens: BTreeSet<String>) {
+        if self.mode == Mode::Pull && diagnostics {
+            // What a sweep reports for an open project file; one the sweep
+            // does not find on disk is pulled as a document.
+            let mut swept: BTreeSet<String> = BTreeSet::new();
+            if self.sweep_projects && open.iter().any(|uri| uri.ends_with(".fsproj")) {
+                let report =
+                    self.request("workspace/diagnostic", json!({ "previousResultIds": [] }));
+                for item in report["result"]["items"].as_array().into_iter().flatten() {
+                    if let Some(uri) = item["uri"].as_str()
+                        && open.contains(uri)
+                        && uri.ends_with(".fsproj")
+                    {
+                        self.take_report(uri, item);
+                        swept.insert(uri.to_string());
+                    }
+                }
+            }
+            for uri in open {
+                if swept.contains(uri) {
+                    continue;
+                }
+                let previous = self.pulled.get(uri).and_then(|(id, _)| id.clone());
+                let resp = self.request(
+                    "textDocument/diagnostic",
+                    json!({ "textDocument": { "uri": uri }, "previousResultId": previous }),
+                );
+                self.take_report(uri, &resp["result"]);
+            }
+        }
+        for uri in tokens {
+            let resp = self.request(
+                "textDocument/semanticTokens/full",
+                json!({ "textDocument": { "uri": uri } }),
+            );
+            self.tokens.insert(uri, resp);
+        }
+    }
+
+    /// Show `report`, a document diagnostic report for `uri` (or a
+    /// workspace report's item for it).
+    fn take_report(&mut self, uri: &str, report: &Value) {
+        match report["kind"].as_str() {
+            Some("unchanged") => {
+                let (_, items) = self
+                    .pulled
+                    .remove(uri)
+                    .expect("`unchanged` answers only an echoed resultId");
+                let id = report["resultId"].as_str().map(str::to_string);
+                self.pulled.insert(uri.to_string(), (id, items));
+            }
+            _ => {
+                let id = report["resultId"].as_str().map(str::to_string);
+                self.pulled
+                    .insert(uri.to_string(), (id, report["items"].clone()));
+            }
+        }
+    }
+
+    /// Act on what the server sent before it went idle, sending nothing
+    /// that is not owed: each refresh it sent is answered with the re-pulls
+    /// a client makes, and the server is waited on to go idle again, until it
+    /// sends none. Unlike [`Self::sync_views`], no ordering barrier is sent,
+    /// since a message of its own would give the server a step to do what it
+    /// owed. Needs [`Hooks`].
+    fn sync_views_idle(&mut self, open: &BTreeSet<String>) {
+        assert!(self.hooks.is_some(), "an idle sync needs hooks");
+        for _ in 0..MAX_SETTLE_ROUNDS {
+            self.wait_idle_and_absorb();
+            let diagnostics = std::mem::take(&mut self.diagnostic_refresh_owed);
+            let tokens: BTreeSet<String> = if std::mem::take(&mut self.token_refresh_owed) {
+                open.iter()
+                    .filter(|u| u.ends_with(".fs"))
+                    .cloned()
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
+            if !diagnostics && tokens.is_empty() {
+                return;
+            }
+            self.repull(open, diagnostics, tokens);
+        }
+        panic!("re-pulls kept releasing refreshes after {MAX_SETTLE_ROUNDS} rounds");
+    }
+
+    /// In a hooked session, wait until the loop is idle having handled
+    /// every message handed to it (this client's and its hooks'), then act on
+    /// what it sent meanwhile ([`Self::absorb`]). Nothing in a session
+    /// without hooks.
+    fn wait_idle_and_absorb(&mut self) {
+        let Some(hooks) = self.hooks.clone() else {
+            return;
+        };
+        let handed_over =
+            self.sent.get() + hooks.injected.load(std::sync::atomic::Ordering::SeqCst);
+        hooks.wait_idle_having(handed_over);
+        while let Ok(msg) = self.conn.receiver.try_recv() {
+            self.absorb(msg);
+        }
     }
 
     fn forget(&mut self, uri: &str) {
@@ -1590,9 +2080,9 @@ enum InputClass {
     /// An input to project evaluation ([`Self::ProjectFiles`] or
     /// [`Self::GlobMembership`]) written while a `.fsproj` buffer is open.
     /// That buffer's diagnostics evaluate the buffer itself, not the
-    /// workspace's cached evaluation, and nothing confirms what they read, so
-    /// nothing owes the client a refresh of the ones it is showing
-    /// (`docs/incremental-lsp-plan.md`, Stage 3b, "Split").
+    /// workspace's cached evaluation; what they read is confirmed in every
+    /// generation, and a move owes the client a refresh of the ones it is
+    /// showing.
     FsprojBufferInputs,
     /// Which projects a directory holds: a `.fsproj` created or deleted,
     /// which moves which project owns the sources around it. A file's owner
@@ -1621,11 +2111,13 @@ enum InputClass {
 /// validates each remembered owner's directory listings and consulted
 /// evaluations in every generation that asks for it; Stage 6b validates
 /// each cached env's read set, bar the contents of installed versions, in
-/// every generation that reads the env.
+/// every generation that reads the env; and what each open `.fsproj`
+/// buffer's diagnostics read is validated in every generation.
 const WITNESSED: &[InputClass] = &[
     InputClass::SourceContent,
     InputClass::ProjectFiles,
     InputClass::GlobMembership,
+    InputClass::FsprojBufferInputs,
     InputClass::DirectoryMembership,
     InputClass::ReferenceResolution,
 ];
@@ -1785,6 +2277,27 @@ impl World {
             relink: false,
         });
         true
+    }
+
+    /// The watch event of writing `file` (or, when not `write`, deleting it)
+    /// as the disk now stands, without making the change: `None` for the
+    /// delete of a file that is not there.
+    fn planned_event(&self, file: FileId, write: bool) -> Option<Pending> {
+        let existed = self.path(file).host_exists();
+        if !write && !existed {
+            return None;
+        }
+        let class = self.class_of(file, write != existed || !write);
+        let typ = match (write, existed) {
+            (false, _) => 3,
+            (true, true) => 2,
+            (true, false) => 1,
+        };
+        Some(Pending {
+            event: json!({ "uri": self.uri(file), "type": typ }),
+            class,
+            relink: false,
+        })
     }
 
     /// [`Cmd::Relink`].
@@ -2092,6 +2605,9 @@ struct Coverage {
     unflushed_checks: usize,
     /// Of those, the ones with a project file's write pending.
     unflushed_project_checks: usize,
+    /// Of those, the ones with an input of an open `.fsproj` buffer's
+    /// diagnostics written ([`InputClass::FsprojBufferInputs`]) pending.
+    unflushed_fsproj_buffer_checks: usize,
     /// Of those, the ones with a globbed directory's membership change
     /// pending.
     unflushed_membership_checks: usize,
@@ -2115,6 +2631,16 @@ struct Coverage {
     references: usize,
     /// Requests stopped at a checkpoint ([`StopAt`]).
     stops: usize,
+    /// `workspace/diagnostic` sweeps run ([`Cmd::Sweep`]).
+    sweeps: usize,
+    /// Of those, the ones whose disk changes were made while they ran.
+    sweeps_changed_mid_run: usize,
+    /// Pulls cancelled while they ran, and answered `RequestCancelled`
+    /// ([`Cmd::CancelledPull`]).
+    cancelled_pulls: usize,
+    /// Comparisons of what the client shows once the server is idle, after a
+    /// sweep or a cancelled pull, with no ordering barrier sent first.
+    idle_display_checks: usize,
 }
 
 impl Coverage {
@@ -2171,15 +2697,32 @@ fn differ(mismatches: &mut Vec<String>, label: &str, got: &Value, want: &Value) 
 
 /// Compare what the warm session's client is displaying with what a fresh
 /// session's would.
+/// Which of what a client displays a comparison covers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Displayed {
+    /// Everything.
+    All,
+    /// Only what the server confirms in every generation, whatever the
+    /// generation reads: the open `.fsproj` buffers' diagnostics. Everything
+    /// else is confirmed only in a generation that reads it, so a write the
+    /// server has not been told of, made after the last read of it, leaves
+    /// it as it was until something reads it.
+    EveryGeneration,
+}
+
 fn compare_displayed(
     warm: &Client,
     world: &World,
     want: &ByKey,
     want_published: &ByKey,
+    scope: Displayed,
     mismatches: &mut Vec<String>,
 ) {
     for file in world.open.keys() {
         let uri = world.uri(*file);
+        if scope == Displayed::EveryGeneration && !matches!(file, FileId::Proj(_)) {
+            continue;
+        }
         if warm.mode == Mode::Pull {
             let got = warm
                 .pulled
@@ -2209,6 +2752,9 @@ fn compare_displayed(
         // same as an empty publish.
         let uris: BTreeSet<&String> = warm.published.keys().chain(want_published.keys()).collect();
         for uri in uris {
+            if scope == Displayed::EveryGeneration && !uri.ends_with(".fsproj") {
+                continue;
+            }
             let got = warm
                 .published
                 .get(uri)
@@ -2226,6 +2772,39 @@ fn compare_displayed(
             );
         }
     }
+}
+
+/// Compare what the warm session's client shows (and nothing it would have to
+/// ask for) against fresh sessions over the same world: for a client that
+/// has acted on everything the server sent before going idle. With a write
+/// the server has not been told of, only what it confirms in every
+/// generation is compared ([`Displayed::EveryGeneration`]); the next
+/// [`Cmd::Check`] reads the rest.
+fn check_displayed(
+    warm: &mut Client,
+    world: &World,
+    coverage: &RefCell<Coverage>,
+) -> Result<(), TestCaseError> {
+    let queries = queries(world);
+    let (want, want_published) = reference_answers(world, warm.mode, &queries);
+    let mut mismatches = Vec::new();
+    let scope = if world.pending.is_empty() {
+        Displayed::All
+    } else {
+        Displayed::EveryGeneration
+    };
+    compare_displayed(warm, world, &want, &want_published, scope, &mut mismatches);
+    coverage.borrow_mut().idle_display_checks += 1;
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+    let total = mismatches.len();
+    mismatches.truncate(6);
+    Err(TestCaseError::fail(format!(
+        "{total} displayed answer(s) differ from a fresh session's once the server was idle.\n\n{}\n\nWorld:\n{}",
+        mismatches.join("\n\n"),
+        world.describe()
+    )))
 }
 
 /// Compare the warm session, and what its client is displaying, against fresh
@@ -2249,7 +2828,14 @@ fn check(
     let unflushed = !world.pending.is_empty();
 
     if !unflushed {
-        compare_displayed(warm, world, &want, &want_published, &mut mismatches);
+        compare_displayed(
+            warm,
+            world,
+            &want,
+            &want_published,
+            Displayed::All,
+            &mut mismatches,
+        );
     }
 
     // Direct queries, `references` last: the warm session extends whatever
@@ -2264,6 +2850,9 @@ fn check(
             let pending = |class| world.pending.iter().any(|p| p.class == class);
             if pending(InputClass::ProjectFiles) {
                 coverage.unflushed_project_checks += 1;
+            }
+            if pending(InputClass::FsprojBufferInputs) {
+                coverage.unflushed_fsproj_buffer_checks += 1;
             }
             if pending(InputClass::GlobMembership) {
                 coverage.unflushed_membership_checks += 1;
@@ -2289,7 +2878,14 @@ fn check(
     // refreshes; drain them so they do not leak into the next command.
     warm.sync_views(&world.open_uris(), None);
     if unflushed {
-        compare_displayed(warm, world, &want, &want_published, &mut mismatches);
+        compare_displayed(
+            warm,
+            world,
+            &want,
+            &want_published,
+            Displayed::All,
+            &mut mismatches,
+        );
     }
     if mismatches.is_empty() {
         return Ok(());
@@ -2363,12 +2959,18 @@ fn run_case_stopping(
 ) -> Result<(), TestCaseError> {
     let (_tmp, mut world) = new_world(&case.disk);
     let stopped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut warm = Client::start_stopping(
-        &world.root,
-        case.mode,
-        stops.clone(),
-        std::sync::Arc::clone(&stopped),
-    );
+    let hooked = case
+        .cmds
+        .iter()
+        .any(|cmd| matches!(cmd, Cmd::Sweep(..) | Cmd::CancelledPull(..)));
+    let instrument = if !stops.is_empty() {
+        Instrument::StopAt(stops.clone(), std::sync::Arc::clone(&stopped))
+    } else if hooked {
+        Instrument::Hooks(HookHandle::default())
+    } else {
+        Instrument::None
+    };
+    let mut warm = Client::start_with(&world.root, case.mode, instrument);
     warm.settle();
     let result = (|| {
         for cmd in &case.cmds {
@@ -2456,6 +3058,103 @@ fn apply(
         }
         Cmd::Relink(proj, to) => {
             world.relink(*proj, *to);
+        }
+        Cmd::Sweep(at, changes) => {
+            let Some(hooks) = warm.hooks.clone().filter(|_| warm.mode == Mode::Pull) else {
+                return Ok(());
+            };
+            let mut planned = Vec::new();
+            let mut events = Vec::new();
+            for (file, content) in changes {
+                let bytes = content.as_ref().map(|c| c.bytes(*file, &world.root));
+                if let Some(event) = world.planned_event(*file, bytes.is_some()) {
+                    events.push(event);
+                }
+                planned.push((world.path(*file), bytes));
+            }
+            {
+                let mut plan = hooks.plan.lock().unwrap();
+                plan.sweep = Some((at.map_or(AT_REPORT, u32::from), planned.clone()));
+                plan.sweep_steps = 0;
+                plan.sweep_applied = false;
+            }
+            let report = warm.request("workspace/diagnostic", json!({ "previousResultIds": [] }));
+            let applied = {
+                let mut plan = hooks.plan.lock().unwrap();
+                plan.sweep = None;
+                plan.sweep_applied
+            };
+            if !applied {
+                apply_disk_changes(&planned);
+            }
+            world.pending.extend(events);
+            let open = world.open_uris();
+            if let Some(items) = report["result"]["items"].as_array() {
+                for item in items {
+                    let Some(uri) = item["uri"].as_str() else {
+                        continue;
+                    };
+                    // A sweep diagnoses a source its project links under that
+                    // project's context, which a document pull of it need not
+                    // share, so only a project file's item is taken as what
+                    // the client shows: the subject here is the delivery of
+                    // a `.fsproj` buffer's diagnostics.
+                    if open.contains(uri) && uri.ends_with(".fsproj") {
+                        warm.take_report(uri, item);
+                    }
+                }
+            }
+            warm.sync_views_idle(&open);
+            {
+                let mut coverage = coverage.borrow_mut();
+                coverage.sweeps += 1;
+                coverage.sweeps_changed_mid_run += usize::from(applied);
+            }
+            // Changes made after the report gave the server no step in which
+            // to notice them; the next comparison sees to them.
+            if applied && world.comparable() {
+                check_displayed(warm, world, coverage)?;
+            }
+        }
+        Cmd::SweepProjects => {
+            warm.sweep_projects = true;
+        }
+        Cmd::CancelledPull(file, at) => {
+            let Some(hooks) = warm.hooks.clone().filter(|_| warm.mode == Mode::Pull) else {
+                return Ok(());
+            };
+            if !world.open.contains_key(file) {
+                return Ok(());
+            }
+            let uri = world.uri(*file);
+            {
+                let mut plan = hooks.plan.lock().unwrap();
+                plan.cancel = Some((
+                    RequestId::from(format!("t{}", warm.next_id)),
+                    u32::from(*at),
+                ));
+                plan.cancelled = false;
+            }
+            let previous = warm.pulled.get(&uri).and_then(|(id, _)| id.clone());
+            let resp = warm.request(
+                "textDocument/diagnostic",
+                json!({ "textDocument": { "uri": uri }, "previousResultId": previous }),
+            );
+            let cancelled = {
+                let mut plan = hooks.plan.lock().unwrap();
+                plan.cancel = None;
+                plan.cancelled
+            };
+            if resp["error"].is_null() {
+                warm.take_report(&uri, &resp["result"]);
+            }
+            let open = world.open_uris();
+            warm.sync_views_idle(&open);
+            coverage.borrow_mut().cancelled_pulls +=
+                usize::from(cancelled && !resp["error"].is_null());
+            if world.comparable() {
+                check_displayed(warm, world, coverage)?;
+            }
         }
         Cmd::Touch(proj, touch) => {
             let file = FileId::Proj(*proj);
@@ -2812,6 +3511,99 @@ fn unwatched_project_writes_agree_with_a_fresh_session() {
     );
 }
 
+/// For all generated scripts that open `.fsproj` buffers and write project
+/// files and sources on disk, never delivering a watch event, every answer
+/// agrees with fresh sessions at every comparison, and so does what the
+/// client displays: an open buffer's diagnostics evaluate the buffer, and
+/// what they read is [`WITNESSED`] too, so the server notices the writes
+/// itself and owes the client the refreshed diagnostics.
+#[test]
+fn unwatched_fsproj_buffer_inputs_agree_with_a_fresh_session() {
+    let cases = env_u64("BORZOI_LSP_STATE_MACHINE_CASES").map_or(DEFAULT_CASES, |n| n as u32);
+    let seed = env_u64("BORZOI_LSP_STATE_MACHINE_SEED").unwrap_or(DEFAULT_SEED);
+    let coverage = RefCell::new(Coverage::default());
+    let strategy = case_strategy_with(
+        unwatched_fsproj_buffer_cmd_strategy().boxed(),
+        fsproj_buffer_strategy().boxed(),
+    );
+    let result = runner(cases, seed).run(&strategy, |case| run_case(&case, &coverage));
+    let coverage = coverage.into_inner();
+    eprintln!("seed {seed}: {coverage:#?}");
+    match result {
+        Ok(()) => {}
+        Err(TestError::Fail(_, case)) => {
+            let (case, message) = minimise(case);
+            panic!("seed {seed}: {message}\n\nminimal script: {case:?}");
+        }
+        Err(err) => panic!("seed {seed}: {err}"),
+    }
+    // Non-vacuity: comparisons were made with an open buffer's input
+    // written and unannounced, and they compared real diagnostics.
+    assert!(
+        coverage.unflushed_fsproj_buffer_checks > 0 && coverage.nonempty_diagnostics > 0,
+        "the generated cases made no comparison with a buffer's input written: {coverage:#?}"
+    );
+}
+
+/// For all generated scripts of a pull client that run `workspace/diagnostic`
+/// sweeps with files written between their steps, and cancel pulls while
+/// they run, never delivering a watch event, what the client shows once the
+/// server is idle (having acted on every refresh the server sent, and sent
+/// nothing else) agrees with fresh sessions after every sweep and every
+/// cancelled pull; and every comparison the other scripts make holds too. A
+/// report the client was sent is what it shows, a sweep's items for open
+/// documents included, and one never sent (a cancelled pull's) is not, so a
+/// server that takes undelivered diagnostics as shown, or that notices a
+/// moved input and goes idle without sending the refresh it owes, fails.
+#[test]
+fn pull_deliveries_agree_with_a_fresh_session_once_idle() {
+    let cases = env_u64("BORZOI_LSP_STATE_MACHINE_CASES").map_or(DEFAULT_CASES, |n| n as u32);
+    let seed = env_u64("BORZOI_LSP_STATE_MACHINE_SEED").unwrap_or(DEFAULT_SEED);
+    let coverage = RefCell::new(Coverage::default());
+    let strategy = (
+        case_strategy_in(
+            Just(Mode::Pull).boxed(),
+            delivery_cmd_strategy().boxed(),
+            prop_oneof![fsproj_buffer_strategy(), source_file_strategy()].boxed(),
+        ),
+        prop::collection::vec(
+            (
+                buffer_delivery_scenario(),
+                prop::collection::vec(delivery_cmd_strategy(), 0..3),
+            ),
+            1..4,
+        ),
+    )
+        .prop_map(|(mut case, scenarios)| {
+            for (scenario, between) in scenarios {
+                case.cmds.extend(scenario);
+                case.cmds.extend(between);
+            }
+            case
+        });
+    let result = runner(cases, seed).run(&strategy, |case| run_case(&case, &coverage));
+    let coverage = coverage.into_inner();
+    eprintln!("seed {seed}: {coverage:#?}");
+    match result {
+        Ok(()) => {}
+        Err(TestError::Fail(_, case)) => {
+            let (case, message) = minimise(case);
+            panic!("seed {seed}: {message}\n\nminimal script: {case:?}");
+        }
+        Err(err) => panic!("seed {seed}: {err}"),
+    }
+    // Non-vacuity: sweeps ran with files changing mid-run, pulls were
+    // cancelled while they ran, and what the client showed was compared
+    // once the server was idle.
+    assert!(
+        coverage.sweeps_changed_mid_run > 0
+            && coverage.cancelled_pulls > 0
+            && coverage.idle_display_checks > 0
+            && coverage.nonempty_diagnostics > 0,
+        "the generated cases made no idle comparison after a delivery: {coverage:#?}"
+    );
+}
+
 /// For all generated scripts that create and delete projects beside the
 /// sources (and write project files and sources) and never deliver a watch
 /// event, every answer agrees with fresh sessions at every comparison, and so
@@ -2898,8 +3690,8 @@ fn unwatched_assembly_writes_agree_with_a_fresh_session() {
 /// (`docs/incremental-lsp-plan.md`, Stage 7), so the server needs no watch
 /// event to be correct. `CSharpSources` is outside the claim by name: the
 /// world has no C# project. So is [`InputClass::InstalledVersionContents`],
-/// which no script here writes, and [`InputClass::FsprojBufferInputs`]: no
-/// script opens a project file.
+/// which no script here writes; and no script opens a project file, which
+/// [`unwatched_fsproj_buffer_inputs_agree_with_a_fresh_session`] does.
 #[test]
 fn unflushed_runs_agree_with_a_fresh_session() {
     let cases = env_u64("BORZOI_LSP_STATE_MACHINE_CASES").map_or(DEFAULT_CASES, |n| n as u32);
@@ -3619,6 +4411,98 @@ fn pinned_scripts() -> Vec<(&'static str, Case)> {
                             sdk: false,
                         }),
                     ),
+                    Cmd::Check,
+                ],
+            },
+        ),
+        (
+            // A sweep's report carries an open `.fsproj` buffer's
+            // diagnostics, computed several steps before it is sent; the
+            // import they read is deleted after the step that computed them
+            // and before the report goes out. Confirming them once the report
+            // is sent finds the move, and the refresh it owes goes out before
+            // the loop is idle, not with whatever step comes next.
+            "a sweep report's buffer diagnostics are confirmed before the step's refresh",
+            Case {
+                mode: Mode::Pull,
+                disk: vec![
+                    (FileId::Proj(Proj::P), project(vec![], vec![Src::A])),
+                    (FileId::Src(Src::A), source(vec![x_is_zero()])),
+                    (FileId::Props, Content::Props(PropsSpec { defines: vec![] })),
+                ],
+                cmds: vec![
+                    Cmd::Open(FileId::Proj(Proj::P)),
+                    Cmd::Edit(
+                        FileId::Proj(Proj::P),
+                        Content::Project(ProjectSpec {
+                            import_props: true,
+                            defines: vec![],
+                            compile: vec![Entry::File(Src::A)],
+                            broken: false,
+                            sdk: false,
+                        }),
+                    ),
+                    Cmd::Sweep(None, vec![(FileId::Props, None)]),
+                ],
+            },
+        ),
+        (
+            // A pull of an open `.fsproj` buffer computes fresh diagnostics
+            // after an import they read was deleted behind the server's
+            // back, and is cancelled before it answers: the client still
+            // shows the diagnostics from before the deletion, which the
+            // server must go on confirming, and so owes them a refresh.
+            "a cancelled pull leaves the buffer's diagnostics owed",
+            Case {
+                mode: Mode::Pull,
+                disk: vec![
+                    (FileId::Proj(Proj::P), project(vec![], vec![Src::A])),
+                    (FileId::Src(Src::A), source(vec![x_is_zero()])),
+                    (FileId::Props, Content::Props(PropsSpec { defines: vec![] })),
+                ],
+                cmds: vec![
+                    Cmd::Open(FileId::Proj(Proj::P)),
+                    Cmd::Edit(
+                        FileId::Proj(Proj::P),
+                        Content::Project(ProjectSpec {
+                            import_props: true,
+                            defines: vec![],
+                            compile: vec![Entry::File(Src::A)],
+                            broken: false,
+                            sdk: false,
+                        }),
+                    ),
+                    Cmd::Delete(FileId::Props),
+                    Cmd::CancelledPull(FileId::Proj(Proj::P), 0),
+                ],
+            },
+        ),
+        (
+            // A client that shows a project's diagnostics from its sweeps:
+            // what a sweep's report read is all the server has to confirm
+            // them by, so a deletion after the report owes them a refresh.
+            "a sweep report's buffer diagnostics are confirmed once sent",
+            Case {
+                mode: Mode::Pull,
+                disk: vec![
+                    (FileId::Proj(Proj::P), project(vec![], vec![Src::A])),
+                    (FileId::Src(Src::A), source(vec![x_is_zero()])),
+                    (FileId::Props, Content::Props(PropsSpec { defines: vec![] })),
+                ],
+                cmds: vec![
+                    Cmd::SweepProjects,
+                    Cmd::Open(FileId::Proj(Proj::P)),
+                    Cmd::Edit(
+                        FileId::Proj(Proj::P),
+                        Content::Project(ProjectSpec {
+                            import_props: true,
+                            defines: vec![],
+                            compile: vec![Entry::File(Src::A)],
+                            broken: false,
+                            sdk: false,
+                        }),
+                    ),
+                    Cmd::Delete(FileId::Props),
                     Cmd::Check,
                 ],
             },

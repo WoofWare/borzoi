@@ -44,7 +44,7 @@
 //! body's own `<DefineConstants>` are still collected.
 
 use crate::inbox::{Superseded, Watch, never_superseded};
-use crate::observed::{EvaluationCounts, Unobserved};
+use crate::observed::EvaluationCounts;
 use crate::read_checks::{Check, ReadChecks, a_fact};
 use crate::vfs::Nanos;
 use borzoi_msbuild::observed::{
@@ -145,6 +145,15 @@ pub struct Workspace {
     env_counts: Cell<ReadCounts>,
     /// MSBuild evaluations run in the open generation.
     evaluated: Cell<u64>,
+    /// What the diagnostics the client was last sent for each `.fsproj`
+    /// buffer read, by the buffer's URI (two URIs naming one file are two
+    /// buffers): confirmed in every generation for each buffer still open
+    /// ([`Self::moved_buffer_diagnostics`]), since the client shows them
+    /// until it is told otherwise. They evaluate the buffer, not the cached
+    /// evaluation, so nothing else confirms what they read. An entry is
+    /// written only as the message carrying the diagnostics is sent
+    /// ([`Self::show_buffer_diagnostics`]).
+    buffers: HashMap<lsp_types::Uri, BufferChecks>,
     /// The imported files' parsed documents, which every evaluation reuses
     /// when it reads a file's bytes unchanged
     /// ([`borzoi_msbuild::parse_fsproj_with_imports_reusing`]). Never stale:
@@ -640,7 +649,70 @@ struct ImmutableRoots {
     nuget: Vec<PathBuf>,
 }
 
+/// What the diagnostics computed for one `.fsproj` buffer read
+/// ([`Workspace::buffer_reads`]), carried with them to the message that
+/// sends them to the client: the checks confirmed in every generation once
+/// the client shows them, the installed contents trusted until a watch
+/// event, and the project generation they were computed under.
+#[derive(Debug)]
+pub struct BufferReads {
+    checks: Vec<Check>,
+    exempt: Vec<Check>,
+    generation: ProjectsGeneration,
+}
+
+/// What the diagnostics in one message to the client read, for each
+/// `.fsproj` buffer they cover. Carried from the computation to the place the
+/// message is sent, where the workspace is told the client shows them
+/// ([`Workspace::show_buffer_diagnostics`]): diagnostics computed and never
+/// sent, as a stopped or cancelled request's or an abandoned sweep's, never
+/// reach it.
+#[derive(Debug, Default)]
+#[must_use = "the workspace must be shown what the diagnostics sent read"]
+pub struct ShownBuffers(Vec<(lsp_types::Uri, BufferReads)>);
+
+impl ShownBuffers {
+    /// The buffer at `uri`'s diagnostics, which read `reads`.
+    pub fn one(uri: lsp_types::Uri, reads: BufferReads) -> Self {
+        ShownBuffers(vec![(uri, reads)])
+    }
+
+    /// `self`, then `other`: of two entries for one buffer, `other`'s is the
+    /// one the client shows.
+    pub fn and(mut self, other: ShownBuffers) -> Self {
+        self.0.extend(other.0);
+        self
+    }
+}
+
+/// What the diagnostics the client shows for a `.fsproj` buffer read
+/// ([`Workspace::show_buffer_diagnostics`]), and whether a watch event has
+/// arrived since they were last confirmed.
+struct BufferChecks {
+    checks: Vec<Check>,
+    exempt: Vec<Check>,
+    event_since: bool,
+}
+
 impl ImmutableRoots {
+    /// The installs an evaluation through `disc` trusts: its dotnet roots,
+    /// the user-local one, and the NuGet folder.
+    fn of(disc: &SdkDiscovery) -> Self {
+        Self {
+            dotnet: disc
+                .roots()
+                .iter()
+                .cloned()
+                .chain(disc.user_dotnet_root().map(Path::to_path_buf))
+                .collect(),
+            nuget: disc
+                .nuget_packages()
+                .map(Path::to_path_buf)
+                .into_iter()
+                .collect(),
+        }
+    }
+
     /// The version directory `path` lies in or names, and how many
     /// components of `path` lie below it. The version directories are
     /// `<dotnet>/sdk/<version>`, `<dotnet>/packs/<pack>/<version>` and
@@ -974,6 +1046,7 @@ impl Workspace {
             checker: ReadChecks::default(),
             env_counts: Cell::new(ReadCounts::default()),
             evaluated: Cell::new(0),
+            buffers: HashMap::new(),
             documents: RefCell::default(),
             retired: HashMap::new(),
             owners: HashMap::new(),
@@ -1052,7 +1125,99 @@ impl Workspace {
         for cached in self.projects.values_mut() {
             cached.event_since = true;
         }
+        for buffer in self.buffers.values_mut() {
+            buffer.event_since = true;
+        }
         self.projects_generation.0 += 1;
+    }
+
+    /// What diagnostics just computed for a `.fsproj` buffer read (`reads`),
+    /// evaluated through `discovery`, to carry with them to the client: every
+    /// read but the installed contents the discovery's roots hold, by the
+    /// rule a cached evaluation follows (`Evaluation::checks_and_exempt`), is
+    /// confirmed in each generation once the client shows them
+    /// ([`Self::show_buffer_diagnostics`], [`Self::moved_buffer_diagnostics`]).
+    pub fn buffer_reads(&self, reads: &ReadSet, discovery: Option<&SdkDiscovery>) -> BufferReads {
+        let immutable = discovery.map_or_else(ImmutableRoots::default, ImmutableRoots::of);
+        let checker = &self.checker;
+        let started = checker.now();
+        let partition = partition_reads(reads.reads(), &immutable, |version| {
+            nuget_committed_before(checker, version, started)
+        });
+        let (checks, exempt) = partition.checks(checker);
+        BufferReads {
+            checks,
+            exempt,
+            generation: self.projects_generation,
+        }
+    }
+
+    /// A message carrying the diagnostics `shown` covers has been sent to the
+    /// client: what they read is now what the client's buffers' diagnostics
+    /// rest on, confirmed in every generation while each buffer is open
+    /// ([`Self::moved_buffer_diagnostics`]). A buffer's diagnostics computed
+    /// under an earlier project generation, as a sweep's step computes its
+    /// report's, are confirmed with the installed contents they trust at the
+    /// next confirmation, as after a watch event: one may have arrived since
+    /// they were computed.
+    pub fn show_buffer_diagnostics(&mut self, shown: ShownBuffers) {
+        for (uri, reads) in shown.0 {
+            let BufferReads {
+                checks,
+                exempt,
+                generation,
+            } = reads;
+            self.buffers.insert(
+                uri,
+                BufferChecks {
+                    checks,
+                    exempt,
+                    event_since: generation != self.projects_generation,
+                },
+            );
+        }
+    }
+
+    /// Whether the client is shown diagnostics for some `.fsproj` buffer
+    /// whose reads are still to be confirmed
+    /// ([`Self::moved_buffer_diagnostics`]): without one, there is nothing
+    /// to confirm.
+    pub fn holds_buffer_diagnostics(&self) -> bool {
+        !self.buffers.is_empty()
+    }
+
+    /// The `.fsproj` buffers among `open` whose diagnostics, as last sent to
+    /// the client, read something that has since moved, as of the open
+    /// generation: what the client shows for them is stale, and they are
+    /// owed fresh diagnostics. Each one returned is forgotten until fresh
+    /// diagnostics reach the client, and so is every buffer not in `open`.
+    /// A watch event since a buffer was last confirmed makes its
+    /// confirmation cover the installed contents it trusts too, as for a
+    /// cached evaluation. Outside a generation nothing is confirmed.
+    pub fn moved_buffer_diagnostics(
+        &mut self,
+        open: &HashSet<lsp_types::Uri>,
+    ) -> Vec<lsp_types::Uri> {
+        self.buffers.retain(|uri, _| open.contains(uri));
+        if self.checker.generation().is_none() {
+            return Vec::new();
+        }
+        let checker = &self.checker;
+        let moved: Vec<lsp_types::Uri> = self
+            .buffers
+            .iter_mut()
+            .filter_map(|(uri, buffer)| {
+                let holds = buffer.checks.iter().all(|check| checker.holds(check))
+                    && (!buffer.event_since
+                        || buffer.exempt.iter().all(|check| checker.holds(check)));
+                buffer.event_since = false;
+                (!holds).then(|| uri.clone())
+            })
+            .collect();
+        for uri in &moved {
+            self.buffers.remove(uri);
+        }
+        moved
     }
 
     /// Watch events named `paths`: ask what the evaluations, the envs and the
@@ -2071,12 +2236,15 @@ impl Workspace {
     ///
     /// Re-evaluating the closure on each call is acceptable: cycle diagnostics
     /// fire only on `.fsproj` open/change/pull, not per source keystroke.
-    pub fn project_graph(&self, entry: &Path) -> ProjectGraph {
+    ///
+    /// Every query the walk makes is recorded in `observer`, which the
+    /// `.fsproj` buffer's diagnostics confirm while the buffer is open.
+    pub fn project_graph(&self, entry: &Path, observer: &Observer) -> ProjectGraph {
         self.project_graph_impl(
             entry,
             &BTreeMap::new(),
             GraphWalkPurpose::DeclaredStructure,
-            &Unobserved::FsprojDiagnostics.msbuild_observer(),
+            observer,
         )
     }
 
@@ -2813,19 +2981,7 @@ fn evaluate_project(
         .ok();
     let mut immutable = disc
         .as_ref()
-        .map_or_else(ImmutableRoots::default, |disc| ImmutableRoots {
-            dotnet: disc
-                .roots()
-                .iter()
-                .cloned()
-                .chain(disc.user_dotnet_root().map(Path::to_path_buf))
-                .collect(),
-            nuget: disc
-                .nuget_packages()
-                .map(Path::to_path_buf)
-                .into_iter()
-                .collect(),
-        });
+        .map_or_else(ImmutableRoots::default, ImmutableRoots::of);
     let reads = preparation.finish().0;
     let extras = build_properties(extra_build_properties);
     let Some(parsed) = parse_with_optional_sdk(
@@ -3829,7 +3985,7 @@ mod tests {
             Workspace::with_env_and_extra_build_properties(SdkDiscoveryEnv::default(), extra);
 
         assert_eq!(ws.parsed_tfm_for_project(&proj), None);
-        let graph = ws.project_graph(&proj);
+        let graph = ws.project_graph(&proj, &Observer::new());
         let node = graph
             .nodes
             .iter()
@@ -5077,7 +5233,7 @@ mod tests {
         write_file(&c, &fsproj_with_refs(&[]));
 
         let ws = Workspace::default();
-        let graph = ws.project_graph(&a);
+        let graph = ws.project_graph(&a, &Observer::new());
 
         assert!(graph.problems.is_empty(), "{:?}", graph.problems);
         assert_eq!(
@@ -5108,7 +5264,7 @@ mod tests {
         let extra = HashMap::from([("DISABLE_ARCADE".to_string(), "true".to_string())]);
 
         let ws = Workspace::with_env_and_extra_build_properties(SdkDiscoveryEnv::default(), extra);
-        let graph = ws.project_graph(&a);
+        let graph = ws.project_graph(&a, &Observer::new());
 
         assert!(graph.problems.is_empty(), "{:?}", graph.problems);
         assert_eq!(
@@ -5148,7 +5304,7 @@ mod tests {
         write_file(&d, &fsproj_with_refs(&[]));
 
         let ws = Workspace::default();
-        let unseeded = ws.project_graph(&a);
+        let unseeded = ws.project_graph(&a, &Observer::new());
         assert_eq!(
             node_paths(&unseeded),
             vec![
@@ -5227,7 +5383,7 @@ mod tests {
             ],
         );
 
-        let diagnostics_walk = ws.project_graph(&a);
+        let diagnostics_walk = ws.project_graph(&a, &Observer::new());
         assert_eq!(
             node_paths(&diagnostics_walk),
             vec![
@@ -5271,7 +5427,7 @@ mod tests {
             vec![lexically_normalize(&a)],
             "the suppressed edge must not be walked for the compile closure"
         );
-        let declared = ws.project_graph(&a);
+        let declared = ws.project_graph(&a, &Observer::new());
         assert_eq!(
             node_paths(&declared),
             vec![lexically_normalize(&a), lexically_normalize(&b)],
@@ -5841,7 +5997,7 @@ mod tests {
              ExcludeAssets=compile); B and C's subtree are not"
         );
 
-        let declared = ws.project_graph(&a);
+        let declared = ws.project_graph(&a, &Observer::new());
         assert_eq!(
             node_paths(&declared),
             vec![
@@ -6197,7 +6353,7 @@ mod tests {
         );
         assert_eq!(node_paths(&compile_closure), vec![lexically_normalize(&a)]);
 
-        let declared = ws.project_graph(&a);
+        let declared = ws.project_graph(&a, &Observer::new());
         assert_eq!(
             node_paths(&declared),
             vec![lexically_normalize(&a), lexically_normalize(&b)],
@@ -6403,7 +6559,7 @@ mod tests {
         write_file(&c, "<Project></Project>");
 
         let ws = Workspace::default();
-        let graph = ws.project_graph(&a);
+        let graph = ws.project_graph(&a, &Observer::new());
 
         assert!(graph.problems.is_empty(), "{:?}", graph.problems);
         let csharp: Vec<_> = graph
@@ -6426,7 +6582,7 @@ mod tests {
         // C.csproj intentionally not created.
 
         let ws = Workspace::default();
-        let graph = ws.project_graph(&a);
+        let graph = ws.project_graph(&a, &Observer::new());
 
         let gone = lexically_normalize(&tmp.path().join("C/C.csproj"));
         let entry = lexically_normalize(&a);
@@ -6451,7 +6607,7 @@ mod tests {
         // Gone.fsproj intentionally not created.
 
         let ws = Workspace::default();
-        let graph = ws.project_graph(&a);
+        let graph = ws.project_graph(&a, &Observer::new());
 
         let gone = lexically_normalize(&tmp.path().join("Gone/Gone.fsproj"));
         let entry = lexically_normalize(&a);
@@ -6478,7 +6634,7 @@ mod tests {
         write_file(&b, &fsproj_with_refs(&["../A/A.fsproj"]));
 
         let ws = Workspace::default();
-        let graph = ws.project_graph(&a);
+        let graph = ws.project_graph(&a, &Observer::new());
 
         let cycles = graph
             .problems
@@ -6503,7 +6659,7 @@ mod tests {
         write_file(&d, &fsproj_with_refs(&[]));
 
         let ws = Workspace::default();
-        let graph = ws.project_graph(&a);
+        let graph = ws.project_graph(&a, &Observer::new());
 
         assert!(graph.problems.is_empty(), "{:?}", graph.problems);
         let d_norm = lexically_normalize(&d);
@@ -6529,7 +6685,7 @@ mod tests {
 
         let mut ws = Workspace::default();
         // Walking the graph visits and evaluates B (A's reference).
-        let graph = ws.project_graph(&a);
+        let graph = ws.project_graph(&a, &Observer::new());
         assert_eq!(graph.nodes.len(), 2, "{:?}", graph.nodes);
 
         // B changes on disk (e.g. the user saves a new define), no watcher event.
@@ -8575,14 +8731,14 @@ mod tests {
             let mut ws = Workspace::default();
             ws.begin_generation(Nanos(i128::MAX / 2));
             assert!(ws.project(&a).is_some());
-            assert_eq!(ws.project_graph(&a).nodes.len(), 1);
+            assert_eq!(ws.project_graph(&a, &Observer::new()).nodes.len(), 1);
             ws.end_generation();
             write_file(
                 &a,
                 r#"<Project><ItemGroup><ProjectReference Include="../B/B.fsproj" /></ItemGroup></Project>"#,
             );
             ws.begin_generation(Nanos(i128::MAX / 2 + 1));
-            assert_eq!(ws.project_graph(&a).nodes.len(), 2);
+            assert_eq!(ws.project_graph(&a, &Observer::new()).nodes.len(), 2);
             ws.end_generation();
         }
 

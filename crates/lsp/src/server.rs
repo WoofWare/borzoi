@@ -48,13 +48,12 @@ use crate::handlers::definition::{
 };
 use crate::handlers::workspace_diagnostic::{Step, Sweep};
 use crate::inbox::{Inbox, Superseded, Watch};
-use crate::observed::Unobserved;
 use crate::parses::ParseMemo;
 use crate::project_deferral;
 use crate::publish::PublishState;
 use crate::semantic::{ProjectId, SemanticState};
 use crate::vfs::{Clock, Vfs};
-use crate::workspace::{ProjectsGeneration, Workspace};
+use crate::workspace::{ProjectsGeneration, ShownBuffers, Workspace};
 use crate::{diagnostics, fsproj_diagnostics};
 
 /// Worker threads servicing deferred SourceLink fetches, and the depth of the
@@ -734,6 +733,11 @@ pub fn run_inbox(
                     }
                 }
             } else {
+                tracing::debug!(
+                    name: crate::inbox::IDLE_EVENT,
+                    received = dispatcher.received,
+                    "the loop waits for a message"
+                );
                 match dispatcher.inbox.recv() {
                     Ok(msg) => msg,
                     // The peer hung up.
@@ -826,6 +830,9 @@ pub struct Dispatcher {
     /// [`crate::batch::plan`] of [`Self::epoch`], made again whenever a
     /// message joins it or a request stops.
     plan: Vec<BatchStep>,
+    /// How many messages have been read into an epoch since the dispatcher
+    /// started ([`crate::inbox::IDLE_EVENT`]).
+    received: u64,
 }
 
 impl Dispatcher {
@@ -863,6 +870,7 @@ impl Dispatcher {
             restarted: Vec::new(),
             stopped: Vec::new(),
             plan: Vec::new(),
+            received: 0,
         }
     }
 
@@ -878,6 +886,7 @@ impl Dispatcher {
             self.shapes.push(message.shape());
             self.epoch.push(Some(message));
             self.restarted.push(None);
+            self.received += 1;
         }
         if self.epoch.len() > before {
             self.replan();
@@ -965,7 +974,8 @@ impl Dispatcher {
     }
 
     /// Do one step of the sweep in flight: a unit of work of its own, so a
-    /// generation of its own.
+    /// generation of its own, ended as every step that runs is (by
+    /// `finish_step`).
     pub fn step_sweep(
         &mut self,
         connection: &Connection,
@@ -975,7 +985,11 @@ impl Dispatcher {
         };
         self.state.begin_generation();
         let stepped = advance_sweep(&mut self.state, connection, in_flight);
-        respond_to_moved_evaluations(&mut self.state, connection);
+        let sweep = match &stepped {
+            Ok(Some(_)) => SweepStatus::InFlight,
+            Ok(None) | Err(_) => SweepStatus::Idle,
+        };
+        finish_step(&mut self.state, connection, sweep);
         self.state.end_generation();
         self.sweep = stepped?;
         Ok(())
@@ -984,7 +998,9 @@ impl Dispatcher {
     /// Do `step` to `message`, the epoch message it names. Each step that
     /// reads or changes the state does so in a generation of its own: what
     /// its handling reads from disk is counted against it
-    /// ([`crate::observed`]). A refusal reads nothing.
+    /// ([`crate::observed`]), and, before `shutdown`, it ends as every such
+    /// step does ([`finish_step`]). A refusal reads and changes nothing, so
+    /// owes the client nothing more than its error.
     fn execute(
         &mut self,
         connection: &Connection,
@@ -1026,49 +1042,30 @@ impl Dispatcher {
                 match (step, message) {
                     (BatchStep::Sync { diagnose, .. }, Incoming::Sync(sync)) => {
                         apply_text_sync(state, connection, sync, diagnose);
-                        respond_to_moved_evaluations(state, connection);
-                        // A text sync can invalidate pull diagnostics or stale
-                        // an open buffer's semantic tokens without any fold,
-                        // so refresh work is drained here too, not only after
-                        // requests.
-                        maybe_send_refresh(state, connection, SweepStatus::of(&self.sweep));
-                        refresh_project_deferrals(state, connection);
                     }
                     (BatchStep::Notify { .. }, Incoming::Cancel(id)) => {
                         // A request read in this epoch is refused by the plan;
                         // any other request but the sweep has been answered
                         // already, so the sweep is all there is to cancel.
+                        // A request stopped for this cancellation left what a
+                        // moved evaluation owes the client to the step that
+                        // applies it, which is this one, and a just-cancelled
+                        // sweep leaves the diagnostic refresh it was holding
+                        // to it ([`finish_step`]).
                         if let Some(in_flight) = self.sweep.take() {
                             self.sweep = cancel_sweep_if_named(connection, in_flight, id.as_ref())?;
                         }
-                        // A request stopped for this cancellation left what a
-                        // moved evaluation owes the client to the step that
-                        // applies it, which is this one.
-                        respond_to_moved_evaluations(state, connection);
-                        // Including a diagnostic refresh a just-cancelled
-                        // sweep was holding.
-                        maybe_send_refresh(state, connection, SweepStatus::of(&self.sweep));
-                        refresh_project_deferrals(state, connection);
                     }
                     (BatchStep::Notify { .. }, Incoming::Notification(notification)) => {
                         handle_other_notification(state, connection, notification);
-                        respond_to_moved_evaluations(state, connection);
-                        maybe_send_refresh(state, connection, SweepStatus::of(&self.sweep));
-                        refresh_project_deferrals(state, connection);
                     }
                     (BatchStep::Reply { .. }, Incoming::Response(response)) => {
-                        // A refresh reply clears the in-flight slot and lets
-                        // the next owed refresh (if any) go out. Any other
-                        // response (the one-shot `registerCapability`, or a
-                        // late/stray one) carries nothing we act on, and must
-                        // not abort a shutdown.
-                        handle_refresh_reply(
-                            state,
-                            connection,
-                            &response.id,
-                            self.shutting_down,
-                            SweepStatus::of(&self.sweep),
-                        );
+                        // A refresh reply clears the in-flight slot, so the
+                        // next owed refresh (if any) goes out as the step
+                        // ends. Any other response (the one-shot
+                        // `registerCapability`, or a late/stray one) carries
+                        // nothing we act on, and must not abort a shutdown.
+                        note_refresh_reply(state, &response.id);
                     }
                     (BatchStep::Shutdown { .. }, Incoming::Shutdown(id)) => {
                         self.shutting_down = true;
@@ -1119,7 +1116,7 @@ impl Dispatcher {
                             handle_request(state, request, watch).and_then(
                                 |dispatch| match dispatch {
                                     Dispatch::Sweep { .. } => Ok(dispatch),
-                                    Dispatch::Reply(_) | Dispatch::Defer { .. } => {
+                                    Dispatch::Reply(..) | Dispatch::Defer { .. } => {
                                         watch.check()?;
                                         Ok(dispatch)
                                     }
@@ -1160,12 +1157,13 @@ impl Dispatcher {
                                 return Ok(Progress::Stopped);
                             }
                         };
-                        respond_to_moved_evaluations(state, connection);
                         // Before the reply, not after: a fold refusal is *why*
                         // this reply is degraded, and an explanation that
                         // arrives after the disappointing answer reads as
                         // unrelated. The fold itself has no way to reach the
-                        // client, so the shell reports what it observed.
+                        // client, so the shell reports what it observed, from
+                        // the evaluations as this run left them.
+                        respond_to_moved_evaluations(state, connection);
                         refresh_project_deferrals(state, connection);
                         // Each member is taken from the epoch here, once, so
                         // it is answered here and never again.
@@ -1181,18 +1179,22 @@ impl Dispatcher {
                         match dispatch {
                             // Synchronous request: reply immediately, to it
                             // and to every request it answers for.
-                            Dispatch::Reply(response) => {
+                            Dispatch::Reply(response, shown) => {
                                 // One copy is made per member as the one
                                 // before it is sent, so the writer's
                                 // backpressure bounds what is held at two
                                 // answers, however many share it.
-                                let mut next = response;
-                                for id in member_ids {
-                                    let following = Response { id, ..next.clone() };
-                                    enqueue_response(connection, &method, next)?;
-                                    next = following;
-                                }
-                                enqueue_response(connection, &method, next)?;
+                                let mut ids = member_ids.into_iter();
+                                let mut next = Some(response);
+                                let copies = std::iter::from_fn(move || {
+                                    let current = next.take()?;
+                                    next = ids.next().map(|id| Response {
+                                        id,
+                                        ..current.clone()
+                                    });
+                                    Some(Message::Response(current))
+                                });
+                                deliver(connection, &mut state.workspace, &method, copies, shown)?;
                             }
                             Dispatch::Defer { .. } | Dispatch::Sweep { .. }
                                 if !member_ids.is_empty() =>
@@ -1218,7 +1220,6 @@ impl Dispatcher {
                                 }
                             }
                         }
-                        maybe_send_refresh(state, connection, SweepStatus::of(&self.sweep));
                     }
                     (BatchStep::Share { .. }, _) => {
                         unreachable!("a share is answered by its leader's run, never on its own")
@@ -1229,10 +1230,54 @@ impl Dispatcher {
                         )
                     }
                 }
+                if !self.shutting_down {
+                    finish_step(state, connection, SweepStatus::of(&self.sweep));
+                }
                 state.end_generation();
             }
         }
         Ok(Progress::Handled)
+    }
+}
+
+/// The end of every step the dispatch loop runs in a generation, after
+/// everything the step sent: what the client shows is confirmed against the
+/// disk as the generation sees it ([`respond_to_moved_evaluations`]), which
+/// owes the client fresh diagnostics and refreshes for whatever moved, among
+/// them diagnostics the step itself just sent; the deferral report is brought
+/// up to date ([`refresh_project_deferrals`]); and then the refresh owed goes
+/// out ([`maybe_send_refresh`]), `sweep` saying whether a
+/// `workspace/diagnostic` sweep is still in flight. Confirming after the
+/// last send and flushing after confirming is what leaves no debt the step
+/// incurred unsent once the loop is idle.
+fn finish_step(state: &mut State, conn: &Connection, sweep: SweepStatus) {
+    respond_to_moved_evaluations(state, conn);
+    refresh_project_deferrals(state, conn);
+    maybe_send_refresh(state, conn, sweep);
+}
+
+/// Tell the client which open `.fsproj` buffers' diagnostics read something
+/// that has since moved ([`Workspace::moved_buffer_diagnostics`]): each is
+/// republished to a push client, and a pull client is owed a diagnostic
+/// refresh. A buffer's diagnostics evaluate the buffer, not the workspace's
+/// cached evaluation, so nothing else notices.
+fn respond_to_moved_fsproj_buffers(state: &mut State, conn: &Connection) {
+    if !state.workspace.holds_buffer_diagnostics() {
+        return;
+    }
+    let open: HashSet<Uri> = state
+        .docs
+        .keys()
+        .filter(|uri| path_extension(uri).as_deref() == Some("fsproj"))
+        .cloned()
+        .collect();
+    let moved = state.workspace.moved_buffer_diagnostics(&open);
+    if moved.is_empty() {
+        return;
+    }
+    state.wants_diagnostic_refresh = true;
+    for uri in moved {
+        publish_diagnostics(conn, state, &uri);
     }
 }
 
@@ -1251,6 +1296,7 @@ impl Dispatcher {
 /// message that found it has already answered from the fresh evaluation, so
 /// what is left is what the client is showing.
 fn respond_to_moved_evaluations(state: &mut State, conn: &Connection) {
+    respond_to_moved_fsproj_buffers(state, conn);
     let current = state.workspace.projects_generation();
     if current == state.evaluations_reported {
         return;
@@ -1300,27 +1346,30 @@ impl SweepStatus {
     }
 }
 
-/// Do one step of `in_flight`. When that completes it, send the report and do
-/// the per-request follow-up the loop does after any reply (deferral toasts,
-/// owed refreshes — including a diagnostic refresh the sweep was holding), and
-/// return `None`.
+/// Do one step of `in_flight`. When that completes it, send the report, with
+/// the deferral report brought up to date first as before any reply, and
+/// return `None`. The step that called this ends as every step does
+/// ([`finish_step`]), which sends a diagnostic refresh the sweep was holding.
 fn advance_sweep(
     state: &mut State,
     connection: &Connection,
     in_flight: InFlightSweep,
 ) -> Result<Option<InFlightSweep>, Box<dyn Error + Send + Sync>> {
     let InFlightSweep { id, sweep, span } = in_flight;
-    match span.in_scope(|| sweep.step(state)) {
+    let stepped = span.in_scope(|| sweep.step(state));
+    match stepped {
         Step::Pending(sweep) => Ok(Some(InFlightSweep { id, sweep, span })),
-        Step::Done(report) => {
+        Step::Done { report, shown } => {
             drop(span);
+            tracing::debug!(name: crate::inbox::SWEEP_REPORT_EVENT, "a sweep's report is ready");
             refresh_project_deferrals(state, connection);
-            enqueue_response(
+            deliver(
                 connection,
+                &mut state.workspace,
                 WorkspaceDiagnosticRequest::METHOD,
-                ok_response(id, &report),
+                [Message::Response(ok_response(id, &report))],
+                shown,
             )?;
-            maybe_send_refresh(state, connection, SweepStatus::Idle);
             Ok(None)
         }
     }
@@ -1367,16 +1416,30 @@ fn server_cancel(
     Ok(())
 }
 
-/// Enqueue one synchronous response onto `lsp_server`'s writer channel. This
-/// span measures channel enqueue latency; the writer thread owns stdout, and
+/// Enqueue `messages`, each a response to a `method` request or a `method`
+/// notification, onto `lsp_server`'s writer channel, then tell `workspace`
+/// that the client shows the `.fsproj` buffer diagnostics they carry, which
+/// read `shown` ([`Workspace::show_buffer_diagnostics`]). Every message
+/// carrying diagnostics is sent here, so the diagnostics the workspace
+/// confirms are those the client was sent. A send that fails (the peer hung
+/// up) stops it, and nothing is shown.
+///
+/// Each response is enqueued in an `lsp.response_enqueue` span, which
+/// measures channel enqueue latency; the writer thread owns stdout, and
 /// client delivery is outside the server process.
-fn enqueue_response(
+fn deliver(
     connection: &Connection,
+    workspace: &mut Workspace,
     method: &str,
-    response: Response,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let _span = tracing::info_span!("lsp.response_enqueue", method).entered();
-    connection.sender.send(Message::Response(response))?;
+    messages: impl IntoIterator<Item = Message>,
+    shown: ShownBuffers,
+) -> Result<(), crossbeam_channel::SendError<Message>> {
+    for message in messages {
+        let _span = matches!(message, Message::Response(_))
+            .then(|| tracing::info_span!("lsp.response_enqueue", method).entered());
+        connection.sender.send(message)?;
+    }
+    workspace.show_buffer_diagnostics(shown);
     Ok(())
 }
 
@@ -1546,7 +1609,9 @@ fn fetch_location(
 /// correlated by id, so out-of-order delivery (a later request answered before
 /// an earlier one) is spec-legal and expected.
 pub enum Dispatch {
-    Reply(Response),
+    /// The response, and what any `.fsproj` buffer diagnostics it carries
+    /// read.
+    Reply(Response, ShownBuffers),
     Defer {
         id: RequestId,
         pending: PendingFetch,
@@ -1581,11 +1646,31 @@ pub fn handle_request(
                 id,
                 sweep: Sweep::new(state, params),
             },
-            Err(err) => Dispatch::Reply(err_response(
-                id,
-                lsp_server::ErrorCode::InvalidParams,
-                format!("workspace diagnostic params: {err:?}"),
-            )),
+            Err(err) => Dispatch::Reply(
+                err_response(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams,
+                    format!("workspace diagnostic params: {err:?}"),
+                ),
+                ShownBuffers::default(),
+            ),
+        });
+    }
+    if req.method == DocumentDiagnosticRequest::METHOD {
+        let id = req.id.clone();
+        return Ok(match extract::<DocumentDiagnosticRequest>(req) {
+            Ok((id, params)) => {
+                let (resp, shown) = crate::handlers::diagnostic::handle(state, params);
+                Dispatch::Reply(ok_response(id, &resp), shown)
+            }
+            Err(err) => Dispatch::Reply(
+                err_response(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams,
+                    format!("diagnostic params: {err:?}"),
+                ),
+                ShownBuffers::default(),
+            ),
         });
     }
     if req.method == GotoDefinition::METHOD {
@@ -1593,24 +1678,33 @@ pub fn handle_request(
         return Ok(match extract::<GotoDefinition>(req) {
             Ok((id, params)) => {
                 match crate::handlers::definition::handle_watched(state, params, watch)? {
-                    DefinitionOutcome::Ready(resp) => Dispatch::Reply(ok_response(id, &resp)),
+                    DefinitionOutcome::Ready(resp) => {
+                        Dispatch::Reply(ok_response(id, &resp), ShownBuffers::default())
+                    }
                     DefinitionOutcome::Deferred(pending) => Dispatch::Defer { id, pending },
                 }
             }
-            Err(err) => Dispatch::Reply(err_response(
-                id,
-                lsp_server::ErrorCode::InvalidParams,
-                format!("definition params: {err:?}"),
-            )),
+            Err(err) => Dispatch::Reply(
+                err_response(
+                    id,
+                    lsp_server::ErrorCode::InvalidParams,
+                    format!("definition params: {err:?}"),
+                ),
+                ShownBuffers::default(),
+            ),
         });
     }
-    Ok(Dispatch::Reply(handle_request_sync(state, req, watch)?))
+    Ok(Dispatch::Reply(
+        handle_request_sync(state, req, watch)?,
+        ShownBuffers::default(),
+    ))
 }
 
-/// The synchronous request handlers — everything except a *deferred*
-/// go-to-definition and a `workspace/diagnostic` sweep (which `handle_request`
-/// intercepts above). Produces a response to send immediately, unless `watch`
-/// stops the run.
+/// The synchronous request handlers that send no diagnostics — everything
+/// except go-to-definition, which may defer, `workspace/diagnostic`, which
+/// sweeps, and `textDocument/diagnostic`, whose report can carry an open
+/// `.fsproj` buffer's diagnostics (`handle_request` intercepts those above).
+/// Produces a response to send immediately, unless `watch` stops the run.
 fn handle_request_sync(
     state: &mut State,
     req: Request,
@@ -1682,17 +1776,6 @@ fn handle_request_sync(
                 id,
                 lsp_server::ErrorCode::InvalidParams,
                 format!("semanticTokens params: {err:?}"),
-            ),
-        },
-        DocumentDiagnosticRequest::METHOD => match extract::<DocumentDiagnosticRequest>(req) {
-            Ok((id, params)) => {
-                let resp = crate::handlers::diagnostic::handle(state, params);
-                ok_response(id, &resp)
-            }
-            Err(err) => err_response(
-                id,
-                lsp_server::ErrorCode::InvalidParams,
-                format!("diagnostic params: {err:?}"),
             ),
         },
         method => err_response(
@@ -1810,7 +1893,7 @@ fn publish_diagnostics(conn: &Connection, state: &mut State, uri: &Uri) {
     let Some(text) = state.docs.get(uri).cloned() else {
         return;
     };
-    let Some(groups) = grouped_for_uri(
+    let Some(Diagnosed { groups, shown }) = grouped_for_uri(
         uri,
         &text,
         &mut state.workspace,
@@ -1821,9 +1904,20 @@ fn publish_diagnostics(conn: &Connection, state: &mut State, uri: &Uri) {
     // The pure planner turns the per-file partition into the exact set of
     // notifications — the document's own set plus any cross-file targets it
     // feeds or has stopped feeding — keeping the per-URI publish state correct.
-    for params in state.publish.plan(uri, groups) {
-        send_notification::<PublishDiagnostics>(conn, params);
-    }
+    // A set equal to what the client already shows is not sent again, and
+    // the client shows what these diagnostics read all the same.
+    let planned = state.publish.plan(uri, groups);
+    // Send failure means the peer hung up; the main loop will exit on its
+    // own when the receiver iterator ends, so we don't propagate here.
+    let _ = deliver(
+        conn,
+        &mut state.workspace,
+        PublishDiagnostics::METHOD,
+        planned
+            .into_iter()
+            .map(notification_message::<PublishDiagnostics>),
+        shown,
+    );
 }
 
 /// What was last reported for a project: the reconciliation record, and the
@@ -2119,8 +2213,31 @@ pub(crate) fn grouped_for_uri(
     text: &Arc<str>,
     workspace: &mut Workspace,
     parses: &mut ParseMemo,
-) -> Option<Vec<FileDiagnostics>> {
+) -> Option<Diagnosed> {
     grouped_for_uri_linked(uri, text, workspace, parses, None)
+}
+
+/// One buffer's diagnostics ([`grouped_for_uri`]): grouped by the file each
+/// lands on, with what they read for a `.fsproj` buffer, to carry to the
+/// message that sends them ([`deliver`]).
+pub(crate) struct Diagnosed {
+    pub(crate) groups: Vec<FileDiagnostics>,
+    pub(crate) shown: ShownBuffers,
+}
+
+impl Diagnosed {
+    /// Diagnostics that read nothing an open buffer's confirmation tracks.
+    fn of(groups: Vec<FileDiagnostics>) -> Self {
+        Diagnosed {
+            groups,
+            shown: ShownBuffers::default(),
+        }
+    }
+
+    /// No diagnostics at all.
+    pub(crate) fn none() -> Self {
+        Diagnosed::of(Vec::new())
+    }
 }
 
 /// [`grouped_for_uri`] with an optional *linking project* — a `.fsproj` the
@@ -2135,7 +2252,7 @@ pub(crate) fn grouped_for_uri_linked(
     workspace: &mut Workspace,
     parses: &mut ParseMemo,
     linking_project: Option<&Path>,
-) -> Option<Vec<FileDiagnostics>> {
+) -> Option<Diagnosed> {
     match path_extension(uri).as_deref() {
         Some(ext @ ("fs" | "fsi" | "fsx")) => {
             let symbols = {
@@ -2153,17 +2270,24 @@ pub(crate) fn grouped_for_uri_linked(
             };
             let path = uri.to_file_path().ok();
             let source = parses.parse(path.as_deref(), text, kind.file_kind(), &symbols, lang);
-            Some(diagnostics::syntactic_diagnostics(&source))
+            Some(Diagnosed::of(diagnostics::syntactic_diagnostics(&source)))
         }
         Some("fsproj") => {
             let path: PathBuf = uri.to_file_path().ok()?;
             let build_properties = workspace.build_properties();
-            let mut diagnostics = fsproj_diagnostics::diagnostics_for(
+            let buffer = fsproj_diagnostics::buffer_diagnostics(
                 text,
                 &path,
                 workspace.env(),
                 &build_properties,
             );
+            let mut diagnostics = buffer.diagnostics;
+            // What these diagnostics read, the buffer evaluation's and the
+            // graph walk's, which the workspace confirms in every generation
+            // once the client shows them, while the buffer is open
+            // (`respond_to_moved_fsproj_buffers`).
+            let reads = borzoi_msbuild::observed::Observer::new();
+            reads.absorb((buffer.reads, Default::default()));
             // Graph-derived cycle diagnostics (consumer #3 stage 3.2) describe the
             // *on-disk* project graph, so we only emit them when the buffer
             // matches disk. An unsaved `.fsproj` edit must not surface a stale
@@ -2179,12 +2303,11 @@ pub(crate) fn grouped_for_uri_linked(
             // contents do, and its spans are in the content's coordinates: a
             // buffer that keeps a mark has every line-0 column one further on.
             let content = crate::disk_text::content(text);
-            if Unobserved::FsprojDiagnostics
-                .read_to_string(&path)
+            if borzoi_msbuild::observed::read_to_string(&reads, &path)
                 .map(crate::disk_text::without_bom)
                 .is_ok_and(|disk| disk == content)
             {
-                let graph = workspace.project_graph(&path);
+                let graph = workspace.project_graph(&path, &reads);
                 let mut graph_diagnostics =
                     fsproj_diagnostics::graph_diagnostics(content, &path, &graph);
                 if content.len() != text.len() {
@@ -2198,15 +2321,19 @@ pub(crate) fn grouped_for_uri_linked(
                 }
                 diagnostics.extend(graph_diagnostics);
             }
-            Some(vec![FileDiagnostics {
-                file: None,
-                diagnostics,
-            }])
+            let reads = workspace.buffer_reads(&reads.finish().0, buffer.discovery.as_ref());
+            Some(Diagnosed {
+                groups: vec![FileDiagnostics {
+                    file: None,
+                    diagnostics,
+                }],
+                shown: ShownBuffers::one(uri.clone(), reads),
+            })
         }
-        _ => Some(vec![FileDiagnostics {
+        _ => Some(Diagnosed::of(vec![FileDiagnostics {
             file: None,
             diagnostics: Vec::new(),
-        }]),
+        }])),
     }
 }
 
@@ -2303,20 +2430,28 @@ where
     N: NotificationTrait,
     N::Params: serde::Serialize,
 {
-    let notif = Notification {
-        method: N::METHOD.to_string(),
-        params: serde_json::to_value(params).expect("notification params serialise"),
-    };
     // Send failure means the peer hung up; the main loop will exit on its
     // own when the receiver iterator ends, so we don't propagate here.
-    let _ = conn.sender.send(Message::Notification(notif));
+    let _ = conn.sender.send(notification_message::<N>(params));
+}
+
+/// The `N` notification carrying `params`.
+fn notification_message<N>(params: N::Params) -> Message
+where
+    N: NotificationTrait,
+    N::Params: serde::Serialize,
+{
+    Message::Notification(Notification {
+        method: N::METHOD.to_string(),
+        params: serde_json::to_value(params).expect("notification params serialise"),
+    })
 }
 
 /// Send the next client-supported refresh a change has owed.
 ///
 /// Sends **at most one refresh at a time** ([`State::pending_refresh_id`]): while
-/// one is outstanding, owed work stays set until [`handle_refresh_reply`] clears
-/// the slot and calls this again. Diagnostic refresh has priority: a watched
+/// one is outstanding, owed work stays set until [`note_refresh_reply`] clears
+/// the slot and the step's end calls this again. Diagnostic refresh has priority: a watched
 /// diagnostic input makes the reports the server directly provides stale,
 /// while semantic-token debt can remain in [`SemanticState`] until the
 /// diagnostic acknowledgement. Unsupported work is drained because
@@ -2361,21 +2496,13 @@ fn maybe_send_refresh(state: &mut State, conn: &Connection, sweep: SweepStatus) 
 }
 
 /// Handle a client response. If `resp_id` is the in-flight refresh, clear the
-/// shared slot and — unless we're shutting down — send the next owed refresh.
-/// Any other id (the one-shot `registerCapability`, or a late/stray reply) is
-/// ignored: it carries nothing we act on, and must not abort shutdown.
-fn handle_refresh_reply(
-    state: &mut State,
-    conn: &Connection,
-    resp_id: &RequestId,
-    shutting_down: bool,
-    sweep: SweepStatus,
-) {
+/// shared slot, so the step's end ([`finish_step`]) sends the next owed
+/// refresh unless the server is shutting down. Any other id (the one-shot
+/// `registerCapability`, or a late/stray reply) is ignored: it carries
+/// nothing we act on, and must not abort shutdown.
+fn note_refresh_reply(state: &mut State, resp_id: &RequestId) {
     if state.pending_refresh_id.as_ref() == Some(resp_id) {
         state.pending_refresh_id = None;
-        if !shutting_down {
-            maybe_send_refresh(state, conn, sweep);
-        }
     }
 }
 
@@ -2449,9 +2576,28 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// [`grouped_for_uri`] of `text` with a parse memo of its own.
+    /// [`grouped_for_uri`] of `text` with a parse memo of its own, sent to
+    /// no client: the workspace is not shown what it read.
     fn grouped(uri: &Uri, text: &str, ws: &mut Workspace) -> Option<Vec<FileDiagnostics>> {
+        diagnosed(uri, text, ws).map(|diagnosed| diagnosed.groups)
+    }
+
+    /// [`grouped_for_uri`] of `text` with a parse memo of its own.
+    fn diagnosed(uri: &Uri, text: &str, ws: &mut Workspace) -> Option<Diagnosed> {
         grouped_for_uri(uri, &Arc::from(text), ws, &mut ParseMemo::default())
+    }
+
+    /// [`grouped_for_uri`] of `text`, sent to the client: the workspace is
+    /// shown what it read, as [`deliver`] shows it.
+    fn grouped_and_shown(
+        uri: &Uri,
+        text: &str,
+        ws: &mut Workspace,
+    ) -> Option<Vec<FileDiagnostics>> {
+        diagnosed(uri, text, ws).map(|Diagnosed { groups, shown }| {
+            ws.show_buffer_diagnostics(shown);
+            groups
+        })
     }
 
     fn url(s: &str) -> Uri {
@@ -2467,8 +2613,15 @@ mod tests {
         let (server, client) = Connection::memory();
         let response = ok_response(RequestId::from(1), &Vec::<lsp_types::Location>::new());
 
-        let (result, trace) =
-            crate::test_trace::capture(|| enqueue_response(&server, References::METHOD, response));
+        let (result, trace) = crate::test_trace::capture(|| {
+            deliver(
+                &server,
+                &mut Workspace::default(),
+                References::METHOD,
+                [Message::Response(response)],
+                ShownBuffers::default(),
+            )
+        });
         result.unwrap();
         assert!(matches!(
             client.receiver.recv().unwrap(),
@@ -3016,6 +3169,224 @@ mod tests {
         let mut ws = Workspace::default();
         let result = grouped(&url("untitled:Untitled-1.fsproj"), "<Project/>", &mut ws);
         assert!(result.is_none(), "expected None for non-file URL");
+    }
+
+    /// Each kind of read an open `.fsproj` buffer's diagnostics make, moved
+    /// with no watch event between two generations: the workspace names the
+    /// buffer as owed fresh diagnostics, and they are a fresh workspace's.
+    /// The reads: an import the evaluation follows, a referenced project's
+    /// existence, the graph walk of the referenced projects (a cycle), SDK
+    /// discovery (a `global.json` pin), and the restore output an SDK
+    /// project's warning looks for. Only the cycle's buffer matches the disk:
+    /// the graph walk, which evaluates the projects as on disk (SDK discovery
+    /// included), runs only then, so each other case holds the buffer's own
+    /// reads.
+    #[test]
+    fn a_moved_input_of_an_open_fsproj_buffer_owes_its_diagnostics() {
+        let sdk_project = r#"<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><Compile Include="A.fs" /></ItemGroup></Project>"#;
+        /// Files to write, relative to the project's directory, with their text.
+        type Files<'a> = &'a [(&'a str, &'a str)];
+        let cases: [(&str, &str, Files, Files); 5] = [
+            (
+                "an import created",
+                r#"<Project><Import Project="common.props" /></Project>"#,
+                &[],
+                &[("common.props", "<Project />")],
+            ),
+            (
+                "a referenced project created",
+                r#"<Project><ItemGroup><ProjectReference Include="../B/B.fsproj" /></ItemGroup></Project>"#,
+                &[],
+                &[("../B/B.fsproj", "<Project />")],
+            ),
+            (
+                "a reference cycle closed",
+                r#"<Project><ItemGroup><ProjectReference Include="../B/B.fsproj" /></ItemGroup></Project>"#,
+                &[("../B/B.fsproj", "<Project />")],
+                &[(
+                    "../B/B.fsproj",
+                    r#"<Project><ItemGroup><ProjectReference Include="../A/App.fsproj" /></ItemGroup></Project>"#,
+                )],
+            ),
+            (
+                "a global.json pin",
+                sdk_project,
+                &[],
+                &[(
+                    "global.json",
+                    r#"{ "sdk": { "version": "9.0.100", "rollForward": "disable" } }"#,
+                )],
+            ),
+            (
+                "the restore output created",
+                sdk_project,
+                &[],
+                &[("obj/project.assets.json", "{}")],
+            ),
+        ];
+        let messages = |groups: Option<Vec<FileDiagnostics>>| -> Vec<String> {
+            groups
+                .unwrap_or_default()
+                .into_iter()
+                .flat_map(|group| group.diagnostics)
+                .map(|d| d.message)
+                .collect()
+        };
+        for (name, project, before, after) in cases {
+            let tmp = TempDir::new().unwrap();
+            let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+            let sdk = root.join("dotnet/sdk/10.0.100/Sdks/Microsoft.NET.Sdk/Sdk");
+            fs::create_dir_all(&sdk).unwrap();
+            fs::write(sdk.join("Sdk.props"), "<Project />").unwrap();
+            fs::write(sdk.join("Sdk.targets"), "<Project />").unwrap();
+            let env = crate::sdk_discovery::SdkDiscoveryEnv {
+                dotnet_root: Some(root.join("dotnet")),
+                ..crate::sdk_discovery::SdkDiscoveryEnv::default()
+            };
+            let dir = root.join("A");
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("App.fsproj");
+            let synced = name == "a reference cycle closed";
+            let disk = if synced {
+                project.to_string()
+            } else {
+                format!("{project}\n<!-- as last saved -->\n")
+            };
+            fs::write(&path, disk).unwrap();
+            fs::write(dir.join("A.fs"), "module A\n").unwrap();
+            let write = |files: &[(&str, &str)]| {
+                for (rel, text) in files {
+                    let file = dir.join(rel);
+                    fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    fs::write(file, text).unwrap();
+                }
+            };
+            write(before);
+            let uri = Uri::from_file_path(&path).unwrap();
+            let open = HashSet::from([uri.clone()]);
+            let mut ws = Workspace::with_env(env.clone());
+            ws.begin_generation(crate::vfs::Nanos(i128::MAX / 2));
+            let shown = messages(grouped_and_shown(&uri, project, &mut ws));
+            assert!(ws.moved_buffer_diagnostics(&open).is_empty(), "{name}");
+            ws.end_generation();
+            write(after);
+            ws.begin_generation(crate::vfs::Nanos(i128::MAX / 2 + 1));
+            assert_eq!(
+                ws.moved_buffer_diagnostics(&open),
+                vec![uri.clone()],
+                "{name}: the buffer was not owed fresh diagnostics"
+            );
+            let refreshed = messages(grouped_and_shown(&uri, project, &mut ws));
+            ws.end_generation();
+            let mut fresh = Workspace::with_env(env);
+            fresh.begin_generation(crate::vfs::Nanos(i128::MAX / 2 + 1));
+            assert_eq!(
+                refreshed,
+                messages(grouped(&uri, project, &mut fresh)),
+                "{name}"
+            );
+            assert_ne!(shown, refreshed, "{name}: the change moved nothing");
+        }
+    }
+
+    /// What an open `.fsproj` buffer's diagnostics rest on is what the
+    /// client was last sent. Diagnostics computed and never sent (a pull
+    /// stopped and then cancelled) leave the debt standing: the buffer is
+    /// still owed fresh diagnostics in the next generation. And two URIs
+    /// naming one project are two buffers, each owed its own.
+    #[test]
+    fn a_buffer_is_owed_diagnostics_until_fresh_ones_are_sent() {
+        let tmp = TempDir::new().unwrap();
+        let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+        let project = r#"<Project><Import Project="common.props" /></Project>"#;
+        let path = root.join("App.fsproj");
+        fs::write(&path, format!("{project}\n<!-- as last saved -->\n")).unwrap();
+        let uri = Uri::from_file_path(&path).unwrap();
+        let alias = Uri::parse(&uri.as_str().replace("App.fsproj", "%41pp.fsproj")).unwrap();
+        assert_ne!(uri, alias);
+        assert_eq!(
+            alias.to_file_path().unwrap(),
+            path,
+            "precondition: one file"
+        );
+        let open = HashSet::from([uri.clone(), alias.clone()]);
+        let mut ws = Workspace::default();
+        let mut at = i128::MAX / 2;
+        let mut generation = |ws: &mut Workspace| {
+            at += 1;
+            ws.begin_generation(crate::vfs::Nanos(at));
+        };
+        generation(&mut ws);
+        grouped_and_shown(&uri, project, &mut ws);
+        grouped_and_shown(&alias, project, &mut ws);
+        ws.end_generation();
+        fs::write(root.join("common.props"), "<Project />").unwrap();
+        // Computed, and never sent.
+        generation(&mut ws);
+        grouped(&uri, project, &mut ws);
+        ws.end_generation();
+        generation(&mut ws);
+        let mut moved = ws.moved_buffer_diagnostics(&open);
+        moved.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        let mut want = vec![uri.clone(), alias.clone()];
+        want.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(
+            moved, want,
+            "diagnostics never sent, or an alias, left a buffer's debt unpaid"
+        );
+        ws.end_generation();
+    }
+
+    /// A `workspace/diagnostic` sweep sends an open `.fsproj` buffer's
+    /// diagnostics with its report, many generations after the step that
+    /// computed them: what they read travels with them and becomes what the
+    /// buffer's diagnostics rest on when the report is sent, so a move after
+    /// it owes the buffer fresh diagnostics. A sweep abandoned unanswered
+    /// shows nothing.
+    #[test]
+    fn a_sweep_report_s_buffer_diagnostics_are_confirmed() {
+        let tmp = TempDir::new().unwrap();
+        let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+        let project = r#"<Project><Import Project="extra.props" /></Project>"#;
+        let path = root.join("App.fsproj");
+        fs::write(&path, format!("{project}\n<!-- as last saved -->\n")).unwrap();
+        let uri = Uri::from_file_path(&path).unwrap();
+        let open = HashSet::from([uri.clone()]);
+        let mut at = i128::MAX / 2;
+        let mut generation = |ws: &mut Workspace| {
+            at += 1;
+            ws.begin_generation(crate::vfs::Nanos(at));
+        };
+        for answered in [true, false] {
+            let _ = fs::remove_file(root.join("extra.props"));
+            let mut ws = Workspace::default();
+            // The step that computes the buffer's diagnostics, then the
+            // report.
+            generation(&mut ws);
+            let computed = diagnosed(&uri, project, &mut ws).expect("a file URI");
+            ws.end_generation();
+            generation(&mut ws);
+            if answered {
+                ws.show_buffer_diagnostics(computed.shown);
+            }
+            ws.end_generation();
+            fs::write(root.join("extra.props"), "<Project />").unwrap();
+            generation(&mut ws);
+            let moved = ws.moved_buffer_diagnostics(&open);
+            ws.end_generation();
+            if answered {
+                assert_eq!(
+                    moved,
+                    vec![uri.clone()],
+                    "the report's diagnostics went unwatched"
+                );
+            } else {
+                assert!(
+                    moved.is_empty(),
+                    "an abandoned sweep's diagnostics were taken as shown"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3661,13 +4032,8 @@ mod tests {
             "semantic refresh waits behind the diagnostic refresh"
         );
 
-        handle_refresh_reply(
-            &mut state,
-            &server,
-            &diagnostic_id,
-            false,
-            SweepStatus::Idle,
-        );
+        note_refresh_reply(&mut state, &diagnostic_id);
+        maybe_send_refresh(&mut state, &server, SweepStatus::Idle);
         let semantic_id = match client
             .receiver
             .recv_timeout(Duration::from_secs(5))
@@ -3707,7 +4073,8 @@ mod tests {
             "no second refresh while the first is in flight"
         );
 
-        handle_refresh_reply(&mut state, &server, &first_id, false, SweepStatus::Idle);
+        note_refresh_reply(&mut state, &first_id);
+        maybe_send_refresh(&mut state, &server, SweepStatus::Idle);
         match client
             .receiver
             .recv_timeout(Duration::from_secs(5))
@@ -3739,17 +4106,13 @@ mod tests {
             other => panic!("expected a diagnostic refresh request, got {other:?}"),
         };
 
-        handle_refresh_reply(
-            &mut state,
-            &server,
-            &RequestId::from("unrelated".to_string()),
-            false,
-            SweepStatus::Idle,
-        );
+        note_refresh_reply(&mut state, &RequestId::from("unrelated".to_string()));
+        maybe_send_refresh(&mut state, &server, SweepStatus::Idle);
         assert_eq!(state.pending_refresh_id.as_ref(), Some(&first_id));
         assert!(client.receiver.try_recv().is_err());
 
-        handle_refresh_reply(&mut state, &server, &first_id, true, SweepStatus::Idle);
+        // After `shutdown` a step does not end in a flush.
+        note_refresh_reply(&mut state, &first_id);
         assert!(state.pending_refresh_id.is_none());
         assert!(
             client.receiver.try_recv().is_err(),
@@ -3872,11 +4235,11 @@ mod tests {
             "no second refresh while one is in flight"
         );
 
-        // The client replies to the first refresh. Driving the real reply path
-        // (`handle_refresh_reply`, exactly what the dispatch loop's
-        // `Message::Response` arm calls) clears the in-flight slot and re-drains,
-        // sending the one coalesced follow-up.
-        handle_refresh_reply(&mut state, &server, &first_id, false, SweepStatus::Idle);
+        // The client replies to the first refresh. The real reply path
+        // (`note_refresh_reply`, then the flush every step ends in) clears the
+        // in-flight slot and re-drains, sending the one coalesced follow-up.
+        note_refresh_reply(&mut state, &first_id);
+        maybe_send_refresh(&mut state, &server, SweepStatus::Idle);
         match client
             .receiver
             .recv_timeout(Duration::from_secs(5))
@@ -3923,7 +4286,8 @@ mod tests {
         // The client acknowledges the refresh *before* the next edit — the ordering
         // the finding is about. Nothing is owed at the reply, so it sends nothing
         // and clears the slot.
-        handle_refresh_reply(&mut state, &server, &first_id, false, SweepStatus::Idle);
+        note_refresh_reply(&mut state, &first_id);
+        maybe_send_refresh(&mut state, &server, SweepStatus::Idle);
         assert!(
             state.pending_refresh_id.is_none(),
             "the reply cleared the in-flight slot"

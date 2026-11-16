@@ -1504,6 +1504,36 @@ dozen, and the counts report it.
   unwitnessed, as `CSharpSources` is; closing it means recording the buffer
   evaluation's reads (and its graph walk's) per open buffer and confirming
   them in every generation.
+
+  Closed since (#665): `fsproj_diagnostics::buffer_diagnostics` records
+  every query the buffer's diagnostics make (SDK discovery, each evaluation
+  pass, the referenced projects' existence, the restore output's), and the
+  server adds the disk-equality read and the graph walk's. The reads travel
+  with the diagnostics as data (`Workspace::buffer_reads`, `ShownBuffers`):
+  in the `textDocument/diagnostic` reply, in a `workspace/diagnostic`
+  sweep's report however many steps after the one that computed them, and in
+  a publish. The one function that sends such a message
+  (`server::deliver`) shows them to the workspace as it sends it
+  (`Workspace::show_buffer_diagnostics`), so diagnostics never sent (a
+  request stopped and then cancelled, an abandoned sweep) never reach it and
+  leave the debt standing. The workspace confirms them per buffer URI, bar
+  the installed contents, in every generation for each open buffer
+  (`Workspace::moved_buffer_diagnostics`); a moved read republishes the
+  buffer to a push client and owes a pull client a diagnostic refresh
+  (`respond_to_moved_fsproj_buffers`). Every step the dispatch loop runs
+  ends the same way, after everything it sent (`server::finish_step`):
+  confirm what the client shows, then send the refresh owed, so debt a step
+  incurs, its own report's included, is never left unsent once the loop is
+  idle. `Unobserved::FsprojDiagnostics` is gone, and `FsprojBufferInputs`
+  is witnessed: `unwatched_fsproj_buffer_inputs_agree_with_a_fresh_session`
+  opens `.fsproj` buffers and writes project files and sources with no
+  event; `pull_deliveries_agree_with_a_fresh_session_once_idle` steps
+  `workspace/diagnostic` sweeps with writes between their steps and at their
+  report, cancels pulls mid-run, and counts sweep reports in what the client
+  shows, comparing what it shows, and the refreshes owed and sent, with a
+  fresh session's once the loop is idle; and
+  `server::tests::a_moved_input_of_an_open_fsproj_buffer_owes_its_diagnostics`
+  moves each kind of read on its own.
 - **`DirectoryMembership` stays unwitnessed** until Stage 4b. The state
   machine now separates it from `GlobMembership` (a source created or deleted
   where a project's `*.fs` glob reads, which the evaluation's listing

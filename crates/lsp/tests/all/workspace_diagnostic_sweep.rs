@@ -525,3 +525,68 @@ fn a_refresh_held_for_a_cancelled_sweep_is_released() {
         "the refresh must go out when the sweep ends, not wait for later traffic: {sent:#?}"
     );
 }
+
+/// An open `.fsproj` buffer's diagnostics that reach the client in a sweep's
+/// report are what the server then watches: an import the buffer names,
+/// created after the report with no watch event, owes the client a
+/// diagnostic refresh at the next message, as it would after a document pull.
+#[test]
+fn a_sweep_report_s_fsproj_diagnostics_are_watched() {
+    let root = TempDir::new().unwrap();
+    let dir = root.path().join("App");
+    std::fs::create_dir(&dir).unwrap();
+    let project = dir.join("App.fsproj");
+    let buffer = r#"<Project><Import Project="extra.props" /></Project>"#;
+    // The buffer is unsaved: what is on disk differs.
+    std::fs::write(&project, "<Project />").unwrap();
+    let uri = Uri::from_file_path(&project).unwrap();
+    let (server, client) = Connection::memory();
+    let mut state = State::default();
+    state.set_client_capabilities(pull_refresh_caps());
+    state.set_workspace_roots(vec![root.path().to_path_buf()]);
+    state.docs.insert(uri.clone(), buffer.to_string());
+    let (_input, inbox) = borzoi::inbox::channel(1);
+    let mut dispatcher = Dispatcher::start(&server, inbox, state, None);
+    let deliver = |dispatcher: &mut Dispatcher, message: Message| {
+        dispatcher.admit([message]);
+        while dispatcher.step(&server).unwrap() == Progress::Handled {}
+    };
+    deliver(&mut dispatcher, sweep("sweep"));
+    while dispatcher.sweep_in_flight() {
+        dispatcher.step_sweep(&server).unwrap();
+    }
+    let before: Vec<Message> = client.receiver.try_iter().collect();
+    let sweep_id = RequestId::from("sweep".to_string());
+    assert!(
+        before
+            .iter()
+            .any(|m| matches!(m, Message::Response(r) if r.id == sweep_id)),
+        "the sweep was answered: {before:#?}"
+    );
+    std::fs::write(dir.join("extra.props"), "<Project />").unwrap();
+    let elsewhere = TempDir::new().unwrap();
+    let hover = request::<HoverRequest>(
+        "hover",
+        HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: Uri::from_file_path(elsewhere.path().join("Other.fs")).unwrap(),
+                },
+                position: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        },
+    );
+    deliver(&mut dispatcher, hover);
+    let after: Vec<Message> = client.receiver.try_iter().collect();
+    assert!(
+        after.iter().any(|m| matches!(
+            m,
+            Message::Request(r) if r.method == WorkspaceDiagnosticRefresh::METHOD
+        )),
+        "no diagnostic refresh was owed for the report's stale diagnostics: {after:#?}"
+    );
+}
