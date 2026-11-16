@@ -20,27 +20,25 @@
 //!
 //! ## Scope
 //!
-//! - Resolve as the resolvers MSBuild consults do: the `$DOTNET_ROOT`
-//!   half picks the host SDK by version alone and then serves its
-//!   `Sdks/{name}/Sdk` (MSBuild's default resolver), and the NuGet half
-//!   serves a restored package's `Sdk/`, else its `sdk/` (NuGet's
-//!   resolver). Both take the directory on `Directory.Exists`; one whose
+//! - Resolve as the resolvers MSBuild consults do, in the order it
+//!   consults them (`sdk_directory_probe_diff` grades both rules and the
+//!   order against `dotnet msbuild`):
+//!   1. MSBuild's default resolver serves `Sdks/{name}/Sdk` of the SDK
+//!      that runs wherever `Directory.Exists` finds it, whatever version
+//!      the reference names. The running SDK is the host SDK
+//!      [`VersionSpec`] selects (typically derived from `global.json` by
+//!      [`global_json`]); no other installed version is asked.
+//!   2. Otherwise NuGet's resolver serves the package at the version the
+//!      reference names: its restored `Sdk/`, else its `sdk/`.
+//!
+//!   Either directory is taken on `Directory.Exists`; one whose
 //!   `Sdk.props` or `Sdk.targets` is then no regular file declines, since
 //!   MSBuild fails to import it ([`SdkPaths`] names both).
-//! - Apply an optional [`VersionSpec`]
-//!   (typically derived from `global.json` by [`global_json`]) to the
-//!   `$DOTNET_ROOT` candidate set only — `global.json`'s `sdk.version`
-//!   constrains the host .NET SDK install, not third-party NuGet
-//!   Project SDK packages.
-//! - Honor a per-import pin `Sdk="Name/Version"` when present: the
-//!   version half names a specific package version, applied to *both*
-//!   roots with `Disable` semantics and overriding the caller's
-//!   `spec` for this lookup. This is the canonical way to pin a
-//!   NuGet-distributed Project SDK.
-//! - Honor a `global.json` `msbuild-sdks` entry for the requested
-//!   name when no per-import pin is present: same `Disable`
-//!   semantics, same "applies to both roots, overrides caller `spec`"
-//!   behaviour. Per-import pin wins when both sources apply.
+//! - The version NuGet looks for is a per-import pin `Sdk="Name/Version"`
+//!   when present, else the name's entry in `global.json`'s top-level
+//!   `msbuild-sdks` map. It selects the package version exactly, and
+//!   never the host SDK: a reference to an SDK the running SDK ships is
+//!   served from it at any version.
 //! - **NuGet is only consulted when a version source is present.**
 //!   Upstream's `Microsoft.Build.NuGetSdkResolver` refuses to scan
 //!   the cache for a "best version" without one (the resource string
@@ -48,19 +46,7 @@
 //!   version specified in the project or global.json"). Silently
 //!   picking the highest restored copy would import a different
 //!   SDK than MSBuild itself would, parsing against the wrong
-//!   `Sdk.props`/`Sdk.targets`. The recognised version sources are a
-//!   per-import pin (`Sdk="Name/Version"`) and the top-level
-//!   `msbuild-sdks` map in `global.json`.
-//! - Among admitted candidates in each root, prefer the highest
-//!   installed; among versions with the same numeric prefix, stable
-//!   releases beat prereleases (any `-suffix`).
-//! - When both roots produce a candidate, the `$DOTNET_ROOT` pick wins
-//!   on tie or strict-higher; NuGet wins only when its max strictly
-//!   exceeds the `$DOTNET_ROOT` pick. Under the current "NuGet only
-//!   with per-import pin" rule both sides filter by the same exact
-//!   version, so in practice cross-root divergence resolves to either
-//!   a tie (DOTNET wins) or a one-sided hit — the strictly-higher
-//!   branch is unreachable but kept structurally.
+//!   `Sdk.props`/`Sdk.targets`.
 //! - Pure filesystem walk. No `$DOTNET_ROOT` / `$NUGET_PACKAGES`
 //!   discovery here — the shell passes the paths in (dependency
 //!   rejection).
@@ -161,96 +147,54 @@ impl std::fmt::Display for SdkResolveError {
 
 impl std::error::Error for SdkResolveError {}
 
-/// Locate the SDK named `sdk_name` under `dotnet_root`'s installed SDK
-/// directories and (optionally) the per-user NuGet package cache,
-/// subject to an optional [`VersionSpec`] constraint.
+/// Locate the SDK named `sdk_name` as MSBuild's resolvers do: the running
+/// host SDK's own copy under `dotnet_root`, else a restored copy in the
+/// per-user NuGet package cache.
 ///
-/// Two on-disk layouts are probed independently:
+/// The two layouts, in the order MSBuild consults them:
 ///
 /// - **`$DOTNET_ROOT`** —
 ///   `{dotnet_root}/sdk/{version}/Sdks/{sdk_name}/Sdk/Sdk.{props,targets}`.
 ///   Used by the in-box SDKs (`Microsoft.NET.Sdk`, `Microsoft.NET.Sdk.Web`,
-///   …). The `spec` (when supplied) selects the host SDK version among all
-///   installed ones, and only that version is asked for `sdk_name`: MSBuild
-///   serves the running SDK's copy or fails, and never tries another
+///   …). `spec` (from `global.json`'s `sdk` block) selects the host SDK
+///   version among all installed ones, and only that version is asked for
+///   `sdk_name`. MSBuild's default resolver serves its copy wherever
+///   `Directory.Exists` finds it, whatever version the reference names,
+///   and before NuGet's resolver is asked; it never tries another installed
 ///   version.
 /// - **NuGet package cache** —
 ///   `{nuget_packages_dir}/{sdk_name.to_ascii_lowercase()}/{version}/{Sdk,sdk}/Sdk.{props,targets}`.
 ///   Used by every NuGet-distributed SDK (`Microsoft.DotNet.Arcade.Sdk`,
-///   `Microsoft.Build.NoTargets`, `MSBuild.Sdk.Extras`, …). The inner
-///   directory's casing is package-defined; NuGet's resolver serves
-///   `Sdk/` (Microsoft canonical, used by `Microsoft.Build.NoTargets`
-///   et al.) where it exists, and `sdk/` (used by
-///   `Microsoft.DotNet.Arcade.Sdk` et al.) otherwise. A version counts
-///   only where NuGet's restore marker is.
-///   Pass `None` to skip the NuGet probe entirely; pass `Some(dir)`
-///   even if the directory doesn't yet exist (the probe tolerates
-///   that — same fall-through as a `$DOTNET_ROOT/sdk` that isn't there).
+///   `Microsoft.Build.NoTargets`, `MSBuild.Sdk.Extras`, …), and consulted
+///   only when the host SDK does not ship `sdk_name` and a version source
+///   names a version. NuGet's resolver serves the inner `Sdk/`
+///   (Microsoft canonical) where it exists, and `sdk/` (used by
+///   `Microsoft.DotNet.Arcade.Sdk` et al.) otherwise. A version counts only
+///   where NuGet's restore marker is. Pass `None` to skip the NuGet probe
+///   entirely; pass `Some(dir)` even if the directory doesn't yet exist.
 ///
-/// **Scope of `spec`.** `global.json`'s `sdk.version` constrains the
-/// *.NET SDK install*, not third-party MSBuild Project SDK package
-/// versions. So `spec` filters the `$DOTNET_ROOT` candidate set
-/// (via `version_spec::select_sdk_version`)
-/// and does **not** filter NuGet candidates.
-///
-/// **Per-import version pin.** If `sdk_name` has the
-/// `"Name/Version"` shape (e.g. `Microsoft.Build.NoTargets/1.0.80`),
-/// the version half names a specific package version and is honored
-/// directly with `Disable` semantics: both roots are filtered to the
-/// exact pin. The per-import pin overrides any caller `spec` for
-/// this lookup — the project is making a specific request about
-/// *this* SDK package, which is a different question from
-/// `global.json`'s host-SDK version pin.
-///
-/// **`msbuild-sdks` pins.** The top-level `msbuild-sdks` map in
-/// `global.json` (e.g. `"Microsoft.Build.NoTargets": "3.7.0"`) names
-/// an exact version for the given SDK. When the project file does
-/// *not* carry a per-import version pin, an entry matching `sdk_name`
-/// in the supplied map is used as the pin — same `Disable` semantics
-/// and same "applies to both roots, overrides caller spec" behaviour
-/// as a per-import pin. A per-import pin takes precedence: it's the
-/// more specific request, written directly at the import site. Pass
-/// `None` to skip msbuild-sdks pin lookup entirely (the v1 behaviour
-/// before this map was wired).
-///
-/// **NuGet requires a version source.** The NuGet cache is only
-/// consulted when there's a pin — either a per-import pin
-/// (`Sdk="Name/Version"`) or an `msbuild-sdks` entry. Without one,
-/// NuGet candidates are not considered: upstream's
-/// `Microsoft.Build.NuGetSdkResolver` refuses to scan the cache for
-/// a "best version" without a version source, and silently picking
-/// the highest restored copy could import a different SDK than
-/// MSBuild itself would. The caller `spec` does *not* count as a
-/// NuGet version source — its scope is the host .NET SDK only.
-///
-/// Returns the [`SdkPaths`] picked as follows:
-///
-/// - If only one root produces a candidate, that one wins.
-/// - If both produce a candidate, the `$DOTNET_ROOT` pick wins on
-///   tie or strict-higher (matching MSBuild's "shared over per-user"
-///   preference). NuGet can only beat DOTNET when both filter by the
-///   same per-import pin (the version source rule above) and DOTNET
-///   doesn't have that version — in which case DOTNET's pick is
-///   `None` and we land in the one-sided branch.
+/// **Version sources.** A per-import pin (`Sdk="Name/Version"`, e.g.
+/// `Microsoft.Build.NoTargets/1.0.80`), else the name's entry in the
+/// supplied `global.json` `msbuild-sdks` map, names the package version
+/// NuGet looks for, exactly. Neither constrains the host SDK, and neither
+/// keeps the host SDK's copy from being served. Without one, NuGet is not
+/// consulted: upstream's `Microsoft.Build.NuGetSdkResolver` refuses to scan
+/// the cache for a "best version", and `spec` is not a version source.
 ///
 /// Failure modes:
 ///
-/// - [`SdkResolveError::NotFound`] if neither root serves the requested
-///   name: the selected host SDK has no `Sdks/{name}/Sdk`, and NuGet has
-///   no restored copy the effective spec admits. Includes the case
-///   of an unpinned reference to a NuGet-only SDK: upstream
-///   matches.
+/// - [`SdkResolveError::VersionNotSatisfied`] when host SDKs are installed
+///   but `spec` admits none of them (the .NET host then runs no build), or
+///   when the host SDK does not ship the name and NuGet has versions of it
+///   but not the one named. `spec` and `available` are the host's, or the
+///   pin and NuGet's versions respectively.
+/// - [`SdkResolveError::NotFound`] when neither serves the name: the
+///   selected host SDK has no `Sdks/{name}/Sdk`, and NuGet is not
+///   consulted or has no version of it.
 /// - [`SdkResolveError::UnsupportedLayout`] if the directory a resolver
 ///   serves lacks a regular `Sdk.props` or `Sdk.targets` (MSBuild then
-///   fails the import), or NuGet serves a directory that does not exist.
-/// - [`SdkResolveError::VersionNotSatisfied`] when installed
-///   versions exist but the effective spec admits none of them.
-///   "Effective spec" is the per-import pin if set, otherwise the
-///   caller `spec`. The returned `available` list is the sorted set
-///   of versions the spec was consulted against: with per-import
-///   set, the union across both roots; without, only the
-///   `$DOTNET_ROOT` versions (NuGet is not consulted in the
-///   unpinned case).
+///   fails the import), NuGet serves a directory that does not exist, or
+///   the NuGet folder NuGet would consult is a relative path.
 ///
 /// The function does not canonicalise the returned paths; they are
 /// `dotnet_root.join("sdk").join(...)` or
@@ -278,15 +222,8 @@ pub fn locate_dotnet_sdk(
     observer: &Observer,
 ) -> Result<SdkPaths, SdkResolveError> {
     // MSBuild allows `Sdk="Name/Version"` (e.g.
-    // `Sdk="Microsoft.Build.NoTargets/1.0.80"`). The per-import
-    // version names a specific package version directly, which is the
-    // canonical way to pin a NuGet-distributed Project SDK. We honour
-    // it: when present, it constrains the lookup to that exact
-    // version (`RollForward::Disable`) across *both* roots,
-    // overriding any caller `spec` for this lookup. The caller spec
-    // (from `global.json`) targets the host .NET SDK, not arbitrary
-    // Project SDK packages — when the project file is itself
-    // expressing a per-import pin, it's the more specific request.
+    // `Sdk="Microsoft.Build.NoTargets/1.0.80"`): the version half names
+    // the package version NuGet's resolver looks for.
     //
     // The version half is also *validated* — anything that isn't
     // SemVer-shape (`Foo/`, `Foo/../Bar`, multi-SDK joined strings
@@ -311,156 +248,83 @@ pub fn locate_dotnet_sdk(
         return Err(SdkResolveError::NotFound);
     }
 
+    // 1. The running SDK's copy. The host SDK is chosen by `spec` alone and
+    //    only then asked for `name`: MSBuild's default resolver serves
+    //    `$(MSBuildSDKsPath)/{name}/Sdk` of the SDK that runs, at any
+    //    version the reference names, ahead of NuGet.
     let host_versions = host_sdk_versions(dotnet_root, observer);
-    let nuget_candidates = match nuget_packages_dir {
-        Some(dir) => collect_from_nuget(dir, name, observer),
-        None => Vec::new(),
-    };
+    let dotnet_versions: Vec<SdkVersion> = host_versions.iter().map(|(v, _)| v.clone()).collect();
+    if !dotnet_versions.is_empty() {
+        let Some(version) = select_sdk_version(&dotnet_versions, spec) else {
+            // The .NET host finds no SDK to run, so no resolver runs.
+            let mut available = dotnet_versions;
+            available.sort();
+            return Err(SdkResolveError::VersionNotSatisfied {
+                spec: spec
+                    .expect("with no spec, the max candidate is always selected when any exist")
+                    .clone(),
+                available,
+            });
+        };
+        let idx = dotnet_versions
+            .iter()
+            .position(|v| v == version)
+            .expect("selection returns a candidate from the slice");
+        let sdk_root = host_versions[idx].1.join("Sdks").join(name).join("Sdk");
+        if let Some(root) = sdk_directory(sdk_root, observer)? {
+            return Ok(sdk_paths(root));
+        }
+    }
 
-    // Two specs are at play, applied to different candidate sets:
-    //
-    // - The caller `spec` (from `global.json`'s `sdk` block)
-    //   constrains the host .NET SDK install — `$DOTNET_ROOT` only.
-    //   NuGet candidates are third-party Project SDK packages and
-    //   aren't governed by `sdk.version`, so applying caller `spec`
-    //   to them would wrongly reject e.g.
-    //   `Microsoft.Build.NoTargets 3.7.134` just because
-    //   `global.json` pins .NET SDK to `8.0.401`.
-    //
-    // - An **effective pin** for `name`: either the per-import
-    //   version (`Sdk="Name/Version"`) or, if absent, the
-    //   `msbuild-sdks[name]` entry from `global.json`. Per-import
-    //   wins — it's the more specific request, written at the import
-    //   site. Either source produces a `Disable(version)` spec that
-    //   applies to *both* roots and overrides the caller spec for
-    //   this lookup: the project / project-wide map is making an
-    //   explicit version request about *this* SDK package, which is
-    //   a different question from the host-SDK pin.
-    //
-    // NuGet is only consulted when an effective pin is present.
-    // Without one, upstream's `Microsoft.Build.NuGetSdkResolver`
-    // refuses to scan the cache and we mirror that: picking the
-    // highest restored copy on its own could import a different SDK
-    // than MSBuild itself would. The caller `spec` does not count as
-    // a NuGet version source.
-    let effective_pin: Option<SdkVersion> =
-        per_import_version.or_else(|| msbuild_sdks.and_then(|m| m.get(name).cloned()));
-    let pin_spec: Option<VersionSpec> =
-        effective_pin.map(|v| VersionSpec::with_version(v, RollForward::Disable, true));
-    let dotnet_spec_ref: Option<&VersionSpec> = pin_spec.as_ref().or(spec);
+    // 2. NuGet, only with a version source: the per-import version, else the
+    //    `msbuild-sdks` entry. Upstream's `Microsoft.Build.NuGetSdkResolver`
+    //    refuses to scan the cache for a "best version" without one, and
+    //    picking the highest restored copy could import a different SDK
+    //    than MSBuild would. The caller `spec` does not count.
+    let Some(pin) = per_import_version.or_else(|| msbuild_sdks.and_then(|m| m.get(name).cloned()))
+    else {
+        return Err(SdkResolveError::NotFound);
+    };
+    let Some(nuget_packages_dir) = nuget_packages_dir else {
+        return Err(SdkResolveError::NotFound);
+    };
     // NuGet's `File.Exists` of a restore marker takes a relative folder
     // against the process's working directory, which we cannot see.
-    if pin_spec.is_some() && nuget_packages_dir.is_some_and(|dir| !dir.has_root()) {
+    if !nuget_packages_dir.has_root() {
         return Err(SdkResolveError::UnsupportedLayout {
             reason: "the NuGet package folder is a relative path".to_owned(),
         });
     }
-
-    // The host SDK is chosen by version alone, and only then asked for
-    // `name`: MSBuild's default resolver serves
-    // `$(MSBuildSDKsPath)/{name}/Sdk` of the SDK that runs, and fails
-    // without trying another version when that SDK lacks it.
-    let dotnet_versions: Vec<SdkVersion> = host_versions.iter().map(|(v, _)| v.clone()).collect();
-    let dotnet_selected = select_sdk_version(&dotnet_versions, dotnet_spec_ref);
-    let dotnet_chosen: Option<(&SdkVersion, PathBuf)> = match dotnet_selected {
-        Some(version) => {
-            let idx = dotnet_versions
-                .iter()
-                .position(|v| v == version)
-                .expect("selection returns a candidate from the slice");
-            let sdk_root = host_versions[idx].1.join("Sdks").join(name).join("Sdk");
-            sdk_directory(sdk_root, observer)?.map(|root| (version, root))
-        }
-        None => None,
-    };
-
-    // NuGet half is gated on having a pin. Without one, we never
-    // even look at the restored cache for picking purposes —
-    // `nuget_versions` stays empty so neither the cross-root pick
-    // nor the `available` diagnostic considers it.
-    let nuget_versions: Vec<SdkVersion> = if pin_spec.is_some() {
-        nuget_candidates.iter().map(|(v, _)| v.clone()).collect()
-    } else {
-        Vec::new()
-    };
-    let nuget_selected = if let Some(s) = pin_spec.as_ref() {
-        select_sdk_version(&nuget_versions, Some(s))
-    } else {
-        None
-    };
-    let nuget_chosen: Option<(&SdkVersion, PathBuf)> = match nuget_selected {
+    let pin_spec = VersionSpec::with_version(pin, RollForward::Disable, true);
+    let nuget_candidates = collect_from_nuget(nuget_packages_dir, name, observer);
+    let nuget_versions: Vec<SdkVersion> = nuget_candidates.iter().map(|(v, _)| v.clone()).collect();
+    match select_sdk_version(&nuget_versions, Some(&pin_spec)) {
         Some(version) => {
             let idx = nuget_versions
                 .iter()
                 .position(|v| v == version)
                 .expect("selection returns a candidate from the slice");
-            // Judged only if it wins below: an installed SDK that serves the
-            // name is used ahead of NuGet's copy, whatever state that is in.
-            Some((version, nuget_candidates[idx].1.clone()))
+            nuget_served(nuget_candidates[idx].1.clone(), observer).map(sdk_paths)
         }
-        None => None,
-    };
-
-    // Pick across the two roots. When both produce a candidate,
-    // `$DOTNET_ROOT` wins ties or strict-higher; NuGet wins only when
-    // its max strictly exceeds the spec-admitted `$DOTNET_ROOT` pick.
-    // This preserves "shared store wins ties" while still picking up
-    // a NuGet copy when DOTNET has nothing (or nothing the spec
-    // admits).
-    let sdk_dir = match (dotnet_chosen, nuget_chosen) {
-        (Some((d, dotnet_root)), Some((n, nuget_root))) => {
-            if d >= n {
-                dotnet_root
-            } else {
-                nuget_served(nuget_root, observer)?
-            }
-        }
-        (Some((_, root)), None) => root,
-        (None, Some((_, root))) => nuget_served(root, observer)?,
-        (None, None) => {
-            // Both roots produced no candidate. We get here in four
-            // sub-cases:
-            //   - both roots physically empty                  → NotFound
-            //   - the selected host SDK lacks `name`           → NotFound
-            //   - DOTNET has versions but spec rejects all     → VersionNotSatisfied
-            //   - effective pin set, neither root has the pin  → VersionNotSatisfied
-            // The `available` list shows the user which versions *were*
-            // on disk — those are the alternatives they could install
-            // or pin against. With an effective pin (per-import or
-            // `msbuild-sdks`), both roots are alternatives (the spec was
-            // consulted against both); without one, only `$DOTNET_ROOT`
-            // is filtered, so only those versions are alternatives.
-            let dotnet_rejected = !dotnet_versions.is_empty() && dotnet_selected.is_none();
-            let nuget_rejected = !nuget_versions.is_empty() && nuget_selected.is_none();
-            if !dotnet_rejected && !nuget_rejected {
-                return Err(SdkResolveError::NotFound);
-            }
-            let mut available = dotnet_versions;
-            if pin_spec.is_some() {
-                for v in nuget_versions {
-                    if !available.contains(&v) {
-                        available.push(v);
-                    }
-                }
-            }
+        None if nuget_versions.is_empty() => Err(SdkResolveError::NotFound),
+        None => {
+            let mut available = nuget_versions;
             available.sort();
-            let effective_spec = match pin_spec {
-                Some(s) => s,
-                None => spec
-                    .expect("with no spec or pin, max is always picked when candidates exist")
-                    .clone(),
-            };
-            return Err(SdkResolveError::VersionNotSatisfied {
-                spec: effective_spec,
+            Err(SdkResolveError::VersionNotSatisfied {
+                spec: pin_spec,
                 available,
-            });
+            })
         }
-    };
-    Ok(SdkPaths {
-        root: sdk_dir.clone(),
-        props: sdk_dir.join("Sdk.props"),
-        targets: sdk_dir.join("Sdk.targets"),
-    })
+    }
+}
+
+/// The well-known pair in the SDK directory `root`.
+fn sdk_paths(root: PathBuf) -> SdkPaths {
+    SdkPaths {
+        props: root.join("Sdk.props"),
+        targets: root.join("Sdk.targets"),
+        root,
+    }
 }
 
 /// The installed SDK versions under `{dotnet_root}/sdk`: every entry whose

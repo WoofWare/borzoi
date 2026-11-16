@@ -6,7 +6,10 @@
 //! `msbuild-sdks` pins, NuGet's resolver serves the restored package's `Sdk/`
 //! where `Directory.Exists` finds it and `sdk/` otherwise. Neither looks at
 //! `Sdk.props` or `Sdk.targets` before MSBuild imports them, and neither tries
-//! another version.
+//! another version. For a name NuGet has a version for, the default resolver
+//! still goes first: it serves the running SDK's copy whatever the version,
+//! and NuGet's is read only where the running SDK has none
+//! (`the_running_sdk_s_copy_is_served_before_nuget_s`).
 //!
 //! Each test builds a layout, puts one shape at a path a resolver probes (the
 //! SDK directory, either file in it, the package's restore markers), and asks
@@ -62,13 +65,18 @@ enum Built {
     Hung,
 }
 
-/// `dotnet msbuild -getProperty:Picked` of a project referencing [`SDK`] in
-/// `project_dir`, under `dotnet` with `env` (the scrubbed environment plus
-/// what the case sets).
-fn build(dotnet: &Path, project_dir: &Path, env: &BTreeMap<String, String>) -> Built {
+/// `dotnet msbuild -getProperty:Picked` of a project whose `Sdk` attribute is
+/// `sdk_ref`, in `project_dir`, under `dotnet` with `env` (the scrubbed
+/// environment plus what the case sets).
+fn build(
+    dotnet: &Path,
+    project_dir: &Path,
+    sdk_ref: &str,
+    env: &BTreeMap<String, String>,
+) -> Built {
     std::fs::write(
         project_dir.join("p.proj"),
-        format!(r#"<Project Sdk="{SDK}"></Project>"#),
+        format!(r#"<Project Sdk="{sdk_ref}"></Project>"#),
     )
     .unwrap();
     let mut cmd = Command::new(dotnet);
@@ -336,7 +344,7 @@ fn the_default_resolver_serves_the_running_sdk_s_directory() {
             );
             continue;
         }
-        let theirs = build(&fake.join("dotnet"), &project, &env);
+        let theirs = build(&fake.join("dotnet"), &project, SDK, &env);
         if grade(&case, ours, name_of, &theirs, &mut failures) {
             committed += 1;
         }
@@ -512,7 +520,7 @@ fn nuget_serves_the_package_s_sdk_directory() {
             "NUGET_PACKAGES".to_owned(),
             packages.to_string_lossy().into_owned(),
         );
-        let theirs = build(Path::new("dotnet"), &project, &env);
+        let theirs = build(Path::new("dotnet"), &project, SDK, &env);
         if grade(&case, ours, name_of, &theirs, &mut failures) {
             committed += 1;
         }
@@ -520,6 +528,234 @@ fn nuget_serves_the_package_s_sdk_directory() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert!(
         committed >= 6,
+        "the sweep committed only {committed} answers of {}",
+        cases.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The order between them, for a name NuGet has a version for.
+
+/// What a resolver-order case puts in the running (highest) SDK's
+/// `Sdks/{name}`.
+#[derive(Clone, Copy, Debug)]
+enum Running {
+    Absent,
+    Complete,
+    /// An empty `Sdk` directory: served, and then the import fails.
+    Empty,
+}
+
+/// What a resolver-order case puts in the NuGet folder.
+#[derive(Clone, Copy, Debug)]
+enum Restored {
+    Absent,
+    /// The pinned version.
+    Pinned,
+    /// Another version only.
+    Other,
+}
+
+/// Where the version comes from.
+#[derive(Clone, Copy, Debug)]
+enum PinForm {
+    /// `global.json`'s `msbuild-sdks`.
+    GlobalJson,
+    /// The reference's own `Name/Version`.
+    PerImport,
+}
+
+/// Which version is pinned.
+#[derive(Clone, Copy, Debug)]
+enum PinVersion {
+    /// One no installed SDK is named by.
+    Unrelated,
+    /// The lower installed SDK's version.
+    LowerSdk,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OrderCase {
+    running: Running,
+    lower_has_it: bool,
+    restored: Restored,
+    form: PinForm,
+    pin: PinVersion,
+}
+
+fn order_cases() -> Vec<OrderCase> {
+    let mut cases = Vec::new();
+    for running in [Running::Absent, Running::Complete, Running::Empty] {
+        for lower_has_it in [false, true] {
+            for restored in [Restored::Absent, Restored::Pinned, Restored::Other] {
+                for form in [PinForm::GlobalJson, PinForm::PerImport] {
+                    for pin in [PinVersion::Unrelated, PinVersion::LowerSdk] {
+                        cases.push(OrderCase {
+                            running,
+                            lower_has_it,
+                            restored,
+                            form,
+                            pin,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    cases
+}
+
+/// Lay `case` out under `dir` and return our answer and the build's, each
+/// directory we resolve to named by the `Picked` its `Sdk.props` sets.
+fn run_order_case(
+    case: OrderCase,
+    real: &Path,
+    high: &str,
+    low: &str,
+    dir: &Path,
+) -> (Result<String, SdkResolveError>, Built) {
+    let fake = dir.join("dotnet");
+    copy_dotnet_root(real, &fake);
+    let sdk_dir = |version: &str| fake.join("sdk").join(version).join("Sdks").join(SDK);
+    match case.running {
+        Running::Absent => {}
+        Running::Complete => complete(&sdk_dir(high).join("Sdk"), "running"),
+        Running::Empty => std::fs::create_dir_all(sdk_dir(high).join("Sdk")).unwrap(),
+    }
+    if case.lower_has_it {
+        complete(&sdk_dir(low).join("Sdk"), "lower");
+    }
+    let pin = match case.pin {
+        PinVersion::Unrelated => "1.0.0",
+        PinVersion::LowerSdk => low,
+    };
+    let packages = dir.join("packages");
+    let id_dir = packages.join(SDK.to_ascii_lowercase());
+    let restore = |version: &str, name: &str| {
+        let version_dir = id_dir.join(version);
+        complete(&version_dir.join("Sdk"), name);
+        std::fs::write(version_dir.join(".nupkg.metadata"), "{}").unwrap();
+    };
+    match case.restored {
+        Restored::Absent => std::fs::create_dir_all(&packages).unwrap(),
+        Restored::Pinned => restore(pin, "nuget"),
+        Restored::Other => restore("2.0.0", "nuget-other"),
+    }
+    let project = dir.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // No package source: NuGet cannot download what the folder lacks.
+    std::fs::write(
+        project.join("nuget.config"),
+        "<configuration><packageSources><clear /></packageSources></configuration>",
+    )
+    .unwrap();
+    let (sdk_ref, global_json, pins) = match case.form {
+        PinForm::GlobalJson => (
+            SDK.to_owned(),
+            format!(r#"{{"msbuild-sdks":{{"{SDK}":"{pin}"}}}}"#),
+            Some(BTreeMap::from([(
+                SDK.to_owned(),
+                SdkVersion::parse(pin).unwrap(),
+            )])),
+        ),
+        PinForm::PerImport => (format!("{SDK}/{pin}"), "{}".to_owned(), None),
+    };
+    // Also stops hostfxr's walk above the project: with no `sdk` member, the
+    // highest SDK runs, as an unconstrained spec selects.
+    std::fs::write(project.join("global.json"), global_json).unwrap();
+    let ours = locate_dotnet_sdk(
+        &fake,
+        Some(&packages),
+        &sdk_ref,
+        None,
+        pins.as_ref(),
+        &Observer::new(),
+    );
+    let mut env = base_environment();
+    env.insert(
+        "DOTNET_ROOT".to_owned(),
+        fake.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "NUGET_PACKAGES".to_owned(),
+        packages.to_string_lossy().into_owned(),
+    );
+    let theirs = build(&fake.join("dotnet"), &project, &sdk_ref, &env);
+    (ours.map(|paths| picked_in(&paths.root)), theirs)
+}
+
+/// A name NuGet has a version for, in both of its forms, against an installed
+/// SDK that ships it or not and a NuGet folder that holds it or not: MSBuild
+/// serves the running SDK's copy wherever `Directory.Exists` finds it,
+/// whatever the version, and consults NuGet only otherwise.
+#[test]
+fn the_running_sdk_s_copy_is_served_before_nuget_s() {
+    let real = PathBuf::from(
+        std::env::var_os("DOTNET_ROOT").expect("DOTNET_ROOT is set; run under nix develop"),
+    );
+    let versions = installed_versions(&real);
+    assert!(
+        versions.len() >= 2,
+        "the devshell's dotnet root must hold two SDKs: {versions:?}"
+    );
+    let high = versions[versions.len() - 1].1.clone();
+    let low = versions[versions.len() - 2].1.clone();
+    let scratch = tempfile::TempDir::new().unwrap();
+    let cases = order_cases();
+    // Each case has its own copy of the dotnet root, so a few run at once.
+    let results: Vec<_> = cases
+        .chunks(6)
+        .enumerate()
+        .flat_map(|(chunk, batch)| {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &case)| {
+                        let dir = scratch.path().join(format!("case{chunk}-{i}"));
+                        let (real, high, low) = (&real, &high, &low);
+                        scope.spawn(move || {
+                            let result = run_order_case(case, real, high, low, &dir);
+                            let _ = std::fs::remove_dir_all(&dir);
+                            (case, result)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut failures = Vec::new();
+    let mut committed = 0;
+    for (case, (ours, theirs)) in results {
+        println!("{case:?}: ours {ours:?}, the build {theirs:?}");
+        let verdict = match (&ours, &theirs) {
+            (Ok(ours), Built::Picked(picked)) if ours == picked => None,
+            (Ok(_), _) => Some("a resolution the build does not make"),
+            (
+                Err(SdkResolveError::NotFound | SdkResolveError::VersionNotSatisfied { .. }),
+                Built::Failed(_),
+            ) => None,
+            (Err(SdkResolveError::NotFound | SdkResolveError::VersionNotSatisfied { .. }), _) => {
+                Some("a failure the build does not have")
+            }
+            (Err(SdkResolveError::UnsupportedLayout { .. }), _) => None,
+        };
+        if !matches!(ours, Err(SdkResolveError::UnsupportedLayout { .. })) {
+            committed += 1;
+        }
+        if let Some(verdict) = verdict {
+            failures.push(format!(
+                "{case:?}: {verdict}: ours {ours:?}, the build {theirs:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(
+        committed >= cases.len() / 2,
         "the sweep committed only {committed} answers of {}",
         cases.len()
     );
