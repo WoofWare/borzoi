@@ -87,6 +87,14 @@ pub fn toolset_visual_studio_version(version_dir: &std::path::Path) -> Option<&'
     crate::evaluator::toolset_visual_studio_version(version_dir)
 }
 
+/// The `MSBuildAssemblyVersion` the walk seeds for the SDK in `version_dir`,
+/// or `None` where it seeds none. Exposed so
+/// `tests/toolset_visual_studio_version_diff.rs` can hold it to each installed
+/// SDK's MSBuild.
+pub fn toolset_assembly_version(version_dir: &std::path::Path) -> Option<&'static str> {
+    crate::evaluator::toolset_assembly_version(version_dir)
+}
+
 /// The feature band the workload locators take the host SDK `version` to be
 /// in (`SdkFeatureBand`), or `None` where they decline. Exposed so
 /// `tests/workload_locator_diff.rs` can hold it to the resolver's.

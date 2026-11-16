@@ -1,15 +1,16 @@
-//! The `VisualStudioVersion` the walk seeds for an SDK, held to what that
-//! SDK's MSBuild defines.
+//! The `VisualStudioVersion` and `MSBuildAssemblyVersion` the walk seeds for
+//! an SDK, held to what that SDK's MSBuild defines.
 //!
-//! The walk seeds the toolset's `VisualStudioVersion` from the host SDK's
-//! version (`toolset_visual_studio_version`), because MSBuild compiles it in
-//! and a read of it decides imports and writes on every SDK chain. This test
-//! asks `dotnet msbuild -getProperty:VisualStudioVersion` of every SDK in the
-//! devshell's corpus root (`BORZOI_DOTNET_ROOT_SDK11`), with none in the
-//! environment, and requires the seed to be exactly that value: a seed that
-//! differs is a wrong commit, and a missing one leaves every SDK chain read of
-//! the name declining. So adding an SDK to the devshell fails here until its
-//! value is probed and recorded.
+//! The walk seeds both from the host SDK's version (the evaluator's
+//! `toolset_product_version`), because MSBuild compiles them in. A read of
+//! `VisualStudioVersion` decides imports and writes on every SDK chain, and
+//! NuGet's restore targets branch on `MSBuildAssemblyVersion`. This test asks
+//! `dotnet msbuild -getProperty:` for each name of every SDK in the devshell's
+//! corpus root (`BORZOI_DOTNET_ROOT_SDK11`), with no `VisualStudioVersion` in
+//! the environment, and requires each seed to be exactly that value: a seed
+//! that differs is a wrong commit, and a missing one leaves every read of the
+//! name declining. So adding an SDK to the devshell fails here until its value
+//! is probed and recorded.
 
 mod common;
 
@@ -24,7 +25,7 @@ use borzoi_oracle_harness::BoundedCommand;
 const SDK11_ROOT_VAR: &str = "BORZOI_DOTNET_ROOT_SDK11";
 
 #[test]
-fn every_installed_sdk_seeds_its_msbuild_s_visual_studio_version() {
+fn every_installed_sdk_seeds_its_msbuild_s_product_version() {
     let root = std::env::var_os(SDK11_ROOT_VAR)
         .map(PathBuf::from)
         .unwrap_or_else(|| panic!("{SDK11_ROOT_VAR} is not set; run under nix develop"));
@@ -56,29 +57,41 @@ fn every_installed_sdk_seeds_its_msbuild_s_visual_studio_version() {
             r#"<Project><Target Name="Nothing" /></Project>"#,
         )
         .unwrap();
-        let mut cmd = Command::new(root.join("dotnet"));
-        cmd.current_dir(dir.path())
-            .env_clear()
-            .envs(&environment)
-            .args([
-                "msbuild",
-                "-nologo",
-                "-getProperty:VisualStudioVersion",
-                "p.proj",
-            ]);
-        let out = BoundedCommand::new(cmd)
-            .timeout(std::time::Duration::from_secs(600))
-            .run_ok(format_args!("dotnet msbuild under SDK {version}"));
-        let theirs = String::from_utf8(out.stdout).expect("UTF-8 output");
-        let theirs = theirs.trim();
-        assert!(
-            !theirs.is_empty(),
-            "SDK {version}'s MSBuild defines VisualStudioVersion"
-        );
-        assert_eq!(
-            test_support::toolset_visual_studio_version(&sdk),
-            Some(theirs),
-            "SDK {version}: the seed must be what its MSBuild defines"
-        );
+        let seeds = [
+            (
+                "VisualStudioVersion",
+                test_support::toolset_visual_studio_version(&sdk),
+            ),
+            (
+                "MSBuildAssemblyVersion",
+                test_support::toolset_assembly_version(&sdk),
+            ),
+        ];
+        for (property, ours) in seeds {
+            let mut cmd = Command::new(root.join("dotnet"));
+            cmd.current_dir(dir.path())
+                .env_clear()
+                .envs(&environment)
+                .args([
+                    "msbuild",
+                    "-nologo",
+                    &format!("-getProperty:{property}"),
+                    "p.proj",
+                ]);
+            let out = BoundedCommand::new(cmd)
+                .timeout(std::time::Duration::from_secs(600))
+                .run_ok(format_args!("dotnet msbuild under SDK {version}"));
+            let theirs = String::from_utf8(out.stdout).expect("UTF-8 output");
+            let theirs = theirs.trim();
+            assert!(
+                !theirs.is_empty(),
+                "SDK {version}'s MSBuild defines {property}"
+            );
+            assert_eq!(
+                ours,
+                Some(theirs),
+                "SDK {version}: the {property} seed must be what its MSBuild defines"
+            );
+        }
     }
 }

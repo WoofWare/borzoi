@@ -7,7 +7,7 @@
 //! like a missing call:
 //!
 //! - **Reserved** (`MSBuildToolsPath`, `MSBuildBinPath`, `MSBuildToolsVersion`,
-//!   `MSBuildRuntimeType`) — seeded *over* whatever the walk stored, and their
+//!   `MSBuildRuntimeType`, `MSBuildAssemblyVersion`) — seeded *over* whatever the walk stored, and their
 //!   provenance is scrubbed. Real MSBuild rejects a project write to these
 //!   outright, so any value or taint the walk accumulated describes something
 //!   no real evaluation ever sees.

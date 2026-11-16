@@ -3,7 +3,10 @@
 > **Status:** part (a) has landed: the path-derivable names are seeded
 > (`properties::well_known`, `this_file_seeds`), held to `dotnet msbuild` by
 > `fsproj_msbuild_diff.rs`'s `path_derivable_reserved_properties_match_msbuild`.
-> Parts (b) and (c) stand as recommended: not done, and permanently declined.
+> Part (b) stands as recommended (not done) for every name but two, which
+> gained a consumer: `VisualStudioVersion` and `MSBuildAssemblyVersion` are
+> seeded from a probed per-SDK table (see (b)). Part (c) is permanently
+> declined.
 > The measurement below
 > prices the work at **+4 call expressions and +30 conditions** on the SDK-chain
 > census, against populations of 398 and 2 758, with a sound ceiling of 54 and
@@ -167,6 +170,18 @@ of exactly the kind the crate exists to avoid, and the census says the whole
 group is worth single-digit declines. **Do not do these** until something other
 than the census asks for them — a real consumer reading the value, per the
 "check for a consumer before paying for a trust verdict" rule.
+
+**Two have a consumer, and are seeded.** `VisualStudioVersion` decides imports
+and writes on every SDK chain. `MSBuildAssemblyVersion` gates
+`_GetRestoreProjectStyle` in `NuGet.targets`, which the restore cone's executor
+must decide (`docs/nuget-dgspec-boundary-plan.md`, A₁.3b). Both are MSBuild's
+compiled-in product version (`17.0`, `18.0`), so one table keyed on the SDK's
+version directory serves both (`toolset_product_version` in `evaluator.rs`),
+and `tests/toolset_visual_studio_version_diff.rs` holds each to the MSBuild of
+every installed SDK. An SDK the table has not probed gets no seed.
+`MSBuildAssemblyVersion` is not the MSBuild assembly's version:
+`Microsoft.Build.dll` is `15.1.0.0` under SDK 10.0.401, where the property
+reads `18.0`. The other three stay unseeded.
 
 ### (c) Unknowable — and this is the interesting one
 

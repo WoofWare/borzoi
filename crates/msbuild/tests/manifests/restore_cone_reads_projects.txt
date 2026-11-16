@@ -69,7 +69,7 @@
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property IsAotCompatible	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property Language	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildAssemblyVersion	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildProjectDirectory	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildProjectFile	value agrees
@@ -250,7 +250,7 @@
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property IsAotCompatible	unset agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property Language	value agrees
-10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildAssemblyVersion	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildProjectDirectory	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildProjectFullPath	value agrees
@@ -446,7 +446,7 @@
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property IsAotCompatible	unset agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property Language	value agrees
-10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildAssemblyVersion	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildProjectDirectory	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildProjectFullPath	value agrees
@@ -650,7 +650,7 @@
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property IsAotCompatible	unset agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property Language	value agrees
-10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildAssemblyVersion	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildProjectDirectory	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildProjectFullPath	value agrees
@@ -846,7 +846,7 @@
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property IsAotCompatible	unset agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property Language	value agrees
-10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildAssemblyVersion	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildProjectDirectory	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildProjectFullPath	value agrees
@@ -1050,7 +1050,7 @@
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property IsAotCompatible	unset agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property Language	value agrees
-10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildAssemblyVersion	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildProjectDirectory	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildProjectFullPath	value agrees
