@@ -573,6 +573,41 @@ at least about 2.6 G, 40%, of a hover-first session on this project. The
 census reports the share by files too, and the upper quartiles, but the
 decision reads the median by bytes, since the walks' cost goes with size.
 
+**7a, as built.** The audit leaves D6 standing. Of `PrecedingTypes`'s
+reads, `get` (an earlier value's type) is the only one that needs an
+earlier file inferred. `earlier_type`, `case` and `record` are per item, and
+`declares_type`, `sealed_types` and `constructor_name_count` are of the
+whole prefix. Each of those six reads what an earlier file declared: its
+types, cases, records and constructor names. `FileFacts::build` computes
+all four from the file's declarations and the earlier files' declared
+facts, before the walk starts, and the walk leaves them as they are.
+`whole_prefix_facts_divergence` holds that. It folds each file's declared
+facts without walking it (`declared_named_file`), and compares every file's
+contribution, value verdicts aside, with `infer_project`'s. It runs over
+fixtures (the `let Red = 0` case, a case and a record naming an earlier
+file's type, a signatured pair), over the edit-script generator's projects,
+and in corpus-diff on every project the whole-project gate infers. Two
+planted bugs fail it: the declarations fold reading an empty table, and a
+declared fact that depends on the walk.
+
+The census (`inference_demand_closures`: the files declaring the earlier
+values a file resolves a use to, closed transitively) measured each file's
+share of its prefix, by bytes:
+
+| Corpus | Files | p25 | Median | p75 | p90 | Weighted by prefix |
+| --- | --- | --- | --- | --- | --- | --- |
+| The whole-project gate's 6 projects | 134 | 0.000 | 0.000 | 0.157 | 0.606 | 0.238 |
+| WoofWare.PawPrint2 | 239 | 0.000 | 0.442 | 0.596 | 0.758 | 0.429 |
+
+The last column is the share a hover on a file drawn at random pays,
+weighted by how much prefix it has. The median by bytes is under 0.5 on both,
+so the threshold is met. It is met narrowly on PawPrint2. And a project's
+entry file needs nearly its whole prefix: `Program.fs`, the file behind the
+`semanticTokens L` and `hover L` rows, needs 223 of its 239 earlier files,
+98% of their bytes. A hover there saves almost nothing under D6. On this
+project the saving is real for hovers on library files, and absent for the
+entry point.
+
 **Oracle (7b)**: for every file, the hover and completion answers from the
 closure's inference equal those from the whole prefix's inference, over the
 whole-project gate and over generated projects that collide constructor
