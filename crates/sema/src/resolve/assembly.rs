@@ -1697,8 +1697,9 @@ impl<'a> Resolver<'a> {
     /// written fully-qualified, resolved in that precedence order:
     ///
     /// 1. **explicit opens** — `open Demo; open type Calc` ≡ `open type Demo.Calc`;
-    /// 2. **enclosing namespace/module** nesting, innermost first — `open type
-    ///    Calc` in `namespace Demo` binds `Demo.Calc`;
+    /// 2. **the enclosing namespace and modules**, innermost first — `open type
+    ///    Calc` in `namespace Demo` binds `Demo.Calc`, but in `namespace
+    ///    Demo.Probe` it does not, since an ancestor namespace is not open;
     /// 3. **root / fully-qualified** — `open type Demo.Calc`, or a bare root type.
     ///
     /// An explicit `open` outranks the enclosing namespace, which outranks the
@@ -1739,13 +1740,15 @@ impl<'a> Resolver<'a> {
                     return Some(handle);
                 }
             }
-            // Tier 2 — enclosing namespace/module nesting, innermost first. The
-            // assembly lookup runs *before* the shadow check because every prefix
-            // is trivially "rooted at the current module" (the innermost prefix
-            // *is* it), which the type-shadow check reports — that only means
-            // *decline* when an assembly type actually sits at this path and a
-            // project entity shadows it; otherwise we keep walking outward.
-            for k in (1..=self.lexical.container_path.len()).rev() {
+            // Tier 2 — the enclosing namespace and modules, innermost first
+            // ([`Self::implicitly_open_container_lens`]: an ancestor namespace
+            // is not open). The assembly lookup runs *before* the shadow check
+            // because every prefix is trivially "rooted at the current module"
+            // (the innermost prefix *is* it), which the type-shadow check
+            // reports — that only means *decline* when an assembly type
+            // actually sits at this path and a project entity shadows it;
+            // otherwise we keep walking outward.
+            for k in self.implicitly_open_container_lens().rev() {
                 let mut full = self.lexical.container_path[..k].to_vec();
                 full.extend_from_slice(path);
                 if let Some(handle) = self.opened_assembly_type(&full) {

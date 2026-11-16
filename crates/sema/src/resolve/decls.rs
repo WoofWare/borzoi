@@ -496,7 +496,14 @@ impl<'a> Resolver<'a> {
                         // unresolvable target (an assembly module) records no
                         // mapping — the hidden marker above keeps it conservative.
                         if let Some(target) = target {
-                            self.index.module_aliases.insert(alias_path, target);
+                            let block_start = self.index.block_starts.last().copied().unwrap_or(0);
+                            self.index.module_aliases.insert(
+                                alias_path,
+                                super::indexes::ModuleAlias {
+                                    target,
+                                    block_start,
+                                },
+                            );
                         }
                     }
                     // The export-decl-list twin: one `ModuleAbbrev` decl whose

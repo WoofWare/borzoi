@@ -150,6 +150,15 @@ fn assert_matches_fcs(src: &str, expected: usize) {
 /// Returns `(agreed, fixture_uses)` so the sweep can surface pure under-resolution
 /// without failing on it.
 fn sweep_sound(src: &str) -> (usize, usize) {
+    sweep_sound_with(src, false)
+}
+
+/// [`sweep_sound`], and under `strict` every fixture resolution we make must
+/// also be one FCS reports: a span FCS leaves unresolved (an FS0039 name, or
+/// everything under it) commits nothing. The lenient form lets such a span
+/// through, since FCS reports no intermediate segment of a path whose tail
+/// it rejects (`Demo.Calc.Nope`).
+fn sweep_sound_with(src: &str, strict: bool) -> (usize, usize) {
     let fixture = ensure_assembly_fixture_built();
     let bytes = std::fs::read(fixture).expect("read fixture dll");
     let view = Ecma335Assembly::parse(&bytes).expect("parse fixture dll");
@@ -201,7 +210,8 @@ fn sweep_sound(src: &str) -> (usize, usize) {
     }
 
     // ours → FCS: a fixture resolution we made that FCS resolves *elsewhere* (a
-    // project entity, no covering fixture use) is a wrong target.
+    // project entity, no covering fixture use) is a wrong target, and so,
+    // under `strict`, is one FCS leaves unresolved.
     for (range, res) in rf.resolutions() {
         if !matches!(res, Resolution::Entity(_) | Resolution::Member { .. }) {
             continue;
@@ -221,9 +231,9 @@ fn sweep_sound(src: &str) -> (usize, usize) {
             }
         }
         assert!(
-            !any_covering || any_fixture,
+            any_fixture || (!any_covering && !strict),
             "{src:?}: we resolved {start}..{end} into the fixture ({:?}), but FCS resolves \
-             that span elsewhere (no covering fixture use) — a wrong target",
+             that span elsewhere or not at all (no covering fixture use) — a wrong target",
             our_assembly_full(&env, *res),
         );
     }
@@ -909,4 +919,28 @@ fn bare_constructor_fallback_is_sound_under_every_binding_form() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// An ancestor of the enclosing namespace is not open (FS0039): from inside
+/// `Demo.Sub` or `Demo.Probe`, neither a name nor an `open type` target
+/// reaches `Demo`'s types, whose statics FCS then leaves unresolved. Graded
+/// strictly ([`sweep_sound_with`]), since every wrong commit here is at a
+/// span FCS rejects; the `namespace Demo` controls must commit.
+#[test]
+fn an_ancestor_namespace_is_not_open_to_assembly_lookups() {
+    for src in [
+        "namespace Demo.Sub\n\nmodule M =\n    let x = Gizmo.Stat()\n",
+        "namespace Demo.Probe\n\nmodule M =\n    open type Calc\n    let x = Zero()\n    let y = Answer\n",
+        "namespace Demo.Probe\n\nmodule M =\n    open type Gizmo\n    let x = Stat()\n",
+        "namespace Demo.Probe\n\nmodule M =\n    open type Widget\n    let x = StaticCount\n",
+    ] {
+        sweep_sound_with(src, true);
+    }
+    for src in [
+        "namespace Demo\n\nmodule M =\n    open type Gizmo\n    let x = Stat()\n",
+        "namespace Demo\n\nmodule M =\n    open type Widget\n    let x = StaticCount\n",
+    ] {
+        let (agreed, _) = sweep_sound_with(src, true);
+        assert!(agreed > 0, "{src:?} commits nothing");
+    }
 }

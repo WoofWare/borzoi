@@ -145,8 +145,7 @@ impl Resolver<'_> {
     /// path, each built afresh: the written ones (the enclosing containers
     /// from the namespace depth in, and the root), then the opened ones.
     fn reference_head_contested(&self, head: &str, residual: &str) -> bool {
-        let relative =
-            (self.lexical.namespace_depth.max(1)..=self.lexical.container_path.len()).rev();
+        let relative = self.implicitly_open_container_lens().rev();
         let written = relative
             .chain(std::iter::once(0))
             .map(|k| (self.lexical.container_path[..k].to_vec(), false));
@@ -225,8 +224,7 @@ impl Resolver<'_> {
                 full.extend_from_slice(written);
                 out.push((full, true));
             }
-            for k in (self.lexical.namespace_depth.max(1)..=self.lexical.container_path.len()).rev()
-            {
+            for k in self.implicitly_open_container_lens().rev() {
                 let mut full = self.lexical.container_path[..k].to_vec();
                 full.extend_from_slice(written);
                 out.push((full, k == self.lexical.namespace_depth));
@@ -252,7 +250,8 @@ impl Resolver<'_> {
             "open_interpretations({written:?}, rooted {rooted}) under {:?}",
             &self.lexical.container_path[..]
         );
-        let tier_2 = (self.lexical.namespace_depth.max(1)..=self.lexical.container_path.len())
+        let tier_2 = self
+            .implicitly_open_container_lens()
             .map(|k| [&self.lexical.container_path[..k], written].concat())
             .collect::<Vec<_>>();
         let enclosing_assembly_module = fast.iter().any(
@@ -327,7 +326,7 @@ impl Resolver<'_> {
                     return Some(full);
                 }
             }
-            for k in (1..=self.lexical.container_path.len()).rev() {
+            for k in self.implicitly_open_container_lens().rev() {
                 let mut full = self.lexical.container_path[..k].to_vec();
                 full.extend_from_slice(written);
                 if self.is_project_module_path(&full) {
@@ -400,7 +399,7 @@ impl Resolver<'_> {
                     return Some(found);
                 }
             }
-            for k in (1..=self.lexical.container_path.len()).rev() {
+            for k in self.implicitly_open_container_lens().rev() {
                 let mut full = self.lexical.container_path[..k].to_vec();
                 full.extend_from_slice(written);
                 if let Some(found) = hit(full, CaseTier::Namespace) {
