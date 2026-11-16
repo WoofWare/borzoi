@@ -121,6 +121,38 @@
 ///     The names the loaded MSBuild reserves, read by reflection
 ///     (`respondReservedNames`).
 ///
+///   {"op":"bench","project":s,"globals":{..}?,"mode":m,"reps":n,"scratch":dir?}
+///     -> {"ok":b,"errors":[..],"runs":[{"instructions":n|null,"allocatedBytes":n}, ..],
+///         "processInstructions":n|null,"msbuildBinPath":s,"compile":[fullPath, ..]}
+///     Not a differential: what MSBuild costs, for `crates/lsp/examples/eval_counts.rs`
+///     to set beside our evaluation's cost. Runs `mode` `reps` times in this
+///     process and reports each run in order: the instructions the whole
+///     process retired over it (`proc_pid_rusage`, null off macOS) and the
+///     managed bytes it allocated. The modes:
+///       - "fresh": evaluate the project file in a new `ProjectCollection`.
+///       - "shared": evaluate it in one `ProjectCollection` kept for the
+///         process's life, across runs and requests, so MSBuild reuses
+///         whatever that collection caches, as a resident host does.
+///       - "designTime": what Ionide.ProjInfo (FsAutoComplete's loader) does
+///         to load the project: two evaluations and a design-time build
+///         (`projInfoDesignTimeBuild`), its intermediate output sent to
+///         `scratch`, which this mode needs.
+///     `ok` is false, with the build's errors, at the first run that fails.
+///     `processInstructions` is everything the process has retired by the end,
+///     .NET start-up and JIT included. `msbuildBinPath` and `compile` are the
+///     last measured run's evaluation (the design-time build's before its
+///     targets run; null and empty when no run succeeded), so the caller can
+///     check MSBuild evaluated the project it evaluated, on the same toolset.
+///
+///   {"op":"idle","ms":n} -> {"instructions":n|null}
+///     Sleeps `ms` milliseconds and reports the instructions the process
+///     retired meanwhile: the work of its background threads. .NET's tiered
+///     JIT recompiles hot code on one for seconds after a burst of new work,
+///     and how soon that lands depends on what else the machine is doing, so
+///     `bench` runs measured before the process goes quiet count that work and
+///     run code the JIT has not yet optimised. A caller wanting MSBuild's
+///     steady state waits on this between batches.
+///
 /// The process takes one optional argument pair, `--msbuild-sdk <dir>`, which
 /// pins it to the MSBuild of the SDK installed at `<dir>` instead of the one
 /// `dotnet` resolves from the working directory (`registerMSBuild`).
@@ -1130,6 +1162,267 @@ let private respondRunTargets (root: JsonElement) : string =
     | Some answer -> JsonSerializer.Serialize answer
     | None -> JsonSerializer.Serialize {| ok = false |}
 
+/// `proc_pid_rusage`, macOS's per-process resource counters, the same call
+/// `crates/lsp/examples/eval_counts.rs` reads for our side, so the two
+/// processes' instruction counts are one kernel counter read the same way.
+[<Runtime.InteropServices.DllImport("/usr/lib/libSystem.B.dylib")>]
+extern int private proc_pid_rusage(int pid, int flavor, uint64[] buffer)
+
+/// Instructions this process has retired so far (`ri_instructions` of
+/// `rusage_info_v4`, kernel mode included), or `None` off macOS. Counts every
+/// thread, so the JIT's, the GC's and tiered recompilation's work is in it:
+/// what a resident MSBuild host pays, wherever in the process it pays it.
+let private instructionsRetired () : uint64 option =
+    if OperatingSystem.IsMacOS() then
+        // `rusage_info_v4` is a 16-byte UUID followed by `u64`s; 64 words is
+        // larger than its 37.
+        let buffer = Array.zeroCreate<uint64> 64
+
+        if proc_pid_rusage (Environment.ProcessId, 4, buffer) = 0 then
+            Some buffer[2 + 29]
+        else
+            None
+    else
+        None
+
+/// A logger that keeps only error messages: the cheapest way to say why a
+/// build failed, so the benchmark measures the build rather than its logging.
+type private ErrorLogger() =
+    let errors = ResizeArray<string>()
+    member _.Errors = List.ofSeq errors
+
+    interface Microsoft.Build.Framework.ILogger with
+        member val Verbosity = Microsoft.Build.Framework.LoggerVerbosity.Quiet with get, set
+        member val Parameters: string = null with get, set
+        member _.Initialize(source: Microsoft.Build.Framework.IEventSource) = source.ErrorRaised.Add(fun e -> errors.Add e.Message)
+        member _.Shutdown() = ()
+
+/// The global properties Ionide.ProjInfo (FsAutoComplete's project loader)
+/// sets for a design-time build (`ProjectLoader.getGlobalProps`), on top of the
+/// request's globals, with `tfm` as `TargetFramework` when given.
+let private projInfoGlobals
+    (globals: Collections.Generic.IDictionary<string, string>)
+    (scratch: string)
+    (tfm: string option)
+    =
+    let table = Collections.Generic.Dictionary<string, string>(globals)
+
+    for name, value in
+        [ "ProvideCommandLineArgs", "true"
+          "DesignTimeBuild", "true"
+          "SkipCompilerExecution", "true"
+          "GeneratePackageOnBuild", "false"
+          "Configuration", "Debug"
+          "DefineExplicitDefaults", "true"
+          "BuildProjectReferences", "false"
+          "UseCommonOutputDirectory", "false"
+          "NonExistentFile", Path.Combine("__NonExistentSubDir__", "__NonExistentFile__")
+          "DotnetProjInfo", "true"
+          // Not ProjInfo's: the targets below write into the intermediate
+          // directory (the compile-inputs cache, the generated AssemblyInfo)
+          // and create the output directory, which for a benchmark must not be
+          // the project's own `obj/` and `bin/`. `BaseIntermediateOutputPath`,
+          // and so where the assets file is read from, is left alone.
+          "IntermediateOutputPath", Path.Combine(scratch, "obj") + string Path.DirectorySeparatorChar
+          "OutDir", Path.Combine(scratch, "bin") + string Path.DirectorySeparatorChar ] do
+        table[name] <- value
+
+    tfm |> Option.iter (fun tfm -> table["TargetFramework"] <- tfm)
+    table :> Collections.Generic.IDictionary<string, string>
+
+/// Ionide.ProjInfo's design-time targets for an SDK-style project
+/// (`ProjectLoader.designTimeBuildTargets false`).
+let private projInfoTargets =
+    [| "ResolveAssemblyReferencesDesignTime"
+       "ResolveProjectReferencesDesignTime"
+       "ResolvePackageDependenciesDesignTime"
+       "FindReferenceAssembliesForReferences"
+       "_GenerateCompileDependencyCache"
+       "_ComputeNonExistentFileProperty"
+       "BeforeBuild"
+       "BeforeCompile"
+       "CoreCompile" |]
+
+/// What a caller compares with its own evaluation of the project, to tell the
+/// two evaluated the same project on the same toolset: the MSBuild that ran
+/// and the `Compile` items, in order.
+let private evaluationSummary (instance: ProjectInstance) : string * string list =
+    instance.GetPropertyValue "MSBuildBinPath",
+    instance.GetItems "Compile" |> Seq.map (fun item -> item.GetMetadataValue "FullPath") |> List.ofSeq
+
+/// The collection the `bench` op's "shared" mode evaluates in, kept for the
+/// process's life, so its caches outlast any one request as a resident
+/// host's do. Typed `obj` because a module-level value is initialised at
+/// start-up, and naming a `Microsoft.Build` type there loads the pinned
+/// reference assembly before `registerMSBuild` redirects the loader.
+let mutable private benchShared: obj = null
+
+let private benchSharedCollection () : ProjectCollection =
+    match benchShared with
+    | :? ProjectCollection as collection -> collection
+    | _ ->
+        let collection = new ProjectCollection()
+        benchShared <- collection
+        collection
+
+/// One design-time build as Ionide.ProjInfo's `ProjectLoader.loadProject`
+/// performs it for an SDK-style project: in a fresh collection, evaluate once
+/// to read the target framework (`TargetFramework`, else the first of
+/// `TargetFrameworks`), evaluate again with it as a global (unless that
+/// leaves the globals unchanged), and build
+/// `projInfoTargets` on that evaluation. Returns the evaluation the build ran
+/// on, as `evaluationSummary` reads it before the targets change it, or the
+/// build's errors when it fails. ProjInfo's loggers (a string writer and its
+/// log provider) are left out, so this is cheaper than what ProjInfo runs,
+/// never dearer.
+let private projInfoDesignTimeBuild
+    (project: string)
+    (globals: Collections.Generic.IDictionary<string, string>)
+    (scratch: string)
+    : Result<string * string list, string list> =
+    use collection = new ProjectCollection()
+    let settings = ProjectLoadSettings.IgnoreMissingImports ||| ProjectLoadSettings.IgnoreInvalidImports
+
+    let load properties =
+        Project(project, properties, null, collection, settings)
+
+    let readingGlobals = projInfoGlobals globals scratch None
+    let readingProject = load readingGlobals
+    let reading = readingProject.CreateProjectInstance()
+
+    let tfm =
+        match reading.GetPropertyValue "TargetFramework" with
+        | tfm when not (String.IsNullOrWhiteSpace tfm) -> Some tfm
+        | _ ->
+            match reading.GetPropertyValue "TargetFrameworks" with
+            | null -> None
+            | tfms -> tfms.Split ';' |> Array.tryHead
+
+    // ProjInfo looks the second load up in the collection first
+    // (`findOrCreateMatchingProject`), and MSBuild refuses a second project of
+    // the same path and globals, so a framework the request's globals already
+    // chose reuses the first load.
+    let buildGlobals = projInfoGlobals globals scratch tfm
+
+    let sameGlobals =
+        readingGlobals.Count = buildGlobals.Count
+        && readingGlobals
+           |> Seq.forall (fun entry ->
+               match buildGlobals.TryGetValue entry.Key with
+               | true, value -> value = entry.Value
+               | _ -> false)
+
+    let buildProject = if sameGlobals then readingProject else load buildGlobals
+    let instance = buildProject.CreateProjectInstance()
+    let evaluated = evaluationSummary instance
+    let logger = ErrorLogger()
+
+    if instance.Build(projInfoTargets, [ logger :> Microsoft.Build.Framework.ILogger ]) then
+        Ok evaluated
+    else
+        Error logger.Errors
+
+/// The `bench` op: run one way of getting a project's evaluation `reps` times
+/// in this process and report what each run cost, in order, so the caller can
+/// tell the first (JIT-cold) run from the warm ones. See the op's entry in the
+/// header for the modes.
+let private bench
+    (project: string)
+    (globals: Collections.Generic.IDictionary<string, string>)
+    (mode: string)
+    (reps: int)
+    (scratch: string)
+    =
+    let evaluate (collection: ProjectCollection) =
+        ProjectInstance(project, globals, null, collection)
+
+    // Each run returns how to summarise the evaluation it measured, which the
+    // loop calls outside the measured window. The design-time build must
+    // summarise inside it, before its targets add to the items.
+    let body: unit -> Result<unit -> string * string list, string list> =
+        match mode with
+        | "fresh" ->
+            fun () ->
+                use collection = new ProjectCollection()
+                let instance = evaluate collection
+                Ok(fun () -> evaluationSummary instance)
+        | "shared" ->
+            fun () ->
+                let instance = evaluate (benchSharedCollection ())
+                Ok(fun () -> evaluationSummary instance)
+        | "designTime" ->
+            fun () -> projInfoDesignTimeBuild project globals scratch |> Result.map (fun summary () -> summary)
+        | other -> failwith $"unknown bench mode: %s{other}"
+
+    let runs = ResizeArray()
+    let mutable failure = None
+    let mutable summary = None
+
+    for _ in 1..reps do
+        if failure.IsNone then
+            let bytes0 = GC.GetTotalAllocatedBytes true
+            let instructions0 = instructionsRetired ()
+            let result = body ()
+            let instructions1 = instructionsRetired ()
+            let bytes1 = GC.GetTotalAllocatedBytes true
+
+            match result with
+            | Error errors -> failure <- Some errors
+            | Ok summarise ->
+                summary <- Some(summarise ())
+
+                runs.Add
+                    {| instructions =
+                        match instructions0, instructions1 with
+                        | Some i0, Some i1 -> Nullable(i1 - i0)
+                        | _ -> Nullable()
+                       allocatedBytes = bytes1 - bytes0 |}
+
+    let msbuildBinPath, compile =
+        match summary with
+        | Some(binPath, compile) -> binPath, compile
+        | None -> null, []
+
+    {| ok = failure.IsNone
+       errors = defaultArg failure []
+       runs = List.ofSeq runs
+       processInstructions = Option.toNullable (instructionsRetired ())
+       msbuildBinPath = msbuildBinPath
+       compile = compile |}
+
+/// The `idle` op: sleep for `ms` milliseconds and report the instructions the
+/// process retired meanwhile, which is the work its background threads did.
+let private respondIdle (root: JsonElement) : string =
+    let before = instructionsRetired ()
+    Threading.Thread.Sleep(root.GetProperty("ms").GetInt32())
+    let after = instructionsRetired ()
+
+    JsonSerializer.Serialize
+        {| instructions =
+            match before, after with
+            | Some i0, Some i1 -> Nullable(i1 - i0)
+            | _ -> Nullable() |}
+
+let private respondBench (root: JsonElement) : string =
+    let globals =
+        match readGlobals root with
+        | null -> Collections.Generic.Dictionary<string, string>() :> Collections.Generic.IDictionary<string, string>
+        | globals -> globals
+
+    let scratch =
+        match root.TryGetProperty "scratch" with
+        | true, s -> s.GetString()
+        | _ -> null
+
+    let mode = root.GetProperty("mode").GetString()
+
+    if mode = "designTime" && isNull scratch then
+        JsonSerializer.Serialize {| error = "bench's designTime mode needs a scratch directory" |}
+    else
+        JsonSerializer.Serialize(
+            bench (root.GetProperty("project").GetString()) globals mode (root.GetProperty("reps").GetInt32()) scratch
+        )
+
 /// Register the MSBuild the oracle runs. With no arguments, the SDK `dotnet`
 /// resolves from the working directory (`RegisterDefaults`). With
 /// `--msbuild-sdk <dir>`, the SDK installed at `<dir>` (`<root>/sdk/<version>`),
@@ -1205,6 +1498,8 @@ let main argv =
                     | "runTargets" -> respondRunTargets root
                     | "globalName" -> respondGlobalName root
                     | "reservedNames" -> respondReservedNames ()
+                    | "bench" -> respondBench root
+                    | "idle" -> respondIdle root
                     | other -> JsonSerializer.Serialize {| error = $"unknown op: %s{other}" |}
                 with ex ->
                     JsonSerializer.Serialize {| error = ex.Message |}
