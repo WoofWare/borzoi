@@ -87,6 +87,7 @@ mod labels;
 mod lexical;
 mod lookup;
 mod model;
+mod open_name_screen;
 mod open_scope;
 mod output;
 mod path_set;

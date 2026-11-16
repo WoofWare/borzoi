@@ -432,6 +432,16 @@ requests keep the full prefix.
 **Expected**: the cold `semanticTokens L` row on WoofWare.PawPrint2 falls by
 about 56% (7.04 G → about 3.1 G).
 
+**Not built.** The target fold leaves no full walks of the prefix behind, and
+inference requests need them. A hover after semantic tokens on the same file
+then pays the whole prefix fold that tokens used to leave cached: on
+WoofWare.PawPrint2, tokens-then-hover goes from about 7 G to about 10 G. An
+agent's session is mostly hover, definition and references, and a session
+that opens with tokens and goes on to hover is the case to optimise, not
+tokens alone. The sema side (Stage 4) stays, with its oracle. It is what D6's
+closure would build on, and it is what a request reads if inference stops
+needing the whole prefix.
+
 ### Stage 6a: the implicit auto-opens' seed, once per env
 
 **Dependencies**: none. **Implements**: D5's first half.
@@ -476,9 +486,38 @@ barriers and same-named blocks. Every gate is unchanged.
 **Expected**: up to −1.13 G on the cold fold, and the fold stops being
 quadratic in the project.
 
+**Measured first.** The 1.13 G is the whole block-start phase, and the
+project half is not most of it. Spans around its parts, on the cold
+`semanticTokens L` fold of WoofWare.PawPrint2 (205 files folded, 1.07 G in
+the phase):
+
+| Part of the block's implicit open of its own namespace | Cost |
+| --- | --- |
+| The signature screen of the assembly half's entries | ~512 M |
+| Writing the assembly half's entries | ~93 M |
+| Building the assembly half (`assembly_fold_group`) | ~44 M |
+| The project half (`open_project_namespace_values`) | ~415 M |
+| The root re-entry and the open's unmodelled contributions | ~0 |
+
+The project's references declare its namespace too, so the assembly half
+folds 416 names into every block. The project has five `.fsi` files, and the
+screen asked each signature screen about each name in turn: the opened path
+cloned into a fresh `Vec<String>`, hashed against each screen's exports.
+
+**6b-i, as built.** `ProjectItems::open_name_screen` takes what depends on
+the opened path alone once per open: per signature screen, whether it
+withholds every name, whether it withholds names in its name set, its exempt
+names and its case names under the path. Each name then costs a few lookups
+per screen. The per-name rule (`sig_screened_open_name`) is the reference: a
+property test holds the two equal over generated screens, ranks and paths,
+and a debug build checks every name of every open against it. On the row
+above, the cold fold falls by 0.47 G (6.28 G → 5.81 G) and block start from
+1.07 G to 0.62 G. What remains for the rest of 6b is the project half and the
+entries' writes.
+
 ### Stage 7 (gated): the inference demand census, then the closure
 
-**Dependencies**: Stage 5. **Implements**: D6.
+**Dependencies**: Stage 4. **Implements**: D6.
 
 7a first audits every read `infer_file` makes of `PrecedingTypes`. It
 classifies each as per item or whole prefix, and for each whole-prefix read
