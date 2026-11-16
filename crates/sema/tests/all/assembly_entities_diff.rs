@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use borzoi_assembly::{Ecma335Assembly, ExistenceIndex, PickleLayer, PickledEntityKind};
+use borzoi_assembly::{Ecma335Assembly, EcmaView, ExistenceIndex, PickleLayer, PickledEntityKind};
 
 use crate::common::assembly_entities::{
     AssemblyEntities, FcsAccess, invoke_fcs_dump_assembly_entities,
@@ -145,20 +145,27 @@ fn excess(ours: &[String], theirs: &[String], limit: usize) -> Vec<String> {
         .collect()
 }
 
-/// Every disagreement between the index of each of `dlls` and the oracle,
-/// and how many rows of each layer were compared.
-fn compare(dlls: &[PathBuf]) -> (Vec<String>, usize, usize) {
+/// Every disagreement between the index of each of `graded` and the oracle,
+/// and how many rows of each layer were compared. `support` is referenced
+/// too, ungraded: the assemblies whose types `graded` reads (an attribute's
+/// type from another package), without which FCS reads less of it.
+fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usize) {
     let anchor = temp_fs_file(
         "assembly_entities_diff_anchor",
         "module Anchor\nlet x = 1\n",
     );
-    let refs: Vec<&Path> = dlls.iter().map(PathBuf::as_path).collect();
+    let refs: Vec<&Path> = graded.iter().chain(support).map(PathBuf::as_path).collect();
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let graded_files: Vec<PathBuf> = graded.iter().map(|p| canonical(p)).collect();
     let report = invoke_fcs_dump_assembly_entities(&anchor, &refs);
     let _ = std::fs::remove_file(&anchor);
     let mut failures = Vec::new();
     let (mut il_rows, mut pickle_rows) = (0, 0);
     for entities in &report.assemblies {
         let file = &entities.file;
+        if !graded_files.contains(&canonical(Path::new(file))) {
+            continue;
+        }
         let bytes = std::fs::read(file).expect("read the assembly");
         let index = Ecma335Assembly::parse(&bytes)
             .and_then(|a| a.existence_index())
@@ -241,7 +248,7 @@ fn the_existence_index_is_what_both_readers_report() {
     ] {
         dlls.push(fixture.to_path_buf());
     }
-    let (failures, il_rows, pickle_rows) = compare(&dlls);
+    let (failures, il_rows, pickle_rows) = compare(&dlls, &[]);
     eprintln!(
         "{} assemblies: {il_rows} TypeDef rows and {pickle_rows} pickled entities compared",
         dlls.len()
@@ -260,20 +267,29 @@ fn the_existence_index_is_what_both_readers_report() {
 }
 
 /// Every `.dll` under `BORZOI_EXISTENCE_SWEEP_ROOT` (a NuGet cache, say),
-/// each read on its own.
+/// each graded on its own, an F# one with the cache's copy of each assembly
+/// it references (outside the reference pack) beside it. A root that cannot
+/// be read, or fewer assemblies than `BORZOI_EXISTENCE_SWEEP_MIN` (default 1)
+/// compared, fails: a sweep that reads nothing must not pass.
 #[test]
 #[ignore = "walks a package cache named by BORZOI_EXISTENCE_SWEEP_ROOT"]
 fn the_existence_index_is_what_both_readers_report_over_a_package_cache() {
-    let root = std::env::var_os("BORZOI_EXISTENCE_SWEEP_ROOT")
-        .expect("BORZOI_EXISTENCE_SWEEP_ROOT names the directory to sweep");
+    let root = PathBuf::from(
+        std::env::var_os("BORZOI_EXISTENCE_SWEEP_ROOT")
+            .expect("BORZOI_EXISTENCE_SWEEP_ROOT names the directory to sweep"),
+    );
+    let min: usize = std::env::var("BORZOI_EXISTENCE_SWEEP_MIN")
+        .map(|v| v.parse().expect("BORZOI_EXISTENCE_SWEEP_MIN is a count"))
+        .unwrap_or(1);
     let mut dlls = Vec::new();
-    let mut stack = vec![PathBuf::from(root)];
+    let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|e| panic!("cannot read an entry of {}: {e}", dir.display()))
+                .path();
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|x| x == "dll") {
@@ -282,20 +298,65 @@ fn the_existence_index_is_what_both_readers_report_over_a_package_cache() {
         }
     }
     dlls.sort();
-    let mut failures = Vec::new();
-    let (mut il_rows, mut pickle_rows) = (0, 0);
+    // The cache's copy of each simple name, the last in path order (the
+    // highest version, as near as a path says), and the reference pack's
+    // names, which the oracle's script references supply.
+    let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
     for dll in &dlls {
-        if Ecma335Assembly::parse(&std::fs::read(dll).expect("read")).is_err() {
-            continue;
+        if let Some(stem) = dll.file_stem().and_then(|s| s.to_str()) {
+            by_name.insert(stem.to_ascii_lowercase(), dll.clone());
         }
-        let (f, i, p) = compare(std::slice::from_ref(dll));
+    }
+    let framework: Vec<String> = std::fs::read_dir(
+        ensure_system_runtime_dll()
+            .parent()
+            .expect("the reference pack's directory"),
+    )
+    .expect("list the reference pack")
+    .filter_map(|e| {
+        let path = e.expect("a directory entry").path();
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_ascii_lowercase)
+    })
+    .chain(["fsharp.core".to_string()])
+    .collect();
+    let mut failures = Vec::new();
+    let (mut compared, mut il_rows, mut pickle_rows) = (0, 0, 0);
+    for dll in &dlls {
+        let bytes = std::fs::read(dll).expect("read");
+        let Ok(assembly) = Ecma335Assembly::parse(&bytes) else {
+            continue;
+        };
+        let fsharp = !matches!(
+            assembly.existence_index().map(|i| i.pickle),
+            Ok(PickleLayer::NotFSharp)
+        );
+        let support: Vec<PathBuf> = if fsharp {
+            assembly
+                .assembly_refs()
+                .iter()
+                .map(|r| r.name.to_ascii_lowercase())
+                .filter(|name| !framework.contains(name))
+                .filter_map(|name| by_name.get(&name).cloned())
+                .filter(|p| p != dll)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let (f, i, p) = compare(std::slice::from_ref(dll), &support);
         failures.extend(f);
+        compared += 1;
         il_rows += i;
         pickle_rows += p;
     }
     eprintln!(
-        "{} assemblies: {il_rows} TypeDef rows and {pickle_rows} pickled entities compared",
-        dlls.len()
+        "{compared} assemblies: {il_rows} TypeDef rows and {pickle_rows} pickled entities compared"
+    );
+    assert!(
+        compared >= min,
+        "only {compared} assemblies compared under {}, fewer than {min}",
+        root.display()
     );
     assert!(
         failures.is_empty(),
