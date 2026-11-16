@@ -190,13 +190,13 @@ fn buffer_diagnostics_observed(
             diags
         }
         Err(ParseError::Xml(e)) => vec![lsp_error_at_origin(format!("malformed XML: {e}"))],
-        // `parse_fsproj_with_imports` rejects only three other inputs:
+        // `parse_fsproj_with_imports` rejects only four other inputs:
         // a relative `project_path` (we always pass a rooted one from
-        // the LSP URL), a reserved-name in `extra_properties`, and
-        // case-insensitive duplicate `extra_properties` keys (we pass
-        // an empty map). None of these are reachable from this entry
-        // point. We still surface them rather than panic so a future
-        // call-site change doesn't silently swallow a real bug.
+        // the LSP URL), on Unix a `project_path` holding a `\` (a file
+        // name the URL may well carry: MSBuild would load another file,
+        // or none), a reserved or invalid name in `extra_properties`,
+        // and case-insensitive duplicate `extra_properties` keys (we pass
+        // an empty map). Each is surfaced as an error at the document head.
         Err(other) => vec![lsp_error_at_origin(format!("fsproj parse failed: {other}"))],
     }
 }

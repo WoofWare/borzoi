@@ -48,6 +48,7 @@ mod common;
 
 use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::{DiagnosticKind, glob_resolver};
+use common::path_spelling::{self, ProjectSpelling};
 use common::{Oracle, SplitMix64};
 use std::collections::HashMap;
 
@@ -254,6 +255,8 @@ struct Fixture {
     exclude: Option<String>,
     /// Each item's `Condition`, written as it stands (whitespace included).
     condition: Option<String>,
+    /// How both sides are handed the project's path.
+    spelling: ProjectSpelling,
 }
 
 impl Fixture {
@@ -268,6 +271,7 @@ impl Fixture {
             includes,
             exclude,
             condition: None,
+            spelling: ProjectSpelling::AsIs,
         }
     }
 
@@ -294,26 +298,6 @@ impl Fixture {
         s.push_str("  </ItemGroup>\n</Project>\n");
         s
     }
-}
-
-/// Lexical normalisation only: several generated identities name files that do
-/// not exist (an escape decoded at the wrong moment is exactly such a name), and
-/// `canonicalize` would erase that difference by failing on both sides.
-/// MSBuild's `FullPath` resolves `.` and `..` lexically (`sub/../ab.fs` is
-/// reported as `ab.fs`), while our identity keeps the spelling it was joined
-/// from; both name the same file, so both sides are resolved the same way.
-fn norm(path: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for seg in path.split(['/', '\\']) {
-        match seg {
-            "." => {}
-            ".." if out.len() > 1 => {
-                out.pop();
-            }
-            _ => out.push(seg),
-        }
-    }
-    out.join("/")
 }
 
 /// What one seam made of a fixture.
@@ -358,6 +342,7 @@ fn check_with(oracle: &mut Oracle, fixture: &Fixture, with_resolver: bool) -> Ou
     let proj = root.join("Demo.fsproj");
     let xml = fixture.xml();
     std::fs::write(&proj, &xml).expect("write project");
+    let proj = path_spelling::respell(&proj, fixture.spelling);
 
     let resolver: &borzoi_msbuild::GlobResolver<'_> = &glob_resolver::resolve;
     let parsed = parse_fsproj_with_imports(
@@ -385,21 +370,22 @@ fn check_with(oracle: &mut Oracle, fixture: &Fixture, with_resolver: bool) -> Ou
         };
     }
 
+    // MSBuild's `FullPath` is the item's lexical full path (`sub/../ab.fs` is
+    // `ab.fs`, `sub//c.fs` is `sub/c.fs`), and so is the include we commit.
     let ours: Vec<String> = parsed
         .items
         .iter()
-        .map(|i| norm(&i.include.to_string_lossy()))
+        .map(|i| i.include.to_string_lossy().into_owned())
         .collect();
     let theirs: Vec<String> = oracle
         .items(&xml, &proj, "Compile", &[])
-        .expect("MSBuild evaluates these documents")
-        .iter()
-        .map(|p| norm(p))
-        .collect();
+        .expect("MSBuild evaluates these documents");
 
     assert_eq!(
-        ours, theirs,
-        "certain-implies-exact violated.\nproject:\n{xml}\nours:   {ours:#?}\ntheirs: {theirs:#?}"
+        ours,
+        theirs,
+        "certain-implies-exact violated at {}.\nproject:\n{xml}\nours:   {ours:#?}\ntheirs: {theirs:#?}",
+        proj.display()
     );
     Outcome::Committed
 }
@@ -419,6 +405,7 @@ fn hand_picked_corners() {
         includes: vec![include.to_string()],
         exclude: exclude.map(str::to_string),
         condition: None,
+        spelling: ProjectSpelling::AsIs,
     };
     let cases = [
         // An escaped `;` is data: one item named `a;b.fs`, not two.
@@ -475,6 +462,10 @@ fn hand_picked_corners() {
             Some("$(MSBuildProjectDirectory)/ab.fs"),
         ),
         corner("plain.fs", "sub/../ab.fs;./ab.fs", Some("ab.fs")),
+        // An item's full path collapses `.`, `..` and runs of `/` lexically,
+        // and keeps a trailing separator.
+        corner("plain.fs", "sub//c.fs;./sub/./c.fs;sub/Deep/../c.fs", None),
+        corner("plain.fs", "sub/;sub//;sub/.;sub/..;sub/x/../", None),
         // A filename part of `*.*` is every file, extensionless ones too,
         // decoded from escapes as well as live…
         corner("plain.fs", "*", Some("%2a.%2a")),
@@ -561,15 +552,19 @@ fn hand_picked_corners() {
     // applies `Exclude`; a decline there would leave unexercised exactly the
     // seam this harness guards. The literal fast path declines globs and
     // excludes by design, so it is checked wherever it commits.
-    for fixture in &cases {
-        check_with(&mut oracle, fixture, false);
-        let outcome = check_with(&mut oracle, fixture, true);
-        assert_ne!(
-            outcome,
-            Outcome::Declined,
-            "the corner declined through the resolver seam:\n{}",
-            fixture.xml()
-        );
+    // And each under every spelling of the project's path.
+    for mut fixture in cases {
+        for spelling in path_spelling::SPELLINGS {
+            fixture.spelling = spelling;
+            check_with(&mut oracle, &fixture, false);
+            let outcome = check_with(&mut oracle, &fixture, true);
+            assert_ne!(
+                outcome,
+                Outcome::Declined,
+                "the corner declined through the resolver seam at {spelling:?}:\n{}",
+                fixture.xml()
+            );
+        }
     }
 }
 
@@ -586,8 +581,9 @@ fn generated_item_specs_are_certain_implies_exact() {
     // thousands: a rare pairing (an include rooted inside a directory a `**`
     // exclude names, #615) needs that many to turn up.
     const CASES: usize = 2000;
-    for _ in 0..CASES {
-        let fixture = Fixture::generate(&mut rng);
+    for case in 0..CASES {
+        let mut fixture = Fixture::generate(&mut rng);
+        fixture.spelling = path_spelling::SPELLINGS[case % path_spelling::SPELLINGS.len()];
         if check_with(&mut oracle, &fixture, false) == Outcome::Committed {
             fast_committed += 1;
         }

@@ -106,7 +106,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::test_support::{PropertyRead, ReadProbe, parse_fsproj_reads};
 use borzoi_msbuild::{RejectionCertainty, SdkPaths, SdkResolution, SdkResolveError};
-use common::{Oracle, SplitMix64};
+use common::{Oracle, SplitMix64, path_spelling};
 
 // ---------------------------------------------------------------------------
 // The case space.
@@ -1733,6 +1733,24 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     }
     let project_path = case_dir.join("proj/p.proj");
     std::fs::write(&project_path, &rendered.project).expect("write project");
+    // Both sides are handed the project's path spelt one of the ways MSBuild
+    // reads as this file, a hash of the case choosing which, so the cases a
+    // seed draws are the same as without the axis, and a case keeps its
+    // spelling whichever thread evaluates it. The last spelling's `..` steps
+    // back through the `far` link, which the file system resolves to
+    // `<case>/decoy` and MSBuild, lexically, to `<case>`.
+    let choice = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{case:?}").hash(&mut hasher);
+        hasher.finish() as usize
+    };
+    let spelt = match choice % (path_spelling::SPELLINGS.len() + 1) {
+        i if i < path_spelling::SPELLINGS.len() => {
+            path_spelling::respell(&project_path, path_spelling::SPELLINGS[i])
+        }
+        _ => case_dir.join("proj/far/../../proj/p.proj"),
+    };
 
     let resolver = {
         let sdk = sdk.clone();
@@ -1763,7 +1781,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     };
     let (parsed, ours) = parse_fsproj_reads(
         &rendered.project,
-        &project_path,
+        &spelt,
         &HashMap::new(),
         &environment,
         Some(&resolver),
@@ -1774,7 +1792,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     .expect("well-formed XML parses");
     let names: Vec<&str> = read_names().collect();
     let theirs = shared.oracle.try_evaluated(
-        &project_path,
+        &spelt,
         &[],
         &names,
         &["Compile", "ProjectReference"],
@@ -1782,7 +1800,11 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     );
 
     let mut outcome = Outcome::default();
-    let mut describe = format!("{case:#?}\n--- p.proj\n{}", rendered.project);
+    let mut describe = format!(
+        "{case:#?}\n--- p.proj, spelt {}\n{}",
+        spelt.display(),
+        rendered.project
+    );
     for (name, text) in rendered.sdk_files.iter().chain(&rendered.case_files) {
         describe.push_str(&format!("--- {name}\n{text}"));
     }

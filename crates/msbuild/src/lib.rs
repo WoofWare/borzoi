@@ -297,10 +297,12 @@ impl ItemMetadataValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedItem {
     pub kind: ItemKind,
-    /// `Include` value joined onto the project directory. Backslashes in
-    /// the original attribute are normalised to forward slashes before
-    /// joining; the result is *not* canonicalised (no filesystem touch),
-    /// so `..` components may be present.
+    /// `Include` value joined onto the project directory, as MSBuild's
+    /// `FullPath` metadatum gives it: backslashes in the original attribute
+    /// read as forward slashes, then `.` segments dropped, runs of
+    /// separators collapsed and each `..` taking the segment before it,
+    /// lexically (no filesystem touch, so no symlink is resolved). A
+    /// trailing separator is kept.
     pub include: PathBuf,
     /// `ReferenceOutputAssembly` metadata (attribute or child element),
     /// `$(...)`-expanded, kept raw. Only populated for
@@ -1150,6 +1152,12 @@ pub enum ParseError {
     /// qualified paths (`/foo` on Windows) — which still *replace* on
     /// `PathBuf::join`, so don't double-join — are accepted.
     RelativeProjectPath(PathBuf),
+    /// On a Unix host, `project_path` held a `\`. MSBuild loads a project
+    /// from its path with every backslash read as a separator, so it
+    /// evaluates the file the rewritten path names, which is not the text the
+    /// caller handed over, or refuses the project (MSB4025) where that path
+    /// names no file.
+    BackslashInProjectPath(PathBuf),
     /// `extra_properties` contained a key that names an MSBuild
     /// reserved property (any spelling, under MSBuild's case-insensitive
     /// comparison, of a name in `ReservedPropertyNames`:
@@ -1186,6 +1194,14 @@ impl fmt::Display for ParseError {
                     p.display()
                 )
             }
+            ParseError::BackslashInProjectPath(p) => {
+                write!(
+                    f,
+                    "project_path {} holds a backslash, which MSBuild reads as a separator on \
+                     this host, so it would load another file, or none (MSB4025)",
+                    p.display()
+                )
+            }
             ParseError::ReservedPropertyInExtras(name) => {
                 write!(
                     f,
@@ -1213,6 +1229,7 @@ impl Error for ParseError {
         match self {
             ParseError::Xml(e) => Some(e),
             ParseError::RelativeProjectPath(_) => None,
+            ParseError::BackslashInProjectPath(_) => None,
             ParseError::ReservedPropertyInExtras(_) => None,
             ParseError::InvalidPropertyNameInExtras(_) => None,
             ParseError::DuplicateExtraProperty { .. } => None,
@@ -1273,11 +1290,11 @@ pub fn parse_fsproj(
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
 ) -> Result<ParsedProject, ParseError> {
-    validate_inputs(project_path, extra_properties)?;
+    let project_path = validate_inputs(project_path, extra_properties)?;
     let doc = crate::document::parse(source)?;
     Ok(evaluator::walk(
         &doc,
-        project_path,
+        &project_path,
         extra_properties,
         environment,
     ))
@@ -1494,9 +1511,11 @@ fn parse_fsproj_observed(
     Result<evaluator::Walked, ParseError>,
     observed::ImportDocuments,
 ) {
-    if let Err(error) = validate_inputs(project_path, extra_properties) {
-        return (Err(error), observer.finish_with_documents().2);
-    }
+    let project_path = match validate_inputs(project_path, extra_properties) {
+        Ok(project_path) => project_path,
+        Err(error) => return (Err(error), observer.finish_with_documents().2),
+    };
+    let project_path = project_path.as_path();
     // Detection only: the walk follows the SDK's own imports of the
     // props/targets files, and holds the files found here as the ones the
     // SDK's discovery names by default. The per-kind `ImplicitImportPresent`
@@ -1547,12 +1566,21 @@ fn parse_fsproj_observed(
 }
 
 /// Input-validation shared between the pure and with-imports entry
-/// points. Both reject the same set of malformed `extra_properties`
-/// and non-rooted project paths up front, before any XML parsing.
+/// points. Both reject the same set of malformed `extra_properties`,
+/// non-rooted project paths and (on Unix) backslash-bearing ones up front,
+/// before any XML parsing, and return the project's path as MSBuild takes it.
+///
+/// MSBuild evaluates a project at its full path (`Path.GetFullPath`): `.`
+/// segments dropped, runs of separators collapsed, and each `..` taking the
+/// segment before it, lexically, whatever that segment links to. Every value
+/// the walk derives from the project's path (the reserved `MSBuildProject*`
+/// and `MSBuildThisFile*` names, relative imports, `Exists` probes, item
+/// paths, the duplicate-import key) starts from that path, so a caller's
+/// `dir//p.fsproj` or `dir/x/../p.fsproj` evaluates as `dir/p.fsproj`.
 fn validate_inputs(
     project_path: &Path,
     extra_properties: &HashMap<String, String>,
-) -> Result<(), ParseError> {
+) -> Result<PathBuf, ParseError> {
     // We check `has_root`, not `is_absolute`. The hazard we're
     // guarding against is `project_dir.join(Include)` double-joining
     // the project directory into the Include path — that only happens
@@ -1563,6 +1591,13 @@ fn validate_inputs(
     // reject it, breaking tests and Windows callers with no upside.
     if !project_path.has_root() {
         return Err(ParseError::RelativeProjectPath(project_path.to_path_buf()));
+    }
+    // On Unix MSBuild reads every `\` of the path it loads a project from as
+    // `/` (`FileUtilities.FixFilePath`), so it loads some other file, or none.
+    if cfg!(unix) && project_path.as_os_str().as_encoded_bytes().contains(&b'\\') {
+        return Err(ParseError::BackslashInProjectPath(
+            project_path.to_path_buf(),
+        ));
     }
     // Property lookup is OrdinalIgnoreCase, but `HashMap<String,_>` is
     // case-sensitive — so the caller can hand us `Configuration` and
@@ -1601,7 +1636,7 @@ fn validate_inputs(
             return Err(ParseError::ReservedPropertyInExtras(key.clone()));
         }
     }
-    Ok(())
+    Ok(imports::normalise(project_path))
 }
 
 #[cfg(test)]

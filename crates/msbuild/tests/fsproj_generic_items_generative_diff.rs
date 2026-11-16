@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
-use common::{Oracle, SplitMix64};
+use common::{Oracle, SplitMix64, path_spelling};
 
 /// `PackageReference` and `FrameworkReference` are captured by the dependency
 /// capture, not the generic tables; `PackageReference` collapses `Update` onto
@@ -309,12 +309,20 @@ struct Tally {
 }
 
 /// Evaluate `xml` both ways and hold every clean list to MSBuild's.
+///
+/// Both sides are handed the project's path spelt one of the ways MSBuild
+/// reads as the same file, the case's number choosing which.
 fn check(oracle: &mut Oracle, xml: &str, gated: bool, tally: &mut Tally) {
     tally.cases += 1;
     let dir = tempfile::tempdir().unwrap();
-    let path = host_fs::canonicalize(dir.path()).unwrap().join("p.fsproj");
+    let path = host_fs::canonicalize(dir.path())
+        .unwrap()
+        .join("proj/p.fsproj");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, xml).unwrap();
     std::fs::write(path.with_file_name("items.props"), IMPORTED).unwrap();
+    let spelling = path_spelling::SPELLINGS[tally.cases % path_spelling::SPELLINGS.len()];
+    let path = path_spelling::respell(&path, spelling);
     let probe = ReadProbe {
         properties: Vec::new(),
         item_types: ITEM_TYPES.iter().map(|t| (*t).to_owned()).collect(),

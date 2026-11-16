@@ -30,14 +30,14 @@
 mod common;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
 use borzoi_msbuild::{PropertyRead, RejectionCertainty, parse_fsproj};
 use common::{
     CONTROLLED_PROPERTY_NAMES, Oracle, SplitMix64, breaks_inside_quote, gen_bool_expr, gen_props,
-    respell_whitespace,
+    path_spelling, respell_whitespace,
 };
 use tempfile::TempDir;
 
@@ -173,14 +173,22 @@ fn check_names_at_path(
     names: &[String],
     dir: Option<&Path>,
 ) -> Vec<String> {
-    let owned;
-    let project_path: &Path = match dir {
-        Some(dir) => {
-            owned = dir.join("Demo.fsproj");
-            &owned
-        }
-        None => Path::new("/repo/proj/Demo.fsproj"),
-    };
+    match dir {
+        Some(dir) => check_names_at_project(oracle, xml, names, Some(&dir.join("Demo.fsproj"))),
+        None => check_names_at_project(oracle, xml, names, None),
+    }
+}
+
+/// [`check_names_at_path`] with the project at `project_path`, spelt as the
+/// caller spells it (`None` evaluates the document from text, at a path no
+/// file is at).
+fn check_names_at_project(
+    oracle: &mut Oracle,
+    xml: &str,
+    names: &[String],
+    at: Option<&Path>,
+) -> Vec<String> {
+    let project_path = at.unwrap_or(Path::new("/repo/proj/Demo.fsproj"));
     let Ok(parsed) = parse_fsproj(
         xml,
         project_path,
@@ -208,7 +216,7 @@ fn check_names_at_path(
         .filter_map(|n| parsed.properties.get(n).map(|v| (n.clone(), v.clone())))
         .collect();
 
-    let Some(theirs) = oracle.project(xml, names, dir.map(|_| project_path), &[]) else {
+    let Some(theirs) = oracle.project(xml, names, at, &[]) else {
         assert!(
             ours.is_empty(),
             "certain-implies-exact violated: MSBuild rejects this project, but we \
@@ -347,6 +355,366 @@ fn reserved_path_properties_are_exact_or_declined() {
     }
     eprintln!("reserved-path readers: {committed} committed");
     assert!(committed >= 10, "too few committed ({committed})");
+}
+
+/// The properties a project body reads off its own path: the reserved
+/// `MSBuildProject*` names and the `MSBuildThisFile*` names, each read back
+/// through a capture (MSBuild computes the second family in the expander, and
+/// a seed is no write), and values composed from them.
+const PATH_READERS: &[(&str, &str)] = &[
+    ("ProjFull", "$(MSBuildProjectFullPath)"),
+    ("ProjDir", "$(MSBuildProjectDirectory)"),
+    ("ProjNoRoot", "$(MSBuildProjectDirectoryNoRoot)"),
+    ("ProjFile", "$(MSBuildProjectFile)"),
+    ("ProjName", "$(MSBuildProjectName)"),
+    ("ProjExt", "$(MSBuildProjectExtension)"),
+    ("ThisFile", "$(MSBuildThisFile)"),
+    ("ThisDir", "$(MSBuildThisFileDirectory)"),
+    ("ThisNoRoot", "$(MSBuildThisFileDirectoryNoRoot)"),
+    ("ThisFull", "$(MSBuildThisFileFullPath)"),
+    ("ThisName", "$(MSBuildThisFileName)"),
+    ("ThisExt", "$(MSBuildThisFileExtension)"),
+    ("Joined", "$(MSBuildProjectDirectory)/Foo.fs"),
+    (
+        "Combined",
+        "$([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', 'Foo.fs'))",
+    ),
+];
+
+/// Names [`path_reader_xml`] writes under a condition probing the file
+/// system, which only an evaluation that reads it can decide.
+const PATH_PROBES: &[&str] = &["FoundRelative", "FoundRooted"];
+
+/// A document reading every [`PATH_READERS`] entry, and writing each
+/// [`PATH_PROBES`] name under a condition that probes for the project file
+/// itself: by a path relative to the project, and by one under
+/// `$(MSBuildProjectDirectory)`.
+fn path_reader_xml() -> String {
+    let mut xml = String::from("<Project>\n  <PropertyGroup>\n");
+    for (name, body) in PATH_READERS {
+        xml.push_str(&format!("    <{name}>{body}</{name}>\n"));
+    }
+    xml.push_str(
+        "    <FoundRelative Condition=\"Exists('Demo.fsproj')\">yes</FoundRelative>\n    \
+         <FoundRooted Condition=\"Exists('$(MSBuildProjectDirectory)/Demo.fsproj')\">yes</FoundRooted>\n    \
+         <Slash Condition=\"HasTrailingSlash('$(MSBuildThisFileDirectory)')\">yes</Slash>\n",
+    );
+    xml.push_str("  </PropertyGroup>\n</Project>\n");
+    xml
+}
+
+/// Every value derived from the project's path, with the project's path spelt
+/// each way MSBuild reads as the same file (`//`, `/./`, `dir/../dir/`): MSBuild
+/// takes the path's lexical full path, so a value carrying the caller's
+/// spelling is a wrong commit. Each name must commit under every spelling (the
+/// file-system probes only where the evaluation reads the file system), so a
+/// decline cannot pass this vacuously.
+#[test]
+fn reserved_path_properties_are_exact_under_every_project_spelling() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    let plain = dir.join("Demo.fsproj");
+    let xml = path_reader_xml();
+    std::fs::write(&plain, &xml).unwrap();
+    let names: Vec<String> = PATH_READERS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(PATH_PROBES.iter().copied())
+        .chain(["Slash"])
+        .map(str::to_string)
+        .collect();
+    for spelling in path_spelling::SPELLINGS {
+        let at = path_spelling::respell(&plain, spelling);
+        let missing = |committed: &[String], probes: bool| -> Vec<String> {
+            names
+                .iter()
+                .filter(|n| probes || !PATH_PROBES.contains(&n.as_str()))
+                .filter(|n| !committed.contains(n))
+                .cloned()
+                .collect()
+        };
+        let pure = check_names_at_project(&mut oracle, &xml, &names, Some(&at));
+        assert_eq!(
+            missing(&pure, false),
+            Vec::<String>::new(),
+            "{spelling:?} ({}): names the walk without imports did not commit",
+            at.display()
+        );
+        let followed = check_imports_at_project(&mut oracle, &xml, &names, &at);
+        assert_eq!(
+            missing(&followed, true),
+            Vec::<String>::new(),
+            "{spelling:?} ({}): names the walk with imports did not commit",
+            at.display()
+        );
+    }
+}
+
+/// [`check_names_at_project`] through [`parse_fsproj_with_imports`], which
+/// follows the document's imports, with no SDK or glob resolver.
+fn check_imports_at_project(
+    oracle: &mut Oracle,
+    xml: &str,
+    names: &[String],
+    at: &Path,
+) -> Vec<String> {
+    let parsed = match parse_fsproj_with_imports(
+        xml,
+        at,
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+    ) {
+        Ok(parsed) => Some(parsed),
+        Err(borzoi_msbuild::ParseError::Xml(_)) => return Vec::new(),
+        Err(_) => None,
+    };
+    let ours: Vec<(String, String)> = parsed
+        .iter()
+        .flat_map(|parsed| {
+            names
+                .iter()
+                .filter(|n| parsed.property(n).untrusted_cause().is_none())
+                .filter_map(|n| parsed.properties.get(n).map(|v| (n.clone(), v.clone())))
+        })
+        .collect();
+    let Some(theirs) = oracle.project(xml, names, Some(at), &[]) else {
+        assert!(
+            ours.is_empty(),
+            "certain-implies-exact violated at {}: MSBuild rejects this project, but we \
+             committed {ours:?}\n--- xml ---\n{xml}",
+            at.display()
+        );
+        return Vec::new();
+    };
+    if let Some(parsed) = &parsed {
+        assert_ne!(
+            parsed.rejection.as_ref().map(|r| r.certainty),
+            Some(RejectionCertainty::Certain),
+            "certain-implies-exact violated at {}: we claim MSBuild rejects this project, \
+             and it evaluates it\n--- xml ---\n{xml}",
+            at.display()
+        );
+    }
+    for (name, our_value) in &ours {
+        assert_eq!(
+            Some(our_value),
+            theirs.get(name),
+            "certain-implies-exact violated for ${{{name}}} at {}\n--- xml ---\n{xml}",
+            at.display()
+        );
+    }
+    ours.into_iter().map(|(name, _)| name).collect()
+}
+
+/// An imported file's own path, spelt each way MSBuild reads as the same file,
+/// from a project whose path is spelt each of those ways too. MSBuild names
+/// the file it imports by its lexical full path, wherever the spelling came
+/// from: the import's text, the project's directory, or a backslash its path
+/// fixup turns into a separator (`sub\i.props` and the escaped `sub%5Ci.props`
+/// both import `sub/i.props`). A file listed twice under two spellings is
+/// imported once.
+#[test]
+fn import_spellings_are_read_as_msbuild_normalises_them() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("proj");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::create_dir_all(dir.join("x")).unwrap();
+    std::fs::write(
+        dir.join("sub/i.props"),
+        "<Project>\n  <PropertyGroup>\n    <Order>$(Order)i</Order>\n    \
+         <ImpFull>$(MSBuildThisFileFullPath)</ImpFull>\n    \
+         <ImpDir>$(MSBuildThisFileDirectory)</ImpDir>\n    \
+         <ImpNoRoot>$(MSBuildThisFileDirectoryNoRoot)</ImpNoRoot>\n    \
+         <ImpFile>$(MSBuildThisFile)</ImpFile>\n    \
+         <ImpProject>$(MSBuildProjectFullPath)</ImpProject>\n  \
+         </PropertyGroup>\n  <Import Project=\"j.props\" />\n</Project>\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sub/j.props"),
+        "<Project>\n  <PropertyGroup>\n    <Order>$(Order)j</Order>\n    \
+         <ChildFull>$(MSBuildThisFileFullPath)</ChildFull>\n  </PropertyGroup>\n</Project>\n",
+    )
+    .unwrap();
+    let names: Vec<String> = [
+        "Order",
+        "ImpFull",
+        "ImpDir",
+        "ImpNoRoot",
+        "ImpFile",
+        "ImpProject",
+        "ChildFull",
+    ]
+    .map(str::to_string)
+    .to_vec();
+    let rooted = dir.to_string_lossy().into_owned();
+    let imports = [
+        "sub/i.props".to_string(),
+        "sub//i.props".to_string(),
+        "sub/./i.props".to_string(),
+        "./sub/i.props".to_string(),
+        "x/../sub/i.props".to_string(),
+        "$(MSBuildProjectDirectory)//sub/i.props".to_string(),
+        "$(MSBuildProjectDirectory)/x/../sub/i.props".to_string(),
+        "$(MSBuildThisFileDirectory)sub/i.props".to_string(),
+        format!("{rooted}//sub/i.props"),
+        format!("{rooted}/x/../sub/i.props"),
+        "sub\\i.props".to_string(),
+        "sub%5Ci.props".to_string(),
+        "sub/i.props;sub//i.props;x/../sub/i.props".to_string(),
+    ];
+    let plain = dir.join("Demo.fsproj");
+    let mut committed = 0usize;
+    for import in &imports {
+        let xml = format!(
+            "<Project>\n  <Import Project=\"{}\" />\n  <PropertyGroup>\n    \
+             <Order>$(Order)p</Order>\n  </PropertyGroup>\n</Project>\n",
+            raw_attribute(import)
+        );
+        std::fs::write(&plain, &xml).unwrap();
+        for spelling in path_spelling::SPELLINGS {
+            let at = path_spelling::respell(&plain, spelling);
+            committed += check_imports_at_project(&mut oracle, &xml, &names, &at).len();
+        }
+    }
+    eprintln!("import spellings: {committed} committed");
+    assert!(
+        committed >= imports.len() * path_spelling::SPELLINGS.len(),
+        "too few committed ({committed})"
+    );
+}
+
+/// On Unix, MSBuild loads a project from its path with every backslash read
+/// as a separator, so a project whose own path holds one is either some other
+/// file (the backslash's rewrite names a file that exists) or refused
+/// (MSB4025, it names none). Both are pinned against MSBuild, and in both we
+/// must refuse the evaluation rather than evaluate the text we were handed as
+/// though MSBuild would.
+#[cfg(unix)]
+#[test]
+fn a_project_path_holding_a_backslash_is_refused() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    let names = vec!["Which".to_string(), "MSBuildProjectFullPath".to_string()];
+    let doc = |which: &str| {
+        format!(
+            "<Project>\n  <PropertyGroup>\n    <Which>{which}</Which>\n  </PropertyGroup>\n</Project>\n"
+        )
+    };
+    std::fs::write(dir.join("Demo.fsproj"), doc("slash")).unwrap();
+    // (path, the file MSBuild evaluates instead, or `None` where it refuses)
+    let cases: Vec<(PathBuf, Option<PathBuf>)> = vec![
+        (
+            root.join("proj\\Demo.fsproj"),
+            Some(dir.join("Demo.fsproj")),
+        ),
+        (dir.join("a\\Demo.fsproj"), None),
+        (dir.join("Demo\\.fsproj"), None),
+    ];
+    for (at, instead) in &cases {
+        let xml = doc("backslash");
+        let theirs = oracle.project(&xml, &names, Some(at), &[]);
+        match instead {
+            Some(instead) => {
+                let theirs = theirs.expect("MSBuild evaluates the rewritten path's file");
+                assert_eq!(theirs["Which"], "slash", "{}", at.display());
+                assert_eq!(
+                    Path::new(&theirs["MSBuildProjectFullPath"]),
+                    instead.as_path(),
+                    "{}",
+                    at.display()
+                );
+            }
+            None => assert!(theirs.is_none(), "MSBuild loads {}", at.display()),
+        }
+        let pure = parse_fsproj(&xml, at, &HashMap::new(), &common::oracle_environment());
+        assert!(
+            matches!(
+                pure,
+                Err(borzoi_msbuild::ParseError::BackslashInProjectPath(_))
+            ),
+            "{}: {pure:?}",
+            at.display()
+        );
+        let followed = parse_fsproj_with_imports(
+            &xml,
+            at,
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        );
+        assert!(
+            matches!(
+                followed,
+                Err(borzoi_msbuild::ParseError::BackslashInProjectPath(_))
+            ),
+            "{}: {followed:?}",
+            at.display()
+        );
+    }
+}
+
+/// On Unix, an import whose path holds a backslash once expanded imports the
+/// file that path names with each backslash read as a separator, whether the
+/// backslash was written, escaped (`%5C`), or came from a name a wildcard
+/// matched; and MSBuild refuses the project where that file does not exist.
+/// Certain-implies-exact, in a directory where the literal backslash names
+/// exist too.
+#[cfg(unix)]
+#[test]
+fn an_import_path_holding_a_backslash_is_read_as_msbuild_reads_it() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("proj");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::create_dir_all(dir.join("both")).unwrap();
+    let imported = |which: &str| {
+        format!(
+            "<Project>\n  <PropertyGroup>\n    <Which>{which}</Which>\n    \
+             <ImpFull>$(MSBuildThisFileFullPath)</ImpFull>\n    \
+             <ImpFile>$(MSBuildThisFile)</ImpFile>\n  </PropertyGroup>\n</Project>\n"
+        )
+    };
+    for (name, which) in [
+        ("sub/i.props", "sub/i"),
+        ("sub\\i.props", "literal sub\\i"),
+        ("q\\r.props", "literal q\\r"),
+        ("both/r.props", "both/r"),
+        ("both\\r.props", "literal both\\r"),
+    ] {
+        std::fs::write(dir.join(name), imported(which)).unwrap();
+    }
+    let names: Vec<String> = ["Which", "ImpFull", "ImpFile"].map(str::to_string).to_vec();
+    let imports = [
+        "sub\\i.props",
+        "sub%5Ci.props",
+        "q\\r.props",
+        "q%5Cr.props",
+        "q*.props",
+        "both*.props",
+        "$(MSBuildProjectDirectory)\\sub\\i.props",
+    ];
+    let plain = dir.join("Demo.fsproj");
+    for import in imports {
+        let xml = format!(
+            "<Project>\n  <Import Project=\"{}\" />\n</Project>\n",
+            raw_attribute(import)
+        );
+        std::fs::write(&plain, &xml).unwrap();
+        check_imports_at_project(&mut oracle, &xml, &names, &plain);
+    }
 }
 
 /// Bodies MSBuild reads apart from roxmltree's text (#642, #787, #855): an

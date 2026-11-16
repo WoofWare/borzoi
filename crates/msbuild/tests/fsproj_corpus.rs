@@ -268,14 +268,20 @@ fn render_snapshot(project: &ParsedProject, project_dir: &Path) -> String {
     out
 }
 
-/// Strip the project directory prefix from a parser-produced include path.
-/// `PathBuf::join` doesn't normalise `..`, so `<dir>/../X` survives intact;
-/// `strip_prefix` removes only the literal prefix, leaving `../X` visible
-/// — which is what we want in the snapshot.
+/// A parser-produced include path (a full path) relative to the project
+/// directory: `X` below it, `../X` beside it, and so on up, short of the
+/// file-system root, so the snapshot does not depend on where the corpus is
+/// checked out. A path only the root holds in common with the project
+/// (`/ilpars.fs`, from an empty property) is kept as it is.
 fn relative_to(path: &Path, project_dir: &Path) -> PathBuf {
-    path.strip_prefix(project_dir)
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|_| path.to_path_buf())
+    let mut up = PathBuf::new();
+    for ancestor in project_dir.ancestors().filter(|a| a.parent().is_some()) {
+        if let Ok(below) = path.strip_prefix(ancestor) {
+            return up.join(below);
+        }
+        up.push("..");
+    }
+    path.to_path_buf()
 }
 
 /// Render with forward slashes so the snapshot is byte-identical on Unix

@@ -419,8 +419,34 @@ struct OrderedResolvedItem {
     row: Option<EvaluatedItem>,
 }
 
+/// The walk's items as the caller receives them, each [`ResolvedItem::include`]
+/// MSBuild's `FullPath` of it: the lexical full path, so `sub/../a.fs` is
+/// `a.fs` and `sub//a.fs` is `sub/a.fs` beside the project. The walk keeps
+/// each spelling as written until here, since MSBuild compares some spellings
+/// as written (`crate::glob::compares_unnormalised`).
 fn into_resolved_items(items: Vec<OrderedResolvedItem>) -> Vec<ResolvedItem> {
-    items.into_iter().map(|ordered| ordered.item).collect()
+    items
+        .into_iter()
+        .map(|ordered| ResolvedItem {
+            include: item_full_path(&ordered.item.include),
+            ..ordered.item
+        })
+        .collect()
+}
+
+/// `Path.GetFullPath` of a rooted item path: [`normalise`], keeping a trailing
+/// separator, which `GetFullPath` keeps and a path's components drop.
+fn item_full_path(path: &Path) -> PathBuf {
+    let full = normalise(path);
+    let trailing = matches!(path.as_os_str().as_encoded_bytes().last(), Some(b'/'))
+        || (cfg!(windows) && path.as_os_str().as_encoded_bytes().last() == Some(&b'\\'));
+    if trailing && full.parent().is_some() {
+        let mut text = full.into_os_string();
+        text.push(std::path::MAIN_SEPARATOR_STR);
+        PathBuf::from(text)
+    } else {
+        full
+    }
 }
 
 /// Examine the project root's `Sdk` attribute and decide whether the
@@ -6593,6 +6619,30 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     // does.
     let collapsed = import_open_path(path, collapse);
     let path = collapsed.as_path();
+    // On Unix MSBuild loads an imported file with every `\` of its path read
+    // as `/` (`FileUtilities.FixFilePath`), and refuses the project where
+    // that names no file. A `\` that reaches here came from a name a wildcard
+    // matched, or from an SDK's directory: the file the walk would open is
+    // not the one MSBuild opens, so decline.
+    if cfg!(unix) && path.as_os_str().as_encoded_bytes().contains(&b'\\') {
+        state.push(
+            DiagnosticKind::UnsupportedConstruct {
+                element: format!(
+                    "Import of {} (a `\\` in the path, which MSBuild reads as a separator \
+                     on this host)",
+                    path.display()
+                ),
+            },
+            span.clone(),
+        );
+        state.mark_structural_skip(
+            StructuralCompileItemUncertainty::ImportProjectUnresolved {
+                project: path.display().to_string(),
+            },
+            span,
+        );
+        return;
+    }
     // MSBuild's duplicate-import skip: an import that resolves to an
     // already-imported path (same lexically-normalised, case-insensitive
     // spelling — see [`import_dedup_key`]) is ignored with a warning

@@ -2536,7 +2536,7 @@ fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
         let p = parse(&src);
         assert_eq!(
             paths(&p.project_references),
-            [Path::new("/repo/proj/../Lib/Lib.fsproj")],
+            [Path::new("/repo/Lib/Lib.fsproj")],
             "{src:?}"
         );
         assert_eq!(
@@ -2679,7 +2679,7 @@ fn metadata_with_inexact_property_declines_but_keeps_the_item() {
     let p = parse(src);
     assert_eq!(
         paths(&p.project_references),
-        [Path::new("/repo/proj/../Lib/Lib.fsproj")]
+        [Path::new("/repo/Lib/Lib.fsproj")]
     );
     assert_eq!(
         p.project_references[0].exclude_assets,
@@ -3950,7 +3950,7 @@ fn project_reference_lands_in_project_references_bucket() {
     assert_eq!(p.project_references[0].kind, ItemKind::ProjectReference);
     assert_eq!(
         p.project_references[0].include,
-        PathBuf::from("/repo/proj/../lib/Lib.csproj"),
+        PathBuf::from("/repo/lib/Lib.csproj"),
     );
     assert!(p.diagnostics.is_empty());
 }
@@ -4140,7 +4140,10 @@ fn a_literal_project_reference_remove_is_applied() {
     let p = parse(src);
     assert!(!p.project_references_uncertain, "{:?}", p.diagnostics);
     assert_eq!(p.project_references.len(), 1);
-    assert!(p.project_references[0].include.ends_with("../C/C.fsproj"));
+    assert_eq!(
+        p.project_references[0].include,
+        Path::new("/repo/C/C.fsproj")
+    );
 
     // `->Exists()` needs the filesystem, which the pure surface never touches.
     let src = r#"<Project>
@@ -5176,7 +5179,7 @@ fn project_reference_and_compile_coexist_in_same_itemgroup() {
         .iter()
         .map(|i| i.include.as_path())
         .collect();
-    assert_eq!(pr_paths, [Path::new("/repo/proj/../Other/Other.fsproj")],);
+    assert_eq!(pr_paths, [Path::new("/repo/Other/Other.fsproj")],);
 }
 
 #[test]
@@ -5192,7 +5195,7 @@ fn project_reference_substitutes_msbuild_thisfiledirectory() {
     // separators but keeps `..` components literal.
     assert_eq!(
         p.project_references[0].include,
-        PathBuf::from("/repo/proj/../lib/Lib.csproj"),
+        PathBuf::from("/repo/lib/Lib.csproj"),
     );
     assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
 }
@@ -5212,10 +5215,7 @@ fn project_reference_with_semicolon_list_splits_into_multiple_items() {
         .collect();
     assert_eq!(
         pr_paths,
-        [
-            Path::new("/repo/proj/../A/A.csproj"),
-            Path::new("/repo/proj/../B/B.csproj"),
-        ],
+        [Path::new("/repo/A/A.csproj"), Path::new("/repo/B/B.csproj"),],
     );
 }
 
@@ -5229,7 +5229,7 @@ fn project_reference_backslashes_are_normalised() {
     let p = parse(src);
     assert_eq!(
         p.project_references[0].include,
-        PathBuf::from("/repo/proj/../lib/Lib.csproj"),
+        PathBuf::from("/repo/lib/Lib.csproj"),
     );
 }
 
@@ -5261,7 +5261,7 @@ fn project_reference_obeys_condition_gating() {
         .iter()
         .map(|i| i.include.as_path())
         .collect();
-    assert_eq!(pr_paths, [Path::new("/repo/proj/../always/Always.csproj")]);
+    assert_eq!(pr_paths, [Path::new("/repo/always/Always.csproj")]);
     assert!(p.diagnostics.is_empty());
 }
 
@@ -5340,7 +5340,7 @@ fn build_mixed_fsproj(kinds: &[bool]) -> (String, Vec<PathBuf>, Vec<PathBuf>) {
             xml.push_str(&format!(
                 "    <ProjectReference Include=\"../p{i}/P{i}.csproj\" />\n"
             ));
-            pr_paths.push(PathBuf::from(format!("/repo/proj/../p{i}/P{i}.csproj")));
+            pr_paths.push(PathBuf::from(format!("/repo/p{i}/P{i}.csproj")));
         }
     }
     xml.push_str("  </ItemGroup>\n</Project>\n");
