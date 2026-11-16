@@ -3080,7 +3080,7 @@ pub enum DeclineCause {
     /// the latest declaration of the name need not be the one it binds (#323).
     QualifierArityNamesake,
     /// A type-qualified case (`U.Case`) whose union type may carry an
-    /// error-level attribute ([`CaseAttributes::on_type`]): FCS checks each
+    /// error-level attribute (`CaseAttributes::on_type`): FCS checks each
     /// type on a qualified path while resolving it, and such an attribute
     /// leaves the path unresolved.
     CaseTypeAttributed,

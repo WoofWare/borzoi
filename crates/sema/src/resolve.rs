@@ -1077,6 +1077,12 @@ fn collect_sig_container_exports(
                     };
                     match defn.repr() {
                         Some(TypeDefnRepr::Union(u)) => {
+                            let case_attributes = model::CaseAttributes {
+                                on_type,
+                                on_cases: u
+                                    .cases()
+                                    .any(|c| decls::attributes_may_be_error_level(c.attributes())),
+                            };
                             for case in u.cases() {
                                 // Operator-named cases (`([])` / `(::)`) are
                                 // Stage 3.
@@ -1095,12 +1101,7 @@ fn collect_sig_container_exports(
                                     }),
                                     tq,
                                     false,
-                                    model::CaseAttributes {
-                                        on_type,
-                                        on_cases: u.cases().any(|c| {
-                                            decls::attributes_may_be_error_level(c.attributes())
-                                        }),
-                                    },
+                                    case_attributes,
                                 );
                             }
                         }
