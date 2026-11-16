@@ -1174,6 +1174,32 @@ pub fn infer_named_file(
     infer_file_in(file, resolved, env, preceding, anonymous_module)
 }
 
+/// What [`infer_named_file`] reads of `file` before it walks it: the file's
+/// declared types, cases, records and constructor names, as the
+/// [`InferredFile`] of a walk that inferred nothing.
+///
+/// A file's inference computes everything it publishes of its declarations
+/// from those declarations and the declared facts of the files before it,
+/// before its walk starts, and the walk leaves them as they are
+/// (`docs/resolve-what-a-request-reads-plan.md`, Stage 7a).
+#[cfg(feature = "test-support")]
+pub(crate) fn declared_named_file(
+    file: &ImplFile,
+    resolved: &ResolvedFile,
+    env: &AssemblyEnv,
+    preceding: &PrecedingTypes,
+    name: &QualifiedNameOfFile,
+) -> InferredFile {
+    let anonymous_module = if is_headerless(file) {
+        name.anonymous_module_segments()
+    } else {
+        None
+    };
+    let tys = session_table(env);
+    FileFacts::build(file, resolved, env, &tys, preceding, anonymous_module)
+        .into_inferred(finish::Walked::nothing())
+}
+
 /// [`infer_file`], with the path of the implicit module the file's contents
 /// live under when it is headerless and that path is known.
 fn infer_file_in(
@@ -1183,6 +1209,17 @@ fn infer_file_in(
     preceding: &PrecedingTypes,
     anonymous_module: Option<Vec<String>>,
 ) -> InferredFile {
+    let tys = session_table(env);
+    let facts = FileFacts::build(file, resolved, env, &tys, preceding, anonymous_module);
+    let mut cx = Gen::new(&facts, &tys);
+    let damaged = cx.walk(file);
+    let walked = cx.finish(damaged);
+    facts.into_inferred(walked)
+}
+
+/// A file's session type table, seeded under `test-support` with the env's
+/// session seed.
+fn session_table(env: &AssemblyEnv) -> TyTable {
     let tys = TyTable::session();
     #[cfg(feature = "test-support")]
     {
@@ -1195,11 +1232,9 @@ fn infer_file_in(
             tys.var(TyVid(v));
         }
     }
-    let facts = FileFacts::build(file, resolved, env, &tys, preceding, anonymous_module);
-    let mut cx = Gen::new(&facts, &tys);
-    let damaged = cx.walk(file);
-    let walked = cx.finish(damaged);
-    facts.into_inferred(walked)
+    #[cfg(not(feature = "test-support"))]
+    let _ = env;
+    tys
 }
 
 /// One file's walk: its immutable facts, and the three parts of what the walk

@@ -29,6 +29,8 @@ use std::sync::Arc;
 use crate::assembly_env::AssemblyEnv;
 use crate::def::{DefId, DefKind};
 use crate::hash::{HashMap, HashSet};
+#[cfg(feature = "test-support")]
+use crate::infer::declared_named_file;
 use crate::infer::{InferredFile, ProjectCase, ProjectRecord, ProjectRecords, infer_named_file};
 use crate::names::NameTable;
 use crate::resolve::{
@@ -275,6 +277,17 @@ pub(crate) struct FileContribution<'a> {
 }
 
 impl<'a> FileContribution<'a> {
+    /// Whether the two contributions publish the same declarations: every
+    /// part but the value verdicts (`items`).
+    #[cfg(feature = "test-support")]
+    fn same_declarations(&self, other: &FileContribution<'_>) -> bool {
+        self.file == other.file
+            && self.constructor_names == other.constructor_names
+            && self.types == other.types
+            && self.cases == other.cases
+            && self.records == other.records
+    }
+
     /// The contribution of the file at Compile index `file`. `inferred` is
     /// `None` for a file that was not inferred (a signature slot, or an
     /// implementation repeating an earlier one's identity); `screened` says
@@ -615,4 +628,58 @@ pub fn infer_project_reusing_with_reuse(
         },
         reused,
     )
+}
+
+/// Where the whole-prefix facts a file's inference reads stop being a fold
+/// over the earlier files' declarations alone: the first file whose
+/// contribution, value verdicts aside, differs between [`infer_project`]'s
+/// fold (`inferred`, of `files` and `resolved` against `env`) and a fold
+/// that builds each file's declared facts without walking it, described;
+/// `None` when no file's does (`docs/resolve-what-a-request-reads-plan.md`,
+/// Stage 7a).
+///
+/// The constructor names, the sealed unions and records, and the declared
+/// types a later file reads of the whole prefix all come from those parts. So
+/// when every file's agree, each file's inference reads the same whole-prefix
+/// facts from the declarations-only table as from the full one, and only an
+/// earlier value's type ([`PrecedingTypes::get`]) needs the earlier file
+/// inferred.
+#[cfg(feature = "test-support")]
+pub(crate) fn whole_prefix_facts_divergence(
+    files: &[ProjectFile],
+    resolved: &ResolvedProject,
+    env: &AssemblyEnv,
+    inferred: &InferredProject,
+) -> Option<String> {
+    let partners = signature_partners(files);
+    let mut declared = PrecedingTypes::default();
+    let mut implementations: HashSet<&str> = HashSet::default();
+    for (idx, rf) in resolved.files().iter().enumerate() {
+        // Which files are inferred, and which screened, as in
+        // `infer_project_reusing_with_reuse`.
+        let is_impl = files[idx].file.as_impl().is_some();
+        let screened = is_impl && partners[idx].is_some();
+        let repeats = is_impl && !implementations.insert(files[idx].qnof.text());
+        let declared_file = if repeats {
+            None
+        } else {
+            files[idx].file.as_impl().map(|impl_file| {
+                declared_named_file(impl_file, rf, env, &declared, &files[idx].qnof)
+            })
+        };
+        let from_declarations =
+            FileContribution::of(env.names(), idx, rf, declared_file.as_ref(), screened);
+        let from_inference =
+            FileContribution::of(env.names(), idx, rf, inferred.file(idx), screened);
+        if !from_declarations.same_declarations(&from_inference) {
+            return Some(format!(
+                "file {idx} ({}) declares differently without its walk:\n\
+                 from declarations: {from_declarations:#?}\n\
+                 from inference: {from_inference:#?}",
+                files[idx].qnof.text()
+            ));
+        }
+        declared.merge(from_declarations);
+    }
+    None
 }

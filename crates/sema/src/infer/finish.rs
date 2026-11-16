@@ -19,6 +19,28 @@ pub(super) struct Walked {
     pub(super) refused_equalities: usize,
 }
 
+impl Walked {
+    /// What a walk that inferred nothing would leave: the [`InferredFile`]
+    /// of [`FileFacts::into_inferred`] is then the file's declarations alone
+    /// (`docs/resolve-what-a-request-reads-plan.md`, Stage 7a).
+    #[cfg(feature = "test-support")]
+    pub(super) fn nothing() -> Walked {
+        Walked {
+            types: HashMap::default(),
+            def_types: HashMap::default(),
+            member_resolutions: HashMap::default(),
+            incompleteness: Vec::new(),
+            receiver_types: HashMap::default(),
+            annotated_params: HashSet::default(),
+            module_values: HashMap::default(),
+            deepest_expr_depth: 0,
+            type_budget_exceeded: None,
+            type_walks: TypeWalks::default(),
+            refused_equalities: 0,
+        }
+    }
+}
+
 /// The declaration holding the file's first recovery, when that is a member
 /// access whose member is not written (`s.`,
 /// [`SyntaxRecovery::first_is_trailing_dot`](crate::SyntaxRecovery::first_is_trailing_dot)):

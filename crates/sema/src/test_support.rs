@@ -30,6 +30,7 @@ pub fn extension_gate_decline(
 
 pub mod binder_completeness;
 pub mod entity_placement;
+pub mod inference_demand;
 pub mod names;
 
 /// The entity FCS says a used symbol is declared in, named **structurally**.

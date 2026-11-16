@@ -32,6 +32,9 @@ use borzoi_msbuild::{
 use borzoi_sema::test_support::binder_completeness::{
     OracleBinder, OracleBinderClass, UnmodelledBinder, unmodelled_binders,
 };
+use borzoi_sema::test_support::inference_demand::{
+    inference_demand_closures, whole_prefix_facts_divergence,
+};
 use borzoi_sema::test_support::{
     AssemblyDecl, assembly_answer_agrees, assembly_full_name_agrees, assembly_names_agree,
     assembly_resolution_decl, certified_expected as certified_structural, kind_admits,
@@ -3841,6 +3844,95 @@ pub struct ReverseDivergence {
 /// that names the same project declaration or assembly symbol. Coverage uses
 /// containment rather than exact range equality because sema sometimes records a
 /// segment of a long identifier while FCS reports the whole identifier path.
+/// Append `loaded`'s rows to the inference demand census at `path`
+/// (`docs/resolve-what-a-request-reads-plan.md`, Stage 7a): one per file
+/// with a prefix, tab-separated, as the project, the file's Compile index and
+/// path, the files and bytes before it, and the files and bytes of those its
+/// inference needs ([`inference_demand_closures`]). [`summarise_inference_demand_census`]
+/// reads them back.
+fn append_inference_demand_census(path: &Path, loaded: &LoadedProject) {
+    use std::io::Write as _;
+    let bytes: Vec<usize> = loaded.parses.texts.iter().map(|t| t.len()).collect();
+    let closures = inference_demand_closures(&loaded.resolved);
+    let mut rows = String::new();
+    for (idx, closure) in closures.iter().enumerate().skip(1) {
+        let prefix_bytes: usize = bytes[..idx].iter().sum();
+        let closure_bytes: usize = closure.iter().map(|&k| bytes[k]).sum();
+        rows.push_str(&format!(
+            "{}\t{idx}\t{}\t{idx}\t{}\t{prefix_bytes}\t{closure_bytes}\n",
+            loaded.project.display(),
+            loaded.parses.paths[idx].display(),
+            closure.len(),
+        ));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|err| panic!("cannot open the census at {}: {err}", path.display()));
+    file.write_all(rows.as_bytes())
+        .unwrap_or_else(|err| panic!("cannot write the census at {}: {err}", path.display()));
+}
+
+/// The distribution of the inference demand census at `path`
+/// ([`append_inference_demand_census`]): for each file with a prefix, the
+/// share of its prefix its inference needs, by files and by bytes, as
+/// quantiles over every file, rendered for a reader.
+///
+/// # Errors
+///
+/// When the census cannot be read, or a row is malformed.
+pub fn summarise_inference_demand_census(path: &Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("cannot read the census at {}: {err}", path.display()))?;
+    let mut by_files = Vec::new();
+    let mut by_bytes = Vec::new();
+    let mut projects = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let number = |i: usize| -> Result<f64, String> {
+            fields
+                .get(i)
+                .and_then(|f| f.parse::<f64>().ok())
+                .ok_or_else(|| format!("malformed census row: {line:?}"))
+        };
+        let [prefix_files, closure_files, prefix_bytes, closure_bytes] =
+            [number(3)?, number(4)?, number(5)?, number(6)?];
+        projects.insert(fields[0]);
+        by_files.push(closure_files / prefix_files);
+        if prefix_bytes > 0.0 {
+            by_bytes.push(closure_bytes / prefix_bytes);
+        }
+    }
+    let quantiles = |shares: &mut Vec<f64>| -> String {
+        if shares.is_empty() {
+            return "no files".to_string();
+        }
+        shares.sort_by(f64::total_cmp);
+        let at = |q: f64| shares[((shares.len() - 1) as f64 * q).round() as usize];
+        let mean = shares.iter().sum::<f64>() / shares.len() as f64;
+        format!(
+            "p10 {:.3}  p25 {:.3}  median {:.3}  p75 {:.3}  p90 {:.3}  max {:.3}  mean {:.3}",
+            at(0.10),
+            at(0.25),
+            at(0.50),
+            at(0.75),
+            at(0.90),
+            at(1.0),
+            mean
+        )
+    };
+    Ok(format!(
+        "inference demand census: {} files with a prefix, over {} projects\n\
+         share of the prefix by files: {}\n\
+         share of the prefix by bytes: {}\n",
+        by_files.len(),
+        projects.len(),
+        quantiles(&mut by_files),
+        quantiles(&mut by_bytes),
+    ))
+}
+
 pub fn compare_project_uses(loaded: &LoadedProject, fcs: &[FileUses]) -> Comparison {
     let mut comparison = Comparison::default();
     let index_by_path: HashMap<PathBuf, usize> = loaded
@@ -3853,6 +3945,24 @@ pub fn compare_project_uses(loaded: &LoadedProject, fcs: &[FileUses]) -> Compari
     let mut comparable_fcs_files = Vec::new();
     let inferred_project =
         infer_project(&loaded.parses.files, &loaded.resolved, &loaded.assembly_env);
+    // What inference reads of the whole prefix is a fold over the earlier
+    // files' declarations (`docs/resolve-what-a-request-reads-plan.md`,
+    // Stage 7a): held on every project the gate infers.
+    if let Some(divergence) = whole_prefix_facts_divergence(
+        &loaded.parses.files,
+        &loaded.resolved,
+        &loaded.assembly_env,
+        &inferred_project,
+    ) {
+        panic!(
+            "{}: the whole-prefix facts inference reads are not a fold over declarations: \
+             {divergence}",
+            loaded.project.display()
+        );
+    }
+    if let Some(census) = std::env::var_os("BORZOI_INFERENCE_DEMAND_CENSUS") {
+        append_inference_demand_census(Path::new(&census), loaded);
+    }
 
     for file_uses in fcs {
         let loaded_idx = index_by_path.get(&path_key(&file_uses.path)).copied();

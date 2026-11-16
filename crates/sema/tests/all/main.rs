@@ -61,6 +61,7 @@ mod infer_check_order_pins;
 mod infer_corpus_diff;
 mod infer_corpus_dump;
 mod infer_cross_file_diff;
+mod infer_declared_prefix;
 mod infer_dropped_namespace_perturbation;
 mod infer_entry_order_diff;
 mod infer_equality_constraints_diff;
