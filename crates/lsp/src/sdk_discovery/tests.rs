@@ -1296,44 +1296,42 @@ fn version_not_satisfied_unions_available_across_roots() {
 //
 // These tests exercise the free function lifted out of
 // SdkDiscovery::resolve so that the multi-root fold can be checked
-// without standing up real SDK layouts on disk. The mock locator
-// returns prepared outcomes per root and records how many times it
-// was called, which lets the tests pin short-circuit behaviour as
-// well as the union/NotFound terminal logic.
+// without standing up real SDK layouts on disk. Each root is scripted:
+// what hostfxr finds there (no SDK, none the spec admits, or one it runs)
+// and, where it runs one, what the locator answers. hostfxr runs from the
+// first root holding an admitted SDK and consults no later one
+// (`sdk_paths_root_choice_diff` in borzoi-msbuild measures it), so the
+// fold must stop there whatever the locator answers (#912).
 // ============================================================
 
 use std::cell::Cell;
-use std::cell::RefCell;
 
 use borzoi_msbuild::{SdkPaths, SdkVersion};
 use proptest::prelude::*;
 use proptest::test_runner::{Config as PtConfig, TestRunner};
 
-/// A locator built from a deterministic sequence of outcomes —
-/// the i-th call returns `outcomes[i]`. Records the total call
-/// count so tests can assert short-circuit behaviour.
-struct ScriptedLocator {
-    outcomes: RefCell<std::vec::IntoIter<Result<SdkResolution, SdkResolveError>>>,
-    call_count: Cell<usize>,
+/// What the locator answers in a root hostfxr runs from.
+#[derive(Debug, Clone)]
+enum Located {
+    /// `Ok`, with a payload naming which root answered.
+    Ok(u32),
+    /// The running SDK lacks the name.
+    NotFound,
+    /// NuGet has versions of a pinned name, but not the one pinned.
+    VersionNotSatisfied(Vec<String>),
+    Unsupported,
 }
 
-impl ScriptedLocator {
-    fn new(outcomes: Vec<Result<SdkResolution, SdkResolveError>>) -> Self {
-        Self {
-            outcomes: RefCell::new(outcomes.into_iter()),
-            call_count: Cell::new(0),
-        }
-    }
-
-    fn locate(&self) -> impl Fn(&Path, &str) -> Result<SdkResolution, SdkResolveError> + '_ {
-        |_root: &Path, _name: &str| {
-            self.call_count.set(self.call_count.get() + 1);
-            self.outcomes
-                .borrow_mut()
-                .next()
-                .expect("locator called more times than outcomes scripted")
-        }
-    }
+/// One scripted root.
+#[derive(Debug, Clone)]
+enum RootOutcome {
+    /// No SDK: hostfxr passes over the root.
+    NoSdk,
+    /// SDKs the spec admits none of: hostfxr passes over the root, and their
+    /// versions join the diagnostic.
+    NoneAdmitted(Vec<String>),
+    /// hostfxr runs an SDK from this root.
+    Runs(Located),
 }
 
 fn sdk_paths_stub(label: &str) -> SdkPaths {
@@ -1349,367 +1347,226 @@ fn unpinned_spec() -> VersionSpec {
     VersionSpec::any_version(true)
 }
 
-#[test]
-fn resolve_across_roots_empty_yields_not_found_without_calling_locate() {
-    let locator = ScriptedLocator::new(vec![]);
-    let result = resolve_across_roots(&[], "Microsoft.NET.Sdk", &locator.locate());
-    assert!(matches!(result, Err(SdkResolveError::NotFound)));
-    assert_eq!(locator.call_count.get(), 0);
+fn versions(strs: &[String]) -> Vec<SdkVersion> {
+    strs.iter()
+        .map(|s| SdkVersion::parse(s).expect("pool version parses"))
+        .collect()
 }
 
-#[test]
-fn resolve_across_roots_first_ok_wins_and_short_circuits() {
-    let roots = vec![
-        PathBuf::from("/a"),
-        PathBuf::from("/b"),
-        PathBuf::from("/c"),
-    ];
-    let locator = ScriptedLocator::new(vec![
-        Err(SdkResolveError::NotFound),
-        Ok(SdkResolution::Single(sdk_paths_stub("b"))),
-        // Third outcome must never be consulted.
-        Err(SdkResolveError::NotFound),
-    ]);
-    let result = resolve_across_roots(&roots, "Microsoft.NET.Sdk", &locator.locate());
-    assert_eq!(result.unwrap(), SdkResolution::Single(sdk_paths_stub("b")));
-    assert_eq!(locator.call_count.get(), 2, "locator must short-circuit");
-}
-
-#[test]
-fn resolve_across_roots_all_not_found_yields_not_found() {
-    let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
-    let locator = ScriptedLocator::new(vec![
-        Err(SdkResolveError::NotFound),
-        Err(SdkResolveError::NotFound),
-    ]);
-    let result = resolve_across_roots(&roots, "Microsoft.NET.Sdk", &locator.locate());
-    assert!(matches!(result, Err(SdkResolveError::NotFound)));
-    assert_eq!(locator.call_count.get(), 2);
-}
-
-#[test]
-fn resolve_across_roots_mixed_errors_union_available() {
-    // Two roots report VersionNotSatisfied with disjoint available
-    // lists, one reports NotFound. Result: VersionNotSatisfied with
-    // the union (deduped, sorted).
-    let roots = vec![
-        PathBuf::from("/a"),
-        PathBuf::from("/b"),
-        PathBuf::from("/c"),
-    ];
-    let avail_a = vec![SdkVersion::parse("8.0.401").unwrap()];
-    let avail_c = vec![
-        SdkVersion::parse("9.0.100").unwrap(),
-        SdkVersion::parse("10.0.100").unwrap(),
-    ];
-    let locator = ScriptedLocator::new(vec![
-        Err(SdkResolveError::VersionNotSatisfied {
-            spec: unpinned_spec(),
-            available: avail_a,
+fn located(l: &Located, spec: &VersionSpec) -> Result<SdkResolution, SdkResolveError> {
+    match l {
+        Located::Ok(tag) => Ok(SdkResolution::Single(sdk_paths_stub(&format!("ok-{tag}")))),
+        Located::NotFound => Err(SdkResolveError::NotFound),
+        Located::VersionNotSatisfied(strs) => Err(SdkResolveError::VersionNotSatisfied {
+            spec: spec.clone(),
+            available: versions(strs),
         }),
-        Err(SdkResolveError::NotFound),
-        Err(SdkResolveError::VersionNotSatisfied {
-            spec: unpinned_spec(),
-            available: avail_c,
+        Located::Unsupported => Err(SdkResolveError::UnsupportedLayout {
+            reason: "scripted".to_owned(),
         }),
-    ]);
-    let result = resolve_across_roots(&roots, "Microsoft.NET.Sdk", &locator.locate());
+    }
+}
+
+/// `resolve_across_roots` over `outcomes`, one root each, with the number of
+/// roots asked for their pick and the number located.
+fn fold(
+    outcomes: &[RootOutcome],
+    spec: &VersionSpec,
+) -> (Result<SdkResolution, SdkResolveError>, usize, usize) {
+    let roots: Vec<PathBuf> = (0..outcomes.len())
+        .map(|i| PathBuf::from(format!("/r{i}")))
+        .collect();
+    let index = |root: &Path| -> usize {
+        root.to_str()
+            .and_then(|s| s.strip_prefix("/r"))
+            .and_then(|i| i.parse().ok())
+            .expect("a scripted root")
+    };
+    let (picks, locates) = (Cell::new(0), Cell::new(0));
+    let pick = |root: &Path| {
+        picks.set(picks.get() + 1);
+        match &outcomes[index(root)] {
+            RootOutcome::NoSdk => Err(SdkResolveError::NotFound),
+            RootOutcome::NoneAdmitted(strs) => Err(SdkResolveError::VersionNotSatisfied {
+                spec: spec.clone(),
+                available: versions(strs),
+            }),
+            RootOutcome::Runs(_) => Ok(root.join("sdk/10.0.100")),
+        }
+    };
+    let locate = |root: &Path, _name: &str| {
+        locates.set(locates.get() + 1);
+        match &outcomes[index(root)] {
+            RootOutcome::Runs(l) => located(l, spec),
+            other => panic!("located a root hostfxr passes over: {other:?}"),
+        }
+    };
+    let result = resolve_across_roots(&roots, "Microsoft.NET.Sdk", &pick, &locate);
+    (result, picks.get(), locates.get())
+}
+
+/// The fold `resolve_across_roots` must compute, with the calls it makes.
+fn reference_fold(
+    outcomes: &[RootOutcome],
+    spec: &VersionSpec,
+) -> (Result<SdkResolution, SdkResolveError>, usize, usize) {
+    let mut union: Vec<SdkVersion> = Vec::new();
+    for (i, o) in outcomes.iter().enumerate() {
+        match o {
+            RootOutcome::NoSdk => {}
+            RootOutcome::NoneAdmitted(strs) => union.extend(versions(strs)),
+            RootOutcome::Runs(l) => return (located(l, spec), i + 1, 1),
+        }
+    }
+    union.sort();
+    union.dedup();
+    let result = if union.is_empty() {
+        Err(SdkResolveError::NotFound)
+    } else {
+        Err(SdkResolveError::VersionNotSatisfied {
+            spec: spec.clone(),
+            available: union,
+        })
+    };
+    (result, outcomes.len(), 0)
+}
+
+#[test]
+fn resolve_across_roots_empty_yields_not_found_without_asking() {
+    let (result, picks, locates) = fold(&[], &unpinned_spec());
+    assert_eq!(result, Err(SdkResolveError::NotFound));
+    assert_eq!((picks, locates), (0, 0));
+}
+
+#[test]
+fn resolve_across_roots_stops_where_the_running_sdk_lacks_the_name() {
+    // #912: the first root runs an SDK without the name; MSBuild fails, and
+    // never looks at the second root's copy.
+    let (result, picks, locates) = fold(
+        &[
+            RootOutcome::Runs(Located::NotFound),
+            RootOutcome::Runs(Located::Ok(1)),
+        ],
+        &unpinned_spec(),
+    );
+    assert_eq!(result, Err(SdkResolveError::NotFound));
+    assert_eq!((picks, locates), (1, 1));
+}
+
+#[test]
+fn resolve_across_roots_stops_where_nuget_lacks_the_pinned_version() {
+    let (result, _, locates) = fold(
+        &[
+            RootOutcome::Runs(Located::VersionNotSatisfied(vec!["9.0.100".to_owned()])),
+            RootOutcome::Runs(Located::Ok(1)),
+        ],
+        &unpinned_spec(),
+    );
+    assert!(
+        matches!(result, Err(SdkResolveError::VersionNotSatisfied { .. })),
+        "{result:?}"
+    );
+    assert_eq!(locates, 1);
+}
+
+#[test]
+fn resolve_across_roots_passes_over_roots_hostfxr_does() {
+    let (result, picks, locates) = fold(
+        &[
+            RootOutcome::NoSdk,
+            RootOutcome::NoneAdmitted(vec!["8.0.401".to_owned()]),
+            RootOutcome::Runs(Located::Ok(7)),
+            RootOutcome::Runs(Located::Ok(8)),
+        ],
+        &unpinned_spec(),
+    );
+    assert_eq!(result, Ok(SdkResolution::Single(sdk_paths_stub("ok-7"))));
+    assert_eq!((picks, locates), (3, 1));
+}
+
+#[test]
+fn resolve_across_roots_unions_the_versions_no_root_admits() {
+    let (result, _, locates) = fold(
+        &[
+            RootOutcome::NoneAdmitted(vec!["10.0.200".to_owned(), "9.0.100".to_owned()]),
+            RootOutcome::NoSdk,
+            RootOutcome::NoneAdmitted(vec!["9.0.100".to_owned()]),
+        ],
+        &unpinned_spec(),
+    );
     let Err(SdkResolveError::VersionNotSatisfied { available, .. }) = result else {
         panic!("expected VersionNotSatisfied, got {result:?}");
     };
     assert_eq!(
         available,
-        vec![
-            SdkVersion::parse("8.0.401").unwrap(),
-            SdkVersion::parse("9.0.100").unwrap(),
-            SdkVersion::parse("10.0.100").unwrap(),
-        ]
+        versions(&["9.0.100".to_owned(), "10.0.200".to_owned()])
     );
-    assert_eq!(locator.call_count.get(), 3, "no Ok ⇒ all roots consulted");
-}
-
-#[test]
-fn resolve_across_roots_dedups_overlapping_available_versions() {
-    // Same version reported by two roots — must appear once in the
-    // returned union, not twice. Also pins sort order is ascending.
-    let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
-    let dup = SdkVersion::parse("9.0.100").unwrap();
-    let locator = ScriptedLocator::new(vec![
-        Err(SdkResolveError::VersionNotSatisfied {
-            spec: unpinned_spec(),
-            // Out-of-order to confirm the function sorts.
-            available: vec![SdkVersion::parse("10.0.100").unwrap(), dup.clone()],
-        }),
-        Err(SdkResolveError::VersionNotSatisfied {
-            spec: unpinned_spec(),
-            available: vec![dup, SdkVersion::parse("8.0.401").unwrap()],
-        }),
-    ]);
-    let result = resolve_across_roots(&roots, "Microsoft.NET.Sdk", &locator.locate());
-    let Err(SdkResolveError::VersionNotSatisfied { available, .. }) = result else {
-        panic!("expected VersionNotSatisfied, got {result:?}");
-    };
-    assert_eq!(
-        available,
-        vec![
-            SdkVersion::parse("8.0.401").unwrap(),
-            SdkVersion::parse("9.0.100").unwrap(),
-            SdkVersion::parse("10.0.100").unwrap(),
-        ]
-    );
-}
-
-#[test]
-fn resolve_across_roots_ok_after_version_not_satisfied_wins() {
-    // The host's first-match-wins applies even when an earlier root
-    // is a near-miss — confirms the iteration doesn't accidentally
-    // get sticky on the first reported error.
-    let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
-    let locator = ScriptedLocator::new(vec![
-        Err(SdkResolveError::VersionNotSatisfied {
-            spec: unpinned_spec(),
-            available: vec![SdkVersion::parse("8.0.401").unwrap()],
-        }),
-        Ok(SdkResolution::Single(sdk_paths_stub("b"))),
-    ]);
-    let result = resolve_across_roots(&roots, "Microsoft.NET.Sdk", &locator.locate());
-    assert_eq!(result.unwrap(), SdkResolution::Single(sdk_paths_stub("b")));
-    assert_eq!(locator.call_count.get(), 2);
-}
-
-#[test]
-fn resolve_across_roots_preserves_locator_reported_spec() {
-    // `locate_dotnet_sdk` reports the *effective* spec — which for
-    // per-import `Sdk="Name/Version"` pins or `msbuild-sdks`
-    // overrides differs from the discovery-wide global.json spec.
-    // The fold must carry that locator-reported spec through to the
-    // aggregated `VersionNotSatisfied`, not substitute one of its
-    // own. Regression: an earlier version of this function dropped
-    // the locator-supplied spec and used a separately-threaded
-    // `&self.spec`, which corrupted diagnostics for those callers.
-    let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
-    let pinned_spec = VersionSpec::with_version(
-        SdkVersion::parse("9.0.100").unwrap(),
-        RollForward::Disable,
-        false,
-    );
-    let locator = ScriptedLocator::new(vec![
-        Err(SdkResolveError::VersionNotSatisfied {
-            spec: pinned_spec.clone(),
-            available: vec![SdkVersion::parse("9.0.200").unwrap()],
-        }),
-        Err(SdkResolveError::NotFound),
-    ]);
-    let result = resolve_across_roots(&roots, "Microsoft.NET.Sdk", &locator.locate());
-    let Err(SdkResolveError::VersionNotSatisfied { spec, .. }) = result else {
-        panic!("expected VersionNotSatisfied, got {result:?}");
-    };
-    assert_eq!(spec, pinned_spec);
-}
-
-#[test]
-fn resolve_across_roots_uses_first_version_not_satisfied_spec() {
-    // If two roots both report `VersionNotSatisfied` with different
-    // specs (a hypothetical that doesn't arise in practice because
-    // `locate_dotnet_sdk` derives the spec from `(sdk_name,
-    // global.json, per-import pin)` which is root-invariant for a
-    // given lookup, but the fold has no way to know that), the
-    // first one wins. The available lists still union.
-    let roots = vec![PathBuf::from("/a"), PathBuf::from("/b")];
-    let first_spec = VersionSpec::with_version(
-        SdkVersion::parse("9.0.100").unwrap(),
-        RollForward::Disable,
-        false,
-    );
-    let second_spec = VersionSpec::with_version(
-        SdkVersion::parse("10.0.100").unwrap(),
-        RollForward::Disable,
-        false,
-    );
-    let locator = ScriptedLocator::new(vec![
-        Err(SdkResolveError::VersionNotSatisfied {
-            spec: first_spec.clone(),
-            available: vec![SdkVersion::parse("9.0.200").unwrap()],
-        }),
-        Err(SdkResolveError::VersionNotSatisfied {
-            spec: second_spec,
-            available: vec![SdkVersion::parse("10.0.200").unwrap()],
-        }),
-    ]);
-    let result = resolve_across_roots(&roots, "Microsoft.NET.Sdk", &locator.locate());
-    let Err(SdkResolveError::VersionNotSatisfied { spec, available }) = result else {
-        panic!("expected VersionNotSatisfied, got {result:?}");
-    };
-    assert_eq!(spec, first_spec);
-    assert_eq!(
-        available,
-        vec![
-            SdkVersion::parse("9.0.200").unwrap(),
-            SdkVersion::parse("10.0.200").unwrap(),
-        ]
-    );
+    assert_eq!(locates, 0);
 }
 
 // ----- PBT --------------------------------------------------
 
-/// One scripted outcome per root for the PBT — kept as a small
-/// closed enum so the property's spec function can run the same
-/// fold the implementation does.
-#[derive(Debug, Clone)]
-enum RootOutcome {
-    /// `Ok` carries an integer payload so the property can confirm
-    /// *which* root's payload survived (not just "some Ok").
-    Ok(u32),
-    NotFound,
-    /// Available list pre-stringified — random valid `SdkVersion`s
-    /// would be cumbersome to generate, and the iteration only
-    /// cares about the union, not the parse.
-    VersionNotSatisfied(Vec<String>),
+fn version_pool() -> impl Strategy<Value = Vec<String>> {
+    // A small pool, so duplicates across roots are common: the case the
+    // dedup leg of the fold cares about.
+    prop::collection::vec(
+        prop::sample::select(vec![
+            "8.0.401".to_string(),
+            "9.0.100".to_string(),
+            "9.0.100-preview.1.24070.1".to_string(),
+            "10.0.100".to_string(),
+            "10.0.204".to_string(),
+        ]),
+        0..4,
+    )
 }
 
 fn outcome_strategy() -> impl Strategy<Value = RootOutcome> {
     prop_oneof![
-        any::<u32>().prop_map(RootOutcome::Ok),
-        Just(RootOutcome::NotFound),
-        // Versions drawn from a small pool so duplicates across roots
-        // are common — that's the case the dedup leg of the fold cares
-        // about. Strings rather than `SdkVersion`s so the strategy can
-        // be `Clone` + `Debug` cheaply.
-        prop::collection::vec(
-            prop::sample::select(vec![
-                "8.0.401".to_string(),
-                "9.0.100".to_string(),
-                "9.0.100-preview.1.24070.1".to_string(),
-                "10.0.100".to_string(),
-                "10.0.204".to_string(),
-            ]),
-            0..4,
-        )
-        .prop_map(RootOutcome::VersionNotSatisfied),
+        Just(RootOutcome::NoSdk),
+        version_pool().prop_map(RootOutcome::NoneAdmitted),
+        prop_oneof![
+            any::<u32>().prop_map(Located::Ok),
+            Just(Located::NotFound),
+            version_pool().prop_map(Located::VersionNotSatisfied),
+            Just(Located::Unsupported),
+        ]
+        .prop_map(RootOutcome::Runs),
     ]
 }
 
-fn outcomes_to_results(
-    outcomes: &[RootOutcome],
-    spec: &VersionSpec,
-) -> Vec<Result<SdkResolution, SdkResolveError>> {
-    outcomes
-        .iter()
-        .map(|o| match o {
-            RootOutcome::Ok(tag) => Ok(SdkResolution::Single(sdk_paths_stub(&format!("ok-{tag}")))),
-            RootOutcome::NotFound => Err(SdkResolveError::NotFound),
-            RootOutcome::VersionNotSatisfied(strs) => Err(SdkResolveError::VersionNotSatisfied {
-                spec: spec.clone(),
-                available: strs
-                    .iter()
-                    .map(|s| SdkVersion::parse(s).expect("pool version parses"))
-                    .collect(),
-            }),
-        })
-        .collect()
-}
-
-/// Reference implementation of the fold — the property check.
-/// Returns `(result, expected_call_count)`.
-fn reference_fold(
-    outcomes: &[RootOutcome],
-    spec: &VersionSpec,
-) -> (Result<SdkResolution, SdkResolveError>, usize) {
-    for (i, o) in outcomes.iter().enumerate() {
-        if let RootOutcome::Ok(tag) = o {
-            return (
-                Ok(SdkResolution::Single(sdk_paths_stub(&format!("ok-{tag}")))),
-                i + 1,
-            );
-        }
-    }
-    // No Ok ⇒ every root consulted.
-    let mut union: Vec<SdkVersion> = Vec::new();
-    for o in outcomes {
-        if let RootOutcome::VersionNotSatisfied(strs) = o {
-            for s in strs {
-                union.push(SdkVersion::parse(s).unwrap());
-            }
-        }
-    }
-    if union.is_empty() {
-        (Err(SdkResolveError::NotFound), outcomes.len())
-    } else {
-        union.sort();
-        union.dedup();
-        (
-            Err(SdkResolveError::VersionNotSatisfied {
-                spec: spec.clone(),
-                available: union,
-            }),
-            outcomes.len(),
-        )
-    }
-}
-
-/// Property: across an arbitrary list of per-root outcomes,
-/// `resolve_across_roots` returns exactly what the reference fold
-/// computes — same outcome (Ok payload identity / NotFound /
-/// VersionNotSatisfied union) and same number of locator calls
-/// (first-match short-circuit observable through the call count).
-///
-/// Distribution sanity: across 256 cases, every fold branch must
-/// fire at least a few times (first-Ok, all-NotFound, mixed-union,
-/// empty-roots).
+/// Property: across an arbitrary list of scripted roots,
+/// `resolve_across_roots` returns exactly what the reference fold computes,
+/// asking hostfxr's pick of each root up to the first it runs from and
+/// locating in that root alone.
 #[test]
 fn resolve_across_roots_matches_reference_fold() {
     let mut runner = TestRunner::new(PtConfig {
         cases: 256,
         ..PtConfig::default()
     });
-    let saw_ok = Cell::new(0u32);
-    let saw_not_found_only = Cell::new(0u32);
-    let saw_mixed_union = Cell::new(0u32);
-    let saw_empty = Cell::new(0u32);
-
+    let (saw_runs, saw_none) = (Cell::new(0u32), Cell::new(0u32));
     let strat = prop::collection::vec(outcome_strategy(), 0..6);
     let spec = unpinned_spec();
     runner
         .run(&strat, |outcomes| {
-            let (expected_result, expected_calls) = reference_fold(&outcomes, &spec);
-            let results = outcomes_to_results(&outcomes, &spec);
-            // One PathBuf per outcome — paths are otherwise opaque to
-            // the iteration.
-            let roots: Vec<PathBuf> = (0..outcomes.len())
-                .map(|i| PathBuf::from(format!("/r{i}")))
-                .collect();
-            let locator = ScriptedLocator::new(results);
-            let result = resolve_across_roots(&roots, "Microsoft.NET.Sdk", &locator.locate());
-            prop_assert_eq!(&result, &expected_result);
-            prop_assert_eq!(locator.call_count.get(), expected_calls);
-
-            // Distribution accounting.
-            if outcomes.is_empty() {
-                saw_empty.set(saw_empty.get() + 1);
-            } else if outcomes.iter().any(|o| matches!(o, RootOutcome::Ok(_))) {
-                saw_ok.set(saw_ok.get() + 1);
-            } else if outcomes.iter().all(|o| matches!(o, RootOutcome::NotFound)) {
-                saw_not_found_only.set(saw_not_found_only.get() + 1);
+            let ours = fold(&outcomes, &spec);
+            let expected = reference_fold(&outcomes, &spec);
+            prop_assert_eq!(&ours.0, &expected.0);
+            prop_assert_eq!((ours.1, ours.2), (expected.1, expected.2));
+            if outcomes.iter().any(|o| matches!(o, RootOutcome::Runs(_))) {
+                saw_runs.set(saw_runs.get() + 1);
             } else {
-                saw_mixed_union.set(saw_mixed_union.get() + 1);
+                saw_none.set(saw_none.get() + 1);
             }
             Ok(())
         })
         .unwrap();
-
-    // Each run draws 0..6 outcomes from a 3-branch pool. Across
-    // 256 cases the per-bucket counts should comfortably exceed 5.
-    assert!(saw_empty.get() >= 5, "too few empty: {}", saw_empty.get());
-    assert!(saw_ok.get() >= 20, "too few Ok: {}", saw_ok.get());
+    assert!(saw_runs.get() >= 50, "too few runs: {}", saw_runs.get());
     assert!(
-        saw_not_found_only.get() >= 5,
-        "too few all-NotFound: {}",
-        saw_not_found_only.get()
-    );
-    assert!(
-        saw_mixed_union.get() >= 20,
-        "too few mixed-union: {}",
-        saw_mixed_union.get()
+        saw_none.get() >= 20,
+        "too few with no pick: {}",
+        saw_none.get()
     );
 }
 
