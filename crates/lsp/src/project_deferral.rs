@@ -39,8 +39,8 @@ use borzoi_msbuild::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
     CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause,
     DefineConstantsUncertaintyCauseKind, DiagnosticKind, DiagnosticOrigin, ImplicitImportKind,
-    ImportFailReason, ParsedProject, RejectionCause, StructuralCompileItemUncertainty,
-    UnloadableImport, UntrustedCause,
+    ImportFailReason, ParsedProject, RejectionCause, RejectionCertainty,
+    StructuralCompileItemUncertainty, UnloadableImport, UntrustedCause,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -448,7 +448,10 @@ fn untrusted_cause_phrase(cause: &UntrustedCause) -> String {
         UntrustedCause::Refused { name } => {
             format!("`$({name})`, which the project sets to a value I can't compute")
         }
-        UntrustedCause::Rejected(rejection) => render_rejection_cause(&rejection.cause),
+        UntrustedCause::Rejected(rejection) => render_rejection_cause(
+            &rejection.cause,
+            rejection.certainty == RejectionCertainty::Certain,
+        ),
     }
 }
 
@@ -955,12 +958,15 @@ fn render_diagnostic_kind(kind: &DiagnosticKind) -> String {
             },
             path.display()
         ),
-        DiagnosticKind::MayBeRejected { cause } => render_rejection_cause(cause),
+        DiagnosticKind::MayBeRejected { cause } => render_rejection_cause(cause, false),
+        DiagnosticKind::Rejected { cause } => render_rejection_cause(cause, true),
     }
 }
 
-/// Wildcard-free for the same reason as [`render_diagnostic_kind`].
-fn render_rejection_cause(cause: &RejectionCause) -> String {
+/// Wildcard-free for the same reason as [`render_diagnostic_kind`]. `certain`:
+/// the walk claims MSBuild rejects the project, rather than that it may.
+fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
+    let rejects = if certain { "rejects" } else { "may reject" };
     match cause {
         RejectionCause::Import {
             project,
@@ -977,11 +983,16 @@ fn render_rejection_cause(cause: &RejectionCause) -> String {
                 UnloadableImport::NoPath => "no path".to_string(),
                 UnloadableImport::Failed(reason) => render_import_fail(reason),
             };
+            let loads = if certain { "loads" } else { "may load" };
             format!(
-                "an `<Import>` of `{project}`{gate} that may load nothing ({why}), so MSBuild \
-                 may reject the whole project"
+                "an `<Import>` of `{project}`{gate} that {loads} nothing ({why}), so MSBuild \
+                 {rejects} the whole project"
             )
         }
+        RejectionCause::IllegalCondition { condition } => format!(
+            "the condition `{condition}`, which MSBuild cannot evaluate, so MSBuild {rejects} \
+             the whole project"
+        ),
     }
 }
 

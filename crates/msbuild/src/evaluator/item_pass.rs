@@ -109,11 +109,14 @@ enum DeferredFileKey {
 /// Which construct a [`DeferredItemGroup`] is, deciding both its replay
 /// order and its handler. MSBuild evaluates ALL `<ItemDefinitionGroup>`s
 /// (its pass 2) before ANY `<ItemGroup>` (pass 3), so the replay runs the
-/// definition groups first regardless of document interleaving.
+/// definition groups first regardless of document interleaving. A
+/// `<UsingTask>` is MSBuild's pass 4, after every item: only its condition is
+/// judged ([`rejection::judge_deferred`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum DeferredGroupKind {
     ItemDefinitionGroup,
     ItemGroup,
+    UsingTask,
 }
 
 impl DeferredGroupKind {
@@ -121,6 +124,7 @@ impl DeferredGroupKind {
         match self {
             DeferredGroupKind::ItemDefinitionGroup => "ItemDefinitionGroup",
             DeferredGroupKind::ItemGroup => "ItemGroup",
+            DeferredGroupKind::UsingTask => "UsingTask",
         }
     }
 }
@@ -142,6 +146,9 @@ pub(super) struct DeferredItemGroup {
     /// exactly as they would have under inline evaluation.
     import_site_span: Option<Range<usize>>,
     in_sdk_subtree: bool,
+    /// Whether MSBuild reaches the group for certain, as the property pass
+    /// found it ([`rejection::reach_is_certain`]).
+    reach_certain: bool,
 }
 
 impl<'r> State<'r> {
@@ -200,6 +207,7 @@ impl<'r> State<'r> {
             range: node.range(),
             import_site_span: self.import_site_span.clone(),
             in_sdk_subtree: self.in_sdk_subtree,
+            reach_certain: rejection::reach_is_certain(self),
         });
     }
 }
@@ -218,7 +226,11 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
     let item_groups = groups
         .iter()
         .filter(|group| group.kind == DeferredGroupKind::ItemGroup);
-    for group in definition_groups.chain(item_groups) {
+    let using_tasks = groups
+        .iter()
+        .filter(|group| group.kind == DeferredGroupKind::UsingTask);
+    state.in_item_pass = true;
+    for group in definition_groups.chain(item_groups).chain(using_tasks) {
         // Reinstate the positional context the group was recorded under, so
         // diagnostics/origins/SDK tolerance match inline evaluation.
         let saved_span =
@@ -227,12 +239,21 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
         let evaluate = match group.kind {
             DeferredGroupKind::ItemDefinitionGroup => evaluate_item_definition_group,
             DeferredGroupKind::ItemGroup => evaluate_item_group,
+            DeferredGroupKind::UsingTask => evaluate_using_task,
+        };
+        // MSBuild evaluates the group's conditions in this pass, against the
+        // final property table: judged here, before the group is walked.
+        let judge = |node: Node<'_, '_>, dir: &Path, state: &mut State<'_>| {
+            rejection::judge_deferred(node, dir, group.reach_certain, state);
         };
         match group.file {
             DeferredFileKey::Entry => {
                 // The entry file's `MSBuildThisFile*` bindings are already
                 // live (every property-pass frame restored them on exit).
-                evaluate(resolve_deferred_node(entry_doc, group), state);
+                let node = resolve_deferred_node(entry_doc, group);
+                let dir = state.entry_project_dir.clone();
+                judge(node, &dir, state);
+                evaluate(node, state);
             }
             DeferredFileKey::Imported(index) => {
                 let file = &files[index];
@@ -242,13 +263,21 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 // item's `$(MSBuildThisFileDirectory)Extra.fs` resolves
                 // against the import's directory, not the entry project's.
                 let frame = state.enter_this_file(&file.path);
-                evaluate(resolve_deferred_node(doc, group), state);
+                let node = resolve_deferred_node(doc, group);
+                let dir = file
+                    .path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default();
+                judge(node, &dir, state);
+                evaluate(node, state);
                 state.exit_this_file(frame);
             }
         }
         state.import_site_span = saved_span;
         state.in_sdk_subtree = saved_sdk;
     }
+    state.in_item_pass = false;
     // All items captured: collapse Include + Update into the effective set and
     // detect the versionless symptom on it (both need every item present).
     #[cfg(any(test, feature = "test-support"))]
@@ -342,6 +371,10 @@ fn evaluate_item_definition_group(node: Node<'_, '_>, state: &mut State<'_>) {
     }
     record_helper_item_definition_defaults(node, state);
 }
+
+/// A `<UsingTask>` the item pass replays: nothing of it is modelled but its
+/// condition, which the replay judges before calling this.
+fn evaluate_using_task(_node: Node<'_, '_>, _state: &mut State<'_>) {}
 
 /// Whether an `<ItemDefinitionGroup>` declares at least one
 /// `<ProjectReference>` metadata default that could change what a reference
@@ -3750,8 +3783,8 @@ fn evaluate_item_condition_silent(node: Node<'_, '_>, state: &State<'_>) -> (Con
     let gate = match eval.outcome {
         condition::Outcome::True => CondGate::Run,
         condition::Outcome::False => CondGate::Skip,
-        // #820's rejection flag will consume `Illegal`; until then it gates as
-        // undecided, like `Unsupported`.
+        // An illegal condition is judged as a rejection, group by group
+        // ([`rejection::judge_deferred`]); here it gates as an unmodelled one.
         condition::Outcome::Illegal | condition::Outcome::Unsupported => CondGate::Unsupported,
     };
     (gate, tainted)

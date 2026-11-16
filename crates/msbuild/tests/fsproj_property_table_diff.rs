@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::common::parse_fsproj_with_imports;
-use borzoi_msbuild::{PropertyRead, parse_fsproj};
+use borzoi_msbuild::{PropertyRead, RejectionCertainty, parse_fsproj};
 use common::{
     CONTROLLED_PROPERTY_NAMES, Oracle, SplitMix64, breaks_inside_quote, gen_bool_expr, gen_props,
     respell_whitespace,
@@ -206,6 +206,12 @@ fn check_names_at_path(
         );
         return Vec::new();
     };
+    assert_ne!(
+        parsed.rejection.as_ref().map(|r| r.certainty),
+        Some(RejectionCertainty::Certain),
+        "certain-implies-exact violated: we claim MSBuild rejects this project, and it \
+         evaluates it\n--- xml ---\n{xml}"
+    );
 
     for (name, our_value) in &ours {
         let their_value = theirs
@@ -873,6 +879,11 @@ fn gen_spaced_condition(rng: &mut SplitMix64) -> String {
     condition
 }
 
+/// How many documents [`conditions_with_raw_whitespace_are_exact_or_declined`]
+/// generates that MSBuild rejects for a condition the walk reads as
+/// unmodelled rather than illegal (#783).
+const RAW_WHITESPACE_REJECTED_UNMODELLED: usize = 121;
+
 /// The whitespace axis at the XML layer (#750): conditions, generated and
 /// built around quoted strings holding spaces, with their spaces respelt as
 /// raw tabs, line feeds, carriage returns and CRLFs (and, now and then,
@@ -893,6 +904,7 @@ fn conditions_with_raw_whitespace_are_exact_or_declined() {
     let mut decided = 0usize;
     let mut decided_inside_quote = 0usize;
     let mut rejected = 0usize;
+    let mut rejected_unmodelled = 0usize;
     for _ in 0..CASES {
         let mut props = gen_props(&mut rng);
         props.push(("Spaced".to_string(), rng.pick(SPACED_VALUES).to_string()));
@@ -914,11 +926,25 @@ fn conditions_with_raw_whitespace_are_exact_or_declined() {
         let site = rng.below(CONDITION_SITES);
         let xml = conditioned_document(&props, &attribute, site);
         // A condition MSBuild finds illegal (whitespace inserted inside a bare
-        // token makes many) rejects the whole project, while the walk, which
-        // cannot tell an illegal condition from an unmodelled one, keeps the
-        // writes around it: #783. Such a document grades nothing here.
+        // token makes many) rejects the whole project. One the walk finds
+        // illegal withdraws everything, which is graded as for every document;
+        // one it calls unmodelled keeps the writes around it, and grades
+        // nothing here. Those are counted, and the count pinned: it moves only
+        // when the evaluator classifies more of MSBuild's rejections (#783).
         if oracle.project(&xml, &names, None, &[]).is_none() {
             rejected += 1;
+            let parsed = parse_fsproj(
+                &xml,
+                Path::new("/repo/proj/Demo.fsproj"),
+                &HashMap::new(),
+                &common::oracle_environment(),
+            )
+            .expect("well-formed");
+            if parsed.rejection.is_some() {
+                check_names_at_path(&mut oracle, &xml, &names, None);
+            } else {
+                rejected_unmodelled += 1;
+            }
             continue;
         }
         if check_names_at_path(&mut oracle, &xml, &names, None).contains(&names[0]) {
@@ -928,7 +954,13 @@ fn conditions_with_raw_whitespace_are_exact_or_declined() {
     }
     eprintln!(
         "raw-whitespace conditions: {decided} of {CASES} decided, \
-         {decided_inside_quote} with a break inside a quote, {rejected} rejected by MSBuild"
+         {decided_inside_quote} with a break inside a quote, {rejected} rejected by MSBuild, \
+         {rejected_unmodelled} of them read as unmodelled"
+    );
+    assert_eq!(
+        rejected_unmodelled, RAW_WHITESPACE_REJECTED_UNMODELLED,
+        "the rejected documents whose condition the walk reads as unmodelled moved: \
+         pin the new count if the evaluator now classifies more of them as illegal"
     );
     assert!(decided >= 500, "only {decided} of {CASES} decided");
     assert!(
@@ -1176,7 +1208,7 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
     std::os::unix::fs::symlink("gone.props", dir.join("dangling.props")).unwrap();
     let project_path = dir.join("Demo.fsproj");
     let names: Vec<String> = ["Alpha", "Beta", "Gamma"].map(String::from).to_vec();
-    let (mut rejected, mut committed) = (0usize, 0usize);
+    let (mut rejected, mut committed, mut certain) = (0usize, 0usize, 0usize);
     // The gate sits on the import, or on an `<ImportGroup>` around it, which
     // gates it as much.
     for (gate_template, in_group) in gates
@@ -1222,6 +1254,9 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
                     read => read.value().map(|v| (name, v.to_owned())),
                 })
                 .collect();
+            let claims_rejection =
+                parsed.rejection.as_ref().map(|r| r.certainty) == Some(RejectionCertainty::Certain);
+            certain += usize::from(claims_rejection);
             let Some(theirs) = oracle.project(&xml, &names, Some(&project_path), &[]) else {
                 rejected += 1;
                 assert!(
@@ -1231,6 +1266,11 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
                 );
                 continue;
             };
+            assert!(
+                !claims_rejection,
+                "certain-implies-exact violated: we claim MSBuild rejects this project, and it \
+                 evaluates it\n--- xml ---\n{xml}"
+            );
             for (name, value) in &ours {
                 committed += 1;
                 assert_eq!(
@@ -1253,8 +1293,307 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
             }
         }
     }
-    eprintln!("import failures: {rejected} rejected by MSBuild, {committed} values committed");
-    // Anti-vacuity: both sides of the contract are exercised.
+    eprintln!(
+        "import failures: {rejected} rejected by MSBuild, {certain} of them claimed, \
+         {committed} values committed"
+    );
+    // Anti-vacuity: both sides of the contract are exercised, and the claim.
+    assert!(certain >= 10, "only {certain} rejections claimed");
     assert!(rejected >= 20, "only {rejected} rejected");
     assert!(committed >= 40, "only {committed} committed");
+}
+
+/// Conditions MSBuild throws on (#783), in every position a condition takes:
+/// where MSBuild evaluates it, where it never does, and where only a gate the
+/// walk cannot decide says which; each position also after content the walk
+/// did not see, and inside an imported file. MSBuild rejects the whole project
+/// when it evaluates one, so a project it rejects must commit nothing, one it
+/// evaluates must commit only its values, and a rejection the walk claims
+/// ([`RejectionCertainty::Certain`]) must be MSBuild's. Where nothing the walk
+/// cannot decide stands between the condition and a position MSBuild never
+/// evaluates, the walk must not withdraw either.
+#[test]
+fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
+    const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+    const UNDECIDED_FALSE: &str = "$([System.String]::IsNullOrWhiteSpace('no'))";
+    // MSBuild's parser rejects each, whatever the values.
+    let by_syntax = [
+        "tr ue",
+        "'a' = 'a'",
+        "$( Word ) == ''",
+        "(true",
+        "false and (tr ue)",
+    ];
+    // Ill typed on the values written: `Word` holds `abc` for certain,
+    // `Maybe` under a gate the walk cannot decide.
+    let by_value = ["1 &lt; abc", "$(Word) &gt; 1", "$(Word)", "$(Maybe) &gt; 1"];
+    // Ill typed exactly where `Exists` resolves against the project's
+    // directory, which holds `flag`, or exactly where it resolves against the
+    // imported file's, which does not: each position's `Exists` directory,
+    // graded in the imported context.
+    let by_directory = [
+        "Exists('flag') And 1 &lt; abc",
+        "!Exists('flag') And 1 &lt; abc",
+    ];
+    let legal = [
+        "'a' == 'a'",
+        "'a' == 'b'",
+        "false and 1 &lt; abc",
+        UNDECIDED_TRUE,
+    ];
+    // `(template, never)`: `{c}` is the condition, and `never` says MSBuild
+    // evaluates it in no build, the walk deciding every gate that says so.
+    let positions: &[(&str, bool)] = &[
+        (
+            "<PropertyGroup><Alpha Condition=\"{c}\">x</Alpha></PropertyGroup>",
+            false,
+        ),
+        (
+            "<PropertyGroup Condition=\"{c}\"><Alpha>x</Alpha></PropertyGroup>",
+            false,
+        ),
+        (
+            "<PropertyGroup Condition=\"false\"><Alpha Condition=\"{c}\">x</Alpha></PropertyGroup>",
+            true,
+        ),
+        (
+            "<PropertyGroup Condition=\"UNDECIDED_TRUE\"><Alpha Condition=\"{c}\">x</Alpha></PropertyGroup>",
+            false,
+        ),
+        (
+            "<PropertyGroup Condition=\"UNDECIDED_FALSE\"><Alpha Condition=\"{c}\">x</Alpha></PropertyGroup>",
+            false,
+        ),
+        (
+            "<Import Project=\"there.props\" Condition=\"{c}\" />",
+            false,
+        ),
+        (
+            "<ImportGroup Condition=\"{c}\"><Import Project=\"there.props\" /></ImportGroup>",
+            false,
+        ),
+        (
+            "<ImportGroup Condition=\"false\"><Import Project=\"there.props\" Condition=\"{c}\" /></ImportGroup>",
+            true,
+        ),
+        (
+            "<ImportGroup Condition=\"UNDECIDED_TRUE\"><Import Project=\"there.props\" Condition=\"{c}\" /></ImportGroup>",
+            false,
+        ),
+        (
+            "<Choose><When Condition=\"{c}\"><PropertyGroup><Alpha>x</Alpha></PropertyGroup></When></Choose>",
+            false,
+        ),
+        (
+            "<Choose><When Condition=\"true\" /><When Condition=\"{c}\" /></Choose>",
+            true,
+        ),
+        (
+            "<Choose><When Condition=\"UNDECIDED_FALSE\" /><When Condition=\"{c}\" /></Choose>",
+            false,
+        ),
+        (
+            "<Choose><When Condition=\"false\"><PropertyGroup><Alpha Condition=\"{c}\">x</Alpha></PropertyGroup></When>\
+             <Otherwise><PropertyGroup><Alpha>y</Alpha></PropertyGroup></Otherwise></Choose>",
+            true,
+        ),
+        (
+            "<Choose><When Condition=\"false\" /><Otherwise><PropertyGroup><Alpha Condition=\"{c}\">x</Alpha>\
+             </PropertyGroup></Otherwise></Choose>",
+            false,
+        ),
+        (
+            "<Choose><When Condition=\"UNDECIDED_TRUE\" /><Otherwise><ItemGroup><I Include=\"x\" Condition=\"{c}\" />\
+             </ItemGroup></Otherwise></Choose>",
+            false,
+        ),
+        (
+            "<ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup>",
+            false,
+        ),
+        (
+            "<ItemGroup Condition=\"false\"><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
+            false,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"false\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            false,
+        ),
+        (
+            "<ItemGroup><I Update=\"x\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            false,
+        ),
+        // Metadata evaluated item by item, for no item and for one.
+        (
+            "<ItemGroup><I Include=\"$(Missing)\"><O>%(Filename)</O><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            false,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\"><O>%(Filename)</O><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            false,
+        ),
+        ("<ItemDefinitionGroup Condition=\"{c}\" />", false),
+        (
+            "<ItemDefinitionGroup Condition=\"false\"><I Condition=\"{c}\" /></ItemDefinitionGroup>",
+            true,
+        ),
+        (
+            "<ItemDefinitionGroup><I Condition=\"false\"><M Condition=\"{c}\">m</M></I></ItemDefinitionGroup>",
+            true,
+        ),
+        (
+            "<ItemDefinitionGroup><I><M Condition=\"{c}\">m</M></I></ItemDefinitionGroup>",
+            false,
+        ),
+        (
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Condition=\"{c}\" />",
+            false,
+        ),
+        ("<Target Name=\"T\" Condition=\"{c}\" />", true),
+        (
+            "<Target Name=\"T\"><PropertyGroup><Alpha Condition=\"{c}\">x</Alpha></PropertyGroup></Target>",
+            true,
+        ),
+    ];
+    #[derive(Clone, Copy, PartialEq)]
+    enum Context {
+        Plain,
+        AfterHiddenContent,
+        Imported,
+    }
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    // The imported context's file sits in `sub`, beside its own `there.props`,
+    // and `flag` beside the project alone.
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    for there in [dir.join("there.props"), dir.join("sub/there.props")] {
+        std::fs::write(
+            there,
+            "<Project><PropertyGroup><Delta>d</Delta></PropertyGroup></Project>",
+        )
+        .unwrap();
+    }
+    std::fs::write(dir.join("flag"), "").unwrap();
+    let project_path = dir.join("Demo.fsproj");
+    let names: Vec<String> = ["Alpha", "Beta", "Gamma", "Delta"]
+        .map(String::from)
+        .to_vec();
+    let (mut rejected, mut committed, mut certain, mut possible) = (0usize, 0, 0, 0);
+    let conditions = by_syntax
+        .iter()
+        .chain(&by_value)
+        .chain(&by_directory)
+        .chain(&legal);
+    for (condition, &(template, never)) in
+        conditions.flat_map(|c| positions.iter().map(move |p| (c, p)))
+    {
+        for context in [
+            Context::Plain,
+            Context::AfterHiddenContent,
+            Context::Imported,
+        ] {
+            let position = template
+                .replace("{c}", condition)
+                .replace("UNDECIDED_TRUE", UNDECIDED_TRUE)
+                .replace("UNDECIDED_FALSE", UNDECIDED_FALSE);
+            let mut inner = String::new();
+            let (before, site) = match context {
+                Context::Plain => (String::new(), position),
+                Context::AfterHiddenContent => (
+                    format!("<Import Project=\"there.props\" Condition=\"{UNDECIDED_TRUE}\" />"),
+                    position,
+                ),
+                Context::Imported => {
+                    inner = format!("<Project>{position}</Project>");
+                    std::fs::write(dir.join("sub/inner.props"), &inner).unwrap();
+                    (
+                        String::new(),
+                        "<Import Project=\"sub/inner.props\" />".to_owned(),
+                    )
+                }
+            };
+            let xml = format!(
+                "<Project>\n  <PropertyGroup><Word>abc</Word>\
+                 <Maybe Condition=\"{UNDECIDED_TRUE}\">abc</Maybe><Beta>b</Beta></PropertyGroup>\n  \
+                 {before}\n  {site}\n  <PropertyGroup><Gamma>g</Gamma></PropertyGroup>\n</Project>\n"
+            );
+            std::fs::write(&project_path, &xml).unwrap();
+            let parsed = parse_fsproj_with_imports(
+                &xml,
+                &project_path,
+                &HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+            )
+            .expect("well-formed");
+            let ours: Vec<(&String, String)> = names
+                .iter()
+                .filter_map(|name| match parsed.property(name) {
+                    PropertyRead::Unset => Some((name, String::new())),
+                    read => read.value().map(|v| (name, v.to_owned())),
+                })
+                .collect();
+            let describe = || {
+                format!(
+                    "--- xml ---\n{xml}--- sub/inner.props ---\n{inner}\n{:#?}",
+                    parsed.rejection
+                )
+            };
+            match parsed.rejection.as_ref().map(|r| r.certainty) {
+                Some(RejectionCertainty::Certain) => certain += 1,
+                Some(RejectionCertainty::Possible) => possible += 1,
+                None => {}
+            }
+            let Some(theirs) = oracle.project(&xml, &names, Some(&project_path), &[]) else {
+                rejected += 1;
+                assert!(
+                    ours.is_empty(),
+                    "certain-implies-exact violated: MSBuild rejects this project, but we \
+                     committed {ours:?}\n{}",
+                    describe()
+                );
+                continue;
+            };
+            assert_ne!(
+                parsed.rejection.as_ref().map(|r| r.certainty),
+                Some(RejectionCertainty::Certain),
+                "certain-implies-exact violated: we claim MSBuild rejects this project, and \
+                 it evaluates it\n{}",
+                describe()
+            );
+            for (name, value) in &ours {
+                committed += 1;
+                assert_eq!(
+                    Some(value),
+                    theirs.get(*name),
+                    "certain-implies-exact violated for {name}\n{}",
+                    describe()
+                );
+            }
+            // Nothing the walk cannot decide stands between the condition and
+            // a position MSBuild never evaluates: no doubt to withdraw for.
+            let decided = context != Context::AfterHiddenContent
+                && !condition.contains("Maybe")
+                && !condition.contains("IsNullOrWhiteSpace");
+            if never && decided {
+                assert_eq!(
+                    parsed.rejection,
+                    None,
+                    "MSBuild never evaluates the condition\n{}",
+                    describe()
+                );
+            }
+        }
+    }
+    eprintln!(
+        "illegal conditions: {rejected} rejected by MSBuild; we claim {certain} rejections \
+         and allow {possible} more; {committed} values committed"
+    );
+    // Anti-vacuity: each side of the contract is exercised, the claim too.
+    assert!(certain >= 150, "only {certain} rejections claimed");
+    assert!(possible >= 50, "only {possible} rejections allowed");
+    assert!(rejected >= 200, "only {rejected} rejected");
+    assert!(committed >= 400, "only {committed} committed");
 }

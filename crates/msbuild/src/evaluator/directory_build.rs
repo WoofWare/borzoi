@@ -485,6 +485,16 @@ pub(super) fn within_route<T>(
     result
 }
 
+/// Whether the walk is inside no doubted walk and behind no import gate it did
+/// not decide from certain inputs: what it reaches now, MSBuild reaches too,
+/// but for the gates of the file itself ([`super::rejection::reach_is_certain`]).
+pub(super) fn reached_for_certain(state: &State<'_>) -> bool {
+    let bookkeeping = &state.directory_build;
+    bookkeeping.route_undecided == 0
+        && bookkeeping.fallback.is_none()
+        && bookkeeping.doubted_walk.is_empty()
+}
+
 /// Settle each file whose import by the SDK the walk has not accounted for,
 /// once every import it could follow is behind it.
 pub(super) fn settle_unaccounted(state: &mut State<'_>) {
@@ -688,7 +698,7 @@ fn named_file(state: &State<'_>, path_name: &str, dir: &Path) -> Option<PathBuf>
 /// Whether a read of `name` now is what the real build reads. An undefined
 /// `TargetFramework` is judged by the walk's mode, as every other read of it
 /// is, and leaning on its exactness is recorded as every other read records it.
-fn is_certain(state: &State<'_>, name: &str) -> bool {
+pub(super) fn is_certain(state: &State<'_>, name: &str) -> bool {
     state.trust_of(name).is_certain()
         && (state.lookup.is_bound(name) || state.undefined_read_is_exact(name))
 }
@@ -696,7 +706,7 @@ fn is_certain(state: &State<'_>, name: &str) -> bool {
 /// Whether `condition` decides the same way whatever the names the walk is
 /// not certain of hold ([`is_certain`]), within the grammar. The pure walker
 /// has no file system, so an `Exists` leaf is outside it there.
-fn decided_from_certain_inputs(state: &State<'_>, condition: &str, dir: &Path) -> bool {
+pub(super) fn decided_from_certain_inputs(state: &State<'_>, condition: &str, dir: &Path) -> bool {
     let observer = state.observer;
     let exists = |path: &str| condition_exists(observer, path, dir);
     let probes = state.follow_imports.then_some(condition::Probes {

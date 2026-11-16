@@ -1205,6 +1205,20 @@ struct State<'r> {
     /// ([`rejection`]); [`Self::into_project`] withdraws what the walk publishes
     /// when it is set.
     rejection: Option<crate::Rejection>,
+    /// How many constructs the walk is inside whose gate it did not decide
+    /// from certain inputs and took: a `<PropertyGroup>`, a `<Choose>` past a
+    /// `<When>` so decided, or an import whose path it did not compute from
+    /// certain values. Import gates count in
+    /// [`directory_build::Bookkeeping`] instead. A construct reached inside
+    /// one is not reached for certain ([`rejection::reach_is_certain`]).
+    reach_doubted: usize,
+    /// Whether the `<Import>` the walk is following names its path from
+    /// certain values, so that its failure to load is MSBuild's
+    /// ([`rejection`]). Set for each explicit import, and `false` for any other.
+    taken_import_path_certain: bool,
+    /// Set while the item pass runs: its conditions are judged group by group
+    /// ([`rejection::judge_deferred`]), not where the walk evaluates them.
+    in_item_pass: bool,
     /// The root each root-surfacing diagnostic stood for, by its index in
     /// `diagnostics`, captured when it was pushed. A diagnostic carries only a
     /// name, and that name's root may change later in the walk;
@@ -1628,6 +1642,9 @@ impl<'r> State<'r> {
             env_property_names,
             walk_opaque: None,
             rejection: None,
+            reach_doubted: 0,
+            taken_import_path_certain: false,
+            in_item_pass: false,
             diagnostic_roots: HashMap::new(),
         }
     }
@@ -2080,6 +2097,9 @@ impl<'r> State<'r> {
             env_property_names: _,
             walk_opaque: _,
             rejection,
+            reach_doubted: _,
+            taken_import_path_certain: _,
+            in_item_pass: _,
             diagnostic_roots: _,
         } = self;
         // Central Package Management opt-in: a versionless
@@ -2150,9 +2170,7 @@ impl<'r> State<'r> {
         let mut project_references_uncertain = project_references_uncertain;
         let mut hidden_content = hidden_content;
         if let Some(rejection) = &rejection {
-            let kind = DiagnosticKind::MayBeRejected {
-                cause: rejection.cause.clone(),
-            };
+            let kind = rejection.diagnostic_kind();
             let (span, origin) = (rejection.span.clone(), rejection.origin.clone());
             items_uncertain = true;
             compile_item_uncertainties.push(CompileItemUncertaintyCause {
@@ -2393,6 +2411,24 @@ impl<'r> State<'r> {
         span: Range<usize>,
         define_axis: DefineAxis,
     ) {
+        // An import that did not load fails MSBuild's evaluation (#845), but
+        // for the walk's own depth limit, which MSBuild does not have. Judged
+        // before the failure latches the walk opaque below: what it hides
+        // comes after it.
+        let failed_import = match &kind {
+            DiagnosticKind::ImportFailed { path, reason }
+                if !matches!(reason, ImportFailReason::DepthLimit { .. }) =>
+            {
+                let certainty = rejection::import_failure_certainty(self, path, reason);
+                Some((
+                    path.display().to_string(),
+                    reason.clone(),
+                    span.clone(),
+                    certainty,
+                ))
+            }
+            _ => None,
+        };
         // `import_site_span.is_some()` iff we're currently walking an
         // imported file — `walk_external_file` sets it on first
         // descent and preserves it on nested descents. That's the
@@ -2456,16 +2492,6 @@ impl<'r> State<'r> {
         if self.import_gate_context || is_structural_compile_risk(&kind) {
             self.project_references_uncertain = true;
         }
-        // An import that did not load fails MSBuild's evaluation (#845), but
-        // for the walk's own depth limit, which MSBuild does not have.
-        let failed_import = match &kind {
-            DiagnosticKind::ImportFailed { path, reason }
-                if !matches!(reason, ImportFailReason::DepthLimit { .. }) =>
-            {
-                Some((path.display().to_string(), reason.clone(), span.clone()))
-            }
-            _ => None,
-        };
         let origin = self.current_origin();
         let span = self.effective_span(span);
         if compile_uncertain {
@@ -2493,8 +2519,9 @@ impl<'r> State<'r> {
                 });
         }
         self.diagnostics.push(Diagnostic { kind, span, origin });
-        if let Some((project, reason, span)) = failed_import {
-            self.note_possible_rejection(
+        if let Some((project, reason, span, certainty)) = failed_import {
+            self.note_rejection(
+                certainty,
                 crate::RejectionCause::Import {
                     project,
                     gate_undecided: false,
@@ -3342,6 +3369,12 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     .contains(&c.tag_name().name().to_ascii_lowercase())
             });
             if all_protected {
+                // MSBuild still evaluates the group's own condition, though it
+                // discards each write unevaluated.
+                if attribute(node, "Condition").is_some() {
+                    let reached = rejection::reach_is_certain(state);
+                    rejection::judge_unwalked_gate(node, current_file_dir, reached, state);
+                }
                 return;
             }
             // A group that writes `<DefineConstants>` makes its own condition
@@ -3380,6 +3413,12 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                         .sdk_package()
                         .is_some()
                 });
+            // Whether MSBuild evaluates what the group holds exactly when the walk
+            // does ([`rejection`]): asked before the gate's evaluation, of the
+            // values it reads.
+            let gate_certain = attribute(node, "Condition").is_none_or(|condition| {
+                directory_build::decided_from_certain_inputs(state, &condition, current_file_dir)
+            });
             let diagnostics_before_condition = state.diagnostics.len();
             let gate = evaluate_property_group_condition(node, current_file_dir, state);
             let group_condition_maybe_wrong = state.diagnostics.len()
@@ -3412,6 +3451,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     if state.enclosing_condition_stale.is_none() {
                         state.enclosing_condition_stale = group_stale;
                     }
+                    state.reach_doubted += usize::from(!gate_certain);
                     for child in node.children().filter(Node::is_element) {
                         walk_property_child(
                             child,
@@ -3421,9 +3461,14 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                             state,
                         );
                     }
+                    state.reach_doubted -= usize::from(!gate_certain);
                     state.enclosing_condition_stale = saved_stale;
                 }
                 CondGate::Skip => {
+                    // MSBuild may take the group, and evaluate its writes.
+                    if !gate_certain {
+                        rejection::judge_properties(node, false, state);
+                    }
                     if group_condition_maybe_wrong || sdk_group_condition_taint {
                         // The gate could not be pinned down, so the group's
                         // writes may actually run in the real build — the
@@ -3446,6 +3491,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                         group_unpinned_root.as_ref(),
                         state,
                     );
+                    rejection::judge_properties(node, false, state);
                     emit_unsupported_condition(node, state);
                     state.define_context = prev;
                     state.package_context = prev_pkg;
@@ -3508,6 +3554,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     state.package_import_gate_context = prev_pkg_gate;
                     // As for a bare `<Import>` (#820).
                     if gate_raised_doubt || !route_decided {
+                        rejection::judge_imports(node, current_file_dir, false, state);
                         rejection::undecided_import_group(node, current_file_dir, state);
                     }
                 }
@@ -3515,6 +3562,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     emit_unsupported_condition(node, state);
                     state.import_gate_context = prev_gate;
                     state.package_import_gate_context = prev_pkg_gate;
+                    rejection::judge_imports(node, current_file_dir, false, state);
                     rejection::undecided_import_group(node, current_file_dir, state);
                 }
             }
@@ -3535,6 +3583,11 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                 state.record_target_definition(node);
             } else {
                 state.record_using_task(node);
+            }
+            // MSBuild evaluates a `<UsingTask>`'s condition after every item,
+            // and never a `<Target>`'s in evaluation.
+            if node.tag_name().name() == "UsingTask" {
+                state.defer_item_group(node, DeferredGroupKind::UsingTask);
             }
             state.push(
                 DiagnosticKind::UnsupportedConstruct {
@@ -3648,7 +3701,12 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     let prev_define = state.define_context;
     let prev_package = state.package_context;
 
-    let mut chosen: Option<Node<'_, '_>> = None;
+    let mut chosen: Option<(usize, Node<'_, '_>)> = None;
+    // The first `<When>` the walk did not decide from certain inputs: from it
+    // on, MSBuild may choose another branch than the walk, so what the walk
+    // reaches there it does not reach for certain ([`rejection`]).
+    let mut first_unsure: Option<usize> = None;
+    let mut chosen_is_certain = true;
     let mut undecided: Option<(usize, Option<UnpinnedRoot>)> = None;
     let mut choice_stale: Option<properties::trust::StaleCause> = None;
     // A `<When>` resolves `Exists` against the entry project, wherever the
@@ -3675,8 +3733,15 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
                     .sdk_package()
                     .is_some()
             });
+        let certain = attribute(*when, "Condition").is_none_or(|condition| {
+            directory_build::decided_from_certain_inputs(state, &condition, &exists_dir)
+        });
         let diagnostics_before = state.diagnostics.len();
         let gate = evaluate_condition(*when, &exists_dir, state);
+        if !certain && first_unsure.is_none() {
+            first_unsure = Some(index);
+            state.reach_doubted += 1;
+        }
         let maybe_wrong =
             state.diagnostics.len() != diagnostics_before || matches!(gate, CondGate::Unsupported);
         if maybe_wrong || uses_sdk_taint {
@@ -3694,7 +3759,8 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             break;
         }
         if matches!(gate, CondGate::Run) {
-            chosen = Some(*when);
+            chosen = Some((index, *when));
+            chosen_is_certain = certain;
             break;
         }
         // A cleanly-false gate: MSBuild skips this branch too; keep going.
@@ -3711,11 +3777,31 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             scan_undecided_choose_branch(branch, unpinned_root.as_ref(), state, &mut items);
         }
         items.apply(node.range(), state);
+        // MSBuild may choose any of those branches, and evaluate the gates
+        // after this one.
+        for branch in &whens[first_unsure.unwrap_or(from)..=from] {
+            rejection::judge_branch(*branch, current_file_dir, false, state);
+        }
+        rejection::judge_whens(node, from + 1, current_file_dir, false, state);
+        state.reach_doubted -= usize::from(first_unsure.is_some());
         return;
     }
 
-    let Some(branch) = chosen.or(otherwise) else {
+    // From the first gate the walk did not decide from certain inputs, MSBuild
+    // may choose a branch before the walk's, and evaluate the gates after the
+    // walk's while that one is among them.
+    let walked = chosen.map_or(whens.len(), |(index, _)| index);
+    if let Some(first) = first_unsure {
+        for branch in &whens[first..walked] {
+            rejection::judge_branch(*branch, current_file_dir, false, state);
+        }
+    }
+    if !chosen_is_certain {
+        rejection::judge_whens(node, walked + 1, current_file_dir, false, state);
+    }
+    let Some(branch) = chosen.map(|(_, when)| when).or(otherwise) else {
         // Every gate cleanly false and no <Otherwise>: an exact no-op.
+        state.reach_doubted -= usize::from(first_unsure.is_some());
         return;
     };
     let saved_stale = state.enclosing_condition_stale.clone();
@@ -3729,6 +3815,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
         walk_top_level(child, current_file_dir, state);
     }
     state.enclosing_condition_stale = saved_stale;
+    state.reach_doubted -= usize::from(first_unsure.is_some());
 }
 
 /// Whether a `<Choose>` subtree is shaped the way MSBuild's loader
@@ -4466,11 +4553,20 @@ fn evaluate_condition_with_exemptions(
     for name in eval.undefined_properties {
         state.push_undefined_read(name, node.range());
     }
+    // MSBuild throws on an illegal condition it evaluates, and the whole
+    // project with it. The item pass judges its conditions group by group
+    // instead ([`rejection::judge_deferred`]): MSBuild evaluates some the walk
+    // does not.
+    if eval.outcome == condition::Outcome::Illegal && !state.in_item_pass {
+        let reached = rejection::reach_is_certain(state);
+        rejection::illegal_condition_at(state, cond, reached, node.range());
+    }
     match eval.outcome {
         condition::Outcome::True => CondGate::Run,
         condition::Outcome::False => CondGate::Skip,
-        // #820's rejection flag will consume `Illegal`; until then it gates as
-        // undecided, like `Unsupported`.
+        // An illegal condition is judged above as a rejection, which withdraws
+        // what the walk publishes; the walk carries on past it as past an
+        // unmodelled one, for the read set and the diagnostics.
         condition::Outcome::Illegal | condition::Outcome::Unsupported => CondGate::Unsupported,
     }
 }
@@ -5035,6 +5131,10 @@ fn diagnose_item_op(node: Node<'_, '_>, attr: &str, state: &mut State<'_>) -> bo
 /// recurse into the referenced file via [`walk_external_file`].
 fn handle_import(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<'_>) {
     if !state.follow_imports {
+        // MSBuild evaluates the import's condition, which the pure walker
+        // judges though it follows no import.
+        let reached = rejection::reach_is_certain(state);
+        rejection::judge_unwalked(node, current_file_dir, reached, state);
         let project = attribute(node, "Project")
             .as_deref()
             .unwrap_or("")
@@ -5136,9 +5236,17 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
             return;
         }
     }
+    // A path named from a value the walk is not certain of may be another in
+    // the build: what the walk loads from it, MSBuild may not, and its failure
+    // to load is no claim ([`rejection`]).
+    let path_certain = rejection::import_path_is_certain(node, state);
+    let saved_path_certain = std::mem::replace(&mut state.taken_import_path_certain, path_certain);
+    state.reach_doubted += usize::from(!path_certain);
     directory_build::within_route(route_decided, state, |state| {
         follow_import_after_gate(node, current_file_dir, state);
     });
+    state.reach_doubted -= usize::from(!path_certain);
+    state.taken_import_path_certain = saved_path_certain;
 }
 
 /// [`follow_explicit_import`] once the import's own gate has let it through.
@@ -5230,8 +5338,24 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // An empty `Project` names no file: MSBuild fails the evaluation
         // (MSB4035 for a missing attribute; `Path.Combine` of the SDK
         // directory with "" names the directory itself, which no import
-        // can load). Decline as the plain `<Import>` path does.
+        // can load). Decline as the plain `<Import>` path does. A resolver
+        // that returns no directory gives MSBuild none to name, and a
+        // `Project` expanding to empty then imports nothing (the workload
+        // locators), so only a resolved directory makes the failure certain.
         if project_attr.trim().is_empty() {
+            // Judged before the skip below latches the walk opaque.
+            if matches!(&resolution, SdkResolution::Roots(roots) if roots.is_empty()) {
+                state.note_possible_rejection(
+                    crate::RejectionCause::Import {
+                        project: project_attr_raw.to_owned(),
+                        gate_undecided: false,
+                        why: crate::UnloadableImport::NoPath,
+                    },
+                    node.range(),
+                );
+            } else {
+                state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
+            }
             state.push(
                 DiagnosticKind::UnsupportedConstruct {
                     element: format!(
@@ -5248,7 +5372,6 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
                 },
                 node.range(),
             );
-            state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
             return;
         }
         // Commit only on a path spelt from a positive alphabet: ASCII
@@ -5401,7 +5524,11 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
         return;
     };
-    let expansion = state.expand(raw_path, node.range());
+    // MSBuild turns each `\` of the attribute as written into `/`
+    // (`ProjectImportElement.Project`'s `FixFilePath`) before it expands it,
+    // so only a `\` a property or an escape supplies survives expansion.
+    let fixed_raw = raw_path.replace('\\', "/");
+    let expansion = state.expand(&fixed_raw, node.range());
     if expansion.had_issue() || expansion.unpinned_root.is_some() {
         // The expanded path has residual `$(...)`, substituted to "", or
         // leaned on an *unpinned* property (a value the property pass could
@@ -5443,6 +5570,8 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
     // The expansion's trust was judged above, through its scan-based flags.
     let escaped = expansion.value.ignoring_trust().as_escaped();
     if escaped.trim().is_empty() && !escaped.contains(';') {
+        // Judged before the skip below latches the walk opaque.
+        state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
         // Push the diagnostic too, not just the uncertainty: this branch
         // can be reached with a *clean* expansion (a literal `Project=""`,
         // or an exact undefined read substituting "" without any
@@ -5464,7 +5593,6 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             },
             node.range(),
         );
-        state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
         return;
     }
     for segment in expansion.value.ignoring_trust().split_list() {
@@ -5477,16 +5605,59 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // ([`Escaped::is_filespec_wildcard`]). So a glob's decoded pattern has
         // no `*`/`?` that was data.
         //
-        // Backslash-to-forward-slash normalisation matches what
-        // `push_include_entry` does for `Include` attributes; MSBuild accepts
-        // both on either platform.
-        let normalised = segment.unescape().replace('\\', "/");
+        // A `\` written in the attribute is already `/` (`fixed_raw`); one a
+        // property or an escape supplies is still `\` here.
+        let decoded = segment.unescape();
         if segment.is_filespec_wildcard() {
-            follow_wildcard_import(&normalised, current_file_dir, node.range(), state);
+            // MSBuild collapses the path before it globs, so the directory
+            // listed is the collapsed one; a `\` a property supplied is not
+            // modelled (below).
+            let supplied_backslash = decoded.contains('\\');
+            let saved_path_certain = state.taken_import_path_certain;
+            if supplied_backslash {
+                state.taken_import_path_certain = false;
+                state.reach_doubted += 1;
+            }
+            follow_wildcard_import(
+                &decoded.replace('\\', "/"),
+                !supplied_backslash,
+                current_file_dir,
+                node.range(),
+                state,
+            );
+            if supplied_backslash {
+                state.reach_doubted -= 1;
+                state.taken_import_path_certain = saved_path_certain;
+            }
             continue;
         }
-        let path = current_file_dir.join(normalised);
-        walk_external_file(&path, node.range(), state);
+        // An escaped separator (`%2f`, `%5c`) is data when MSBuild decides
+        // the path's structure and collapses `..` (`.%5c./..` pops `.\.`
+        // whole), and the walk cannot say which file that names; decline,
+        // as an SDK import does.
+        if has_escaped_separator(segment.as_escaped()) {
+            decline_import_path(node, raw_path, "an escaped path separator", state);
+            continue;
+        }
+        let path = if decoded.contains('\\') {
+            // A `\` a property supplied (the SDK's own
+            // `$(MSBuildThisFileDirectory)..\..\…`) goes through MSBuild's Unix
+            // path adjustment, which the walk does not model (#903). The walk
+            // opens the path with each `\` a `/`, as the file system resolves
+            // it, and claims neither that MSBuild certainly reaches what it
+            // finds there nor that MSBuild fails to load it.
+            let path = current_file_dir.join(decoded.replace('\\', "/"));
+            let saved_path_certain = std::mem::take(&mut state.taken_import_path_certain);
+            state.reach_doubted += 1;
+            walk_import_file(&path, node.range(), false, state);
+            state.reach_doubted -= 1;
+            state.taken_import_path_certain = saved_path_certain;
+            path
+        } else {
+            let path = import_open_path(&current_file_dir.join(&decoded), true);
+            walk_external_file(&path, node.range(), state);
+            path
+        };
         // Record NuGet's central-package import point by its *shape* —
         // membership in `walked_files` afterwards means the walk genuinely
         // entered the file, on this import or an earlier one (failed
@@ -5520,6 +5691,34 @@ fn sdk_project_in_alphabet(escaped: &str, unescaped: &str) -> bool {
         && unescaped
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '/' | '\\'))
+}
+
+/// Decline the plain import at `node`, whose `Project` is `raw_path`, for
+/// `why`: MSBuild may load another file than the walk would, or none.
+fn decline_import_path(node: Node<'_, '_>, raw_path: &str, why: &str, state: &mut State<'_>) {
+    state.push(
+        DiagnosticKind::UnsupportedConstruct {
+            element: format!("Import Project={raw_path:?} ({why})"),
+        },
+        node.range(),
+    );
+    state.mark_structural_skip(
+        StructuralCompileItemUncertainty::ImportProjectUnresolved {
+            project: raw_path.to_string(),
+        },
+        node.range(),
+    );
+    state.note_unloadable_import(node, crate::UnloadableImport::PathUndecided);
+}
+
+/// Whether `escaped`, an import path in MSBuild's escaped domain, holds an
+/// escaped separator (`%2f` or `%5c`, either case).
+fn has_escaped_separator(escaped: &str) -> bool {
+    escaped.match_indices('%').any(|(at, _)| {
+        escaped
+            .get(at..at + 3)
+            .is_some_and(|e| e.eq_ignore_ascii_case("%2f") || e.eq_ignore_ascii_case("%5c"))
+    })
 }
 
 /// What `Path.Combine(root, Project)` appends to an SDK root, for a `Project`
@@ -5561,8 +5760,13 @@ fn sdk_import_path(root: &Path, under_root: &str) -> std::io::Result<PathBuf> {
 /// sorted set, and a deterministic order is required here anyway.
 /// A wildcard *directory* component falls back to the conservative
 /// structural skip: the un-followed files could have carried anything.
+///
+/// With `collapse`, the directory is collapsed as text before it is listed,
+/// as MSBuild collapses the fixed part of a wildcard path, so the files
+/// listed are the ones beside a symlink's text, not its target's.
 fn follow_wildcard_import(
     normalised: &str,
+    collapse: bool,
     current_file_dir: &Path,
     span: Range<usize>,
     state: &mut State<'_>,
@@ -5572,7 +5776,13 @@ fn follow_wildcard_import(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let dir = path.parent().unwrap_or(current_file_dir);
+    let written_dir = path.parent().unwrap_or(current_file_dir);
+    let dir = if written_dir.to_string_lossy().contains(['*', '?']) {
+        written_dir.to_path_buf()
+    } else {
+        import_open_path(written_dir, collapse)
+    };
+    let dir = dir.as_path();
     if dir.to_string_lossy().contains(['*', '?']) || file_pattern.is_empty() {
         // Push the diagnostic too, not just the uncertainty: silently
         // returning would leave `is_partial` false with imports dropped.
@@ -5646,7 +5856,7 @@ fn follow_wildcard_import(
         key(a).cmp(&key(b)).then_with(|| a.cmp(b))
     });
     for matched in matches {
-        walk_external_file(&matched, span.clone(), state);
+        walk_import_file(&matched, span.clone(), collapse, state);
     }
 }
 
@@ -5814,6 +6024,33 @@ fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
 }
 
 fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
+    walk_import_file(path, span, true, state);
+}
+
+/// The path [`walk_import_file`] opens for `path`: collapsed as text when
+/// `collapse` says and nothing that fails it in MSBuild would be erased.
+fn import_open_path(path: &Path, collapse: bool) -> PathBuf {
+    let text = path.as_os_str().as_encoded_bytes();
+    if collapse && !text.contains(&0) && !matches!(text.last(), Some(b'/' | b'\\')) {
+        std::path::absolute(path).map_or_else(|_| path.to_path_buf(), |p| normalise(&p))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// [`walk_external_file`], collapsing `path` first only when `collapse` says.
+fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut State<'_>) {
+    // MSBuild opens an import at its path collapsed as text
+    // (`FileUtilities.NormalizePath`, which is `GetFullPath`): `..` pops the
+    // segment before it whatever that segment links to, so `link/../a.props`
+    // is the `a.props` beside `link`, never the one beside `link`'s target.
+    // The file's identity (`MSBuildThisFile*`, nested imports' directory) is
+    // that collapsed path too. Collapsing would erase what fails the path in
+    // MSBuild: a trailing separator, which names a directory no import loads
+    // (MSB4019), and a NUL anywhere (MSB4102). Such a path is opened as
+    // written, and fails as it does in MSBuild.
+    let collapsed = import_open_path(path, collapse);
+    let path = collapsed.as_path();
     // MSBuild's duplicate-import skip: an import that resolves to an
     // already-imported path (same lexically-normalised, case-insensitive
     // spelling — see [`import_dedup_key`]) is ignored with a warning
@@ -6096,6 +6333,9 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     // depth limits, and the import-site span pin (already `Some` here
     // for any descent beyond the first) all just work.
     latch_default_targets(doc.root_element(), state);
+    // The file's own imports say for themselves how they name their paths;
+    // its implicit SDK imports are not explicit imports.
+    let saved_path_certain = std::mem::take(&mut state.taken_import_path_certain);
     let nested_sdk = resolve_project_sdk(doc.root_element(), state);
     if let Some(paths) = nested_sdk.as_ref() {
         directory_build::note_nested_sdk(&paths.root, state);
@@ -6105,6 +6345,7 @@ fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
     if let Some(paths) = nested_sdk.as_ref() {
         walk_external_file(&paths.targets, doc.root_element().range(), state);
     }
+    state.taken_import_path_certain = saved_path_certain;
     for name in unprotected {
         state.protected.insert(name);
     }

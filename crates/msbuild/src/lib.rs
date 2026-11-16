@@ -622,8 +622,10 @@ pub struct ParsedProject {
     /// [`Self::project_references_uncertain`] and
     /// [`Self::define_constants_uncertain`] are `true` whenever it is `Some`.
     pub hidden_content: Option<UntrustedCause>,
-    /// Why MSBuild may reject the whole project, or `None` when nothing the
-    /// walk passed could make it. MSBuild's rejection is total: the build has
+    /// Why MSBuild rejects the whole project, or may, or `None` when nothing
+    /// the walk passed could make it: the first construct the walk claims
+    /// MSBuild rejects ([`RejectionCertainty::Certain`]), else the first that
+    /// may ([`RejectionCertainty::Possible`]). MSBuild's rejection is total: the build has
     /// no value for any property, and no item. So the walk publishes nothing
     /// as the build's once this is `Some`, whatever it bound before or after
     /// the construct: every [`Self::property`] read is inexact
@@ -631,7 +633,8 @@ pub struct ParsedProject {
     /// [`Self::items_uncertain`], [`Self::define_constants_uncertain`],
     /// [`Self::project_references_uncertain`] and
     /// [`Self::package_references_uncertain`] are set (each naming a
-    /// [`DiagnosticKind::MayBeRejected`] cause where the axis records causes),
+    /// [`DiagnosticKind::Rejected`] or [`DiagnosticKind::MayBeRejected`] cause
+    /// where the axis records causes),
     /// [`Self::target_name`] is unknown and [`Self::hidden_content`] is
     /// `Some`. The trust-blind fields ([`Self::properties`],
     /// [`Self::target_frameworks`], [`Self::lang_version`],
@@ -642,7 +645,7 @@ pub struct ParsedProject {
     /// The evaluation is still `Ok`: its [`Self::read_set`] says when it
     /// changes, and its diagnostics say why.
     ///
-    /// The constructs, each [`RejectionCertainty::Possible`]:
+    /// The constructs:
     ///
     /// - an `<Import>` whose condition the walk could not decide, whose path
     ///   names no file MSBuild can load: missing, a directory, a dangling link,
@@ -652,7 +655,21 @@ pub struct ParsedProject {
     ///   import points' fallback is one of these;
     /// - an `<Import>` the walk took whose path names no file MSBuild can load:
     ///   it failed to load (missing, a dangling link, malformed XML), the path
-    ///   is empty or absent, or the walk could not compute it (#845).
+    ///   is empty or absent, or the walk could not compute it (#845);
+    /// - a `Condition` MSBuild throws on (#783): a syntax error, or an ill-typed
+    ///   operand on the path MSBuild evaluates, where MSBuild evaluates the
+    ///   condition or may: an item's whatever its group holds, an `Include`
+    ///   item's metadata whatever the item holds, never one under a false
+    ///   `<PropertyGroup>`, `<ImportGroup>` or `<ItemDefinitionGroup>`, an
+    ///   unchosen `<When>` or a `<Target>`.
+    ///
+    /// A construct is [`RejectionCertainty::Certain`] where MSBuild reaches it
+    /// for certain: the walk hid nothing before it, and every gate and import
+    /// path on the way to it was decided from certain values. Of the imports,
+    /// only one taken whose path names a missing file (a dangling link
+    /// included) or is empty is claimed, its path named from certain values; of
+    /// the conditions, a syntax error, or an ill-typed one reading only certain
+    /// values. Every other is [`RejectionCertainty::Possible`].
     ///
     /// Not among them, each a doubt the walk cannot resolve from what it saw:
     /// an import in content the walk did not see, or one a value that content
@@ -661,9 +678,11 @@ pub struct ParsedProject {
     /// Compile items, #792); one whose condition requires its file while its
     /// path is one the walk could not compute, which may name a dangling link
     /// MSBuild's `Exists` accepts; an SDK the walk's resolver cannot resolve,
-    /// which MSBuild's may; and every import the pure [`parse_fsproj`] meets,
-    /// since it reads no file. The import-graph and property-table
-    /// differentials grade the rest against MSBuild.
+    /// which MSBuild's may; every import the pure [`parse_fsproj`] meets,
+    /// since it reads no file; and a condition the walk calls unmodelled,
+    /// which MSBuild may evaluate or reject. The import-graph and property-table
+    /// differentials grade the rest against MSBuild, and hold every certain
+    /// rejection to MSBuild's.
     pub rejection: Option<Rejection>,
     pub diagnostics: Vec<Diagnostic>,
     /// `true` if any diagnostic was emitted — i.e. the result may diverge

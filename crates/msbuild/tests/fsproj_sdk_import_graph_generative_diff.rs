@@ -28,10 +28,10 @@
 //! - what `Directory.Build.props` writes: the targets gate, that value, a
 //!   redirect of `DirectoryBuildPropsPath`, and `Exists()` probes under a
 //!   `<When>`, a property element and a property group;
-//! - re-imports of either file by alias (a `..` respelling, a case respelling,
-//!   a directory symlink, a file symlink, a relative path to a symlink beside
-//!   the importing file, and one beside the importing file but not the
-//!   project), literal, through the path property, SDK-qualified
+//! - re-imports of either file by alias (a `..` respelling, a `..` after a
+//!   directory symlink, a case respelling, a directory symlink, a file
+//!   symlink, a relative path to a symlink beside the importing file, and one
+//!   beside the importing file but not the project), literal, through the path property, SDK-qualified
 //!   (`<Import Sdk=…>`), or by writing the path property alone for an import
 //!   point to read, from `Sdk.props` (before or after its props import point),
 //!   `Sdk.targets`, the body, or `Directory.Build.targets`;
@@ -95,7 +95,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::test_support::{PropertyRead, ReadProbe, parse_fsproj_reads};
-use borzoi_msbuild::{SdkPaths, SdkResolution, SdkResolveError};
+use borzoi_msbuild::{RejectionCertainty, SdkPaths, SdkResolution, SdkResolveError};
 use common::{Oracle, SplitMix64};
 
 // ---------------------------------------------------------------------------
@@ -164,6 +164,9 @@ enum Which {
 enum Spelling {
     /// Through `..`, which MSBuild's path normalisation collapses.
     DotDot,
+    /// Through `..` after a directory symlink, which MSBuild collapses as
+    /// text: the file beside the link, not the decoy beside its target.
+    LinkDotDot,
     /// In another case, which MSBuild's duplicate check folds.
     Case,
     /// Through a directory symlink: another file to MSBuild.
@@ -472,6 +475,7 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
             which: *rng.pick(&[Which::Props, Which::Targets]),
             spelling: *rng.pick(&[
                 Spelling::DotDot,
+                Spelling::LinkDotDot,
                 Spelling::Case,
                 Spelling::DirLink,
                 Spelling::FileLink,
@@ -846,7 +850,8 @@ const STANDARD_TARGETS_CONDITION: &str =
 /// the `Directory.Build.*` files are in `<case>`, `<case>/proj/up` is a
 /// symlink to `<case>`, `<case>/proj/alias.{props,targets}` are symlinks to
 /// the two files, and so is `rel.{props,targets}` in the SDK directory,
-/// `<case>` and `<case>/proj`.
+/// `<case>` and `<case>/proj`; `<case>/proj/far` is a symlink to
+/// `<case>/decoy/x/y`.
 fn reimport_path(which: Which, spelling: Spelling) -> String {
     let ext = match which {
         Which::Props => "props",
@@ -854,6 +859,9 @@ fn reimport_path(which: Which, spelling: Spelling) -> String {
     };
     match spelling {
         Spelling::DotDot => format!("$(MSBuildProjectDirectory)/../proj/../Directory.Build.{ext}"),
+        Spelling::LinkDotDot => {
+            format!("$(MSBuildProjectDirectory)/far/../../Directory.Build.{ext}")
+        }
         Spelling::Case => format!("$(MSBuildProjectDirectory)/../DIRECTORY.build.{ext}"),
         Spelling::DirLink => format!("$(MSBuildProjectDirectory)/up/Directory.Build.{ext}"),
         Spelling::FileLink => format!("$(MSBuildProjectDirectory)/alias.{ext}"),
@@ -1353,6 +1361,9 @@ enum FindingKind {
     Compile,
     References,
     Defines,
+    /// A rejection the walk claims (`RejectionCertainty::Certain`) of a
+    /// project MSBuild evaluates.
+    Rejection,
 }
 
 /// What one case came to.
@@ -1361,6 +1372,8 @@ struct Outcome {
     findings: Vec<Finding>,
     /// MSBuild rejected the project.
     rejected: bool,
+    /// The walk claims MSBuild rejects the project, and it does.
+    claimed_rejection: bool,
     committed_properties: usize,
     /// The properties the walk committed, graded against MSBuild.
     committed: Vec<&'static str>,
@@ -1417,6 +1430,17 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         }
     }
     symlink(Path::new(".."), &case_dir.join("proj/up"));
+    // `proj/far/../..` is `<case>` to MSBuild and `<case>/decoy` to the file
+    // system, where each `Directory.Build.*` is an empty project.
+    std::fs::create_dir_all(case_dir.join("decoy/x/y")).expect("mkdir decoy");
+    for ext in ["props", "targets"] {
+        std::fs::write(
+            case_dir.join(format!("decoy/Directory.Build.{ext}")),
+            "<Project />",
+        )
+        .expect("write decoy");
+    }
+    symlink(Path::new("../decoy/x/y"), &case_dir.join("proj/far"));
     symlink(
         Path::new("../Directory.Build.props"),
         &case_dir.join("proj/alias.props"),
@@ -1502,10 +1526,13 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     for (name, text) in rendered.sdk_files.iter().chain(&rendered.case_files) {
         describe.push_str(&format!("--- {name}\n{text}"));
     }
+    let claims_rejection =
+        parsed.rejection.as_ref().map(|r| r.certainty) == Some(RejectionCertainty::Certain);
     let Some(theirs) = theirs else {
         // MSBuild refuses the project, so any value the walk commits is one no
         // build holds.
         outcome.rejected = true;
+        outcome.claimed_rejection = claims_rejection;
         if !parsed.items_uncertain {
             outcome.findings.push(Finding {
                 what: "Compile".to_owned(),
@@ -1544,6 +1571,14 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         let _ = std::fs::remove_dir_all(sdk_dir.parent().unwrap());
         return (outcome, describe);
     };
+    if claims_rejection {
+        outcome.findings.push(Finding {
+            what: "the project".to_owned(),
+            ours: format!("a certain rejection: {:?}", parsed.rejection),
+            theirs: "an evaluated project".to_owned(),
+            kind: FindingKind::Rejection,
+        });
+    }
     outcome.msbuild_imported = Some((
         !theirs["properties"]["InDbp"].is_null(),
         !theirs["properties"]["InDbt"].is_null(),
@@ -1796,6 +1831,8 @@ fn census_keys(case: &Case) -> Vec<String> {
 struct Report {
     cases: usize,
     rejected: usize,
+    /// Of those, the cases whose rejection the walk claims.
+    claimed_rejections: usize,
     committed_properties: usize,
     exact_targets: usize,
     /// Cases whose Compile set the walk called certain, each graded.
@@ -1860,6 +1897,7 @@ fn sweep(seed: u64, cases: usize) -> Report {
         }
         report.cases += 1;
         report.rejected += usize::from(outcome.rejected);
+        report.claimed_rejections += usize::from(outcome.claimed_rejection);
         report.committed_properties += outcome.committed_properties;
         report.exact_targets += outcome.exact_targets;
         report.certain_compile += usize::from(outcome.certain_compile);
@@ -1907,13 +1945,14 @@ fn sweep(seed: u64, cases: usize) -> Report {
 
 fn assert_clean(report: &Report) {
     eprintln!(
-        "sdk import graph: {} cases, {} rejected, {} committed property reads, \
+        "sdk import graph: {} cases, {} rejected ({} of them claimed), {} committed property reads, \
          {} exact target reads, {} certain Compile sets, certain reference lists by whether \
          MSBuild kept the project's own: {:?}, certain define sets by whether another user's \
          file defined one: {:?}; {} cases outside every family, MSBuild's (props, targets) \
          imports among them: {:?}; known-family cases with findings: {:?}",
         report.cases,
         report.rejected,
+        report.claimed_rejections,
         report.committed_properties,
         report.exact_targets,
         report.certain_compile,
@@ -2002,13 +2041,19 @@ fn the_import_graph_is_exact_or_declined() {
         );
     }
     // MSBuild rejects only the dangling-symlink imports and the SDK-qualified
-    // rooted ones (each a known family): a case it rejects grades little, so a
-    // generator drifting into rejected shapes would hollow the sweep out.
+    // rooted ones: a case it rejects grades little, so a generator drifting
+    // into rejected shapes would hollow the sweep out.
     assert!(
         report.rejected * 5 < report.cases,
         "MSBuild rejected {} of {} generated projects",
         report.rejected,
         report.cases
+    );
+    // The walk claims the rejections it reaches for certain, each graded.
+    assert!(
+        report.claimed_rejections >= 20,
+        "the walk claims only {} rejections",
+        report.claimed_rejections
     );
     // Every value of every dimension is generated, so no axis is dead.
     let expected: BTreeSet<String> = [

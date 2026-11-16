@@ -5025,7 +5025,7 @@ mod tests {
         // The import of a missing file fails MSBuild's evaluation (MSB4019,
         // #845), so the body's `TargetFramework`, written before it, is no
         // more the build's than anything else: no TFM is served, the fold is
-        // declined, and the deferral names the rejection.
+        // declined, and the deferral names the rejection, which is certain.
         let tmp = TempDir::new().unwrap();
         let proj = tmp.path().join("P.fsproj");
         write_file(
@@ -5056,7 +5056,7 @@ mod tests {
         assert!(
             causes
                 .iter()
-                .any(|c| c.contains("MSBuild may reject the whole project")),
+                .any(|c| c.contains("MSBuild rejects the whole project")),
             "{causes:?}"
         );
     }

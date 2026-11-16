@@ -208,11 +208,16 @@ pub enum DiagnosticKind {
         path: PathBuf,
         kind: ImplicitImportKind,
     },
-    /// MSBuild may reject the whole project, for `cause`; see
-    /// [`crate::ParsedProject::rejection`], which holds the first one. The
-    /// diagnostic sits at the construct, and the item and define axes name it
-    /// as their cause.
+    /// MSBuild may reject the whole project, for `cause`
+    /// ([`RejectionCertainty::Possible`]); see
+    /// [`crate::ParsedProject::rejection`], which holds the first certain one,
+    /// else the first. The diagnostic sits at the construct, and the item and
+    /// define axes name it as their cause.
     MayBeRejected { cause: RejectionCause },
+    /// MSBuild rejects the whole project, for `cause`
+    /// ([`RejectionCertainty::Certain`]): as [`Self::MayBeRejected`], and a
+    /// claim the differentials grade.
+    Rejected { cause: RejectionCause },
 }
 
 /// Why MSBuild may reject the whole project, and how sure the walk is of it:
@@ -228,6 +233,17 @@ pub struct Rejection {
     pub origin: DiagnosticOrigin,
 }
 
+impl Rejection {
+    /// The diagnostic that names this rejection as an axis's cause.
+    pub fn diagnostic_kind(&self) -> DiagnosticKind {
+        let cause = self.cause.clone();
+        match self.certainty {
+            RejectionCertainty::Possible => DiagnosticKind::MayBeRejected { cause },
+            RejectionCertainty::Certain => DiagnosticKind::Rejected { cause },
+        }
+    }
+}
+
 /// How sure the walk is that MSBuild rejects the project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectionCertainty {
@@ -235,6 +251,12 @@ pub enum RejectionCertainty {
     /// claims nothing about it. What is graded is the withdrawal alone: no
     /// value is published as the build's, whichever way MSBuild goes.
     Possible,
+    /// MSBuild rejects it. A claim: the property-table and import-graph
+    /// differentials hold every such verdict to the oracle's rejection. It
+    /// needs the construct reached for certain (see
+    /// [`crate::ParsedProject::rejection`]); short of that, the same construct
+    /// is [`Self::Possible`].
+    Certain,
 }
 
 /// What may make MSBuild reject the project.
@@ -253,6 +275,10 @@ pub enum RejectionCause {
         gate_undecided: bool,
         why: UnloadableImport,
     },
+    /// A `Condition` MSBuild evaluates and throws on: a syntax error, or an
+    /// ill-typed operand on the path it evaluates (MSB4086, MSB4092, MSB4113,
+    /// …). `condition` is the attribute's text.
+    IllegalCondition { condition: String },
 }
 
 /// Why an import may load no file.
