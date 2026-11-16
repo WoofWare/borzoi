@@ -869,3 +869,51 @@ fn a_file_msbuild_refuses_at_load_time_rejects_where_it_is_imported() {
     );
     assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
 }
+
+#[test]
+fn a_rule_a_parse_configuration_may_relax_is_claimed_only_where_none_can_apply() {
+    // MSB4066. A newer MSBuild skips the attribute when a parse configuration
+    // lists it (#917): one beside the project, one above it, or one the
+    // environment names.
+    let relaxable = "  <PropertyGroup X=\"1\"><R>x</R></PropertyGroup>";
+    let tmp = TempDir::new().unwrap();
+    assert_rejected(
+        &parse_file(&project(&tmp, relaxable, &[])),
+        &["Before", "After"],
+    );
+    for config in ["proj/Directory.Parse.config", "Directory.Parse.config"] {
+        let tmp = TempDir::new().unwrap();
+        let project_path = project(&tmp, relaxable, &[(config, "<ParseConfig />")]);
+        assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
+    }
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(&tmp, relaxable, &[]);
+    let environment = HashMap::from([(
+        "MSBUILD_PARSE_CONFIG".to_owned(),
+        "/elsewhere/parse.config".to_owned(),
+    )]);
+    let parsed = parse_file_with_sdk_env(
+        &project_path,
+        |_: &str| Err(SdkResolveError::NotFound),
+        HashMap::new(),
+        environment,
+    );
+    assert_withdrawn(&parsed, &["Before", "After"]);
+    // A rule no configuration relaxes, beside it, is claimed anyway.
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(
+        &tmp,
+        "  <PropertyGroup X=\"1\"><MSBuildProjectName>x</MSBuildProjectName></PropertyGroup>",
+        &[("proj/Directory.Parse.config", "<ParseConfig />")],
+    );
+    assert_rejected(&parse_file(&project_path), &["Before", "After"]);
+}
+
+#[test]
+fn an_include_beside_an_empty_remove_is_rejected() {
+    // MSBuild throws a null reference on it (MSB1025 from `dotnet msbuild`),
+    // which the loader differential's oracle cannot report as a rejection.
+    for parsed in both_walkers("  <ItemGroup><I Include=\"x\" Remove=\"\" /></ItemGroup>") {
+        assert_rejected(&parsed, &["Before", "After"]);
+    }
+}

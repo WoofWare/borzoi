@@ -1851,3 +1851,350 @@ fn load_time_errors_reject_exactly_where_msbuild_loads_them() {
     assert!(evaluated >= 300, "only {evaluated} evaluated");
     assert!(committed >= 1000, "only {committed} committed");
 }
+
+/// MSBuild's loader schema (#917), from tables rather than hand-picked
+/// cases: every element `ProjectParser` parses, each given every attribute of
+/// a table (each name any element takes, some in another case, and names none
+/// does) and, separately, every child of a table (each element MSBuild knows,
+/// property-, item- and metadata-like ones, text, CDATA, a comment and a
+/// processing instruction). MSBuild refuses a file that breaks its loader, so
+/// the property table is held to certain-implies-exact, a claimed rejection to
+/// MSBuild's, and a project MSBuild evaluates must not be withdrawn.
+#[test]
+fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
+    // `{a}` is where an attribute goes, `{c}` where a child goes.
+    let subjects: &[(&str, &str)] = &[
+        ("project", "{c}"),
+        ("PropertyGroup", "<PropertyGroup{a}>{c}</PropertyGroup>"),
+        (
+            "property",
+            "<PropertyGroup><Zeta{a}>z{c}</Zeta></PropertyGroup>",
+        ),
+        ("ItemGroup", "<ItemGroup{a}>{c}</ItemGroup>"),
+        ("item", "<ItemGroup><I Include=\"x\"{a}>{c}</I></ItemGroup>"),
+        (
+            "item in a target",
+            "<Target Name=\"T\"><ItemGroup><I Include=\"x\"{a}>{c}</I></ItemGroup></Target>",
+        ),
+        (
+            "metadatum",
+            "<ItemGroup><I Include=\"x\"><M{a}>m{c}</M></I></ItemGroup>",
+        ),
+        (
+            "removing item",
+            "<ItemGroup><I Remove=\"x\"{a}>{c}</I></ItemGroup>",
+        ),
+        (
+            "updating item",
+            "<ItemGroup><I Update=\"x\"{a}>{c}</I></ItemGroup>",
+        ),
+        // An item operation MSBuild builds in a group it evaluates, under a
+        // false condition too, but not in a `<When>` it does not choose.
+        (
+            "removing item under a false group",
+            "<ItemGroup Condition=\"false\"><I Remove=\"x\"{a}>{c}</I></ItemGroup>",
+        ),
+        (
+            "removing item in a chosen When",
+            "<Choose><When Condition=\"true\"><ItemGroup><I Remove=\"x\"{a}>{c}</I>\
+             </ItemGroup></When></Choose>",
+        ),
+        (
+            "removing item in an unchosen When",
+            "<Choose><When Condition=\"false\"><ItemGroup><I Remove=\"x\"{a}>{c}</I>\
+             </ItemGroup></When></Choose>",
+        ),
+        (
+            "removing references",
+            "<ItemGroup><I Remove=\"@(J); @(K)\"{a}>{c}</I></ItemGroup>",
+        ),
+        ("ImportGroup", "<ImportGroup{a}>{c}</ImportGroup>"),
+        ("Import", "<Import Project=\"there.props\"{a}>{c}</Import>"),
+        (
+            "ItemDefinitionGroup",
+            "<ItemDefinitionGroup{a}>{c}</ItemDefinitionGroup>",
+        ),
+        (
+            "item definition",
+            "<ItemDefinitionGroup><I{a}>{c}</I></ItemDefinitionGroup>",
+        ),
+        (
+            "definition metadatum",
+            "<ItemDefinitionGroup><I><M{a}>m{c}</M></I></ItemDefinitionGroup>",
+        ),
+        (
+            "Choose",
+            "<Choose{a}><When Condition=\"true\" />{c}</Choose>",
+        ),
+        (
+            "When",
+            "<Choose><When Condition=\"true\"{a}>{c}</When></Choose>",
+        ),
+        (
+            "Otherwise",
+            "<Choose><When Condition=\"false\" /><Otherwise{a}>{c}</Otherwise></Choose>",
+        ),
+        ("Target", "<Target Name=\"T\"{a}>{c}</Target>"),
+        (
+            "task",
+            "<Target Name=\"T\"><Message Text=\"m\"{a}>{c}</Message></Target>",
+        ),
+        (
+            "Output",
+            "<Target Name=\"T\"><Message Text=\"m\"><Output TaskParameter=\"Text\" \
+             PropertyName=\"Q\"{a}>{c}</Output></Message></Target>",
+        ),
+        (
+            "OnError",
+            "<Target Name=\"T\"><OnError ExecuteTargets=\"T\"{a}>{c}</OnError></Target>",
+        ),
+        (
+            "UsingTask",
+            "<UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\"{a}>{c}</UsingTask>",
+        ),
+        (
+            "ParameterGroup",
+            "<UsingTask TaskName=\"X\" TaskFactory=\"F\" AssemblyFile=\"y.dll\">\
+             <ParameterGroup{a}>{c}</ParameterGroup></UsingTask>",
+        ),
+        (
+            "parameter",
+            "<UsingTask TaskName=\"X\" TaskFactory=\"F\" AssemblyFile=\"y.dll\">\
+             <ParameterGroup><P{a}>{c}</P></ParameterGroup></UsingTask>",
+        ),
+        (
+            "task body",
+            "<UsingTask TaskName=\"X\" TaskFactory=\"F\" AssemblyFile=\"y.dll\">\
+             <Task{a}>{c}</Task></UsingTask>",
+        ),
+        (
+            "ProjectExtensions",
+            "<ProjectExtensions{a}>{c}</ProjectExtensions>",
+        ),
+    ];
+    let attributes: &[(&str, &str)] = &[
+        ("Condition", "true"),
+        ("Label", "l"),
+        ("Include", "i"),
+        ("Exclude", "e"),
+        ("Remove", "r"),
+        ("Update", "u"),
+        ("KeepMetadata", "k"),
+        ("RemoveMetadata", "k"),
+        ("KeepDuplicates", "true"),
+        ("MatchOnMetadata", "k"),
+        ("MatchOnMetadata", "; "),
+        ("MatchOnMetadataOptions", "CaseSensitive"),
+        ("Project", "there.props"),
+        ("Version", "1.0"),
+        ("MinimumVersion", "1.0"),
+        ("TaskName", "Y"),
+        ("AssemblyFile", "z.dll"),
+        ("AssemblyName", "Z"),
+        ("TaskFactory", "F"),
+        ("Architecture", "*"),
+        ("Runtime", "*"),
+        ("RequiredPlatform", "*"),
+        ("RequiredRuntime", "4.0"),
+        ("Override", "true"),
+        ("Name", "N"),
+        ("Inputs", "i"),
+        ("Outputs", "o"),
+        ("KeepDuplicateOutputs", "true"),
+        ("DependsOnTargets", "T"),
+        ("BeforeTargets", "T"),
+        ("AfterTargets", "T"),
+        ("Returns", "r"),
+        ("ExecuteTargets", "T"),
+        ("TaskParameter", "Text"),
+        ("ItemName", "J"),
+        ("PropertyName", "R"),
+        ("ParameterType", "System.String"),
+        ("Output", "true"),
+        ("Required", "true"),
+        ("Evaluate", "true"),
+        ("ContinueOnError", "false"),
+        ("MSBuildRuntime", "*"),
+        ("MSBuildArchitecture", "*"),
+        ("condition", "true"),
+        ("include", "i"),
+        ("continueOnError", "false"),
+        ("Foo", "f"),
+        ("_Foo", "f"),
+        ("Foo-Bar", "f"),
+        ("FullPath", "f"),
+        ("filename", "f"),
+        ("Choose", "c"),
+        ("Import", "i"),
+        (
+            "xmlns",
+            "http://schemas.microsoft.com/developer/msbuild/2003",
+        ),
+    ];
+    let children = [
+        "<PropertyGroup />",
+        "<ItemGroup />",
+        "<ImportGroup />",
+        "<Import Project=\"there.props\" />",
+        "<ItemDefinitionGroup />",
+        "<Choose><When Condition=\"true\" /></Choose>",
+        "<When Condition=\"true\" />",
+        "<Otherwise />",
+        "<Target Name=\"U\" />",
+        "<UsingTask TaskName=\"Y\" AssemblyFile=\"z.dll\" />",
+        "<ProjectExtensions />",
+        "<OnError ExecuteTargets=\"T\" />",
+        "<Output TaskParameter=\"Text\" PropertyName=\"R\" />",
+        "<ParameterGroup />",
+        "<Task />",
+        "<Message Text=\"m\" />",
+        "<Error Text=\"e\" />",
+        "<Foo />",
+        "<Zeta>z</Zeta>",
+        "<J Include=\"j\" />",
+        "<FullPath>f</FullPath>",
+        "<x:Foo xmlns:x=\"urn:x\" />",
+        "text",
+        "&#160;",
+        "<![CDATA[x]]>",
+        "<!-- c -->",
+        "<?pi x?>",
+        "@(I)",
+        "@<x />(I)",
+        "@(I);<!-- c -->",
+    ];
+    let mut cases: Vec<String> = Vec::new();
+    for (subject, template) in subjects {
+        if template.contains("{a}") {
+            for (name, value) in attributes {
+                // A name the template writes already would be a duplicate
+                // attribute, which is no XML at all.
+                if template.contains(&format!(" {name}=")) {
+                    continue;
+                }
+                let _ = subject;
+                // Each name with its value, and empty, which a required or
+                // exclusive attribute refuses.
+                for value in [*value, ""] {
+                    // MSBuild crashes on an `Include` beside an empty `Remove`
+                    // (a null reference in `ParseProjectItemElement`, MSB1025
+                    // from `dotnet msbuild`), which the oracle reports as an
+                    // error, not a rejection; a unit test pins the rejection.
+                    if *name == "Remove" && value.is_empty() && template.contains(" Include=") {
+                        continue;
+                    }
+                    cases.push(
+                        template
+                            .replace("{a}", &format!(" {name}=\"{value}\""))
+                            .replace("{c}", ""),
+                    );
+                }
+            }
+        }
+        for child in children {
+            cases.push(template.replace("{a}", "").replace("{c}", child));
+        }
+    }
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    for there in [dir.join("there.props"), dir.join("sub/there.props")] {
+        std::fs::write(
+            there,
+            "<Project><PropertyGroup><Delta>d</Delta></PropertyGroup></Project>",
+        )
+        .unwrap();
+    }
+    let project_path = dir.join("Demo.fsproj");
+    let names: Vec<String> = ["Beta", "Gamma", "Delta"].map(String::from).to_vec();
+    let (mut rejected, mut certain, mut possible, mut evaluated) = (0usize, 0, 0, 0);
+    let mut failures: Vec<String> = Vec::new();
+    // Each case in the project, and in a file it imports.
+    for (site, imported) in cases.iter().flat_map(|site| [(site, false), (site, true)]) {
+        let at = if imported {
+            std::fs::write(
+                dir.join("sub/inner.props"),
+                format!("<Project>{site}</Project>"),
+            )
+            .unwrap();
+            "<Import Project=\"sub/inner.props\" />"
+        } else {
+            site.as_str()
+        };
+        let site = format!("{}{site}", if imported { "(imported) " } else { "" });
+        let xml = format!(
+            "<Project>\n  <PropertyGroup><Beta>b</Beta></PropertyGroup>\n  {at}\n  \
+             <PropertyGroup><Gamma>g</Gamma></PropertyGroup>\n</Project>\n"
+        );
+        std::fs::write(&project_path, &xml).unwrap();
+        let parsed = parse_fsproj_with_imports(
+            &xml,
+            &project_path,
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed");
+        let ours: Vec<(&String, String)> = names
+            .iter()
+            .filter_map(|name| match parsed.property(name) {
+                PropertyRead::Unset => Some((name, String::new())),
+                read => read.value().map(|v| (name, v.to_owned())),
+            })
+            .collect();
+        let claimed =
+            parsed.rejection.as_ref().map(|r| r.certainty) == Some(RejectionCertainty::Certain);
+        match parsed.rejection.as_ref().map(|r| r.certainty) {
+            Some(RejectionCertainty::Certain) => certain += 1,
+            Some(RejectionCertainty::Possible) => possible += 1,
+            None => {}
+        }
+        let verdict = format!(
+            "{:?}",
+            parsed.rejection.as_ref().map(|r| (&r.certainty, &r.cause))
+        );
+        let Some(theirs) = oracle.project(&xml, &names, Some(&project_path), &[]) else {
+            rejected += 1;
+            if !ours.is_empty() {
+                failures.push(format!("MSBuild rejects, we committed {ours:?}: {site}"));
+            }
+            continue;
+        };
+        evaluated += 1;
+        if claimed {
+            failures.push(format!("MSBuild evaluates, we claim {verdict}: {site}"));
+        } else if parsed.rejection.is_some() {
+            failures.push(format!("MSBuild evaluates, we withdraw {verdict}: {site}"));
+        }
+        for (name, value) in &ours {
+            if Some(value) != theirs.get(*name) {
+                failures.push(format!(
+                    "{name}: ours {value:?}, theirs {:?}: {site}",
+                    theirs.get(*name)
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases disagree:\n{}",
+        failures.len(),
+        2 * cases.len(),
+        failures.join("\n")
+    );
+    eprintln!(
+        "loader schema: {} cases; {rejected} rejected by MSBuild, {certain} claimed, \
+         {possible} more withdrawn; {evaluated} evaluated",
+        2 * cases.len()
+    );
+    // Anti-vacuity: both verdicts occur in numbers, and the claim covers most
+    // of MSBuild's refusals.
+    assert!(rejected >= 4000, "only {rejected} rejected");
+    assert!(evaluated >= 1800, "only {evaluated} evaluated");
+    assert!(
+        certain * 20 >= rejected * 19,
+        "only {certain} of {rejected} claimed"
+    );
+}

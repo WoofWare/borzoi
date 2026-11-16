@@ -91,6 +91,7 @@ pub(crate) mod executor;
 pub(crate) use directory_build::DirectoryBuildFile;
 mod item_pass;
 mod item_spec;
+mod loader;
 pub(crate) mod property_reads;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod reads;
@@ -982,6 +983,10 @@ struct State<'r> {
     /// `current_file_dir`, which is what relative `<Import Project="
     /// ...">` paths resolve against.
     entry_project_dir: PathBuf,
+    /// The caller's environment names a parse configuration
+    /// (`MSBUILD_PARSE_CONFIG`), which a newer MSBuild reads to relax its
+    /// loader (`rejection::parse_configuration_may_apply`).
+    parse_configuration_named: bool,
     /// `Some(range)` while walking an imported file; `None` while
     /// walking the entry project's body. The range is the span of the
     /// top-level `<Import>` element *in the entry project* that
@@ -1604,6 +1609,13 @@ impl<'r> State<'r> {
             walked_directory_packages_props_import: None,
             depth: 0,
             entry_project_dir,
+            parse_configuration_named: environment.iter().any(|(key, value)| {
+                (if cfg!(windows) {
+                    key.eq_ignore_ascii_case("MSBUILD_PARSE_CONFIG")
+                } else {
+                    key == "MSBUILD_PARSE_CONFIG"
+                }) && !value.trim().is_empty()
+            }),
             import_site_span: None,
             sdk_resolver,
             glob_resolver,
@@ -2057,6 +2069,7 @@ impl<'r> State<'r> {
             walked_directory_packages_props_import: _,
             depth: _,
             entry_project_dir: _,
+            parse_configuration_named: _,
             import_site_span: _,
             sdk_resolver: _,
             glob_resolver: _,
@@ -3857,14 +3870,11 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
 /// and this check stops descending at the ceiling.
 ///
 /// Deliberately *not* validated: attributes on the branch children
-/// themselves. `<PropertyGroup Foo="bar">` inside a branch is MSB4066
-/// at load time — but it is exactly as much MSB4066 at top level
-/// (pinned), where this walker has always ignored unknown group
-/// attributes and evaluated best-effort. Holding branch groups to a
-/// stricter standard than the same element one level up would be
-/// inconsistent; modelling MSBuild's full load-time attribute schema
-/// is an evaluator-wide question, out of scope for the Choose stage
-/// (docs/completed/sdk-chain-exactness-plan.md, Stage A).
+/// themselves, and anything else of MSBuild's load-time schema, which
+/// the loader port judges for the whole file as the walk enters it
+/// (`loader`, `rejection::judge_load_time`). This check only decides
+/// whether the walk models a `<Choose>`, and is stricter than the
+/// loader where the walk declines a shape MSBuild loads.
 fn choose_shape_is_valid(node: Node<'_, '_>) -> bool {
     choose_shape_is_valid_at(node, 1)
 }
