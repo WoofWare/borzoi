@@ -96,6 +96,19 @@ again), so a value whose worlds agree is *committed determinate*, not degraded.
   fixture **270 → 52** causes (the `TargetPlatformVersion`/`PublishAot`/
   `RuntimeIdentifier`/`TargetsNet*` cascades were all collateral of this one
   decline). No world-set, provenance bit, or table degradation was needed.
+- **Plain imports** (#903) — a `\` a property supplies to `<Import Project>`
+  (the attribute's own are `/` already, by `FixFilePath`). MSBuild opens
+  `FixFilePath(GetFullPath(dir/expansion))`: it collapses `..` over `/` alone,
+  so a `\` the fixup kept is a name character there (`q\..\../..` pops
+  `q\..\..` whole), and the kept spelling is the duplicate-import key
+  (`zz\..\T.props` imports an already-imported `T.props` again). Each piece's
+  fixup only rewrites slashes, so when the *whole* expansion's probe hits, the
+  path is lexically the expansion with every `\` a `/` whatever the pieces did.
+  The walk commits exactly then: `unix_adjustment_rewrites` asks
+  `path_fixup::unix_path_probe` (`.`/`..` hit; an absolute segment is probed
+  through `observed`), and declines the import otherwise. The pieces'
+  decisions are not modelled; `sdk_import_project_path_diff` runs MSBuild from
+  three working directories and holds every commit to all of them.
 
 The three superseded stages — the original P1 (conditions bracket the worlds),
 P2 (exact-value consumers degrade), and their "scan the evaluated property table"

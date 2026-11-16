@@ -739,3 +739,35 @@ fn metadata_evaluated_item_by_item_is_not_claimed() {
         );
     }
 }
+
+#[test]
+fn an_undecided_import_with_a_written_backslash_is_judged_as_written_with_a_slash() {
+    // MSBuild turns the attribute's own `\` into `/` before expanding it, so
+    // `sub\..\there.props` is `there.props` beside the project, which loads.
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(
+        &tmp,
+        &format!("  <Import Project=\"sub\\..\\there.props\" Condition=\"{UNDECIDED_TRUE}\" />"),
+        &[("proj/there.props", "<Project />")],
+    );
+    let parsed = parse_file(&project_path);
+    assert_eq!(parsed.rejection, None, "{:#?}", parsed.diagnostics);
+}
+
+#[test]
+fn an_undecided_import_of_a_backslash_the_working_directory_decides_may_be_rejected() {
+    // `sub\x/../there.props` from a property opens `sub/there.props`, which is
+    // missing, where `sub/` is a directory under MSBuild's working directory,
+    // and `there.props` (its `..` popping `sub\x` whole) where it is not.
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(
+        &tmp,
+        &format!(
+            "  <PropertyGroup><P>sub\\x/../there.props</P></PropertyGroup>\n  \
+             <Import Project=\"$(P)\" Condition=\"{UNDECIDED_TRUE}\" />"
+        ),
+        &[("proj/there.props", "<Project />")],
+    );
+    let parsed = parse_file(&project_path);
+    assert_withdrawn(&parsed, &["After"]);
+}

@@ -383,11 +383,17 @@ pub(super) fn visit_point(
     // names does not load (#820). What the walk's opacity alone leaves in
     // doubt is the doubt of the content it could not see (`rejection`).
     let path_name = kind.path_name();
-    let certain =
-        rejection::certain_but_for_opacity(state, path_name) && names_one_file(state, path_name);
+    // A `\` in the path that MSBuild's Unix path adjustment may keep names a
+    // file `point_path` need not, which `Exists` (reading every `\` as `/`)
+    // does not guard.
+    let settles = point_path_settles(state, path_name);
+    let certain = rejection::certain_but_for_opacity(state, path_name)
+        && names_one_file(state, path_name)
+        && settles;
     let path = point_path(state, path_name, current_file_dir);
     if !rejection::ruled_out_but_for_opacity(node, current_file_dir, state)
-        && let Some(why) = rejection::may_load_nothing_at(state, path.as_deref(), certain, guarded)
+        && let Some(why) =
+            rejection::may_load_nothing_at(state, path.as_deref(), certain, guarded && settles)
     {
         state.note_possible_rejection(
             RejectionCause::Import {
@@ -686,6 +692,26 @@ fn names_one_file(state: &State<'_>, path_name: &str) -> bool {
         .lookup
         .get_ignoring_trust(path_name)
         .is_none_or(|value| !value.as_escaped().contains(';') && !value.is_filespec_wildcard())
+}
+
+/// Whether [`point_path`], which reads every `\` as `/`, names the file an
+/// import of the path property opens ([`super::adjustment_settles`]).
+fn point_path_settles(state: &State<'_>, path_name: &str) -> bool {
+    // Only the value's shape is read here; its trust is the caller's.
+    state
+        .lookup
+        .get_ignoring_trust(path_name)
+        .is_none_or(|value| {
+            let mut rewrites = None;
+            value.split_list().all(|segment| {
+                super::adjustment_settles(
+                    value.as_escaped(),
+                    &segment,
+                    &mut rewrites,
+                    state.observer,
+                )
+            })
+        })
 }
 
 /// [`point_path`], if `Exists()` of it is true: what a point guarded by that

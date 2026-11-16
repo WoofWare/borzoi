@@ -5595,6 +5595,10 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         );
         return;
     }
+    // A `\` written in the attribute is already `/` (`fixed_raw`); one a
+    // property supplies is still `\` here, and MSBuild's Unix path
+    // adjustment decides it for the whole expansion at once.
+    let mut rewrites = None;
     for segment in expansion.value.ignoring_trust().split_list() {
         // Wildcard-ness is classified on the **escaped** segment, before
         // decoding (classify, then unescape — the same order item specs use).
@@ -5604,31 +5608,33 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // literal too, whole: `*.props%2a` imports the file named `*.props*`
         // ([`Escaped::is_filespec_wildcard`]). So a glob's decoded pattern has
         // no `*`/`?` that was data.
-        //
-        // A `\` written in the attribute is already `/` (`fixed_raw`); one a
-        // property or an escape supplies is still `\` here.
         let decoded = segment.unescape();
+        if !adjustment_settles(escaped, &segment, &mut rewrites, state.observer) {
+            decline_import_path(
+                node,
+                raw_path,
+                "a `\\` a property supplies, which MSBuild's Unix path adjustment \
+                 keeps or rewrites as its working directory decides",
+                state,
+            );
+            continue;
+        }
+        // Every live `\` reads as a `/` from here on.
         if segment.is_filespec_wildcard() {
             // MSBuild collapses the path before it globs, so the directory
-            // listed is the collapsed one; a `\` a property supplied is not
-            // modelled (below).
-            let supplied_backslash = decoded.contains('\\');
-            let saved_path_certain = state.taken_import_path_certain;
-            if supplied_backslash {
-                state.taken_import_path_certain = false;
-                state.reach_doubted += 1;
+            // listed is the collapsed one. An escaped `\` reaches the glob as
+            // a character the walk does not model there.
+            if has_escaped_backslash(segment.as_escaped()) {
+                decline_import_path(node, raw_path, "an escaped `\\` in a wildcard", state);
+                continue;
             }
             follow_wildcard_import(
                 &decoded.replace('\\', "/"),
-                !supplied_backslash,
+                true,
                 current_file_dir,
                 node.range(),
                 state,
             );
-            if supplied_backslash {
-                state.reach_doubted -= 1;
-                state.taken_import_path_certain = saved_path_certain;
-            }
             continue;
         }
         // An escaped separator (`%2f`, `%5c`) is data when MSBuild decides
@@ -5639,25 +5645,10 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             decline_import_path(node, raw_path, "an escaped path separator", state);
             continue;
         }
-        let path = if decoded.contains('\\') {
-            // A `\` a property supplied (the SDK's own
-            // `$(MSBuildThisFileDirectory)..\..\…`) goes through MSBuild's Unix
-            // path adjustment, which the walk does not model (#903). The walk
-            // opens the path with each `\` a `/`, as the file system resolves
-            // it, and claims neither that MSBuild certainly reaches what it
-            // finds there nor that MSBuild fails to load it.
-            let path = current_file_dir.join(decoded.replace('\\', "/"));
-            let saved_path_certain = std::mem::take(&mut state.taken_import_path_certain);
-            state.reach_doubted += 1;
-            walk_import_file(&path, node.range(), false, state);
-            state.reach_doubted -= 1;
-            state.taken_import_path_certain = saved_path_certain;
-            path
-        } else {
-            let path = import_open_path(&current_file_dir.join(&decoded), true);
-            walk_external_file(&path, node.range(), state);
-            path
-        };
+        // MSBuild collapses the path as one written with `/`
+        // (`adjustment_settles`).
+        let path = import_open_path(&current_file_dir.join(decoded.replace('\\', "/")), true);
+        walk_external_file(&path, node.range(), state);
         // Record NuGet's central-package import point by its *shape* —
         // membership in `walked_files` afterwards means the walk genuinely
         // entered the file, on this import or an earlier one (failed
@@ -5719,6 +5710,108 @@ fn has_escaped_separator(escaped: &str) -> bool {
             .get(at..at + 3)
             .is_some_and(|e| e.eq_ignore_ascii_case("%2f") || e.eq_ignore_ascii_case("%5c"))
     })
+}
+
+/// Whether `escaped` holds an escaped `\` (`%5c`, either case).
+fn has_escaped_backslash(escaped: &str) -> bool {
+    escaped.match_indices('%').any(|(at, _)| {
+        escaped
+            .get(at..at + 3)
+            .is_some_and(|e| e.eq_ignore_ascii_case("%5c"))
+    })
+}
+
+/// Whether the walk names the file MSBuild opens for `segment` of a plain
+/// import's expansion `whole` (both escaped), and the duplicate-import key it
+/// opens it under, by reading every `\` in it as `/`. Only a `\` a property
+/// supplied is still there (the attribute's own are `/` already), and MSBuild's
+/// Unix path adjustment (`FileUtilities.MaybeAdjustFilePath`) keeps or
+/// rewrites it.
+///
+/// MSBuild adjusts each piece of the expansion (a literal run, a property's
+/// value) and then the whole result, and opens what it ends with, collapsed
+/// first as a path whose separators are `/` alone and only then with every
+/// remaining `\` turned to `/` (`NormalizePath` is `FixFilePath(GetFullPath)`).
+/// A `\` the adjustment keeps is a name character to that collapse, so
+/// `q\..\../..` pops `q\..\..` whole; and the spelling it keeps is the
+/// duplicate-import key, so `zz\..\T.props` imports a `T.props` already
+/// imported again (both probed, dotnet 10.0.401). Every adjustment only turns
+/// `\` into `/` and collapses slash runs, so the walk's reading holds when
+/// either:
+///
+/// - the whole result's adjustment rewrites ([`unix_adjustment_rewrites`],
+///   asked once per import through `rewrites`), which leaves the expansion
+///   with every `\` a `/` whatever the pieces did; or
+/// - the segment is not a wildcard and no spelling the adjustments can leave
+///   collapses or keys otherwise ([`adjustment_is_immaterial`]), whatever
+///   each one decided.
+///
+/// Otherwise some decision turns on what the segment names, and the piece
+/// decisions are not modelled (some turn on a directory relative to the
+/// working directory), so the caller declines.
+pub(super) fn adjustment_settles(
+    whole: &str,
+    segment: &Escaped,
+    rewrites: &mut Option<bool>,
+    observer: &Observer,
+) -> bool {
+    !segment.as_escaped().contains('\\')
+        || (!segment.is_filespec_wildcard() && adjustment_is_immaterial(&segment.unescape()))
+        || *rewrites.get_or_insert_with(|| unix_adjustment_rewrites(whole, observer))
+}
+
+/// Whether every spelling MSBuild's Unix path adjustments can leave of
+/// `decoded`, one import path with its `\` intact, opens the same file under
+/// the same duplicate-import key. Each `\` sits between two characters that
+/// are not separators, so an adjustment only turns some `\` into `/` (there is
+/// no slash run for it to collapse, and the path's rootedness is its first
+/// character's); and no `.` or `..` component follows the start of the first
+/// `/`-separated segment holding a `\`, so the collapse over `/` alone pops and
+/// drops what the collapse over both separators does, in every spelling.
+fn adjustment_is_immaterial(decoded: &str) -> bool {
+    let bytes = decoded.as_bytes();
+    let separator = |at: usize| matches!(bytes.get(at), Some(b'/' | b'\\') | None);
+    let flanked = bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| **b == b'\\')
+        .all(|(at, _)| at > 0 && !separator(at - 1) && !separator(at + 1));
+    let Some(first) = decoded.find('\\') else {
+        return true;
+    };
+    let from = decoded[..first].rfind('/').map_or(0, |at| at + 1);
+    flanked
+        && decoded[from..]
+            .split(['/', '\\'])
+            .all(|component| !matches!(component, "." | ".."))
+}
+
+/// Whether MSBuild's Unix path adjustment rewrites every `\` of a plain
+/// import's expansion `escaped` as `/`, whatever MSBuild's working directory:
+/// the probe the decision turns on (`LooksLikeUnixFilePath`) is asked of the
+/// file system through `observer` where it names an absolute path, and a first
+/// segment of `.` or `..` is a directory under any working directory that
+/// exists.
+pub(super) fn unix_adjustment_rewrites(escaped: &str, observer: &Observer) -> bool {
+    // MSBuild on Windows reads `\` as a separator and adjusts nothing.
+    if cfg!(windows) {
+        return true;
+    }
+    // `None`: a `$(`, `@(` or `\\` prefix, which MSBuild returns unadjusted.
+    let Some(rewrite) = properties::path_fixup::worlds(escaped) else {
+        return false;
+    };
+    match properties::path_fixup::unix_path_probe(&rewrite) {
+        properties::path_fixup::UnixPathProbe::Exists => true,
+        properties::path_fixup::UnixPathProbe::Absent
+        | properties::path_fixup::UnixPathProbe::WorkingDirectory => false,
+        properties::path_fixup::UnixPathProbe::Directory(dir) => {
+            observed::is_dir(observer, Path::new(dir))
+        }
+        properties::path_fixup::UnixPathProbe::FileOrDirectory(path) => {
+            observed::exists(observer, Path::new(path))
+        }
+    }
 }
 
 /// What `Path.Combine(root, Project)` appends to an SDK root, for a `Project`
@@ -6479,5 +6572,123 @@ mod toolset_tests {
                 "{dir}"
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod adjustment_tests {
+    use super::adjustment_is_immaterial;
+
+    /// `GetFullPath` on Unix: `/` is the only separator; empty and `.`
+    /// components drop, `..` pops (not past the root), and a trailing `/`
+    /// stays.
+    fn get_full_path(path: &str) -> String {
+        let mut out: Vec<&str> = Vec::new();
+        for component in path.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    out.pop();
+                }
+                _ => out.push(component),
+            }
+        }
+        let trailing = path.ends_with('/') && !out.is_empty();
+        format!("/{}{}", out.join("/"), if trailing { "/" } else { "" })
+    }
+
+    /// The duplicate-import key MSBuild gives an import of `spelling` from
+    /// `/d/e`: `FixFilePath(GetFullPath(Path.Combine(dir, spelling)))`. The
+    /// file it opens is that key collapsed again.
+    fn key(spelling: &str) -> String {
+        let combined = if spelling.starts_with('/') {
+            spelling.to_string()
+        } else {
+            format!("/d/e/{spelling}")
+        };
+        get_full_path(&combined).replace('\\', "/")
+    }
+
+    /// Every spelling MSBuild's adjustments can leave of `value`: each run of
+    /// separators holding a `\` is left with any of its `\` turned to `/`, or
+    /// collapsed to one `/`.
+    fn spellings(value: &str) -> Vec<String> {
+        let mut out = vec![String::new()];
+        let chars: Vec<char> = value.chars().collect();
+        let mut at = 0;
+        while at < chars.len() {
+            let is_separator = |c: char| c == '/' || c == '\\';
+            if !is_separator(chars[at]) {
+                for s in &mut out {
+                    s.push(chars[at]);
+                }
+                at += 1;
+                continue;
+            }
+            let end = (at..chars.len())
+                .find(|&i| !is_separator(chars[i]))
+                .unwrap_or(chars.len());
+            let run = &chars[at..end];
+            let backslashes: Vec<usize> = (0..run.len()).filter(|&i| run[i] == '\\').collect();
+            let mut variants: Vec<String> = Vec::new();
+            for mask in 0..(1u32 << backslashes.len()) {
+                let mut variant: Vec<char> = run.to_vec();
+                for (bit, &i) in backslashes.iter().enumerate() {
+                    if mask & (1 << bit) != 0 {
+                        variant[i] = '/';
+                    }
+                }
+                variants.push(variant.into_iter().collect());
+            }
+            if !backslashes.is_empty() {
+                variants.push("/".to_string());
+            }
+            out = out
+                .iter()
+                .flat_map(|prefix| variants.iter().map(move |v| format!("{prefix}{v}")))
+                .collect();
+            at = end;
+        }
+        out
+    }
+
+    /// Every string up to `len` characters over `alphabet`.
+    fn all_strings(alphabet: &[char], len: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut layer = vec![String::new()];
+        for _ in 0..len {
+            layer = layer
+                .iter()
+                .flat_map(|prefix| {
+                    alphabet.iter().map(move |c| {
+                        let mut s = prefix.clone();
+                        s.push(*c);
+                        s
+                    })
+                })
+                .collect();
+            all.extend(layer.iter().cloned());
+        }
+        all
+    }
+
+    /// Where `adjustment_is_immaterial` holds, every spelling the
+    /// adjustments can leave has the walk's key (every `\` read as `/`), so
+    /// MSBuild opens the walk's file under the walk's key whatever each
+    /// adjustment decided.
+    #[test]
+    fn an_immaterial_adjustment_leaves_one_key() {
+        let mut immaterial = 0;
+        for value in all_strings(&['a', '.', '/', '\\'], 7) {
+            if !value.contains('\\') || !adjustment_is_immaterial(&value) {
+                continue;
+            }
+            immaterial += 1;
+            let walk = key(&value.replace('\\', "/"));
+            for spelling in spellings(&value) {
+                assert_eq!(key(&spelling), walk, "{value:?} spelt {spelling:?}");
+            }
+        }
+        assert!(immaterial > 500, "{immaterial}");
     }
 }

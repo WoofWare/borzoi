@@ -623,12 +623,23 @@ fn may_load_nothing(
     if let Some(sdk) = attribute(node, "Sdk") {
         return sdk_import_may_load_nothing(&sdk, project, seen, state);
     }
-    let expansion = expand_silent(project, state);
+    // MSBuild turns the attribute's own `\` into `/` before it expands it.
+    let expansion = expand_silent(&project.replace('\\', "/"), state);
     if path_undecided(project, state, expansion.had_unsupported) {
         return (!requires_own_file).then_some(UnloadableImport::PathUndecided);
     }
     // Its trust is judged just above, name by name.
     let value = expansion.value.ignoring_trust();
+    // A `\` a property supplied that MSBuild's Unix path adjustment may keep
+    // can name a file the walk does not (`adjustment_settles`), and `Exists`
+    // collapses its argument otherwise than the import does, so a gate that
+    // requires the file does not guard this one.
+    let mut rewrites = None;
+    if value.split_list().any(|segment| {
+        !super::adjustment_settles(value.as_escaped(), &segment, &mut rewrites, state.observer)
+    }) {
+        return Some(UnloadableImport::PathUndecided);
+    }
     if requires_own_file {
         let whole = current_file_dir.join(value.unescape().replace('\\', "/"));
         if value.trimmed_unescaped().is_empty()

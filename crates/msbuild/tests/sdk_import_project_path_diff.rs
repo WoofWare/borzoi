@@ -33,6 +33,7 @@ use std::time::Duration;
 mod common;
 
 use crate::common::parse_fsproj_with_imports;
+use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::{SdkPaths, SdkResolution, SdkResolveError};
 use borzoi_oracle_harness::BoundedCommand;
 use common::SplitMix64;
@@ -50,6 +51,75 @@ const TARGETS: &[(&str, &[&str])] = &[
     ("X", &["..", "..", "..", "outside", "X.props"]),
 ];
 
+/// Every relative first segment [`respell_with_tail`] writes, as text.
+const FIRST_SEGMENTS: &[&str] = &[
+    "E.props", "sub", "ghost", "%2e", "%2e%2e", "%00", "a;b", "*", " x", "%3b", "%C3%A9", "x?",
+];
+
+/// Whether MSBuild's Unix path adjustment rewrites every `\` of `expanded`
+/// whatever its working directory: the domain the walk must commit in, as
+/// `FileUtilities.LooksLikeUnixFilePath` states it. The first segment of the
+/// rewrite (`\` to `/`, slash runs collapsed, one pair of enclosing quotes
+/// dropped) is `.` or `..`, or an absolute directory that exists; a lone
+/// absolute segment must exist at all.
+fn adjustment_certainly_converts(expanded: &str) -> bool {
+    if expanded.starts_with("$(") || expanded.starts_with("@(") || expanded.starts_with(r"\\") {
+        return false;
+    }
+    let mut converted = String::new();
+    for c in expanded.chars() {
+        let c = if c == '\\' { '/' } else { c };
+        if !(c == '/' && converted.ends_with('/')) {
+            converted.push(c);
+        }
+    }
+    let quoted = converted.len() > 2
+        && (converted.starts_with('\'') && converted.ends_with('\'')
+            || converted.starts_with('"') && converted.ends_with('"'));
+    let unquoted = if quoted {
+        &converted[1..converted.len() - 1]
+    } else {
+        converted.as_str()
+    };
+    match unquoted[1..].find('/') {
+        Some(at) => {
+            let first = &unquoted[..at + 1];
+            matches!(first, "." | "..")
+                || (first.starts_with('/') && host_fs::metadata(first).is_ok_and(|m| m.is_dir()))
+        }
+        None => unquoted.starts_with('/') && host_fs::metadata(unquoted).is_ok(),
+    }
+}
+
+/// Whether every spelling MSBuild's Unix path adjustments can leave of
+/// `expanded` (one plain import path, escaped) opens one file under one
+/// duplicate-import key, whatever each adjustment decided: the other half of
+/// the domain the walk must commit in. MSBuild collapses `..` over `/` alone
+/// before it turns a kept `\` into `/`, and keys the import by that spelling,
+/// so this holds when no `\` touches a separator or an end (an adjustment then
+/// only turns some `\` into `/`) and no `.` or `..` component follows the
+/// start of the first `/`-segment holding a `\`. A wildcard globs the path,
+/// which is another question.
+fn adjustment_immaterial(expanded: &str) -> bool {
+    if expanded.contains(['*', '?']) {
+        return false;
+    }
+    let decoded = borzoi_msbuild::test_support::unescape(expanded);
+    let chars: Vec<char> = decoded.chars().collect();
+    let is_separator = |c: Option<&char>| matches!(c, Some('/' | '\\') | None);
+    let flanked = (0..chars.len())
+        .filter(|&i| chars[i] == '\\')
+        .all(|i| i > 0 && !is_separator(chars.get(i - 1)) && !is_separator(chars.get(i + 1)));
+    let Some(first) = decoded.find('\\') else {
+        return true;
+    };
+    let from = decoded[..first].rfind('/').map_or(0, |at| at + 1);
+    flanked
+        && decoded[from..]
+            .split(['/', '\\'])
+            .all(|c| c != "." && c != "..")
+}
+
 /// Imports per generated project.
 const IMPORTS_PER_PROJECT: usize = 30;
 
@@ -63,6 +133,24 @@ struct Layout {
 }
 
 impl Layout {
+    /// A working directory holding nothing.
+    fn empty_cwd(&self) -> PathBuf {
+        let dir = self.root.join("cwd-empty");
+        std::fs::create_dir_all(&dir).expect("mkdir empty cwd");
+        dir
+    }
+
+    /// A working directory holding a directory for every relative first
+    /// segment a generated spelling can start with, spelt as MSBuild probes
+    /// it (the escaped text).
+    fn full_cwd(&self) -> PathBuf {
+        let dir = self.root.join("cwd-full");
+        for name in FIRST_SEGMENTS {
+            std::fs::create_dir_all(dir.join(name)).expect("mkdir first segment");
+        }
+        dir
+    }
+
     fn sdks(&self) -> PathBuf {
         self.sdks.clone()
     }
@@ -199,8 +287,17 @@ fn child_environment(layout: &Layout) -> HashMap<String, String> {
 
 /// MSBuild's `Seen`, or its output when the evaluation fails.
 fn msbuild_seen(proj: &Path, env: &HashMap<String, String>) -> Result<String, String> {
+    msbuild_seen_from(proj, env, proj.parent().unwrap())
+}
+
+/// [`msbuild_seen`], with `dotnet msbuild` run from `cwd`.
+fn msbuild_seen_from(
+    proj: &Path,
+    env: &HashMap<String, String>,
+    cwd: &Path,
+) -> Result<String, String> {
     let mut cmd = Command::new("dotnet");
-    cmd.current_dir(proj.parent().unwrap());
+    cmd.current_dir(cwd);
     cmd.env_clear();
     cmd.envs(env);
     cmd.args(["msbuild", "-nologo", "-getProperty:Seen"]);
@@ -424,10 +521,10 @@ fn sdk_import_project_path_tails_resolve_as_msbuild_does() {
 /// directory to the attribute as written, before expanding it, so a rooted
 /// spelling that starts inside `$(P)` is appended to the SDK directory, while
 /// one written rooted names its own file.
-fn check_property_cases(seed: u64, cases: usize, kind: Kind) -> (usize, usize) {
+fn check_property_cases(seed: u64, cases: usize, kind: Kind) -> PropertyTally {
     let layout = Layout::new();
     let mut rng = SplitMix64(seed);
-    let (mut imported, mut failed) = (0, 0);
+    let mut tally = PropertyTally::default();
     for case in 0..cases {
         let (spelling, in_domain) = respell_with_tail(&mut rng, &layout);
         let boundaries: Vec<usize> = (0..=spelling.len())
@@ -440,33 +537,88 @@ fn check_property_cases(seed: u64, cases: usize, kind: Kind) -> (usize, usize) {
         } else {
             (rest, format!("{first}$(P)"))
         };
-        // A `\` a property supplies to a plain import goes through MSBuild's
-        // Unix path adjustment, which the walk does not model (#903).
-        let value = match kind {
-            Kind::Sdk => value.to_owned(),
-            Kind::Plain => value.replace('\\', "/"),
-        };
         let prelude = format!("  <PropertyGroup><P>{value}</P></PropertyGroup>\n");
         let (xml, parsed, theirs) =
             evaluate_both_after(&layout, kind, &prelude, std::slice::from_ref(&attribute));
         let label = format!("{kind:?} seed {seed} case {case}");
-        if assert_certain_implies_exact(&label, &xml, &parsed, theirs, in_domain) {
-            imported += 1;
+        // A `\` the property supplies to a plain import meets MSBuild's Unix
+        // path adjustment, which keeps or rewrites it as the first segment of
+        // the expanded path exists under MSBuild's working directory. So
+        // MSBuild runs from directories holding none and all of the
+        // generator's first segments too: an answer that moves with the
+        // directory is one we must decline.
+        let (theirs, must_commit) = match kind {
+            Kind::Plain if value.contains('\\') => {
+                let expanded = attribute.replace('\\', "/").replace("$(P)", value);
+                let theirs = msbuild_seen_from_every_cwd(&layout, theirs);
+                tally.moved += usize::from(theirs.as_ref().is_err_and(|e| e.contains(MOVES)));
+                let must_commit = in_domain
+                    && (adjustment_certainly_converts(&expanded)
+                        || adjustment_immaterial(&expanded));
+                tally.adjusted += usize::from(must_commit && theirs.is_ok());
+                (theirs, must_commit)
+            }
+            _ => (theirs, in_domain),
+        };
+        if assert_certain_implies_exact(&label, &xml, &parsed, theirs, must_commit) {
+            tally.imported += 1;
         } else {
-            failed += 1;
+            tally.failed += 1;
         }
     }
-    (imported, failed)
+    tally
+}
+
+/// What [`check_property_cases`] saw.
+#[derive(Debug, Default)]
+struct PropertyTally {
+    /// Cases MSBuild evaluated.
+    imported: usize,
+    /// Cases MSBuild failed.
+    failed: usize,
+    /// Plain cases holding a `\` that the walk had to commit and agree on:
+    /// MSBuild's adjustment rewrites it, or no spelling it leaves differs.
+    adjusted: usize,
+    /// Plain cases whose answer moved with MSBuild's working directory.
+    moved: usize,
+}
+
+/// The mark [`msbuild_seen_from_every_cwd`] puts on an answer that moves.
+const MOVES: &str = "MSBuild's answer moves with its working directory";
+
+/// MSBuild's `Seen` for the plain project in `layout`'s SDK directory, given
+/// `from_project_dir` (its answer run from there), run again from directories
+/// holding none and all of the generator's first segments. Answers that
+/// differ are an `Err`, which the walk must decline as it declines a failure.
+fn msbuild_seen_from_every_cwd(
+    layout: &Layout,
+    from_project_dir: Result<String, String>,
+) -> Result<String, String> {
+    let proj = layout.sdk_root().join("p.proj");
+    let env = child_environment(layout);
+    let mut answers = vec![from_project_dir];
+    for cwd in [layout.empty_cwd(), layout.full_cwd()] {
+        answers.push(msbuild_seen_from(&proj, &env, &cwd));
+    }
+    if answers.iter().all(|a| *a == answers[0]) {
+        answers.swap_remove(0)
+    } else {
+        Err(format!("{MOVES}: {answers:#?}"))
+    }
 }
 
 #[test]
 fn sdk_import_project_paths_through_a_property_resolve_as_msbuild_does() {
     for kind in KINDS {
-        let (imported, failed) = check_property_cases(0, 16, kind);
+        let tally = check_property_cases(0, 24, kind);
         assert!(
-            imported > 0 && failed > 0,
-            "{kind:?}: imported {imported}, failed {failed}"
+            tally.imported > 0 && tally.failed > 0,
+            "{kind:?}: {tally:?}"
         );
+        if let Kind::Plain = kind {
+            // The generator still reaches both sides of the adjustment.
+            assert!(tally.adjusted > 0 && tally.moved > 0, "{kind:?}: {tally:?}");
+        }
     }
 }
 
@@ -491,13 +643,72 @@ fn an_absolute_path_through_a_property_is_appended_to_the_sdk_directory() {
     ));
 }
 
+/// A plain import of a path whose `\` a property supplies, from the SDK
+/// directory (which holds `sub/`), with MSBuild run from there, from an empty
+/// directory and from one holding every first segment. Each case says whether
+/// MSBuild's answer moves with its working directory, and whether the walk
+/// must commit (the adjustment rewrites whatever the directory holds).
+#[test]
+fn a_backslash_a_property_supplies_is_adjusted_as_msbuild_does() {
+    let layout = Layout::new();
+    let root = layout.sdk_root();
+    let root = root.to_string_lossy();
+    let cases: &[(&str, &[&str], bool, bool)] = &[
+        // `..` is a directory under any working directory.
+        (r"..\targets", &["$(P)/T.props"], false, true),
+        (r"..\Sdk\", &["$(P)/E.props"], false, true),
+        // So is `.`: the rewrite is the duplicate-import key, and `E` is
+        // imported once.
+        (r".\sub\..\E.props", &["E.props", "$(P)"], false, true),
+        // `sub` may or may not be a directory under the working directory,
+        // but no spelling the adjustment leaves collapses or keys otherwise:
+        // `D` is imported once, and `S` once.
+        (
+            r"sub\deeper\D.props",
+            &["$(P)", "sub/deeper/D.props"],
+            false,
+            true,
+        ),
+        (r"sub\S.props", &["sub/S.props", "$(P)"], false, true),
+        // An absolute first segment is probed where it is.
+        (&format!(r"{root}\sub"), &["$(P)/../E.props"], false, true),
+        // `sub\deeper/..` pops `sub\deeper` whole when `sub/` is missing
+        // under the working directory, so MSBuild opens `Sdk/S.props`, which
+        // is not there, and otherwise `Sdk/sub/S.props`.
+        (r"sub\deeper", &["$(P)/../S.props"], true, false),
+        // A `\` kept is kept in the duplicate-import key, which then differs
+        // from `E.props`'s: `E` is imported twice unless `ghost/` exists.
+        (r"ghost\..\E.props", &["E.props", "$(P)"], true, false),
+        // A missing absolute first segment keeps the `\`, wherever MSBuild
+        // runs, and the walk declines.
+        (
+            r"/borzoi-missing-root\x\..\..",
+            &["$(P)/E.props"],
+            false,
+            false,
+        ),
+    ];
+    for &(value, imports, moves, must_commit) in cases {
+        let prelude = format!("  <PropertyGroup><P>{value}</P></PropertyGroup>\n");
+        let imports: Vec<String> = imports.iter().map(|i| (*i).to_string()).collect();
+        let (xml, parsed, theirs) = evaluate_both_after(&layout, Kind::Plain, &prelude, &imports);
+        let theirs = msbuild_seen_from_every_cwd(&layout, theirs);
+        assert_eq!(
+            theirs.as_ref().is_err_and(|e| e.contains(MOVES)),
+            moves,
+            "{value}: {theirs:?}"
+        );
+        assert_certain_implies_exact(value, &xml, &parsed, theirs, must_commit);
+    }
+}
+
 #[test]
 #[ignore = "soak: fresh seed, BORZOI_MSBUILD_SOAK_SEED / _CASES"]
 fn sdk_import_project_paths_through_a_property_soak() {
     let (seed, cases) = common::soak_parameters("sdk_import_project_paths_property", 40);
     for kind in KINDS {
-        let (imported, failed) = check_property_cases(seed, cases, kind);
-        println!("{kind:?}: imported {imported}, failed {failed}");
+        let tally = check_property_cases(seed, cases, kind);
+        println!("{kind:?}: {tally:?}");
     }
 }
 
