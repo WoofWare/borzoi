@@ -4868,6 +4868,146 @@ the same 476 distinct reads.
 - The memo keeps a file's text read and its document read apart, so an
   evaluation that read one file both ways would open it twice.
 
+### Follow-up: a change beside a read's path asks it nothing again
+
+**Dependencies**: Stage 3b's witnesses. **Closes**:
+[#776](https://github.com/WoofWare/borzoi/issues/776).
+
+A witness held the stamp of every directory its read's path is resolved
+through, from `/` down. Any entry made, removed or renamed in one of them
+moved that stamp, so the next generation asked every read beneath it again:
+a dotfile written in `$HOME`, or another process's temporary directory in
+`$TMPDIR`. Correctness was unaffected; each such change cost one generation
+a full confirmation. #772 kept the flaky witness-sharing tests still by
+holding the temporary directory's ancestors' stamps (`hold_ancestors_still`).
+
+**What each step needs.** A resolution looks one name up per step, in the
+directory reached, and the answer is the one recorded while every step finds
+what it found. Most steps only enter a directory and go on below it; for
+those, what decides the step is the entry itself, not its siblings, so the
+witness now holds what an `lstat` of it finds: a directory, of the same
+device and inode, mode and owners (an *identity*: all an `lstat` finds
+but the times and size its entries move). A directory, never a symlink to
+one, keeps the canonical spelling and the count of links followed; the
+next `lstat` below it succeeding shows search permission in it; and its
+mode and owners decide whether a symlink in it is followed (Linux's
+`fs.protected_symlinks` refuses one in a sticky, world-writable directory
+owned by neither the follower nor the link's owner). The root, which every
+walk enters with no name looked up for it, is held by its identity too. A
+symlink followed is held by its own stamp (a replacement is a new link
+whose ctime is new, inode reused or not). The last lookup is held by the stamp of the
+directory it is made in, whose entries decide it, as before. A `.` or `..`
+looked up in `d` is held by the identity of `d/..`: an `lstat` finds it
+only with search permission in `d`, and it is the directory a `..` returns
+to. A listing is held by its directory's stamp, and by the walk to it,
+which enters the directory as any other: its items are spelt as where the
+path leads, so an event naming a directory above the one listed
+distrusts them, however the listing spells its path. So the
+directories whose entries a read's answer depends on are exactly the
+directory its last lookup is made in (or the one listed); every other
+directory on its path may gain and lose entries freely.
+
+**Born wide.** An identity says what an entry is when it is looked at:
+a directory renamed away and back has it again, so it cannot say that
+nothing changed between the walk that took the witness and the query asked
+after it. A stamp moves for good. So a witness is born *wide*: it also holds
+the stamp of every directory the walk looked a name up in (the old witness),
+each taken before the lookup. The first later generation that finds them
+all unchanged and not racy shows that no step changed from before the walk
+to then, so the walk is what the query saw, and the witness *narrows* to the
+items above. A witness's first later confirmation therefore costs what it
+did; only from the one after are the ancestors' siblings free.
+`a_directory_swapped_back_while_a_witness_is_taken_is_not_trusted` is the
+case a witness born narrow gets wrong: the walk sees two directories
+swapped, the query sees them swapped back, and they are swapped again.
+A later generation it must be: in the one that took the witness, every
+confirmation finds the walk's own looks, so a check confirmed twice there
+(two evaluations sharing it) would narrow on nothing seen since.
+
+**Canonical spellings.** A canonicalisation that spells each name as the
+directory holding it does (macOS's `realpath` reads each name back from
+the volume; Windows's final path name) moves with a case-only rename of a
+directory its path enters, which keeps every identity on the walk. On such
+a host (`Probe::canonical_spells_as_asked`) a canonicalisation's witness
+stays wide: an entry made in a directory its walk looked a name up in
+asks it again. Elsewhere the answer keeps the spelling asked, which the
+rename does not move.
+
+**Cost.** The walk and every confirmation `lstat` each path once per
+generation (a cached look, shared by every witness naming the path), where
+they `stat`ed each directory once: the same count for a path spelt through
+real directories, and one more for a listing reached through a symlink (its
+`stat`). A witness's items name the paths it passes through rather than the
+directories it looks up in: the same number, less `/`.
+
+**Hints.** A watch event that names a path now distrusts every item of that
+path or below it, by spelling (a directory moved into place moves everything
+below it, and on a file system whose stamps do not move nothing else sees
+it, inodes reused or not), and the stamp of a directory holding it. An
+identity or a symlink's stamp is not distrusted by an event naming a
+sibling. A listing spelt through a final symlink is matched by where it
+leads. Each of these was found by the model once it reused inodes and moved
+directories into place.
+
+**`hold_ancestors_still` stays,** narrowed in what it covers: the two
+counting tests' reads include SDK discovery's `global.json` probes and
+MSBuild's `Directory.Build` probes up every ancestor, whose answers the
+ancestors' entries decide, so concurrent tests' entries there must still
+ask them again. Without the hold, with a process churning entries in
+`$TMPDIR`, both fail (20 against 12, and 19 against 8, `stat`s). The tests
+now take their steady count after the witnesses have narrowed.
+
+**The guarantee.** Unchanged: a check holds in a generation only if its
+read's query gets the recorded answer as of that generation. Stage 3b's
+racy rule judges every stamp a witness holds (an identity has none), and a
+witness is trusted only on the stamps that guarantee it.
+
+Oracle:
+
+- `read_checks::tests::a_narrowed_witness_is_right_and_spared_by_siblings`:
+  on the model, after two quiet generations (every witness must have
+  narrowed), generated changes above the reads: siblings made, removed,
+  renamed and rewritten in every directory of the tree, and changes that
+  move where paths lead (a directory linked from where it was, swapped,
+  replaced by a copy less one entry, renamed away and made anew, a symlink
+  re-pointed), on file systems whose stamps move or do not (with hints),
+  inodes reused or not. A check that holds is right; after sibling changes
+  alone, a check asks nothing again unless the directory its answer is
+  decided by, computed from the model independently of the checker, took a
+  change. Its generator check asks for checks spared below a changed
+  directory, checks a change in their deciding directory asked again, and,
+  for every kind of moving change, narrowed witnesses whose answer it moved.
+- `read_checks::host_tests::sibling_changes_above_a_read_ask_it_nothing_on_the_host`:
+  on the host, reads spelt through relative and absolute symlinks and `..`;
+  entries made, renamed and removed in the temporary directory and the
+  directories below it ask nothing again once the witnesses narrow, while
+  the temporary directory's own ancestors change as other tests please; an
+  entry made in the deciding directory asks again.
+- The model's existing properties take the new changes (swaps, copies moved
+  into place, relinks) and inode reuse, and
+  `the_generator_reaches_witnessed_and_moved_checks` asks for narrowed
+  witnesses that found the disk moved; the host property takes swaps,
+  copies moved into place and symlinks renamed over entries.
+
+Planted, each caught, then removed (each run against the `read_checks`
+tests):
+
+| plant | caught by |
+|---|---|
+| a witness never narrows | the ancestor property and its generator check |
+| a witness born narrow (no stamps of the directories passed through) | `a_directory_swapped_back_while_a_witness_is_taken_is_not_trusted` |
+| a witness that narrows in the generation that took it | `a_directory_swapped_back_while_a_witness_is_taken_is_not_trusted`, confirmed twice |
+| a canonicalisation narrowed where the disk spells the answer | `a_canonicalisation_spelt_by_the_disk_keeps_its_lookups` |
+| entries keyed by `Path` equality (`link/` as `link`) | `a_listing_through_a_trailing_separator_leaves_a_walk_its_symlink` |
+| a listing held by its directory's stamp alone (a stealthy replacement above a directory listed through a symlink) | the ancestor property (the model's `/l`; a regression seed) |
+| an identity of device and inode alone (a `chmod` making a directory sticky and world-writable missed) | the ancestor property and its generator check (the model refuses a symlink in a protected directory) |
+| no identity of the root (a symlink in `/` followed after `/` is made sticky and world-writable) | `a_check_that_holds_is_right` and the ancestor property (the model's `/l`) |
+| a symlink followed held by its identity, not its stamp | the ancestor property and its generator check (a relink reusing the inode) |
+| an identity that accepts any entry of any inode | six model properties and generator checks |
+| the last lookup's directory held only while wide | seven tests, the spelling test on the host among them |
+| a `.` or `..` held only while wide | `a_directory_a_dot_is_looked_up_in_is_witnessed` |
+| a hint matching only the path it names, not those below | `the_generator_reaches_witnessed_and_moved_checks` |
+
 ## Non-goals
 
 - **Semantic diagnostics.** The server publishes syntactic diagnostics only.

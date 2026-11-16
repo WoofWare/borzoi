@@ -44,6 +44,8 @@ use proptest::prelude::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+use crate::common::host_fs;
+
 const RECV_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_SETTLE_ROUNDS: usize = 8;
 
@@ -399,21 +401,32 @@ proptest! {
 /// cost a pull client's second diagnostic request for it, after a first that
 /// warmed everything: an `unchanged` report, or, after a keystroke in the
 /// file, a `full` one. The listings and `stat`s of the ownership walks and
-/// of confirming what they remembered.
-fn second_pull_ownership(depth: usize, keystroke: bool, clock: Clock) -> (u64, u64) {
+/// of confirming what they remembered, and how many directories there are
+/// on the path from `/` to the file's.
+///
+/// A witness is born wide, holding the stamps of the directories the walk
+/// to each listed directory looks names up in, the temporary directory's
+/// ancestors among them, which concurrent tests change; so with stamps
+/// trusted, the pull is measured once a request has confirmed every
+/// listing without asking, narrowing each witness to what those changes
+/// leave be. A host whose temporary directory changes between every two
+/// generations for two seconds on end gives it no such request.
+fn second_pull_ownership(depth: usize, keystroke: bool, clock: Clock) -> (u64, u64, u64) {
     let tmp = TempDir::new().unwrap();
-    let dir = (0..depth).fold(tmp.path().to_path_buf(), |dir, i| dir.join(format!("d{i}")));
+    let root = host_fs::canonicalize(tmp.path()).unwrap();
+    let dir = (0..depth).fold(root.clone(), |dir, i| dir.join(format!("d{i}")));
     std::fs::create_dir_all(&dir).unwrap();
     let relative: String = (0..depth).map(|i| format!("d{i}/")).collect();
     std::fs::write(
-        tmp.path().join("P.fsproj"),
+        root.join("P.fsproj"),
         format!("<Project>\n  <ItemGroup>\n    <Compile Include=\"{relative}A.fs\" />\n  </ItemGroup>\n</Project>\n"),
     )
     .unwrap();
     let file = dir.join("A.fs");
     let text = "module A\n\nlet a = 1\n";
     std::fs::write(&file, text).unwrap();
-    let mut client = Client::start(tmp.path(), true, clock);
+    let settled = matches!(clock, Clock::HostAhead(_));
+    let mut client = Client::start(&root, true, clock);
     let uri = Uri::from_file_path(&file).unwrap();
     client.notify(
         "textDocument/didOpen",
@@ -428,6 +441,29 @@ fn second_pull_ownership(depth: usize, keystroke: bool, clock: Clock) -> (u64, u
     );
     client.settle();
     let result_id = first["resultId"].as_str().expect("a result id").to_string();
+    for attempt in 0.. {
+        if !settled {
+            break;
+        }
+        let mark = client.generations().len();
+        client.request(
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": uri.as_str() }, "previousResultId": result_id }),
+        );
+        client.settle();
+        let listed: u64 = client.generations()[mark..]
+            .iter()
+            .map(|g| g.ownership.listings)
+            .sum();
+        if listed == 0 {
+            break;
+        }
+        assert!(
+            attempt < 100,
+            "no request confirmed the listings without asking"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     if keystroke {
         client.notify(
             "textDocument/didChange",
@@ -453,7 +489,7 @@ fn second_pull_ownership(depth: usize, keystroke: bool, clock: Clock) -> (u64, u
         new.iter().map(|g| g.ownership.stats).sum(),
     );
     client.shut_down();
-    counts
+    (counts.0, counts.1, dir.ancestors().count() as u64)
 }
 
 proptest! {
@@ -464,29 +500,28 @@ proptest! {
     /// `full` report's diagnostics), and an earlier generation has already
     /// walked and remembered the answer (`docs/incremental-lsp-plan.md`,
     /// Stage 4b). So the pull lists nothing, and confirms the answer by one
-    /// `stat` of each directory the walk read: those from the file's up to
-    /// its project's, where the project lists the file.
+    /// `lstat` of each directory on the paths to those the walk read (from
+    /// the file's up to its project's, where the project lists the file).
     #[test]
     fn a_pull_confirms_its_owner_by_one_stat_per_directory(
         depth in 0usize..4,
         keystroke in any::<bool>(),
     ) {
-        let directories = depth as u64 + 1;
-        prop_assert_eq!(second_pull_ownership(depth, keystroke, settled()), (0, directories));
+        let (listings, stats, on_path) = second_pull_ownership(depth, keystroke, settled());
+        prop_assert_eq!((listings, stats), (0, on_path));
     }
 
     /// The control: with every stamp racy, no witness is trusted, so the
-    /// pull lists each of those directories again, once, and stamps it.
+    /// pull lists each of those directories again, once, and looks at the
+    /// paths to them.
     #[test]
     fn with_racy_stamps_a_pull_lists_its_owners_directories_once(
         depth in 0usize..4,
         keystroke in any::<bool>(),
     ) {
         let directories = depth as u64 + 1;
-        prop_assert_eq!(
-            second_pull_ownership(depth, keystroke, racy()),
-            (directories, directories)
-        );
+        let (listings, stats, on_path) = second_pull_ownership(depth, keystroke, racy());
+        prop_assert_eq!((listings, stats), (directories, on_path));
     }
 }
 
