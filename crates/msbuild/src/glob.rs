@@ -210,6 +210,10 @@ pub enum Unmodelled {
     /// MSBuild's file matcher resolves as a Windows short name relative to the
     /// build's working directory (`glob::has_tilde_after_first_fixed_segment`).
     TildeInFixedDirectory,
+    /// A name a glob would match holds a `\`, legal in a Unix file name. The
+    /// file matcher's regular expressions read it as a separator, and the
+    /// item's full path turns it into one, which names another file.
+    BackslashInName,
 }
 
 impl std::fmt::Display for Unmodelled {
@@ -219,6 +223,7 @@ impl std::fmt::Display for Unmodelled {
             Unmodelled::TrailingSeparator => "ends in a path separator",
             Unmodelled::TrailingDotOrSpace => "has a segment ending in `.` or a space",
             Unmodelled::WindowsReservedCharacter => "has one of `\"<>|:`",
+            Unmodelled::BackslashInName => "has a `\\` in a file or directory name",
             Unmodelled::TildeInFixedDirectory => {
                 "has a `~` in a fixed directory segment after the first"
             }

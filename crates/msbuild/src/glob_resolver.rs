@@ -259,6 +259,12 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
                 .filter(|e| e.excludes_from_globs())
                 .any(|e| e.unescape().contains('?'));
         each_file(&listing, "", &mut |rel| {
+            if rel.contains('\\') {
+                return Err(GlobDecline::OutsideModelledShape {
+                    spec: rel.to_string(),
+                    shape: Unmodelled::BackslashInName,
+                });
+            }
             let shape = match unmodelled_shape(rel) {
                 Some(Unmodelled::NonAscii) if !question && !rel.contains(FOLDED_ONTO_ASCII) => {
                     unmodelled_shape(&rel.replace(|c: char| !c.is_ascii(), "x"))
@@ -1355,6 +1361,22 @@ mod tests {
             ghost_passed >= 5,
             "ghost literals rarely passed through: {ghost_passed}/{n}"
         );
+    }
+
+    /// A `\` in a name the walk finds is a separator to MSBuild, and declines.
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_in_a_listed_name_declines() {
+        let tmp = fixture();
+        fs::write(tmp.path().join("sub/a\\b.fs"), b"").unwrap();
+        assert!(matches!(
+            try_resolve(tmp.path(), "**/*.fs", &[]),
+            Err(GlobDecline::OutsideModelledShape {
+                shape: Unmodelled::BackslashInName,
+                ..
+            })
+        ));
+        assert_eq!(try_resolve(tmp.path(), "*.fs", &[]), Ok(4));
     }
 
     #[cfg(unix)]
