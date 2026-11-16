@@ -25,7 +25,8 @@ use std::path::Path;
 
 use crate::diagnostics::FileDiagnostics;
 use crate::pull::{diagnostic_result_id, document_report};
-use crate::server::{State, grouped_for_uri_linked, path_extension};
+use crate::server::{Diagnosed, State, grouped_for_uri_linked, path_extension};
+use crate::workspace::ShownBuffers;
 
 /// One file's pull-diagnostic outcome, independent of the (document vs
 /// workspace) report shape the caller wraps it in. Shared by
@@ -35,10 +36,13 @@ pub(crate) enum FileOutcome {
     /// The client's cached report for this file is still valid; echo `result_id`.
     Unchanged(String),
     /// A fresh report: the diagnostic `groups`, plus the `result_id` to stamp
-    /// (present only for cacheable source files).
+    /// (present only for cacheable source files), and what the diagnostics
+    /// read for an open `.fsproj` buffer, which the message sending them
+    /// carries.
     Full {
         groups: Vec<FileDiagnostics>,
         result_id: Option<String>,
+        shown: ShownBuffers,
     },
 }
 
@@ -85,6 +89,7 @@ pub(crate) fn diagnose_file(
         return FileOutcome::Full {
             groups: Vec::new(),
             result_id: None,
+            shown: ShownBuffers::default(),
         };
     };
     if is_cacheable(uri) {
@@ -109,41 +114,45 @@ pub(crate) fn diagnose_file(
         if previous_result_id == Some(result_id.as_str()) {
             return FileOutcome::Unchanged(result_id);
         }
-        let groups = grouped_for_uri_linked(
+        let Diagnosed { groups, shown } = grouped_for_uri_linked(
             uri,
             &text,
             &mut state.workspace,
             state.semantic.parses_mut(),
             linking_project,
         )
-        .unwrap_or_default();
+        .unwrap_or_else(Diagnosed::none);
         return FileOutcome::Full {
             groups,
             result_id: Some(result_id),
+            shown,
         };
     }
-    let groups = grouped_for_uri_linked(
+    let Diagnosed { groups, shown } = grouped_for_uri_linked(
         uri,
         &text,
         &mut state.workspace,
         state.semantic.parses_mut(),
         linking_project,
     )
-    .unwrap_or_default();
+    .unwrap_or_else(Diagnosed::none);
     FileOutcome::Full {
         groups,
         result_id: None,
+        shown,
     }
 }
 
 /// Run the document-diagnostic handler. Never errors or panics: an unreadable
 /// URI yields an empty `Full` report (clearing any stale client state). Answers
 /// `Unchanged` when the file is cacheable and the client's `previous_result_id`
-/// still matches the current `(source, symbols, lang)`.
+/// still matches the current `(source, symbols, lang)`. With the report comes
+/// what its diagnostics read for an open `.fsproj` buffer, which the response
+/// sending it carries.
 pub fn handle(
     state: &mut State,
     params: DocumentDiagnosticParams,
-) -> DocumentDiagnosticReportResult {
+) -> (DocumentDiagnosticReportResult, ShownBuffers) {
     let uri = &params.text_document.uri;
     match diagnose_file(state, uri, params.previous_result_id.as_deref(), None) {
         FileOutcome::Unchanged(result_id) => {
@@ -153,12 +162,21 @@ pub fn handle(
                     result_id,
                 },
             };
-            DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(unchanged))
+            (
+                DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(
+                    unchanged,
+                )),
+                ShownBuffers::default(),
+            )
         }
-        FileOutcome::Full { groups, result_id } => {
+        FileOutcome::Full {
+            groups,
+            result_id,
+            shown,
+        } => {
             let mut report = document_report(uri, groups);
             report.full_document_diagnostic_report.result_id = result_id;
-            full(report)
+            (full(report), shown)
         }
     }
 }
@@ -184,6 +202,15 @@ mod tests {
     };
 
     use crate::server::State;
+
+    /// The report alone: these tests send nothing to a client.
+    fn handle(
+        state: &mut State,
+        params: DocumentDiagnosticParams,
+    ) -> DocumentDiagnosticReportResult {
+        let (report, _shown) = super::handle(state, params);
+        report
+    }
 
     fn params_with(uri: Uri, previous_result_id: Option<String>) -> DocumentDiagnosticParams {
         DocumentDiagnosticParams {

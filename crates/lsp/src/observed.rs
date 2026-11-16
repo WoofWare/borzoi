@@ -316,11 +316,6 @@ impl crate::read_checks::Probe for HostDisk {
 /// the `std` call they wrap does, and count nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unobserved {
-    /// The `.fsproj` buffer's diagnostics: their existence probes, and the
-    /// SDK discovery they run for the buffer (into an observer nobody
-    /// reads). No stage routes them: the diagnostics are computed afresh for
-    /// every request, so nothing they read is cached.
-    FsprojDiagnostics,
     /// The on-disk assembly cache: its entries, the stamps it keys and
     /// brackets them with, and the running binary's. No stage routes it: an
     /// entry answers for the DLL stamp the env's resolution records

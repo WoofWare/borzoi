@@ -50,6 +50,20 @@ pub const CHECKPOINT_EVENT: &str = "inbox.checkpoint";
 /// at a checkpoint, with the request's `method`.
 pub const STOPPED_EVENT: &str = "inbox.stopped";
 
+/// The name of the `tracing` event the loop emits each time it has nothing
+/// left to do and waits for a message: everything it owed the client for
+/// the messages it had has been sent. Its `received` field is how many
+/// messages the loop has taken from its inbox since it started, so a test
+/// that knows how many it handed over can wait for the idle that follows
+/// them all, and compare what a client shows once the server is idle.
+pub const IDLE_EVENT: &str = "inbox.idle";
+
+/// The name of the `tracing` event the loop emits when a
+/// `workspace/diagnostic` sweep's last step has produced its report, before
+/// the report is sent. Tests change files on it, after every file the sweep
+/// diagnosed and before the report reaches the client.
+pub const SWEEP_REPORT_EVENT: &str = "inbox.sweep_report";
+
 /// A running request stopped at a checkpoint: a notification was handed to
 /// the loop after the loop read the counter for the request's run. Whatever
 /// the run computed and cached stands; its answer is not sent.

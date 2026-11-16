@@ -32,7 +32,7 @@
 //! See [`crate::position::offset_to_position`] for how byte spans (from
 //! roxmltree, by way of the msbuild parser) become UTF-16 LSP positions.
 
-use crate::observed::Unobserved;
+use borzoi_msbuild::observed::{self as msbuild_observed, Observer, ReadSet};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -52,8 +52,32 @@ use crate::sdk_discovery::{DiscoveryError, SdkDiscovery, SdkDiscoveryEnv};
 use crate::tfm_policy;
 use crate::uri::UriExt as _;
 
-/// Translate one fsproj buffer into LSP diagnostics. See module-level
-/// docs for severity/surfacing conventions.
+/// One `.fsproj` buffer's diagnostics, with everything computing them read
+/// and the SDK discovery they evaluated through: an open buffer's
+/// diagnostics are what its client shows until it is told otherwise, so the
+/// server confirms these reads in every generation and refreshes the
+/// diagnostics when one moves
+/// ([`crate::workspace::Workspace::buffer_reads`]).
+pub struct BufferDiagnostics {
+    pub diagnostics: Vec<Diagnostic>,
+    pub reads: ReadSet,
+    pub discovery: Option<SdkDiscovery>,
+}
+
+/// Translate one fsproj buffer into LSP diagnostics: [`buffer_diagnostics`]
+/// without what it read.
+pub fn diagnostics_for(
+    text: &str,
+    project_path: &Path,
+    env: &SdkDiscoveryEnv,
+    build_properties: &HashMap<String, String>,
+) -> Vec<Diagnostic> {
+    buffer_diagnostics(text, project_path, env, build_properties).diagnostics
+}
+
+/// Translate one fsproj buffer into LSP diagnostics, recording every
+/// file-system query it makes. See module-level docs for severity/surfacing
+/// conventions.
 ///
 /// `project_path` must be the on-disk path to the fsproj being parsed:
 /// it seeds MSBuild's path-derived reserved properties, anchors relative
@@ -64,17 +88,37 @@ use crate::uri::UriExt as _;
 /// ([`crate::workspace::Workspace::build_properties`]), so the buffer is
 /// evaluated under the same `Configuration`/`Platform` the workspace resolves
 /// under.
-pub fn diagnostics_for(
+pub fn buffer_diagnostics(
     text: &str,
     project_path: &Path,
     env: &SdkDiscoveryEnv,
     build_properties: &HashMap<String, String>,
-) -> Vec<Diagnostic> {
-    let discovery = SdkDiscovery::for_project(
+) -> BufferDiagnostics {
+    let observer = Observer::new();
+    let discovery = SdkDiscovery::for_project(project_path, env, &observer);
+    let diagnostics = buffer_diagnostics_observed(
+        text,
         project_path,
         env,
-        &Unobserved::FsprojDiagnostics.msbuild_observer(),
+        build_properties,
+        &discovery,
+        &observer,
     );
+    BufferDiagnostics {
+        diagnostics,
+        reads: observer.finish().0,
+        discovery: discovery.ok(),
+    }
+}
+
+fn buffer_diagnostics_observed(
+    text: &str,
+    project_path: &Path,
+    env: &SdkDiscoveryEnv,
+    build_properties: &HashMap<String, String>,
+    discovery: &Result<SdkDiscovery, DiscoveryError>,
+    observer: &Observer,
+) -> Vec<Diagnostic> {
     let discovery_failure = discovery.as_ref().err();
     match evaluate_buffer(
         text,
@@ -82,6 +126,7 @@ pub fn diagnostics_for(
         env,
         build_properties,
         discovery.as_ref().ok(),
+        observer,
     ) {
         Ok(parsed) => {
             let lang_version_refusal =
@@ -123,13 +168,18 @@ pub fn diagnostics_for(
                 })
                 .map(|d| to_lsp_diagnostic(text, &d.kind, &d.span, discovery_failure))
                 .collect();
-            diags.extend(reference_diagnostics(text, &parsed.project_references));
+            diags.extend(reference_diagnostics(
+                text,
+                &parsed.project_references,
+                observer,
+            ));
             // RestoreStale (consumer #3 stage 3.2): a real, SDK-resolved project
             // whose `obj/project.assets.json` is absent — the file the semantic
             // layer reads for cross-assembly resolution. `resolved_sdk_root` gates
             // the check to SDK-style projects (a bare `<Project>` has nothing to
             // restore, so it never warns).
-            let unrestored = parsed.resolved_sdk_root.is_some() && !assets_present(project_path);
+            let unrestored =
+                parsed.resolved_sdk_root.is_some() && !assets_present(project_path, observer);
             if let Some(d) = restore_diagnostic(unrestored) {
                 diags.push(d);
             }
@@ -159,13 +209,16 @@ pub fn diagnostics_for(
 /// (`server::tests::fsproj_sync_does_not_pin_the_project_cache`).
 ///
 /// `disc` is the project's SDK discovery, or `None` if it failed, in which
-/// case the buffer is evaluated without an SDK resolver.
+/// case the buffer is evaluated without an SDK resolver. Every pass's reads
+/// go into `observer`, a pass whose evaluation is discarded too: it chose
+/// the one served.
 fn evaluate_buffer(
     text: &str,
     project_path: &Path,
     env: &SdkDiscoveryEnv,
     build_properties: &HashMap<String, String>,
     disc: Option<&SdkDiscovery>,
+    observer: &Observer,
 ) -> Result<borzoi_msbuild::ParsedProject, ParseError> {
     // The environment the *caller* declared, not the ambient process: a
     // workspace constructed with an explicit `SdkDiscoveryEnv` has asked not to
@@ -173,7 +226,15 @@ fn evaluate_buffer(
     // `$(…)` evaluation. `SdkDiscoveryEnv::from_process_env` is what fills this
     // with the real environment for production callers.
     let environment = env.build_environment.clone();
-    parse_buffer(text, project_path, build_properties, &environment, disc).map(|pass1| {
+    parse_buffer(
+        text,
+        project_path,
+        build_properties,
+        &environment,
+        disc,
+        observer,
+    )
+    .map(|pass1| {
         serve_chosen_tfm(
             pass1,
             text,
@@ -181,6 +242,7 @@ fn evaluate_buffer(
             build_properties,
             &environment,
             disc,
+            observer,
         )
     })
 }
@@ -197,6 +259,7 @@ fn parse_buffer(
     extras: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     disc: Option<&SdkDiscovery>,
+    observer: &Observer,
 ) -> Result<borzoi_msbuild::ParsedProject, ParseError> {
     // Glob resolution is independent of SDK discovery, so both arms get the
     // filesystem-backed resolver. It borrows nothing, so it lives for the
@@ -224,6 +287,7 @@ fn parse_buffer(
         ),
     }
     .inspect(crate::observed::report_evaluation)
+    .inspect(|parsed| observer.absorb((parsed.read_set.clone(), parsed.read_counts)))
 }
 
 /// Re-evaluate the buffer under the target framework the LSP serves it as,
@@ -262,6 +326,7 @@ fn serve_chosen_tfm(
     extras: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     disc: Option<&SdkDiscovery>,
+    observer: &Observer,
 ) -> borzoi_msbuild::ParsedProject {
     let choice = tfm_policy::tfm_choice(&pass1, extras);
     let Some(seed) = choice.reseed() else {
@@ -269,7 +334,7 @@ fn serve_chosen_tfm(
     };
     let mut seeded = extras.clone();
     tfm_policy::seed_target_framework_global(&mut seeded, seed);
-    match parse_buffer(text, project_path, &seeded, environment, disc) {
+    match parse_buffer(text, project_path, &seeded, environment, disc, observer) {
         // The document can overwrite the seed mid-evaluation, so the seeded
         // pass is not one inner build, and the workspace discards it too
         // (`ReseedOutcome::Overridable`). Diagnosing it would describe a build
@@ -301,12 +366,16 @@ fn serve_chosen_tfm(
 /// broken reference) live in *other* files — anchoring those needs cross-file
 /// publishing and is deferred. Existence is checked against the
 /// lexically-normalised path, the identity [`crate::project_graph`] uses.
-fn reference_diagnostics(text: &str, references: &[ResolvedItem]) -> Vec<Diagnostic> {
+fn reference_diagnostics(
+    text: &str,
+    references: &[ResolvedItem],
+    observer: &Observer,
+) -> Vec<Diagnostic> {
     references
         .iter()
         .filter(|item| span_points_at_project_reference(text, &item.span))
         .filter_map(|item| {
-            reference_problem(&item.include)
+            reference_problem(&item.include, observer)
                 .map(|message| reference_diagnostic(text, &item.span, message))
         })
         .collect()
@@ -339,7 +408,7 @@ fn span_points_at_project_reference(text: &str, span: &std::ops::Range<usize>) -
 
 /// The warning message for a `<ProjectReference>` target, or `None` when the
 /// target is fine (an existing `.fsproj`/`.csproj`).
-fn reference_problem(target: &Path) -> Option<String> {
+fn reference_problem(target: &Path, observer: &Observer) -> Option<String> {
     let normalized = lexically_normalize(target);
     match classify(&normalized) {
         ProjectKind::Other => Some(format!(
@@ -347,7 +416,7 @@ fn reference_problem(target: &Path) -> Option<String> {
             normalized.display(),
         )),
         ProjectKind::FSharp | ProjectKind::CSharp => {
-            if Unobserved::FsprojDiagnostics.exists(&normalized) {
+            if msbuild_observed::exists(observer, &normalized) {
                 None
             } else {
                 Some(format!(
@@ -481,13 +550,10 @@ fn reference_diagnostic(text: &str, span: &std::ops::Range<usize>, message: Stri
 /// `MSBuildProjectExtensionsPath` / `BaseIntermediateOutputPath`) is genuinely
 /// unresolvable by the LSP today — the warning correctly fires — so the two must
 /// move together if custom asset paths are ever supported.
-fn assets_present(project_path: &Path) -> bool {
-    project_path
-        .parent()
-        .map(|dir| {
-            Unobserved::FsprojDiagnostics.exists(dir.join("obj").join("project.assets.json"))
-        })
-        .unwrap_or(false)
+fn assets_present(project_path: &Path, observer: &Observer) -> bool {
+    project_path.parent().is_some_and(|dir| {
+        msbuild_observed::exists(observer, &dir.join("obj").join("project.assets.json"))
+    })
 }
 
 /// The compiler's refusal of the project's `<LangVersion>`, when the SDK the
