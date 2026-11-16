@@ -996,7 +996,8 @@ fn collect_sig_container_exports(
                     access_root_len: Option<usize>,
                     case: Option<CaseKind>,
                     type_qualified: Option<DeclPath>,
-                    attributed: bool| {
+                    attributed: bool,
+                    case_attributes: model::CaseAttributes| {
         let name = def.name();
         let text = names.text(name);
         let pos = def.range.start();
@@ -1013,6 +1014,7 @@ fn collect_sig_container_exports(
             case,
             type_qualified,
             attributed,
+            case_attributes,
             pos,
         });
     };
@@ -1040,7 +1042,16 @@ fn collect_sig_container_exports(
                 let attributed = vd.attributes().next().is_some();
                 let is_function = sig_val_type_is_function(vs.ty());
                 let def = Def::from_token(names, &ident, DefKind::Value { is_function });
-                push(defs, def, true, access_root_len, None, None, attributed);
+                push(
+                    defs,
+                    def,
+                    true,
+                    access_root_len,
+                    None,
+                    None,
+                    attributed,
+                    model::CaseAttributes::default(),
+                );
             }
             SigDecl::Types(types) => {
                 for defn in types.defns() {
@@ -1059,12 +1070,19 @@ fn collect_sig_container_exports(
                     // it exports type-qualified only.
                     let rqa = !sig_cases_certainly_bare(&defn);
                     let type_contested = contested_types.contains(&type_name);
+                    let on_type = decls::attributes_may_be_error_level(defn.attributes());
                     let tq_path = |case: &str| {
                         (!type_contested)
                             .then(|| DeclPath::under(names, container_id, &[&*type_name, case]))
                     };
                     match defn.repr() {
                         Some(TypeDefnRepr::Union(u)) => {
+                            let case_attributes = model::CaseAttributes {
+                                on_type,
+                                on_cases: u
+                                    .cases()
+                                    .any(|c| decls::attributes_may_be_error_level(c.attributes())),
+                            };
                             for case in u.cases() {
                                 // Operator-named cases (`([])` / `(::)`) are
                                 // Stage 3.
@@ -1083,6 +1101,7 @@ fn collect_sig_container_exports(
                                     }),
                                     tq,
                                     false,
+                                    case_attributes,
                                 );
                             }
                         }
@@ -1099,6 +1118,10 @@ fn collect_sig_container_exports(
                                     Some(CaseKind::Enum),
                                     tq,
                                     false,
+                                    model::CaseAttributes {
+                                        on_type,
+                                        on_cases: false,
+                                    },
                                 );
                             }
                         }

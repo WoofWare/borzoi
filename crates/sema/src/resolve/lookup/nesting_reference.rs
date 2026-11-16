@@ -378,10 +378,12 @@ impl Resolver<'_> {
                 .filter(|_| !self.value_shadows_case(&full))
             {
                 None => None,
-                Some(_) if self.earlier_case_type_namesake_possible(&full, written.len() > 2) => {
-                    Some((CrossFileCase::Declined, full))
+                Some(id) => {
+                    match self.cross_file_case_reading_declined(&full, id, written.len() > 2) {
+                        Some(cause) => Some((CrossFileCase::Declined(cause), full)),
+                        None => Some((CrossFileCase::Hit(tier, id), full)),
+                    }
                 }
-                Some(id) => Some((CrossFileCase::Hit(tier, id), full)),
             }
         };
         if !rooted {

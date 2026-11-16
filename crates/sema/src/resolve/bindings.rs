@@ -8,7 +8,7 @@ use crate::def::{DefId, DefKind};
 use crate::diagnostics::{SemaDiagnostic, SemaDiagnosticKind};
 use crate::hash::HashSet;
 
-use super::model::{ExportedItem, ItemId, Resolution};
+use super::model::{CaseAttributes, ExportedItem, ItemId, Resolution};
 use super::state::{AliasTargets, Frame, Resolver, ScopeEntry};
 use super::types::head_typar_decls;
 use super::{active_pat_name_of, active_pattern_param_arity};
@@ -269,7 +269,7 @@ impl<'a> Resolver<'a> {
                         ),
                         repr_access_root: None,
                         attributed,
-                        case_attributed: false,
+                        case_attributes: CaseAttributes::default(),
                     });
                     // The export-decl-list twin of the `ExportedItem` push: an
                     // ordinary `let` value (no case, no type-qualified path). Its

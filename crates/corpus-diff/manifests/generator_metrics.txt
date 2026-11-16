@@ -19,6 +19,7 @@ decline_census.assembly.by_cause.authoritative_module_leaf
 decline_census.assembly.by_cause.case_pattern_head_occupied
 decline_census.assembly.by_cause.case_qualifier_head
 decline_census.assembly.by_cause.case_representation_inaccessible
+decline_census.assembly.by_cause.case_type_attributed
 decline_census.assembly.by_cause.contested_rooting
 decline_census.assembly.by_cause.custom_operation_may_take
 decline_census.assembly.by_cause.custom_operations_unknown
@@ -163,6 +164,12 @@ decline_census.assembly.by_pair.case_representation_inaccessible.implicit_open
 decline_census.assembly.by_pair.case_representation_inaccessible.pre_walk
 decline_census.assembly.by_pair.case_representation_inaccessible.root
 decline_census.assembly.by_pair.case_representation_inaccessible.whole_walk
+decline_census.assembly.by_pair.case_type_attributed.enclosing_namespace
+decline_census.assembly.by_pair.case_type_attributed.explicit_open
+decline_census.assembly.by_pair.case_type_attributed.implicit_open
+decline_census.assembly.by_pair.case_type_attributed.pre_walk
+decline_census.assembly.by_pair.case_type_attributed.root
+decline_census.assembly.by_pair.case_type_attributed.whole_walk
 decline_census.assembly.by_pair.contested_rooting.enclosing_namespace
 decline_census.assembly.by_pair.contested_rooting.explicit_open
 decline_census.assembly.by_pair.contested_rooting.implicit_open
@@ -492,6 +499,7 @@ decline_census.project.by_cause.authoritative_module_leaf
 decline_census.project.by_cause.case_pattern_head_occupied
 decline_census.project.by_cause.case_qualifier_head
 decline_census.project.by_cause.case_representation_inaccessible
+decline_census.project.by_cause.case_type_attributed
 decline_census.project.by_cause.contested_rooting
 decline_census.project.by_cause.custom_operation_may_take
 decline_census.project.by_cause.custom_operations_unknown
@@ -636,6 +644,12 @@ decline_census.project.by_pair.case_representation_inaccessible.implicit_open
 decline_census.project.by_pair.case_representation_inaccessible.pre_walk
 decline_census.project.by_pair.case_representation_inaccessible.root
 decline_census.project.by_pair.case_representation_inaccessible.whole_walk
+decline_census.project.by_pair.case_type_attributed.enclosing_namespace
+decline_census.project.by_pair.case_type_attributed.explicit_open
+decline_census.project.by_pair.case_type_attributed.implicit_open
+decline_census.project.by_pair.case_type_attributed.pre_walk
+decline_census.project.by_pair.case_type_attributed.root
+decline_census.project.by_pair.case_type_attributed.whole_walk
 decline_census.project.by_pair.contested_rooting.enclosing_namespace
 decline_census.project.by_pair.contested_rooting.explicit_open
 decline_census.project.by_pair.contested_rooting.implicit_open
