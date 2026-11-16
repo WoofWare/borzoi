@@ -361,14 +361,22 @@ const CASES: &[Case] = &[
     },
     // An import whose path is built from the startup directory: which
     // document arrives depends on where MSBuild started. What it writes is
-    // read directly, not through the self-default idiom (`<Out
-    // Condition="'$(Out)' == ''">`), which the walk commits after an import
-    // it could not decide by design (`State::self_default_absence_is_a_fact`).
+    // read directly.
     Case {
         name: "startup-selected-import",
         xml: "<Project>\n  <Import Project=\"$(MSBuildStartupDirectory)/startup.props\" Condition=\"Exists('$(MSBuildStartupDirectory)/startup.props')\" />\n  <PropertyGroup>\n    <Helper>[$(Out)]|$(Configuration)</Helper>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", ""), ("Helper", "[]|Debug")],
+        startup_moves: &["Out", "Helper"],
+    },
+    // The same import, then the self-default idiom over the name it writes. A
+    // served evaluation has no startup directory, so it cannot know whether
+    // the import ran and the default with it: `Out`'s absence is no fact.
+    Case {
+        name: "startup-selected-self-default",
+        xml: "<Project>\n  <Import Project=\"$(MSBuildStartupDirectory)/startup.props\" Condition=\"Exists('$(MSBuildStartupDirectory)/startup.props')\" />\n  <PropertyGroup>\n    <Out Condition=\"'$(Out)' == ''\">default</Out>\n    <Helper>[$(Out)]|$(Configuration)</Helper>\n  </PropertyGroup>\n</Project>\n",
+        files: &[],
+        pins: &[("Out", "default"), ("Helper", "[default]|Debug")],
         startup_moves: &["Out", "Helper"],
     },
     // The startup directory read directly, laundered through a helper beside a
@@ -1358,6 +1366,9 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
     // the documents after the first `CASES_N`, so the global population is
     // the same with them as without.
     let mut startup_rng = SplitMix64(0x57a7_0d1c);
+    // The imports likewise, so the gates and bodies are the same with them as
+    // without.
+    let mut import_rng = SplitMix64(0x1a0b_e988);
 
     // Gates: some depend on a global, some do not, so a generated document may
     // be genuinely invariant — a sweep of only-dependent documents would never
@@ -1386,12 +1397,9 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
     ];
     // Gates and bodies on the startup directory and the toolset names a global
     // set supplies, which a document of the second population draws in place
-    // of a write's own gate half the time and its body a third of it. No
-    // import is selected by the startup directory: see the
-    // `startup-selected-import` case for the class that would reach, which
-    // the walk does not model by design. `MSBuildUserExtensionsPath` unset is
-    // the host's value, whose `\` MSBuild's Unix path adjustment rewrites when
-    // a body reads it.
+    // of a write's own gate half the time and its body a third of it.
+    // `MSBuildUserExtensionsPath` unset is the host's value, whose `\`
+    // MSBuild's Unix path adjustment rewrites when a body reads it.
     const STARTUP_GATES: &[&str] = &[
         "Exists('$(MSBuildStartupDirectory)/startup.props')",
         "!Exists('$(MSBuildStartupDirectory)/startup.props')",
@@ -1406,6 +1414,16 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
         "[$(MSBuildUserExtensionsPath)]",
     ];
     const WRITTEN: &[&str] = &["Out", "Helper", "Configuration", "Platform"];
+    // An import a document of the second population draws before its writes,
+    // selected by the startup directory or by a toolset name a global set
+    // supplies. Each writes `Out` where it exists, so a later write's
+    // `'$(Out)' == ''` gate is the self-default idiom after an import a served
+    // evaluation cannot decide.
+    const IMPORTS: &[&str] = &[
+        "",
+        "  <Import Project=\"$(MSBuildStartupDirectory)/startup.props\" Condition=\"Exists('$(MSBuildStartupDirectory)/startup.props')\" />\n",
+        "  <Import Project=\"$(MSBuildUserExtensionsPath)/borzoi.props\" Condition=\"Exists('$(MSBuildUserExtensionsPath)/borzoi.props')\" />\n",
+    ];
 
     /// Documents of the global grammar alone.
     const CASES_N: usize = 250;
@@ -1418,7 +1436,11 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
     for case in 0..CASES_N + STARTUP_CASES_N {
         let mixed = case >= CASES_N;
         let writes = 1 + rng.below(4);
-        let mut xml = String::from("<Project>\n  <PropertyGroup>\n");
+        let mut xml = String::from("<Project>\n");
+        if mixed {
+            xml.push_str(import_rng.pick(IMPORTS));
+        }
+        xml.push_str("  <PropertyGroup>\n");
         for _ in 0..writes {
             let name = rng.pick(WRITTEN);
             let mut gate = *rng.pick(GATES);

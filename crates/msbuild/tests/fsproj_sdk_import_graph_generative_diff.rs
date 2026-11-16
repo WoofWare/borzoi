@@ -53,7 +53,13 @@
 //! Compile item. Every file also declares a `<ProjectReference>` of its own,
 //! and a user's file other than the project removes the project's, so content
 //! that runs after the body changes the list. Every file also appends a define
-//! of its own to `DefineConstants`. All five are graded with the oracle's
+//! of its own to `DefineConstants`. And every file records that it ran in
+//! `Ran_<marker>`, which the evaluation's last element fills, for every file
+//! that did not run, with the self-default idiom
+//! (`<Ran_x Condition="'$(Ran_x)' == ''">no</Ran_x>`): so a file the walk
+//! cannot see that MSBuild runs is followed by a self-default of a name only
+//! that file writes, which the walk must not commit as `no`
+//! ([`RAN_PROPERTIES`]). All six are graded with the oracle's
 //! `evaluated` op, certain-implies-exact: a property the walk commits (a
 //! trusted value, or a trusted "unset") must be MSBuild's, a target read the
 //! probe calls exact must name the element MSBuild keeps, and a Compile set the
@@ -459,7 +465,48 @@ struct Case {
     gated: Option<GatedImport>,
 }
 
-/// The properties every case reads back.
+/// The marker of every file a case may hold, each the subject of a `Ran_`
+/// property ([`RAN_PROPERTIES`]).
+const MARKERS: [&str; 14] = [
+    "sdkp",
+    "common",
+    "behindp",
+    "sdkt",
+    "behindt",
+    "sdkt2",
+    "dbp",
+    "other",
+    "gated",
+    "dbt",
+    "child",
+    "grandchild",
+    "body",
+    "inner",
+];
+
+/// `Ran_<marker>` for each of [`MARKERS`], in order: `yes` when the marker's
+/// file ran ([`tracer`]), else `no`, written by the self-default idiom at the
+/// end of the evaluation ([`ran_summary`]). After content the walk could not
+/// see, that idiom reads a name only the hidden content may have written, so
+/// the walk's commit of `no` there would be a belief, not a fact.
+const RAN_PROPERTIES: [&str; 14] = [
+    "Ran_sdkp",
+    "Ran_common",
+    "Ran_behindp",
+    "Ran_sdkt",
+    "Ran_behindt",
+    "Ran_sdkt2",
+    "Ran_dbp",
+    "Ran_other",
+    "Ran_gated",
+    "Ran_dbt",
+    "Ran_child",
+    "Ran_grandchild",
+    "Ran_body",
+    "Ran_inner",
+];
+
+/// The properties every case reads back, but for [`RAN_PROPERTIES`].
 const PROPERTIES: [&str; 22] = [
     "Seen",
     "SeenChild",
@@ -484,6 +531,11 @@ const PROPERTIES: [&str; 22] = [
     "ExistsElementProbe",
     "ExistsGroupProbe",
 ];
+
+/// Every property a case reads back.
+fn read_names() -> impl Iterator<Item = &'static str> {
+    PROPERTIES.into_iter().chain(RAN_PROPERTIES)
+}
 
 /// The targets every case reads back: `T` is defined by every file, so the
 /// definition MSBuild keeps names the last file that ran; the others by one
@@ -914,6 +966,7 @@ fn render_undecided(case: &Case, site: UndecidedSite) -> String {
 /// own among them: content the walk cannot see may write a define whether it
 /// is an SDK's file or a user's (#843, #862).
 fn tracer(marker: &str) -> String {
+    assert!(MARKERS.contains(&marker), "{marker} is not in MARKERS");
     let user = if SDK_MARKERS.contains(&marker) {
         String::new()
     } else {
@@ -926,10 +979,26 @@ fn tracer(marker: &str) -> String {
     };
     format!(
         "  <PropertyGroup>\n    <Trace>$(Trace);{marker}</Trace>\n    \
-         <DefineConstants>$(DefineConstants);D_{marker}</DefineConstants>\n  </PropertyGroup>\n  \
+         <DefineConstants>$(DefineConstants);D_{marker}</DefineConstants>\n    \
+         <Ran_{marker}>yes</Ran_{marker}>\n  </PropertyGroup>\n  \
          <ItemGroup>\n    <ProjectReference Include=\"refs/{marker}.fsproj\" />\n{user}  \
          </ItemGroup>\n  <Target Name=\"T\" />\n  <Target Name=\"T_{marker}\" />\n"
     )
+}
+
+/// The evaluation's last element: `Ran_<marker>` filled with `no`, by the
+/// self-default idiom, for every file that did not run. Only the files that
+/// ran write the names before it, so a file the walk could not see leaves a
+/// name the walk reads as undefined here and MSBuild reads as `yes`.
+fn ran_summary() -> String {
+    let mut text = String::from("  <PropertyGroup>\n");
+    for marker in MARKERS {
+        text.push_str(&format!(
+            "    <Ran_{marker} Condition=\"'$(Ran_{marker})' == ''\">no</Ran_{marker}>\n"
+        ));
+    }
+    text.push_str("  </PropertyGroup>\n");
+    text
 }
 
 /// The project's own reference, which every other user's file removes.
@@ -1206,6 +1275,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
     }
     sdk_targets.push_str(&render_gated(case, GatedSite::SdkTargets));
     sdk_targets.push_str(&tracer("sdkt2"));
+    sdk_targets.push_str(&ran_summary());
     sdk_targets.push_str("</Project>\n");
     sdk_files.push(("Sdk.targets", sdk_targets));
     let sdk_files: Vec<(&'static str, String)> = sdk_files
@@ -1325,7 +1395,10 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             "<Project>\n{disable_props}  <Import Project=\"Sdk.props\" Sdk=\"{sdk}\" />\n{body}  \
              <Import Project=\"Sdk.targets\" Sdk=\"{sdk}\" />\n</Project>\n"
         ),
-        Form::SdkLess => format!("<Project>\n{disable_props}{body}</Project>\n"),
+        Form::SdkLess => format!(
+            "<Project>\n{disable_props}{body}{}</Project>\n",
+            ran_summary()
+        ),
         Form::NestedSdk => {
             case_files.push((
                 "proj/inner.props",
@@ -1443,7 +1516,8 @@ impl Case {
     /// condition in the case is a literal or reads a literal some file wrote,
     /// every path is one the walk can spell, and nothing reads the
     /// environment, so the log of which files ran and the markers they wrote
-    /// are all decided.
+    /// are all decided, and so is every `Ran_` property: with nothing hidden,
+    /// a file's self-defaults read only what files the walk saw wrote.
     ///
     /// A case with an [`Undecided`] write has no such obligation: that write
     /// may decide every import that follows it. Nor has a case whose import
@@ -1461,7 +1535,27 @@ impl Case {
         {
             &[]
         } else {
-            &["Trace", "BodySaw", "InDbp", "InDbt", "InOther"]
+            &[
+                "Trace",
+                "BodySaw",
+                "InDbp",
+                "InDbt",
+                "InOther",
+                "Ran_sdkp",
+                "Ran_common",
+                "Ran_behindp",
+                "Ran_sdkt",
+                "Ran_behindt",
+                "Ran_sdkt2",
+                "Ran_dbp",
+                "Ran_other",
+                "Ran_gated",
+                "Ran_dbt",
+                "Ran_child",
+                "Ran_grandchild",
+                "Ran_body",
+                "Ran_inner",
+            ]
         }
     }
 }
@@ -1556,6 +1650,10 @@ struct Outcome {
     msbuild_imported: Option<(bool, bool)>,
     /// Whether MSBuild ran `gated.props`, read off its marker in `Trace`.
     msbuild_ran_gated: bool,
+    /// The [`RAN_PROPERTIES`] MSBuild reads as `yes` that the walk holds as
+    /// `no` and declines: each a file that ran where the walk could not see
+    /// it, whose self-default the walk would otherwise have committed.
+    ran_declined: usize,
 }
 
 fn symlink(target: &Path, link: &Path) {
@@ -1659,7 +1757,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         shared.root.join("Sdks").to_string_lossy().into_owned(),
     );
     let probe = ReadProbe {
-        properties: PROPERTIES.iter().map(|p| (*p).to_owned()).collect(),
+        properties: read_names().map(str::to_owned).collect(),
         targets: TARGETS.iter().map(|t| (*t).to_owned()).collect(),
         ..ReadProbe::default()
     };
@@ -1674,10 +1772,11 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         &probe,
     )
     .expect("well-formed XML parses");
+    let names: Vec<&str> = read_names().collect();
     let theirs = shared.oracle.try_evaluated(
         &project_path,
         &[],
-        &PROPERTIES,
+        &names,
         &["Compile", "ProjectReference"],
         &TARGETS,
     );
@@ -1718,7 +1817,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
                 kind: FindingKind::Defines,
             });
         }
-        for name in PROPERTIES {
+        for name in read_names() {
             if let read @ (PropertyRead::Value(_) | PropertyRead::Unset) = &ours.properties[name] {
                 outcome.findings.push(Finding {
                     what: name.to_owned(),
@@ -1747,7 +1846,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
     outcome.msbuild_ran_gated = theirs["properties"]["Trace"]
         .as_str()
         .is_some_and(|trace| trace.split(';').any(|marker| marker == "gated"));
-    for name in PROPERTIES {
+    for name in read_names() {
         let theirs = &theirs["properties"][name];
         let read = &ours.properties[name];
         let committed = match read {
@@ -1756,6 +1855,12 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
             }
             PropertyRead::Unset => (!theirs.is_null()).then(|| "unset".to_owned()),
             PropertyRead::UnsetInexact(_) | PropertyRead::Untrusted(_) => {
+                if RAN_PROPERTIES.contains(&name)
+                    && theirs.as_str() == Some("yes")
+                    && parsed.properties.get(name).map(String::as_str) == Some("no")
+                {
+                    outcome.ran_declined += 1;
+                }
                 if case.must_commit().contains(&name) {
                     outcome.findings.push(Finding {
                         what: format!("{name} (must commit)"),
@@ -2034,6 +2139,8 @@ struct Report {
     /// Cases with findings, by the known families they belong to.
     explained: BTreeMap<Vec<Family>, usize>,
     census: BTreeMap<String, usize>,
+    /// [`Outcome::ran_declined`], summed.
+    ran_declined: usize,
 }
 
 fn sweep(seed: u64, cases: usize) -> Report {
@@ -2091,6 +2198,7 @@ fn sweep(seed: u64, cases: usize) -> Report {
         report.cases += 1;
         report.rejected += usize::from(outcome.rejected);
         report.claimed_rejections += usize::from(outcome.claimed_rejection);
+        report.ran_declined += outcome.ran_declined;
         report.committed_properties += outcome.committed_properties;
         report.exact_targets += outcome.exact_targets;
         report.certain_compile += usize::from(outcome.certain_compile);
@@ -2142,7 +2250,8 @@ fn assert_clean(report: &Report) {
          {} exact target reads, {} certain Compile sets, certain reference lists by whether \
          MSBuild kept the project's own: {:?}, certain define sets by whether another user's \
          file defined one: {:?}; {} cases outside every family, MSBuild's (props, targets) \
-         imports among them: {:?}; known-family cases with findings: {:?}",
+         imports among them: {:?}; known-family cases with findings: {:?}; {} `Ran_` \
+         self-defaults held as `no` and declined where MSBuild ran the file",
         report.cases,
         report.rejected,
         report.claimed_rejections,
@@ -2153,7 +2262,8 @@ fn assert_clean(report: &Report) {
         report.certain_defines,
         report.outside_families,
         report.outside_imports,
-        report.explained
+        report.explained,
+        report.ran_declined
     );
     assert!(
         report.unexplained.is_empty(),
@@ -2241,6 +2351,15 @@ fn the_import_graph_is_exact_or_declined() {
         "MSBuild rejected {} of {} generated projects",
         report.rejected,
         report.cases
+    );
+    // Files MSBuild runs that the walk cannot see are followed by the
+    // self-default of their `Ran_` properties, which the walk holds as `no` and
+    // declines: the sweep reaches the shape that would commit `no` where
+    // MSBuild reads `yes`.
+    assert!(
+        report.ran_declined >= 50,
+        "only {} self-defaults after a hidden file MSBuild ran were held as `no` and declined",
+        report.ran_declined
     );
     // The walk claims the rejections it reaches for certain, each graded.
     assert!(

@@ -2,12 +2,12 @@
 //!
 //! The SDK's default idiom, `<Name Condition="'$(Name)' == ''">fallback</Name>`,
 //! is decided by the walker's self-default exemption, which believes an
-//! undefined read rather than declining it (`self_default_absence_is_a_fact`).
-//! That belief is wrong for exactly one class of name: one MSBuild's toolset
-//! defines before any project text runs. The walker holds no value for such a
-//! name whenever it has not seeded it (no canonical SDK resolved, the walk
-//! passed content it could not see, or the SDK is one whose
-//! `VisualStudioVersion` it does not know), while the real build holds the
+//! undefined read behind no hidden content rather than declining it
+//! (`self_default_absence_is_a_fact`). That belief is wrong for exactly one
+//! class of name: one MSBuild's toolset defines before any project text runs.
+//! The walker holds no value for such a name whenever it has not seeded it
+//! (no canonical SDK resolved, or the SDK is one whose `VisualStudioVersion`
+//! it does not know), while the real build holds the
 //! toolset's, so the fallback is a wrong commit: `VisualStudioVersion`'s `10.0`
 //! in `Microsoft.Common.CurrentVersion.targets` against MSBuild 18's `18.0`.
 //!

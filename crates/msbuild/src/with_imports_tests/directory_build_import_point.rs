@@ -136,19 +136,25 @@ fn hidden_content_may_define_an_unbound_path_so_an_unreached_point_declines() {
     assert!(untrusted(&parsed, "FromDbt"));
 }
 
-/// The same opacity with no `Directory.Build.*` file anywhere charges nothing
-/// for the import points: the walk's doubt about them is a doubt about whether
-/// the default file is imported, and there is none. (A file the hidden content
-/// names is hidden content like any other, which withdraws the Compile set,
-/// the reference list and the define set on its own account, #821, #848,
-/// #862.)
+/// The point of the SDK's block alone, with no discovery before it: no write
+/// touches the path.
+const BARE_TARGETS_POINT: &str = "  <Import Project=\"$(DirectoryBuildTargetsPath)\" \
+    Condition=\"'$(ImportDirectoryBuildTargets)' == 'true' and \
+    exists('$(DirectoryBuildTargetsPath)')\"/>\n";
+
+/// The same opacity with no `Directory.Build.*` file anywhere, and no write
+/// to the path, charges nothing for the import point: the walk's doubt about
+/// it is a doubt about whether the default file is imported, and there is
+/// none. (A file the hidden content names is hidden content like any other,
+/// which withdraws the Compile set, the reference list and the define set on
+/// its own account, #821, #848, #862.)
 #[test]
 fn an_import_the_walk_cannot_decide_charges_nothing_without_a_directory_build_file() {
     let tmp = tempfile::tempdir().unwrap();
     let resolver = opaque_sdk(
         tmp.path(),
         "    <Unrelated>1</Unrelated>\n",
-        &format!("<Project>\n{COMMON_TARGETS_BLOCK}</Project>\n"),
+        &format!("<Project>\n{BARE_TARGETS_POINT}</Project>\n"),
     );
     let project = write_at(
         tmp.path(),
@@ -184,6 +190,45 @@ fn an_import_the_walk_cannot_decide_charges_nothing_without_a_directory_build_fi
         "the hidden import withdraws the define set, the points nothing: {:?}",
         parsed.define_constants_uncertainties
     );
+}
+
+/// The SDK's own block behind the same opacity, with no `Directory.Build.*`
+/// file anywhere. Its discovery reads `ImportDirectoryBuildTargets` and
+/// `DirectoryBuildTargetsPath` unset, through the self-default idiom, and the
+/// hidden import may have written either, so neither absence is a fact: the
+/// path is doubted, and its point charged. What the walk publishes is what the
+/// hidden import alone withdraws.
+#[test]
+fn the_standard_block_behind_an_import_the_walk_cannot_decide_doubts_its_point() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolver = opaque_sdk(
+        tmp.path(),
+        "    <Unrelated>1</Unrelated>\n",
+        &format!("<Project>\n{COMMON_TARGETS_BLOCK}</Project>\n"),
+    );
+    let project = write_at(
+        tmp.path(),
+        "p.fsproj",
+        "<Project Sdk=\"Opaque\">\n  <ItemGroup>\n    <Compile Include=\"A.fs\" />\n    \
+         <ProjectReference Include=\"B.fsproj\" />\n  </ItemGroup>\n</Project>\n",
+    );
+    let parsed = parse_file_with_sdk_resolution(&project, resolver);
+    assert!(
+        parsed.items_uncertain
+            && parsed
+                .compile_item_uncertainties
+                .iter()
+                .any(|cause| matches!(
+                    cause.kind,
+                    CompileItemUncertaintyCauseKind::Structural(
+                        StructuralCompileItemUncertainty::DirectoryBuildImportUndecided { .. }
+                    )
+                )),
+        "the point is charged: {:?}",
+        parsed.compile_item_uncertainties
+    );
+    assert!(parsed.project_references_uncertain);
+    assert!(parsed.define_constants_uncertain);
 }
 
 /// The body names the file outright, so the SDK's discovery never runs and

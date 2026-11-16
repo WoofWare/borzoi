@@ -889,8 +889,8 @@ fn committed_probe(result: &ParsedProject) -> Option<&str> {
 
 /// The ways a body reads a toolset name, each a different route through the
 /// walk's handling of a name it holds no value for: the plain undefined-read
-/// guard, the SDK's self-default idiom (whose exemption believes undefined
-/// reads behind opacity), and another property's gate.
+/// guard, the SDK's self-default idiom (whose exemption believes an undefined
+/// read the plain guard does not), and another property's gate.
 #[derive(Debug, Clone, Copy)]
 enum ToolsetReader {
     Direct,
