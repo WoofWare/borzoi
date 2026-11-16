@@ -63,8 +63,14 @@ pub fn is_toolset_initial_property_name(name: &str) -> bool {
 /// environment variable can set it. Exposed so the LSP's compiler-selector
 /// coverage test exempts exactly the names nothing outside the SDK can write.
 pub fn is_msbuild_reserved_name(name: &str) -> bool {
-    crate::evaluator::is_msbuild_reserved_name(&name.to_ascii_lowercase())
+    crate::evaluator::is_msbuild_reserved_name(name)
 }
+
+/// The names MSBuild reserves, as MSBuild spells them: the list
+/// [`is_msbuild_reserved_name`] and the rejection of a caller's reserved extra
+/// property both read. Exposed so `tests/reserved_global_diff.rs` can hold it
+/// to the installed MSBuild's own table in both directions.
+pub const MSBUILD_RESERVED_NAMES: &[&str] = &crate::evaluator::MSBUILD_RESERVED_NAMES;
 
 /// The names the walker takes MSBuild's toolset to define before evaluation
 /// starts, lowercase. Exposed so `tests/toolset_predefined_names_diff.rs` can

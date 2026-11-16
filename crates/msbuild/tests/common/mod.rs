@@ -764,6 +764,58 @@ impl Oracle {
         )
     }
 
+    /// The names the oracle's MSBuild reserves (the `reservedNames` op), as
+    /// MSBuild spells them, after checking that the op's three readings of
+    /// `ReservedPropertyNames` agree with one another.
+    pub fn reserved_names(&mut self) -> Vec<String> {
+        let resp = self.request(&serde_json::json!({ "op": "reservedNames" }));
+        let strings = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .expect("reservedNames carries string arrays")
+                .iter()
+                .map(|n| n.as_str().expect("a reserved name is a string").to_string())
+                .collect()
+        };
+        let names = strings(&resp["names"]);
+        assert!(!names.is_empty(), "MSBuild reserves no constant: {resp}");
+        if !resp["table"].is_null() {
+            let mut table = strings(&resp["table"]);
+            table.sort();
+            assert_eq!(
+                table, names,
+                "MSBuild's ReservedProperties table is not its reserved constants"
+            );
+        }
+        let kinds = resp["kinds"].as_i64().expect("kinds is a number");
+        if kinds >= 0 {
+            assert_eq!(
+                kinds as usize,
+                names.len(),
+                "MSBuild has a ReservedPropertyKind no reserved constant spells: {resp}"
+            );
+        }
+        names
+    }
+
+    /// Whether MSBuild takes `name` as a global property name (the
+    /// `globalName` op): `Ok(())`, or `Err` with the message the `Project`
+    /// constructor refuses it with.
+    pub fn global_name(&mut self, name: &str) -> Result<(), String> {
+        let resp = self.request(&serde_json::json!({ "op": "globalName", "name": name }));
+        if resp["accepted"]
+            .as_bool()
+            .expect("globalName answers accepted")
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "{}: {}",
+                resp["exceptionType"].as_str().unwrap_or("?"),
+                resp["message"].as_str().unwrap_or("?")
+            ))
+        }
+    }
+
     /// `globals` is MSBuild's **global property** set for the evaluation: the
     /// `-p:` command line, and what an IDE-style consumer injects (the LSP sends
     /// `Configuration` and `Platform`). It is handed to the `Project`

@@ -238,7 +238,7 @@ fn attribute_names<'input>(node: Node<'_, 'input>) -> Vec<&'input str> {
 
 /// `XmlUtilities.IsValidElementName`: ASCII letters and `_`, then also digits
 /// and `-`.
-fn is_valid_name(name: &str) -> bool {
+pub(crate) fn is_valid_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
@@ -429,9 +429,7 @@ impl Loader {
                     property,
                 ));
             }
-            if is_reserved_element_name(name)
-                || is_msbuild_reserved_name(&name.to_ascii_lowercase())
-            {
+            if is_reserved_element_name(name) || is_msbuild_reserved_name(name) {
                 return Err(violation(
                     LoadTimeError::ReservedProperty {
                         name: name.to_owned(),
@@ -770,7 +768,7 @@ impl Loader {
         }
         if let Some(property) = attribute(output, "PropertyName")
             && !property.chars().all(char::is_whitespace)
-            && is_msbuild_reserved_name(&property.to_ascii_lowercase())
+            && is_msbuild_reserved_name(&property)
         {
             return Err(violation(
                 LoadTimeError::ReservedProperty {

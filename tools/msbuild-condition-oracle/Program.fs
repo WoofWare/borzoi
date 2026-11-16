@@ -108,6 +108,17 @@
 ///     the evaluated items (F#'s `FSharpSourceCodeCompileOrder` reorders the
 ///     Compile list) without a `dotnet msbuild` per case.
 ///
+///   {"op":"globalName","name":s}
+///     -> {"accepted":true}
+///      | {"accepted":false,"exceptionType":s,"message":s}
+///     Whether MSBuild takes `name` as a global property name
+///     (`respondGlobalName`).
+///
+///   {"op":"reservedNames"}
+///     -> {"names":[..],"table":[..]|null,"kinds":n}
+///     The names the loaded MSBuild reserves, read by reflection
+///     (`respondReservedNames`).
+///
 /// The process takes one optional argument pair, `--msbuild-sdk <dir>`, which
 /// pins it to the MSBuild of the SDK installed at `<dir>` instead of the one
 /// `dotnet` resolves from the working directory (`registerMSBuild`).
@@ -508,6 +519,75 @@ let private respondProject (root: JsonElement) : string =
             {| ok = true
                values = values |> Map.toSeq |> dict |}
     | None -> JsonSerializer.Serialize {| ok = false |}
+
+/// The `globalName` op: whether MSBuild takes `name` as a global property name,
+/// or the exception it refuses it with. MSBuild refuses a reserved name
+/// (`ReservedPropertyNames.IsReservedProperty`) and a name that is not a valid
+/// element name, each before evaluating anything, so the document is empty.
+///
+/// The evaluation is a `ProjectInstance`, as a build's is (`dotnet msbuild`
+/// evaluates through `BuildManager`), not the editable `Project` the `project`
+/// op builds. The two differ here: `Project` also refuses a global named after
+/// a property its toolset defines (`MSBuildSDKsPath`, which `-p:` sets
+/// freely), because its evaluation will not write a toolset property over a
+/// global.
+let private respondGlobalName (root: JsonElement) : string =
+    let name = root.GetProperty("name").GetString()
+    use collection = new ProjectCollection()
+    let globals = Collections.Generic.Dictionary<string, string>()
+    globals[name] <- "x"
+
+    try
+        use reader = projectReader "<Project />"
+        let element = Microsoft.Build.Construction.ProjectRootElement.Create(reader, collection)
+        ProjectInstance(element, globals, null, collection) |> ignore
+        JsonSerializer.Serialize {| accepted = true |}
+    with ex ->
+        JsonSerializer.Serialize
+            {| accepted = false
+               exceptionType = ex.GetType().FullName
+               message = ex.Message |}
+
+/// The `reservedNames` op: the names the loaded MSBuild reserves, read from
+/// `Microsoft.Build.Internal.ReservedPropertyNames` by reflection. `names` is
+/// every string constant of that class for which its own
+/// `IsReservedProperty` holds; `table` is its `ReservedProperties` set where
+/// the class keeps one (`null` otherwise); `kinds` counts the members of
+/// `ReservedPropertyKind` other than `None` where that enum exists (`-1`
+/// otherwise), one per reserved name, so a reserved name no constant spells
+/// shows up as a count that disagrees with `names`.
+let private respondReservedNames () : string =
+    let flags =
+        Reflection.BindingFlags.Static
+        ||| Reflection.BindingFlags.Public
+        ||| Reflection.BindingFlags.NonPublic
+
+    let assembly = typeof<Project>.Assembly
+    let names = assembly.GetType("Microsoft.Build.Internal.ReservedPropertyNames", true)
+    let isReserved = names.GetMethod("IsReservedProperty", flags, [| typeof<string> |])
+
+    let reserved =
+        names.GetFields flags
+        |> Array.filter (fun f -> f.IsLiteral && f.FieldType = typeof<string>)
+        |> Array.map (fun f -> f.GetRawConstantValue() :?> string)
+        |> Array.filter (fun n -> isReserved.Invoke(null, [| box n |]) :?> bool)
+        |> Array.distinct
+        |> Array.sort
+
+    let table =
+        match names.GetField("ReservedProperties", flags) with
+        | null -> null
+        | field -> (field.GetValue null :?> Collections.Generic.IEnumerable<string>) |> Seq.sort |> Array.ofSeq
+
+    let kinds =
+        match assembly.GetTypes() |> Array.tryFind (fun t -> t.IsEnum && t.Name = "ReservedPropertyKind") with
+        | Some kind -> Enum.GetNames kind |> Array.filter (fun n -> n <> "None") |> Array.length
+        | None -> -1
+
+    JsonSerializer.Serialize
+        {| names = reserved
+           table = table
+           kinds = kinds |}
 
 /// The restore target whose execution the `restoreCone` op records: half A of
 /// docs/nuget-dgspec-boundary-plan.md, what `dotnet msbuild
@@ -1076,6 +1156,8 @@ let main argv =
                     | "evaluated" -> respondEvaluated root
                     | "targetItems" -> respondTargetItems root
                     | "runTargets" -> respondRunTargets root
+                    | "globalName" -> respondGlobalName root
+                    | "reservedNames" -> respondReservedNames ()
                     | other -> JsonSerializer.Serialize {| error = $"unknown op: %s{other}" |}
                 with ex ->
                     JsonSerializer.Serialize {| error = ex.Message |}
