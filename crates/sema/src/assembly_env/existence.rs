@@ -24,7 +24,8 @@ use crate::hash::{HashMap, HashSet};
 
 use borzoi_assembly::{Entity, EntityKind, ExistenceIndex, PickleLayer, PickledEntityKind};
 
-/// What one referenced assembly contributes to the [`ExistenceSet`].
+/// What one referenced assembly contributes to the extension gate's existence
+/// questions: everything it declares, at every accessibility.
 #[derive(Debug, Clone)]
 pub enum ExistenceInput {
     /// The assembly's existence index, read from its metadata.
@@ -60,9 +61,10 @@ pub struct ExistenceSet {
     entities: HashSet<Vec<String>>,
     /// The entities directly inside each namespace or entity path.
     children: HashMap<Vec<String>, Vec<Child>>,
-    /// The namespaces holding, anywhere in their entity tree, an abbreviation
-    /// marked `[<Extension>]` or `[<AutoOpen>]` (at any accessibility): each
-    /// brings its target's extensions wherever the namespace is in scope.
+    /// The containers holding, anywhere in their entity tree, an abbreviation
+    /// marked `[<Extension>]` or `[<AutoOpen>]` (at any accessibility): its
+    /// namespace and each enclosing module's path. Each brings its target's
+    /// extensions wherever the container is opened.
     abbreviation_lenders: HashSet<Vec<String>>,
     /// Some assembly's declarations are unknown.
     unknowable: bool,
@@ -137,11 +139,14 @@ impl ExistenceSet {
                         continue;
                     }
                     let abbreviation = row.kind == PickledEntityKind::Abbreviation;
-                    if abbreviation && (row.extension || row.auto_open) {
-                        self.abbreviation_lenders.insert(namespace.clone());
-                    }
                     let mut parent = namespace;
+                    let namespace_len = parent.len();
                     parent.extend(row.enclosing.iter().map(|s| canonical(s)));
+                    if abbreviation && (row.extension || row.auto_open) {
+                        for k in namespace_len..=parent.len() {
+                            self.abbreviation_lenders.insert(parent[..k].to_vec());
+                        }
+                    }
                     for spelling in [&row.logical_name, &row.compiled_name] {
                         let name = canonical(spelling);
                         let mut path = parent.clone();
@@ -161,8 +166,11 @@ impl ExistenceSet {
     fn add_entity(&mut self, parent: &[String], entity: &Entity) {
         let abbreviation = entity.kind == EntityKind::Abbreviation;
         if abbreviation && (entity.is_extension_container || entity.is_auto_open) {
-            self.abbreviation_lenders
-                .insert(canonical_path(&entity.namespace));
+            let namespace = canonical_path(&entity.namespace);
+            for k in namespace.len().min(parent.len())..=parent.len() {
+                self.abbreviation_lenders.insert(parent[..k].to_vec());
+            }
+            self.abbreviation_lenders.insert(namespace);
         }
         let mut spellings = vec![canonical(&entity.name)];
         if let Some(source) = &entity.source_name {
@@ -232,10 +240,10 @@ impl ExistenceSet {
         false
     }
 
-    /// Whether `namespace` holds, anywhere in its entity tree, an
-    /// abbreviation marked `[<Extension>]` or `[<AutoOpen>]` at any
-    /// accessibility, which brings its target's extensions into scope
-    /// wherever the namespace is.
+    /// Whether the container at `namespace` (a namespace, or a module's path)
+    /// holds, anywhere in its entity tree, an abbreviation marked
+    /// `[<Extension>]` or `[<AutoOpen>]` at any accessibility, which brings
+    /// its target's extensions into scope wherever the container is opened.
     pub(crate) fn lends_extensions_through_an_abbreviation(&self, namespace: &[String]) -> bool {
         self.unknowable
             || self
@@ -286,6 +294,9 @@ mod tests {
     fn set(inner_auto_open: bool) -> ExistenceSet {
         let mut alias = pickled("B", "Alias", PickledEntityKind::Abbreviation);
         alias.extension = true;
+        let mut nested = pickled("D", "Nested", PickledEntityKind::Abbreviation);
+        nested.enclosing = vec!["MModule".to_string()];
+        nested.auto_open = true;
         let index = ExistenceIndex {
             il: vec![
                 il("A", &[], "MModule", false),
@@ -293,7 +304,11 @@ mod tests {
                 il("A", &["MModule", "Inner"], "Hidden", false),
                 il("A.N", &[], "Only`1", false),
             ],
-            pickle: PickleLayer::Read(vec![pickled("", "B", PickledEntityKind::Namespace), alias]),
+            pickle: PickleLayer::Read(vec![
+                pickled("", "B", PickledEntityKind::Namespace),
+                alias,
+                nested,
+            ]),
         };
         let mut set = ExistenceSet::default();
         set.add(&ExistenceInput::Read(index), &[]);
@@ -325,6 +340,8 @@ mod tests {
         assert!(!whole.lends_a_short_name_under(&segs("A"), "Hidden"));
         assert!(!set(false).lends_a_short_name_under(&segs("A.M"), "Hidden"));
         assert!(whole.lends_extensions_through_an_abbreviation(&segs("B")));
+        assert!(whole.lends_extensions_through_an_abbreviation(&segs("D.M")));
+        assert!(whole.lends_extensions_through_an_abbreviation(&segs("D")));
         assert!(!whole.lends_extensions_through_an_abbreviation(&segs("A")));
     }
 
