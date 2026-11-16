@@ -632,6 +632,7 @@ fn minus(total: ReadCounts, part: ReadCounts) -> ReadCounts {
 fn answered(observation: &Observation) -> bool {
     match observation {
         Observation::Text(answer) => answer.is_ok(),
+        Observation::Prefix { answer, .. } => answer.is_ok(),
         Observation::Kind(answer) | Observation::LinkKind(answer) => answer.is_ok(),
         Observation::Listing(answer) => answer.is_ok(),
         Observation::Canonical(answer) => answer.is_ok(),
@@ -7765,6 +7766,101 @@ mod tests {
                      (on_path = {on_path}): {tally:#?}"
                 );
             }
+        }
+
+        /// The leading bytes of a thin 64-bit Mach-O executable of
+        /// `cputype`, as a `dotnet` muxer's header is.
+        fn macho_muxer(cputype: u32) -> Vec<u8> {
+            let mut bytes = 0xfeed_facf_u32.to_le_bytes().to_vec();
+            bytes.extend(cputype.to_le_bytes());
+            bytes.resize(64, 0);
+            bytes
+        }
+
+        /// [`world`], whose SDK imports the workload manifests' targets
+        /// through the workload locator, as `Microsoft.NET.Sdk` does: two
+        /// versions of one manifest, each defining a constant, the newer of
+        /// which a scan picks, and an install state under `Arm64` pinning
+        /// the older, beside an `Arm64` `dotnet` muxer.
+        fn workload_world(root: &Path) -> (PathBuf, SdkDiscoveryEnv) {
+            let (project, env) = world(root, false);
+            let dotnet = root.join("dotnet");
+            let sdk = dotnet.join("sdk/10.0.100");
+            write_file(
+                &sdk.join("Sdks/Microsoft.NET.Sdk/Sdk/Sdk.targets"),
+                r#"<Project>
+  <Import Project="WorkloadManifest.targets" Sdk="Microsoft.NET.SDK.WorkloadManifestTargetsLocator" />
+</Project>"#,
+            );
+            write_file(&sdk.join("KnownWorkloadManifests.txt"), "w.workload");
+            for (version, define) in [("1.0.0", "W_ONE"), ("2.0.0", "W_TWO")] {
+                let manifest = dotnet
+                    .join("sdk-manifests/10.0.100/w.workload")
+                    .join(version);
+                write_file(&manifest.join("WorkloadManifest.json"), "{}");
+                write_file(
+                    &manifest.join("WorkloadManifest.targets"),
+                    &format!(
+                        "<Project><PropertyGroup><DefineConstants>$(DefineConstants);{define}</DefineConstants></PropertyGroup></Project>"
+                    ),
+                );
+            }
+            write_file(
+                &dotnet.join("metadata/workloads/Arm64/10.0.100/InstallState/default.json"),
+                r#"{"manifests": {"w.workload": "1.0.0"}}"#,
+            );
+            fs::write(
+                dotnet.join(if cfg!(windows) {
+                    "dotnet.exe"
+                } else {
+                    "dotnet"
+                }),
+                macho_muxer(0x0100_000c),
+            )
+            .unwrap();
+            (project, env)
+        }
+
+        /// The read-set soundness property over an install state, which a
+        /// workload locator reads under the architecture of the host's
+        /// `dotnet` muxer: the muxer's header is among the evaluation's
+        /// reads, as a digest of its bytes, so a muxer written again with the
+        /// same bytes leaves the evaluation and its reads the same, and one of
+        /// another architecture, which finds no install state and so takes
+        /// the newer manifest, moves it.
+        #[test]
+        fn the_workspace_read_set_is_sound_over_an_install_state() {
+            let tmp = TempDir::new().unwrap();
+            let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+            let (project, env) = workload_world(&root);
+            let defines = |parsed: &ParsedProject| parsed.define_constants.clone();
+            let base = evaluation(&project, &env);
+            assert!(
+                defines(&base).iter().any(|d| d == "W_ONE")
+                    && !defines(&base).iter().any(|d| d == "W_TWO"),
+                "the install state's pin applies: {:?}",
+                defines(&base)
+            );
+            let muxer = root.join(if cfg!(windows) {
+                "dotnet/dotnet.exe"
+            } else {
+                "dotnet/dotnet"
+            });
+            let extra = [Perturbation {
+                why: Why::Extra,
+                edits: vec![Edit::Write(muxer, macho_muxer(0x0100_0007))],
+            }];
+            let fifo = crate::observed::host_fs::Fifo::new();
+            let extra: Vec<Perturbation> = extra
+                .into_iter()
+                .chain(soundness::fifo_perturbations(&root, &fifo.path))
+                .collect();
+            let tally = soundness::sweep(&root, &|| evaluation(&project, &env), &extra);
+            assert_eq!(
+                tally.moved(Why::Extra),
+                1,
+                "an x64 muxer moves the evaluation: {tally:#?}"
+            );
         }
 
         /// The soundness property for what a cached evaluation confirms, its

@@ -91,6 +91,9 @@ struct Memo {
     link_kinds: HashMap<OsString, Result<EntryKind, Failure>>,
     listings: HashMap<OsString, Result<Vec<Result<DirEntry, Failure>>, Failure>>,
     canonicals: HashMap<OsString, Result<PathBuf, Failure>>,
+    /// Every leading-bytes read ([`read_prefix`]), by path and then by how
+    /// many bytes it asked for.
+    prefixes: HashMap<(OsString, u64), Result<Vec<u8>, Failure>>,
 }
 
 /// A whole-file read parsed as XML ([`read_document`]): the document, or why
@@ -287,7 +290,7 @@ impl Observer {
     fn record(&self, path: &Path, observation: Observation) {
         let mut counts = self.counts.get();
         match &observation {
-            Observation::Text(_) => counts.opens += 1,
+            Observation::Text(_) | Observation::Prefix { .. } => counts.opens += 1,
             Observation::Kind(_) | Observation::LinkKind(_) | Observation::Stamp(_) => {
                 counts.stats += 1;
             }
@@ -319,7 +322,8 @@ impl Observer {
 /// repeats.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ReadCounts {
-    /// Files opened to read them whole, whether or not the open succeeded.
+    /// Files opened to read them whole, or to read their leading bytes
+    /// ([`read_prefix`]), whether or not the open succeeded.
     /// Each is preceded by a `stat` of the path, which declines a path that
     /// names no regular file without opening it ([`open_regular`]), and each
     /// successful open is followed by one `fstat` of the open file.
@@ -479,6 +483,14 @@ pub enum Observation {
     /// binary file ([`read_stamped`]), or reads it through a cache keyed by
     /// its stamp ([`stamp`]).
     Stamp(Result<FileStamp, Failure>),
+    /// The file's first `limit` bytes, or all of them when it is shorter
+    /// ([`read_prefix`]), for a reader of a binary header: what it learns is
+    /// those bytes, so the answer is their digest. A file written again with
+    /// the same leading bytes, or changed only past them, answers the same.
+    Prefix {
+        limit: u64,
+        answer: Result<BytesDigest, Failure>,
+    },
 }
 
 impl Observation {
@@ -501,6 +513,10 @@ pub fn answer_now(path: &Path, query: &Observation) -> Observation {
         Observation::Listing(_) => Observation::Listing(listed(&listing_of(path))),
         Observation::Canonical(_) => Observation::Canonical(canonical_of(path)),
         Observation::Stamp(_) => Observation::Stamp(stamp_of(path)),
+        Observation::Prefix { limit, .. } => Observation::Prefix {
+            limit: *limit,
+            answer: bytes_answer(&prefix_of(path, *limit)),
+        },
     }
 }
 
@@ -528,6 +544,23 @@ impl TextDigest {
         Self {
             len: text.len() as u64,
             hash: (u128::from(half(0)) << 64) | u128::from(half(1)),
+        }
+    }
+}
+
+/// The identity of some bytes that are not text: their length and a 128-bit
+/// hash ([`bytes_digest`]), for the reasons [`TextDigest`] is a digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BytesDigest {
+    pub len: u64,
+    pub hash: u128,
+}
+
+impl BytesDigest {
+    pub fn of(bytes: &[u8]) -> Self {
+        Self {
+            len: bytes.len() as u64,
+            hash: bytes_digest(bytes),
         }
     }
 }
@@ -972,6 +1005,23 @@ fn stamped_bytes(path: &Path) -> (Result<FileStamp, Failure>, Result<Vec<u8>, Fa
     }
 }
 
+/// The first `limit` bytes of the file at `path`, or all of them when it is
+/// shorter, opened as every whole-file read is ([`open_regular`]).
+fn prefix_of(path: &Path, limit: u64) -> Result<Vec<u8>, Failure> {
+    use std::io::Read as _;
+    let (file, _) = open_regular(path).map_err(|e| Failure::of(&e))?;
+    let mut bytes = Vec::new();
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Failure::of(&e))?;
+    Ok(bytes)
+}
+
+/// What a [`Observation::Prefix`] records of a leading-bytes read's answer.
+fn bytes_answer(answer: &Result<Vec<u8>, Failure>) -> Result<BytesDigest, Failure> {
+    answer.as_deref().map(BytesDigest::of).map_err(Clone::clone)
+}
+
 /// [`std::fs::read_to_string`].
 pub fn read_to_string(observer: &Observer, path: &Path) -> Result<String, Failure> {
     if let Some(answer) = observer.recall_file(path, |file| file.text().to_owned()) {
@@ -1164,6 +1214,36 @@ pub fn read_stamped(observer: &Observer, path: &Path) -> Result<Vec<u8>, Failure
     bytes
 }
 
+/// The first `limit` bytes of the file at `path`, or all of them when it is
+/// shorter: for a reader of a binary header, such as an executable's, that
+/// needs neither the rest of the file nor its text. The file is opened as a
+/// whole-file read opens it ([`open_regular`]), so a FIFO is never opened.
+///
+/// Recorded as a digest of the bytes read ([`Observation::Prefix`]), so the
+/// read holds while they do: a file written again with the same leading bytes
+/// still validates, and the next evaluation records the same read, which a
+/// stamp would not.
+pub fn read_prefix(observer: &Observer, path: &Path, limit: u64) -> Result<Vec<u8>, Failure> {
+    let key = (path.as_os_str().to_owned(), limit);
+    if let Some(memo) = &observer.memo
+        && let Some(answer) = memo.borrow().prefixes.get(&key)
+    {
+        return answer.clone();
+    }
+    let result = prefix_of(path, limit);
+    observer.record(
+        path,
+        Observation::Prefix {
+            limit,
+            answer: bytes_answer(&result),
+        },
+    );
+    if let Some(memo) = &observer.memo {
+        memo.borrow_mut().prefixes.insert(key, result.clone());
+    }
+    result
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod soundness;
 
@@ -1324,6 +1404,46 @@ mod tests {
         assert!(!read.still_holds(), "a same-size rewrite left it standing");
         std::fs::remove_file(&path).unwrap();
         assert!(!read.still_holds(), "a deletion left it standing");
+    }
+
+    /// A leading-bytes read records what it read, which need not be text, and
+    /// holds while the file's leading bytes are those: through a rewrite of
+    /// the same bytes, which the next read records alike (a stamp would
+    /// move), and through a change past them, but not through a change among
+    /// them, a truncation into them or a deletion. A file shorter than the
+    /// limit reads whole.
+    #[test]
+    fn a_prefix_read_holds_while_its_leading_bytes_do() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("muxer");
+        std::fs::write(&path, b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01tail").unwrap();
+        let read = || {
+            let observer = Observer::new();
+            let bytes = read_prefix(&observer, &path, 8);
+            (bytes, observer.finish())
+        };
+        let (bytes, (reads, counts)) = read();
+        assert_eq!(bytes.unwrap(), b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01");
+        assert_eq!((counts.opens, counts.stats), (1, 0));
+        assert_eq!(reads.first_stale(), None);
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01tail").unwrap();
+        assert_eq!(reads.first_stale(), None, "a rewrite of the same bytes");
+        assert_eq!(read().1.0, reads, "the next read records the same");
+
+        std::fs::write(&path, b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01other tail").unwrap();
+        assert_eq!(reads.first_stale(), None, "a change past the limit");
+
+        for moved in [&b"\xcf\xfa\xed\xfe\x07\x00\x00\x01tail"[..], b"\xcf\xfa"] {
+            std::fs::write(&path, moved).unwrap();
+            assert!(reads.first_stale().is_some(), "{moved:02x?}");
+        }
+        std::fs::write(&path, b"ab").unwrap();
+        assert_eq!(read().0.unwrap(), b"ab", "a short file reads whole");
+        std::fs::remove_file(&path).unwrap();
+        assert!(reads.first_stale().is_some(), "a deletion");
+        assert!(read().0.unwrap_err().is_absent());
     }
 
     /// Clippy reads only the nearest `clippy.toml`, so the crate's replaces
@@ -1505,16 +1625,22 @@ mod tests {
         LinkKind,
         Listing,
         Canonical,
+        /// [`read_prefix`] of two bytes, and of eight: one path's two
+        /// different queries.
+        Prefix2,
+        Prefix8,
     }
 
     impl Query {
-        const ALL: [Query; 6] = [
+        const ALL: [Query; 8] = [
             Query::Text,
             Query::Document,
             Query::Kind,
             Query::LinkKind,
             Query::Listing,
             Query::Canonical,
+            Query::Prefix2,
+            Query::Prefix8,
         ];
 
         /// The query's answer, in a form two answers compare in.
@@ -1529,6 +1655,8 @@ mod tests {
                 Query::LinkKind => format!("{:?}", link_kind(observer, path)),
                 Query::Listing => format!("{:?}", listed(&read_dir(observer, path))),
                 Query::Canonical => format!("{:?}", canonicalize(observer, path)),
+                Query::Prefix2 => format!("{:?}", read_prefix(observer, path, 2)),
+                Query::Prefix8 => format!("{:?}", read_prefix(observer, path, 8)),
             }
         }
 
@@ -1536,7 +1664,9 @@ mod tests {
         /// every time.
         fn count(self, counts: &mut ReadCounts) -> &mut u64 {
             match self {
-                Query::Text | Query::Document => &mut counts.opens,
+                Query::Text | Query::Document | Query::Prefix2 | Query::Prefix8 => {
+                    &mut counts.opens
+                }
                 Query::Kind | Query::LinkKind => &mut counts.stats,
                 Query::Listing => &mut counts.listings,
                 Query::Canonical => &mut counts.canonicalizations,
@@ -1757,12 +1887,17 @@ mod tests {
                 assert_eq!(text.kind(), ErrorKind::InvalidInput, "{text}");
                 assert_eq!(read_document(&observer, &path).unwrap_err(), text);
                 assert_eq!(read_stamped(&observer, &path).unwrap_err(), text);
+                assert_eq!(read_prefix(&observer, &path, 4).unwrap_err(), text);
                 assert!(!racy_content_now(&path, 0).0);
                 let (reads, _) = observer.finish();
-                assert_eq!(reads.len(), 2, "{reads:#?}");
+                assert_eq!(reads.len(), 3, "{reads:#?}");
                 for read in reads.reads() {
                     match &read.observation {
-                        Observation::Text(Err(failure)) => assert_eq!(*failure, text),
+                        Observation::Text(Err(failure))
+                        | Observation::Prefix {
+                            answer: Err(failure),
+                            ..
+                        } => assert_eq!(*failure, text),
                         Observation::Stamp(Ok(stamp)) => assert!(stamp.unreadable),
                         other => panic!("{}: {other:?}", path.display()),
                     }

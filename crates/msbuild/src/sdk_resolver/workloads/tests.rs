@@ -253,7 +253,7 @@ fn a_host_band_workload_set_is_selected_unless_the_install_state_opts_out() {
         &[("x.workloadset.json", r#"{"W.Workload": "1.0.0"}"#)],
     );
     let env = WorkloadEnvironment {
-        process_architecture: Some("X64"),
+        process_architecture: Some(ProcessArchitecture::X64),
         ..no_user_env()
     };
     assert_eq!(

@@ -49,7 +49,7 @@ pub fn one_query_per_read(reads: &ReadSet) -> ReadCounts {
     let mut counts = ReadCounts::default();
     for read in reads.reads() {
         match read.observation {
-            Observation::Text(_) => counts.opens += 1,
+            Observation::Text(_) | Observation::Prefix { .. } => counts.opens += 1,
             Observation::Kind(_) | Observation::LinkKind(_) | Observation::Stamp(_) => {
                 counts.stats += 1;
             }

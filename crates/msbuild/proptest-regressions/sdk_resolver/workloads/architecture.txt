@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 573dbe34cd51a94ae0a6aa57525ded183f56640e4e2fcf5d6a0fc187754f9055 # shrinks to generated = Generated { bytes: [127, 69, 76, 70, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 0, 0, 0, 0], header_len: 20, expected: Some(Ppc64le) }, cut = Index(15372286728091293014)
+cc 774f455facf6ac1aeca8c71294cade3a19e896f9076f2a6e26bc2d9c48e7c46c # shrinks to generated = Generated { bytes: [202, 254, 186, 190, 0, 0, 0, 1, 1, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 146, 146, 48, 206, 94, 208, 143, 163, 158, 144, 233, 144, 245, 24, 110, 176, 190, 195, 40, 152, 140, 29, 67, 12, 236, 206, 140, 109, 94, 2, 212, 23, 75, 149, 183, 80, 12, 92, 208, 32, 38, 78, 83, 103, 25, 22, 45, 41, 181, 110, 74, 49, 86, 248, 159, 132, 251, 181, 191, 88, 89, 186, 254, 248, 235, 203, 78, 132, 78, 53, 127, 23, 30, 22, 199, 254, 190, 22, 249, 198, 165, 169], header_len: 28, expected: Some(X64) }
+cc cfd7d0bb35b4e9d4f19f30d585da14cd2d2c3d816181cfad6df11d2004972c1b # shrinks to generated = Generated { bytes: [202, 254, 186, 190, 0, 0, 0, 1, 1, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], header_len: 28, expected: Some(X64) }, cut = Index(7633135478776366186)

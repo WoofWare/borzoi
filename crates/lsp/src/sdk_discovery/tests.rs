@@ -1637,6 +1637,169 @@ fn resolve_workload_locator_exactly_without_global_json_pin() {
     assert_eq!(resolved, SdkResolution::Roots(vec![manifest_dir]));
 }
 
+/// The leading bytes of a thin 64-bit Mach-O executable of `cputype`
+/// (`CPU_TYPE_ARM64` or `CPU_TYPE_X86_64`), padded as a header is.
+fn macho_muxer(cputype: u32) -> Vec<u8> {
+    let mut bytes = 0xfeed_facf_u32.to_le_bytes().to_vec();
+    bytes.extend(cputype.to_le_bytes());
+    bytes.resize(64, 0);
+    bytes
+}
+
+const ARM64_MUXER: u32 = 0x0100_000c;
+const X64_MUXER: u32 = 0x0100_0007;
+
+/// The workload layout of [`install_workload_layout`] with a second, newer
+/// manifest version, a `dotnet` muxer of `cputype`, and an install state under
+/// the `Arm64` architecture that pins the older version; and a discovery for a
+/// project beside it, with `$DOTNET_ROOT` (or `$PATH`, with `on_path`) naming
+/// the root. Returns the two manifest directories, the muxer, and the
+/// discovery.
+fn install_state_world(
+    tmp: &Path,
+    cputype: u32,
+    on_path: bool,
+) -> (PathBuf, PathBuf, PathBuf, SdkDiscovery) {
+    let dotnet_root = tmp.join("dotnet");
+    let older = install_workload_layout(&dotnet_root);
+    let newer = dotnet_root.join("sdk-manifests/10.0.300/w.workload/2.0.0");
+    fs::create_dir_all(&newer).unwrap();
+    fs::write(newer.join("WorkloadManifest.json"), "{}").unwrap();
+    fs::write(newer.join("WorkloadManifest.targets"), "<Project/>").unwrap();
+    let muxer = dotnet_root.join(DOTNET_BIN);
+    fs::write(&muxer, macho_muxer(cputype)).unwrap();
+    let install_state = dotnet_root.join("metadata/workloads/Arm64/10.0.300/InstallState");
+    fs::create_dir_all(&install_state).unwrap();
+    fs::write(
+        install_state.join("default.json"),
+        r#"{"manifests": {"w.workload": "1.0.0"}}"#,
+    )
+    .unwrap();
+    let project_dir = tmp.join("proj");
+    fs::create_dir_all(&project_dir).unwrap();
+    let env = env_with(|e| {
+        if on_path {
+            e.search_path = Some(dotnet_root.clone().into_os_string());
+        } else {
+            e.dotnet_root = Some(dotnet_root.clone());
+        }
+    });
+    let disc =
+        SdkDiscovery::for_project(&project_dir.join("App.fsproj"), &env, &Observer::new()).unwrap();
+    (older, newer, muxer, disc)
+}
+
+/// A workload locator resolved through `disc`, and the reads behind it.
+fn resolve_locator(
+    disc: &SdkDiscovery,
+) -> (
+    Result<SdkResolution, SdkResolveError>,
+    borzoi_msbuild::observed::ReadSet,
+) {
+    let observer = Observer::new();
+    let resolved = disc.resolve(workloads::WORKLOAD_MANIFEST_TARGETS_LOCATOR, &observer);
+    (resolved, observer.finish().0)
+}
+
+/// The install state is read under the architecture of the host's `dotnet`
+/// muxer, which its header names: an `Arm64` muxer's pin applies, where a
+/// discovery that could not say the architecture would decline on the file.
+#[test]
+fn an_install_state_under_the_muxer_s_architecture_is_read() {
+    for on_path in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let tmp = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+        let (older, _, _, disc) = install_state_world(&tmp, ARM64_MUXER, on_path);
+        assert_eq!(
+            resolve_locator(&disc).0.unwrap(),
+            SdkResolution::Roots(vec![older]),
+            "on_path = {on_path}"
+        );
+    }
+}
+
+/// The muxer's header is part of what a resolution read: rewriting the muxer
+/// with the same bytes leaves the reads standing and the next resolution's
+/// reads the same, while a muxer of another architecture makes them stale,
+/// and the next resolution looks under that architecture, where this layout
+/// has no install state, so the newest manifest wins.
+#[test]
+fn a_muxer_of_another_architecture_invalidates_the_resolution() {
+    let tmp = TempDir::new().unwrap();
+    let (older, newer, muxer, disc) = install_state_world(tmp.path(), ARM64_MUXER, false);
+    let (resolved, reads) = resolve_locator(&disc);
+    assert_eq!(resolved.unwrap(), SdkResolution::Roots(vec![older]));
+    assert_eq!(reads.first_stale(), None);
+
+    fs::remove_file(&muxer).unwrap();
+    fs::write(&muxer, macho_muxer(ARM64_MUXER)).unwrap();
+    assert_eq!(reads.first_stale(), None, "the same muxer, written again");
+    assert_eq!(resolve_locator(&disc).1, reads);
+
+    fs::write(&muxer, macho_muxer(X64_MUXER)).unwrap();
+    assert_eq!(
+        reads.first_stale().map(|read| read.path.clone()),
+        Some(muxer.clone())
+    );
+    assert_eq!(
+        resolve_locator(&disc).0.unwrap(),
+        SdkResolution::Roots(vec![newer])
+    );
+}
+
+/// Where the muxer's header does not say the architecture (a universal binary
+/// of two, a script, no muxer at all), the locators decline on the install
+/// state, as they must when its folder cannot be named.
+#[test]
+fn an_install_state_declines_where_the_muxer_does_not_say() {
+    let mut universal = 0xcafe_babe_u32.to_be_bytes().to_vec();
+    universal.extend(2u32.to_be_bytes());
+    for cputype in [ARM64_MUXER, X64_MUXER] {
+        let mut entry = cputype.to_be_bytes().to_vec();
+        entry.resize(20, 0);
+        universal.extend(entry);
+    }
+    for muxer_bytes in [
+        Some(universal),
+        Some(b"#!/bin/sh\nexec dotnet \"$@\"\n".to_vec()),
+        None,
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let (_, _, muxer, disc) = install_state_world(tmp.path(), ARM64_MUXER, false);
+        match &muxer_bytes {
+            Some(bytes) => fs::write(&muxer, bytes).unwrap(),
+            None => fs::remove_file(&muxer).unwrap(),
+        }
+        let err = resolve_locator(&disc).0.unwrap_err();
+        assert!(
+            matches!(err, SdkResolveError::UnsupportedLayout { .. }),
+            "{muxer_bytes:?}: {err:?}"
+        );
+    }
+}
+
+/// Only a workload locator reads the muxer.
+#[test]
+fn only_a_workload_locator_reads_the_muxer() {
+    let tmp = TempDir::new().unwrap();
+    let (_, _, muxer, disc) = install_state_world(tmp.path(), ARM64_MUXER, false);
+    install_sdk(&tmp.path().join("dotnet"), "10.0.300", "Microsoft.NET.Sdk");
+    let observer = Observer::new();
+    disc.resolve("Microsoft.NET.Sdk", &observer).unwrap();
+    let (reads, _) = observer.finish();
+    assert!(
+        reads.reads().iter().all(|read| read.path != muxer),
+        "{reads:#?}"
+    );
+    assert!(
+        resolve_locator(&disc)
+            .1
+            .reads()
+            .iter()
+            .any(|read| read.path == muxer)
+    );
+}
+
 #[test]
 fn resolve_degrades_locators_when_global_json_pins_workload_set() {
     // Identical layout to the exact-resolution test above, except the

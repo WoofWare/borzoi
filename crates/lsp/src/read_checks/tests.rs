@@ -383,6 +383,7 @@ impl Model {
         match query {
             Observation::Text(_) => unreachable!("whole-file reads go through the DiskCache"),
             Observation::Stamp(_) => unreachable!("an evaluation records no stamps"),
+            Observation::Prefix { .. } => unreachable!("the model's evaluations read no prefixes"),
             Observation::Kind(_) => {
                 Observation::Kind(at(true).map(|p| Model::kind_of(&self.entries[&p].node)))
             }

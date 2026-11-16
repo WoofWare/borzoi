@@ -112,6 +112,7 @@ use crate::SdkResolution;
 use crate::dotnet_io;
 use crate::observed::{self, EntryKind, Failure, Observer};
 
+mod architecture;
 mod feature_band;
 mod manifest;
 mod manifest_version;
@@ -119,6 +120,8 @@ mod workload_sets;
 use super::global_json::GlobalJsonWorkloads;
 use feature_band::FeatureBand;
 use manifest_version::ManifestVersion;
+
+pub use architecture::{EXECUTABLE_HEADER_BYTES, ProcessArchitecture};
 
 pub const WORKLOAD_MANIFEST_TARGETS_LOCATOR: &str =
     "Microsoft.NET.SDK.WorkloadManifestTargetsLocator";
@@ -166,12 +169,13 @@ pub struct WorkloadEnvironment<'a> {
     /// when that set is not installed) and `sdk.workloads-update-mode` opts
     /// in or out of the default selection.
     pub global_json: GlobalJsonWorkloads,
-    /// The architecture of the process a build resolves the locators in, as
-    /// `RuntimeInformation.ProcessArchitecture` spells it (`X64`, `Arm64`):
-    /// the install state lives under a directory of that name. `None` when
+    /// The architecture of the process a build resolves the locators in
+    /// (`RuntimeInformation.ProcessArchitecture`): the install state lives
+    /// under a directory of its name. A host reads it off the `dotnet` muxer
+    /// it builds with ([`ProcessArchitecture::of_executable`]). `None` when
     /// the caller cannot say, which declines wherever an install-state file
     /// exists for any architecture.
-    pub process_architecture: Option<&'a str>,
+    pub process_architecture: Option<ProcessArchitecture>,
 }
 
 fn unsupported(reason: impl Into<String>) -> SdkResolveError {

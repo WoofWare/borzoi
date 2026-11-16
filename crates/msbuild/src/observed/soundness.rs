@@ -495,7 +495,11 @@ pub fn perturbations(root: &Path, read_set: &ReadSet) -> Vec<Perturbation> {
             | Observation::Kind(Err(failure))
             | Observation::LinkKind(Err(failure))
             | Observation::Canonical(Err(failure))
-            | Observation::Stamp(Err(failure)) => failure.is_absent(),
+            | Observation::Stamp(Err(failure))
+            | Observation::Prefix {
+                answer: Err(failure),
+                ..
+            } => failure.is_absent(),
             _ => false,
         };
         // A dangling symlink fails a following query as absent, but its

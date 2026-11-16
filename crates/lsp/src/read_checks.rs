@@ -152,6 +152,7 @@ pub fn a_fact(observation: &Observation) -> bool {
     }
     match observation {
         Observation::Text(answer) => answered_or_absent(answer),
+        Observation::Prefix { answer, .. } => answered_or_absent(answer),
         Observation::Kind(answer) | Observation::LinkKind(answer) => answered_or_absent(answer),
         Observation::Listing(Ok(entries)) => entries
             .iter()
@@ -893,7 +894,7 @@ impl<D: Probe> ReadChecks<D> {
             Observation::LinkKind(_) => self.resolution(path, false, false, generation),
             // A file's stamp, like its text, moves with no directory's
             // stamp moving.
-            Observation::Text(_) | Observation::Stamp(_) => None,
+            Observation::Text(_) | Observation::Stamp(_) | Observation::Prefix { .. } => None,
         }
     }
 
@@ -1083,7 +1084,7 @@ impl<D: Probe> ReadChecks<D> {
     fn ask(&self, read: &Read) -> Observation {
         let mut counts = self.counts.get();
         match read.observation {
-            Observation::Text(_) => counts.opens += 1,
+            Observation::Text(_) | Observation::Prefix { .. } => counts.opens += 1,
             Observation::Kind(_) | Observation::LinkKind(_) | Observation::Stamp(_) => {
                 counts.stats += 1;
             }
