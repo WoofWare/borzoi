@@ -27,6 +27,7 @@ mod gates;
 mod generate;
 mod lower;
 mod names;
+mod statements;
 
 use std::collections::HashSet;
 use std::io::Write as _;

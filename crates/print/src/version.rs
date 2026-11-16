@@ -34,7 +34,9 @@ mod sealed {
 }
 
 /// Whether a feature is present: [`Available`] or [`Unavailable`].
-pub trait Gate: sealed::Sealed + Debug + Clone + Copy + PartialEq + Eq + Hash + 'static {
+pub trait Gate:
+    sealed::Sealed + Debug + Clone + Copy + PartialEq + Eq + Hash + Send + Sync + 'static
+{
     /// The gate's value where the feature is present.
     const WITNESS: Option<Self>;
 }
@@ -51,7 +53,9 @@ impl Gate for Unavailable {
 
 /// An F# language version, as a type. Implemented only by the markers in this
 /// module, one per [`LanguageVersion`].
-pub trait Version: sealed::Sealed + Debug + Clone + Copy + PartialEq + Eq + Hash + 'static {
+pub trait Version:
+    sealed::Sealed + Debug + Clone + Copy + PartialEq + Eq + Hash + Send + Sync + 'static
+{
     /// The version this type stands for.
     const LANGUAGE: LanguageVersion;
 
@@ -61,6 +65,13 @@ pub trait Version: sealed::Sealed + Debug + Clone + Copy + PartialEq + Eq + Hash
 
     /// `_.Member`, a lambda reading a member of its argument (F# 8).
     type AccessorFunctionShorthand: Gate;
+
+    /// `and!` after a `let!` in a computation expression (F# 5). Only FCS's
+    /// checker refuses it below F# 5.
+    type AndBang: Gate;
+
+    /// `while!` in a computation expression (F# 8).
+    type WhileBang: Gate;
 }
 
 macro_rules! versions {
@@ -88,26 +99,26 @@ macro_rules! versions {
 
 versions! {
     /// F# 4.6, the oldest version `borzoi-cst` parses.
-    V4_6: available [] unavailable [AccessorFunctionShorthand];
+    V4_6: available [] unavailable [AccessorFunctionShorthand, AndBang, WhileBang];
     /// F# 4.7.
-    V4_7: available [] unavailable [AccessorFunctionShorthand];
+    V4_7: available [] unavailable [AccessorFunctionShorthand, AndBang, WhileBang];
     /// F# 5.0.
-    V5_0: available [] unavailable [AccessorFunctionShorthand];
+    V5_0: available [AndBang] unavailable [AccessorFunctionShorthand, WhileBang];
     /// F# 6.0.
-    V6_0: available [] unavailable [AccessorFunctionShorthand];
+    V6_0: available [AndBang] unavailable [AccessorFunctionShorthand, WhileBang];
     /// F# 7.0.
-    V7_0: available [] unavailable [AccessorFunctionShorthand];
+    V7_0: available [AndBang] unavailable [AccessorFunctionShorthand, WhileBang];
     /// F# 8.0.
-    V8_0: available [AccessorFunctionShorthand] unavailable [];
+    V8_0: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
     /// F# 9.0.
-    V9_0: available [AccessorFunctionShorthand] unavailable [];
+    V9_0: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
     /// F# 10.0.
-    V10_0: available [AccessorFunctionShorthand] unavailable [];
+    V10_0: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
     /// F# 11.0, what a project without `<LangVersion>` gets
     /// ([`LanguageVersion::DEFAULT`]).
-    V11_0: available [AccessorFunctionShorthand] unavailable [];
+    V11_0: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
     /// `<LangVersion>preview</LangVersion>`.
-    Preview: available [AccessorFunctionShorthand] unavailable [];
+    Preview: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
 }
 
 /// The version a project without `<LangVersion>` gets.

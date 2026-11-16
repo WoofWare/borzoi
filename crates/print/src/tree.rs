@@ -411,6 +411,126 @@ pub enum Expr<V: Version> {
         gate: V::AccessorFunctionShorthand,
         path: LongIdent,
     },
+    /// `builder { body }`, a computation expression.
+    Computation {
+        builder: Box<Expr<V>>,
+        body: Box<Comp<V>>,
+    },
+}
+
+/// A computation expression's body: statements one after another, each
+/// binding scoping over the statements after it, as F# nests them.
+///
+/// Its statements are not expressions. F#'s checker translates a body by its
+/// shape, and refuses a control construct in parentheses ("this construct is
+/// ambiguous"), so the printer writes statements bare, one per line, and keeps
+/// only their operands in parentheses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Comp<V: Version> {
+    /// The last statement.
+    Last(Stmt<V>),
+    /// A statement, then the rest.
+    Then(Stmt<V>, Box<Comp<V>>),
+    /// `let …`, then the rest.
+    Let(LetBindings<V>, Box<Comp<V>>),
+    /// `use p = e`, then the rest.
+    Use(Box<Binding<V>>, Box<Comp<V>>),
+    /// `let! p = e` or `use! p = e`, any `and! q = f`, then the rest.
+    Bang {
+        kind: BangKind,
+        pat: Pat,
+        value: Expr<V>,
+        ands: Vec<AndBang<V>>,
+        rest: Box<Comp<V>>,
+    },
+}
+
+/// Whether a bang binding is `let!` or `use!`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BangKind {
+    Let,
+    Use,
+}
+
+/// `and! p = e`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndBang<V: Version> {
+    pub gate: V::AndBang,
+    pub pat: Pat,
+    pub value: Expr<V>,
+}
+
+/// A statement of a computation expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stmt<V: Version> {
+    /// An expression: a value the builder combines, or an implicit yield.
+    Expr(Expr<V>),
+    /// `do! e`
+    DoBang(Expr<V>),
+    /// `return e`
+    Return(Expr<V>),
+    /// `return! e`
+    ReturnFrom(Expr<V>),
+    /// `yield e`
+    Yield(Expr<V>),
+    /// `yield! e`
+    YieldFrom(Expr<V>),
+    /// `if c then a [else b]`
+    IfThenElse {
+        cond: Expr<V>,
+        then_branch: Box<Comp<V>>,
+        else_branch: Option<Box<Comp<V>>>,
+    },
+    /// `match e with | p -> c …`
+    Match {
+        scrutinee: Expr<V>,
+        clauses: Vec1<CompClause<V>>,
+    },
+    /// `match! e with | p -> c …`
+    MatchBang {
+        scrutinee: Expr<V>,
+        clauses: Vec1<CompClause<V>>,
+    },
+    /// `while c do b done`
+    While { cond: Expr<V>, body: Box<Comp<V>> },
+    /// `while! c do b done`
+    WhileBang {
+        gate: V::WhileBang,
+        cond: Expr<V>,
+        body: Box<Comp<V>>,
+    },
+    /// `for i = a to b do c done`
+    For {
+        var: Ident,
+        from: Expr<V>,
+        direction: ForDirection,
+        to: Expr<V>,
+        body: Box<Comp<V>>,
+    },
+    /// `for p in e do c done`
+    ForEach {
+        pat: Pat,
+        source: Expr<V>,
+        body: Box<Comp<V>>,
+    },
+    /// `try c with | p -> c …`
+    TryWith {
+        body: Box<Comp<V>>,
+        clauses: Vec1<CompClause<V>>,
+    },
+    /// `try c finally e`
+    TryFinally {
+        body: Box<Comp<V>>,
+        finally: Expr<V>,
+    },
+}
+
+/// `| pat [when guard] -> body` in a computation expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompClause<V: Version> {
+    pub pat: Pat,
+    pub guard: Option<Expr<V>>,
+    pub body: Comp<V>,
 }
 
 /// Which way a `for … to/downto` loop counts.

@@ -5,24 +5,30 @@
 //! * Every expression, pattern and type is parenthesised, so precedence,
 //!   associativity and what a trailing construct swallows never arise
 //!   (`if c then a else b; d`, `a :: b : T`, a `match` inside a `match`).
+//!   Computation-expression statements are the exception: F#'s checker refuses
+//!   a control construct in parentheses there, so statements are bare and only
+//!   their operands are parenthesised.
 //! * Every expression is on one line, so the only columns the offside rule sees
 //!   are the starts of declaration lines. A construct that pushes an offside
 //!   context at its own column (`|`, `when`, `{ f =`, `[`) never has a second
-//!   line to be offside on. The exception is `let rec … and …`, whose `and`
-//!   F# accepts only at the start of a line in its `let`'s column; the printer
-//!   breaks the line there, in an expression too, and nothing pushed earlier on
-//!   the line has a later column, so nothing else sees the break.
+//!   line to be offside on. Two constructs break lines, in an expression too:
+//!   `let rec … and …` (and `let! … and! …`), whose `and` F# accepts only at the
+//!   start of a line in its `let`'s column; and a computation expression's
+//!   body, whose statements F# separates only by layout, one per line in the
+//!   column of the first, with each later part of a statement (`else`, a `|`
+//!   clause, `with`, `finally`) starting a line in the statement's column. A break's column is always past every context pushed earlier on
+//!   its line, so only the contexts the break is meant to end see it.
 //! * Expressions use the verbose forms (`let … in`, `do … done`), which need no
 //!   layout.
 //!
-//! The one place layout matters is declarations: each starts its own line, and
-//! a nested module's declarations are indented two columns past it.
+//! Elsewhere layout matters only between declarations: each starts its own
+//! line, and a nested module's declarations are indented two columns past it.
 
 use crate::names::{Ident, LongIdent, Operator, TyparName, ValueName};
 use crate::tree::{
-    Access, Args, Attribute, AttributeArgs, Binding, BindingHead, Const, Expr, ForDirection,
-    ImplFile, LetBindings, MatchClause, ModuleDecl, NamespaceName, NestedModule, Pat, Type,
-    TypeDefn, TypeRepr, UnionCase,
+    Access, Args, Attribute, AttributeArgs, BangKind, Binding, BindingHead, Comp, CompClause,
+    Const, Expr, ForDirection, ImplFile, LetBindings, MatchClause, ModuleDecl, NamespaceName,
+    NestedModule, Pat, Stmt, Type, TypeDefn, TypeRepr, UnionCase,
 };
 use crate::version::Version;
 
@@ -492,6 +498,15 @@ impl Printer {
                 self.out.push_str("_.");
                 self.long_ident(path);
             }
+            Expr::Computation { builder, body } => {
+                match &**builder {
+                    Expr::Name(name) => self.long_ident(name),
+                    other => self.expr(other),
+                }
+                self.out.push_str(" { ");
+                self.comp(body);
+                self.out.push_str(" }");
+            }
         }
         self.out.push(')');
     }
@@ -546,6 +561,189 @@ impl Printer {
             }
         }
         self.out.push(')');
+    }
+
+    /// A line break, then spaces to `column`.
+    fn newline_at(&mut self, column: usize) {
+        self.out.push('\n');
+        self.out.extend(std::iter::repeat_n(' ', column));
+    }
+
+    /// A computation expression's body, its statements one per line in the
+    /// column of the first. On one line, `do! a; b` is `do!` of the sequence,
+    /// and `if c then a else b; d` puts `d` in the `else`; F# separates
+    /// statements by layout, and by nothing else that keeps them statements.
+    fn comp<V: Version>(&mut self, c: &Comp<V>) {
+        let column = self.column();
+        let mut c = c;
+        loop {
+            match c {
+                Comp::Last(s) => return self.stmt(s),
+                Comp::Then(s, rest) => {
+                    self.stmt(s);
+                    c = rest;
+                }
+                Comp::Let(bindings, rest) => {
+                    self.let_bindings(bindings);
+                    c = rest;
+                }
+                Comp::Use(b, rest) => {
+                    self.out.push_str("use");
+                    self.binding(b);
+                    c = rest;
+                }
+                Comp::Bang {
+                    kind,
+                    pat,
+                    value,
+                    ands,
+                    rest,
+                } => {
+                    self.out.push_str(match kind {
+                        BangKind::Let => "let! ",
+                        BangKind::Use => "use! ",
+                    });
+                    self.pat(pat);
+                    self.out.push_str(" = ");
+                    self.expr(value);
+                    // Like `and` after `let rec`, `and!` starts a line in its
+                    // `let!`'s column.
+                    for and in ands {
+                        self.newline_at(column);
+                        self.out.push_str("and! ");
+                        self.pat(&and.pat);
+                        self.out.push_str(" = ");
+                        self.expr(&and.value);
+                    }
+                    c = rest;
+                }
+            }
+            self.newline_at(column);
+        }
+    }
+
+    /// A statement. A construct of several parts puts each later part
+    /// (`else`, each `|` clause, `with`, `finally`) at the start of a line in
+    /// the statement's column, so no part can read as the end of the statement
+    /// nested in the part before it. `done` is the exception: at the start of a
+    /// line in that column F# reads it as the next statement, and as a closing
+    /// keyword it ends whatever is open before it on its line.
+    fn stmt<V: Version>(&mut self, s: &Stmt<V>) {
+        let column = self.column();
+        match s {
+            Stmt::Expr(e) => self.expr(e),
+            Stmt::DoBang(e) => self.keyword_expr("do! ", e),
+            Stmt::Return(e) => self.keyword_expr("return ", e),
+            Stmt::ReturnFrom(e) => self.keyword_expr("return! ", e),
+            Stmt::Yield(e) => self.keyword_expr("yield ", e),
+            Stmt::YieldFrom(e) => self.keyword_expr("yield! ", e),
+            Stmt::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                self.out.push_str("if ");
+                self.expr(cond);
+                self.out.push_str(" then ");
+                self.comp(then_branch);
+                if let Some(e) = else_branch {
+                    self.newline_at(column);
+                    if let Comp::Last(Stmt::IfThenElse { .. })
+                    | Comp::Then(Stmt::IfThenElse { .. }, _) = &**e
+                    {
+                        // F# reads `else if` on one line as `elif`, whose
+                        // context is the `else`'s column, so the branch's later
+                        // statements, in the `if`'s, would be misread.
+                        self.out.push_str("else");
+                        self.newline_at(column + 2);
+                    } else {
+                        self.out.push_str("else ");
+                    }
+                    self.comp(e);
+                }
+            }
+            Stmt::Match { scrutinee, clauses } => {
+                self.keyword_expr("match ", scrutinee);
+                self.out.push_str(" with");
+                self.comp_clauses(clauses.as_slice(), column);
+            }
+            Stmt::MatchBang { scrutinee, clauses } => {
+                self.keyword_expr("match! ", scrutinee);
+                self.out.push_str(" with");
+                self.comp_clauses(clauses.as_slice(), column);
+            }
+            Stmt::While { cond, body } => self.comp_loop("while ", cond, body),
+            Stmt::WhileBang {
+                gate: _,
+                cond,
+                body,
+            } => self.comp_loop("while! ", cond, body),
+            Stmt::For {
+                var,
+                from,
+                direction,
+                to,
+                body,
+            } => {
+                self.out.push_str("for ");
+                self.ident(var);
+                self.out.push_str(" = ");
+                self.expr(from);
+                self.out.push_str(match direction {
+                    ForDirection::To => " to ",
+                    ForDirection::Downto => " downto ",
+                });
+                self.expr(to);
+                self.out.push_str(" do ");
+                self.comp(body);
+                self.out.push_str(" done");
+            }
+            Stmt::ForEach { pat, source, body } => {
+                self.out.push_str("for ");
+                self.pat(pat);
+                self.out.push_str(" in ");
+                self.expr(source);
+                self.out.push_str(" do ");
+                self.comp(body);
+                self.out.push_str(" done");
+            }
+            Stmt::TryWith { body, clauses } => {
+                self.out.push_str("try ");
+                self.comp(body);
+                self.newline_at(column);
+                self.out.push_str("with");
+                self.comp_clauses(clauses.as_slice(), column);
+            }
+            Stmt::TryFinally { body, finally } => {
+                self.out.push_str("try ");
+                self.comp(body);
+                self.newline_at(column);
+                self.keyword_expr("finally ", finally);
+            }
+        }
+    }
+
+    /// `while c do body done`.
+    fn comp_loop<V: Version>(&mut self, keyword: &str, cond: &Expr<V>, body: &Comp<V>) {
+        self.keyword_expr(keyword, cond);
+        self.out.push_str(" do ");
+        self.comp(body);
+        self.out.push_str(" done");
+    }
+
+    /// Each `| pat [when guard] -> body` on a line of its own in `column`.
+    fn comp_clauses<V: Version>(&mut self, clauses: &[CompClause<V>], column: usize) {
+        for c in clauses {
+            self.newline_at(column);
+            self.out.push_str("| ");
+            self.pat(&c.pat);
+            if let Some(guard) = &c.guard {
+                self.out.push_str(" when ");
+                self.expr(guard);
+            }
+            self.out.push_str(" -> ");
+            self.comp(&c.body);
+        }
     }
 
     fn keyword_expr<V: Version>(&mut self, keyword: &str, e: &Expr<V>) {
@@ -797,12 +995,14 @@ impl Printer {
 mod tests {
     use super::print_impl_file;
     use crate::names::{Ident, LongIdent, Operator, ValueName};
-    use crate::tree::{BindingHead, Const, Pat};
+    use crate::tree::{BangKind, BindingHead, Const, Pat};
     use crate::vec::{Vec1, Vec2};
     use crate::version::{Available, DefaultVersion};
 
     type Args = crate::tree::Args<DefaultVersion>;
     type Binding = crate::tree::Binding<DefaultVersion>;
+    type Comp = crate::tree::Comp<DefaultVersion>;
+    type Stmt = crate::tree::Stmt<DefaultVersion>;
     type Expr = crate::tree::Expr<DefaultVersion>;
     type ImplFile = crate::tree::ImplFile<DefaultVersion>;
     type LetBindings = crate::tree::LetBindings<DefaultVersion>;
@@ -946,6 +1146,52 @@ mod tests {
             },
         };
         assert_eq!(let_x(e), "let x = (M ((a), ``type`` = (b)))\n");
+    }
+
+    fn ret(s: &str) -> Comp {
+        Comp::Last(Stmt::Return(name(s)))
+    }
+
+    fn computation(body: Comp) -> Expr {
+        Expr::Computation {
+            builder: Box::new(name("async")),
+            body: Box::new(body),
+        }
+    }
+
+    #[test]
+    fn a_computation_expressions_statements_are_bare_and_one_per_line() {
+        let body = Comp::Bang {
+            kind: BangKind::Let,
+            pat: Pat::Name(LongIdent::single(id("x"))),
+            value: name("a"),
+            ands: Vec::new(),
+            rest: Box::new(Comp::Then(Stmt::DoBang(name("b")), Box::new(ret("x")))),
+        };
+        assert_eq!(
+            let_x(computation(body)),
+            "let x = (async { let! (x) = (a)\n                 do! (b)\n                 return (x) })\n"
+        );
+    }
+
+    #[test]
+    fn a_statements_later_parts_start_lines_in_its_column() {
+        let inner_if = Stmt::IfThenElse {
+            cond: name("d"),
+            then_branch: Box::new(ret("a")),
+            else_branch: None,
+        };
+        let body = Comp::Last(Stmt::IfThenElse {
+            cond: name("c"),
+            then_branch: Box::new(Comp::Last(inner_if.clone())),
+            else_branch: Some(Box::new(Comp::Then(inner_if, Box::new(ret("b"))))),
+        });
+        // The outer `else` is not the inner `if`'s, and the second branch's
+        // `if` is not an `elif`.
+        assert_eq!(
+            let_x(computation(body)),
+            "let x = (async { if (c) then if (d) then return (a)\n                 else\n                   if (d) then return (a)\n                   return (b) })\n"
+        );
     }
 
     #[test]

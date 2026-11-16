@@ -19,9 +19,10 @@
 
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
-    Access, Args, ArrayRank, Attribute, AttributeArgs, Binding, BindingHead, Const, Expr, Float32,
-    Float64, ForDirection, ImplFile, LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace,
-    NamespaceName, NestedModule, Pat, RecordField, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
+    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, BangKind, Binding, BindingHead,
+    Comp, CompClause, Const, Expr, Float32, Float64, ForDirection, ImplFile, LetBindings,
+    MatchClause, ModuleDecl, NamedModule, Namespace, NamespaceName, NestedModule, Pat, RecordField,
+    Stmt, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -306,6 +307,11 @@ fn binding<V: Version>(b: &NormalisedBinding) -> L<Binding<V>> {
     if !matches!(b.leading_keyword, K::Let | K::LetRec | K::And) {
         return decline("binding keyword other than let/and");
     }
+    binding_body(b)
+}
+
+/// A binding whatever its keyword, which the caller has checked.
+fn binding_body<V: Version>(b: &NormalisedBinding) -> L<Binding<V>> {
     if b.self_id.is_some() {
         return decline("binding self identifier");
     }
@@ -447,6 +453,10 @@ fn expr<V: Version>(e: &NormalisedExpr) -> L<Expr<V>> {
                     rhs: b(arg)?,
                 }
             }
+            _ if let N::ComputationExpr(body) = &**arg => Expr::Computation {
+                builder: b(func)?,
+                body: Box::new(comp(body)?),
+            },
             _ => application(func, arg)?,
         },
         N::App {
@@ -727,6 +737,175 @@ fn args<V: Version>(elements: &[NormalisedExpr]) -> L<Args<V>> {
     Ok(match Vec1::from_vec(named) {
         Some(named) => Args::Named { positional, named },
         None => Args::Positional(Vec2::from_vec(positional).ok_or(Decline("short list"))?),
+    })
+}
+
+/// A computation expression's body. FCS nests a binding over the statements
+/// after it, and flattens the rest of a sequence; a binding before the end of
+/// a sequence scopes over less than the rest of the block, which the tree
+/// cannot say.
+fn comp<V: Version>(e: &NormalisedExpr) -> L<Comp<V>> {
+    use NormalisedExpr as N;
+    use NormalisedLeadingKeyword as K;
+    Ok(match e {
+        N::Sequential(items) => {
+            let (last, init) = items.split_last().ok_or(Decline("empty sequential"))?;
+            let mut acc = comp(last)?;
+            for item in init.iter().rev() {
+                if let N::LetOrUse { .. } = item {
+                    return decline("comp: binding scoped short of the block");
+                }
+                acc = Comp::Then(stmt(item)?, Box::new(acc));
+            }
+            acc
+        }
+        N::LetOrUse {
+            is_rec,
+            bindings,
+            body,
+        } => {
+            let rest = Box::new(comp(body)?);
+            let [first, others @ ..] = bindings.as_slice() else {
+                return decline("comp: binding group without bindings");
+            };
+            match first.leading_keyword {
+                K::Let | K::LetRec => Comp::Let(let_bindings(*is_rec, bindings)?, rest),
+                K::Use if !*is_rec && others.is_empty() => {
+                    Comp::Use(Box::new(binding_body(first)?), rest)
+                }
+                K::LetBang | K::UseBang => {
+                    let simple = |b: &NormalisedBinding| {
+                        b.attributes.is_empty()
+                            && !b.is_mutable
+                            && !b.is_inline
+                            && b.access.is_none()
+                            && b.self_id.is_none()
+                    };
+                    if *is_rec || !bindings.iter().all(simple) {
+                        return decline("comp: bang binding with modifiers");
+                    }
+                    let ands = others
+                        .iter()
+                        .map(|b| {
+                            if b.leading_keyword != K::AndBang {
+                                return decline("comp: bang group keyword");
+                            }
+                            Ok(AndBang {
+                                gate: V::AndBang::WITNESS
+                                    .ok_or(Decline("comp: and! before its version"))?,
+                                pat: pat(&b.pat)?,
+                                value: expr(&b.expr)?,
+                            })
+                        })
+                        .collect::<L<Vec<_>>>()?;
+                    Comp::Bang {
+                        kind: if first.leading_keyword == K::LetBang {
+                            BangKind::Let
+                        } else {
+                            BangKind::Use
+                        },
+                        pat: pat(&first.pat)?,
+                        value: expr(&first.expr)?,
+                        ands,
+                        rest,
+                    }
+                }
+                _ => return decline("comp: binding keyword"),
+            }
+        }
+        other => Comp::Last(stmt(other)?),
+    })
+}
+
+/// A computation expression's statement. A parenthesised one is an
+/// expression: F#'s checker refuses a parenthesised control construct.
+fn stmt<V: Version>(e: &NormalisedExpr) -> L<Stmt<V>> {
+    use NormalisedExpr as N;
+    let c = |e: &NormalisedExpr| comp(e).map(Box::new);
+    Ok(match e {
+        N::YieldOrReturn { flags, from, inner } => {
+            let inner = expr(inner)?;
+            match (flags, from) {
+                ((true, false), false) => Stmt::Yield(inner),
+                ((true, false), true) => Stmt::YieldFrom(inner),
+                ((false, true), false) => Stmt::Return(inner),
+                ((false, true), true) => Stmt::ReturnFrom(inner),
+                _ => return decline("comp: yield or return flags"),
+            }
+        }
+        N::DoBang(e) => Stmt::DoBang(expr(e)?),
+        N::IfThenElse {
+            condition,
+            then_branch,
+            else_branch,
+        } => Stmt::IfThenElse {
+            cond: expr(condition)?,
+            then_branch: c(then_branch)?,
+            else_branch: else_branch.as_deref().map(c).transpose()?,
+        },
+        N::Match { scrutinee, clauses } => Stmt::Match {
+            scrutinee: expr(scrutinee)?,
+            clauses: vec1(clauses, comp_clause)?,
+        },
+        N::MatchBang { scrutinee, clauses } => Stmt::MatchBang {
+            scrutinee: expr(scrutinee)?,
+            clauses: vec1(clauses, comp_clause)?,
+        },
+        N::While { cond, body } => Stmt::While {
+            cond: expr(cond)?,
+            body: c(body)?,
+        },
+        N::WhileBang { cond, body } => Stmt::WhileBang {
+            gate: V::WhileBang::WITNESS.ok_or(Decline("comp: while! before its version"))?,
+            cond: expr(cond)?,
+            body: c(body)?,
+        },
+        N::For {
+            ident: var,
+            from,
+            ascending,
+            to,
+            body,
+        } => Stmt::For {
+            var: ident(var)?,
+            from: expr(from)?,
+            direction: if *ascending {
+                ForDirection::To
+            } else {
+                ForDirection::Downto
+            },
+            to: expr(to)?,
+            body: c(body)?,
+        },
+        N::ForEach {
+            pat: p,
+            enum_expr,
+            body,
+        } => Stmt::ForEach {
+            pat: pat(p)?,
+            source: expr(enum_expr)?,
+            body: c(body)?,
+        },
+        N::TryWith { body, clauses } => Stmt::TryWith {
+            body: c(body)?,
+            clauses: vec1(clauses, comp_clause)?,
+        },
+        N::TryFinally { body, finally } => Stmt::TryFinally {
+            body: c(body)?,
+            finally: expr(finally)?,
+        },
+        N::LetOrUse { .. } | N::Sequential(_) => {
+            return decline("comp: block where a statement belongs");
+        }
+        other => Stmt::Expr(expr(other)?),
+    })
+}
+
+fn comp_clause<V: Version>(cl: &NormalisedMatchClause) -> L<CompClause<V>> {
+    Ok(CompClause {
+        pat: pat(&cl.pat)?,
+        guard: cl.when.as_deref().map(expr).transpose()?,
+        body: comp(&cl.result)?,
     })
 }
 

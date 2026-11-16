@@ -324,14 +324,14 @@ This is a Cargo workspace with ten members:
   `t` at version `V`, FCS at `V` must parse `print(t)` with no diagnostic at
   all and its parse must lower back to `t` exactly (and our parser must agree
   with FCS); generated trees are checked at `preview` too, and each gated
-  construct must draw FCS's FS3350 one version below its gate
-  (`print_roundtrip::gates`). The trees come from a generator over the whole
-  tree at every version, from exhaustive tables of keywords and short operator
-  spellings, and from every corpus file lowered with the unmodelled
-  declarations dropped
-  (`print_roundtrip::corpus`, pinned per file). When the oracle finds a value
-  F# cannot express, the fix is to the tree's types, so that value cannot be
-  built; CI runs the printer's tests under the `cst` change filter.
+  construct FCS's parser enforces must draw its FS3350 one version below its
+  gate (`print_roundtrip::gates`). The trees come from a generator over the
+  whole tree at every version, from exhaustive tables of keywords, short
+  operator spellings and computation-expression statements nested in each
+  other, and from every corpus file lowered with the unmodelled declarations
+  dropped (`print_roundtrip::corpus`, pinned per file). When the oracle finds
+  a value F# cannot express, the fix is to the tree's types, so that value
+  cannot be built; CI runs the printer's tests under the `cst` change filter.
 - `crates/sema/` — `borzoi-sema`. Semantic analysis (name resolution
   today, type inference later) over the `borzoi-cst` AST. `resolve_file`
   builds a position-ordered scope tree and resolves each name use to its
