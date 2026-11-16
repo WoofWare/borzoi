@@ -21,7 +21,7 @@ use borzoi_oracle_harness::project_graph::{
 use serde_json::Value;
 
 use super::source_reference_gen::{
-    ANCHOR_USE, Case, anchor_module, consumer_files, generate, kinds, library_files,
+    ANCHOR_USE, Case, anchor_module, consumer_files, generate, kinds, library_files, middle_files,
 };
 
 fn name(s: &str) -> PlainName {
@@ -170,25 +170,36 @@ fn seed() -> u64 {
     std::env::var("BORZOI_SOURCE_REF_SEED")
         .ok()
         .map(|s| s.parse().expect("BORZOI_SOURCE_REF_SEED is a u64"))
-        .unwrap_or(0x5eed_0f_5ce5)
+        .unwrap_or(0x005e_ed0f_5ce5)
 }
 
 fn case_fixture(case: &Case) -> ProjectGraphFixture {
-    ProjectGraphFixture::materialise(vec![
-        FixtureProject {
-            name: name(&case.library),
-            files: files(library_files(case)),
-            project_refs: Vec::new(),
-            defines: Vec::new(),
-        },
-        FixtureProject {
-            name: name(&case.consumer),
-            files: files(consumer_files(case)),
-            project_refs: vec![name(&case.library)],
-            defines: Vec::new(),
-        },
-    ])
-    .expect("a generated case is a graph")
+    let library = name(&case.library);
+    let mut projects = vec![FixtureProject {
+        name: library.clone(),
+        files: files(library_files(case)),
+        project_refs: Vec::new(),
+        defines: Vec::new(),
+    }];
+    let consumer_refs = match middle_files(case) {
+        Some((middle, sources)) => {
+            projects.push(FixtureProject {
+                name: name(&middle),
+                files: files(sources),
+                project_refs: vec![library],
+                defines: Vec::new(),
+            });
+            vec![name(&middle)]
+        }
+        None => vec![library],
+    };
+    projects.push(FixtureProject {
+        name: name(&case.consumer),
+        files: files(consumer_files(case)),
+        project_refs: consumer_refs,
+        defines: Vec::new(),
+    });
+    ProjectGraphFixture::materialise(projects).expect("a generated case is a graph")
 }
 
 /// Each JSON value of `xs` not matched by an equal one in `ys`, as text.
@@ -254,7 +265,12 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
         &cases
             .iter()
             .zip(&fixtures)
-            .map(|(c, f)| f.fsproj(&name(&c.library)))
+            .flat_map(|(c, f)| {
+                f.closure(&name(&c.consumer))
+                    .into_iter()
+                    .map(|p| f.fsproj(&p.name))
+                    .collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>(),
     );
 
@@ -284,10 +300,18 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
                     case.library
                 ));
             }
+            // FS0074: a type reached through the middle project lives in an
+            // assembly the consumer was not handed.
+            if errors(answer).iter().any(|e| e["ErrorNumber"] == 74) {
+                problems.push(format!(
+                    "the {side} answer misses a transitive reference (FS0074)"
+                ));
+            }
         }
         if !problems.is_empty() {
             let sources: String = library_files(case)
                 .into_iter()
+                .chain(middle_files(case).into_iter().flat_map(|(_, f)| f))
                 .chain(consumer_files(case))
                 .map(|(n, t)| format!("--- {n}\n{t}"))
                 .collect();
@@ -348,6 +372,7 @@ fn the_generated_graphs_cover_every_declaration_kind() {
         "assembly-level auto-open",
         "IVT to the consumer",
         "IVT to another assembly",
+        "transitive reference through a middle project",
     ];
     let missing: Vec<&str> = want.iter().copied().filter(|k| !seen.contains(k)).collect();
     assert!(
