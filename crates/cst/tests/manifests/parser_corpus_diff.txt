@@ -52,7 +52,6 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefi
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleAbbreviations/E_InvalidAbbrevName01.fs	both-reject exact 0/0/1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleAbbreviations/E_InvalidAbbrevName02.fs	both-reject exact 0/0/1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/ModuleAbbreviations/E_UseInsideFunc.fs	both-reject outside-damage 1/1/2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/OperatorNames/AstrSymbOper01.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/OperatorNames/E_BasicOperatorNames01.fs	both-reject exact 2/2/4
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/PrecedenceAndOperators/E_QuestionMark01.fs	we-accept-fcs-rejects exact 2/2/6
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/PrecedenceAndOperators/E_QuestionMark02.fs	we-accept-fcs-rejects exact 2/2/5
@@ -89,8 +88,6 @@ tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/Simple/E_Syntax
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/SimpleConstant/E_NoRangeConst01.fs	both-reject outside-damage 8/8/9
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/TypeConstraint/E_typeconstraint01.fs	both-reject outside-damage 4/4/5
 tests/FSharp.Compiler.ComponentTests/Conformance/PseudoCustomAttributes/AssemblyCopyright_001.fs	non-utf8
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/BasicExtensionOperators.fs	range-divergent
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ScopeCapture.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase02.fsx	both-reject outside-damage 1/1/1
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase03.fsx	both-reject outside-damage 1/1/1
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase04.fsx	both-reject outside-damage 1/1/2
@@ -107,7 +104,6 @@ tests/FSharp.Compiler.ComponentTests/Conformance/UnitsOfMeasure/Parenthesis/E_Er
 tests/FSharp.Compiler.ComponentTests/Conformance/UnitsOfMeasure/Parenthesis/E_Error06.fsx	both-reject exact 4/4/5
 tests/FSharp.Compiler.ComponentTests/Conformance/UnitsOfMeasure/Parenthesis/E_IncompleteParens01.fsx	both-reject exact 2/2/3
 tests/FSharp.Compiler.ComponentTests/Conformance/UnitsOfMeasure/Parenthesis/E_IncompleteParens02.fsx	both-reject outside-damage 4/4/5
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Inlining/Match02.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/EmittedIL/QueryExpressionStepping/Utils.fs	non-utf8
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DerivedType.fs	both-reject exact 3/3/4
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Structure/DoNotInlineX.fs	both-reject outside-damage 9/9/10
@@ -121,8 +117,6 @@ tests/FSharp.Compiler.ComponentTests/InteractiveSession/ErrorTestCases/E_let_id_
 tests/FSharp.Compiler.ComponentTests/InteractiveSession/ErrorTestCases/E_let_mutable_equal.fsx	both-reject outside-damage 2/2/3
 tests/FSharp.Compiler.ComponentTests/InteractiveSession/ErrorTestCases/E_module_mutable_id_equal.fsx	both-reject outside-damage 0/0/1
 tests/FSharp.Compiler.ComponentTests/InteractiveSession/ErrorTestCases/E_type_id_equal_pipe.fsx	both-reject exact 2/2/3
-tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/libtest.fsx	range-divergent
-tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/measures.fsx	range-divergent
 tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/members_basics.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/AlternateGenericTypeSyntax01.fs	both-reject outside-damage 5/5/6
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/DeclarationElements/ObjectConstructors/E_MissingArgumentForGetterProp01.fs	both-reject outside-damage 2/2/3
@@ -264,10 +258,8 @@ tests/fsharp/core/large/lets/LargeLets-maxtested.fs	we-reject-fcs-accepts diverg
 tests/fsharp/core/large/mixed/LargeSequentialLet-500.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@25653,module[0]/Expr@25704
 tests/fsharp/core/large/mixed/LargeSequentialLet-maxtested.fs	we-reject-fcs-accepts divergent 2/4/5 at:module[0]/Expr@25653,module[0]/Expr@25704
 tests/fsharp/core/large/sequential/LargeSequential-maxtested.fs	fcs-error
-tests/fsharp/core/libtest/test.fsx	range-divergent
 tests/fsharp/core/load-script/loadfail1.fsx	both-reject exact 0/0/2
 tests/fsharp/core/longnames/test.fsx	range-divergent
-tests/fsharp/core/measures/test.fsx	range-divergent
 tests/fsharp/core/members/absil.fs	both-reject divergent 0/0/1 at:module[0]/Let@277
 tests/fsharp/core/members/absil.fsi	both-reject divergent 15/15/17 beyond-fcs:532 at:module[0]/Val@2086,module[0]/Val@2125,module[0]/Val@2171,module[0]/Val@2227,module[0]/Types@2270,module[0]/Val@4543,module[0]/Val@4575,module[0]/Val@4623,+56#9be39c15
 tests/fsharp/core/members/basics-hw/test.fsx	we-reject-fcs-accepts divergent 1776/1779/1781 at:module[0]/Types@127766,module[0]/Let@127926,module[0]/Let@127953,module[0]/nested@127733/Types@127766,module[0]/nested@127733/Let@127926,module[0]/nested@127733/Let@127953
