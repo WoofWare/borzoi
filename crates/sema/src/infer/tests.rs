@@ -66,7 +66,7 @@ fn primitive_env() -> AssemblyEnv {
             roots.push(synthetic_entity(&["System"], target, kind));
         }
     }
-    AssemblyEnv::from_assemblies_with_abbreviation_visibility(vec![(
+    AssemblyEnv::from_synthetic_assemblies(vec![(
         std::path::PathBuf::from("FSharp.Core.dll"),
         roots,
         crate::AbbreviationVisibility::Modelled,

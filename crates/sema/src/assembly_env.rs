@@ -1626,7 +1626,12 @@ impl AssemblyEnv {
     /// file it came from — go-to-definition reads that DLL's portable PDB for the
     /// source location. Same name-index rules as [`Self::from_entities`]; on a
     /// cross-assembly `(namespace, name, arity)` collision the assembly listed
-    /// first wins (deterministic, refine-later).
+    /// first wins (deterministic, refine-later). It is handed no existence
+    /// index, and a projection cannot establish absence (it leaves out what
+    /// another assembly cannot name), so the extension gate's existence
+    /// questions answer "unknown" ([`ExistenceInput::Unread`]):
+    /// [`Self::from_views`] and
+    /// [`Self::from_assemblies_with_projection_knowability`] take the index.
     pub fn from_assemblies(assemblies: Vec<(PathBuf, Vec<Entity>)>) -> Self {
         Self::from_assemblies_with_abbreviation_visibility(
             assemblies
@@ -1653,6 +1658,24 @@ impl AssemblyEnv {
     pub fn from_assemblies_with_abbreviation_visibility(
         assemblies: Vec<(PathBuf, Vec<Entity>, AbbreviationVisibility, Vec<String>)>,
     ) -> Self {
+        Self::from_assemblies_with_existence(assemblies, ExistenceInput::Unread)
+    }
+
+    /// [`Self::from_assemblies_with_abbreviation_visibility`] for **synthetic**
+    /// assemblies, a test's hand-built entities, which are taken as
+    /// everything the assemblies declare ([`ExistenceInput::Synthetic`]). A real
+    /// assembly's projection leaves out what another assembly cannot name, so
+    /// it never goes through here.
+    pub fn from_synthetic_assemblies(
+        assemblies: Vec<(PathBuf, Vec<Entity>, AbbreviationVisibility, Vec<String>)>,
+    ) -> Self {
+        Self::from_assemblies_with_existence(assemblies, ExistenceInput::Synthetic)
+    }
+
+    fn from_assemblies_with_existence(
+        assemblies: Vec<(PathBuf, Vec<Entity>, AbbreviationVisibility, Vec<String>)>,
+        existence: ExistenceInput,
+    ) -> Self {
         Self::from_assemblies_with_projection_knowability(
             assemblies
                 .into_iter()
@@ -1666,7 +1689,7 @@ impl AssemblyEnv {
                     AssemblyProjectionInput {
                         path,
                         roots,
-                        existence: ExistenceInput::Synthetic,
+                        existence: existence.clone(),
                         abbreviation_visibility: visibility,
                         extension_index_unknowable: false,
                         signature_non_authoritative: false,
