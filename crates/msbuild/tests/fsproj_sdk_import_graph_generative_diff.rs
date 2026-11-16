@@ -40,6 +40,12 @@
 //!   overwritten, or refused then overwritten from a value an import it cannot
 //!   decide redefines; in `Sdk.props`, the body, or a helper `Sdk.targets`
 //!   imports just before its point.
+//! - an import of a user's file, or an `<ImportGroup>` around one, in `Sdk.props`,
+//!   the body or `Sdk.targets`, under a gate MSBuild takes or skips that reads a
+//!   value the walk doubts: one written under a condition it cannot decide, a
+//!   toolset property it does not seed, one an import it cannot decide
+//!   rewrites, one refused then overwritten, and one an SDK file marks tainted
+//!   without a diagnostic (the gated imports, [`GateInput`]).
 //!
 //! Every file appends its marker to `Trace`, so the final value is a log of
 //! which files ran and in what order, and defines the target `T`, so MSBuild's
@@ -368,6 +374,67 @@ impl Repeat {
     }
 }
 
+/// Where a [`GatedImport`] is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GatedSite {
+    /// At the end of `Sdk.props`.
+    SdkProps,
+    /// In the body, after the project's own tracer.
+    Body,
+    /// In `Sdk.targets`, before its closing tracer.
+    SdkTargets,
+}
+
+/// How the value a [`GatedImport`]'s gate reads is put in doubt to the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GateInput {
+    /// `GateIn` is written `off`, then `on` under a condition MSBuild takes and
+    /// the walk cannot decide: the walk holds a value it cannot pin down.
+    UnderUndecidedCondition,
+    /// The gate reads `$(RoslynTargetsPath)`, a toolset property the walk does
+    /// not seed and MSBuild defines.
+    UnseededToolset,
+    /// `GateIn` is written `on`, then a property group whose gate reads
+    /// `$(RoslynTargetsPath)` (so the walk cannot pin it down) holds a write of
+    /// `GateIn` under a condition that is cleanly false. In an SDK file the
+    /// walk marks `GateIn` SDK-tainted without a diagnostic, though no build
+    /// rewrites it, so the gate reads a value the walk calls untrusted and its
+    /// decision raises nothing.
+    SdkTaintedOnly,
+    /// `GateIn` is written from a value the walk refuses, then overwritten
+    /// with `on`.
+    RefusedThenOverwritten,
+    /// `GateIn` is written `off`, then rewritten `on` by an import MSBuild
+    /// takes and the walk cannot decide: a stale value.
+    HiddenRewrite,
+}
+
+/// An `<Import>` (or an `<ImportGroup>` around one) of the user's
+/// `gated.props` under a condition that reads a value the walk doubts. The
+/// file appends its tracer, so all three item axes see whether it ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GatedImport {
+    site: GatedSite,
+    input: GateInput,
+    /// Through an `<ImportGroup Condition>` rather than the import's own.
+    group: bool,
+    /// The gate tests the value MSBuild holds (`on`, or a defined
+    /// `RoslynTargetsPath`), so MSBuild takes the import; otherwise it tests
+    /// the other value and skips it.
+    taken: bool,
+}
+
+impl GatedImport {
+    /// Whether the gate's decision raises a diagnostic in the walk, which
+    /// latches its opacity: every input but the two it decides exactly.
+    fn undecided_to_the_walk(self) -> bool {
+        !matches!(
+            self.input,
+            GateInput::SdkTaintedOnly | GateInput::RefusedThenOverwritten
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Case {
     form: Form,
@@ -389,6 +456,9 @@ struct Case {
     repeat_which: Which,
     point_doubt: PointDoubt,
     repeats: Vec<Repeat>,
+    /// Never at an SDK site in an SDK-less project, which has no SDK file to
+    /// write it in, so a case with one always evaluates its gate.
+    gated: Option<GatedImport>,
 }
 
 /// The properties every case reads back.
@@ -553,7 +623,73 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
                 ]),
             })
             .collect(),
+        gated: (rng.below(2) == 0)
+            .then(|| GatedImport {
+                site: *rng.pick(&[GatedSite::SdkProps, GatedSite::Body, GatedSite::SdkTargets]),
+                input: *rng.pick(&[
+                    GateInput::UnderUndecidedCondition,
+                    GateInput::UnseededToolset,
+                    GateInput::SdkTaintedOnly,
+                    GateInput::SdkTaintedOnly,
+                    GateInput::RefusedThenOverwritten,
+                    GateInput::RefusedThenOverwritten,
+                    GateInput::HiddenRewrite,
+                ]),
+                group: rng.below(2) == 0,
+                taken: rng.below(2) == 0,
+            })
+            // An SDK-less project has no SDK file to write the import in.
+            .filter(|g| g.site == GatedSite::Body || form != Form::SdkLess),
     }
+}
+
+/// The gated import written at `site`, with the writes that put its input in
+/// doubt just before it, in the same file.
+fn render_gated(case: &Case, site: GatedSite) -> String {
+    let Some(g) = case.gated.filter(|g| g.site == site) else {
+        return String::new();
+    };
+    // `$(GateX.Substring(0,1))` is `a` to MSBuild; the walk computes no
+    // `Substring`.
+    let writes = match g.input {
+        GateInput::UnderUndecidedCondition => "  <PropertyGroup>\n    <GateX>abc</GateX>\n    \
+             <GateIn>off</GateIn>\n    \
+             <GateIn Condition=\"'$(GateX.Substring(0,1))' == 'a'\">on</GateIn>\n  \
+             </PropertyGroup>\n"
+            .to_owned(),
+        GateInput::UnseededToolset => String::new(),
+        GateInput::SdkTaintedOnly => {
+            "  <PropertyGroup>\n    <GateIn>on</GateIn>\n  </PropertyGroup>\n  \
+             <PropertyGroup Condition=\"'$(RoslynTargetsPath)' != 'zzz'\">\n    \
+             <GateIn Condition=\"'$(GateIn)' == 'zzz'\">off</GateIn>\n  </PropertyGroup>\n"
+                .to_owned()
+        }
+        GateInput::RefusedThenOverwritten => "  <PropertyGroup>\n    <GateX>abc</GateX>\n    \
+             <GateIn>$(GateX.Substring(0,1))</GateIn>\n    <GateIn>on</GateIn>\n  \
+             </PropertyGroup>\n"
+            .to_owned(),
+        GateInput::HiddenRewrite => "  <PropertyGroup>\n    <GateX>abc</GateX>\n    \
+             <GateIn>off</GateIn>\n  </PropertyGroup>\n  \
+             <Import Project=\"$(MSBuildProjectDirectory)/../gate-rewrite.props\" \
+             Condition=\"'$(GateX.Substring(0,1))' == 'a'\" />\n"
+            .to_owned(),
+    };
+    let condition = match (g.input, g.taken) {
+        (GateInput::UnseededToolset, true) => "'$(RoslynTargetsPath)' != ''",
+        (GateInput::UnseededToolset, false) => "'$(RoslynTargetsPath)' == ''",
+        (_, true) => "'$(GateIn)' == 'on'",
+        (_, false) => "'$(GateIn)' == 'off'",
+    };
+    let path = "$(MSBuildProjectDirectory)/../gated.props";
+    let import = if g.group {
+        format!(
+            "  <ImportGroup Condition=\"{condition}\">\n    <Import Project=\"{path}\" />\n  \
+             </ImportGroup>\n"
+        )
+    } else {
+        format!("  <Import Project=\"{path}\" Condition=\"{condition}\" />\n")
+    };
+    format!("{writes}{import}")
 }
 
 /// The file a repeat imports, as a path an import anywhere in the case
@@ -994,6 +1130,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
     if case.repeat_which == Which::Props {
         sdk_props.push_str(&repeats_at(case, RepeatSite::SdkAfterPoint));
     }
+    sdk_props.push_str(&render_gated(case, GatedSite::SdkProps));
     sdk_props.push_str("</Project>\n");
     sdk_files.push(("Sdk.props", sdk_props));
 
@@ -1069,6 +1206,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
     if case.repeat_which == Which::Targets {
         sdk_targets.push_str(&repeats_at(case, RepeatSite::SdkAfterPoint));
     }
+    sdk_targets.push_str(&render_gated(case, GatedSite::SdkTargets));
     sdk_targets.push_str(&tracer("sdkt2"));
     sdk_targets.push_str("</Project>\n");
     sdk_files.push(("Sdk.targets", sdk_targets));
@@ -1120,6 +1258,17 @@ fn render(case: &Case, sdk: &str) -> Rendered {
             tracer("other")
         ),
     ));
+    if case.gated.is_some() {
+        case_files.push((
+            "gated.props",
+            format!("<Project>\n{}</Project>\n", tracer("gated")),
+        ));
+        case_files.push((
+            "gate-rewrite.props",
+            "<Project>\n  <PropertyGroup>\n    <GateIn>on</GateIn>\n  </PropertyGroup>\n</Project>\n"
+                .to_owned(),
+        ));
+    }
     if case.targets_present {
         let mut text = String::from("<Project>\n");
         text.push_str(&tracer("dbt"));
@@ -1162,6 +1311,7 @@ fn render(case: &Case, sdk: &str) -> Rendered {
     }
     body.push_str(&reimports_at(case, Site::Body, sdk));
     body.push_str(&repeats_at(case, RepeatSite::Body));
+    body.push_str(&render_gated(case, GatedSite::Body));
     let disable_props = format!(
         "{}{}",
         if case.body_disables_props_import {
@@ -1207,11 +1357,13 @@ enum Family {
     /// refused: the walk takes one side of every import it decides, and a
     /// later write of a property the skipped (or followed) file also writes
     /// is published as trusted, with only later *undefined* reads made
-    /// inexact (#791). It holds #820's remainder too: an import point in
-    /// content the walk cannot see whose failure ([`PointDoubt::GateOr`] over
-    /// a missing file) makes MSBuild reject an evaluation the walk cannot know
-    /// is rejected. Covers property findings only: the Compile set, the reference list
-    /// and the define set must still be uncertain.
+    /// inexact (#791). The same holds for a gated import whose gate the walk
+    /// cannot decide ([`GatedImport::undecided_to_the_walk`]). It holds #820's
+    /// remainder too: an import point in content the walk cannot see whose
+    /// failure ([`PointDoubt::GateOr`] over a missing file) makes MSBuild reject
+    /// an evaluation the walk cannot know is rejected. Covers property findings
+    /// only: the Compile set, the reference list and the define set must still
+    /// be uncertain.
     UndecidedImportHidesWrites,
 }
 
@@ -1227,6 +1379,7 @@ impl Family {
                     || case.props_point == PropsPoint::BehindUndecidedImport
                     || case.targets_point == TargetsPoint::BehindUndecidedImport
                     || case.has_hidden_repeat()
+                    || case.gated.is_some_and(GatedImport::undecided_to_the_walk)
             }
         }
     }
@@ -1281,6 +1434,7 @@ impl Case {
             repeat_which: Which::Targets,
             point_doubt: PointDoubt::Decided,
             repeats: Vec::new(),
+            gated: None,
         }
     }
 
@@ -1293,13 +1447,16 @@ impl Case {
     /// A case with an [`Undecided`] write has no such obligation: that write
     /// may decide every import that follows it. Nor has a case whose import
     /// point is behind an import the walk cannot decide: what the hidden file
-    /// writes is the walk's to doubt.
+    /// writes is the walk's to doubt. Nor has a case with a gated import: its
+    /// gate reads a value the walk doubts, so the walk may settle a
+    /// `Directory.Build.*` import point it never reaches as undecided.
     fn must_commit(&self) -> &'static [&'static str] {
         if self.undecided.is_some()
             || self.has_hidden_repeat()
             || self.point_doubt != PointDoubt::Decided
             || self.props_point == PropsPoint::BehindUndecidedImport
             || self.targets_point == TargetsPoint::BehindUndecidedImport
+            || self.gated.is_some()
         {
             &[]
         } else {
@@ -1396,6 +1553,8 @@ struct Outcome {
     /// Whether MSBuild imported `Directory.Build.props` and `.targets`, read
     /// off the markers they write.
     msbuild_imported: Option<(bool, bool)>,
+    /// Whether MSBuild ran `gated.props`, read off its marker in `Trace`.
+    msbuild_ran_gated: bool,
 }
 
 fn symlink(target: &Path, link: &Path) {
@@ -1583,6 +1742,9 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         !theirs["properties"]["InDbp"].is_null(),
         !theirs["properties"]["InDbt"].is_null(),
     ));
+    outcome.msbuild_ran_gated = theirs["properties"]["Trace"]
+        .as_str()
+        .is_some_and(|trace| trace.split(';').any(|marker| marker == "gated"));
     for name in PROPERTIES {
         let theirs = &theirs["properties"][name];
         let read = &ours.properties[name];
@@ -1768,6 +1930,15 @@ fn brief(case: &Case) -> String {
             case.repeat_which, r.target, r.site
         ));
     }
+    if let Some(g) = case.gated {
+        s.push_str(&format!(
+            " gated[{:?} {:?}{}{}]",
+            g.input,
+            g.site,
+            if g.group { " group" } else { "" },
+            if g.taken { " taken" } else { "" }
+        ));
+    }
     s
 }
 
@@ -1804,6 +1975,12 @@ fn census_keys(case: &Case) -> Vec<String> {
         keys.push(format!("repeat.target={:?}", r.target));
         keys.push(format!("repeat.site={:?}", r.site));
         keys.push(format!("repeat.with={:?}", case.point_doubt));
+    }
+    if let Some(g) = case.gated {
+        keys.push(format!("gated.site={:?}", g.site));
+        keys.push(format!("gated.input={:?}", g.input));
+        keys.push(format!("gated.group={}", g.group));
+        keys.push(format!("gated.taken={}", g.taken));
     }
     if let Some(u) = case.undecided {
         keys.push(format!("undecided.site={:?}", u.site));
@@ -1894,6 +2071,20 @@ fn sweep(seed: u64, cases: usize) -> Report {
                     *report.census.entry(key).or_default() += 1;
                 }
             }
+        }
+        if let Some(g) = case.gated
+            && outcome.certain_compile
+            && outcome.certain_defines
+        {
+            let place = if g.site == GatedSite::Body {
+                "user"
+            } else {
+                "sdk"
+            };
+            *report
+                .census
+                .entry(format!("gated_graded={:?}@{place}", g.input))
+                .or_default() += 1;
         }
         report.cases += 1;
         report.rejected += usize::from(outcome.rejected);
@@ -2131,6 +2322,18 @@ fn the_import_graph_is_exact_or_declined() {
         "repeat.with=GateFalse",
         "repeat.with=GateOr",
         "repeat.with=PathRefused",
+        "gated.site=SdkProps",
+        "gated.site=Body",
+        "gated.site=SdkTargets",
+        "gated.input=UnderUndecidedCondition",
+        "gated.input=UnseededToolset",
+        "gated.input=SdkTaintedOnly",
+        "gated.input=RefusedThenOverwritten",
+        "gated.input=HiddenRewrite",
+        "gated.group=true",
+        "gated.group=false",
+        "gated.taken=true",
+        "gated.taken=false",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -2165,6 +2368,23 @@ fn the_import_graph_is_exact_or_declined() {
     assert!(
         uncommitted.is_empty(),
         "re-import shapes that reached a graded commit fewer than 3 times: {uncommitted:?}"
+    );
+    // And a gate the walk decides exactly though it reads a doubted value (an
+    // SDK-tainted one, a refused-then-overwritten one) leaves the Compile and
+    // define sets certain, so the sweep grades them against MSBuild. Taint
+    // arises in an SDK file alone.
+    let ungraded: Vec<String> = [
+        "gated_graded=SdkTaintedOnly@sdk",
+        "gated_graded=RefusedThenOverwritten@user",
+        "gated_graded=RefusedThenOverwritten@sdk",
+    ]
+    .into_iter()
+    .filter(|key| report.census.get(*key).copied().unwrap_or(0) < 3)
+    .map(str::to_owned)
+    .collect();
+    assert!(
+        ungraded.is_empty(),
+        "gated inputs whose Compile and define sets were graded fewer than 3 times: {ungraded:?}"
     );
 }
 
@@ -2323,6 +2543,73 @@ fn a_hidden_sdk_import_of_a_user_file_commits_no_compile_set() {
             ..Case::usual()
         });
     }
+}
+
+/// Every gated import, on the usual SDK shape: MSBuild accepts each project,
+/// and the walk publishes MSBuild's Compile set, reference list and define set,
+/// or declines each, whichever way MSBuild takes the gate. Where the walk
+/// decides the gate exactly (an input it holds exactly, though one an SDK file
+/// marked tainted or one a refused write left marked), every value it commits
+/// is MSBuild's too, and it commits the Compile and define sets: such a gate is
+/// decided in every build.
+#[test]
+fn a_gate_reading_a_doubted_value_is_exact_or_declined_on_every_axis() {
+    let mut shared = Shared::new();
+    let mut failures = Vec::new();
+    for site in [GatedSite::SdkProps, GatedSite::Body, GatedSite::SdkTargets] {
+        for input in [
+            GateInput::UnderUndecidedCondition,
+            GateInput::UnseededToolset,
+            GateInput::SdkTaintedOnly,
+            GateInput::RefusedThenOverwritten,
+            GateInput::HiddenRewrite,
+        ] {
+            for group in [false, true] {
+                for taken in [false, true] {
+                    let gated = GatedImport {
+                        site,
+                        input,
+                        group,
+                        taken,
+                    };
+                    let case = Case {
+                        gated: Some(gated),
+                        ..Case::usual()
+                    };
+                    let (outcome, describe) = evaluate(&mut shared, &case);
+                    let findings: Vec<&Finding> = outcome
+                        .findings
+                        .iter()
+                        .filter(|f| {
+                            !gated.undecided_to_the_walk() || f.kind != FindingKind::Property
+                        })
+                        .collect();
+                    let ungraded = !gated.undecided_to_the_walk()
+                        && !(outcome.certain_compile && outcome.certain_defines);
+                    // The gate goes the way the case says in MSBuild, so both
+                    // directions are graded.
+                    let misdirected = outcome.msbuild_ran_gated != taken;
+                    if outcome.rejected || !findings.is_empty() || ungraded || misdirected {
+                        failures.push(format!(
+                            "{}: rejected {}, MSBuild ran gated.props {}, Compile certain {}, \
+                             defines certain {}, findings {findings:#?}\n{describe}",
+                            brief(&case),
+                            outcome.rejected,
+                            outcome.msbuild_ran_gated,
+                            outcome.certain_compile,
+                            outcome.certain_defines,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} gated cases failed:\n{}",
+        failures.len(),
+        failures.join("\n=====\n")
+    );
 }
 
 /// Each known family's witness still diverges. When one stops, the family is
