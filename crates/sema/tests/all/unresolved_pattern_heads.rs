@@ -444,6 +444,31 @@ const NAMESAKE_CELLS: &[ProjectCell] = &[
         binder: Expect::Abandoned,
     },
     ProjectCell {
+        // `namespace N.Inner` opens `N.Inner` alone, so FCS does not see the
+        // union, and `System.Reflection.MethodBody` lacks `Il`: FS0039.
+        id: "union_in_an_unopened_ancestor_namespace",
+        earlier: &[("NamesakeUnions.fs", NAMESAKE_UNIONS)],
+        prelude: "namespace N.Inner\nopen System.Reflection\nmodule M =\n    let x = \"outer\"\n",
+        template: "    let f (b: N.MethodBody<int>) =\n        match b with\n        | MethodBody.Il «x» -> ignore ‹x›\n        | _ -> ()\n",
+        binder: Expect::Abandoned,
+    },
+    ProjectCell {
+        // Opened, it is seen.
+        id: "union_in_an_opened_ancestor_namespace",
+        earlier: &[("NamesakeUnions.fs", NAMESAKE_UNIONS)],
+        prelude: "namespace N.Inner\nopen System.Reflection\nopen N\nmodule M =\n    let x = \"outer\"\n",
+        template: "    let f (b: N.MethodBody<int>) =\n        match b with\n        | MethodBody.Il «x» -> ‹x›\n        | _ -> 0\n",
+        binder: Expect::Interned,
+    },
+    ProjectCell {
+        // The in-file twin: an earlier namespace block of this file.
+        id: "in_file_union_in_an_unopened_ancestor_namespace",
+        earlier: &[],
+        prelude: "namespace N\ntype MethodBody<'a> =\n    | Il of 'a\n    | Jit of 'a\nnamespace N.Inner\nopen System.Reflection\nmodule M =\n    let x = \"outer\"\n",
+        template: "    let f (b: N.MethodBody<int>) =\n        match b with\n        | MethodBody.Il «x» -> ignore ‹x›\n        | _ -> ()\n",
+        binder: Expect::Abandoned,
+    },
+    ProjectCell {
         // So does one on the in-file union's case.
         id: "in_file_obsolete_error_case",
         earlier: &[],

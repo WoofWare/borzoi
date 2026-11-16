@@ -3371,6 +3371,10 @@ impl<'a> Resolver<'a> {
     /// * the project declares no type named `T` but the found union: its one
     ///   declaration of the name, exceptions included, in an earlier file or
     ///   this one;
+    /// * an earlier file's union is one FCS sees by its simple name
+    ///   ([`Self::sees_types_declared_in`]): the case index's container walk
+    ///   also reaches an enclosing namespace's ancestors, which FCS does not
+    ///   open;
     /// * the found case and its union carry no attribute list, since an
     ///   error-level attribute (`[<Obsolete(…, true)>]`) abandons the
     ///   sub-pattern before its arguments are checked;
@@ -3394,7 +3398,11 @@ impl<'a> Resolver<'a> {
         let earlier = self.preceding.earlier_type_arities.get(type_name);
         let project_only_found = match found {
             FoundUnion::EarlierFile(type_path) => {
-                type_path.last().map(String::as_str) == Some(type_name)
+                type_path
+                    .split_last()
+                    .is_some_and(|(last, container)| {
+                        last == type_name && self.sees_types_declared_in(container)
+                    })
                     && !self.prescan.own_type_simple_names.contains(type_name)
                     // Two declarations at one path are two types (at two
                     // arities, or an FS0037 duplicate). A signature's
@@ -3438,6 +3446,23 @@ impl<'a> Resolver<'a> {
                             .iter()
                             .any(|s| s.residue || s.entries.iter().any(|e| e.name == type_name)))
             })
+    }
+
+    /// Whether a type declared directly in project container `container` is
+    /// in scope here by its simple name: `container` is the root, this
+    /// block's own namespace or one of its enclosing modules, or an explicit
+    /// open's. A namespace block opens its own namespace alone, so inside
+    /// `namespace N.Inner` the types of `N` are not in scope.
+    fn sees_types_declared_in(&self, container: &[String]) -> bool {
+        let path = &self.lexical.container_path;
+        let own_namespace = self.lexical.namespace_depth.min(path.len());
+        container.is_empty()
+            || (container.len() >= own_namespace && path.get(..container.len()) == Some(container))
+            || self
+                .scope
+                .open_shortening_prefixes
+                .iter()
+                .any(|prefix| prefix.path == container)
     }
 
     /// Whether `res` names a union case whose case and type carry no attribute
