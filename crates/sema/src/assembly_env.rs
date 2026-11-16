@@ -210,9 +210,11 @@ impl ExtensionView<'_> {
     }
 
     /// Whether any referenced assembly may declare an extension of `name`
-    /// anywhere ([`ExistenceSet::extension_named_anywhere`]).
+    /// anywhere ([`ExistenceSet::extension_named_anywhere`]). A project
+    /// reference with no built output is missing from the universe, so with
+    /// one the universe bounds nothing.
     pub(crate) fn extension_named_anywhere(self, name: &str, is_static: bool) -> bool {
-        self.0.existence.extension_named_anywhere(name, is_static)
+        self.0.references_not_built || self.0.existence.extension_named_anywhere(name, is_static)
     }
 
     /// Whether some project reference has no built output yet.

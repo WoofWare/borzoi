@@ -220,6 +220,15 @@ mod tests {
             unenumerated.decline(synthetic.extension_view(), "NoSourceDeclaresThis", false),
             Some(GateInput::OpenNotEnumerated)
         );
+        // A project reference with no built output is missing from the
+        // universe, so it bounds nothing: the open may reach the unbuilt
+        // project's own extensions.
+        let mut missing = AssemblyEnv::default();
+        missing.mark_references_not_built();
+        assert_eq!(
+            unenumerated.decline(missing.extension_view(), "NoSourceDeclaresThis", false),
+            Some(GateInput::OpenNotEnumerated)
+        );
         // A project `open` declines only under an unbuilt project reference.
         let mut unbuilt = AssemblyEnv::default();
         unbuilt.mark_references_not_built();
