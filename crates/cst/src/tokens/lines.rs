@@ -149,7 +149,8 @@ impl<'s> LineStarts<'s> {
     }
 
     /// The byte offset of `pos`: its line's start, plus its column, plus the
-    /// excess (see [`Self::wide`]) of the non-ASCII characters between. Each
+    /// bytes the non-ASCII characters between spend beyond their UTF-16 code
+    /// units. Each
     /// such character found before the offset moves it on by its excess, so
     /// this costs a search for the line's first one and a step per one
     /// before the offset, and an ASCII line no step at all. A column in line 1
