@@ -43,6 +43,17 @@ use common::odd_entry::{self, Odd};
 
 const SDK: &str = "Contoso.Sdk";
 
+/// A workload environment with nothing to say; the fake roots hold no
+/// workload manifest, so the workload resolver serves no name.
+fn no_workloads() -> borzoi_msbuild::workloads::WorkloadEnvironment<'static> {
+    borzoi_msbuild::workloads::WorkloadEnvironment {
+        user_dotnet_root: None,
+        overrides_present: false,
+        global_json: Default::default(),
+        process_architecture: None,
+    }
+}
+
 fn props(name: &str) -> String {
     format!("<Project><PropertyGroup><Picked>{name}</Picked></PropertyGroup></Project>")
 }
@@ -336,7 +347,15 @@ fn the_default_resolver_serves_the_running_sdk_s_directory() {
             }
         }
         let case = format!("{site:?} as {shape:?}");
-        let ours = locate_dotnet_sdk(&fake, None, SDK, None, None, &Observer::new());
+        let ours = locate_dotnet_sdk(
+            &fake,
+            None,
+            SDK,
+            None,
+            None,
+            &no_workloads(),
+            &Observer::new(),
+        );
         if matches!(shape, Shape::Odd(Odd::Fifo)) && !matches!(site, Site::Directory) {
             assert!(
                 matches!(ours, Err(SdkResolveError::UnsupportedLayout { .. })),
@@ -513,6 +532,7 @@ fn nuget_serves_the_package_s_sdk_directory() {
             SDK,
             None,
             Some(&pins),
+            &no_workloads(),
             &Observer::new(),
         );
         let mut env = base_environment();
@@ -669,6 +689,7 @@ fn run_order_case(
         &sdk_ref,
         None,
         pins.as_ref(),
+        &no_workloads(),
         &Observer::new(),
     );
     let mut env = base_environment();
@@ -840,8 +861,16 @@ fn hostfxr_runs_the_highest_sdk_holding_a_dotnet_dll() {
         let project = case_dir.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("global.json"), "{}").unwrap();
-        let ours = locate_dotnet_sdk(&fake, None, SDK, None, None, &Observer::new())
-            .map(|paths| picked_in(&paths.root));
+        let ours = locate_dotnet_sdk(
+            &fake,
+            None,
+            SDK,
+            None,
+            None,
+            &no_workloads(),
+            &Observer::new(),
+        )
+        .map(|paths| picked_in(&paths.root));
         let theirs = hostfxr_resolved_sdk(&fake, &project, &trace).map(|dir| {
             if dir.ends_with("99.0.0") {
                 "stray".to_owned()

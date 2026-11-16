@@ -148,10 +148,10 @@ impl std::fmt::Display for SdkResolveError {
 impl std::error::Error for SdkResolveError {}
 
 /// Locate the SDK named `sdk_name` as MSBuild's resolvers do: the running
-/// host SDK's own copy under `dotnet_root`, else a restored copy in the
-/// per-user NuGet package cache.
+/// host SDK's own copy under `dotnet_root`, else the workload pack of that
+/// id, else a restored copy in the per-user NuGet package cache.
 ///
-/// The two layouts, in the order MSBuild consults them:
+/// The three, in the order MSBuild consults them:
 ///
 /// - **`$DOTNET_ROOT`** —
 ///   `{dotnet_root}/sdk/{version}/Sdks/{sdk_name}/Sdk/Sdk.{props,targets}`.
@@ -162,6 +162,13 @@ impl std::error::Error for SdkResolveError {}
 ///   `Directory.Exists` finds it, whatever version the reference names,
 ///   and before NuGet's resolver is asked; it never tries another installed
 ///   version.
+/// - **Workload packs** — the workload SDK resolver (priority 4000, ahead of
+///   NuGet's 6000) looks the name up as a workload pack id
+///   ([`workloads::resolve_workload_pack`], under `workload_env`) wherever the
+///   running SDK does not ship it. An installed pack serves its `Sdk` folder;
+///   no pack of the name for the host passes the name on to NuGet. Its
+///   manifests load before it answers, so a workload state we cannot resolve
+///   exactly declines every name the running SDK does not ship.
 /// - **NuGet package cache** —
 ///   `{nuget_packages_dir}/{sdk_name.to_ascii_lowercase()}/{version}/{Sdk,sdk}/Sdk.{props,targets}`.
 ///   Used by every NuGet-distributed SDK (`Microsoft.DotNet.Arcade.Sdk`,
@@ -193,22 +200,31 @@ impl std::error::Error for SdkResolveError {}
 ///   consulted or has no version of it.
 /// - [`SdkResolveError::UnsupportedLayout`] if the directory a resolver
 ///   serves lacks a regular `Sdk.props` or `Sdk.targets` (MSBuild then
-///   fails the import), NuGet serves a directory that does not exist, or
-///   the NuGet folder NuGet would consult is a relative path.
+///   fails the import), NuGet serves a directory that does not exist, the
+///   NuGet folder NuGet would consult is a relative path, the workload
+///   resolver's state is outside what [`workloads`] certifies, or the name is
+///   a workload pack that is not installed (MSBuild then imports nothing and
+///   adds a `MissingWorkloadPack` item, which the walk does not model).
 ///
 /// The function does not canonicalise the returned paths; they are
-/// `dotnet_root.join("sdk").join(...)` or
+/// `dotnet_root.join("sdk").join(...)`, a pack root's `packs/...` or
 /// `nuget_packages_dir.join(lowercased_name)...` literally, so the
 /// caller can tell which root won by inspecting the path components.
 ///
 /// ```no_run
 /// use std::path::PathBuf;
-/// use borzoi_msbuild::{locate_dotnet_sdk, parse_fsproj_with_imports};
+/// use borzoi_msbuild::{locate_dotnet_sdk, parse_fsproj_with_imports, workloads};
 ///
 /// let dotnet_root = PathBuf::from("/usr/local/share/dotnet");
 /// let nuget = PathBuf::from("/Users/me/.nuget/packages");
+/// let workload_env = workloads::WorkloadEnvironment {
+///     user_dotnet_root: None,
+///     overrides_present: false,
+///     global_json: Default::default(),
+///     process_architecture: None,
+/// };
 /// let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
-///     locate_dotnet_sdk(&dotnet_root, Some(&nuget), name, None, None, observer)
+///     locate_dotnet_sdk(&dotnet_root, Some(&nuget), name, None, None, &workload_env, observer)
 /// };
 /// // pass `Some(&resolver)` to parse_fsproj_with_imports.
 /// # let _ = resolver;
@@ -219,6 +235,7 @@ pub fn locate_dotnet_sdk(
     sdk_name: &str,
     spec: Option<&VersionSpec>,
     msbuild_sdks: Option<&std::collections::BTreeMap<String, SdkVersion>>,
+    workload_env: &workloads::WorkloadEnvironment<'_>,
     observer: &Observer,
 ) -> Result<SdkPaths, SdkResolveError> {
     // MSBuild allows `Sdk="Name/Version"` (e.g.
@@ -270,13 +287,39 @@ pub fn locate_dotnet_sdk(
             .iter()
             .position(|v| v == version)
             .expect("selection returns a candidate from the slice");
-        let sdk_root = host_versions[idx].1.join("Sdks").join(name).join("Sdk");
+        let host_dir = &host_versions[idx].1;
+        let sdk_root = host_dir.join("Sdks").join(name).join("Sdk");
         if let Some(root) = sdk_directory(sdk_root, observer)? {
             return Ok(sdk_paths(root));
         }
+        // 2. The workload SDK resolver of the running SDK. A locator name
+        //    is [`resolve_sdk`]'s to route before it reaches here.
+        if !workloads::is_workload_locator(name) {
+            match workloads::resolve_workload_pack(
+                name,
+                dotnet_root,
+                host_dir,
+                workload_env,
+                observer,
+            )? {
+                workloads::WorkloadPackResolution::NotAPack => {}
+                workloads::WorkloadPackResolution::Installed(root) => {
+                    return Ok(sdk_paths(root));
+                }
+                workloads::WorkloadPackResolution::Missing { version } => {
+                    return Err(SdkResolveError::UnsupportedLayout {
+                        reason: format!(
+                            "the workload pack {name} {version} is not installed, so MSBuild \
+                             imports nothing and adds a MissingWorkloadPack item, which is \
+                             not modelled"
+                        ),
+                    });
+                }
+            }
+        }
     }
 
-    // 2. NuGet, only with a version source: the per-import version, else the
+    // 3. NuGet, only with a version source: the per-import version, else the
     //    `msbuild-sdks` entry. Upstream's `Microsoft.Build.NuGetSdkResolver`
     //    refuses to scan the cache for a "best version" without one, and
     //    picking the highest restored copy could import a different SDK
@@ -731,6 +774,7 @@ pub fn resolve_sdk(
         sdk_name,
         spec,
         msbuild_sdks,
+        workload_env,
         observer,
     )
     .map(SdkResolution::from)
