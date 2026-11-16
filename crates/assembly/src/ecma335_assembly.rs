@@ -749,6 +749,38 @@ impl Ecma335Assembly {
         out
     }
 
+    /// Everything this assembly declares, at every accessibility, read from
+    /// its `TypeDef` table and its host F# signature pickle with no projection
+    /// in between ([`crate::existence`]).
+    pub fn existence_index(&self) -> Result<crate::ExistenceIndex, ImportError> {
+        let il = crate::existence::il_rows(&self.image);
+        let pickle = if self.fsharp_interface_data_version()?.is_none() {
+            crate::PickleLayer::NotFSharp
+        } else {
+            let resources = self.fsharp_resources()?;
+            match primary_signature_resource_for_host(&resources, &self.identity.name) {
+                None => crate::PickleLayer::Unreadable("no host signature resource".to_string()),
+                Some(_) if foreign_signature_data_present(&resources, &self.identity.name) => {
+                    crate::PickleLayer::Unreadable(
+                        "foreign CCUs' signatures are embedded beside the host's".to_string(),
+                    )
+                }
+                Some(sig) => {
+                    let stream_b =
+                        b_stream_signature_resource_for_host(&resources, &self.identity.name);
+                    match crate::fsharp_pickle::unpickle_signature(&sig.payload, stream_b) {
+                        Err(error) => crate::PickleLayer::Unreadable(error.to_string()),
+                        Ok(ccu) => match crate::existence::pickled_rows(&ccu) {
+                            Ok(rows) => crate::PickleLayer::Read(rows),
+                            Err(reason) => crate::PickleLayer::Unreadable(reason),
+                        },
+                    }
+                }
+            }
+        };
+        Ok(crate::ExistenceIndex { il, pickle })
+    }
+
     /// The assembly-level `FSharpInterfaceDataVersionAttribute` version triple,
     /// or `None` if the attribute is absent. The constructor signature is
     /// `(int32, int32, int32)`, so no enum widths are needed; a present-but-
