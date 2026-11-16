@@ -279,6 +279,29 @@ pub enum RejectionCause {
     /// ill-typed operand on the path it evaluates (MSB4086, MSB4092, MSB4113,
     /// …). `condition` is the attribute's text.
     IllegalCondition { condition: String },
+    /// A construct MSBuild refuses when it loads the file holding it, before
+    /// it evaluates any of it, whatever any condition in the file holds.
+    LoadTime(LoadTimeError),
+}
+
+/// A construct MSBuild refuses when it loads a file (#888).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadTimeError {
+    /// A property element named for a reserved property (any case), or for
+    /// one of the elements MSBuild reserves (exact case): MSB4004. A
+    /// property in a `<Target>` counts too.
+    ReservedProperty { name: String },
+    /// An item whose `Include`, `Update` or `Remove` is present and empty
+    /// (MSB4035, in a `<Target>` too), or, outside a `<Target>`, an item with
+    /// none of the three (MSB4232). `item` is its type.
+    ItemWithoutSpec { item: String },
+    /// An `<Import>` whose `Project` is absent or empty: MSB4035.
+    ImportWithoutProject,
+    /// A `<Choose>` MSBuild's loader refuses: no `<When>` (MSB4085), a
+    /// `<When>` without a `Condition` (MSB4035), an `<Otherwise>` out of
+    /// place (MSB4082, MSB4084), or an element or attribute it does not
+    /// allow (MSB4067, MSB4066), at any depth.
+    MalformedChoose,
 }
 
 /// Why an import may load no file.

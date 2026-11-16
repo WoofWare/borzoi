@@ -86,14 +86,14 @@ use roxmltree::Node;
 use crate::diagnostic::ImportFailReason;
 use crate::document::attribute;
 use crate::imports::normalise;
-use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
+use crate::{LoadTimeError, Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 
 use super::item_pass::expand_silent;
 use super::observed::{self, EntryKind};
 use super::{
-    SdkResolution, State, condition, condition_exists, directory_build, import_dedup_key,
-    properties, sdk_import_path, sdk_project_in_alphabet, sdk_project_under_root,
-    sdk_root_is_reparsed,
+    SdkResolution, State, choose_shape_is_valid, condition, condition_exists, directory_build,
+    import_dedup_key, is_msbuild_reserved_name, properties, sdk_import_path,
+    sdk_project_in_alphabet, sdk_project_under_root, sdk_root_is_reparsed,
 };
 
 impl State<'_> {
@@ -225,6 +225,136 @@ pub(super) fn illegal_condition_at(
         },
         span,
     );
+}
+
+/// Judge the file whose root element is `root`, which the walk is entering,
+/// for a construct MSBuild refuses when it loads the file (#888). MSBuild
+/// parses the whole file before it evaluates any of it, so no condition in
+/// the file matters, nor whether the walk later reaches the construct: the
+/// rejection is certain wherever MSBuild certainly loads the file, which is
+/// where the walk reaches the file's own import for certain.
+pub(super) fn judge_load_time(root: Node<'_, '_>, state: &mut State<'_>) {
+    if let Some((error, span)) = first_load_time_error(root) {
+        state.note_rejection(
+            certain_if(reach_is_certain(state)),
+            RejectionCause::LoadTime(error),
+            span,
+        );
+    }
+}
+
+/// The elements MSBuild reserves as property names, in exact case (MSB4004;
+/// probed, `dotnet msbuild` 10.0, where `Import`, `ItemDefinitionGroup`,
+/// `Project`, `Sdk`, `Parameter`, `ParameterGroup` and `Task` load, and so do
+/// `choose` and `propertygroup`).
+const RESERVED_ELEMENT_NAMES: [&str; 11] = [
+    "Choose",
+    "When",
+    "Otherwise",
+    "PropertyGroup",
+    "ItemGroup",
+    "Target",
+    "UsingTask",
+    "ProjectExtensions",
+    "Output",
+    "OnError",
+    "ImportGroup",
+];
+
+/// The first construct in document order under `root` that MSBuild refuses
+/// at load time, and its span. Only the elements MSBuild parses are looked
+/// in: a `<ProjectExtensions>` holds whatever XML it likes.
+fn first_load_time_error(root: Node<'_, '_>) -> Option<(LoadTimeError, Range<usize>)> {
+    root.children()
+        .filter(Node::is_element)
+        .find_map(|child| match child.tag_name().name() {
+            "PropertyGroup" => reserved_property(child),
+            "ItemGroup" => item_without_spec(child, false),
+            "Import" => import_without_project(child),
+            "ImportGroup" => child
+                .children()
+                .filter(|c| c.is_element() && c.has_tag_name("Import"))
+                .find_map(import_without_project),
+            "Choose" => {
+                if choose_shape_is_valid(child) {
+                    choose_load_time_error(child)
+                } else {
+                    Some((LoadTimeError::MalformedChoose, child.range()))
+                }
+            }
+            "Target" => {
+                child
+                    .children()
+                    .filter(Node::is_element)
+                    .find_map(|c| match c.tag_name().name() {
+                        "PropertyGroup" => reserved_property(c),
+                        "ItemGroup" => item_without_spec(c, true),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        })
+}
+
+/// [`first_load_time_error`] within the branches of `choose`, a `<Choose>`
+/// whose shape MSBuild accepts (so nested no deeper than it loads).
+fn choose_load_time_error(choose: Node<'_, '_>) -> Option<(LoadTimeError, Range<usize>)> {
+    choose
+        .children()
+        .filter(Node::is_element)
+        .flat_map(|branch| branch.children().filter(Node::is_element))
+        .find_map(|group| match group.tag_name().name() {
+            "PropertyGroup" => reserved_property(group),
+            "ItemGroup" => item_without_spec(group, false),
+            "Choose" => choose_load_time_error(group),
+            _ => None,
+        })
+}
+
+/// The first property of the `<PropertyGroup>` at `group` named for a
+/// reserved property or element.
+fn reserved_property(group: Node<'_, '_>) -> Option<(LoadTimeError, Range<usize>)> {
+    group.children().filter(Node::is_element).find_map(|p| {
+        let name = p.tag_name().name();
+        (is_msbuild_reserved_name(&name.to_ascii_lowercase())
+            || RESERVED_ELEMENT_NAMES.contains(&name))
+        .then(|| {
+            (
+                LoadTimeError::ReservedProperty {
+                    name: name.to_owned(),
+                },
+                p.range(),
+            )
+        })
+    })
+}
+
+/// The first item of the `<ItemGroup>` at `group` whose `Include`, `Update`
+/// or `Remove` is empty, or, outside a target (`!in_target`), that has none.
+fn item_without_spec(
+    group: Node<'_, '_>,
+    in_target: bool,
+) -> Option<(LoadTimeError, Range<usize>)> {
+    group.children().filter(Node::is_element).find_map(|item| {
+        let specs = ["Include", "Update", "Remove"].map(|name| attribute(item, name));
+        let empty = specs.iter().flatten().any(|spec| spec.is_empty());
+        let none = specs.iter().all(Option::is_none);
+        (empty || (none && !in_target)).then(|| {
+            (
+                LoadTimeError::ItemWithoutSpec {
+                    item: item.tag_name().name().to_owned(),
+                },
+                item.range(),
+            )
+        })
+    })
+}
+
+/// The `<Import>` at `import`, when its `Project` is absent or empty.
+fn import_without_project(import: Node<'_, '_>) -> Option<(LoadTimeError, Range<usize>)> {
+    attribute(import, "Project")
+        .is_none_or(|project| project.is_empty())
+        .then(|| (LoadTimeError::ImportWithoutProject, import.range()))
 }
 
 /// What a judged condition decides about the constructs under it.

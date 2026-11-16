@@ -1597,3 +1597,234 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     assert!(rejected >= 200, "only {rejected} rejected");
     assert!(committed >= 400, "only {committed} committed");
 }
+
+/// Constructs MSBuild refuses when it loads the file holding them (#888): a
+/// reserved property name, an item without a usable `Include`, `Update` or
+/// `Remove`, an `<Import>` with no `Project`, a malformed `<Choose>`, beside
+/// shapes it loads. Each sits in every container that holds it: one MSBuild
+/// evaluates, one under a false gate, one under a gate the walk cannot decide,
+/// an unchosen `<When>`, a `<Target>`, and a `<ProjectExtensions>`, which
+/// MSBuild does not parse. Each of those in the project, after content the
+/// walk did not see, in a file the project imports, and in one it does not
+/// import. MSBuild rejects the whole project for each refused construct in a
+/// file it loads, so the property table is held to certain-implies-exact and a
+/// claimed rejection to MSBuild's; where nothing the walk cannot decide is in
+/// play and MSBuild evaluates the project, the walk must not withdraw.
+#[test]
+fn load_time_errors_reject_exactly_where_msbuild_loads_them() {
+    const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+    let properties = [
+        "MSBuildProjectDirectory",
+        "msbuildthisfile",
+        "MSBuildToolsPath",
+        "MSBuildNodeCount",
+        "MSBuildDisableFeaturesFromVersion",
+        "When",
+        "Target",
+        "ImportGroup",
+        "MSBuildExtensionsPath",
+        "choose",
+        "Import",
+        "Zeta",
+    ]
+    .map(|name| format!("<{name}>x</{name}>"));
+    let items = [
+        "<I Include=\"\" />",
+        "<I Include=\"\" Condition=\"false\" />",
+        "<I Remove=\"\" />",
+        "<I Update=\"\" />",
+        "<I />",
+        "<I Include=\" \" />",
+        "<I Include=\"$(Nothing)\" />",
+        "<I Include=\"x\" />",
+    ];
+    let imports = [
+        "<Import />",
+        "<Import Project=\"\" />",
+        "<Import Project=\"\" Condition=\"false\" />",
+        "<Import Condition=\"false\" />",
+        "<Import Project=\" \" />",
+        "<Import Project=\"$(Nothing)\" Condition=\"false\" />",
+        "<Import Project=\"there.props\" />",
+    ];
+    let chooses = [
+        "<Choose />",
+        "<Choose><Otherwise /></Choose>",
+        "<Choose><When Condition=\"true\" /><Otherwise /><Otherwise /></Choose>",
+        "<Choose><Otherwise /><When Condition=\"true\" /></Choose>",
+        "<Choose><When /></Choose>",
+        "<Choose><When Condition=\"true\"><Foo /></When></Choose>",
+        "<Choose><When Condition=\"true\"><PropertyGroup><Zeta>z</Zeta></PropertyGroup></When></Choose>",
+    ];
+    let property_containers = [
+        "<PropertyGroup>{x}</PropertyGroup>",
+        "<PropertyGroup Condition=\"false\">{x}</PropertyGroup>",
+        "<PropertyGroup Condition=\"UNDECIDED_TRUE\">{x}</PropertyGroup>",
+        "<Choose><When Condition=\"false\"><PropertyGroup>{x}</PropertyGroup></When></Choose>",
+        "<Target Name=\"T\"><PropertyGroup>{x}</PropertyGroup></Target>",
+        "<ProjectExtensions><PropertyGroup>{x}</PropertyGroup></ProjectExtensions>",
+    ];
+    let item_containers = [
+        "<ItemGroup>{x}</ItemGroup>",
+        "<ItemGroup Condition=\"false\">{x}</ItemGroup>",
+        "<ItemGroup Condition=\"UNDECIDED_TRUE\">{x}</ItemGroup>",
+        "<Choose><When Condition=\"false\"><ItemGroup>{x}</ItemGroup></When></Choose>",
+        "<Target Name=\"T\"><ItemGroup>{x}</ItemGroup></Target>",
+        "<ProjectExtensions><ItemGroup>{x}</ItemGroup></ProjectExtensions>",
+    ];
+    let import_containers = [
+        "{x}",
+        "<ImportGroup>{x}</ImportGroup>",
+        "<ImportGroup Condition=\"false\">{x}</ImportGroup>",
+        "<ImportGroup Condition=\"UNDECIDED_TRUE\">{x}</ImportGroup>",
+        "<ProjectExtensions>{x}</ProjectExtensions>",
+    ];
+    let choose_containers = [
+        "{x}",
+        "<Choose><When Condition=\"false\">{x}</When></Choose>",
+        "<Choose><When Condition=\"UNDECIDED_TRUE\">{x}</When></Choose>",
+        "<ProjectExtensions>{x}</ProjectExtensions>",
+    ];
+    let sites: Vec<String> = [
+        (&properties[..], &property_containers[..]),
+        (&items.map(String::from)[..], &item_containers[..]),
+        (&imports.map(String::from)[..], &import_containers[..]),
+        (&chooses.map(String::from)[..], &choose_containers[..]),
+    ]
+    .into_iter()
+    .flat_map(|(constructs, containers)| {
+        constructs
+            .iter()
+            .flat_map(|c| containers.iter().map(move |k| k.replace("{x}", c)))
+            .collect::<Vec<_>>()
+    })
+    .map(|site| site.replace("UNDECIDED_TRUE", UNDECIDED_TRUE))
+    .collect();
+    #[derive(Clone, Copy, PartialEq)]
+    enum Context {
+        Plain,
+        AfterHiddenContent,
+        Imported,
+        NotImported,
+    }
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    for there in [dir.join("there.props"), dir.join("sub/there.props")] {
+        std::fs::write(
+            there,
+            "<Project><PropertyGroup><Delta>d</Delta></PropertyGroup></Project>",
+        )
+        .unwrap();
+    }
+    let project_path = dir.join("Demo.fsproj");
+    let names: Vec<String> = ["Alpha", "Beta", "Gamma", "Delta", "Zeta"]
+        .map(String::from)
+        .to_vec();
+    let (mut rejected, mut committed, mut certain, mut evaluated) = (0usize, 0, 0, 0);
+    for site in &sites {
+        for context in [
+            Context::Plain,
+            Context::AfterHiddenContent,
+            Context::Imported,
+            Context::NotImported,
+        ] {
+            let mut inner = String::new();
+            let (before, at) = match context {
+                Context::Plain => (String::new(), site.clone()),
+                Context::AfterHiddenContent => (
+                    format!("<Import Project=\"there.props\" Condition=\"{UNDECIDED_TRUE}\" />"),
+                    site.clone(),
+                ),
+                Context::Imported | Context::NotImported => {
+                    inner = format!("<Project>{site}</Project>");
+                    std::fs::write(dir.join("sub/inner.props"), &inner).unwrap();
+                    let gate = if context == Context::Imported {
+                        "true"
+                    } else {
+                        "false"
+                    };
+                    (
+                        String::new(),
+                        format!("<Import Project=\"sub/inner.props\" Condition=\"{gate}\" />"),
+                    )
+                }
+            };
+            let xml = format!(
+                "<Project>\n  <PropertyGroup><Beta>b</Beta></PropertyGroup>\n  {before}\n  \
+                 {at}\n  <PropertyGroup><Gamma>g</Gamma></PropertyGroup>\n</Project>\n"
+            );
+            std::fs::write(&project_path, &xml).unwrap();
+            let parsed = parse_fsproj_with_imports(
+                &xml,
+                &project_path,
+                &HashMap::new(),
+                &common::oracle_environment(),
+                None,
+                None,
+            )
+            .expect("well-formed");
+            let ours: Vec<(&String, String)> = names
+                .iter()
+                .filter_map(|name| match parsed.property(name) {
+                    PropertyRead::Unset => Some((name, String::new())),
+                    read => read.value().map(|v| (name, v.to_owned())),
+                })
+                .collect();
+            let describe = || {
+                format!(
+                    "--- xml ---\n{xml}--- sub/inner.props ---\n{inner}\n{:#?}",
+                    parsed.rejection
+                )
+            };
+            let claimed =
+                parsed.rejection.as_ref().map(|r| r.certainty) == Some(RejectionCertainty::Certain);
+            certain += usize::from(claimed);
+            let Some(theirs) = oracle.project(&xml, &names, Some(&project_path), &[]) else {
+                rejected += 1;
+                assert!(
+                    ours.is_empty(),
+                    "certain-implies-exact violated: MSBuild rejects this project, but we \
+                     committed {ours:?}\n{}",
+                    describe()
+                );
+                continue;
+            };
+            evaluated += 1;
+            assert!(
+                !claimed,
+                "certain-implies-exact violated: we claim MSBuild rejects this project, and \
+                 it evaluates it\n{}",
+                describe()
+            );
+            for (name, value) in &ours {
+                committed += 1;
+                assert_eq!(
+                    Some(value),
+                    theirs.get(*name),
+                    "certain-implies-exact violated for {name}\n{}",
+                    describe()
+                );
+            }
+            if context != Context::AfterHiddenContent && !site.contains("IsNullOrWhiteSpace") {
+                assert_eq!(
+                    parsed.rejection,
+                    None,
+                    "MSBuild evaluates the project, and nothing the walk cannot decide is in \
+                     play\n{}",
+                    describe()
+                );
+            }
+        }
+    }
+    eprintln!(
+        "load-time errors: {rejected} rejected by MSBuild, {certain} of them claimed; \
+         {evaluated} evaluated, {committed} values committed"
+    );
+    // Anti-vacuity: each side of the contract is exercised, the claim too.
+    assert!(certain >= 250, "only {certain} rejections claimed");
+    assert!(rejected >= 250, "only {rejected} rejected");
+    assert!(evaluated >= 300, "only {evaluated} evaluated");
+    assert!(committed >= 1000, "only {committed} committed");
+}

@@ -571,8 +571,6 @@ fn an_illegal_condition_msbuild_evaluates_is_rejected() {
         "<Import Project=\"nope.props\" Condition=\"tr ue\" />",
         "<ImportGroup Condition=\"tr ue\" />",
         "<ImportGroup><Import Project=\"nope.props\" Condition=\"tr ue\" /></ImportGroup>",
-        // A group of writes MSBuild discards still has its condition evaluated.
-        "<PropertyGroup Condition=\"tr ue\"><MSBuildProjectName>x</MSBuildProjectName></PropertyGroup>",
     ] {
         for parsed in both_walkers(&format!("  {body}")) {
             let rejection = parsed
@@ -770,4 +768,90 @@ fn an_undecided_import_of_a_backslash_the_working_directory_decides_may_be_rejec
     );
     let parsed = parse_file(&project_path);
     assert_withdrawn(&parsed, &["After"]);
+}
+
+/// Constructs MSBuild refuses when it loads the file holding them (#888),
+/// whatever any condition holds; each probed with `dotnet msbuild` 10.0.
+const LOAD_TIME_REJECTED: &[&str] = &[
+    // MSB4004, a reserved property name in any case, or a reserved element
+    // name, anywhere a property is parsed.
+    "<PropertyGroup><MSBuildProjectDirectory>x</MSBuildProjectDirectory></PropertyGroup>",
+    "<PropertyGroup Condition=\"false\"><msbuildprojectdirectory>x</msbuildprojectdirectory></PropertyGroup>",
+    "<PropertyGroup><MSBuildThisFile Condition=\"false\">x</MSBuildThisFile></PropertyGroup>",
+    "<PropertyGroup><MSBuildDisableFeaturesFromVersion>x</MSBuildDisableFeaturesFromVersion></PropertyGroup>",
+    "<PropertyGroup><When>x</When></PropertyGroup>",
+    "<Choose><When Condition=\"false\"><PropertyGroup><MSBuildProjectName>x</MSBuildProjectName></PropertyGroup></When></Choose>",
+    "<Target Name=\"T\"><PropertyGroup><MSBuildProjectName>x</MSBuildProjectName></PropertyGroup></Target>",
+    // MSB4035 and MSB4232: an item without a usable specification.
+    "<ItemGroup Condition=\"false\"><I Include=\"\" /></ItemGroup>",
+    "<ItemGroup><I Include=\"\" Condition=\"false\" /></ItemGroup>",
+    "<ItemGroup><I Remove=\"\" /></ItemGroup>",
+    "<ItemGroup><I Update=\"\" /></ItemGroup>",
+    "<ItemGroup><I /></ItemGroup>",
+    "<Target Name=\"T\"><ItemGroup><I Include=\"\" /></ItemGroup></Target>",
+    "<Choose><When Condition=\"false\"><ItemGroup><I Include=\"\" /></ItemGroup></When></Choose>",
+    // MSB4035: an `<Import>` with no `Project`, wherever it sits.
+    "<ImportGroup Condition=\"false\"><Import /></ImportGroup>",
+    "<ImportGroup Condition=\"false\"><Import Project=\"\" /></ImportGroup>",
+    "<Import Condition=\"false\" />",
+    // A malformed `<Choose>`, at any depth.
+    "<Choose />",
+    "<Choose><When Condition=\"true\" /><Otherwise /><Otherwise /></Choose>",
+    "<Choose><When Condition=\"false\"><Choose /></When><Otherwise /></Choose>",
+];
+
+/// Shapes beside those that MSBuild loads.
+const LOAD_TIME_ACCEPTED: &[&str] = &[
+    "<PropertyGroup><MSBuildExtensionsPath>x</MSBuildExtensionsPath></PropertyGroup>",
+    "<PropertyGroup><choose>x</choose><Import>x</Import><ItemDefinitionGroup>x</ItemDefinitionGroup></PropertyGroup>",
+    "<ItemGroup><I Include=\" \" /><J Include=\"$(Nothing)\" /></ItemGroup>",
+    "<Target Name=\"T\"><ItemGroup><I /></ItemGroup></Target>",
+    "<ImportGroup Condition=\"false\"><Import Project=\"$(Nothing)\" /><Import Project=\" \" /></ImportGroup>",
+    "<ProjectExtensions><PropertyGroup><MSBuildThisFile>x</MSBuildThisFile></PropertyGroup></ProjectExtensions>",
+];
+
+#[test]
+fn a_construct_msbuild_refuses_at_load_time_is_rejected() {
+    for body in LOAD_TIME_REJECTED {
+        for parsed in both_walkers(&format!("  {body}")) {
+            let rejection = parsed
+                .rejection
+                .as_ref()
+                .unwrap_or_else(|| panic!("no rejection for {body}: {:#?}", parsed.diagnostics));
+            assert!(
+                matches!(rejection.cause, RejectionCause::LoadTime(_)),
+                "{body}: {rejection:#?}"
+            );
+            assert_rejected(&parsed, &["Before", "After"]);
+        }
+    }
+    for body in LOAD_TIME_ACCEPTED {
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_eq!(parsed.rejection, None, "{body}");
+        }
+    }
+}
+
+#[test]
+fn a_file_msbuild_refuses_at_load_time_rejects_where_it_is_imported() {
+    let refused = "<Project><ItemGroup><I Include=\"\" /></ItemGroup></Project>";
+    let import =
+        |gate: &str| format!("  <Import Project=\"refused.props\" Condition=\"{gate}\" />");
+    // Imported for certain: MSBuild loads the file, and refuses it.
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(&tmp, &import("true"), &[("proj/refused.props", refused)]);
+    assert_rejected(&parse_file(&project_path), &["Before", "After"]);
+    // Never imported: MSBuild never loads it.
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(&tmp, &import("false"), &[("proj/refused.props", refused)]);
+    assert_eq!(parse_file(&project_path).rejection, None);
+    // Imported through a path the walk does not name for certain (a `\` a
+    // property supplies, #903): MSBuild may load another file.
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(
+        &tmp,
+        "  <PropertyGroup><P>sub\\refused.props</P></PropertyGroup>\n  <Import Project=\"$(P)\" />",
+        &[("proj/sub/refused.props", refused)],
+    );
+    assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
 }

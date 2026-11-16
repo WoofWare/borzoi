@@ -40,7 +40,7 @@ pub use diagnostic::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
     CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause,
     DefineConstantsUncertaintyCauseKind, Diagnostic, DiagnosticKind, DiagnosticOrigin,
-    ImplicitImportKind, ImportFailReason, PackageReferenceUncertaintyCause,
+    ImplicitImportKind, ImportFailReason, LoadTimeError, PackageReferenceUncertaintyCause,
     PackageReferenceUncertaintyCauseKind, Rejection, RejectionCause, RejectionCertainty,
     StructuralCompileItemUncertainty, StructuralPackageReferenceUncertainty, UnloadableImport,
 };
