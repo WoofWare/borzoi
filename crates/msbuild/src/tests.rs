@@ -2254,6 +2254,28 @@ fn reserved_toolset_property_in_extras_is_rejected() {
 }
 
 #[test]
+fn startup_directory_in_extras_is_rejected() {
+    // `dotnet msbuild -p:MSBuildStartupDirectory=/x` errors (MSB4177): the
+    // startup directory is a fact of the process, never a global property.
+    // An evaluation of a process the caller launches supplies it as such
+    // (`parse_fsproj_probed`'s `startup_directory`).
+    for name in ["MSBuildStartupDirectory", "msbuildstartupdirectory"] {
+        let extras = HashMap::from([(name.to_string(), "/x".to_string())]);
+        let err = parse_fsproj(
+            "<Project/>",
+            Path::new("/repo/Demo.fsproj"),
+            &extras,
+            &HashMap::new(),
+        )
+        .expect_err("the startup directory is not a global property");
+        assert!(
+            matches!(&err, crate::ParseError::ReservedPropertyInExtras(n) if n == name),
+            "{name}: got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn get_directory_name_of_file_above_is_unsupported_in_pure_parse() {
     // The pure `parse_fsproj` contract promises no filesystem access, and
     // `GetDirectoryNameOfFileAbove` is a filesystem probe — in this mode

@@ -46,6 +46,7 @@ mod resolved_sdk_root;
 mod sdk_custom_entry;
 mod sdk_resolution;
 mod spans;
+mod startup_directory;
 mod target_framework_reads;
 mod this_file_directory;
 mod toolset_seed;

@@ -373,10 +373,12 @@ impl<'m> Reads<'m> {
 ///
 /// MSBuild's authoritative list is larger (`MSBuildBinPath`,
 /// `MSBuildExtensionsPath`, …); toolset-derived names are left to the walker
-/// and the toolset seeding, and `MSBuildStartupDirectory` (the working
-/// directory of a build process that does not exist) is never seeded. The
-/// `MSBuildThisFile*` family starts out naming the project and is rebound for
-/// each imported file ([`this_file_seeds`]).
+/// and the toolset seeding. `MSBuildStartupDirectory`, the working directory
+/// of the build process, is no fact of the project's path: it is undefined
+/// for an evaluation of a build nobody launched, and an input to an
+/// evaluation of a process the caller launches, which the walker seeds from
+/// it. The `MSBuildThisFile*` family starts out naming the project and is
+/// rebound for each imported file ([`this_file_seeds`]).
 pub fn well_known(project_path: &Path) -> PropertyMap {
     // MSBuild derives these from the project's full path, `.` and `..`
     // resolved, lexically.

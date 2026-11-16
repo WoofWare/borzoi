@@ -151,6 +151,12 @@ pub use crate::evaluator::reads::{
 /// item types at the end of the walk, as a target that runs on the evaluation
 /// would read them. The restore-cone census reports these reads against
 /// MSBuild's (stage A₁.3a of `docs/nuget-dgspec-boundary-plan.md`).
+///
+/// `startup_directory` is the working directory of the build process the
+/// evaluation models, which MSBuild exposes as `MSBuildStartupDirectory`: the
+/// directory the restore cone's `dotnet` starts in. `None` models a build
+/// nobody launched, as the public entry points do, and leaves the name unset.
+#[allow(clippy::too_many_arguments)]
 pub fn parse_fsproj_reads(
     source: &str,
     project_path: &std::path::Path,
@@ -158,6 +164,7 @@ pub fn parse_fsproj_reads(
     environment: &std::collections::HashMap<String, String>,
     sdk_resolver: Option<&crate::SdkResolver<'_>>,
     glob_resolver: Option<&crate::GlobResolver<'_>>,
+    startup_directory: Option<&std::path::Path>,
     probe: &ReadProbe,
 ) -> Result<(crate::ParsedProject, EvaluationReads), crate::ParseError> {
     let walked = crate::parse_fsproj_probed(
@@ -167,6 +174,7 @@ pub fn parse_fsproj_reads(
         environment,
         sdk_resolver,
         glob_resolver,
+        startup_directory,
         Some(probe),
     )?;
     let reads = walked.reads.expect("a probed walk answers its probe");

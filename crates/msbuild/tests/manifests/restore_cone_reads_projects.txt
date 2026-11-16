@@ -75,7 +75,7 @@
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildProjectFile	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildProjectFullPath	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildProjectName	value agrees
-10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildStartupDirectory	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NETCoreSdkVersion	value agrees
 10.0.401 resolved TypeEquality/TypeEquality/TypeEquality.fsproj reads property NETStandardMaximumVersion	unset agrees
@@ -255,7 +255,7 @@
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildProjectFullPath	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildProjectName	value agrees
-10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildStartupDirectory	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property NETCoreSdkVersion	value agrees
 10.0.401 resolved WoofWare.Expect/WoofWare.Expect/WoofWare.Expect.fsproj reads property NETStandardMaximumVersion	value agrees
@@ -452,7 +452,7 @@
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildProjectFullPath	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildProjectName	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildRuntimeType	value agrees
-10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildStartupDirectory	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property NETCoreAppMaximumVersion	value agrees
 10.0.401 resolved WoofWare.Incremental/WoofWare.Incremental/WoofWare.Incremental.fsproj reads property NETCoreSdkPortableRuntimeIdentifier	value agrees
@@ -655,7 +655,7 @@
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildProjectFullPath	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildProjectName	value agrees
-10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildStartupDirectory	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property NETCoreSdkVersion	value agrees
 10.0.401 resolved WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj reads property NETStandardMaximumVersion	value agrees
@@ -852,7 +852,7 @@
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildProjectFullPath	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildProjectName	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildRuntimeType	value agrees
-10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildStartupDirectory	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property NETCoreAppMaximumVersion	value agrees
 10.0.401 resolved WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj reads property NETCoreSdkPortableRuntimeIdentifier	value agrees
@@ -1055,7 +1055,7 @@
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildProjectFullPath	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildProjectName	value agrees
-10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildStartupDirectory	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property NETCoreSdkVersion	value agrees
 10.0.401 resolved WoofWare.WeakHashTable/WoofWare.WeakHashTable/WoofWare.WeakHashTable.fsproj reads property NETStandardMaximumVersion	value agrees

@@ -1296,6 +1296,7 @@ fn check_cdata_document(oracle: &mut Oracle, body: &str, condition: &str, tally:
         &common::oracle_environment(),
         None,
         None,
+        None,
         &probe,
     )
     .expect("the generated document parses");

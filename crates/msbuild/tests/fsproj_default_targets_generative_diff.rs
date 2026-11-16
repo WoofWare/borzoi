@@ -123,6 +123,7 @@ fn check(oracle: &mut Oracle, files: &[(&str, String)], tally: &mut Tally) {
         &common::oracle_environment(),
         None,
         None,
+        None,
         &probe,
     )
     .unwrap();

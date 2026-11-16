@@ -328,6 +328,7 @@ fn check(oracle: &mut Oracle, xml: &str, gated: bool, tally: &mut Tally) {
         &common::oracle_environment(),
         None,
         None,
+        None,
         &probe,
     )
     .unwrap();
@@ -520,6 +521,7 @@ fn a_body_with_line_ends_or_references_is_compared() {
             &path,
             &HashMap::new(),
             &common::oracle_environment(),
+            None,
             None,
             None,
             &probe,

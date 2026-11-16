@@ -138,6 +138,7 @@ pub fn walk(
         false,
         None,
         None,
+        None,
         &observer,
     );
     let project_dir = project_path.parent().unwrap_or_else(|| Path::new(""));
@@ -206,6 +207,7 @@ pub fn walk_with_imports<'r>(
     detected_packages_props: Option<&Path>,
     sdk_resolver: Option<&'r SdkResolver<'r>>,
     glob_resolver: Option<&'r GlobResolver<'r>>,
+    startup_directory: Option<&Path>,
     observer: &'r Observer,
     #[cfg(any(test, feature = "test-support"))] probe: Option<&ReadProbe>,
 ) -> Walked {
@@ -219,6 +221,7 @@ pub fn walk_with_imports<'r>(
         true,
         sdk_resolver,
         glob_resolver,
+        startup_directory,
         observer,
     );
     // The entry project is never inside an SDK.
@@ -1356,9 +1359,16 @@ impl<'r> State<'r> {
         follow_imports: bool,
         sdk_resolver: Option<&'r SdkResolver<'r>>,
         glob_resolver: Option<&'r GlobResolver<'r>>,
+        startup_directory: Option<&Path>,
         observer: &'r Observer,
     ) -> Self {
         let mut lookup = properties::well_known(project_path);
+        // Seeded before `reserved` is taken from the table, so it is reserved
+        // and protected like the path-derived names.
+        if let Some(seed) = startup_directory.and_then(|dir| startup_directory_seed(observer, dir))
+        {
+            lookup.insert_escaped("MSBuildStartupDirectory", seed);
+        }
         // Reserved well-known names are unconditionally protected;
         // `TreatAsLocalProperty` is documented to apply to *global*
         // properties only, so listing a reserved name there must not
@@ -4700,27 +4710,6 @@ pub(crate) fn is_toolset_initial_property_name(lower: &str) -> bool {
         )
 }
 
-/// Toolset-computed property names MSBuild *overwrites* after folding the
-/// environment in, so a same-named environment variable is invisible to
-/// projects. Probed one name at a time against dotnet msbuild 10.0.300
-/// (spoof each via the environment, read it back): these read their real
-/// toolset values, while — notably — `MSBuildExtensionsPath{,32,64}`,
-/// `MSBuildUserExtensionsPath`, `MSBuildSDKsPath`,
-/// `MSBuildFrameworkToolsRoot`, `MSBuildAllProjects`,
-/// `MSBuildSemanticVersion`, `MSBuildFileVersion`, `VisualStudioVersion`,
-/// and `OS` all honour the spoof, so they must stay promotable. We do not
-/// seed these names with their real values (they are host/toolset facts
-/// this crate cannot know), so reads surface as undefined — conservative.
-/// Lowercase, matched against the lowercased variable name: the property
-/// table is case-insensitive, so the toolset overwrite displaces every
-/// spelling.
-///
-/// `DOTNET_HOST_PATH` is here for the same reason one step earlier in the
-/// pipeline: the `dotnet` *host* rewrites it to the muxer it actually selected
-/// before MSBuild is even loaded, so the value our caller inherited never
-/// reaches the evaluation. Probed: `DOTNET_HOST_PATH=SPOOF dotnet msbuild …`
-/// reads the real dotnet path, not `SPOOF`. The F# SDK's own targets read the
-/// property, so promoting the inherited value would commit a wrong path.
 /// What the caller's environment snapshot said about `MSBuildExtensionsPath`
 /// (see [`State::env_extensions_path`]). MSBuild promotes the name from the
 /// environment, so it is *not* in [`is_env_ignored_toolset_name`] — but
@@ -4876,6 +4865,34 @@ fn is_toolset_predefined_name(lower: &str) -> bool {
     TOOLSET_PREDEFINED_NAMES.contains(&lower)
 }
 
+/// Toolset-computed property names MSBuild *overwrites* after folding the
+/// environment in, so a same-named environment variable is invisible to
+/// projects. Probed one name at a time against dotnet msbuild 10.0.300
+/// (spoof each via the environment, read it back): these read their real
+/// toolset values, while — notably — `MSBuildExtensionsPath{,32,64}`,
+/// `MSBuildUserExtensionsPath`, `MSBuildSDKsPath`,
+/// `MSBuildFrameworkToolsRoot`, `MSBuildAllProjects`,
+/// `MSBuildSemanticVersion`, `MSBuildFileVersion`, `VisualStudioVersion`,
+/// and `OS` all honour the spoof, so they must stay promotable. Most of these
+/// names are host or toolset facts this crate does not know, and stay unseeded,
+/// so reads surface as undefined — conservative. Two are seeded where the walk
+/// does know them: `MSBuildAssemblyVersion` from a probed per-SDK table
+/// ([`toolset_assembly_version`]), and `MSBuildStartupDirectory` only for an
+/// evaluation of a process the caller launches, which hands the walk the
+/// directory it starts the process in ([`startup_directory_seed`]). An
+/// evaluation of a build nobody launched has no such directory, and leaves the
+/// name undefined.
+///
+/// Lowercase, matched against the lowercased variable name: the property
+/// table is case-insensitive, so the toolset overwrite displaces every
+/// spelling.
+///
+/// `DOTNET_HOST_PATH` is here for the same reason one step earlier in the
+/// pipeline: the `dotnet` *host* rewrites it to the muxer it actually selected
+/// before MSBuild is even loaded, so the value our caller inherited never
+/// reaches the evaluation. Probed: `DOTNET_HOST_PATH=SPOOF dotnet msbuild …`
+/// reads the real dotnet path, not `SPOOF`. The F# SDK's own targets read the
+/// property, so promoting the inherited value would commit a wrong path.
 fn is_env_ignored_toolset_name(lower: &str) -> bool {
     matches!(
         lower,
@@ -4892,6 +4909,33 @@ fn is_env_ignored_toolset_name(lower: &str) -> bool {
             | "roslyntargetspath"
             | "dotnet_host_path"
     )
+}
+
+/// The `MSBuildStartupDirectory` of a build whose process starts in `dir`:
+/// the directory as the file system resolves it, spliced raw, or `None` where
+/// the walk cannot say.
+///
+/// MSBuild reads the process's working directory, which is the physical
+/// directory: started through a symlink to `…/real`, it reports `…/real`. So
+/// `dir` is canonicalised, through the observer, and retargeting a link on
+/// the way invalidates the evaluation. The value has no trailing separator,
+/// and is raw text in the escaped domain, as the `MSBuildThisFile*` names are
+/// ([`properties::this_file_seeds`]): started in a directory named
+/// `a%20b;c`, `$(MSBuildStartupDirectory)` reads `…/a b;c`, and an `Include`
+/// of it splits at the `;`. Each probed against `dotnet msbuild` and held to
+/// the oracle by `tests/startup_directory_diff.rs`.
+///
+/// `None`, so that the name stays unset and its reads inexact
+/// ([`is_toolset_initial_property_name`]), for a `dir` that is not rooted
+/// (which would name a directory relative to this process's own), one that
+/// does not resolve or whose resolution is not UTF-8, and off Unix, where
+/// nothing has graded how the working directory resolves links.
+fn startup_directory_seed(observer: &Observer, dir: &Path) -> Option<Escaped> {
+    if !cfg!(unix) || !dir.has_root() {
+        return None;
+    }
+    let physical = observed::canonicalize(observer, dir).ok()?;
+    Some(Escaped::from_xml(physical.to_str()?))
 }
 
 /// The names MSBuild treats as *reserved*, transcribed from

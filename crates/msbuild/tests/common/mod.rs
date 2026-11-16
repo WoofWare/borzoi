@@ -377,6 +377,13 @@ impl Oracle {
         )
     }
 
+    /// An oracle running the MSBuild `dotnet` resolves, with `working_dir` as
+    /// its working directory (which MSBuild reports as
+    /// `MSBuildStartupDirectory`).
+    pub fn spawn_in_dir(working_dir: &Path) -> Oracle {
+        Oracle::spawn_in(Vec::new(), Some(working_dir.to_path_buf()), None)
+    }
+
     /// An oracle whose default SDK resolver looks in `sdks_path` for a
     /// `<Project Sdk="Name">` (`<sdks_path>/Name/Sdk`): the shape a
     /// differential laying out a synthetic SDK needs, so MSBuild imports it
