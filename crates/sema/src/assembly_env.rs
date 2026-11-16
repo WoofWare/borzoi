@@ -5506,6 +5506,22 @@ impl AssemblyEnv {
         {
             return true;
         }
+        // A property or event of an extension container may have an accessor
+        // under `[<Extension>]` (F# allows it on a static property's getter),
+        // which FCS calls as an extension method by its accessor name. The
+        // reader projects the property, not the accessor, so each accessor
+        // spelling of it may be one.
+        if !is_static
+            && entity.is_extension_container
+            && entity.members.iter().any(|m| {
+                matches!(m, Member::Property(_) | Member::Event(_))
+                    && ["get_", "set_", "add_", "remove_"]
+                        .iter()
+                        .any(|prefix| name.strip_prefix(prefix) == Some(member_name(m)))
+            })
+        {
+            return true;
+        }
         self.children(handle)
             .iter()
             .any(|&c| self.entity_tree_has_extension_named(c, name, is_static))
