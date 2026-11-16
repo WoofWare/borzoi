@@ -130,6 +130,11 @@ enum Container {
     /// An F# record, whose members the reader projects through the F# view
     /// (which hides what fsc synthesises).
     Record,
+    /// `[<Extension>] type Holder = G.C<n>.AliasImpl<n>.AliasTarget`: an
+    /// attributed abbreviation of an unmarked type in a namespace the call's
+    /// `open` does not reach, so only the alias brings its extensions into
+    /// scope.
+    Alias,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,6 +372,23 @@ impl Cell {
                     && self.container == Container::Plain
                     && self.target == Target::Receiver
                     && self.drop == Drop::No));
+        // The alias is a perturbation of the plain method's container.
+        let alias = self.container != Container::Alias
+            || (self.style == Style::CsMarked
+                && self.kind == Kind::Method
+                && self.attr_on == AttrOn::Member
+                && self.renamed == Renamed::No
+                && self.synth == Synth::No
+                && self.target == Target::Receiver
+                && self.drop == Drop::No
+                && matches!(self.home, Home::Namespace | Home::Module)
+                && matches!(
+                    self.reach,
+                    Reach::OpenNamespace
+                        | Reach::SharedNamespace
+                        | Reach::Enclosing
+                        | Reach::OpenModule
+                ));
         // The internal module is a perturbation of the plain method's home.
         let internal = self.home != Home::InternalModule
             || (self.kind == Kind::Method
@@ -375,7 +397,7 @@ impl Cell {
                 && self.container == Container::Plain
                 && self.target == Target::Receiver
                 && self.drop == Drop::No);
-        shape && reach && bounded && internal && hidden
+        shape && reach && bounded && internal && hidden && alias
     }
 
     /// The method name a call of cell `n` spells. Each cell's names are its
@@ -459,6 +481,7 @@ impl Cell {
                                 (Container::Generic, Synth::No),
                                 (Container::Record, Synth::No),
                                 (Container::Record, Synth::Yes),
+                                (Container::Alias, Synth::No),
                             ] {
                                 for home in [
                                     Home::Namespace,
@@ -584,6 +607,13 @@ fn member_lines(n: usize, cell: Cell) -> Vec<String> {
                 Kind::EventAdd => unreachable!("no C#-style event cell"),
             };
             lines.push(decl);
+            if cell.container == Container::Alias {
+                // The target's members are declared by `alias_target`.
+                return vec![
+                    format!("[<{EXTENSION}>]"),
+                    format!("type Holder = {}.AliasImpl{n}.AliasTarget", namespace(n)),
+                ];
+            }
             let mut out = Vec::new();
             if cell.style == Style::CsMarked {
                 out.push(format!("[<{EXTENSION}>]"));
@@ -613,6 +643,29 @@ fn member_lines(n: usize, cell: Cell) -> Vec<String> {
     }
 }
 
+/// The namespace fragment declaring the unmarked type an alias cell's
+/// `Holder` abbreviates, then the cell's namespace again.
+fn alias_target(n: usize, cell: Cell) -> Vec<String> {
+    let ns = namespace(n);
+    let plain = member_lines(
+        n,
+        Cell {
+            container: Container::Plain,
+            ..cell
+        },
+    );
+    let mut out = vec![format!("namespace {ns}.AliasImpl{n}"), String::new()];
+    // Every line of the plain holder but its own marker.
+    out.extend(plain.into_iter().skip(1).map(|l| {
+        l.replace("type Holder =", "type AliasTarget =")
+            .replace("r: Receiver", &format!("r: {ns}.Receiver"))
+    }));
+    out.push(String::new());
+    out.push(format!("namespace {ns}"));
+    out.push(String::new());
+    out
+}
+
 /// Cell `n`'s namespace block of the fixture.
 fn cell_source(n: usize, cell: Cell) -> String {
     let mut out = vec![
@@ -626,6 +679,9 @@ fn cell_source(n: usize, cell: Cell) -> String {
         format!("    {}", cell.intrinsic(n)),
         String::new(),
     ];
+    if cell.container == Container::Alias {
+        out.extend(alias_target(n, cell));
+    }
     let body = member_lines(n, cell);
     let indent = |lines: Vec<String>, by: usize| -> Vec<String> {
         lines

@@ -745,7 +745,10 @@ pub struct AssemblyProjectionSkips {
     /// *not* the one it looks for, so [`Entity::is_extension_container`] and
     /// [`MethodLike::is_extension_method`] are unread there, not false: a
     /// consumer proving no C#-style extension exists must treat each of these
-    /// namespaces as possibly holding one, of any name.
+    /// namespaces as possibly holding one, of any name. Also the namespace
+    /// of each non-public `[<Extension>]` type abbreviation of an F#
+    /// assembly, which the projection does not show but a friend assembly
+    /// calls the extensions of.
     pub unreadable_attribute_namespaces: Vec<Vec<String>>,
     /// `true` when this F#-authored assembly may export type abbreviations
     /// the projection cannot see: its host signature pickle failed to decode
