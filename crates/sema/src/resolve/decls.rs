@@ -1363,8 +1363,9 @@ impl<'a> Resolver<'a> {
                     //   (`open_extension_namespaces`), its project half is in the
                     //   project's extension names, which the gate asks of every
                     //   call; or
-                    // - a project module at that path that no assembly entity
-                    //   shares (no assembly module, no dropped type at any split)
+                    // - a project module at that path that no assembly entity of
+                    //   any accessibility shares (none at any split of the path,
+                    //   and no dropped type there)
                     //   and whose values the walk can list (an abbreviation, or a
                     //   module a later reading cannot see through, is not): it
                     //   brings nothing beyond the project's names.
@@ -1401,7 +1402,13 @@ impl<'a> Resolver<'a> {
                                     certified &= *m == path
                                         && !self.index.module_aliases.contains_key(m)
                                         && !self.module_has_hidden_values(m)
-                                        && self.opened_assembly_modules(m).is_empty()
+                                        // No assembly entity, of any
+                                        // accessibility (a friend assembly's
+                                        // internal module opens too), sits
+                                        // at any split of the path.
+                                        && (0..m.len()).all(|k| {
+                                            self.assemblies.entities_named(&m[..k], &m[k]).is_empty()
+                                        })
                                         && !self
                                             .assemblies
                                             .any_split_of_a_module_path_has_a_dropped_type(m);

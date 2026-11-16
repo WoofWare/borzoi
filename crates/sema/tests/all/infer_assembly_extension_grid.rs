@@ -139,6 +139,9 @@ enum Synth {
 enum Home {
     Namespace,
     Module,
+    /// `module internal Exts`, the fixture granting the calling project
+    /// friendship (`InternalsVisibleTo`).
+    InternalModule,
     Nested,
     AutoOpen,
     Rqa,
@@ -298,7 +301,15 @@ impl Cell {
                     && matches!(self.renamed, Renamed::No | Renamed::Shared)
                     && self.target == Target::Receiver
                     && self.container != Container::Generic));
-        shape && reach && bounded
+        // The internal module is a perturbation of the plain method's home.
+        let internal = self.home != Home::InternalModule
+            || (self.kind == Kind::Method
+                && self.renamed == Renamed::No
+                && self.synth == Synth::No
+                && self.container == Container::Plain
+                && self.target == Target::Receiver
+                && self.drop == Drop::No);
+        shape && reach && bounded && internal
     }
 
     /// The method name a call of cell `n` spells. Each cell's names are its
@@ -335,7 +346,7 @@ impl Cell {
     fn module_path(self) -> Option<&'static str> {
         match self.home {
             Home::Namespace => None,
-            Home::Module | Home::AutoOpen | Home::Rqa => Some("Exts"),
+            Home::Module | Home::InternalModule | Home::AutoOpen | Home::Rqa => Some("Exts"),
             Home::Nested => Some("Outer.Exts"),
         }
     }
@@ -344,7 +355,7 @@ impl Cell {
     fn top_level(self) -> &'static str {
         match self.home {
             Home::Namespace => "Holder",
-            Home::Module | Home::AutoOpen | Home::Rqa => "Exts",
+            Home::Module | Home::InternalModule | Home::AutoOpen | Home::Rqa => "Exts",
             Home::Nested => "Outer",
         }
     }
@@ -377,6 +388,7 @@ impl Cell {
                                 for home in [
                                     Home::Namespace,
                                     Home::Module,
+                                    Home::InternalModule,
                                     Home::Nested,
                                     Home::AutoOpen,
                                     Home::Rqa,
@@ -548,6 +560,10 @@ fn cell_source(n: usize, cell: Cell) -> String {
             out.push("module Exts =".to_string());
             out.extend(indent(body, 4));
         }
+        Home::InternalModule => {
+            out.push("module internal Exts =".to_string());
+            out.extend(indent(body, 4));
+        }
         Home::AutoOpen => {
             out.push("[<AutoOpen>]".to_string());
             out.push("module Exts =".to_string());
@@ -568,10 +584,22 @@ fn cell_source(n: usize, cell: Cell) -> String {
 }
 
 fn fixture_source(cells: &[Cell]) -> String {
-    cells
-        .iter()
-        .enumerate()
-        .map(|(n, &c)| cell_source(n, c))
+    // Friendship for the calling projects of the internal-module cells. The
+    // oracle's project is named after one of its files, `Shared` or some
+    // `Use<n>`, so every one of them is a friend.
+    let mut friends = vec!["Shared".to_string()];
+    friends.extend((0..cells.len()).map(|n| format!("Use{n}")));
+    let mut out = vec![
+        "namespace G.Friends".to_string(),
+        "module Attrs =".to_string(),
+    ];
+    out.extend(friends.iter().map(|f| {
+        format!("    [<assembly: System.Runtime.CompilerServices.InternalsVisibleTo(\"{f}\")>]")
+    }));
+    out.push("    do ()".to_string());
+    let header = out.join("\n") + "\n";
+    std::iter::once(header)
+        .chain(cells.iter().enumerate().map(|(n, &c)| cell_source(n, c)))
         .collect::<Vec<_>>()
         .join("\n")
 }
