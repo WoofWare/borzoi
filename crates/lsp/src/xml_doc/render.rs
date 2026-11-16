@@ -158,6 +158,32 @@ struct Flow {
     /// broke) before the end — so the content is not plain inline text, even if it
     /// ends up a single paragraph.
     broke: bool,
+    /// How many paragraphs under construction have ended, kept or dropped:
+    /// what tells a [`FlowMark`] whether its paragraph is still the open one.
+    ended: usize,
+    /// The paragraph under construction holds something a reader would see.
+    para_visible: bool,
+}
+
+/// A point in a [`Flow`], from which [`Flow::text_since`] reads what was
+/// added after it.
+struct FlowMark {
+    blocks: usize,
+    para: usize,
+    ended: usize,
+    /// The open paragraph already held something visible, so it will be
+    /// kept, as the first block after `blocks`, when it ends.
+    para_visible: bool,
+}
+
+/// Whether `inline` shows a reader anything.
+fn is_visible(inline: &Inline) -> bool {
+    match inline {
+        Inline::Text(t) => !t.trim().is_empty(),
+        Inline::LineBreak => false,
+        Inline::Code(t) | Inline::Strong(t) | Inline::Emphasis(t) => !t.trim().is_empty(),
+        Inline::Link { .. } => true,
+    }
 }
 
 impl Flow {
@@ -165,6 +191,7 @@ impl Flow {
         // A line break is a boundary too: flattened into one inline's text it
         // would sit at an edge that gets trimmed.
         self.broke |= matches!(inline, Inline::LineBreak);
+        self.para_visible |= is_visible(&inline);
         self.para.push(inline);
     }
 
@@ -180,15 +207,49 @@ impl Flow {
     /// the content.
     fn end_paragraph(&mut self) {
         let para = std::mem::take(&mut self.para);
-        let visible = para.iter().any(|i| match i {
-            Inline::Text(t) => !t.trim().is_empty(),
-            Inline::LineBreak => false,
-            Inline::Code(t) | Inline::Strong(t) | Inline::Emphasis(t) => !t.trim().is_empty(),
-            Inline::Link { .. } => true,
-        });
-        if visible {
+        self.ended += 1;
+        if std::mem::take(&mut self.para_visible) {
             self.blocks.push(Block::Paragraph(para));
         }
+    }
+
+    fn mark(&self) -> FlowMark {
+        FlowMark {
+            blocks: self.blocks.len(),
+            para: self.para.len(),
+            ended: self.ended,
+            para_visible: self.para_visible,
+        }
+    }
+
+    /// The text a reader is shown of everything added since `mark`,
+    /// flattened as [`flatten`] does. When the paragraph open at `mark` held
+    /// nothing visible, its whitespace may lead the result.
+    fn text_since(&self, mark: &FlowMark) -> String {
+        let mut out = String::new();
+        if self.ended == mark.ended {
+            flatten_inlines(&self.para[mark.para..], &mut out);
+            return out;
+        }
+        // The paragraph open at `mark` has ended. It is the first block
+        // since, its inlines from before `mark` first, if it was visible
+        // then; otherwise those inlines were only whitespace.
+        let added = &self.blocks[mark.blocks..];
+        match added {
+            [Block::Paragraph(first), rest @ ..] if mark.para_visible => {
+                flatten_inlines(&first[mark.para..], &mut out);
+                if !rest.is_empty() {
+                    out.push('\n');
+                    flatten(rest, &mut out);
+                }
+            }
+            _ => flatten(added, &mut out),
+        }
+        if !self.para.is_empty() {
+            out.push('\n');
+            flatten_inlines(&self.para, &mut out);
+        }
+        out
     }
 
     fn block(&mut self, block: Block) {
@@ -562,14 +623,13 @@ impl Renderer {
             // already name it (`<see cref="T:System.String">string</see>`):
             // `<see cref="M:…QuicStream.Abort(…)">aborted</see>` would
             // otherwise leave the reader no way to tell what is referred to.
-            // The comparison reads the words with `label_text` rather than
-            // rendering them a second time (which, nested, is exponential).
+            // The words compared are the ones the reader is shown, read back
+            // from the flow rather than derived again from the children.
+            let mark = flow.mark();
             self.flow(&e.children, flow);
             if let Some(cref) = e.attribute("cref") {
                 let target = readable_cref(cref);
-                let words = label_text(&e.children);
-                let words = words.trim();
-                if words.is_empty() || !target.to_lowercase().contains(&words.to_lowercase()) {
+                if !words_name_target(&flow.text_since(&mark), &target) {
                     flow.inline(Inline::Text(" (".to_string()));
                     flow.inline(Inline::Code(target));
                     flow.inline(Inline::Text(")".to_string()));
@@ -794,29 +854,7 @@ fn flatten(blocks: &[Block], out: &mut String) {
             out.push('\n');
         }
         match block {
-            Block::Paragraph(inlines) => {
-                for inline in inlines {
-                    match inline {
-                        Inline::Text(t)
-                        | Inline::Code(t)
-                        | Inline::Strong(t)
-                        | Inline::Emphasis(t) => out.push_str(t),
-                        // A link flattened into plain text keeps where it
-                        // led: `<b><a href="u">BYTE</a></b>` is `BYTE (u)`.
-                        Inline::Link { text, url } if text.trim().is_empty() => {
-                            out.push_str(&blank_label_text(text, url));
-                        }
-                        Inline::Link { text, url } if text == url => out.push_str(url),
-                        Inline::Link { text, url } => {
-                            out.push_str(text);
-                            out.push_str(" (");
-                            out.push_str(url);
-                            out.push(')');
-                        }
-                        Inline::LineBreak => out.push('\n'),
-                    }
-                }
-            }
+            Block::Paragraph(inlines) => flatten_inlines(inlines, out),
             Block::CodeBlock { code, .. } => out.push_str(code),
             Block::List { items, .. } => {
                 for (j, item) in items.iter().enumerate() {
@@ -830,32 +868,68 @@ fn flatten(blocks: &[Block], out: &mut String) {
     }
 }
 
-/// The words a reference's content shows, read without rendering it: the
-/// character data, plus the names a nested reference draws from an attribute
-/// (`<see cref="M:T.Dispose"><paramref name="resource"/></see>` is labelled
-/// `resource`). Used only to decide whether those words already name the
-/// target; an empty label names nothing.
-fn label_text(nodes: &[DocNode]) -> String {
-    let mut out = String::new();
-    for node in nodes {
-        match node {
-            DocNode::Text(t) => out.push_str(t),
-            DocNode::Element(e) => {
-                let name = name_of(e);
-                let borne = match name.as_str() {
-                    "paramref" | "typeparamref" => e.attribute("name"),
-                    "see" | "seealso" => e.attribute("langword").or_else(|| e.attribute("langref")),
-                    _ => None,
-                };
-                match borne {
-                    Some(word) => out.push_str(word),
-                    None if is_ignored(&name) => {}
-                    None => out.push_str(&label_text(&e.children)),
-                }
+/// The text of a paragraph's `inlines`.
+fn flatten_inlines(inlines: &[Inline], out: &mut String) {
+    for inline in inlines {
+        match inline {
+            Inline::Text(t) | Inline::Code(t) | Inline::Strong(t) | Inline::Emphasis(t) => {
+                out.push_str(t);
             }
+            // A link flattened into plain text keeps where it led:
+            // `<b><a href="u">BYTE</a></b>` is `BYTE (u)`.
+            Inline::Link { text, url } if text.trim().is_empty() => {
+                out.push_str(&blank_label_text(text, url));
+            }
+            Inline::Link { text, url } if text == url => out.push_str(url),
+            Inline::Link { text, url } => {
+                out.push_str(text);
+                out.push_str(" (");
+                out.push_str(url);
+                out.push(')');
+            }
+            Inline::LineBreak => out.push('\n'),
         }
     }
-    out
+}
+
+/// Whether the `words` a reference shows already name its readable `target`,
+/// so the target need not follow them: they spell a trailing run of the
+/// dotted segments of its name, alone or followed by its parameter list,
+/// read without case, whitespace or the name's generic arity (`string` names
+/// `System.String`, `String.Join` and `System.GC.Collect()` name
+/// `System.String.Join(System.String,System.String[])` and
+/// `System.GC.Collect()`, `` List`1 `` names ``System.Collections.Generic.List`1``).
+/// A parameter list must match exactly: `` `0 `` in one names a type
+/// parameter, so `Add()` does not name ``List`1.Add(`0)``. Words merely
+/// *inside* the name do not name it (`R` does not name `System.String`, nor
+/// `Read` `System.IO.Stream.ReadAsync`), and empty words name nothing.
+fn words_name_target(words: &str, target: &str) -> bool {
+    // Whitespace and case dropped, then the name split from its parameter
+    // list and its generic arity (`` `1 ``, ``` ``2 ```) dropped.
+    let parts = |s: &str| -> (String, String) {
+        let s: String = s
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect();
+        let (name, params) = s.split_at(s.find('(').unwrap_or(s.len()));
+        let mut bare = String::new();
+        let mut chars = name.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '`' {
+                while chars.next_if(|c| *c == '`' || c.is_ascii_digit()).is_some() {}
+            } else {
+                bare.push(c);
+            }
+        }
+        (bare, params.to_string())
+    };
+    let ((run, words_params), (name, params)) = (parts(words), parts(target));
+    !run.is_empty()
+        && (words_params.is_empty() || words_params == params)
+        && name
+            .strip_suffix(&run)
+            .is_some_and(|before| before.is_empty() || before.ends_with('.'))
 }
 
 /// Put `inline` — drawn from `e`'s attributes — into `flow` in place of `e`,
@@ -1303,6 +1377,105 @@ mod tests {
             ),
             "A string."
         );
+        assert_eq!(
+            markdown_of(
+                r#"<member name="T:X"><summary><see cref="M:System.String.Join(System.String,System.String[])">String.Join</see></summary></member>"#
+            ),
+            "String.Join"
+        );
+        assert_eq!(
+            markdown_of(
+                r#"<member name="T:X"><summary><see cref="T:Microsoft.FSharp.Collections.list`1">list</see></summary></member>"#
+            ),
+            "list"
+        );
+        // The parameter list and generic arity may be spelt out too.
+        for words in ["System.GC.Collect()", "GC.Collect()", "Collect"] {
+            assert_eq!(
+                markdown_of(&format!(
+                    r#"<member name="T:X"><summary><see cref="M:System.GC.Collect()">{words}</see></summary></member>"#
+                )),
+                words,
+            );
+        }
+        assert_eq!(
+            markdown_of(
+                r#"<member name="T:X"><summary><see cref="T:System.Collections.Generic.List`1">List`1</see></summary></member>"#
+            ),
+            r"List\`1"
+        );
+        // A parameter list spelt out must be the target's: `` `0 `` is a
+        // type parameter, not an arity.
+        let add = |words: &str| {
+            markdown_of(&format!(
+                r#"<member name="T:X"><summary><see cref="M:System.Collections.Generic.List`1.Add(`0)">{words}</see></summary></member>"#
+            ))
+        };
+        assert_eq!(add("Add"), "Add");
+        assert_eq!(add("List`1.Add(`0)"), r"List\`1.Add(\`0)");
+        assert_ne!(add("Add()"), "Add()");
+        assert!(add("Add()").starts_with("Add() ("));
+        // Words inside the name, not a trailing run of its segments, do not
+        // name it.
+        assert_eq!(
+            markdown_of(
+                r#"<member name="T:X"><summary><see cref="T:System.String">R</see></summary></member>"#
+            ),
+            "R (`System.String`)"
+        );
+        assert_eq!(
+            markdown_of(
+                r#"<member name="T:X"><summary><see cref="M:System.IO.Stream.ReadAsync">Read</see></summary></member>"#
+            ),
+            "Read (`System.IO.Stream.ReadAsync`)"
+        );
+        // The words are the ones shown, a nested reference's name included.
+        assert_eq!(
+            markdown_of(
+                r#"<member name="T:X"><summary><see cref="T:System.String">R<seealso name="0"/></see></summary></member>"#
+            ),
+            "R`0` (`System.String`)"
+        );
+        assert_eq!(
+            markdown_of(
+                r#"<member name="T:X"><summary><see cref="T:System.String"><see cref="T:System.String"/></see></summary></member>"#
+            ),
+            "`System.String`"
+        );
+    }
+
+    /// Found by `no_member_content_is_lost` (#906): the words of a
+    /// `<seealso>` were read without the name a nested `<seealso name>`
+    /// shows, so `R` alone was taken to name `System.String`, and the target —
+    /// with its `.` — was dropped.
+    #[test]
+    fn a_nested_reference_name_is_part_of_the_words() {
+        let member = element(
+            "member",
+            Vec::new(),
+            vec![DocNode::Element(element(
+                "seealso",
+                vec![("cref", "T:System.String".into())],
+                vec![DocNode::Element(element(
+                    "summary",
+                    Vec::new(),
+                    vec![
+                        DocNode::Text("R".into()),
+                        DocNode::Element(element(
+                            "seealso",
+                            vec![("name", "0".into())],
+                            Vec::new(),
+                        )),
+                    ],
+                ))],
+            ))],
+        );
+        let (blocks, _) = render_member(&member);
+        // The `<summary>` is a block of its own, so the target follows it.
+        assert_eq!(
+            to_markdown(&blocks),
+            "**See also**\n\n- R`0`\n\n  (`System.String`)"
+        );
     }
 
     /// Shrunk inputs once found by the property tests below (kept as examples:
@@ -1547,13 +1720,98 @@ mod tests {
             }),
         ];
         leaf.prop_recursive(5, 48, 5, move |inner| {
-            (
+            let any = (
                 proptest::sample::select(names.clone()),
                 attrs.clone(),
-                proptest::collection::vec(inner, 0..5),
+                proptest::collection::vec(inner.clone(), 0..5),
             )
-                .prop_map(|(n, a, children)| DocNode::Element(element(n, a, children)))
+                .prop_map(|(n, a, children)| DocNode::Element(element(n, a, children)));
+            if with_attrs {
+                prop_oneof![4 => any, 1 => labelled_reference(inner)].boxed()
+            } else {
+                any.boxed()
+            }
         })
+    }
+
+    /// Crefs a [`labelled_reference`] points at, and words that do, nearly
+    /// do, or do not name them.
+    const TARGETS: &[&str] = &[
+        "T:System.String",
+        "M:System.String.Join(System.String,System.String[])",
+        "T:Microsoft.FSharp.Collections.list`1",
+        "M:System.Linq.Enumerable.Select``2(System.Func{``0,``1})",
+        "!:ReadOnlySpan<T>",
+        "O:System.Object.Equals",
+        "M:X.<G>$1.M(System.Int32)",
+        "t:A",
+        "M:System.GC.Collect()",
+        "T:System.Collections.Generic.List`1",
+        "M:System.Collections.Generic.List`1.Add(`0)",
+    ];
+    const LABELS: &[&str] = &[
+        "System.GC.Collect()",
+        "GC.Collect()",
+        "Collect",
+        "()",
+        "List`1",
+        "List",
+        "Join(System.String,System.String[])",
+        "Select``2",
+        "Add()",
+        "Add(`0)",
+        "List`1.Add",
+        "String",
+        "string",
+        "System.String",
+        "String.Join",
+        "Join",
+        "list",
+        "Select",
+        "Enumerable.Select",
+        "ReadOnlySpan<T>",
+        "Equals",
+        "M",
+        "a",
+        "R",
+        "s",
+        "Str",
+        "ing",
+        "Joi",
+        ".",
+        "0",
+        " ",
+    ];
+
+    /// A `<see>`/`<seealso>` with a target and words of its own, which shows
+    /// the target unless the words name it. The words are built to sit either
+    /// side of that line: fragments of the targets' names, nested references
+    /// whose words come from an attribute, and arbitrary content.
+    fn labelled_reference(inner: BoxedStrategy<DocNode>) -> BoxedStrategy<DocNode> {
+        let attribute_borne = (
+            proptest::sample::select(vec!["see", "seealso", "paramref", "typeparamref"]),
+            proptest::sample::select(vec!["name", "cref", "langword", "href", "langref"]),
+            prop_oneof![
+                proptest::sample::select(LABELS).prop_map(str::to_string),
+                proptest::sample::select(TARGETS).prop_map(str::to_string),
+                attr_value(),
+            ],
+        )
+            .prop_map(|(n, a, v)| DocNode::Element(element(n, vec![(a, v)], Vec::new())));
+        let word = prop_oneof![
+            3 => proptest::sample::select(LABELS).prop_map(|w| DocNode::Text(w.into())),
+            2 => attribute_borne,
+            1 => inner,
+        ];
+        (
+            proptest::sample::select(vec!["see", "seealso"]),
+            proptest::sample::select(TARGETS),
+            proptest::collection::vec(word, 1..4),
+        )
+            .prop_map(|(n, cref, children)| {
+                DocNode::Element(element(n, vec![("cref", cref.into())], children))
+            })
+            .boxed()
     }
 
     fn element(name: &str, attrs: Vec<(&str, String)>, children: Vec<DocNode>) -> DocElement {
@@ -1577,6 +1835,37 @@ mod tests {
 
     fn visible(s: &str) -> String {
         s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// Whether a reference's `words` name its readable `target` (whitespace
+    /// and case aside): the words' name — up to any parameter list, each
+    /// generic arity (a run of backticks and the digits after it) dropped —
+    /// spells the last few dotted segments of the target's, and the words
+    /// carry no parameter list or exactly the target's. Empty words name
+    /// nothing.
+    fn names(words: &str, target: &str) -> bool {
+        let parts = |s: &str| -> (String, String) {
+            let s = s
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .to_lowercase();
+            let (name, params) = match s.split_once('(') {
+                Some((name, params)) => (name.to_string(), format!("({params}")),
+                None => (s, String::new()),
+            };
+            let mut pieces = name.split('`');
+            let mut bare = pieces.next().unwrap_or_default().to_string();
+            for piece in pieces {
+                bare.push_str(piece.trim_start_matches(|c: char| c.is_ascii_digit()));
+            }
+            (bare, params)
+        };
+        let ((words, words_params), (name, params)) = (parts(words), parts(target));
+        let segments: Vec<&str> = name.split('.').collect();
+        !words.is_empty()
+            && (words_params.is_empty() || words_params == params)
+            && (0..segments.len()).any(|i| segments[i..].join(".") == words)
     }
 
     /// The words a reader must be shown for `nodes`, in document order,
@@ -1620,11 +1909,7 @@ mod tests {
                             // The words as a reader sees them — including a
                             // name drawn from an attribute — and they must say
                             // something: an empty label names nothing.
-                            let words = expected_text(&e.children);
-                            let words = words.trim();
-                            if words.is_empty()
-                                || !target.to_lowercase().contains(&words.to_lowercase())
-                            {
+                            if !names(&expected_text(&e.children), &target) {
                                 out.push_str(&target);
                             }
                         }
