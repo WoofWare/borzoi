@@ -5,7 +5,7 @@ You should find the F# compiler checked out in ../fsharp ; shout if it's not the
 
 ## Workspace layout
 
-This is a Cargo workspace with nine members:
+This is a Cargo workspace with ten members:
 
 - `crates/cst/` — `borzoi-cst`. The lexer, lex-filter (offside rewriter),
   recursive-descent parser, and the CST/AST: a flat preorder table per file
@@ -300,6 +300,21 @@ This is a Cargo workspace with nine members:
   recurses per element; `borzoi-msbuild`'s `xml_nesting_pump` and
   `borzoi-nuget`'s `dgspec::xml_nesting_pump` hold every reader of untrusted
   XML to that without naming the recursive paths. A new reader belongs in one.
+- `crates/print/` — `borzoi-print`. An owned F# syntax tree a program builds
+  (`tree`, with validated names in `names`), and a *reference* printer that
+  writes it as source: every expression, pattern and type parenthesised, every
+  expression on one line, verbose forms throughout. It is the output half of
+  source generation; `borzoi-cst`'s lossless tree comes only from parsing.
+  No dependencies. Its correctness oracle is in `borzoi-cst`'s tests
+  (`tests/all/print_roundtrip/`), beside the FCS harness it needs: for a tree
+  `t`, FCS must parse `print(t)` with no diagnostic at all and its parse must
+  lower back to `t` exactly (and our parser must agree with FCS, the shape of
+  #947 aside). The trees come from a generator over the whole tree, from
+  exhaustive tables of keywords and short operator spellings, and from every
+  corpus file lowered with the unmodelled declarations dropped
+  (`print_roundtrip::corpus`, pinned per file). When the oracle finds a value
+  F# cannot express, the fix is to the tree's types, so that value cannot be
+  built; CI runs the printer's tests under the `cst` change filter.
 - `crates/sema/` — `borzoi-sema`. Semantic analysis (name resolution
   today, type inference later) over the `borzoi-cst` AST. `resolve_file`
   builds a position-ordered scope tree and resolves each name use to its
@@ -691,6 +706,7 @@ nix develop -c cargo test -p borzoi-cst  --test all recovery_sweep::       -- --
 nix develop -c cargo test -p borzoi-cst  --test all parser_diff_decl_sequence_grid::every_declaration_pair_streams -- --ignored  # ~3 min
 nix develop -c cargo test -p borzoi-cst  --test all flat_tree_reference::corpus -- --ignored  # ~2.5 min
 nix develop -c cargo test -p borzoi-cst  --test all facade_properties::corpus -- --ignored  # ~4 min
+nix develop -c cargo test -p borzoi-cst  --test all print_roundtrip::corpus:: -- --ignored  # ~30 s
 nix develop -c cargo test -p borzoi-sema --test all resolve_corpus_diff:: -- --ignored  #  ~20 s
 nix develop -c cargo test -p borzoi-sema --test all attr_resolution_sweep:: -- --ignored  #  ~25 s
 nix develop -c cargo test -p borzoi-sema --test all silent_region_sweep:: -- --ignored  #  ~1.5 min
@@ -743,7 +759,8 @@ on macOS (where Nix renames case-colliding names) and on Linux CI.
 A manifest whose every entry is keyed (`<key><TAB><value>`) — the
 whole-project `project_corpus.txt`, and the `parser_corpus`,
 `parser_corpus_diff`, `recovery_sweep`, `version_dependence_census`,
-`resolve_corpus_diff`, `infer_corpus_diff` and `xml_doc_source_*` sweeps' —
+`print_roundtrip::corpus`, `resolve_corpus_diff`, `infer_corpus_diff` and
+`xml_doc_source_*` sweeps' —
 merges key by key rather than as text, so a rebase past another branch's
 manifest movement needs no regeneration when the two moved different items. Enable the driver once per clone:
 

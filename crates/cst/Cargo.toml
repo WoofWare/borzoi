@@ -82,6 +82,8 @@ borzoi-cst = { path = ".", features = [
     "unstable-preview",
 ] }
 borzoi-oracle-harness.workspace = true
+# The printer the `print_roundtrip` oracle grades against FCS.
+borzoi-print.workspace = true
 # The feature table's parser, so `tests/all/language_features.rs` reads
 # `language-features.tsv` exactly as the generator does.
 borzoi-astgen.workspace = true

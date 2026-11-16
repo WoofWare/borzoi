@@ -34,7 +34,9 @@ set -euo pipefail
 # in ci.yml.
 filter_prefixes() {
   case "$1" in
-    cst)       echo "crates/cst" ;;
+    # crates/print's correctness oracle is in crates/cst's tests, which grade
+    # it against FCS, so the printer lives under cst's filter.
+    cst)       echo "crates/cst crates/print" ;;
     # The condition/property oracle and the workload oracle exist solely for
     # crates/msbuild's differential tests, so they live under its filter
     # (mirrors nuget).

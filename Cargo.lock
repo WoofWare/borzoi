@@ -223,6 +223,7 @@ dependencies = [
  "borzoi-astgen",
  "borzoi-cst",
  "borzoi-oracle-harness",
+ "borzoi-print",
  "borzoi-stats",
  "logos",
  "proc-macro2",
@@ -276,6 +277,10 @@ dependencies = [
  "serde_json",
  "tempfile",
 ]
+
+[[package]]
+name = "borzoi-print"
+version = "0.1.0"
 
 [[package]]
 name = "borzoi-sema"

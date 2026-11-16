@@ -8,6 +8,7 @@ members = [
     "crates/msbuild",
     "crates/nuget",
     "crates/oracle-harness",
+    "crates/print",
     "crates/sema",
     "crates/spawn",
     "tools/astgen",
@@ -29,6 +30,7 @@ borzoi-cst = { path = "crates/cst" }
 borzoi-msbuild = { path = "crates/msbuild" }
 borzoi-nuget = { path = "crates/nuget" }
 borzoi-oracle-harness = { path = "crates/oracle-harness" }
+borzoi-print = { path = "crates/print" }
 borzoi-sema = { path = "crates/sema" }
 borzoi-spawn = { path = "crates/spawn" }
 borzoi-stats = { path = "tools/stats" }
