@@ -7730,19 +7730,37 @@ let private assemblyEntitiesOf (checkResults: FSharpCheckFileResults) (file: str
             {| Error = ex.Message; Rows = [||] |}
     {| File = absolute; Fcs = fcs; Il = il |}
 
+/// Whether the assembly at `path` embeds an F# signature resource: the pickle
+/// whose entities `assembly-entities` grades through FCS. Unreadable counts
+/// as no.
+let private carriesFSharpSignature (path: string) : bool =
+    try
+        use stream = File.OpenRead path
+        use pe = new System.Reflection.PortableExecutable.PEReader(stream)
+        let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
+        md.ManifestResources
+        |> Seq.exists (fun h ->
+            md.GetString(md.GetManifestResource(h).Name).StartsWith("FSharpSignature", StringComparison.Ordinal))
+    with _ -> false
+
 /// For an `assembly-entities` request, `switches` (a script's options) without
-/// any reference whose file name is a requested ref's; any other `kind`'s
-/// switches unchanged. `assembly-entities` reports on exactly the files it is
-/// handed, and FCS would load a script reference of the same name (the
-/// implicit FSharp.Core, say) in preference to the appended request, leaving
-/// the requested file unread.
+/// any reference whose file name is a requested F# assembly's; any other
+/// `kind`'s switches unchanged. FCS would load a script reference of the same
+/// name (the implicit FSharp.Core, say) in preference to the appended
+/// request, leaving the requested pickle unread. Only an F# assembly's FCS
+/// view is graded, and replacing a framework reference with an older facade
+/// of the same name (netstandard.library's `System.Runtime.dll`) aborts the
+/// check, so no other reference is replaced.
 ///
 /// Top-level, and applied inside an existing binding rather than a new `let` in the batch loop,
 /// for the reason [`collectAssemblyEntityRows`] gives: every `let` in that
 /// loop's sequence nests the rest of it one level deeper in the AST.
 let private dropScriptRefsNamedLike (kind: string) (refs: string list) (switches: string[]) : string[] =
     if kind <> "assembly-entities" then switches else
-    let requested = refs |> List.map (fun r -> Path.GetFileName(r.Trim()))
+    let requested =
+        refs
+        |> List.filter (fun r -> carriesFSharpSignature (r.Trim()))
+        |> List.map (fun r -> Path.GetFileName(r.Trim()))
     let referencedFile (o: string) =
         if o.StartsWith("-r:") || o.StartsWith("/r:") then Some(o.Substring 3)
         elif o.StartsWith("--reference:") then Some(o.Substring "--reference:".Length)
