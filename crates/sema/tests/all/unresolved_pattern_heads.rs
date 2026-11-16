@@ -477,6 +477,38 @@ const NAMESAKE_CELLS: &[ProjectCell] = &[
         binder: Expect::Abandoned,
     },
     ProjectCell {
+        // A duplicated case name (FS0023) resolves to its first declaration,
+        // here the obsolete one.
+        id: "duplicate_case_first_obsolete",
+        earlier: &[(
+            "NamesakeUnions.fs",
+            "namespace N\ntype MethodBody<'a> =\n    | [<System.Obsolete(\"gone\", true)>] Il of 'a\n    | Il of 'a\n",
+        )],
+        prelude: NAMESAKE_PRELUDE,
+        template: "    let f (b: MethodBody<int>) =\n        match b with\n        | MethodBody.Il «x» -> ignore ‹x›\n        | _ -> ()\n",
+        binder: Expect::Abandoned,
+    },
+    ProjectCell {
+        // The in-file twin.
+        id: "in_file_duplicate_case_first_obsolete",
+        earlier: &[],
+        prelude: "module P\nopen System.Reflection\ntype MethodBody<'a> =\n    | [<System.Obsolete(\"gone\", true)>] Il of 'a\n    | Il of 'a\nlet x = \"outer\"\n",
+        template: "let f (b: MethodBody<int>) =\n    match b with\n    | MethodBody.Il «x» -> ignore ‹x›\n    | _ -> ()\n",
+        binder: Expect::Abandoned,
+    },
+    ProjectCell {
+        // FCS binds `x`, but an attribute on any case of the union declines
+        // every case's binders.
+        id: "attributed_sibling_case",
+        earlier: &[(
+            "NamesakeUnions.fs",
+            "namespace N\ntype MethodBody<'a> =\n    | Il of 'a\n    | [<System.Obsolete(\"gone\", true)>] Jit of 'a\n",
+        )],
+        prelude: NAMESAKE_PRELUDE,
+        template: "    let f (b: MethodBody<int>) =\n        match b with\n        | MethodBody.Il «x» -> ‹x›\n        | _ -> 0\n",
+        binder: Expect::Opaque,
+    },
+    ProjectCell {
         // A record of the union's name and path, at another arity, is
         // another type: FCS tries it first.
         id: "project_namesake_record_field_at_the_same_path",

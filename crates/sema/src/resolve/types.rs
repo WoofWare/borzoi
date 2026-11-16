@@ -395,6 +395,12 @@ impl<'a> Resolver<'a> {
             .get(&self.lexical.container_path.id())
             .and_then(|m| m.get(&type_key))
             .copied();
+        // What FCS checks of a case heading a pattern before its arguments:
+        // its attributes and its type's. Taken over every case, since FCS
+        // resolves a duplicated case name (FS0023) to its first declaration,
+        // which need not be the one the case index keeps.
+        let case_attributed = defn.attributes().next().is_some()
+            || u.cases().any(|case| case.attributes().next().is_some());
         for case in u.cases() {
             // An operator-named case (`([])` / `( :: )`, FSharp.Core's `list`) has
             // no identifier token; FCS records its compiled `op_Nil` /
@@ -438,10 +444,6 @@ impl<'a> Resolver<'a> {
             // cross-file uses too. A require-qualified case is not value-exported or
             // framed (reachable only as `T.Case`); an anonymous-root case cannot be
             // exported, so it stays a `Local` and its module is marked hidden.
-            // What FCS checks of a case heading a pattern before its
-            // arguments: its attributes and its type's.
-            let case_attributed =
-                defn.attributes().next().is_some() || case.attributes().next().is_some();
             let res = if require_qualified {
                 // Reachable only as `T.Case`: give it a cross-file handle via the
                 // type-qualified index (no value-namespace export) and use that
@@ -3375,9 +3377,10 @@ impl<'a> Resolver<'a> {
     ///   ([`Self::sees_types_declared_in`]): the case index's container walk
     ///   also reaches an enclosing namespace's ancestors, which FCS does not
     ///   open;
-    /// * the found case and its union carry no attribute list, since an
+    /// * the found union and its cases carry no attribute list, since an
     ///   error-level attribute (`[<Obsolete(…, true)>]`) abandons the
-    ///   sub-pattern before its arguments are checked;
+    ///   sub-pattern before its arguments are checked, and a duplicated case
+    ///   name resolves to its first declaration;
     /// * every referenced assembly's type named `T` under a prefix the type
     ///   walk visits finds nothing named `C`
     ///   ([`AssemblyEnv::pattern_lookup_in_type_finds_nothing`](crate::AssemblyEnv::pattern_lookup_in_type_finds_nothing)), and no
@@ -3466,8 +3469,8 @@ impl<'a> Resolver<'a> {
                 .any(|prefix| prefix.path == container)
     }
 
-    /// Whether `res` names a union case whose case and type carry no attribute
-    /// list ([`ExportedItem::case_attributed`](super::model::ExportedItem::case_attributed)),
+    /// Whether `res` names a union case whose union carries no attribute list
+    /// on itself or any case ([`ExportedItem::case_attributed`](super::model::ExportedItem::case_attributed)),
     /// as an export of this file's or an earlier one's
     /// ([`ProjectItems::is_plain_union_case_item`](super::model::ProjectItems::is_plain_union_case_item)):
     /// not an enum case, an exception constructor, or a case with no handle.

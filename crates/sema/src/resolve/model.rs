@@ -575,7 +575,7 @@ pub struct ProjectItems {
     /// pattern-position resolution and case/module collision soundness.
     pub(super) case_item_ids: HashSet<ItemId>,
     /// The project-global [`ItemId`]s of earlier files' **union** cases whose
-    /// case and type carry no attribute list
+    /// union carries no attribute list on itself or any case
     /// ([`ExportedItem::case_attributed`]), of every accessibility and
     /// [`CaseKind::Union`] flavour: the [type-qualified
     /// cases](Self::type_qualified_cases) certain to bind the patterns applied
@@ -3665,11 +3665,13 @@ pub struct ExportedItem {
     /// and never contests. Always `false` for cases and active-pattern case
     /// handles.
     pub(super) attributed: bool,
-    /// For a union case, `true` when the case or its union type may carry an
-    /// attribute list: FCS checks the attributes of a case heading a pattern
-    /// before its arguments (`CheckUnionCaseAttributes`), and an error-level
-    /// one (`[<Obsolete(…, true)>]`) abandons the whole sub-pattern, so only
-    /// an unattributed case certainly binds them
+    /// For a union case, `true` when its union type or any of the union's
+    /// cases may carry an attribute list: FCS checks the attributes of a case
+    /// heading a pattern before its arguments (`CheckUnionCaseAttributes`),
+    /// and an error-level one (`[<Obsolete(…, true)>]`) abandons the whole
+    /// sub-pattern, so only an unattributed case certainly binds them. Any
+    /// case counts, since a duplicated case name (FS0023) resolves to its
+    /// first declaration, which need not be the one exported
     /// ([`Resolver::namesake_declined_case_head_binds`](super::state::Resolver::namesake_declined_case_head_binds)).
     /// A signature-derived union case answers `true`. `false` for every
     /// other export.
