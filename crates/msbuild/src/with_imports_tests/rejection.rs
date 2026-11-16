@@ -846,13 +846,26 @@ fn a_file_msbuild_refuses_at_load_time_rejects_where_it_is_imported() {
     let tmp = TempDir::new().unwrap();
     let project_path = project(&tmp, &import("false"), &[("proj/refused.props", refused)]);
     assert_eq!(parse_file(&project_path).rejection, None);
-    // Imported through a path the walk does not name for certain (a `\` a
-    // property supplies, #903): MSBuild may load another file.
+    // Imported through a `\` a property supplies that no spelling of MSBuild's
+    // Unix adjustment can move (#903): it opens `sub/refused.props` either way.
     let tmp = TempDir::new().unwrap();
     let project_path = project(
         &tmp,
         "  <PropertyGroup><P>sub\\refused.props</P></PropertyGroup>\n  <Import Project=\"$(P)\" />",
         &[("proj/sub/refused.props", refused)],
+    );
+    assert_rejected(&parse_file(&project_path), &["Before", "After"]);
+    // Imported through a path the walk does not name for certain: whether the
+    // `..` pops `sub\x` whole depends on MSBuild's working directory (#903), so
+    // MSBuild may load another file.
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(
+        &tmp,
+        "  <PropertyGroup><P>sub\\x/../refused.props</P></PropertyGroup>\n  <Import Project=\"$(P)\" />",
+        &[
+            ("proj/refused.props", refused),
+            ("proj/sub/refused.props", refused),
+        ],
     );
     assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
 }
