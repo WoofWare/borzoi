@@ -558,6 +558,21 @@ distribution. 7a states its threshold before measuring. 7b is built only if
 the audit leaves D6 standing and the median share is small enough that a
 hover-first session's cold cost falls by more than the bookkeeping adds.
 
+**7a's threshold, stated before measuring.** On WoofWare.PawPrint2 a
+hover-first session's cold cost today is the full resolution fold (5.63 G on
+`semanticTokens L`, after Stage 6) plus the prefix's inference (about
+0.84 G): about 6.5 G. Under D6 it is the surface fold and the target's walk
+(about 1.6 G, the end state below), plus full walks and inference of the
+closure: a share `s` of the prefix's declaration walks (4.49 G) and its
+inference (0.84 G), about `1.6 + 5.3 s` G. The break-even is near
+`s = 0.9`, but 7b would add partial walks and a second kind of cached prefix
+to the LSP, and a later request on another file widens what the session has
+walked back towards today's. So 7b is worth building only for a large win:
+**the median file's closure share by bytes must be at most 0.5**, which saves
+at least about 2.6 G, 40%, of a hover-first session on this project. The
+census reports the share by files too, and the upper quartiles, but the
+decision reads the median by bytes, since the walks' cost goes with size.
+
 **Oracle (7b)**: for every file, the hover and completion answers from the
 closure's inference equal those from the whole prefix's inference, over the
 whole-project gate and over generated projects that collide constructor
