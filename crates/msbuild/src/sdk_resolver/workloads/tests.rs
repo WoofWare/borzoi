@@ -949,20 +949,31 @@ fn auto_import_returns_empty_when_no_pack_ships_auto_import_props() {
     assert_eq!(result, SdkResolution::Roots(Vec::new()));
 }
 
+/// Install manifest `id` at `1.0.0` in band `10.0.300` defining one SDK pack,
+/// `Fake.Workload.Sdk` at `1.0.0`.
+fn manifest_with_sdk_pack(root: &Path, id: &str) {
+    let dir = root.join("sdk-manifests/10.0.300").join(id).join("1.0.0");
+    write(
+        &dir.join("WorkloadManifest.json"),
+        r#"{"version": "1.0.0", "packs": {"Fake.Workload.Sdk": {"kind": "Sdk", "version": "1.0.0"}}}"#,
+    );
+}
+
 #[test]
-fn auto_import_degrades_when_any_auto_import_props_exists() {
+fn auto_import_ignores_a_pack_no_manifest_defines() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
     manifest(root, "10.0.100", "w.workload", "1.0.0");
     write(
-        &root.join("packs/Fake.Workload.Sdk/1.0.0/AutoImport.props"),
+        &root.join("packs/Fake.Workload.Sdk/1.0.0/Sdk/AutoImport.props"),
         "<Project/>",
     );
 
-    let err = resolve_workload_locator(AUTO, root, &version_dir, &no_user_env(), &Observer::new())
-        .unwrap_err();
-    assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));
+    let result =
+        resolve_workload_locator(AUTO, root, &version_dir, &no_user_env(), &Observer::new())
+            .unwrap();
+    assert_eq!(result, SdkResolution::Roots(Vec::new()));
 }
 
 #[test]
@@ -1008,40 +1019,41 @@ fn outdated_manifest_ids_are_skipped() {
 }
 
 #[test]
-fn auto_import_degrades_on_the_sdk_subfolder_layout() {
-    // The layout CachingWorkloadResolver actually imports from:
-    // packs/{id}/{version}/Sdk/AutoImport.props.
+fn auto_import_returns_the_sdk_folder_of_an_installed_sdk_pack() {
+    // The layout CachingWorkloadResolver imports from:
+    // packs/{id}/{version}/Sdk/AutoImport.props; one beside `Sdk` is not
+    // looked for.
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
-    manifest(root, "10.0.100", "w.workload", "1.0.0");
-    write(
-        &root.join("packs/Fake.Workload.Sdk/1.0.0/Sdk/AutoImport.props"),
-        "<Project/>",
-    );
+    manifest_with_sdk_pack(root, "w.workload");
+    let pack = root.join("packs/Fake.Workload.Sdk/1.0.0");
+    write(&pack.join("AutoImport.props"), "<Project/>");
+    let observe = || {
+        resolve_workload_locator(AUTO, root, &version_dir, &no_user_env(), &Observer::new())
+            .unwrap()
+    };
+    assert_eq!(observe(), SdkResolution::Roots(Vec::new()));
 
-    let err = resolve_workload_locator(AUTO, root, &version_dir, &no_user_env(), &Observer::new())
-        .unwrap_err();
-    assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));
+    write(&pack.join("Sdk/AutoImport.props"), "<Project/>");
+    assert_eq!(observe(), SdkResolution::Roots(vec![pack.join("Sdk")]));
 }
 
 #[test]
-fn auto_import_scans_user_packs_even_without_user_manifests() {
+fn auto_import_finds_user_packs_even_without_user_manifests() {
     // WorkloadResolver.Create gates the *pack* roots only on the user
     // profile directory existing — not on it containing sdk-manifests
     // (that gate belongs to SdkDirectoryWorkloadManifestProvider). A
-    // user-local pack shipping AutoImport.props must degrade the
-    // auto-import locator even when the user root holds no manifests.
+    // user-local pack is installed even when the user root holds no
+    // manifests.
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("dotnet");
     let user = tmp.path().join("user-dotnet");
     let version_dir = host_sdk(&root, "10.0.300", &["w.workload"]);
-    manifest(&root, "10.0.100", "w.workload", "1.0.0");
+    manifest_with_sdk_pack(&root, "w.workload");
     write(&root.join("metadata/workloads/10.0.300/userlocal"), "");
-    write(
-        &user.join("packs/Fake.Workload.Sdk/1.0.0/Sdk/AutoImport.props"),
-        "<Project/>",
-    );
+    let pack = user.join("packs/Fake.Workload.Sdk/1.0.0");
+    write(&pack.join("Sdk/AutoImport.props"), "<Project/>");
 
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
@@ -1049,9 +1061,9 @@ fn auto_import_scans_user_packs_even_without_user_manifests() {
         global_json: Default::default(),
         process_architecture: None,
     };
-    let err =
-        resolve_workload_locator(AUTO, &root, &version_dir, &env, &Observer::new()).unwrap_err();
-    assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));
+    let result =
+        resolve_workload_locator(AUTO, &root, &version_dir, &env, &Observer::new()).unwrap();
+    assert_eq!(result, SdkResolution::Roots(vec![pack.join("Sdk")]));
 }
 
 #[test]
@@ -1259,23 +1271,32 @@ fn unreadable_band_directory_degrades() {
 
 #[cfg(unix)]
 #[test]
-fn unreadable_packs_directory_degrades_auto_import() {
+fn a_pack_under_an_unsearchable_directory_is_not_installed() {
+    // `Directory.Exists` answers false where its `stat` fails, so the
+    // resolver passes such a pack over rather than throw.
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
-    manifest(root, "10.0.300", "w.workload", "1.0.0");
+    manifest_with_sdk_pack(root, "w.workload");
     let packs = root.join("packs");
-    fs::create_dir_all(&packs).unwrap();
+    write(
+        &packs.join("Fake.Workload.Sdk/1.0.0/Sdk/AutoImport.props"),
+        "<Project/>",
+    );
 
-    let result = with_dir_mode(&packs, 0o000, || {
-        resolve_workload_locator(AUTO, root, &version_dir, &no_user_env(), &Observer::new())
+    let (searchable, result) = with_dir_mode(&packs, 0o000, || {
+        (
+            host_fs::metadata(packs.join("Fake.Workload.Sdk")).is_ok(),
+            resolve_workload_locator(AUTO, root, &version_dir, &no_user_env(), &Observer::new()),
+        )
     });
-    if host_fs::read_dir(&packs).is_err() {
-        assert!(matches!(
-            result.unwrap_err(),
-            SdkResolveError::UnsupportedLayout { .. }
-        ));
-    }
+    // Root bypasses permission bits.
+    let expected = if searchable {
+        vec![packs.join("Fake.Workload.Sdk/1.0.0/Sdk")]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(result.unwrap(), SdkResolution::Roots(expected));
 }
 
 #[cfg(unix)]

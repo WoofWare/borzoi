@@ -54,7 +54,14 @@
 //! * The targets locator keeps only manifest directories that contain
 //!   `WorkloadManifest.targets`; the auto-import locator returns the
 //!   `{pack}/Sdk` folders of installed SDK-kind packs whose
-//!   `Sdk/AutoImport.props` exists.
+//!   `Sdk/AutoImport.props` exists (`GetInstalledWorkloadPacksOfKind`): the
+//!   packs of every resolved manifest in composition order (manifest order,
+//!   then each manifest's packs as its document lists them), an alias
+//!   resolved to the target its `alias-to` names for the first runtime
+//!   identifier of the host SDK's chain that it names, each installed where
+//!   `{root}/packs/{id}/{version}` is a directory under the first pack root
+//!   (the user-local one, then the dotnet root) that has it, and each folder
+//!   once.
 //!
 //! * A workload set, selected by `global.json`, by the install state or by
 //!   default from the host band's, overrides the manifests it names, and
@@ -86,9 +93,11 @@
 //! relative root, which the resolver takes against a working directory we
 //! cannot see.
 //! The auto-import locator also declines unless the workload resolver
-//! certainly loads every resolved manifest (`manifest::check_manifests_load`:
+//! certainly loads every resolved manifest (`manifest::load_manifests`:
 //! the reader's grammar, the localization catalogs, and the composition's
-//! `depends-on` and conflict checks).
+//! `depends-on` and conflict checks), where an installed SDK pack it would
+//! look up has a version that is no plain path component, and where an
+//! `AutoImport.props` it would return is a special file.
 //!
 //! Every existence probe asks what CLR `File.Exists` answers
 //! (`dotnet_io::file_exists`), which `tools/workload-oracle` grades with a
@@ -258,7 +267,7 @@ pub fn resolve_workload_locator(
         return Err(unsupported("a workload root is a relative path"));
     }
     let band = host_feature_band(sdk_version_dir)?;
-    check_runtime_identifier_chain(sdk_version_dir, observer)?;
+    let runtime_identifiers = runtime_identifier_chain(sdk_version_dir, observer)?;
     let roots = workload_roots(dotnet_root, &band, env, observer)?;
     let manifest_roots = enumerate_manifest_roots(sdk_version_dir, &band, &roots, env, observer)?;
 
@@ -306,26 +315,69 @@ pub fn resolve_workload_locator(
             directory: &m.directory,
         })
         .collect();
-    manifest::check_manifests_load(&resolved, observer)?;
+    let packs = manifest::load_manifests(&resolved, observer)?;
+    auto_import_folders(&packs, &runtime_identifiers, &roots, observer).map(SdkResolution::Roots)
+}
 
-    // Auto-import locator: MSBuild returns the `{pack}/Sdk` folder of
-    // every *installed* SDK-kind workload pack whose
-    // `Sdk/AutoImport.props` exists. Whatever the precise "installed"
-    // semantics, MSBuild can only import files that exist — so when no
-    // candidate `AutoImport.props` exists under any pack root, the
-    // empty result is exact. Any candidate on disk means a workload may
-    // be installed, and we degrade rather than model the
-    // manifest→pack→installation-record chain.
-    for root in roots.pack_roots() {
-        if let Some(found) = find_any_auto_import_props(&root.join("packs"), observer)? {
+/// The auto-import locator's answer: `CachingWorkloadResolver` asks
+/// `WorkloadResolver.GetInstalledWorkloadPacksOfKind(Sdk)` for the installed
+/// SDK packs, in composition order, and keeps the `Sdk` folder of each where
+/// CLR `File.Exists` finds `Sdk/AutoImport.props`, each path once (`Distinct`,
+/// since two aliases can name one pack).
+///
+/// A pack is resolved to its id for the host (`Pack::resolved_id`, against
+/// the runtime identifier chain) and is installed where `Directory.Exists`
+/// finds `{root}/packs/{id}/{version}` under the first pack root that holds
+/// one (`GetPackPath`). A version that is no plain path component declines,
+/// since the resolver's `Path.Combine` would make of it a path we do not
+/// model, and so does an `AutoImport.props` that is a special file, since
+/// MSBuild's import of a FIFO never returns, and neither would the walk's.
+fn auto_import_folders(
+    packs: &[manifest::Pack],
+    runtime_identifiers: &[String],
+    roots: &WorkloadRoots,
+    observer: &Observer,
+) -> Result<Vec<PathBuf>, SdkResolveError> {
+    let mut folders: Vec<PathBuf> = Vec::new();
+    for pack in packs {
+        if pack.kind != manifest::PackKind::Sdk {
+            continue;
+        }
+        let Some(id) = pack.resolved_id(runtime_identifiers) else {
+            continue;
+        };
+        if !is_pack_path_component(&pack.version) {
             return Err(unsupported(format!(
-                "a workload pack ships AutoImport.props (a workload may \
-                 be installed): {}",
-                found.display()
+                "a workload pack version that is no plain path component: {} {:?}",
+                pack.id, pack.version
             )));
         }
+        let Some(pack_dir) = roots
+            .pack_roots()
+            .map(|root| root.join("packs").join(id).join(&pack.version))
+            .find(|dir| dotnet_io::directory_exists(observer, dir))
+        else {
+            continue;
+        };
+        let folder = pack_dir.join("Sdk");
+        let props = folder.join("AutoImport.props");
+        if !dotnet_io::file_exists(observer, &props) {
+            continue;
+        }
+        if observed::kind(observer, &props) == Ok(EntryKind::Other) {
+            return Err(unsupported(format!(
+                "a workload pack's AutoImport.props is a special file: {}",
+                props.display()
+            )));
+        }
+        if !folders
+            .iter()
+            .any(|seen| seen.as_os_str() == folder.as_os_str())
+        {
+            folders.push(folder);
+        }
     }
-    Ok(SdkResolution::Roots(Vec::new()))
+    Ok(folders)
 }
 
 /// The text of `path`, which CLR `File.Exists` found, or the decline where
@@ -343,20 +395,29 @@ fn read_existing_text(path: &Path, observer: &Observer) -> Result<String, SdkRes
         .map_err(|err| unsupported(format!("cannot read {}: {err}", path.display())))
 }
 
-/// `WorkloadResolver.Create`, which both locators run, reads the host SDK's
-/// `NETCoreSdkRuntimeIdentifierChain.txt` wherever CLR `File.Exists` finds it.
-/// Neither locator's answer depends on the runtime identifiers it lists, but
-/// a read that throws fails the resolution, so the file must be absent or
-/// readable.
-fn check_runtime_identifier_chain(
+/// The host's runtime identifiers, most specific first, as
+/// `WorkloadResolver.Create` (which both locators run) reads them: the
+/// non-empty lines of the host SDK's `NETCoreSdkRuntimeIdentifierChain.txt`,
+/// untrimmed, wherever CLR `File.Exists` finds it, and none where it does not.
+/// They are the host the SDK was built for, read off disk, not the process's,
+/// so nothing about the machine the evaluation runs on enters. A read that
+/// throws fails the resolution of either locator.
+fn runtime_identifier_chain(
     sdk_version_dir: &Path,
     observer: &Observer,
-) -> Result<(), SdkResolveError> {
+) -> Result<Vec<String>, SdkResolveError> {
     let path = sdk_version_dir.join("NETCoreSdkRuntimeIdentifierChain.txt");
-    if dotnet_io::file_exists(observer, &path) {
-        read_existing_text(&path, observer)?;
+    if !dotnet_io::file_exists(observer, &path) {
+        return Ok(Vec::new());
     }
-    Ok(())
+    let contents = read_existing_text(&path, observer)?;
+    // `File.ReadAllLines` consumes a leading UTF-8 byte order mark.
+    let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
+    Ok(read_all_lines(contents)
+        .into_iter()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 /// The feature band of the host SDK (`10.0.301` → `10.0.300`,
@@ -468,8 +529,9 @@ impl WorkloadRoots {
             .chain(std::iter::once(self.dotnet_root.as_path()))
     }
 
-    /// Roots whose `packs` directory the auto-import scan consults,
-    /// precedence order.
+    /// Roots under whose `packs` directory the auto-import locator looks
+    /// for installed packs, precedence order (`WorkloadResolver.Create`'s
+    /// root paths).
     fn pack_roots(&self) -> impl Iterator<Item = &Path> {
         self.user
             .as_ref()
@@ -510,10 +572,11 @@ fn workload_roots(
     if dotnet_io::file_exists(observer, &marker) {
         match env.user_dotnet_root {
             Some(user_root) => {
-                if user_root != dotnet_root && observed::is_dir(observer, user_root) {
+                // Both gates ask `Directory.Exists`.
+                if user_root != dotnet_root && dotnet_io::directory_exists(observer, user_root) {
                     user = Some(UserRoot {
                         path: user_root.to_path_buf(),
-                        participates_in_manifests: observed::is_dir(
+                        participates_in_manifests: dotnet_io::directory_exists(
                             observer,
                             &user_root.join("sdk-manifests"),
                         ),
@@ -1048,29 +1111,15 @@ fn is_safe_manifest_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
 }
 
-/// The first `packs/*/*/Sdk/AutoImport.props` (the layout
-/// `CachingWorkloadResolver` imports from) — or a bare
-/// `packs/*/*/AutoImport.props`, held conservatively as a candidate
-/// too — under `packs_dir`, if any. An unreadable directory degrades
-/// (`Err`): treating it as empty would certify the zero-import answer
-/// off evidence we could not actually collect.
-fn find_any_auto_import_props(
-    packs_dir: &Path,
-    observer: &Observer,
-) -> Result<Option<PathBuf>, SdkResolveError> {
-    for pack in read_dir_or_degrade(packs_dir, observer)? {
-        for version in read_dir_or_degrade(&pack.path, observer)? {
-            for candidate in [
-                version.path.join("Sdk").join("AutoImport.props"),
-                version.path.join("AutoImport.props"),
-            ] {
-                if dotnet_io::file_exists(observer, &candidate) {
-                    return Ok(Some(candidate));
-                }
-            }
-        }
-    }
-    Ok(None)
+/// A pack version `Path.Combine` joins into a pack path as one plain
+/// component: not empty (which it would skip), not `.` or `..` (which
+/// `Directory.Exists` would collapse), and no separator.
+fn is_pack_path_component(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+'))
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
 //! (`BORZOI_DOTNET_ROOT_SDK11`), so a prerelease SDK's resolver is graded as
 //! well as the release ones.
 //!
-//! Six sweeps, each *certain-implies-exact* (an answer we commit must be the
+//! Seven sweeps, each *certain-implies-exact* (an answer we commit must be the
 //! resolver's) with a positive domain where we must commit:
 //!
 //! - the feature band of a host SDK version (`SdkFeatureBand`), over a
@@ -31,6 +31,13 @@
 //!   the install state under the oracle's architecture or another, and a
 //!   `global.json` pinning a set or choosing the update mode, over generated
 //!   layouts (the oracle is handed the `global.json`);
+//! - the installed SDK packs the auto-import locator returns, over generated
+//!   manifests declaring packs of every kind, with versions, `alias-to` maps
+//!   against generated runtime identifier chains, and pack directories under
+//!   the user and dotnet roots (with odd entries in place of a pack or its
+//!   `Sdk/AutoImport.props`), plus planted layouts each resolver and we must
+//!   answer as planted, each graded SDK's own installation, and its own
+//!   manifests with every pack they name installed;
 //! - every existence probe the resolver makes (`File.Exists` of a manifest,
 //!   its targets, a marker, the install state, the known list, the runtime
 //!   identifier chain, and `Directory.GetDirectories` of a band or id
@@ -1919,6 +1926,804 @@ fn sweep_sets(seed: u64, cases: usize) {
             cases * 2
         );
         assert!(committed >= cases / 2, "{}: {committed}", sdk.display());
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+// ---------------------------------------------------------------------------
+// The installed SDK packs the auto-import locator returns.
+
+/// Runtime identifier chains the host SDK directory may hold, as text: the
+/// resolver reads the file with `File.ReadAllLines` and keeps every non-empty
+/// line, untrimmed. `None` is no file, which leaves no alias resolvable.
+#[cfg(unix)]
+const PACK_RID_CHAINS: &[Option<&str>] = &[
+    None,
+    Some("linux-x64\nlinux\nunix\nany\nbase\n"),
+    Some("osx-arm64\r\nosx\r\nunix-arm64\r\nunix\r\nany\r\nbase"),
+    Some("\u{feff}linux-x64\nany\n"),
+    Some("\n\nunix\n\nlinux-x64\n"),
+    Some("linux-x64 \rany"),
+];
+
+/// The keys an `alias-to` map draws from: runtime identifiers of the chains
+/// above, one in another case and one with a trailing space (the lookup is
+/// ordinal), and one no chain lists.
+#[cfg(unix)]
+const ALIAS_KEYS: &[&str] = &[
+    "linux-x64",
+    "Linux-X64",
+    "linux-x64 ",
+    "osx-arm64",
+    "unix",
+    "any",
+    "win-x64",
+];
+
+/// A pack's `version`, and whether it is a plain path component, which we
+/// certify; the resolver joins the rest into a pack path that is not one.
+/// The certified ones come first.
+#[cfg(unix)]
+const PACK_VERSIONS: &[(&str, bool)] = &[
+    ("1.0.0", true),
+    ("10.0.0-rc.1.25451.107", true),
+    ("35.0.7", true),
+    ("1.0.0+meta", true),
+    ("", false),
+    ("..", false),
+    ("a/b", false),
+];
+
+/// What sits at a pack's path under one pack root.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum PackEntry {
+    /// A directory, holding `Sdk/AutoImport.props` as the [`PropsEntry`]
+    /// says, or no such file (`None`).
+    Installed(Option<PropsEntry>),
+    /// An odd entry in place of the directory: `Directory.Exists` alone is
+    /// asked of it.
+    Odd(Odd),
+}
+
+/// What sits at `Sdk/AutoImport.props` in an installed pack.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum PropsEntry {
+    File,
+    /// `AutoImport.props` beside `Sdk` rather than in it, which the resolver
+    /// does not look for.
+    Beside,
+    Odd(Odd),
+}
+
+/// A generated layout of manifests declaring packs: their kinds, versions,
+/// `alias-to` maps (some packs aliasing one target, which the resolver
+/// returns once) and ids (some shared between manifests, which fails the
+/// composition), the runtime identifier chain, and each pack id the
+/// manifests can resolve to installed under the user root, the dotnet root,
+/// both or neither, in the manifest's casing or another, with or without
+/// `Sdk/AutoImport.props`, or with an odd entry in place of either.
+#[cfg(unix)]
+struct PackLayout {
+    _dir: tempfile::TempDir,
+    dotnet_root: PathBuf,
+    user_root: Option<PathBuf>,
+    /// How many SDK packs alias `any`, which the chain lists, to one shared
+    /// target at one version, and nothing else.
+    shared_sdk_aliases: usize,
+    in_domain: bool,
+    description: String,
+}
+
+#[cfg(unix)]
+fn gen_pack_layout(rng: &mut SplitMix64) -> PackLayout {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = host_fs::canonicalize(dir.path()).unwrap();
+    let dotnet_root = root.join("dotnet");
+    let sdk_dir = dotnet_root.join("sdk").join(HOST);
+    std::fs::create_dir_all(&sdk_dir).unwrap();
+    let mut description = String::new();
+    let mut in_domain = true;
+
+    let chain = *rng.pick(PACK_RID_CHAINS);
+    if let Some(chain) = chain {
+        write(&sdk_dir.join(RID_CHAIN), chain);
+    }
+    description.push_str(&format!("runtime identifier chain {chain:?}\n"));
+
+    const MANIFEST_IDS: &[&str] = &["contoso.one", "contoso.two", "contoso.three"];
+    if rng.below(2) == 0 {
+        let mut known: Vec<&str> = MANIFEST_IDS.to_vec();
+        for i in (1..known.len()).rev() {
+            known.swap(i, rng.below(i + 1));
+        }
+        write(
+            &sdk_dir.join("KnownWorkloadManifests.txt"),
+            &known.join("\n"),
+        );
+        description.push_str(&format!("known {known:?}\n"));
+    }
+
+    // Every (pack id, version) a manifest can resolve to, for installing.
+    let mut targets: Vec<(String, String)> = Vec::new();
+    let mut shared_sdk_aliases = 0;
+    for (index, manifest_id) in MANIFEST_IDS.iter().enumerate() {
+        if rng.below(4) == 0 {
+            continue;
+        }
+        let mut packs = serde_json::Map::new();
+        for k in 0..rng.below(4) {
+            let id = match rng.below(10) {
+                // In two manifests, the composition throws.
+                0 => "Contoso.Shared.Sdk".to_owned(),
+                _ => format!("Contoso.M{index}.Sdk{k}"),
+            };
+            let kind = *rng.pick(&[
+                "Sdk",
+                "Sdk",
+                "Sdk",
+                "sdk",
+                "SDK",
+                "Framework",
+                "Library",
+                "Template",
+                "Tool",
+            ]);
+            let shape = rng.below(5);
+            let (version, plain) = if shape == 4 {
+                // One shared alias target at one version, so two such packs
+                // name one path.
+                PACK_VERSIONS[0]
+            } else if rng.below(12) == 0 {
+                *rng.pick(PACK_VERSIONS)
+            } else {
+                *rng.pick(&PACK_VERSIONS[..4])
+            };
+            if !plain {
+                in_domain = false;
+            }
+            let mut pack = serde_json::Map::new();
+            pack.insert("kind".to_owned(), json!(kind));
+            pack.insert("version".to_owned(), json!(version));
+            targets.push((id.clone(), version.to_owned()));
+            match shape {
+                0 | 1 => {}
+                4 => {
+                    pack.insert(
+                        "alias-to".to_owned(),
+                        json!({ "any": "Contoso.Aliased.Shared" }),
+                    );
+                    targets.push(("Contoso.Aliased.Shared".to_owned(), version.to_owned()));
+                    shared_sdk_aliases += usize::from(kind.eq_ignore_ascii_case("sdk"));
+                }
+                2 => {
+                    pack.insert("alias-to".to_owned(), json!({}));
+                }
+                _ => {
+                    let mut aliases = serde_json::Map::new();
+                    for _ in 0..1 + rng.below(3) {
+                        let key = *rng.pick(ALIAS_KEYS);
+                        let target = match rng.below(4) {
+                            // Shared with another pack: the same path twice,
+                            // which the resolver returns once.
+                            0 => "Contoso.Aliased.Shared".to_owned(),
+                            1 => format!("{id}.Any"),
+                            _ => format!("{id}.{}", key.trim().replace('-', ".")),
+                        };
+                        targets.push((target.clone(), version.to_owned()));
+                        aliases.insert(key.to_owned(), json!(target));
+                    }
+                    pack.insert("alias-to".to_owned(), serde_json::Value::Object(aliases));
+                }
+            }
+            packs.insert(id, serde_json::Value::Object(pack));
+        }
+        let body = json!({ "version": "1.0.0", "packs": packs });
+        let manifest_dir = dotnet_root
+            .join("sdk-manifests")
+            .join(HOST)
+            .join(manifest_id)
+            .join("1.0.0");
+        write(
+            &manifest_dir.join("WorkloadManifest.json"),
+            &body.to_string(),
+        );
+        description.push_str(&format!("manifest {manifest_id}: {body}\n"));
+    }
+
+    // A user root, consulted for packs where the `userlocal` marker is
+    // present.
+    let user_root = (rng.below(3) == 0).then(|| {
+        let user_root = root.join("user");
+        std::fs::create_dir_all(&user_root).unwrap();
+        if rng.below(4) != 0 {
+            write(
+                &dotnet_root
+                    .join("metadata/workloads")
+                    .join(HOST)
+                    .join("userlocal"),
+                "",
+            );
+            description.push_str("userlocal marker\n");
+        }
+        description.push_str("user root\n");
+        user_root
+    });
+
+    targets.sort();
+    targets.dedup();
+    let aside = root.join("aside");
+    let pack_roots: Vec<PathBuf> = user_root
+        .iter()
+        .cloned()
+        .chain([dotnet_root.clone()])
+        .collect();
+    let mut placed = BTreeSet::new();
+    for (id, version) in &targets {
+        // An uncertified version names no directory of its own to install.
+        if !PACK_VERSIONS[..4].iter().any(|(v, _)| v == version) {
+            continue;
+        }
+        for pack_root in &pack_roots {
+            if rng.below(3) == 0 {
+                continue;
+            }
+            // The id in another casing, which a case-insensitive file system
+            // finds under the manifest's spelling.
+            let spelled = if rng.below(5) == 0 {
+                id.to_ascii_lowercase()
+            } else {
+                id.clone()
+            };
+            let path = pack_root.join("packs").join(&spelled).join(version);
+            // One entry per path, where the file system may fold case.
+            if !placed.insert(path.to_string_lossy().to_ascii_lowercase()) {
+                continue;
+            }
+            let entry = match rng.below(8) {
+                0 => PackEntry::Odd(*rng.pick(Odd::ALL)),
+                _ => PackEntry::Installed(match rng.below(8) {
+                    0 => None,
+                    1 => Some(PropsEntry::Beside),
+                    2 => Some(PropsEntry::Odd(*rng.pick(Odd::ALL))),
+                    _ => Some(PropsEntry::File),
+                }),
+            };
+            match entry {
+                PackEntry::Odd(odd) => odd_entry::place(odd, &path, "", &aside),
+                PackEntry::Installed(props) => {
+                    std::fs::create_dir_all(&path).unwrap();
+                    let at = path.join("Sdk").join("AutoImport.props");
+                    match props {
+                        None => {}
+                        Some(PropsEntry::File) => write(&at, "<Project />"),
+                        Some(PropsEntry::Beside) => {
+                            write(&path.join("AutoImport.props"), "<Project />")
+                        }
+                        Some(PropsEntry::Odd(odd)) => {
+                            odd_entry::place(odd, &at, "<Project />", &aside);
+                            // A special file MSBuild would import: its read
+                            // of a FIFO never returns, and we decline a
+                            // socket rather than tell it apart.
+                            if matches!(odd, Odd::Socket | Odd::Fifo) {
+                                in_domain = false;
+                            }
+                        }
+                    }
+                }
+            }
+            description.push_str(&format!(
+                "{entry:?} at {}\n",
+                path.strip_prefix(&root).unwrap().display()
+            ));
+        }
+    }
+    PackLayout {
+        _dir: dir,
+        dotnet_root,
+        user_root,
+        shared_sdk_aliases: if chain.is_some_and(|c| c.contains("any")) {
+            shared_sdk_aliases
+        } else {
+            0
+        },
+        in_domain,
+        description,
+    }
+}
+
+/// Both locators over generated [`PackLayout`]s, ours against each installed
+/// resolver's, certain-implies-exact; where nothing outside the certified
+/// subset was generated and the resolver answers, we must answer too. Each
+/// way an installed SDK pack reaches the answer (through an alias, under the
+/// user root, twice over one path) must be met on a commit.
+#[cfg(unix)]
+#[test]
+fn installed_sdk_packs_are_the_resolver_s() {
+    sweep_packs(0x0818_9ac5, 300);
+}
+
+/// The fresh-seed twin; `BORZOI_MSBUILD_SOAK_SEED` reproduces a run.
+#[cfg(unix)]
+#[test]
+#[ignore = "soak: run with --ignored; BORZOI_MSBUILD_SOAK_SEED reproduces"]
+fn soak_installed_sdk_packs() {
+    let (seed, cases) = common::soak_parameters("workload_packs", 2000);
+    sweep_packs(seed, cases);
+}
+
+#[cfg(unix)]
+fn sweep_packs(seed: u64, cases: usize) {
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let mut rng = SplitMix64(seed);
+        let (mut committed, mut answered, mut threw) = (0, 0, 0);
+        // What the committed auto-import answers reached.
+        let (mut found, mut aliased, mut user, mut repeated) = (0, 0, 0, 0);
+        for case in 0..cases {
+            let layout = gen_pack_layout(&mut rng);
+            for locator in [
+                WORKLOAD_MANIFEST_TARGETS_LOCATOR,
+                WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
+            ] {
+                let env = WorkloadEnvironment {
+                    user_dotnet_root: layout.user_root.as_deref(),
+                    overrides_present: false,
+                    global_json: Default::default(),
+                    process_architecture: None,
+                };
+                let sdk_dir = layout.dotnet_root.join("sdk").join(HOST);
+                let ours = match resolve_workload_locator(
+                    locator,
+                    &layout.dotnet_root,
+                    &sdk_dir,
+                    &env,
+                    &Observer::new(),
+                ) {
+                    Ok(SdkResolution::Roots(roots)) => Some(
+                        roots
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>(),
+                    ),
+                    Ok(other) => panic!("a locator resolves to roots, not {other:?}"),
+                    Err(_) => None,
+                };
+                let response = oracle.request(&json!({
+                    "op": "resolve",
+                    "sdk": locator,
+                    "dotnetRoot": layout.dotnet_root.to_string_lossy(),
+                    "sdkVersion": HOST,
+                    "userProfileDir": layout.user_root.as_ref().map(|p| p.to_string_lossy()),
+                }));
+                let theirs = (response["ok"] == json!(true)).then(|| {
+                    response["paths"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| p.as_str().unwrap().to_owned())
+                        .collect::<Vec<_>>()
+                });
+                if locator == WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR {
+                    threw += usize::from(theirs.is_none());
+                }
+                if theirs.is_some() && layout.in_domain {
+                    answered += 1;
+                }
+                let failure = match (&ours, &theirs) {
+                    (Some(ours), Some(theirs)) if ours == theirs => {
+                        committed += 1;
+                        if locator == WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR && !ours.is_empty() {
+                            found += 1;
+                            // `{root}/packs/{id}/{version}/Sdk`: an alias
+                            // target's id extends its pack's, or is shared.
+                            aliased += usize::from(ours.iter().any(|p| {
+                                let id = Path::new(p)
+                                    .iter()
+                                    .rev()
+                                    .nth(2)
+                                    .and_then(|id| id.to_str())
+                                    .unwrap_or_default();
+                                id.starts_with("Contoso.Aliased.") || id.split('.').count() > 3
+                            }));
+                            user +=
+                                usize::from(layout.user_root.as_ref().is_some_and(|u| {
+                                    ours.iter().any(|p| Path::new(p).starts_with(u))
+                                }));
+                            repeated += usize::from(
+                                layout.shared_sdk_aliases > 1
+                                    && ours.iter().any(|p| p.contains("/Contoso.Aliased.Shared/")),
+                            );
+                        }
+                        None
+                    }
+                    (Some(ours), _) => {
+                        Some(format!("we commit {ours:#?}, the resolver: {response}"))
+                    }
+                    (None, Some(theirs)) if layout.in_domain => {
+                        Some(format!("we decline, the resolver says {theirs:#?}"))
+                    }
+                    (None, _) => None,
+                };
+                if let Some(failure) = failure
+                    && failures.len() < 8
+                {
+                    failures.push(format!(
+                        "{} case {case}, {locator}: {failure}\n{}",
+                        sdk.display(),
+                        layout.description
+                    ));
+                }
+            }
+        }
+        println!(
+            "{}: committed {committed}, the resolver answered {answered} in the domain and the \
+             auto-import locator threw {threw}, of {}; auto-import answers holding a pack \
+             {found}: through an alias {aliased}, under the user root {user}, where two \
+             packs alias one path {repeated}",
+            sdk.display(),
+            cases * 2
+        );
+        assert!(committed >= cases, "{}: {committed}", sdk.display());
+        assert!(
+            found > 0 && aliased > 0 && user > 0 && repeated > 0,
+            "{}: the sweep never committed some way a pack reaches the answer",
+            sdk.display()
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Both locators on each graded SDK's own installation, whose manifests
+/// declare real packs (aliased per runtime identifier, of every kind), held
+/// to that SDK's resolver: what we commit must be its answer, and we must
+/// commit. The devshell's installation carries a `userlocal` marker, so both
+/// are handed an empty user root.
+#[test]
+fn the_installed_layouts_resolve_as_their_own_resolvers_do() {
+    let mut failures = Vec::new();
+    let user = tempfile::TempDir::new().unwrap();
+    let user_root = host_fs::canonicalize(user.path()).unwrap();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let architecture = oracle.request(&json!({"op": "identity"}))["processArchitecture"]
+            .as_str()
+            .expect("the oracle names its architecture")
+            .to_owned();
+        let dotnet_root = sdk.parent().unwrap().parent().unwrap();
+        let version = sdk.file_name().unwrap().to_string_lossy().into_owned();
+        for locator in [
+            WORKLOAD_MANIFEST_TARGETS_LOCATOR,
+            WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
+        ] {
+            let env = WorkloadEnvironment {
+                user_dotnet_root: Some(&user_root),
+                overrides_present: false,
+                global_json: Default::default(),
+                process_architecture: Some(&architecture),
+            };
+            let ours = resolve_workload_locator(locator, dotnet_root, &sdk, &env, &Observer::new());
+            let response = oracle.request(&json!({
+                "op": "resolve",
+                "sdk": locator,
+                "dotnetRoot": dotnet_root.to_string_lossy(),
+                "sdkVersion": version,
+                "userProfileDir": user_root.to_string_lossy(),
+            }));
+            let theirs: Option<Vec<PathBuf>> = response["paths"]
+                .as_array()
+                .map(|paths| paths.iter().map(|p| p.as_str().unwrap().into()).collect());
+            println!(
+                "{}: {locator}: we say {ours:?}, the resolver {response}",
+                sdk.display()
+            );
+            match (ours, theirs) {
+                (Ok(SdkResolution::Roots(ours)), Some(theirs)) if ours == theirs => {}
+                (ours, _) => failures.push(format!(
+                    "{}: {locator}: we say {ours:?}, the resolver {response}",
+                    sdk.display()
+                )),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Each graded SDK's own manifests, runtime identifier chain and known list,
+/// in a fresh dotnet root where every pack id they name (an alias target
+/// included) is installed at its version with `Sdk/AutoImport.props`: the
+/// auto-import locator's answer is then every SDK pack of the real manifests
+/// that resolves for the SDK's runtime identifiers, in composition order, and
+/// we must commit it.
+#[cfg(unix)]
+#[test]
+fn the_installed_manifests_packs_resolve_as_their_own_resolvers_do() {
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let real_root = sdk.parent().unwrap().parent().unwrap();
+        let version = sdk.file_name().unwrap().to_string_lossy().into_owned();
+        let dir = tempfile::TempDir::new().unwrap();
+        let dotnet_root = host_fs::canonicalize(dir.path()).unwrap().join("dotnet");
+        let sdk_dir = dotnet_root.join("sdk").join(&version);
+        std::fs::create_dir_all(&sdk_dir).unwrap();
+        for name in [RID_CHAIN, "KnownWorkloadManifests.txt"] {
+            if let Ok(text) = host_fs::read_to_string(sdk.join(name)) {
+                write(&sdk_dir.join(name), &text);
+            }
+        }
+        std::os::unix::fs::symlink(
+            real_root.join("sdk-manifests"),
+            dotnet_root.join("sdk-manifests"),
+        )
+        .unwrap();
+        // Real manifests carry trailing commas, which `serde_json` refuses.
+        let trailing_comma = |text: &str| -> String {
+            let mut out = String::new();
+            let mut pending = String::new();
+            for c in text.chars() {
+                if c == ',' {
+                    out.push_str(&pending);
+                    pending = ",".to_owned();
+                } else if !pending.is_empty() && c.is_whitespace() {
+                    pending.push(c);
+                } else {
+                    if !(pending.starts_with(',') && (c == '}' || c == ']')) {
+                        out.push_str(&pending);
+                    } else {
+                        out.push_str(&pending[1..]);
+                    }
+                    pending.clear();
+                    out.push(c);
+                }
+            }
+            out + &pending
+        };
+        for manifest in files_named(&real_root.join("sdk-manifests"), "WorkloadManifest.json") {
+            let text = host_fs::read_to_string(&manifest).unwrap();
+            let document: serde_json::Value = serde_json::from_str(&trailing_comma(&text))
+                .unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
+            let Some(packs) = document["packs"].as_object() else {
+                continue;
+            };
+            for (id, pack) in packs {
+                let version = pack["version"].as_str().unwrap();
+                let aliases = pack["alias-to"].as_object().into_iter().flatten();
+                for id in
+                    std::iter::once(id.as_str()).chain(aliases.map(|(_, t)| t.as_str().unwrap()))
+                {
+                    let props = dotnet_root
+                        .join("packs")
+                        .join(id)
+                        .join(version)
+                        .join("Sdk/AutoImport.props");
+                    write(&props, "<Project />");
+                }
+            }
+        }
+        let env = WorkloadEnvironment {
+            user_dotnet_root: None,
+            overrides_present: false,
+            global_json: Default::default(),
+            process_architecture: None,
+        };
+        let ours = resolve_workload_locator(
+            WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
+            &dotnet_root,
+            &sdk_dir,
+            &env,
+            &Observer::new(),
+        );
+        let response = oracle.request(&json!({
+            "op": "resolve",
+            "sdk": WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
+            "dotnetRoot": dotnet_root.to_string_lossy(),
+            "sdkVersion": version,
+            "userProfileDir": null,
+        }));
+        let theirs: Option<Vec<PathBuf>> = response["paths"]
+            .as_array()
+            .map(|paths| paths.iter().map(|p| p.as_str().unwrap().into()).collect());
+        println!(
+            "{}: the resolver returns {} folders",
+            sdk.display(),
+            theirs.as_ref().map_or(0, Vec::len)
+        );
+        match (ours, theirs) {
+            (Ok(SdkResolution::Roots(ours)), Some(theirs))
+                if ours == theirs && !theirs.is_empty() => {}
+            (ours, _) => failures.push(format!(
+                "{}: we say {ours:#?}, the resolver {response}",
+                sdk.display()
+            )),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A planted pack layout: manifests (id and `packs` object, in known-list
+/// order), the runtime identifier chain, the pack directories that ship
+/// `Sdk/AutoImport.props` (relative to the layout root), and the answer
+/// each installed resolver must give and we must commit, as directories
+/// relative to the layout root.
+#[cfg(unix)]
+struct PackPlant {
+    name: &'static str,
+    manifests: &'static [(&'static str, &'static str)],
+    chain: &'static str,
+    installed: &'static [&'static str],
+    user_local: bool,
+    answer: &'static [&'static str],
+}
+
+#[cfg(unix)]
+const PACK_PLANTS: &[PackPlant] = &[
+    PackPlant {
+        name: "two packs aliased to one path, returned once",
+        manifests: &[
+            (
+                "contoso.one",
+                r#"{"A.Sdk": {"kind": "Sdk", "version": "1.0.0", "alias-to": {"linux-x64": "Shared.Sdk"}}}"#,
+            ),
+            (
+                "contoso.two",
+                r#"{"B.Sdk": {"kind": "sdk", "version": "1.0.0", "alias-to": {"any": "Shared.Sdk"}}}"#,
+            ),
+        ],
+        chain: "linux-x64\nany\n",
+        installed: &["dotnet/packs/Shared.Sdk/1.0.0"],
+        user_local: false,
+        answer: &["dotnet/packs/Shared.Sdk/1.0.0/Sdk"],
+    },
+    PackPlant {
+        name: "the alias of the chain's first listed identifier",
+        manifests: &[(
+            "contoso.one",
+            r#"{"A.Sdk": {"kind": "Sdk", "version": "2.0.0", "alias-to": {"any": "A.Any", "linux-x64": "A.Linux"}}}"#,
+        )],
+        chain: "linux-x64\nany\n",
+        installed: &["dotnet/packs/A.Any/2.0.0", "dotnet/packs/A.Linux/2.0.0"],
+        user_local: false,
+        answer: &["dotnet/packs/A.Linux/2.0.0/Sdk"],
+    },
+    PackPlant {
+        name: "the user root before the dotnet root",
+        manifests: &[(
+            "contoso.one",
+            r#"{"A.Sdk": {"kind": "Sdk", "version": "1.0.0"}}"#,
+        )],
+        chain: "",
+        installed: &["user/packs/A.Sdk/1.0.0", "dotnet/packs/A.Sdk/1.0.0"],
+        user_local: true,
+        answer: &["user/packs/A.Sdk/1.0.0/Sdk"],
+    },
+    PackPlant {
+        name: "manifest order, then each manifest's packs in document order",
+        manifests: &[
+            (
+                "contoso.two",
+                r#"{"Z.Sdk": {"kind": "Sdk", "version": "1.0.0"}, "Fw": {"kind": "Framework", "version": "1.0.0"}, "M.Sdk": {"kind": "Sdk", "version": "1.0.0"}}"#,
+            ),
+            (
+                "contoso.one",
+                r#"{"A.Sdk": {"kind": "Sdk", "version": "1.0.0"}}"#,
+            ),
+        ],
+        chain: "",
+        installed: &[
+            "dotnet/packs/A.Sdk/1.0.0",
+            "dotnet/packs/Fw/1.0.0",
+            "dotnet/packs/M.Sdk/1.0.0",
+            "dotnet/packs/Z.Sdk/1.0.0",
+        ],
+        user_local: false,
+        answer: &[
+            "dotnet/packs/Z.Sdk/1.0.0/Sdk",
+            "dotnet/packs/M.Sdk/1.0.0/Sdk",
+            "dotnet/packs/A.Sdk/1.0.0/Sdk",
+        ],
+    },
+];
+
+/// Each [`PackPlant`] on each installed resolver: the resolver gives the
+/// planted answer, and we commit it.
+#[cfg(unix)]
+#[test]
+fn planted_sdk_packs_resolve_as_planted() {
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        for plant in PACK_PLANTS {
+            let dir = tempfile::TempDir::new().unwrap();
+            let root = host_fs::canonicalize(dir.path()).unwrap();
+            let dotnet_root = root.join("dotnet");
+            let sdk_dir = dotnet_root.join("sdk").join(HOST);
+            std::fs::create_dir_all(&sdk_dir).unwrap();
+            write(&sdk_dir.join(RID_CHAIN), plant.chain);
+            let known: Vec<&str> = plant.manifests.iter().map(|(id, _)| *id).collect();
+            write(
+                &sdk_dir.join("KnownWorkloadManifests.txt"),
+                &known.join("\n"),
+            );
+            for (id, packs) in plant.manifests {
+                write(
+                    &dotnet_root
+                        .join("sdk-manifests")
+                        .join(HOST)
+                        .join(id)
+                        .join("1.0.0")
+                        .join("WorkloadManifest.json"),
+                    &format!(r#"{{"version": "1.0.0", "packs": {packs}}}"#),
+                );
+            }
+            for pack in plant.installed {
+                write(&root.join(pack).join("Sdk/AutoImport.props"), "<Project />");
+            }
+            let user_root = root.join("user");
+            std::fs::create_dir_all(&user_root).unwrap();
+            if plant.user_local {
+                write(
+                    &dotnet_root
+                        .join("metadata/workloads")
+                        .join(HOST)
+                        .join("userlocal"),
+                    "",
+                );
+            }
+            let expected: Vec<String> = plant
+                .answer
+                .iter()
+                .map(|p| root.join(p).to_string_lossy().into_owned())
+                .collect();
+            let env = WorkloadEnvironment {
+                user_dotnet_root: Some(&user_root),
+                overrides_present: false,
+                global_json: Default::default(),
+                process_architecture: None,
+            };
+            let ours = match resolve_workload_locator(
+                WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
+                &dotnet_root,
+                &sdk_dir,
+                &env,
+                &Observer::new(),
+            ) {
+                Ok(SdkResolution::Roots(roots)) => Ok(roots
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()),
+                other => Err(format!("{other:?}")),
+            };
+            let response = oracle.request(&json!({
+                "op": "resolve",
+                "sdk": WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
+                "dotnetRoot": dotnet_root.to_string_lossy(),
+                "sdkVersion": HOST,
+                "userProfileDir": user_root.to_string_lossy(),
+            }));
+            let theirs: Option<Vec<String>> = response["paths"].as_array().map(|paths| {
+                paths
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_owned())
+                    .collect()
+            });
+            if theirs.as_ref() != Some(&expected) {
+                failures.push(format!(
+                    "{}, {}: the resolver says {response}, planted {expected:#?}",
+                    sdk.display(),
+                    plant.name
+                ));
+            }
+            if ours.as_ref() != Ok(&expected) {
+                failures.push(format!(
+                    "{}, {}: we say {ours:#?}, planted {expected:#?}",
+                    sdk.display(),
+                    plant.name
+                ));
+            }
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
