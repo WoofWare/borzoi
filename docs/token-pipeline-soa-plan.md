@@ -410,14 +410,17 @@ starts past a file-start BOM, every other line one byte past a `\n`. It is
 built by one scan that compares 32-byte chunks at a time and pushes a start
 per set bit. `filter_collect` and `context_pushes` build it and hand the
 filter a `tokens::LineCursor` over it, which moves only forward (it asserts
-so, and that the offset is in the source), so a token boundary costs one step
-per line crossed; `Filter::byte_offset` and `Filter::utf16_col` index the
-table by line, and the sparse `(line, start)` list and its binary search go.
-The filter's `Pos` is the table's `LinePos`.
+so, and that the offset is a character boundary in the source), so a token
+boundary costs one step per line crossed plus a count of the bytes it moves
+across; the sparse `(line, start)` list and its binary search go. The filter's
+`Pos` is the table's `LinePos`, whose column counts UTF-16 code units, the
+scale of FCS's lexbuf and so of every offside comparison (#947): the table
+keeps its source, the cursor counts the units of the bytes it crosses, and
+`LineStarts::byte_offset` maps a position back to its byte.
 
 `tests/all/line_table_reference.rs` holds the cursor to a rescan of the bytes
-before each offset: at every offset in turn, from every offset straight to the
-end, and at every token boundary of the full-trivia table under symbol sets
+before each offset, and the table's way back to the offset: at every character
+boundary in turn, from every one straight to the end, and at every token boundary of the full-trivia table under symbol sets
 that make the `#if` arms active and inactive. Its sources are the lexical pairs
 plus `NEWLINE_SHAPES` (a `\n`, `\r\n` and lone `\r` inside a block comment,
 each string form and an inactive region, with multi-byte characters beside

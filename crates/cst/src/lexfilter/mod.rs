@@ -45,7 +45,8 @@ use typars_close_op::{
     TyparScanAction, classify_typar_scan_token, is_typar_application_trigger, typars_close_op_split,
 };
 
-/// 1-based line, 0-based byte column. F# offside compares both.
+/// FCS's source position: 1-based line, 0-based column in UTF-16 code units
+/// ([`LinePos`]). F# offside compares both.
 type Pos = LinePos;
 
 /// FCS's `PositionWithColumn` (LexFilter.fs:582): `undentation_limit`'s
@@ -579,7 +580,7 @@ impl Opener {
     /// generic `CtxtParen _ :: rest when not strict` arm (LexFilter.fs:786) —
     /// and keeps it *opaque* under a strict walk, where it falls to the
     /// catch-all (`CtxtParen _ -> col`, LexFilter.fs:988) so the fill body is
-    /// limited by the paren's own column (the byte just after the interpolation
+    /// limited by the paren's own column (just after the interpolation
     /// opener) rather than by the enclosing `let`/`module`. Our non-strict
     /// `!strict && matches Paren` arm already grants the same non-strict
     /// transparency, so `InterpFill` needs no help here — and including it made
@@ -964,8 +965,7 @@ struct Filter<'a> {
     /// The index of the next entry of `raw` that [`Self::pull_raw`] reads.
     next_raw: usize,
     /// Original source the token spans index into, read for the text of a
-    /// lexed token ([`Self::text`]) and for UTF-16 columns
-    /// ([`Self::utf16_col`]).
+    /// lexed token ([`Self::text`]).
     source: &'a str,
     /// LIFO stack of tokens to consume before pulling from `raw`. FCS's
     /// `delayedStack`.
@@ -987,8 +987,7 @@ struct Filter<'a> {
     initialized: bool,
     eof_pulled: bool,
     /// The line of the last token boundary [`Self::pull_raw`] reached, over
-    /// the source's newline table, which also gives [`Self::byte_offset`]
-    /// and [`Self::utf16_col`] each line's start.
+    /// the source's newline table, which also gives [`Self::byte_offset`].
     lines: LineCursor<'a>,
     /// Depth of all `TokenLExprParen` openers seen so far minus their closers.
     /// Mirrors the depth of `CtxtParen` entries on the stack. Used to gate
@@ -1188,7 +1187,7 @@ impl<'a> Filter<'a> {
     /// would misread a later same-column top-level token as a continuation of
     /// the first statement. The BOM's own trivia token, which starts before
     /// line 1 does, gets column 0, and its column is never consulted.
-    fn new(raw: &'a RawTokens<'a>, lines: &'a LineStarts, lang: LanguageVersion) -> Self {
+    fn new(raw: &'a RawTokens<'a>, lines: &'a LineStarts<'a>, lang: LanguageVersion) -> Self {
         let source = raw.source();
         Self {
             raw,
@@ -1972,7 +1971,7 @@ impl<'a> Filter<'a> {
     /// — FCS's `startPosOfTokenTup` reads EOF as `ColumnMinusOne`
     /// (LexFilter.fs:640, "processed as if on column -1 … forces the closure of
     /// all contexts"), so a context pushed at EOF is one column further left than
-    /// its byte position for the offside check. Only the handful of lookahead-
+    /// its position for the offside check. Only the handful of lookahead-
     /// anchored pushes can see EOF (the dispatch-token pushes never do — the EOF
     /// force-closure cascade pops the stack before any push runs), so
     /// [`Self::push_ctxt`] hard-codes `false` and only those sites pass `true`.
@@ -2081,19 +2080,18 @@ impl<'a> Filter<'a> {
         };
         // Byte-identical to FCS's `lexfltTokenIsOffsideOfContextStartedEarlier`
         // (FSComp.txt) fed through `warningStringOfPosition` (ParseHelpers.fs:34):
-        // 1-based line, 0-based column printed 1-based — in UTF-16 code units
-        // (FCS's lexbuf column scale), hence `utf16_col` rather than the raw
-        // byte column. The embedded position is the limiting context's anchor,
-        // so users can see which earlier construct imposed the limit. Below the
-        // retired `StrictIndentation` gate the text is the one the compilers
-        // that still had the gate wrote, which goes on to name the way back to
-        // non-conforming indentation; the current compiler has no such way and
-        // stops after the first sentence.
+        // 1-based line, 0-based column printed 1-based, in UTF-16 code units
+        // like every [`Pos`] column. The embedded position is the limiting
+        // context's anchor, so users can see which earlier construct imposed
+        // the limit. Below the retired `StrictIndentation` gate the text is
+        // the one the compilers that still had the gate wrote, which goes on
+        // to name the way back to non-conforming indentation; the current
+        // compiler has no such way and stops after the first sentence.
         let mut message = format!(
             "Unexpected syntax or possible incorrect indentation: this token is offside of \
              context started at position ({}:{}). Try indenting this further.",
             limit.pos.line,
-            self.utf16_col(limit.pos) + 1,
+            limit.pos.col + 1,
         );
         if !self.strict_indentation_is_error {
             message.push_str(
@@ -2142,30 +2140,16 @@ impl<'a> Filter<'a> {
             Some(&self.undentation_skip),
         );
         // FCS's `startPosOfTokenTup`: an EOF-anchored context's offside column is
-        // its byte column minus one (`ColumnMinusOne`). `ctxt.start_pos()` keeps
-        // the true byte position (for the message / virtual anchoring); the −1
+        // its column minus one (`ColumnMinusOne`). `ctxt.start_pos()` keeps
+        // the true position (for the message / virtual anchoring); the −1
         // lives only here, in the comparison. Non-EOF anchors subtract 0.
         let c2 = ctxt.start_pos().col as i32 - i32::from(anchor_is_eof);
         if c2 >= limit.col { Ok(()) } else { Err(limit) }
     }
 
-    /// The byte offset of `pos`, a position the cursor reached.
+    /// The byte offset of `pos`, a position in the source.
     fn byte_offset(&self, pos: Pos) -> usize {
-        self.lines.table().line_start(pos.line) + pos.col as usize
-    }
-
-    /// The FCS-facing column of `pos`: UTF-16 code units from the line start
-    /// (FCS's lexbuf column scale), converted from our byte column. The two
-    /// diverge whenever a non-ASCII character precedes `pos` on its line
-    /// (`é` is 2 UTF-8 bytes / 1 UTF-16 unit). `pos` must be a token-start
-    /// position — contexts anchor only at those — so its column ends on a
-    /// char boundary.
-    fn utf16_col(&self, pos: Pos) -> u32 {
-        let line_start = self.byte_offset(Pos { col: 0, ..pos });
-        self.source[line_start..line_start + pos.col as usize]
-            .chars()
-            .map(|c| c.len_utf16() as u32)
-            .sum()
+        self.lines.table().byte_offset(pos)
     }
 
     /// FCS's `undentationLimit` (LexFilter.fs:772-988). Returns the

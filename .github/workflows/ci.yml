@@ -502,6 +502,18 @@ jobs:
           nix develop --command cargo test --profile gate -p borzoi-cst --test all \
             layout_perturbation_sweep:: -- --ignored --nocapture
 
+      - name: Hold the lex filter's columns to UTF-16 units over the corpus
+        if: steps.gate.outputs.run == 'true'
+        # FCS counts a column in UTF-16 code units. Respelling every
+        # identifier's last letter as `é` keeps every such column and adds a
+        # byte, so the filter's tokens and offside diagnostics must not move;
+        # one measured in bytes would move after nearly every identifier. The
+        # normal suite runs a sample; this runs every file at the oldest and
+        # newest language versions.
+        run: |
+          nix develop --command cargo test --profile gate -p borzoi-cst --test all \
+            utf16_width_invariance::corpus -- --ignored --nocapture
+
       - name: Report the slowest tests
         if: ${{ !cancelled() && steps.gate.outputs.run == 'true' }}
         run: bash tools/ci/slowest-tests.sh | tee -a "$GITHUB_STEP_SUMMARY"
