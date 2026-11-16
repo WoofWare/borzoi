@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 31fab9b935fd23950e3edadb9a8d59958343f78c7cf7b4e3d06cdf38920543ad # shrinks to tree = Tree { project_config: None, repo_config: None, user_config: None, environment: None, lock: false, linked: false }
+cc 75219a7a10eb69ad8feb24dfbc0c36d218f1c6934755a61e5ce8a38c4019f199 # shrinks to tree = Tree { project_config: Some(Unset), repo_config: None, user_config: None, environment: None, lock: false, linked: false }
+cc 24b529644749530b288e962d3c25f602d9e148bb20cfc1f60241d74a5b12e24e # shrinks to tree = Tree { project_config: None, repo_config: Some(Unset), user_config: None, environment: None, lock: false, linked: false }
+cc be82c91cfee136953c5f6e1140865fc993907847e8872ee301642a0eaf721a17 # shrinks to tree = Tree { project_config: None, repo_config: None, user_config: Some(Linked), environment: None, lock: false, linked: false }

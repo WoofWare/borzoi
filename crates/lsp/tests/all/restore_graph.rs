@@ -598,9 +598,15 @@ fn installed_sdks() -> Vec<(String, PathBuf)> {
 fn shadow_of(project: &Path, env: &SdkDiscoveryEnv) -> borzoi::restore::ShadowRun {
     let mut workspace = Workspace::with_env(env.clone());
     let served = workspace.served_tfm_for_project(project);
-    restore_to_scratch(project, &dotnet_root(), &served, Some(env))
-        .shadow
-        .unwrap_or_else(|| panic!("{}: the restore wrote no spec", project.display()))
+    restore_to_scratch(
+        project,
+        &dotnet_root(),
+        &served,
+        Some(env),
+        &borzoi_msbuild::observed::Observer::new(),
+    )
+    .shadow
+    .unwrap_or_else(|| panic!("{}: the restore wrote no spec", project.display()))
 }
 
 /// The server reads which NuGet restored from the restore's own log
@@ -795,7 +801,13 @@ fn the_on_demand_restore_runs_b1_in_shadow() {
         let env = controlled_env();
         let mut workspace = Workspace::with_env(env.clone());
         let served = workspace.served_tfm_for_project(&project);
-        let restored = restore_to_scratch(&project, &dotnet_root(), &served, Some(&env));
+        let restored = restore_to_scratch(
+            &project,
+            &dotnet_root(),
+            &served,
+            Some(&env),
+            &borzoi_msbuild::observed::Observer::new(),
+        );
         assert!(
             matches!(restored.outcome, RestoreOutcome::Resolved(_)),
             "{tag}: the restore resolves"
@@ -919,7 +931,13 @@ fn the_shadow_judges_nugets_restore_not_the_commands() {
         let env = controlled_env();
         let mut workspace = Workspace::with_env(env.clone());
         let served = workspace.served_tfm_for_project(&project);
-        let restored = restore_to_scratch(&project, &dotnet_root(), &served, Some(&env));
+        let restored = restore_to_scratch(
+            &project,
+            &dotnet_root(),
+            &served,
+            Some(&env),
+            &borzoi_msbuild::observed::Observer::new(),
+        );
         assert!(
             matches!(restored.outcome, RestoreOutcome::Declined),
             "{tag}: the command fails, so the server declines"

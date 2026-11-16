@@ -343,8 +343,19 @@ pub enum Unobserved {
     /// `(size, mtime)` witness (`xml_doc::lookup::DocFileCache`). No stage
     /// routes them.
     XmlDoc,
-    /// On-demand restore: its inputs probe, and the files a `dotnet restore`
-    /// child wrote to its scratch directory. No stage routes it.
+    /// On-demand restore: the files a `dotnet restore` child wrote to its
+    /// scratch directory, and what reading its assets file there probes. The
+    /// scratch directory is deleted when the restore returns, so nothing
+    /// could confirm a read of it; and the child's own reads (the package
+    /// folder, the SDK and its `library-packs`, its evaluation of the
+    /// project) are not observed at all. So an env a restore answered names
+    /// it as an unrecorded reader (`semantic::EnvReads::unrecorded`), and is
+    /// dropped by every structural or referenced-assembly event and every
+    /// moved `projects_generation`. The inputs probe that decides whether and
+    /// how to restore (the project's real directory, a `packages.lock.json`,
+    /// NuGet's settings as far as the global packages folder, where that
+    /// folder lies) is not this variant's: it asks through the env's
+    /// observer (`restore::restore_to_scratch_assemblies`).
     Restore,
 }
 
