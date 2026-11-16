@@ -844,6 +844,12 @@ fn message(kind: &DiagnosticKind, discovery_failure: Option<&DiscoveryError>) ->
         DiagnosticKind::UnsupportedPropertyExpression { expression } => {
             format!("$(...) expression not understood, left literal: {expression}")
         }
+        DiagnosticKind::PathAdjustmentUndecided { value } => {
+            format!(
+                "MSBuild may rewrite the backslashes in {value} as slashes, depending on which \
+                 directories exist where it runs — value not used"
+            )
+        }
         DiagnosticKind::UnresolvedItemReference { reference } => {
             // `reference` is the full expanded value as it appears in
             // the source, including its `@(...)` syntax. Wrapping it

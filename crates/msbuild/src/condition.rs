@@ -1412,6 +1412,11 @@ fn expand_scalar_for_condition(
     undefined: &mut Vec<String>,
 ) -> Result<String, ()> {
     match scalar {
+        // MSBuild expands a quoted operand only when its scanner saw something
+        // to expand in it (`Scanner.ParseQuotedString`: a `$(`, `@(`, `%(` or
+        // any `%`). Any other is compared as written, so its `\` never meets
+        // the Unix path adjustment an expansion applies.
+        ScalarExpr::String(raw) if !raw.contains("$(") && !raw.contains('%') => Ok(raw.clone()),
         ScalarExpr::String(raw) => expand_operand(raw, props, fs_observer, undefined),
         ScalarExpr::Bare(raw) => Ok(raw.clone()),
         ScalarExpr::Property(raw) => expand_operand(raw, props, fs_observer, undefined),
@@ -1780,7 +1785,7 @@ fn expand_for_condition(
     for issue in issues {
         match issue {
             Issue::Undefined { name } => undefined.push(name),
-            Issue::Unsupported { .. } => return Err(()),
+            Issue::Unsupported { .. } | Issue::PathAdjustmentUndecided { .. } => return Err(()),
         }
     }
     // Item and metadata references are scanned on the **escaped** text, exactly

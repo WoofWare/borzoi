@@ -41,6 +41,12 @@ pub(crate) fn file_or_directory_exists(observer: &Observer, path: &Path) -> bool
     }
 }
 
+/// Whether the full form of `path` is the root, a directory on every Unix
+/// host, so that both predicates hold for it without asking the file system.
+pub(crate) fn names_the_root(path: &Path) -> bool {
+    full_path(path).is_some_and(|(full, _)| full.parent().is_none())
+}
+
 /// `File.Exists(path)` for a rooted `path`: something is there that is no
 /// directory, a dangling symlink included.
 pub(crate) fn file_exists(observer: &Observer, path: &Path) -> bool {

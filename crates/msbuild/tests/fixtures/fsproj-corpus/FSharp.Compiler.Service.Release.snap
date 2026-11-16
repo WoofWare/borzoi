@@ -23,7 +23,7 @@ properties (23):
   PackageTags
   Tailcalls
   TargetFrameworks
-items (381):
+items (379):
   Compile       Utilities/NullHelpers.fs
   Compile       Utilities/Activity.fsi
   Compile       Utilities/Activity.fs
@@ -157,8 +157,6 @@ items (381):
   Compile       SyntaxTree/LexHelpers.fs
   Compile       /pplex.fsi
   Compile       /pplex.fs
-  Compile       //lex.fsi
-  Compile       //lex.fs
   Compile       SyntaxTree/LexFilter.fsi
   Compile       SyntaxTree/LexFilter.fs
   Compile       TypedTree/tainted.fsi
@@ -417,7 +415,7 @@ package_references (7, uncertain=true):
   Include System.Memory version=<none>
   Include System.Runtime.CompilerServices.Unsafe version=<none>
 framework_references (0):
-diagnostics (39):
+diagnostics (43):
   SdkResolverAbsent { name: "Microsoft.NET.Sdk" }
   UndefinedProperty { name: "NoWarn" }
   UndefinedProperty { name: "DefineConstants" }
@@ -443,7 +441,11 @@ diagnostics (39):
   UndefinedProperty { name: "IntermediateOutputPath" }
   UndefinedProperty { name: "IntermediateOutputPath" }
   UndefinedProperty { name: "IntermediateOutputPath" }
+  PathAdjustmentUndecided { value: "\\lex.fsi" }
+  PathAdjustmentUndecided { value: "/\\lex.fsi" }
   UndefinedProperty { name: "IntermediateOutputPath" }
+  PathAdjustmentUndecided { value: "\\lex.fs" }
+  PathAdjustmentUndecided { value: "/\\lex.fs" }
   UndefinedProperty { name: "IntermediateOutputPath" }
   UndefinedProperty { name: "MonoPackaging" }
   UndefinedProperty { name: "BUILDING_USING_DOTNET" }

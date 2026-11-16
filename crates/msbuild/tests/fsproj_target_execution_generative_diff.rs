@@ -765,6 +765,11 @@ const LIST_IDENTITIES: [&str; 10] = [
     "j1", "j2", "%34%31", "%25", "%2541", "a%3Bb", "%20j%20", "%", "%40", "x%2Ey",
 ];
 
+/// An identity holding a backslash, which a list read into a value meets
+/// MSBuild's Unix path adjustment with; drawn now and then, as the walk
+/// declines every run it reaches.
+const BACKSLASH_IDENTITY: &str = "j\\k";
+
 /// Values a target writes that read `J` beside text: escapes it may complete
 /// (`%@(J)` with `J` spelt `%34%31` reads `%41`), text on either side, two
 /// lists, a list beside another, and a property that holds a list (`%$(B)`).
@@ -785,16 +790,23 @@ const LIST_VALUES: [&str; 14] = [
     "%25@(J)",
 ];
 
+/// Values with a backslash beside a list, which MSBuild's Unix path
+/// adjustment meets only once the list is expanded: drawn now and then, as
+/// the walk declines every run they reach.
+const BACKSLASH_LIST_VALUES: [&str; 4] = ["@(J)\\", "\\@(J)", "..\\@(J)", "$(B)\\@(J)"];
+
 /// A project whose target writes properties from [`LIST_VALUES`] and includes
 /// what they hold, so a list's spelling reaches a property, a later read, and
 /// an item.
 fn list_project(rng: &mut SplitMix64) -> String {
     let mut out = String::from("<Project>\n  <ItemGroup>\n");
     for _ in 0..1 + rng.below(3) {
-        out.push_str(&format!(
-            "    <J Include=\"{}\" />\n",
+        let identity = if rng.below(10) == 0 {
+            BACKSLASH_IDENTITY
+        } else {
             rng.pick(&LIST_IDENTITIES)
-        ));
+        };
+        out.push_str(&format!("    <J Include=\"{identity}\" />\n"));
     }
     if rng.below(2) == 0 {
         out.push_str("    <I Include=\"e\" />\n");
@@ -802,10 +814,12 @@ fn list_project(rng: &mut SplitMix64) -> String {
     out.push_str("  </ItemGroup>\n  <Target Name=\"T0\">\n    <PropertyGroup>\n");
     for property in PROPERTIES {
         if rng.below(4) != 0 {
-            out.push_str(&format!(
-                "      <{property}>{}</{property}>\n",
+            let value = if rng.below(10) == 0 {
+                rng.pick(&BACKSLASH_LIST_VALUES)
+            } else {
                 rng.pick(&LIST_VALUES)
-            ));
+            };
+            out.push_str(&format!("      <{property}>{value}</{property}>\n"));
         }
     }
     out.push_str("    </PropertyGroup>\n");

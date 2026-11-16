@@ -1,21 +1,25 @@
 //! MSBuild's unix-only path fixup, `MaybeAdjustFilePath`.
 //!
-//! Stage P0 of `docs/msbuild-unix-path-fixup-plan.md`. On a non-Windows host
-//! MSBuild passes every expanded value through `FileUtilities.MaybeAdjustFilePath`
-//! (`FileUtilities.cs:608`): a backslash-bearing value is rewritten `\`→`/` (and
-//! its slash runs collapsed) **iff** the rewritten first segment exists as a
-//! directory relative to the MSBuild process's working directory — a
-//! cwd-dependent decision we cannot make.
+//! On a non-Windows host MSBuild passes each piece of an expansion, and then
+//! the whole expanded value, through `FileUtilities.MaybeAdjustFilePath`
+//! (`Expander.SpanBasedConcatenator`, `Expander.ExpandIntoStringLeaveEscaped`):
+//! a backslash-bearing piece is rewritten `\`→`/` (and its slash runs
+//! collapsed) **iff** the rewritten first segment exists as a directory. A
+//! segment named by an absolute path is probed under the root, a fact of the
+//! file system; one named relatively is probed under the MSBuild process's
+//! working directory, which no evaluation the LSP serves knows.
 //!
-//! The response (later stages) is to *bracket the two worlds*: the value MSBuild
-//! commits is one of exactly two — the raw text, or the rewrite — so a consumer
-//! that agrees under both can commit, and one that disagrees declines. This
-//! module is the eligibility half: [`worlds`] says whether the fixup can fire
-//! and, if so, what the rewrite is.
+//! [`worlds`] says whether the fixup can fire and, if so, what the rewrite is;
+//! [`unix_path_probe`] names the question that decides it; [`adjust`] asks it.
 //!
-//! Everything here is a faithful port of the source, unit-pinned and (in
-//! `tests/path_fixup_diff.rs`) differentially bracketed against `dotnet msbuild`
-//! run from two directories.
+//! Everything here is a faithful port of the source, unit-pinned and
+//! differentially tested against `dotnet msbuild` run from several directories
+//! (`tests/path_fixup_diff.rs`, `tests/path_fixup_expansion_diff.rs`).
+
+use std::path::Path;
+
+use crate::dotnet_io;
+use crate::observed::Observer;
 
 /// The **rewrite** the fixup would apply if it fires, or `None` when the fixup
 /// cannot fire at all (so the value is unambiguous — MSBuild returns it raw).
@@ -115,6 +119,53 @@ pub fn unix_path_probe(rewrite: &str) -> UnixPathProbe<'_> {
         // `Path.Combine` returns a rooted second argument whole.
         segment if segment.starts_with('/') => UnixPathProbe::Directory(segment),
         _ => UnixPathProbe::WorkingDirectory,
+    }
+}
+
+/// What `MaybeAdjustFilePath`, with the empty base directory every expansion
+/// passes, makes of one escaped piece of text.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Adjusted {
+    /// MSBuild returns the piece as it was.
+    Unchanged,
+    /// MSBuild returns this rewrite.
+    Rewritten(String),
+    /// The answer turns on a directory named relative to the MSBuild
+    /// process's working directory.
+    WorkingDirectory,
+    /// The answer turns on a path under the root, and the evaluation asks no
+    /// file system.
+    Unasked,
+}
+
+/// What MSBuild's fixup makes of `escaped`, one piece of an expansion or a
+/// whole expanded value, asking the file system through `observer` where the
+/// probe names an absolute path (`None` asks nothing).
+pub(crate) fn adjust(escaped: &str, observer: Option<&Observer>) -> Adjusted {
+    let Some(rewrite) = worlds(escaped) else {
+        return Adjusted::Unchanged;
+    };
+    let rewrites = match unix_path_probe(&rewrite) {
+        UnixPathProbe::Exists => Some(true),
+        UnixPathProbe::Absent => Some(false),
+        // The root exists without asking (a lone `\`, or `\..`).
+        UnixPathProbe::Directory(path) | UnixPathProbe::FileOrDirectory(path)
+            if dotnet_io::names_the_root(Path::new(path)) =>
+        {
+            Some(true)
+        }
+        UnixPathProbe::Directory(dir) => {
+            observer.map(|observer| dotnet_io::directory_exists(observer, Path::new(dir)))
+        }
+        UnixPathProbe::FileOrDirectory(path) => {
+            observer.map(|observer| dotnet_io::file_or_directory_exists(observer, Path::new(path)))
+        }
+        UnixPathProbe::WorkingDirectory => return Adjusted::WorkingDirectory,
+    };
+    match rewrites {
+        Some(true) => Adjusted::Rewritten(rewrite),
+        Some(false) => Adjusted::Unchanged,
+        None => Adjusted::Unasked,
     }
 }
 
@@ -310,5 +361,52 @@ mod tests {
         assert_eq!(convert_to_unix_slashes("a\\\\\\b"), "a/b");
         assert_eq!(convert_to_unix_slashes("\\a"), "/a");
         assert_eq!(convert_to_unix_slashes("a\\"), "a/");
+    }
+
+    /// [`adjust`] asks the file system only about an absolute first segment,
+    /// and answers each probe's question as its outcome says.
+    #[test]
+    #[cfg(not(windows))]
+    fn adjust_answers_each_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::observed::host_fs::canonicalize(dir.path()).unwrap();
+        let root = root.to_str().unwrap();
+        let first = root.split('/').nth(1).unwrap();
+        let observer = Observer::new();
+        let ask = |value: &str| adjust(value, Some(&observer));
+        // A directory under the root: rewritten, slash runs collapsed.
+        assert_eq!(
+            ask(&format!("{root}\\a\\\\b")),
+            Adjusted::Rewritten(format!("{root}/a/b"))
+        );
+        assert_eq!(
+            ask(&format!("\\{first}")),
+            Adjusted::Rewritten(format!("/{first}"))
+        );
+        // Nothing there: as it was.
+        assert_eq!(ask("/borzoi-missing\\a"), Adjusted::Unchanged);
+        assert_eq!(ask("\\borzoi-missing"), Adjusted::Unchanged);
+        // `.` and `..` are directories wherever MSBuild runs.
+        assert_eq!(ask("..\\a"), Adjusted::Rewritten("../a".to_string()));
+        // Under the working directory: not this evaluation's to decide.
+        assert_eq!(ask("seg\\a"), Adjusted::WorkingDirectory);
+        // Ineligible: no backslash, a network prefix, an escaped backslash.
+        assert_eq!(ask("seg/a"), Adjusted::Unchanged);
+        assert_eq!(ask("\\\\srv\\a"), Adjusted::Unchanged);
+        assert_eq!(ask("seg%5ca"), Adjusted::Unchanged);
+        // No file system: an absolute probe is unasked, a relative one still
+        // the working directory's.
+        assert_eq!(adjust(&format!("{root}\\a"), None), Adjusted::Unasked);
+        assert_eq!(adjust("seg\\a", None), Adjusted::WorkingDirectory);
+        assert_eq!(
+            adjust("..\\a", None),
+            Adjusted::Rewritten("../a".to_string())
+        );
+        // The root exists without asking: `/..` is `/` to `Directory.Exists`.
+        assert_eq!(adjust("\\", None), Adjusted::Rewritten("/".to_string()));
+        assert_eq!(
+            adjust("\\..\\a", None),
+            Adjusted::Rewritten("/../a".to_string())
+        );
     }
 }

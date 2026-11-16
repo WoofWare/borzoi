@@ -5,13 +5,15 @@
 > not belong to that stack: it is a separate, host- and cwd-dependent
 > normalisation.
 
-> **Status:** P0 (#948) and the P3 keystone (#953) have landed. The keystone
-> needed only *two path functions* — `[System.IO.Path]::Combine` and
-> `IsPathRooted` — to stop declining on backslash and instead commit
-> cwd-independently, which is all the SDK chain's fixup-ambiguity ever reaches.
-> The full **provenance dimension** — a stored fixup-divergent value being made
-> exact for the property table / `DefineConstants` / `target_name` — is *not* on
-> the critical path and is deferred until a consumer needs it. Everything below
+> **Status:** P0 (#948), the P3 keystone (#953) and the expansion stage
+> (#987) have landed. The keystone needed only *two path functions* —
+> `[System.IO.Path]::Combine` and `IsPathRooted` — to stop declining on
+> backslash and instead commit cwd-independently, which is all the SDK chain's
+> fixup-ambiguity ever reaches. The expansion stage models the fixup on every
+> expansion wherever its probe is cwd-independent, and declines a seed's
+> backslash wherever it is not. What remains of the **provenance dimension** —
+> a relative probe of *project text*, taken to miss today — is *not* on the
+> critical path and is deferred until a consumer needs it. Everything below
 > "Landed stages" has detail only on that remaining work.
 
 ## The behaviour (reference)
@@ -109,6 +111,26 @@ again), so a value whose worlds agree is *committed determinate*, not degraded.
   through `observed`), and declines the import otherwise. The pieces'
   decisions are not modelled; `sdk_import_project_path_diff` runs MSBuild from
   three working directories and holds every commit to all of them.
+- **Expansions** (#987) — `properties::substitute` adjusts each piece (a
+  literal run, a reference's value) and then the whole value, as MSBuild's
+  `SpanBasedConcatenator` and `ExpandIntoStringLeaveEscaped` do
+  (`path_fixup::adjust`). A probe of `.`/`..` hits, an absolute one is asked
+  through `observed` (`dotnet_io`'s `Directory.Exists` /
+  `FileOrDirectoryExists`), and a relative one turns on the working directory.
+  A value MSBuild stores without expanding it — a global, the environment, a
+  toolset or reserved name, a task output (`properties::Origin::Seed`) — keeps
+  its `\` until a read adjusts it: `MSBuildUserExtensionsPath`, the host's
+  `$(LocalAppData)` joined with `Microsoft\MSBuild`, reads as
+  `…/Microsoft/MSBuild`. A seed's backslash that meets a relative probe, and
+  any absolute probe on the path that asks no file system, declines
+  (`PathAdjustmentUndecided`); project text's relative probe is taken to miss
+  (the gap below). A condition operand is expanded, and adjusted, only when
+  MSBuild's scanner saw something to expand in it. Targets run in the project's
+  directory, so the executor declines every relative probe
+  (`substitute_in_target`). `path_fixup_expansion_diff` holds this to MSBuild
+  from an empty working directory and one holding every relative segment, over
+  generated values × sources × read sites (body, condition, `Exists`, property
+  function).
 
 The three superseded stages — the original P1 (conditions bracket the worlds),
 P2 (exact-value consumers degrade), and their "scan the evaluated property table"
@@ -120,7 +142,11 @@ property of the *derivation* (see the three defects below).
 
 ### The provenance dimension (deferred until a stored divergent value must be exact)
 
-The keystone made every fixup-ambiguity in the SDK chain collapse before it was
+What remains is project text whose probe names a directory relative to the
+working directory: the walk takes that probe to miss, which is MSBuild's
+answer from a directory holding none of the segments, and the expansion stage
+keeps doing so because declining it would decline the SDK's own `obj\`. The
+keystone made every fixup-ambiguity in the SDK chain collapse before it was
 stored, so nothing exact-valued currently observes divergence. When a consumer
 *does* need a stored fixup-divergent value to be exact — the concrete trigger is
 `BaseIntermediateOutputPath`, which stays genuinely divergent (`obj\` vs `obj/` by

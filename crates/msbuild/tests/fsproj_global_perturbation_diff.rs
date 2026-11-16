@@ -382,14 +382,22 @@ const CASES: &[Case] = &[
     },
     // Toolset names a caller may set as globals: read directly, and steering
     // an import through `MSBuildUserExtensionsPath`, whose swept value holds a
-    // `borzoi.props` ([`global_sets`]). `MSBuildUserExtensionsPath` is not read
-    // into a body: unset, it is the host's computed value, stored with a `\`
-    // that MSBuild's Unix path fixup rewrites on expansion, and the walk does
-    // not model the fixup of a stored value (the deferred provenance dimension
-    // of `docs/msbuild-unix-path-fixup-plan.md`).
+    // `borzoi.props` ([`global_sets`]).
     Case {
         name: "toolset-global-read",
         xml: "<Project>\n  <PropertyGroup>\n    <Out>[$(MSBuildSDKsPath)]</Out>\n    <Helper>[$(MSBuildExtensionsPath)]</Helper>\n  </PropertyGroup>\n</Project>\n",
+        files: &[],
+        pins: &[],
+        startup_moves: &[],
+    },
+    // `MSBuildUserExtensionsPath` read into bodies. Unset, it is the host's
+    // computed value, stored with the `\` of `Microsoft\MSBuild`, which
+    // MSBuild's Unix path adjustment rewrites as each body reads it (its
+    // first segment is a directory under the root); the `\x` the second body
+    // adds is rewritten only with the whole value.
+    Case {
+        name: "toolset-user-extensions-read",
+        xml: "<Project>\n  <PropertyGroup>\n    <Out>[$(MSBuildUserExtensionsPath)]</Out>\n    <Helper>$(MSBuildUserExtensionsPath)\\x</Helper>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[],
         startup_moves: &[],
@@ -1091,6 +1099,20 @@ fn every_route_from_a_global_is_exact_or_declined() {
             census.rejected_under.join(" "),
             census.render()
         );
+        // A body reading the host's `MSBuildUserExtensionsPath` is decided
+        // under every global set: the adjustment its `\` meets probes a
+        // directory under the root.
+        if case.name == "toolset-user-extensions-read" {
+            for name in ["Out", "Helper"] {
+                let committed_sets = census.by_name.get(name).map_or(0, |n| n.committed_sets);
+                assert_eq!(
+                    committed_sets, census.evaluated_sets,
+                    "{}: `{name}` committed under only {committed_sets} of the {} global sets \
+                     MSBuild evaluates it under",
+                    case.name, census.evaluated_sets
+                );
+            }
+        }
         committed += census.committed;
         moving += census.derived_moving();
         tracked += census.derived_tracked();
@@ -1365,10 +1387,11 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
     // Gates and bodies on the startup directory and the toolset names a global
     // set supplies, which a document of the second population draws in place
     // of a write's own gate half the time and its body a third of it. No
-    // body reads `MSBuildUserExtensionsPath`, and no import is selected by the
-    // startup directory: see the `toolset-global-read` and
-    // `startup-selected-import` cases for the two classes those would reach,
-    // which the walk does not model by design.
+    // import is selected by the startup directory: see the
+    // `startup-selected-import` case for the class that would reach, which
+    // the walk does not model by design. `MSBuildUserExtensionsPath` unset is
+    // the host's value, whose `\` MSBuild's Unix path adjustment rewrites when
+    // a body reads it.
     const STARTUP_GATES: &[&str] = &[
         "Exists('$(MSBuildStartupDirectory)/startup.props')",
         "!Exists('$(MSBuildStartupDirectory)/startup.props')",
@@ -1380,6 +1403,7 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
         "$(MSBuildStartupDirectory)",
         "$(MSBuildStartupDirectory)|$(Platform)",
         "[$(MSBuildExtensionsPath)]",
+        "[$(MSBuildUserExtensionsPath)]",
     ];
     const WRITTEN: &[&str] = &["Out", "Helper", "Configuration", "Platform"];
 

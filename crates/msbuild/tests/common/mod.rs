@@ -384,6 +384,18 @@ impl Oracle {
         Oracle::spawn_in(Vec::new(), Some(working_dir.to_path_buf()), None)
     }
 
+    /// [`Self::spawn_in_dir`], with `env` added to the child's scrubbed
+    /// environment, where MSBuild reads each as a property. A test that does
+    /// this hands our evaluator the same pairs beside [`oracle_environment`].
+    pub fn spawn_in_dir_with_env(working_dir: &Path, env: &[(String, String)]) -> Oracle {
+        Oracle::spawn_in_with_env(
+            Vec::new(),
+            Some(working_dir.to_path_buf()),
+            None,
+            env.to_vec(),
+        )
+    }
+
     /// An oracle whose default SDK resolver looks in `sdks_path` for a
     /// `<Project Sdk="Name">` (`<sdks_path>/Name/Sdk`): the shape a
     /// differential laying out a synthetic SDK needs, so MSBuild imports it
@@ -409,6 +421,15 @@ impl Oracle {
         working_dir: Option<PathBuf>,
         locale: Option<String>,
     ) -> Oracle {
+        Oracle::spawn_in_with_env(args, working_dir, locale, Vec::new())
+    }
+
+    fn spawn_in_with_env(
+        args: Vec<std::ffi::OsString>,
+        working_dir: Option<PathBuf>,
+        locale: Option<String>,
+        env: Vec<(String, String)>,
+    ) -> Oracle {
         let bin = ensure_oracle_built().to_path_buf();
         // A factory rather than a bare program+args: the child's environment must
         // be scrubbed (see `scrub_oracle_env`), and every respawn must scrub it
@@ -423,6 +444,7 @@ impl Oracle {
             if let Some(locale) = &locale {
                 cmd.env("LANG", locale).env("LC_ALL", locale);
             }
+            cmd.envs(env.iter().map(|(name, value)| (name, value)));
             cmd
         };
         Oracle {

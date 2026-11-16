@@ -203,13 +203,6 @@ impl Escaped {
         self.0.push_str(&other.0);
     }
 
-    /// Append **project XML text** — the literal runs between `$(…)`
-    /// references. XML text is already escaped-domain text (`<P>a%20b</P>`
-    /// evaluates to `a b`), so it composes verbatim.
-    pub fn push_xml(&mut self, text: &str) {
-        self.0.push_str(text);
-    }
-
     /// Split a `;`-delimited list the way MSBuild does: **on the semicolons of
     /// the escaped text**, so an escaped `%3b` is data and does not split.
     ///
