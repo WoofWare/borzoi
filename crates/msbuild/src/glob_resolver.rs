@@ -82,8 +82,9 @@ use crate::{GlobRequest, SpecFragment, Unmodelled};
 use crate::glob::{
     GlobDecline, MatcherPattern, Pattern, as_file_matcher_reads, compares_unnormalised,
     has_tilde_after_first_fixed_segment, has_wildcard_directory_part, is_legal_filespec,
-    is_recursive_filename_pattern, matches_by_regex, select, select_ignoring_case, split_filespec,
-    split_glob_root, split_segments, unmodelled_shape,
+    is_recursive_filename_pattern, matches_by_regex, regex_filename, regex_question_readings,
+    select, select_ignoring_case, split_filespec, split_glob_root, split_segments,
+    unmodelled_shape,
 };
 
 /// Whether this host's glob case rule is the one [`select_ignoring_case`]
@@ -156,15 +157,11 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
                     shape: Unmodelled::TildeInFixedDirectory,
                 });
             }
-            let pattern = Pattern::with_literal_prefix(
-                anchor_prefix(&base_segs, &norm),
-                &as_file_matcher_reads(&norm),
-            )
-            .with_all_files_rule();
+            let patterns = file_matcher_patterns(&norm, anchor_prefix(&base_segs, &norm))?;
             let by_regex = matches_by_regex(&norm);
             Ok(GlobExclude {
                 norm,
-                matcher: MatcherPattern { pattern, by_regex },
+                matcher: MatcherPattern { patterns, by_regex },
             })
         })
         .collect();
@@ -284,14 +281,13 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
                 shape: Unmodelled::GlobstarExcludeAboveIncludeRoot,
             });
         }
-        // The pattern keeps the base literal for relative specs; an absolute
+        // The patterns keep the base literal for relative specs; an absolute
         // fragment is parsed on its own (its own wildcards are wildcards). A
         // filename part of `*.*` matches every file, as MSBuild's does.
-        let pat = Pattern::with_literal_prefix(
-            anchor_prefix(&base_segs, &norm),
-            &as_file_matcher_reads(&norm),
-        )
-        .with_all_files_rule();
+        let include = MatcherPattern {
+            patterns: file_matcher_patterns(&norm, anchor_prefix(&base_segs, &norm))?,
+            by_regex: matches_by_regex(&norm),
+        };
         // Root the walk at the literal anchor so `../shared/*.fs` enumerates
         // the sibling directory and `/opt/lib/*.fs` the absolute one.
         // `anchor_segs` is absolute (or empty → `/`).
@@ -342,19 +338,22 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
             .collect::<Result<_, _>>()?;
         let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
         let selected = if FILE_MATCHER_CASE_RULE_MODELLED {
-            let include = MatcherPattern {
-                pattern: pat,
-                by_regex: matches_by_regex(&norm),
-            };
             let excludes: Vec<MatcherPattern> =
                 live_excludes.iter().map(|e| e.matcher.clone()).collect();
             select_ignoring_case(&key_refs, &include, &excludes)?
         } else {
+            // `select` takes one pattern per include fragment.
+            let [pat] = include.patterns.as_slice() else {
+                return Err(GlobDecline::OutsideModelledShape {
+                    spec: norm,
+                    shape: Unmodelled::RegexQuestionAcrossSeparator,
+                });
+            };
             let excludes: Vec<Pattern> = live_excludes
                 .iter()
-                .map(|e| e.matcher.pattern.clone())
+                .flat_map(|e| e.matcher.patterns.iter().cloned())
                 .collect();
-            select(&key_refs, std::slice::from_ref(&pat), &excludes)?
+            select(&key_refs, std::slice::from_ref(pat), &excludes)?
         };
         for key in selected {
             out.push(Path::new("/").join(&key));
@@ -380,25 +379,57 @@ fn fixed_directory_exists(norm: &str, base_dir: &Path, observer: &Observer) -> b
     observed::is_dir(observer, &base_dir.join(fixed))
 }
 
+/// The readings of a decoded glob the file matcher is handed, as
+/// [`Pattern`]s rooted under `prefix`: the spelling it reads
+/// ([`as_file_matcher_reads`]), and where it compares by regular expression,
+/// that spelling with each `?` past the first `**` also read as a separator
+/// ([`regex_question_readings`]). Before a `**` the walk's fixed depth keeps a
+/// `?` within one name. Declines where there are too many such `?`s to read.
+fn file_matcher_patterns(norm: &str, prefix: &[&str]) -> Result<Vec<Pattern>, GlobDecline> {
+    Ok(file_matcher_readings(norm)?
+        .iter()
+        .map(|reading| Pattern::with_literal_prefix(prefix, reading).with_all_files_rule())
+        .collect())
+}
+
+/// [`file_matcher_patterns`]' readings, as spellings.
+fn file_matcher_readings(norm: &str) -> Result<Vec<String>, GlobDecline> {
+    let read = as_file_matcher_reads(norm);
+    match read.find("**") {
+        Some(globstar) if matches_by_regex(norm) => regex_question_readings(&read, globstar)
+            .ok_or_else(|| GlobDecline::OutsideModelledShape {
+                spec: norm.to_string(),
+                shape: Unmodelled::RegexQuestionAcrossSeparator,
+            }),
+        _ => Ok(vec![read]),
+    }
+}
+
 /// A live glob exclude's fixed directory as absolute segments, and the
-/// directory segments its wildcard part names after its first `**`, or `None`
-/// when that part has no `**`. MSBuild applies those names only to
-/// directories its walk enters, which start below the include's own fixed
-/// directory (`Unmodelled::GlobstarExcludeAboveIncludeRoot`).
+/// directory segments its wildcard part names after its first `**` in any
+/// of its readings ([`file_matcher_readings`]), or `None` when that part has
+/// no `**`. MSBuild applies those names only to directories its walk enters,
+/// which start below the include's own fixed directory
+/// (`Unmodelled::GlobstarExcludeAboveIncludeRoot`).
 fn globstar_exclude_names(
     norm: &str,
     absolute: bool,
     base_segs: &[&str],
 ) -> Option<(Vec<String>, Vec<String>)> {
-    let read = as_file_matcher_reads(norm);
-    let (_, wildcard_dir, _) = split_filespec(&read);
-    let dirs = split_segments(&wildcard_dir);
-    let globstar = dirs.iter().position(|seg| *seg == "**")?;
-    let after: Vec<String> = dirs[globstar + 1..]
-        .iter()
-        .filter(|seg| **seg != "**")
-        .map(|seg| seg.to_string())
-        .collect();
+    // A live exclude's readings were enumerated when it was built.
+    let readings = file_matcher_readings(norm).ok()?;
+    let mut after: Vec<String> = Vec::new();
+    for read in &readings {
+        let (_, wildcard_dir, _) = split_filespec(read);
+        let dirs = split_segments(&wildcard_dir);
+        let globstar = dirs.iter().position(|seg| *seg == "**")?;
+        after.extend(
+            dirs[globstar + 1..]
+                .iter()
+                .filter(|seg| **seg != "**")
+                .map(|seg| seg.to_string()),
+        );
+    }
     let prefix = split_glob_root(norm).prefix;
     let base: Vec<String> = if absolute {
         prefix
@@ -476,10 +507,11 @@ fn lexical_full_path(base_segs: &[&str], spelling: &str) -> String {
 /// spelling.
 ///
 /// - An exclude MSBuild classifies as a glob ([`SpecFragment::is_wildcard`])
-///   is a pattern over the item's full path, with the all-files reading of
-///   `*.*` except in the filename-only branch
-///   ([`is_recursive_filename_pattern`]). One the file matcher would refuse
-///   declines.
+///   is a pattern over the item's full path. Outside the filename-only
+///   branch ([`is_recursive_filename_pattern`]) it is a regular expression,
+///   whose file name is read its own way ([`regex_filename`]: `a*.*` takes
+///   `ab`) and whose `?` can match a separator ([`regex_question_readings`]).
+///   One the file matcher would refuse declines.
 /// - Any other exclude is a name. Two names are compared as full paths
 ///   (`./a.fs` is `a.fs`), unless either is a spelling MSBuild does not
 ///   normalise ([`compares_unnormalised`]), which is compared as written.
@@ -517,17 +549,34 @@ fn literal_survives_excludes(
             let fixed_full =
                 lexical_full_path(base_segs, if fixed.is_empty() { "." } else { fixed });
             let fixed_segs = split_segments(&fixed_full);
-            let pattern =
-                Pattern::with_literal_prefix(&fixed_segs, &format!("{wildcard_dir}{filename}"));
             if is_recursive_filename_pattern(&norm) {
                 // `FileMatcher.IsMatch` on the name, which no culture moves.
+                let pattern =
+                    Pattern::with_literal_prefix(&fixed_segs, &format!("{wildcard_dir}{filename}"));
                 let takes = pattern.matches_ignoring_ascii_case(&item_full);
                 (takes, takes)
             } else {
-                let pattern = pattern.with_all_files_rule();
+                // A regular expression over the whole path, which reads the
+                // file name its own way and a `?` as any character, a
+                // separator included.
+                let tail = format!("{wildcard_dir}{}", regex_filename(&filename));
+                let readings = regex_question_readings(&tail, 0).ok_or_else(|| {
+                    GlobDecline::OutsideModelledShape {
+                        spec: norm.clone(),
+                        shape: Unmodelled::RegexQuestionAcrossSeparator,
+                    }
+                })?;
+                let patterns: Vec<Pattern> = readings
+                    .iter()
+                    .map(|reading| Pattern::with_literal_prefix(&fixed_segs, reading))
+                    .collect();
                 (
-                    pattern.matches_ignoring_ascii_case(&item_full),
-                    pattern.matches_ignoring_ascii_case_but_i(&item_full),
+                    patterns
+                        .iter()
+                        .any(|p| p.matches_ignoring_ascii_case(&item_full)),
+                    patterns
+                        .iter()
+                        .any(|p| p.matches_ignoring_ascii_case_but_i(&item_full)),
                 )
             }
         } else {

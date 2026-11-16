@@ -72,6 +72,8 @@ const EXTRAS: &[&str] = &[
     "B.fs",
     "Up.fs",
     "sub/IN.fs",
+    "sub/a/b.fs",
+    "sub/Deep/a/b.fs",
 ];
 
 /// Non-ASCII names, one of which a disk holds now and then, under `uni/` so
@@ -139,13 +141,15 @@ const WILD: &[&str] = &[
     "**/Deep/**",
     "**/DEEP/**",
     "**/**",
+    "S*/**",
 ];
 
 /// A spec's file name: literal names and wildcard ones in several cases, and
 /// names with `i`/`I` and `k` (which a culture or a non-ASCII letter can fold).
 const NAME: &[&str] = &[
     "*.fs", "*.FS", "A*", "a*.fs", "a.fs", "A.FS", "b.fs", "B.FS", "?.fs", "*", "*.*", "d.fs",
-    "D.FS", "in.fs", "IN.FS", "i*.fs", "I*.fs", "k.fs", "K.fs", "**", "up.fs", "UP.FS",
+    "D.FS", "in.fs", "IN.FS", "i*.fs", "I*.fs", "k.fs", "K.fs", "**", "up.fs", "UP.FS", "a*.*",
+    "A*.*", "a?b.fs",
 ];
 
 /// Non-ASCII file names, outside the allow-list, drawn now and then.
@@ -415,6 +419,25 @@ fn case_corners() {
         corner(&["sub/a.fs", "SUB/"], "sub/*.fs", Some("SUB/**/**/**")),
         corner(&["sub/a.fs", "sub/x/b.fs"], "sub/**/**/**", None),
         corner(&["sub/a.fs", "sub/x/b.fs"], "**/*.fs", Some("sub/**/**/**")),
+        // A regular expression reads `*.*` as `*`.
+        corner(&["sub/ab", "sub/ab.fs"], "s*/A*.*", None),
+        corner(&["sub/ab", "sub/ab.fs"], "sub/*.*", Some("S*/a*.*")),
+        corner(&["ab", "z.fs"], "AB;z.fs", Some("a*.*")),
+        // A regular expression reads `?` as any character, a separator
+        // included: against a literal include, and past a `**` in the file
+        // matcher. Matched name by name, or before a `**`, it stays in a name.
+        corner(&["q/x/a/b.fs"], "**/X/a?b.fs", None),
+        corner(
+            &["sub/a/b.fs", "z.fs"],
+            "sub/a/b.fs;z.fs",
+            Some("SUB/a?b.fs"),
+        ),
+        corner(
+            &["sub/a/b.fs", "z.fs"],
+            "sub/a/b.fs;z.fs",
+            Some("**/a?b.fs"),
+        ),
+        corner(&["sub/a/b.fs"], "s*/a?b.fs", None),
         // `i` and `I` where no regular expression compares them.
         corner(&["sub/x/bi.fs"], "**/*.fs", Some("**/BI.fs")),
         corner(&["sub/x/bi.fs"], "sub/x/*.fs", Some("sub/x/BI.fs")),

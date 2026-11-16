@@ -68,7 +68,7 @@ pub enum GlobDecline {
     NonAsciiOrder { path: String },
     /// Folding ASCII case changes whether `path` is selected — by the include
     /// or by an exclude — on a host whose file-matcher case rule is not
-    /// modelled ([`select_ignoring_case`] is the one that is).
+    /// modelled (`glob::select_ignoring_case` is the one that is).
     CaseAmbiguous { path: String },
     /// Whether `path` is selected turns on whether `i` and `I` are one letter.
     /// MSBuild matches some globs by a regular expression that ignores case by
@@ -274,8 +274,12 @@ pub enum Unmodelled {
     GlobstarExcludeAboveIncludeRoot,
     /// A glob's fixed directory has a `~` in a segment after its first, which
     /// MSBuild's file matcher resolves as a Windows short name relative to the
-    /// build's working directory ([`has_tilde_after_first_fixed_segment`]).
+    /// build's working directory (`glob::has_tilde_after_first_fixed_segment`).
     TildeInFixedDirectory,
+    /// A glob MSBuild compares by regular expression has more `?`s that
+    /// expression could read as a path separator than
+    /// `glob::regex_question_readings` reads both ways.
+    RegexQuestionAcrossSeparator,
 }
 
 impl std::fmt::Display for Unmodelled {
@@ -296,6 +300,9 @@ impl std::fmt::Display for Unmodelled {
             }
             Unmodelled::TildeInFixedDirectory => {
                 "has a `~` in a fixed directory segment after the first"
+            }
+            Unmodelled::RegexQuestionAcrossSeparator => {
+                "has too many `?`s MSBuild's regular expression could read as a path separator"
             }
         })
     }
@@ -445,14 +452,97 @@ pub fn matches_by_regex(spec: &str) -> bool {
 /// which would match no directory at all there: `sub/**/**/**` takes only
 /// files below a directory of `sub`, never `sub/a.fs` (oracle-pinned), so it
 /// is spelt `sub/**/*/**/*.*`.
+///
+/// A glob it compares by regular expression ([`matches_by_regex`]) has its
+/// file name read as that expression reads it ([`regex_filename`]).
 pub fn as_file_matcher_reads(spec: &str) -> String {
     let (fixed, wildcard_dir, filename) = split_filespec(spec);
     let wildcard = wildcard_dir.trim_end_matches(['/', '\\']);
     if is_directory_name_pattern(wildcard) && &wildcard[3..wildcard.len() - 3] == "**" {
         format!("{fixed}**/*/**/{filename}")
+    } else if matches_by_regex(spec) {
+        format!("{fixed}{wildcard_dir}{}", regex_filename(&filename))
     } else {
         spec.to_string()
     }
+}
+
+/// A glob's file name as MSBuild's regular expression for it reads it
+/// (`FileMatcher.AppendRegularExpressionFromFilename`): the `.*` of each
+/// `*.*` is dropped, so `a*.*` takes `ab`, which has no dot (oracle-pinned).
+/// A trailing `.`, which that function also reads specially, is outside the
+/// allow-list.
+pub fn regex_filename(filename: &str) -> String {
+    let chars: Vec<char> = filename.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        out.push(chars[i]);
+        if chars[i] == '*' && chars.get(i + 1) == Some(&'.') && chars.get(i + 2) == Some(&'*') {
+            i += 2;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The most `?`s [`regex_question_readings`] reads both ways; past it the
+/// readings double too fast to enumerate, and the caller declines.
+const MAX_CROSSING_QUESTIONS: usize = 4;
+
+/// The spellings a glob's regular expression can read `text` as, for
+/// [`Pattern`]. MSBuild's expression reads `?` as any character, a separator
+/// included, so a `?` with a character of the same name on each side may
+/// also read as a separator: `sub/a?b.fs` takes `sub/a/b.fs` (oracle-pinned,
+/// against a literal include and past a `**` in the file matcher). Next to a
+/// separator, or where it would leave a name empty, `.` or `..`, it cannot,
+/// as a path has none of those. Only the `?`s from byte `from` on are read
+/// both ways. `None` past [`MAX_CROSSING_QUESTIONS`] such `?`s.
+pub fn regex_question_readings(text: &str, from: usize) -> Option<Vec<String>> {
+    let bytes = text.as_bytes();
+    let is_sep = |b: u8| b == b'/' || b == b'\\';
+    let crossing: Vec<usize> = (from.max(1)..text.len().saturating_sub(1))
+        .filter(|&i| bytes[i] == b'?' && !is_sep(bytes[i - 1]) && !is_sep(bytes[i + 1]))
+        .collect();
+    if crossing.len() > MAX_CROSSING_QUESTIONS {
+        return None;
+    }
+    let mut readings = Vec::new();
+    for mask in 0u32..1 << crossing.len() {
+        let mut reading = bytes.to_vec();
+        let replaced: Vec<usize> = crossing
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| mask & (1 << bit) != 0)
+            .map(|(_, &i)| i)
+            .collect();
+        for &i in &replaced {
+            reading[i] = b'/';
+        }
+        // The names on each side of every `?` read as a separator.
+        let name_ending_at = |end: usize| {
+            let start = reading[..end]
+                .iter()
+                .rposition(|&b| is_sep(b))
+                .map_or(0, |s| s + 1);
+            &reading[start..end]
+        };
+        let name_starting_at = |start: usize| {
+            let end = reading[start..]
+                .iter()
+                .position(|&b| is_sep(b))
+                .map_or(reading.len(), |e| start + e);
+            &reading[start..end]
+        };
+        let is_name = |name: &[u8]| !matches!(name, b"" | b"." | b"..");
+        if replaced
+            .iter()
+            .all(|&i| is_name(name_ending_at(i)) && is_name(name_starting_at(i + 1)))
+        {
+            readings.push(String::from_utf8(reading).expect("only ASCII bytes were replaced"));
+        }
+    }
+    Some(readings)
 }
 
 /// The `**/{name}/**` shape of a wildcard directory part (trailing separators
@@ -624,12 +714,14 @@ impl Pattern {
     }
 }
 
-/// A glob as MSBuild's file matcher applies it: its [`Pattern`], and whether
-/// the matcher compares files with it by regular expression
-/// ([`matches_by_regex`]) rather than name by name.
+/// A glob as MSBuild's file matcher applies it: the [`Pattern`]s of its
+/// readings (one, unless a regular expression can read a `?` as a separator:
+/// [`regex_question_readings`]), any of which takes a file, and whether the
+/// matcher compares files with it by regular expression ([`matches_by_regex`])
+/// rather than name by name.
 #[derive(Debug, Clone)]
 pub struct MatcherPattern {
-    pub pattern: Pattern,
+    pub patterns: Vec<Pattern>,
     pub by_regex: bool,
 }
 
@@ -637,11 +729,13 @@ impl MatcherPattern {
     /// Whether the file matcher takes `candidate`, ignoring ASCII case, with
     /// `i` and `I` kept apart in a regular expression when `but_i`.
     fn matches(&self, candidate: &str, but_i: bool) -> bool {
-        if but_i && self.by_regex {
-            self.pattern.matches_ignoring_ascii_case_but_i(candidate)
-        } else {
-            self.pattern.matches_ignoring_ascii_case(candidate)
-        }
+        self.patterns.iter().any(|pattern| {
+            if but_i && self.by_regex {
+                pattern.matches_ignoring_ascii_case_but_i(candidate)
+            } else {
+                pattern.matches_ignoring_ascii_case(candidate)
+            }
+        })
     }
 }
 
@@ -1448,7 +1542,7 @@ mod tests {
 
     fn matcher(spec: &str) -> MatcherPattern {
         MatcherPattern {
-            pattern: Pattern::parse(spec).with_all_files_rule(),
+            patterns: vec![Pattern::parse(&as_file_matcher_reads(spec)).with_all_files_rule()],
             by_regex: matches_by_regex(spec),
         }
     }
@@ -1514,6 +1608,36 @@ mod tests {
         ] {
             assert!(matches_by_regex(by_regex), "{by_regex}");
         }
+    }
+
+    /// How the file matcher's regular expression reads a file name and a `?`.
+    #[test]
+    fn the_regex_reading_follows_append_regular_expression_from_filename() {
+        for (name, read) in [
+            ("*.*", "*"),
+            ("a*.*", "a*"),
+            ("*.*.*", "*.*"),
+            ("*.*x", "*x"),
+            ("a.*", "a.*"),
+            ("*.fs", "*.fs"),
+        ] {
+            assert_eq!(regex_filename(name), read, "{name}");
+        }
+        assert_eq!(as_file_matcher_reads("s*/a*.*"), "s*/a*");
+        assert_eq!(as_file_matcher_reads("sub/a*.*"), "sub/a*.*");
+        // A `?` inside a name may read as a separator; next to one, or where
+        // it would leave a name empty or `.`, it may not.
+        let readings = |text: &str, from: usize| regex_question_readings(text, from).unwrap();
+        assert_eq!(readings("sub/a?b.fs", 0), ["sub/a?b.fs", "sub/a/b.fs"]);
+        assert_eq!(readings("?.fs", 0), ["?.fs"]);
+        assert_eq!(readings("s?/x?/a.fs", 0), ["s?/x?/a.fs"]);
+        assert_eq!(readings("a??b", 0), ["a??b", "a/?b", "a?/b"]);
+        assert_eq!(readings("x/.?y", 0), ["x/.?y"]);
+        assert_eq!(
+            readings("s?b/**/a?b.fs", 4),
+            ["s?b/**/a?b.fs", "s?b/**/a/b.fs"]
+        );
+        assert_eq!(regex_question_readings("a?a?a?a?a?a", 0), None);
     }
 
     /// The directory-name shape with a name of `**` needs one directory.
