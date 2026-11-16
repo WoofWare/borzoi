@@ -524,7 +524,7 @@ them would cost about 800 file-system calls per evaluation (the cold
 
 The axiom covers existing versions only. Installing a package, or adding an
 SDK or targeting-pack version, changes which versions exist without touching
-any existing file. SDK resolution (`sdk_resolver::collect_from_dotnet_root`)
+any existing file. SDK resolution (`sdk_resolver::host_sdk_versions`)
 and pack selection (`project_assets::framework::best_version_with_tfm`) read
 exactly that from directory listings. So every `Listing` and every `Absent`
 observation is validated, under these roots as elsewhere: one `stat` of each

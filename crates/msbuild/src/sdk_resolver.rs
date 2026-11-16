@@ -20,8 +20,13 @@
 //!
 //! ## Scope
 //!
-//! - Look under both roots for `Sdk.props` *and* `Sdk.targets` —
-//!   [`SdkPaths`] requires both.
+//! - Resolve as the resolvers MSBuild consults do: the `$DOTNET_ROOT`
+//!   half picks the host SDK by version alone and then serves its
+//!   `Sdks/{name}/Sdk` (MSBuild's default resolver), and the NuGet half
+//!   serves a restored package's `Sdk/`, else its `sdk/` (NuGet's
+//!   resolver). Both take the directory on `Directory.Exists`; one whose
+//!   `Sdk.props` or `Sdk.targets` is then no regular file declines, since
+//!   MSBuild fails to import it ([`SdkPaths`] names both).
 //! - Apply an optional [`VersionSpec`]
 //!   (typically derived from `global.json` by [`global_json`]) to the
 //!   `$DOTNET_ROOT` candidate set only — `global.json`'s `sdk.version`
@@ -70,6 +75,7 @@
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
+use crate::dotnet_io;
 use crate::observed::{self, Observer};
 use crate::{SdkPaths, SdkResolution};
 use version_spec::{RollForward, VersionSpec, select_sdk_version};
@@ -89,8 +95,8 @@ use version_spec::{RollForward, VersionSpec, select_sdk_version};
 /// `Microsoft.Build.MadeUp.Sdk` (check the spelling).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SdkResolveError {
-    /// `dotnet_root/sdk/` exists but contains no installed version that
-    /// provides the named SDK with both `Sdk.props` and `Sdk.targets`.
+    /// Neither root serves the named SDK: the host SDK the spec selects has
+    /// no `Sdks/{name}/Sdk` directory, and NuGet has no restored copy.
     /// Also the catch-all for "dotnet_root doesn't exist" and "sdk_name
     /// has shape we refuse to splice into a filesystem path".
     NotFound,
@@ -164,14 +170,19 @@ impl std::error::Error for SdkResolveError {}
 /// - **`$DOTNET_ROOT`** —
 ///   `{dotnet_root}/sdk/{version}/Sdks/{sdk_name}/Sdk/Sdk.{props,targets}`.
 ///   Used by the in-box SDKs (`Microsoft.NET.Sdk`, `Microsoft.NET.Sdk.Web`,
-///   …). The `spec` (when supplied) applies here.
+///   …). The `spec` (when supplied) selects the host SDK version among all
+///   installed ones, and only that version is asked for `sdk_name`: MSBuild
+///   serves the running SDK's copy or fails, and never tries another
+///   version.
 /// - **NuGet package cache** —
 ///   `{nuget_packages_dir}/{sdk_name.to_ascii_lowercase()}/{version}/{Sdk,sdk}/Sdk.{props,targets}`.
 ///   Used by every NuGet-distributed SDK (`Microsoft.DotNet.Arcade.Sdk`,
 ///   `Microsoft.Build.NoTargets`, `MSBuild.Sdk.Extras`, …). The inner
-///   directory's casing is package-defined; the resolver probes both
+///   directory's casing is package-defined; NuGet's resolver serves
 ///   `Sdk/` (Microsoft canonical, used by `Microsoft.Build.NoTargets`
-///   et al.) and `sdk/` (used by `Microsoft.DotNet.Arcade.Sdk` et al.).
+///   et al.) where it exists, and `sdk/` (used by
+///   `Microsoft.DotNet.Arcade.Sdk` et al.) otherwise. A version counts
+///   only where NuGet's restore marker is.
 ///   Pass `None` to skip the NuGet probe entirely; pass `Some(dir)`
 ///   even if the directory doesn't yet exist (the probe tolerates
 ///   that — same fall-through as a `$DOTNET_ROOT/sdk` that isn't there).
@@ -224,11 +235,14 @@ impl std::error::Error for SdkResolveError {}
 ///
 /// Failure modes:
 ///
-/// - [`SdkResolveError::NotFound`] if neither root supplies any
-///   installed version with both well-known files for the requested
-///   name *and that the effective spec admits*. Includes the case
+/// - [`SdkResolveError::NotFound`] if neither root serves the requested
+///   name: the selected host SDK has no `Sdks/{name}/Sdk`, and NuGet has
+///   no restored copy the effective spec admits. Includes the case
 ///   of an unpinned reference to a NuGet-only SDK: upstream
 ///   matches.
+/// - [`SdkResolveError::UnsupportedLayout`] if the directory a resolver
+///   serves lacks a regular `Sdk.props` or `Sdk.targets` (MSBuild then
+///   fails the import), or NuGet serves a directory that does not exist.
 /// - [`SdkResolveError::VersionNotSatisfied`] when installed
 ///   versions exist but the effective spec admits none of them.
 ///   "Effective spec" is the per-import pin if set, otherwise the
@@ -297,7 +311,7 @@ pub fn locate_dotnet_sdk(
         return Err(SdkResolveError::NotFound);
     }
 
-    let dotnet_candidates = collect_from_dotnet_root(dotnet_root, name, observer);
+    let host_versions = host_sdk_versions(dotnet_root, observer);
     let nuget_candidates = match nuget_packages_dir {
         Some(dir) => collect_from_nuget(dir, name, observer),
         None => Vec::new(),
@@ -334,10 +348,31 @@ pub fn locate_dotnet_sdk(
     let pin_spec: Option<VersionSpec> =
         effective_pin.map(|v| VersionSpec::with_version(v, RollForward::Disable, true));
     let dotnet_spec_ref: Option<&VersionSpec> = pin_spec.as_ref().or(spec);
+    // NuGet's `File.Exists` of a restore marker takes a relative folder
+    // against the process's working directory, which we cannot see.
+    if pin_spec.is_some() && nuget_packages_dir.is_some_and(|dir| !dir.has_root()) {
+        return Err(SdkResolveError::UnsupportedLayout {
+            reason: "the NuGet package folder is a relative path".to_owned(),
+        });
+    }
 
-    let dotnet_versions: Vec<SdkVersion> =
-        dotnet_candidates.iter().map(|(v, _)| v.clone()).collect();
-    let dotnet_chosen = select_sdk_version(&dotnet_versions, dotnet_spec_ref);
+    // The host SDK is chosen by version alone, and only then asked for
+    // `name`: MSBuild's default resolver serves
+    // `$(MSBuildSDKsPath)/{name}/Sdk` of the SDK that runs, and fails
+    // without trying another version when that SDK lacks it.
+    let dotnet_versions: Vec<SdkVersion> = host_versions.iter().map(|(v, _)| v.clone()).collect();
+    let dotnet_selected = select_sdk_version(&dotnet_versions, dotnet_spec_ref);
+    let dotnet_chosen: Option<(&SdkVersion, PathBuf)> = match dotnet_selected {
+        Some(version) => {
+            let idx = dotnet_versions
+                .iter()
+                .position(|v| v == version)
+                .expect("selection returns a candidate from the slice");
+            let sdk_root = host_versions[idx].1.join("Sdks").join(name).join("Sdk");
+            sdk_directory(sdk_root, observer)?.map(|root| (version, root))
+        }
+        None => None,
+    };
 
     // NuGet half is gated on having a pin. Without one, we never
     // even look at the restored cache for picking purposes —
@@ -348,10 +383,22 @@ pub fn locate_dotnet_sdk(
     } else {
         Vec::new()
     };
-    let nuget_chosen = if let Some(s) = pin_spec.as_ref() {
+    let nuget_selected = if let Some(s) = pin_spec.as_ref() {
         select_sdk_version(&nuget_versions, Some(s))
     } else {
         None
+    };
+    let nuget_chosen: Option<(&SdkVersion, PathBuf)> = match nuget_selected {
+        Some(version) => {
+            let idx = nuget_versions
+                .iter()
+                .position(|v| v == version)
+                .expect("selection returns a candidate from the slice");
+            // Judged only if it wins below: an installed SDK that serves the
+            // name is used ahead of NuGet's copy, whatever state that is in.
+            Some((version, nuget_candidates[idx].1.clone()))
+        }
+        None => None,
     };
 
     // Pick across the two roots. When both produce a candidate,
@@ -361,48 +408,31 @@ pub fn locate_dotnet_sdk(
     // a NuGet copy when DOTNET has nothing (or nothing the spec
     // admits).
     let sdk_dir = match (dotnet_chosen, nuget_chosen) {
-        (Some(d), Some(n)) => {
+        (Some((d, dotnet_root)), Some((n, nuget_root))) => {
             if d >= n {
-                let idx = dotnet_versions
-                    .iter()
-                    .position(|v| v == d)
-                    .expect("selection returns a candidate from the slice");
-                &dotnet_candidates[idx].1
+                dotnet_root
             } else {
-                let idx = nuget_versions
-                    .iter()
-                    .position(|v| v == n)
-                    .expect("selection returns a candidate from the slice");
-                &nuget_candidates[idx].1
+                nuget_served(nuget_root, observer)?
             }
         }
-        (Some(d), None) => {
-            let idx = dotnet_versions
-                .iter()
-                .position(|v| v == d)
-                .expect("selection returns a candidate from the slice");
-            &dotnet_candidates[idx].1
-        }
-        (None, Some(n)) => {
-            let idx = nuget_versions
-                .iter()
-                .position(|v| v == n)
-                .expect("selection returns a candidate from the slice");
-            &nuget_candidates[idx].1
-        }
+        (Some((_, root)), None) => root,
+        (None, Some((_, root))) => nuget_served(root, observer)?,
         (None, None) => {
-            // Both roots produced no admitted candidate. We get here
-            // in three sub-cases:
-            //   - both roots physically empty                → NotFound
-            //   - DOTNET has versions but spec rejects all   → VersionNotSatisfied
-            //   - effective pin set, neither root has the pin → VersionNotSatisfied
+            // Both roots produced no candidate. We get here in four
+            // sub-cases:
+            //   - both roots physically empty                  → NotFound
+            //   - the selected host SDK lacks `name`           → NotFound
+            //   - DOTNET has versions but spec rejects all     → VersionNotSatisfied
+            //   - effective pin set, neither root has the pin  → VersionNotSatisfied
             // The `available` list shows the user which versions *were*
             // on disk — those are the alternatives they could install
             // or pin against. With an effective pin (per-import or
             // `msbuild-sdks`), both roots are alternatives (the spec was
             // consulted against both); without one, only `$DOTNET_ROOT`
             // is filtered, so only those versions are alternatives.
-            if dotnet_versions.is_empty() && nuget_versions.is_empty() {
+            let dotnet_rejected = !dotnet_versions.is_empty() && dotnet_selected.is_none();
+            let nuget_rejected = !nuget_versions.is_empty() && nuget_selected.is_none();
+            if !dotnet_rejected && !nuget_rejected {
                 return Err(SdkResolveError::NotFound);
             }
             let mut available = dotnet_versions;
@@ -433,80 +463,108 @@ pub fn locate_dotnet_sdk(
     })
 }
 
-/// Probe `{dotnet_root}/sdk/{version}/Sdks/{sdk_name}/Sdk/` for every
-/// installed version. Each returned tuple carries the parsed
-/// `SdkVersion` and the directory that contains `Sdk.props` /
-/// `Sdk.targets`.
+/// The installed SDK versions under `{dotnet_root}/sdk`: every entry whose
+/// name parses as a version and that is a directory or a link to one (Nix's
+/// wrapped .NET links each `sdk/{version}`). Empty when `sdk/` cannot be
+/// listed.
 ///
-/// We deliberately do not filter on `entry.file_type()`: on Unix (and
-/// notably Nix-built .NET wrappers) the `sdk/{version}` entries can be
-/// symlinks to the real version directory, and `DirEntry::file_type`
-/// does not follow symlinks. The final `is_file()` probe on
-/// `Sdk.{props,targets}` *does* follow them, which is the check that
-/// actually matters.
-///
-/// A missing or unreadable `sdk/` directory yields an empty vector —
-/// not an error. [`locate_dotnet_sdk`] decides whether the empty union
-/// across both roots constitutes `NotFound`.
-fn collect_from_dotnet_root(
-    dotnet_root: &Path,
-    sdk_name: &str,
-    observer: &Observer,
-) -> Vec<(SdkVersion, PathBuf)> {
-    let sdk_dir = dotnet_root.join("sdk");
-    let Ok(entries) = observed::read_dir(observer, &sdk_dir) else {
+/// hostfxr also passes over a version directory without a `dotnet.dll`,
+/// which this does not model (#910).
+fn host_sdk_versions(dotnet_root: &Path, observer: &Observer) -> Vec<(SdkVersion, PathBuf)> {
+    let Ok(entries) = observed::read_dir(observer, &dotnet_root.join("sdk")) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for entry in entries.into_iter().flatten() {
-        let Some(dir_name) = entry.name.to_str().map(str::to_owned) else {
+        let Some(version) = entry.name.to_str().and_then(SdkVersion::parse) else {
             continue;
         };
-        let Some(version) = SdkVersion::parse(&dir_name) else {
-            continue;
-        };
-        let sdk_root = entry.path.join("Sdks").join(sdk_name).join("Sdk");
-        if !observed::is_file(observer, &sdk_root.join("Sdk.props"))
-            || !observed::is_file(observer, &sdk_root.join("Sdk.targets"))
-        {
-            continue;
+        if observed::is_dir(observer, &entry.path) {
+            out.push((version, entry.path));
         }
-        out.push((version, sdk_root));
     }
     out
 }
 
-/// Probe `{nuget_packages_dir}/{sdk_name.to_ascii_lowercase()}/{version}/{Sdk,sdk}/`
-/// for every restored version of the package. Each returned tuple
-/// carries the parsed `SdkVersion` and the inner directory containing
-/// `Sdk.props` / `Sdk.targets`.
+/// What the resolver that found `sdk_root` serves: `Some(sdk_root)` when
+/// `Directory.Exists` finds it and both `Sdk.props` and `Sdk.targets` in it
+/// are regular files; `None` when `Directory.Exists` does not find it.
+///
+/// Both MSBuild's default resolver and NuGet's take the directory on
+/// `Directory.Exists` alone. Where a file is then missing, a dangling link,
+/// or no regular file, MSBuild fails the import (MSB4019, MSB4024), or never
+/// finishes reading it (a FIFO); this declines that, rather than resolving
+/// elsewhere (`sdk_directory_probe_diff` grades both resolvers' rule against
+/// `dotnet msbuild`). `Directory.Exists` follows links (`stat`), and the
+/// paths here hold no `..` for .NET to collapse, so it is
+/// [`observed::is_dir`].
+fn sdk_directory(
+    sdk_root: PathBuf,
+    observer: &Observer,
+) -> Result<Option<PathBuf>, SdkResolveError> {
+    if !observed::is_dir(observer, &sdk_root) {
+        return Ok(None);
+    }
+    for file in ["Sdk.props", "Sdk.targets"] {
+        if !observed::is_file(observer, &sdk_root.join(file)) {
+            return Err(SdkResolveError::UnsupportedLayout {
+                reason: format!(
+                    "the SDK directory {} has no regular {file}, so MSBuild fails to import it",
+                    sdk_root.display()
+                ),
+            });
+        }
+    }
+    Ok(Some(sdk_root))
+}
+
+/// The directory NuGet's resolver serves, `sdk_root`, judged as
+/// [`sdk_directory`] judges it. NuGet serves it whether or not it exists, so
+/// its absence fails the import rather than letting another root answer.
+fn nuget_served(sdk_root: PathBuf, observer: &Observer) -> Result<PathBuf, SdkResolveError> {
+    match sdk_directory(sdk_root.clone(), observer)? {
+        Some(root) => Ok(root),
+        None => Err(SdkResolveError::UnsupportedLayout {
+            reason: format!(
+                "NuGet serves the SDK directory {}, which does not exist",
+                sdk_root.display()
+            ),
+        }),
+    }
+}
+
+/// The restored versions of the package `sdk_name` in
+/// `{nuget_packages_dir}/{sdk_name.to_ascii_lowercase()}/`, each with the
+/// directory NuGet's MSBuild SDK resolver serves for it.
 ///
 /// **Name lowercasing.** NuGet stores packages in lowercased
 /// directories regardless of the casing in the project file. We mirror
 /// the `dotnet` CLI's normalisation so a `<Project
 /// Sdk="Microsoft.DotNet.Arcade.Sdk">` resolves against the package
-/// stored at `microsoft.dotnet.arcade.sdk/`. This matters on
-/// case-sensitive filesystems (Linux, opt-in macOS); case-insensitive
-/// ones would happen to work either way, but the explicit lowercase
-/// keeps behaviour uniform.
+/// stored at `microsoft.dotnet.arcade.sdk/`.
+///
+/// **Installed.** NuGet takes a version as restored only where its
+/// `.nupkg.metadata` or its `{id}.{version}.nupkg.sha512` exists (CLR
+/// `File.Exists`); a version directory with neither is one it restores
+/// again, so it is no candidate here.
 ///
 /// **Inner directory casing.** The folder name inside the package is
 /// package-defined — Microsoft.Build.NoTargets, Microsoft.NET.ILLink.Tasks,
 /// Microsoft.Net.Sdk.WindowsDesktop, Microsoft.Build.Traversal etc. ship
 /// `Sdk/` (capital, Microsoft's canonical convention); Microsoft.DotNet
-/// .Arcade.Sdk and friends ship `sdk/` (lowercase). On a case-sensitive
-/// filesystem only the exact case resolves, so we probe both. Capital
-/// `Sdk/` wins if a package somehow ships both (none observed in the
-/// wild, but it's the documented Microsoft convention).
+/// .Arcade.Sdk and friends ship `sdk/` (lowercase). NuGet's resolver serves
+/// `Sdk/` where `Directory.Exists` finds it and `sdk/` otherwise, whether or
+/// not that exists, so [`sdk_directory`] judges the one it serves.
 ///
 /// A missing or unreadable package directory yields an empty vector —
-/// same fall-through contract as [`collect_from_dotnet_root`].
+/// the same fall-through as an empty [`host_sdk_versions`].
 fn collect_from_nuget(
     nuget_packages_dir: &Path,
     sdk_name: &str,
     observer: &Observer,
 ) -> Vec<(SdkVersion, PathBuf)> {
-    let pkg_dir = nuget_packages_dir.join(sdk_name.to_ascii_lowercase());
+    let id = sdk_name.to_ascii_lowercase();
+    let pkg_dir = nuget_packages_dir.join(&id);
     let Ok(entries) = observed::read_dir(observer, &pkg_dir) else {
         return Vec::new();
     };
@@ -519,16 +577,21 @@ fn collect_from_nuget(
             continue;
         };
         let version_dir = entry.path;
-        let sdk_root = ["Sdk", "sdk"]
-            .iter()
-            .map(|c| version_dir.join(c))
-            .find(|p| {
-                observed::is_file(observer, &p.join("Sdk.props"))
-                    && observed::is_file(observer, &p.join("Sdk.targets"))
-            });
-        if let Some(sdk_root) = sdk_root {
-            out.push((version, sdk_root));
+        let installed = dotnet_io::file_exists(observer, &version_dir.join(".nupkg.metadata"))
+            || dotnet_io::file_exists(
+                observer,
+                &version_dir.join(format!("{id}.{dir_name}.nupkg.sha512")),
+            );
+        if !installed {
+            continue;
         }
+        let upper = version_dir.join("Sdk");
+        let sdk_root = if observed::is_dir(observer, &upper) {
+            upper
+        } else {
+            version_dir.join("sdk")
+        };
+        out.push((version, sdk_root));
     }
     out
 }
@@ -832,9 +895,8 @@ pub fn nuget_package_version(
 /// The `{dotnet_root}/sdk/{version}` directory of the host SDK the spec
 /// admits (highest installed version when unconstrained) — the SDK
 /// whose `KnownWorkloadManifests.txt` drives workload locator
-/// resolution. Mirrors [`collect_from_dotnet_root`]'s enumeration
-/// without the per-SDK `Sdks/{name}` probe: the *host* SDK is selected
-/// by version alone. No installed version at all is `NotFound`;
+/// resolution: [`host_sdk_versions`], selected by version alone, as
+/// [`locate_dotnet_sdk`] selects it. No installed version at all is `NotFound`;
 /// installed versions all rejected by the spec is `VersionNotSatisfied`
 /// with the sorted available list, matching ordinary SDK resolution's
 /// diagnostic split.
@@ -843,21 +905,7 @@ fn select_host_sdk_version_dir(
     spec: Option<&VersionSpec>,
     observer: &Observer,
 ) -> Result<PathBuf, SdkResolveError> {
-    let sdk_dir = dotnet_root.join("sdk");
-    let entries = observed::read_dir(observer, &sdk_dir).map_err(|_| SdkResolveError::NotFound)?;
-    let mut candidates: Vec<(SdkVersion, PathBuf)> = Vec::new();
-    for entry in entries.into_iter().flatten() {
-        let Some(dir_name) = entry.name.to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Some(version) = SdkVersion::parse(&dir_name) else {
-            continue;
-        };
-        if !observed::is_dir(observer, &entry.path) {
-            continue;
-        }
-        candidates.push((version, entry.path));
-    }
+    let mut candidates = host_sdk_versions(dotnet_root, observer);
     if candidates.is_empty() {
         return Err(SdkResolveError::NotFound);
     }

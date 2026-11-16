@@ -560,6 +560,37 @@ fn parse_msbuild_sdks(
     Ok(out)
 }
 
+/// A `global.json` entry that is no regular file, met before any regular one
+/// on the walk up from a project: the readers of `global.json` part over it,
+/// so [`find_global_json`] cannot say which file governs.
+///
+/// hostfxr, which picks the SDK, takes any entry `stat` succeeds on: a
+/// directory or a socket ends its walk, and then it ignores the file and runs
+/// the newest SDK, while a dangling link or a link loop it passes over to the
+/// next ancestor. The .NET CLI's own reader then fails on a dangling link or a
+/// socket (CLR `File.Exists` finds them), and a FIFO stops both for good.
+/// `global_json_lookup_diff` measures hostfxr's walk; the managed readers
+/// inside MSBuild (NuGet's `msbuild-sdks`, the workload resolver) are not
+/// measured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndecidedGlobalJson {
+    /// The entry named `global.json`.
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for UndecidedGlobalJson {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is no regular file, and the .NET host and SDK read such a global.json \
+             differently",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for UndecidedGlobalJson {}
+
 /// Search upward from `start_dir` for a `global.json` file. Returns
 /// the on-disk path of the nearest one (closest ancestor wins), or
 /// `None` if no ancestor contains the file.
@@ -569,19 +600,26 @@ fn parse_msbuild_sdks(
 /// path is not canonicalised; callers that need stable identity should
 /// canonicalise the input first.
 ///
-/// Symlinks in the chain are followed by the OS — we don't probe
-/// `file_type()` because we never need to distinguish symlinked vs
-/// real files for this lookup. Every probe goes through `observer`.
-pub fn find_global_json(start_dir: &Path, observer: &Observer) -> Option<PathBuf> {
+/// A regular file, or a link to one, is found; an ancestor where nothing is
+/// named `global.json` (where `lstat` fails) is passed over, as hostfxr's
+/// `stat` and CLR `File.Exists` both pass over it. Anything else there is
+/// [`UndecidedGlobalJson`]. Every probe goes through `observer`.
+pub fn find_global_json(
+    start_dir: &Path,
+    observer: &Observer,
+) -> Result<Option<PathBuf>, UndecidedGlobalJson> {
     let mut cursor = Some(start_dir);
     while let Some(dir) = cursor {
         let candidate = dir.join("global.json");
-        if observed::is_file(observer, &candidate) {
-            return Some(candidate);
+        if observed::link_kind(observer, &candidate).is_ok() {
+            if observed::is_file(observer, &candidate) {
+                return Ok(Some(candidate));
+            }
+            return Err(UndecidedGlobalJson { path: candidate });
         }
         cursor = dir.parent();
     }
-    None
+    Ok(None)
 }
 
 /// Map the documented `rollForward` values to [`RollForward`].

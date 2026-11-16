@@ -57,8 +57,8 @@ pub use imports::detect_implicit_imports;
 pub use properties::escaping::escape;
 pub use properties::trust::UntrustedCause;
 pub use sdk_resolver::global_json::{
-    GlobalJson, GlobalJsonError, GlobalJsonSettings, SdkPathEntry, find_global_json,
-    parse_global_json,
+    GlobalJson, GlobalJsonError, GlobalJsonSettings, SdkPathEntry, UndecidedGlobalJson,
+    find_global_json, parse_global_json,
 };
 pub use sdk_resolver::version_spec::{RollForward, VersionSpec};
 pub use sdk_resolver::{

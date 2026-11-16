@@ -367,6 +367,8 @@ fn install_sdk_package(folder: &Path, id: &str, version: &str) -> PathBuf {
         .join(version)
         .join("Sdk");
     fs::create_dir_all(&sdk).unwrap();
+    // NuGet's marker that the version is restored.
+    fs::write(sdk.parent().unwrap().join(".nupkg.metadata"), "{}").unwrap();
     fs::write(sdk.join("Sdk.props"), "<Project/>").unwrap();
     fs::write(sdk.join("Sdk.targets"), "<Project/>").unwrap();
     sdk.join("Sdk.props")
@@ -925,6 +927,7 @@ fn e2e_msbuild_sdks_pin_overrides_caller_spec() {
     let nuget = tmp.path().join("nuget");
     let sdk_pkg_root = nuget.join("my.custom.sdk").join("1.2.3").join("Sdk");
     fs::create_dir_all(&sdk_pkg_root).unwrap();
+    fs::write(sdk_pkg_root.parent().unwrap().join(".nupkg.metadata"), "{}").unwrap();
     fs::write(sdk_pkg_root.join("Sdk.props"), "<Project/>").unwrap();
     fs::write(sdk_pkg_root.join("Sdk.targets"), "<Project/>").unwrap();
 
@@ -2045,6 +2048,7 @@ fn msbuild_sdks_pinned_resolution_declines_under_the_override() {
     let nuget = tmp.path().join("nuget");
     let sdk_pkg_root = nuget.join("my.custom.sdk").join("1.2.3").join("Sdk");
     fs::create_dir_all(&sdk_pkg_root).unwrap();
+    fs::write(sdk_pkg_root.parent().unwrap().join(".nupkg.metadata"), "{}").unwrap();
     fs::write(sdk_pkg_root.join("Sdk.props"), "<Project/>").unwrap();
     fs::write(sdk_pkg_root.join("Sdk.targets"), "<Project/>").unwrap();
 

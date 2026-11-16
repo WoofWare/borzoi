@@ -872,6 +872,7 @@ impl SdkContext {
 
         let Some(global_json_path) =
             find_global_json(project_dir, &borzoi_msbuild::observed::Observer::new())
+                .map_err(|undecided| undecided.to_string())?
         else {
             let dotnet_root = dotnet_root
                 .ok_or_else(|| "DOTNET_ROOT is not set; run under nix develop".to_string())?;

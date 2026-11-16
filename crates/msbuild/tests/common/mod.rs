@@ -23,6 +23,8 @@
 #![allow(dead_code)] // each importer uses a different subset.
 
 pub mod case_axis;
+#[cfg(unix)]
+pub mod odd_entry;
 pub mod sdk_chain;
 
 use borzoi_msbuild::observed::host_fs::HostPath;

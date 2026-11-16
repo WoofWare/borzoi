@@ -653,7 +653,9 @@ fn find_global_json_in_start_dir() {
     let temp = TempDir::new().unwrap();
     let gj = temp.path().join("global.json");
     fs::write(&gj, "{}").unwrap();
-    let found = find_global_json(temp.path(), &Observer::new()).unwrap();
+    let found = find_global_json(temp.path(), &Observer::new())
+        .unwrap()
+        .unwrap();
     assert_eq!(found, gj);
 }
 
@@ -664,7 +666,9 @@ fn find_global_json_walks_upward() {
     fs::write(&gj, "{}").unwrap();
     let nested = temp.path().join("a").join("b").join("c");
     fs::create_dir_all(&nested).unwrap();
-    let found = find_global_json(&nested, &Observer::new()).unwrap();
+    let found = find_global_json(&nested, &Observer::new())
+        .unwrap()
+        .unwrap();
     assert_eq!(found, gj);
 }
 
@@ -679,7 +683,9 @@ fn find_global_json_picks_closest_ancestor() {
     fs::write(&inner, "{}").unwrap();
     let nested = inner_dir.join("src");
     fs::create_dir(&nested).unwrap();
-    let found = find_global_json(&nested, &Observer::new()).unwrap();
+    let found = find_global_json(&nested, &Observer::new())
+        .unwrap()
+        .unwrap();
     assert_eq!(found, inner, "closest ancestor wins, not outermost");
 }
 
@@ -688,15 +694,47 @@ fn find_global_json_returns_none_when_absent() {
     let temp = TempDir::new().unwrap();
     let nested = temp.path().join("a").join("b");
     fs::create_dir_all(&nested).unwrap();
-    assert_eq!(find_global_json(&nested, &Observer::new()), None);
+    assert_eq!(find_global_json(&nested, &Observer::new()), Ok(None));
 }
 
 #[test]
-fn find_global_json_ignores_directory_named_global_json() {
-    // Defensive: a directory called `global.json` shouldn't satisfy.
+fn find_global_json_is_undecided_over_a_directory_named_global_json() {
+    // hostfxr stops its walk at a directory named `global.json` and runs the
+    // newest SDK, so neither passing over it to an outer file nor reporting
+    // none would be exact.
     let temp = TempDir::new().unwrap();
-    fs::create_dir(temp.path().join("global.json")).unwrap();
-    assert_eq!(find_global_json(temp.path(), &Observer::new()), None);
+    fs::write(temp.path().join("global.json"), "{}").unwrap();
+    let inner = temp.path().join("inner");
+    fs::create_dir_all(inner.join("global.json")).unwrap();
+    assert_eq!(
+        find_global_json(&inner, &Observer::new()),
+        Err(super::UndecidedGlobalJson {
+            path: inner.join("global.json")
+        })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn find_global_json_is_undecided_over_a_dangling_link() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("global.json"), "{}").unwrap();
+    let inner = temp.path().join("inner");
+    fs::create_dir(&inner).unwrap();
+    std::os::unix::fs::symlink("missing", inner.join("global.json")).unwrap();
+    assert!(find_global_json(&inner, &Observer::new()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn find_global_json_follows_a_link_to_a_file() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join("real.json"), "{}").unwrap();
+    std::os::unix::fs::symlink("real.json", temp.path().join("global.json")).unwrap();
+    assert_eq!(
+        find_global_json(temp.path(), &Observer::new()),
+        Ok(Some(temp.path().join("global.json")))
+    );
 }
 
 // ============================================================

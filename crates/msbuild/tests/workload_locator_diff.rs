@@ -10,7 +10,7 @@
 //! (`BORZOI_DOTNET_ROOT_SDK11`), so a prerelease SDK's resolver is graded as
 //! well as the release ones.
 //!
-//! Three sweeps, each *certain-implies-exact* (an answer we commit must be the
+//! Four sweeps, each *certain-implies-exact* (an answer we commit must be the
 //! resolver's) with a positive domain where we must commit:
 //!
 //! - the feature band of a host SDK version (`SdkFeatureBand`), over a
@@ -23,7 +23,13 @@
 //!   the host's (its own, its release band, earlier and later previews and
 //!   release candidates, earlier and later releases, non-canonical spellings),
 //!   known-list order, flat and versioned manifests, unresolvable id
-//!   directories, and a missing `WorkloadManifest.targets`.
+//!   directories, and a missing `WorkloadManifest.targets`;
+//! - every existence probe the resolver makes (`File.Exists` of a manifest,
+//!   its targets, a marker, the install state, the known list, the runtime
+//!   identifier chain, and `Directory.GetDirectories` of a band or id
+//!   directory), with a dangling link, a link loop, a directory, a link to
+//!   one, a link to a file, a socket and, where nothing opens the path, a
+//!   FIFO at the probed path.
 
 mod common;
 
@@ -40,6 +46,8 @@ use borzoi_msbuild::workloads::{
 use borzoi_msbuild::{SdkResolution, test_support};
 use borzoi_oracle_harness::workload_oracle::Oracle;
 use common::SplitMix64;
+#[cfg(unix)]
+use common::odd_entry::{self, Odd};
 use serde_json::json;
 
 /// The devshell's corpus root (flake.nix, `dotnet-sdk-corpus`): the release
@@ -270,6 +278,14 @@ const MANIFEST_VERSIONS: &[(&str, bool)] = &[
     ("2.0.0-preview.3.1", false),
 ];
 
+/// The manifest versions in the domain we must resolve.
+const PLAIN_MANIFEST_VERSIONS: &[(&str, bool)] = &[
+    ("1.0.0", true),
+    ("1.0.2", true),
+    ("1.0.10", true),
+    ("2.0.0", true),
+];
+
 struct Host {
     version: String,
     /// `(major, minor, patch-hundreds)` and the prerelease label and number,
@@ -368,8 +384,14 @@ impl Host {
 
 /// Fill `band_dir` with a random subset of the manifest ids, each flat,
 /// versioned or unresolvable, with or without `WorkloadManifest.targets`;
-/// clears `in_domain` for a manifest version outside the plain spellings.
-fn populate_band(rng: &mut SplitMix64, band_dir: &Path, in_domain: &mut bool) -> Vec<String> {
+/// clears `in_domain` for a manifest version outside the plain spellings,
+/// which a `plain` band never holds.
+fn populate_band(
+    rng: &mut SplitMix64,
+    band_dir: &Path,
+    in_domain: &mut bool,
+    plain: bool,
+) -> Vec<String> {
     std::fs::create_dir_all(band_dir).unwrap();
     let mut contents = Vec::new();
     for id in IDS.iter().chain([&UNLISTED_ID]) {
@@ -393,8 +415,12 @@ fn populate_band(rng: &mut SplitMix64, band_dir: &Path, in_domain: &mut bool) ->
             _ => {
                 let mut names = Vec::new();
                 for _ in 0..1 + rng.below(2) {
-                    let (version, plain) = *rng.pick(MANIFEST_VERSIONS);
-                    if !plain {
+                    let (version, in_spelling) = if plain {
+                        *rng.pick(PLAIN_MANIFEST_VERSIONS)
+                    } else {
+                        *rng.pick(MANIFEST_VERSIONS)
+                    };
+                    if !in_spelling {
                         *in_domain = false;
                     }
                     let version_dir = id_dir.join(version);
@@ -422,10 +448,24 @@ fn write(path: &Path, content: &str) {
 
 const MANIFEST_JSON: &str = r#"{"version": "1.0.0", "workloads": {}, "packs": {}}"#;
 
-fn gen_layout(rng: &mut SplitMix64) -> Layout {
+/// The file `WorkloadResolver.Create` reads the runtime identifiers from, in
+/// the host SDK directory, and what a linux-x64 SDK holds there.
+const RID_CHAIN: &str = "NETCoreSdkRuntimeIdentifierChain.txt";
+const RID_CHAIN_CONTENT: &str = "linux-x64\nlinux\nunix\nany\nbase\n";
+
+/// A generated layout. A `plain` one keeps to the domain we must resolve: a
+/// host version we certify, band directories the resolver parses, and plain
+/// manifest versions. The domain is rarely met otherwise, and a sweep of such
+/// layouts never holds a decline of ours to the resolver.
+fn gen_layout(rng: &mut SplitMix64, plain: bool) -> Layout {
     let dir = tempfile::TempDir::new().unwrap();
     let dotnet_root = host_fs::canonicalize(dir.path()).unwrap().join("dotnet");
-    let host = gen_host(rng);
+    let host = loop {
+        let host = gen_host(rng);
+        if !plain || test_support::workload_accepts_host_version(&host.version) {
+            break host;
+        }
+    };
     let mut description = format!("host {}\n", host.version);
     // The locators resolve a host whose spelling they certify; for the rest
     // they make no claim.
@@ -433,6 +473,10 @@ fn gen_layout(rng: &mut SplitMix64) -> Layout {
 
     let sdk_dir = dotnet_root.join("sdk").join(&host.version);
     std::fs::create_dir_all(&sdk_dir).unwrap();
+    if rng.below(2) == 0 {
+        write(&sdk_dir.join(RID_CHAIN), RID_CHAIN_CONTENT);
+        description.push_str("runtime identifier chain\n");
+    }
     if rng.below(5) != 0 {
         let mut known: Vec<&str> = IDS.iter().copied().filter(|_| rng.below(4) != 0).collect();
         for i in (1..known.len()).rev() {
@@ -450,10 +494,13 @@ fn gen_layout(rng: &mut SplitMix64) -> Layout {
             continue;
         }
         if !parses {
+            if plain {
+                continue;
+            }
             in_domain = false;
         }
         let band_dir = dotnet_root.join("sdk-manifests").join(&band);
-        let contents = populate_band(rng, &band_dir, &mut in_domain);
+        let contents = populate_band(rng, &band_dir, &mut in_domain, plain);
         description.push_str(&format!("band {band}: {contents:?}\n"));
     }
 
@@ -469,6 +516,7 @@ fn gen_layout(rng: &mut SplitMix64) -> Layout {
                 rng,
                 &user_root.join("sdk-manifests").join(&band),
                 &mut in_domain,
+                plain,
             );
             description.push_str(&format!("user band {band}: {contents:?}\n"));
         }
@@ -558,6 +606,43 @@ fn soak_the_workload_locators_resolve_as_the_resolver_does() {
     sweep_locators(seed, cases);
 }
 
+/// Both locators' answers on `layout`, ours against the resolver's: the
+/// number we commit, the number the resolver gives on a layout in the domain
+/// we must resolve, and why the first wrong one is wrong.
+fn grade(oracle: &mut Oracle, layout: &Layout) -> (usize, usize, Option<String>) {
+    let mut committed = 0;
+    let mut answered = 0;
+    let mut failure = None;
+    for locator in [
+        WORKLOAD_MANIFEST_TARGETS_LOCATOR,
+        WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
+    ] {
+        let ours = ours(layout, locator);
+        let theirs = theirs(oracle, layout, locator);
+        let verdict = match (&ours, &theirs) {
+            (Some(ours), Ok(theirs)) if ours == theirs => None,
+            (Some(ours), _) => Some(format!(
+                "we commit {ours:#?}, the resolver says {theirs:#?}"
+            )),
+            (None, Ok(theirs)) if layout.in_domain => {
+                Some(format!("we decline, the resolver says {theirs:#?}"))
+            }
+            (None, _) => None,
+        };
+        if ours.is_some() {
+            committed += 1;
+        }
+
+        if theirs.is_ok() && layout.in_domain {
+            answered += 1;
+        }
+        if let Some(verdict) = verdict {
+            failure.get_or_insert(format!("{locator}: {verdict}"));
+        }
+    }
+    (committed, answered, failure)
+}
+
 fn sweep_locators(seed: u64, cases: usize) {
     let mut failures = Vec::new();
     for sdk in graded_sdks() {
@@ -567,39 +652,21 @@ fn sweep_locators(seed: u64, cases: usize) {
         let mut prerelease_committed = 0;
         let mut hosts = BTreeSet::new();
         for case in 0..cases {
-            let layout = gen_layout(&mut rng);
-            for locator in [
-                WORKLOAD_MANIFEST_TARGETS_LOCATOR,
-                WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
-            ] {
-                let ours = ours(&layout, locator);
-                let theirs = theirs(&mut oracle, &layout, locator);
-                let verdict = match (&ours, &theirs) {
-                    (Some(ours), Ok(theirs)) if ours == theirs => None,
-                    (Some(ours), _) => Some(format!(
-                        "we commit {ours:#?}, the resolver says {theirs:#?}"
-                    )),
-                    (None, Ok(theirs)) if layout.in_domain => {
-                        Some(format!("we decline, the resolver says {theirs:#?}"))
-                    }
-                    (None, _) => None,
-                };
-                if ours.is_some() {
-                    committed += 1;
-                    if layout.host.pre.is_some() {
-                        prerelease_committed += 1;
-                    }
-                }
-                hosts.insert(layout.host.version.clone());
-                if let Some(verdict) = verdict
-                    && failures.len() < 8
-                {
-                    failures.push(format!(
-                        "{} case {case}, {locator}: {verdict}\n{}",
-                        sdk.display(),
-                        layout.description
-                    ));
-                }
+            let layout = gen_layout(&mut rng, case % 2 == 1);
+            let (here, _, failure) = grade(&mut oracle, &layout);
+            committed += here;
+            if layout.host.pre.is_some() {
+                prerelease_committed += here;
+            }
+            hosts.insert(layout.host.version.clone());
+            if let Some(failure) = failure
+                && failures.len() < 8
+            {
+                failures.push(format!(
+                    "{} case {case}, {failure}\n{}",
+                    sdk.display(),
+                    layout.description
+                ));
             }
         }
         println!(
@@ -614,6 +681,291 @@ fn sweep_locators(seed: u64, cases: usize) {
              prerelease hosts)",
             sdk.display()
         );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+// ---------------------------------------------------------------------------
+// What the resolver's existence probes meet.
+
+/// A path the resolver asks `File.Exists` of, and what it does with what it
+/// finds there.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum Probe {
+    /// `WorkloadManifest.targets` in a resolved manifest directory: the
+    /// targets locator keeps the directory where it exists.
+    Targets,
+    /// `WorkloadManifest.json`: it makes its directory a manifest directory;
+    /// a flat one is then opened (failures caught) to read its version, and
+    /// the auto-import locator opens every resolved one to load it.
+    ManifestJson,
+    /// `metadata/workloads/{release band}/userlocal`: the user root takes part.
+    UserLocal,
+    /// `metadata/workloads/{release band}/installertype/msi`: an MSI install,
+    /// whose install state lives outside the layout.
+    Msi,
+    /// `metadata/workloads/{arch}/{band}/InstallState/default.json`: read
+    /// where it exists.
+    InstallState,
+    /// `KnownWorkloadManifests.txt` in the host SDK directory: read with
+    /// `File.ReadAllLines` where it exists.
+    KnownList,
+    /// `NETCoreSdkRuntimeIdentifierChain.txt` in the host SDK directory:
+    /// read with `File.ReadAllLines` where it exists.
+    RidChain,
+    /// An entry of a band directory or a manifest id directory, which
+    /// `Directory.GetDirectories` lists: only a directory, or a link it can
+    /// follow to one, is a candidate.
+    Entry,
+}
+
+#[cfg(unix)]
+impl Probe {
+    const ALL: &[Probe] = &[
+        Probe::Targets,
+        Probe::ManifestJson,
+        Probe::UserLocal,
+        Probe::Msi,
+        Probe::InstallState,
+        Probe::KnownList,
+        Probe::RidChain,
+        Probe::Entry,
+    ];
+
+    /// The shapes this probe is graded on: a FIFO only where nothing opens
+    /// the path, since the resolver's read of one blocks for good.
+    fn shapes(self) -> &'static [Odd] {
+        match self {
+            Probe::Targets | Probe::UserLocal | Probe::Msi | Probe::Entry => Odd::ALL,
+            Probe::ManifestJson | Probe::InstallState | Probe::KnownList | Probe::RidChain => {
+                Odd::OPENABLE
+            }
+        }
+    }
+
+    /// Whether we decline `odd` here on purpose while the resolver answers:
+    /// an MSI marker or an install state is outside what we resolve, and a
+    /// flat manifest or a targets file that is a socket is one we decline
+    /// rather than tell apart from a FIFO, whose read hangs the resolver (a
+    /// flat manifest) or MSBuild's import and the walk (a targets file).
+    fn declines_on_purpose(self, odd: Odd) -> bool {
+        match self {
+            Probe::Msi | Probe::InstallState => odd.file_exists_to_dotnet(),
+            Probe::ManifestJson => odd == Odd::Socket,
+            Probe::Targets => matches!(odd, Odd::Socket | Odd::Fifo),
+            _ => false,
+        }
+    }
+
+    /// Whether the resolver throws on `odd` here, whatever the layout: it
+    /// reads a file `File.Exists` found, and the read of a dangling link, a
+    /// link loop or a socket fails.
+    fn resolver_throws(self, odd: Odd) -> bool {
+        matches!(self, Probe::KnownList | Probe::RidChain)
+            && matches!(odd, Odd::Dangling | Odd::Loop | Odd::Socket)
+    }
+}
+
+/// `RuntimeInformation.ProcessArchitecture`'s name for this machine, which
+/// the install-state folder is keyed by.
+#[cfg(unix)]
+fn process_architecture() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "X64",
+        "aarch64" => "Arm64",
+        other => panic!("no ProcessArchitecture name known for {other}"),
+    }
+}
+
+/// The directories in `dir`, sorted.
+#[cfg(unix)]
+fn subdirectories(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = host_fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.host_is_dir())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Every file named `name` under `root`, sorted.
+#[cfg(unix)]
+fn files_named(root: &Path, name: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = host_fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.host_is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| n == name) {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Put `odd` at the path `probe` asks about in `layout`, or `None` where the
+/// layout has no such path (no manifest to perturb, or no user root for the
+/// `userlocal` marker to bring in).
+#[cfg(unix)]
+fn perturb(rng: &mut SplitMix64, layout: &mut Layout, probe: Probe, odd: Odd) -> Option<PathBuf> {
+    let manifest_trees: Vec<PathBuf> = std::iter::once(layout.dotnet_root.join("sdk-manifests"))
+        .chain(layout.user_root.iter().map(|u| u.join("sdk-manifests")))
+        .collect();
+    let manifests: Vec<PathBuf> = manifest_trees
+        .iter()
+        .flat_map(|tree| files_named(tree, "WorkloadManifest.json"))
+        .collect();
+    if matches!(probe, Probe::Targets | Probe::ManifestJson) && manifests.is_empty() {
+        return None;
+    }
+    let (band, release) = layout.host.bands();
+    let workloads = layout.dotnet_root.join("metadata").join("workloads");
+    let sdk_dir = layout.dotnet_root.join("sdk").join(&layout.host.version);
+    let (path, content) = match probe {
+        Probe::Targets => (
+            rng.pick(&manifests)
+                .with_file_name("WorkloadManifest.targets"),
+            "<Project />".to_owned(),
+        ),
+        Probe::ManifestJson => (rng.pick(&manifests).clone(), MANIFEST_JSON.to_owned()),
+        Probe::UserLocal => {
+            layout.user_root.as_ref()?;
+            (workloads.join(&release).join("userlocal"), String::new())
+        }
+        Probe::Msi => (
+            workloads.join(&release).join("installertype").join("msi"),
+            String::new(),
+        ),
+        Probe::InstallState => (
+            workloads
+                .join(process_architecture())
+                .join(&band)
+                .join("InstallState")
+                .join("default.json"),
+            "{}".to_owned(),
+        ),
+        Probe::KnownList => {
+            let path = sdk_dir.join("KnownWorkloadManifests.txt");
+            let content = host_fs::read_to_string(&path).unwrap_or_default();
+            (path, content)
+        }
+        Probe::RidChain => (sdk_dir.join(RID_CHAIN), RID_CHAIN_CONTENT.to_owned()),
+        Probe::Entry => {
+            // A band directory's entry is named as a manifest id, an id
+            // directory's as a manifest version.
+            let mut parents: Vec<(PathBuf, &str)> = Vec::new();
+            for tree in &manifest_trees {
+                for band_dir in subdirectories(tree) {
+                    for id_dir in subdirectories(&band_dir) {
+                        parents.push((id_dir, "3.0.0"));
+                    }
+                    parents.push((band_dir, "contoso.entry"));
+                }
+            }
+            if parents.is_empty() {
+                return None;
+            }
+            let (parent, name) = rng.pick(&parents);
+            (parent.join(name), String::new())
+        }
+    };
+    let aside = layout._dir.path().join("aside");
+    odd_entry::place(odd, &path, &content, &aside);
+    if probe.declines_on_purpose(odd) {
+        layout.in_domain = false;
+    }
+    let shown = path.strip_prefix(layout._dir.path()).unwrap_or(&path);
+    layout
+        .description
+        .push_str(&format!("{odd:?} at {}\n", shown.display()));
+    Some(path)
+}
+
+/// Every probe the resolver makes, with every shape it can meet there, on
+/// generated layouts: where the resolver's `File.Exists` and the operating
+/// system's `stat` part (a dangling link or a socket is a file to the one and
+/// not the other), we must answer as the resolver does or decline.
+///
+/// Each shape is graded on layouts until the resolver has answered on two in
+/// the domain we must resolve (where every answer of ours is a commit the
+/// resolver grades), unless no answer is to be had: a shape we decline on
+/// purpose, or one whose read throws in the resolver.
+#[cfg(unix)]
+#[test]
+fn the_workload_probes_answer_as_the_resolver_s() {
+    const MIN_LAYOUTS: usize = 4;
+    const MIN_ANSWERS: usize = 2;
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let mut rng = SplitMix64(0x0dd_e417);
+        for &probe in Probe::ALL {
+            for &odd in probe.shapes() {
+                let unanswerable = probe.declines_on_purpose(odd) || probe.resolver_throws(odd);
+                let (mut graded, mut committed, mut answered, mut attempts) = (0, 0, 0, 0);
+                while graded < MIN_LAYOUTS || (answered < MIN_ANSWERS && !unanswerable) {
+                    attempts += 1;
+                    assert!(
+                        attempts < 400,
+                        "{}: {probe:?} as {odd:?}: {graded} layouts took the probe, and the \
+                         resolver answered on {answered} in the domain",
+                        sdk.display()
+                    );
+                    let mut layout = gen_layout(&mut rng, true);
+                    let Some(placed) = perturb(&mut rng, &mut layout, probe, odd) else {
+                        continue;
+                    };
+                    // The walk would read a special targets file MSBuild
+                    // imports, and a read of a FIFO never returns, so no
+                    // committed root may hold one.
+                    if matches!(probe, Probe::Targets)
+                        && matches!(odd, Odd::Socket | Odd::Fifo)
+                        && ours(&layout, WORKLOAD_MANIFEST_TARGETS_LOCATOR).is_some_and(|roots| {
+                            roots
+                                .iter()
+                                .any(|root| Path::new(root) == placed.parent().unwrap())
+                        })
+                    {
+                        failures.push(format!(
+                            "{}, {probe:?} as {odd:?}: we commit a root whose targets file is \
+                             a special file\n{}",
+                            sdk.display(),
+                            layout.description
+                        ));
+                    }
+                    graded += 1;
+                    let (here, theirs, failure) = grade(&mut oracle, &layout);
+                    committed += here;
+                    answered += theirs;
+                    if let Some(failure) = failure
+                        && failures.len() < 8
+                    {
+                        failures.push(format!(
+                            "{}, {probe:?} as {odd:?}: {failure}\n{}",
+                            sdk.display(),
+                            layout.description
+                        ));
+                    }
+                }
+                println!(
+                    "{}: {probe:?} as {odd:?}: committed {committed} of {} answers; the resolver \
+                     answered {answered} in the domain",
+                    sdk.display(),
+                    graded * 2
+                );
+            }
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

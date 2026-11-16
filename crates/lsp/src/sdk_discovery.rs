@@ -70,8 +70,9 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 use borzoi_msbuild::{
-    GlobalJsonError, SdkPathEntry, SdkResolution, SdkResolveError, SdkVersion, VersionSpec,
-    find_global_json, nuget_package_version, parse_global_json, resolve_sdk, workloads,
+    GlobalJsonError, SdkPathEntry, SdkResolution, SdkResolveError, SdkVersion, UndecidedGlobalJson,
+    VersionSpec, find_global_json, nuget_package_version, parse_global_json, resolve_sdk,
+    workloads,
 };
 use borzoi_nuget::settings::{
     GlobalPackagesFolderDecline, SettingsFs, global_packages_folder_with,
@@ -174,6 +175,10 @@ pub enum DiscoveryError {
         path: PathBuf,
         source: GlobalJsonError,
     },
+    /// The nearest entry named `global.json` is no regular file, which the
+    /// .NET host and SDK read differently, so which SDK a build uses cannot
+    /// be said.
+    GlobalJsonUndecided(UndecidedGlobalJson),
 }
 
 impl DiscoveryError {
@@ -181,6 +186,7 @@ impl DiscoveryError {
     pub fn global_json_path(&self) -> Option<&Path> {
         match self {
             Self::GlobalJsonRead { path, .. } | Self::GlobalJsonParse { path, .. } => Some(path),
+            Self::GlobalJsonUndecided(undecided) => Some(&undecided.path),
             Self::RelativeProjectPath(_) | Self::MissingDotnetRoot => None,
         }
     }
@@ -211,6 +217,9 @@ impl std::fmt::Display for DiscoveryError {
                     path.display()
                 )
             }
+            Self::GlobalJsonUndecided(undecided) => {
+                write!(f, "cannot tell which global.json applies: {undecided}")
+            }
         }
     }
 }
@@ -221,6 +230,7 @@ impl std::error::Error for DiscoveryError {
             Self::RelativeProjectPath(_) | Self::MissingDotnetRoot => None,
             Self::GlobalJsonRead { source, .. } => Some(source),
             Self::GlobalJsonParse { source, .. } => Some(source),
+            Self::GlobalJsonUndecided(undecided) => Some(undecided),
         }
     }
 }
@@ -506,7 +516,9 @@ impl SdkDiscovery {
         // alternatives that don't need the host). The decision lives
         // in [`expand_sdk_paths`] so this site doesn't have to know.
         let (roots, spec, msbuild_sdks, global_json_path, global_json_pins_workload_set) =
-            match find_global_json(&walk_start, observer) {
+            match find_global_json(&walk_start, observer)
+                .map_err(DiscoveryError::GlobalJsonUndecided)?
+            {
                 Some(path) => {
                     let text = borzoi_msbuild::observed::read_to_string(observer, &path).map_err(
                         |source| DiscoveryError::GlobalJsonRead {

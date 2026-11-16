@@ -8438,6 +8438,8 @@ mod tests {
                     ),
                 );
                 write_file(&sdk.join("Sdk.targets"), "<Project />");
+                // NuGet's marker that the version is restored.
+                write_file(&sdk.parent().unwrap().join(".nupkg.metadata"), "{}");
             }
             write_file(
                 &root.join("repo/App/App.fsproj"),
