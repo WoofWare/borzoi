@@ -29,6 +29,7 @@
 //! an extension member, is an operation of every builder.
 
 use crate::FcsRange as _;
+use crate::fcs_range::ident_at;
 use std::collections::BTreeSet;
 
 use borzoi_cst::syntax::{
@@ -576,12 +577,6 @@ fn type_head(ty: &Type) -> Option<SyntaxToken> {
     }
 }
 
-/// The identifier token at exactly `range` under `root`.
-fn ident_at(root: &SyntaxNode, range: borzoi_cst::syntax::TextRange) -> Option<SyntaxToken> {
-    root.token_at_offset(range.start())
-        .find(|t| t.kind() == SyntaxKind::IDENT_TOK && t.fcs_range() == range)
-}
-
 impl Resolver<'_> {
     /// Enter a computation expression whose body the walk is about to
     /// resolve (module docs): mark every name its builder's custom
@@ -995,6 +990,43 @@ mod tests {
                 !committed,
                 declines,
                 "{alias}: {:?}",
+                rf.resolution_at(range)
+            );
+        }
+    }
+
+    /// A builder bound to a glued `(*)` is found by its binder as any other
+    /// builder is, though its binder's range spans the parentheses: a name its
+    /// operations cannot take resolves inside its expression, by any spelling
+    /// of the builder.
+    #[test]
+    fn a_builder_named_by_a_glued_star_is_found_by_its_binder() {
+        use crate::{AssemblyEnv, ProjectItems, Resolution, SyntaxRecovery, resolve_file};
+        use borzoi_cst::syntax::{AstNode, ImplFile};
+
+        for binder in ["b", "(*)", "( * )"] {
+            let src = format!(
+                "module M\ntype B() =\n    member _.Return(x: 'a) = x\nlet {binder} = B()\nlet outer = 1\nlet probe = {} {{ return outer }}\n",
+                if binder == "b" { "b" } else { "op_Multiply" }
+            );
+            let parsed = parse(&src);
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            let recovery = SyntaxRecovery::of(&parsed);
+            let file = ImplFile::cast(parsed.root).expect("impl file");
+            let rf = resolve_file(
+                &file,
+                &ProjectItems::default(),
+                &AssemblyEnv::default(),
+                &recovery,
+            );
+            let at = src.rfind("outer }").expect("the use");
+            let range = borzoi_cst::syntax::TextRange::new(
+                u32::try_from(at).unwrap().into(),
+                u32::try_from(at + 5).unwrap().into(),
+            );
+            assert!(
+                matches!(rf.resolution_at(range), Some(Resolution::Item(_))),
+                "{binder}: {:?}",
                 rf.resolution_at(range)
             );
         }

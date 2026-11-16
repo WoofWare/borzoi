@@ -8,8 +8,13 @@
 //! `clippy.toml` bans (and the LSP's). Were one site to read the raw range, a
 //! glued `(*)` would be keyed apart at it: a binder its uses could not find, a
 //! doc comment hover could not pair.
+//!
+//! The way back, from a recorded range to its token, is [`ident_at`]: a glued
+//! `(*)`'s range starts at its `(`, not at its `*`.
 
-use borzoi_cst::syntax::{SyntaxToken, TextRange, fcs_ident_range};
+use borzoi_cst::syntax::{
+    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, fcs_ident_range,
+};
 
 /// A token's range as FCS reports it: the range every definition, use and
 /// decline sema records is keyed by. It is the token's own range except for
@@ -24,6 +29,24 @@ pub trait FcsRange {
 impl FcsRange for SyntaxToken {
     fn fcs_range(&self) -> TextRange {
         fcs_ident_range(self)
+    }
+}
+
+/// The identifier token whose [`fcs_range`](FcsRange::fcs_range) is exactly
+/// `range` under `root`: the way back from a recorded range to its token. A
+/// glued `(*)`'s range spans its parentheses, so its `*` is among the
+/// covering node's tokens, not at the range's start.
+pub(crate) fn ident_at(root: &SyntaxNode, range: TextRange) -> Option<SyntaxToken> {
+    if !root.text_range().contains_range(range) {
+        return None;
+    }
+    let is_it = |t: &SyntaxToken| t.kind() == SyntaxKind::IDENT_TOK && t.fcs_range() == range;
+    match root.covering_element(range) {
+        NodeOrToken::Token(t) => is_it(&t).then_some(t),
+        NodeOrToken::Node(n) => n
+            .children_with_tokens()
+            .filter_map(NodeOrToken::into_token)
+            .find(is_it),
     }
 }
 
