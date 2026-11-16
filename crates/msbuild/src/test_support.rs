@@ -106,6 +106,14 @@ pub fn compare_workload_feature_bands(a: &str, b: &str) -> Option<std::cmp::Orde
     crate::sdk_resolver::workloads::compare_feature_bands(a, b)
 }
 
+/// Whether the workload locators pick among manifest version directories
+/// named `names` (more than one) rather than decline: each a name whose
+/// comparison they certify, and no two tied at the top. Exposed for the same
+/// differential.
+pub fn workload_manifest_versions_are_told_apart(names: &[&str]) -> bool {
+    crate::sdk_resolver::workloads::manifest_versions_are_told_apart(names)
+}
+
 /// Evaluate `condition` with `Exists('…')` answered from the file system,
 /// relative paths resolved against `exists_dir`, as the walk answers it for
 /// an element whose condition resolves there. Exposed so

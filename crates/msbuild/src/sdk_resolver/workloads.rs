@@ -40,8 +40,9 @@
 //!   skipped (`samsung.net.sdk.tizen` on the probed layout).
 //! * Inside an id directory, versioned subdirectories containing
 //!   `WorkloadManifest.json` take precedence over a flat manifest, and
-//!   the **highest version wins**; a directory resolving to no
-//!   manifest is skipped. A hardcoded outdated-id set (and the
+//!   the **highest version wins** by the provider's own `VersionCompare`
+//!   (`manifest_version.rs`); a directory resolving to no manifest is
+//!   skipped. A hardcoded outdated-id set (and the
 //!   `workloadsets` folder name) is skipped everywhere.
 //! * Import order is known-list line order first, then the remaining
 //!   ids ordinal-case-insensitively alphabetical — this matches the
@@ -71,9 +72,10 @@
 //! user-local root (we cannot see what a real build would), a host
 //! SDK version or band directory name outside the spellings
 //! `SdkFeatureBand` (`feature_band.rs`) certifies, a host SDK version with
-//! build metadata, workload environment overrides, any manifest
-//! version directory name `SdkVersion` cannot parse (we cannot
-//! reproduce MSBuild's comparison for those), and any directory or
+//! build metadata, workload environment overrides, manifest version
+//! directories beside each other whose names `ManifestVersion` does not
+//! certify or cannot tell apart (the reference may throw comparing them, or
+//! pick by an order we cannot see), and any directory or
 //! known-list file that exists but cannot be enumerated/read (the
 //! real provider throws there; an empty answer would be wrongly
 //! certified as exact), and any file the resolver reads (a known list,
@@ -97,14 +99,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{SdkResolveError, SdkVersion};
+use super::SdkResolveError;
 use crate::SdkResolution;
 use crate::dotnet_io;
 use crate::observed::{self, EntryKind, Failure, Observer};
 
 mod feature_band;
 mod manifest;
+mod manifest_version;
 use feature_band::FeatureBand;
+use manifest_version::ManifestVersion;
 
 pub const WORKLOAD_MANIFEST_TARGETS_LOCATOR: &str =
     "Microsoft.NET.SDK.WorkloadManifestTargetsLocator";
@@ -389,6 +393,29 @@ pub(crate) fn feature_band_of(version: &str) -> Option<String> {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn accepts_host_version(version: &str) -> bool {
     host_feature_band(Path::new(version)).is_ok()
+}
+
+/// Whether [`resolve_manifest_directory`] picks among version directories
+/// named `names` rather than decline. Exposed for the differential.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn manifest_versions_are_told_apart(names: &[&str]) -> bool {
+    let Some(versions) = names
+        .iter()
+        .map(|name| ManifestVersion::parse(name))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    versions.iter().all(|a| {
+        versions
+            .iter()
+            .any(|b| b.compare(a) == std::cmp::Ordering::Greater)
+            || versions
+                .iter()
+                .filter(|b| b.compare(a) == std::cmp::Ordering::Equal)
+                .count()
+                == 1
+    })
 }
 
 /// The order of the feature bands of two versions, or `None` where either
@@ -752,11 +779,17 @@ fn enumerate_manifest_roots(
                 if !observed::is_dir(observer, &id_dir) {
                     continue;
                 }
-                // `FallbackForMissingManifest` filters unresolvable
-                // candidates *before* picking the highest band, so a
-                // band whose id directory holds no manifest is passed
-                // over in favour of an older band that resolves.
-                if let Some(directory) = resolve_manifest_directory(&id_dir, observer)? {
+                // `FallbackForMissingManifest` resolves the id directory of
+                // every candidate band (a list it builds whole) and filters
+                // out the unresolvable ones *before* picking the highest
+                // band: a band whose id directory holds no manifest is passed
+                // over in favour of an older band that resolves, and one
+                // whose resolution throws fails the resolution even below
+                // the band that wins.
+                let resolved = resolve_manifest_directory(&id_dir, observer)?;
+                if let Some(directory) = resolved
+                    && !found.contains_key(&key)
+                {
                     found.insert(
                         key.clone(),
                         ResolvedManifest {
@@ -764,7 +797,6 @@ fn enumerate_manifest_roots(
                             directory,
                         },
                     );
-                    break;
                 }
             }
         }
@@ -992,15 +1024,22 @@ fn is_plain_prerelease(s: &str) -> bool {
 
 /// `SdkDirectoryWorkloadManifestProvider.ResolveManifestDirectory`:
 /// versioned subdirectories containing `WorkloadManifest.json` beat a
-/// flat manifest, highest version wins; nothing resolvable means the
-/// directory is skipped (`Ok(None)`), not an error. A version directory
-/// name our `SdkVersion` cannot parse degrades — we cannot reproduce
-/// MSBuild's comparison for it.
+/// flat manifest, the highest by `VersionCompare` (`manifest_version.rs`)
+/// winning; nothing resolvable means the directory is skipped (`Ok(None)`),
+/// not an error.
+///
+/// The provider folds the candidates in enumeration order, so it compares
+/// no name when there is one candidate, which then wins whatever it is
+/// called; when there are more, every one must be a name
+/// [`ManifestVersion::parse`] certifies, since a comparison the reference
+/// cannot make throws, and which comparisons it makes hangs on an order
+/// we cannot see. For the same reason two distinct names it cannot tell
+/// apart, at the top, decline: the later one listed wins.
 fn resolve_manifest_directory(
     id_dir: &Path,
     observer: &Observer,
 ) -> Result<Option<PathBuf>, SdkResolveError> {
-    let mut best: Option<(SdkVersion, PathBuf)> = None;
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
     for entry in read_dir_or_degrade(id_dir, observer)? {
         let candidate = entry.path;
         // CLR `File.Exists`, as `ResolveManifestDirectory` asks it: a
@@ -1009,20 +1048,47 @@ fn resolve_manifest_directory(
             continue;
         }
         let Some(name) = entry.name.to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Some(version) = SdkVersion::parse(&name) else {
             return Err(unsupported(format!(
-                "unparseable workload manifest version directory: {}",
+                "a workload manifest version directory with a non-UTF-8 name: {}",
                 candidate.display()
             )));
         };
-        if best.as_ref().is_none_or(|(v, _)| version > *v) {
-            best = Some((version, candidate));
-        }
+        candidates.push((name, candidate));
     }
-    if let Some((_, directory)) = best {
-        return Ok(Some(directory));
+    if let [(_, only)] = candidates.as_slice() {
+        return Ok(Some(only.clone()));
+    }
+    if !candidates.is_empty() {
+        let mut versions = Vec::new();
+        for (name, path) in &candidates {
+            let Some(version) = ManifestVersion::parse(name) else {
+                return Err(unsupported(format!(
+                    "a workload manifest version directory whose comparison we do not \
+                     certify, beside others: {}",
+                    path.display()
+                )));
+            };
+            versions.push((version, path));
+        }
+        let (best, path) = versions
+            .iter()
+            .reduce(|best, next| {
+                if next.0.compare(&best.0) == std::cmp::Ordering::Greater {
+                    next
+                } else {
+                    best
+                }
+            })
+            .expect("candidates are not empty");
+        if versions.iter().any(|(version, other)| {
+            other != path && version.compare(best) == std::cmp::Ordering::Equal
+        }) {
+            return Err(unsupported(format!(
+                "workload manifest version directories the resolver cannot tell apart: {}",
+                id_dir.display()
+            )));
+        }
+        return Ok(Some((*path).clone()));
     }
     let flat = id_dir.join("WorkloadManifest.json");
     if dotnet_io::file_exists(observer, &flat) {
