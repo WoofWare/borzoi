@@ -192,6 +192,12 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
         if !is_legal_filespec(&norm) {
             return Err(GlobDecline::IllegalFilespec { pattern: norm });
         }
+        if has_cur_dir_segment(&split_filespec(&norm).1) {
+            return Err(GlobDecline::OutsideModelledShape {
+                spec: norm,
+                shape: Unmodelled::CurDirInWildcardDirectory,
+            });
+        }
         if has_tilde_after_first_fixed_segment(&norm) {
             return Err(GlobDecline::OutsideModelledShape {
                 spec: norm,
@@ -1048,6 +1054,13 @@ mod tests {
             Err(GlobDecline::CurDirSegmentExclude { .. })
         ));
         assert_eq!(try_resolve(tmp.path(), "./*.fs", &[]), Ok(4));
+        assert!(matches!(
+            try_resolve(tmp.path(), "*/./**/*.fs", &[]),
+            Err(GlobDecline::OutsideModelledShape {
+                shape: Unmodelled::CurDirInWildcardDirectory,
+                ..
+            })
+        ));
         assert_eq!(run_rel(tmp.path(), "*.*", &["*.fs"]), ["noext"]);
         assert_eq!(run_rel(tmp.path(), "*", &["%2a.%2a"]), Vec::<String>::new());
     }

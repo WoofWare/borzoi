@@ -280,6 +280,12 @@ pub enum Unmodelled {
     /// expression could read as a path separator than
     /// `glob::regex_question_readings` reads both ways.
     RegexQuestionAcrossSeparator,
+    /// A glob include has a `.` segment in its wildcard directory part. The
+    /// file matcher's walk looks for a directory named `.` there, so
+    /// `*/./**/*.fs` takes nothing, unless a `**` came first, past which its
+    /// regular expression drops the segment (`**/./*.fs` takes `sub/a.fs`;
+    /// oracle-pinned). `Pattern` drops it everywhere.
+    CurDirInWildcardDirectory,
 }
 
 impl std::fmt::Display for Unmodelled {
@@ -303,6 +309,9 @@ impl std::fmt::Display for Unmodelled {
             }
             Unmodelled::RegexQuestionAcrossSeparator => {
                 "has too many `?`s MSBuild's regular expression could read as a path separator"
+            }
+            Unmodelled::CurDirInWildcardDirectory => {
+                "has a `.` segment in its wildcard directory part"
             }
         })
     }

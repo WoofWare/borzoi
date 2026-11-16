@@ -484,6 +484,16 @@ fn case_corners() {
             corner(&["sub/x/bi.fs"], "**/*.fs", Some("S*/x/BI.fs")),
             "CultureDependentCase",
         ),
+        // The walk looks for a directory named `.` before a `**`, and the
+        // regular expression drops one after it.
+        (
+            corner(&["sub/a.fs"], "*/./**/*.fs", Some("missing/*.fs")),
+            "CurDirInWildcardDirectory",
+        ),
+        (
+            corner(&["sub/a.fs"], "**/./*.fs", None),
+            "CurDirInWildcardDirectory",
+        ),
         // A regular expression folds the Kelvin sign onto `k`.
         (
             corner(&["sub/x/\u{212a}.fs"], "s*/x/k.fs", None),
