@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 
 use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_print::print_impl_file;
+use borzoi_print::version::DefaultVersion;
 
 use super::lower::{Decline, lower_file_lossy};
 use super::{CheckFailure, check_printed, panic_message};
@@ -57,7 +58,7 @@ fn sweep_file(path: &std::path::Path) -> Outcome {
     let Ok(root) = catch_unwind_silent(|| normalise_parse(&parse)) else {
         return Outcome::Skipped("not normalisable");
     };
-    let (tree, tally) = match lower_file_lossy(&root) {
+    let (tree, tally) = match lower_file_lossy::<DefaultVersion>(&root) {
         Ok(lowered) => lowered,
         Err(Decline(why)) => return Outcome::Skipped(why),
     };

@@ -73,7 +73,7 @@ src/Compiler/AbstractIL/FSharpDeltaMetadataWriter.fs	kept=36 dropped=3
 src/Compiler/AbstractIL/ILDeltaHandles.fs	kept=35 dropped=42
 src/Compiler/AbstractIL/ILMetadataHeaps.fs	kept=1 dropped=2
 src/Compiler/AbstractIL/IlxDeltaStreams.fs	kept=10 dropped=4
-src/Compiler/AbstractIL/il.fs	kept=411 dropped=104
+src/Compiler/AbstractIL/il.fs	kept=412 dropped=103
 src/Compiler/AbstractIL/il.fsi	signature file
 src/Compiler/AbstractIL/ilascii.fs	kept=29 dropped=1
 src/Compiler/AbstractIL/ilascii.fsi	signature file
@@ -87,7 +87,7 @@ src/Compiler/AbstractIL/ilprint.fs	kept=6 dropped=0
 src/Compiler/AbstractIL/ilprint.fsi	signature file
 src/Compiler/AbstractIL/ilread.fs	kept=178 dropped=102
 src/Compiler/AbstractIL/ilread.fsi	signature file
-src/Compiler/AbstractIL/ilreflect.fs	kept=112 dropped=27
+src/Compiler/AbstractIL/ilreflect.fs	kept=113 dropped=26
 src/Compiler/AbstractIL/ilreflect.fsi	signature file
 src/Compiler/AbstractIL/ilsign.fs	kept=36 dropped=10
 src/Compiler/AbstractIL/ilsign.fsi	signature file
@@ -103,7 +103,7 @@ src/Compiler/Checking/AccessibilityLogic.fs	kept=44 dropped=3
 src/Compiler/Checking/AccessibilityLogic.fsi	signature file
 src/Compiler/Checking/AttributeChecking.fs	kept=60 dropped=18
 src/Compiler/Checking/AttributeChecking.fsi	signature file
-src/Compiler/Checking/AugmentWithHashCompare.fs	kept=125 dropped=1
+src/Compiler/Checking/AugmentWithHashCompare.fs	kept=126 dropped=0
 src/Compiler/Checking/AugmentWithHashCompare.fsi	signature file
 src/Compiler/Checking/CheckBasics.fs	kept=31 dropped=6
 src/Compiler/Checking/CheckBasics.fsi	signature file
@@ -123,7 +123,7 @@ src/Compiler/Checking/Expressions/CheckArrayOrListComputedExpressions.fs	kept=11
 src/Compiler/Checking/Expressions/CheckComputationExpressions.fs	kept=72 dropped=22
 src/Compiler/Checking/Expressions/CheckComputationExpressions.fsi	signature file
 src/Compiler/Checking/Expressions/CheckComputationExpressionsCustomOps.fs	kept=10 dropped=2
-src/Compiler/Checking/Expressions/CheckExpressions.fs	kept=272 dropped=27
+src/Compiler/Checking/Expressions/CheckExpressions.fs	kept=273 dropped=26
 src/Compiler/Checking/Expressions/CheckExpressions.fsi	signature file
 src/Compiler/Checking/Expressions/CheckExpressionsOps.fs	kept=38 dropped=4
 src/Compiler/Checking/Expressions/CheckSequenceExpressions.fs	kept=13 dropped=1
@@ -133,7 +133,7 @@ src/Compiler/Checking/InfoReader.fs	kept=66 dropped=6
 src/Compiler/Checking/InfoReader.fsi	signature file
 src/Compiler/Checking/MethodCalls.fs	kept=75 dropped=17
 src/Compiler/Checking/MethodCalls.fsi	signature file
-src/Compiler/Checking/MethodOverrides.fs	kept=44 dropped=10
+src/Compiler/Checking/MethodOverrides.fs	kept=45 dropped=9
 src/Compiler/Checking/MethodOverrides.fsi	signature file
 src/Compiler/Checking/NameResolution.fs	kept=227 dropped=72
 src/Compiler/Checking/NameResolution.fsi	signature file
@@ -372,13 +372,13 @@ src/Compiler/SyntaxTree/PrettyNaming.fs	kept=93 dropped=25
 src/Compiler/SyntaxTree/PrettyNaming.fsi	signature file
 src/Compiler/SyntaxTree/SyntaxTree.fs	kept=57 dropped=54
 src/Compiler/SyntaxTree/SyntaxTree.fsi	signature file
-src/Compiler/SyntaxTree/SyntaxTreeOps.fs	kept=124 dropped=29
+src/Compiler/SyntaxTree/SyntaxTreeOps.fs	kept=125 dropped=28
 src/Compiler/SyntaxTree/SyntaxTreeOps.fsi	signature file
 src/Compiler/SyntaxTree/SyntaxTrivia.fs	kept=32 dropped=22
 src/Compiler/SyntaxTree/SyntaxTrivia.fsi	signature file
 src/Compiler/SyntaxTree/UnicodeLexing.fs	kept=4 dropped=4
 src/Compiler/SyntaxTree/UnicodeLexing.fsi	signature file
-src/Compiler/SyntaxTree/WarnScopes.fs	kept=32 dropped=3
+src/Compiler/SyntaxTree/WarnScopes.fs	kept=33 dropped=2
 src/Compiler/SyntaxTree/WarnScopes.fsi	signature file
 src/Compiler/SyntaxTree/XmlDoc.fs	kept=11 dropped=5
 src/Compiler/SyntaxTree/XmlDoc.fsi	signature file
@@ -387,7 +387,7 @@ src/Compiler/SyntaxTree/XmlDocIncludeExpander.fsi	signature file
 src/Compiler/TypedTree/CompilerGeneratedNameMapState.fs	kept=8 dropped=3
 src/Compiler/TypedTree/CompilerGlobalState.fs	kept=10 dropped=6
 src/Compiler/TypedTree/CompilerGlobalState.fsi	signature file
-src/Compiler/TypedTree/GeneratedNames.fs	kept=20 dropped=2
+src/Compiler/TypedTree/GeneratedNames.fs	kept=21 dropped=1
 src/Compiler/TypedTree/QuotationPickler.fs	kept=129 dropped=2
 src/Compiler/TypedTree/QuotationPickler.fsi	signature file
 src/Compiler/TypedTree/RuntimeAsync.fs	kept=17 dropped=0
@@ -413,7 +413,7 @@ src/Compiler/TypedTree/TypedTreeOps.Remap.fs	kept=181 dropped=24
 src/Compiler/TypedTree/TypedTreeOps.Remap.fsi	signature file
 src/Compiler/TypedTree/TypedTreeOps.Remapping.fs	kept=144 dropped=16
 src/Compiler/TypedTree/TypedTreeOps.Remapping.fsi	signature file
-src/Compiler/TypedTree/TypedTreeOps.Transforms.fs	kept=98 dropped=57
+src/Compiler/TypedTree/TypedTreeOps.Transforms.fs	kept=102 dropped=53
 src/Compiler/TypedTree/TypedTreeOps.Transforms.fsi	signature file
 src/Compiler/TypedTree/TypedTreePickle.fs	kept=387 dropped=23
 src/Compiler/TypedTree/TypedTreePickle.fsi	signature file
@@ -2020,8 +2020,8 @@ tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/WellFormedn
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/WellFormednessChecking/E_NonAbstractClassNotImplAllInheritedAbstractSlots01.fs	kept=0 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/WellFormednessChecking/E_Override_with_Incorrect_Type01.fs	kept=0 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/InferenceProcedures/WellFormednessChecking/WellFormednessChecking.fs	kept=10 dropped=0
-tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/ByteStrings.fs	kept=10 dropped=3
-tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/CharByteLiterals.fs	kept=8 dropped=1
+tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/ByteStrings.fs	kept=13 dropped=0
+tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/CharByteLiterals.fs	kept=9 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/Comments.fs	kept=3 dropped=23
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/ConditionalCompilation.fs	kept=3 dropped=13
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/Directives.fs	kept=9 dropped=3
@@ -2033,7 +2033,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/LineDirectives.
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/NumericLiterals.fs	kept=3 dropped=21
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/PreprocessorElif.fs	kept=12 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/ShiftGenerics.fs	kept=3 dropped=1
-tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/Strings.fs	kept=8 dropped=1
+tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/Strings.fs	kept=9 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/StringsAndCharacters.fs	kept=5 dropped=24
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/SymbolicKeywords.fs	kept=3 dropped=6
 tests/FSharp.Compiler.ComponentTests/Conformance/LexicalAnalysis/SymbolicOperators.fs	kept=4 dropped=6
@@ -3541,12 +3541,12 @@ tests/FSharp.Compiler.ComponentTests/Language/RecordSpreadsTests.fs	kept=131 dro
 tests/FSharp.Compiler.ComponentTests/Language/RegressionTests.fs	kept=22 dropped=1
 tests/FSharp.Compiler.ComponentTests/Language/RequireNamedArgumentsTests.fs	kept=40 dropped=1
 tests/FSharp.Compiler.ComponentTests/Language/ReraiseInComputationExpressionsTests.fs	kept=38 dropped=1
-tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncAsyncLocal.fs	kept=3 dropped=5
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncAsyncLocal.fs	kept=4 dropped=4
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncBasic.fs	kept=12 dropped=2
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEdgeCases.fs	kept=9 dropped=7
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerable.fs	kept=17 dropped=7
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableLowLevel.fs	kept=9 dropped=5
-tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableTests.fs	kept=10 dropped=20
+tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncEnumerableTests.fs	kept=11 dropped=19
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncReraiseOwnership.fs	kept=13 dropped=4
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncSequence.fs	kept=10 dropped=5
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeAsyncSequenceBuilder.fs	kept=8 dropped=3
@@ -3624,7 +3624,7 @@ tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/
 tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/struct_private_field_repro.fsx	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/type_alias_primitives.fsx	kept=20 dropped=0
 tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/type_augmentation.fsx	kept=2 dropped=1
-tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/underscore_dot_lambda.fsx	kept=1 dropped=3
+tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/underscore_dot_lambda.fsx	kept=3 dropped=1
 tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/union_with_function_type.fs	kept=2 dropped=0
 tests/FSharp.Compiler.ComponentTests/Signatures/TestCasesForGenerationRoundTrip/zero_constraint.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/Signatures/TestHelpers.fs	kept=6 dropped=1
@@ -4292,9 +4292,9 @@ tests/FSharp.Compiler.Service.Tests/BuildGraphTests.fs	kept=16 dropped=16
 tests/FSharp.Compiler.Service.Tests/ByteMemoryTests.fs	kept=3 dropped=1
 tests/FSharp.Compiler.Service.Tests/CSharpProjectAnalysis.fs	kept=14 dropped=2
 tests/FSharp.Compiler.Service.Tests/CapturedTypes.fs	kept=21 dropped=0
-tests/FSharp.Compiler.Service.Tests/Checker.fs	kept=35 dropped=10
+tests/FSharp.Compiler.Service.Tests/Checker.fs	kept=37 dropped=8
 tests/FSharp.Compiler.Service.Tests/CheckerExtensionsTests.fs	kept=3 dropped=0
-tests/FSharp.Compiler.Service.Tests/Common.fs	kept=65 dropped=16
+tests/FSharp.Compiler.Service.Tests/Common.fs	kept=66 dropped=15
 tests/FSharp.Compiler.Service.Tests/CompilerGlobalStateTests.fs	kept=6 dropped=1
 tests/FSharp.Compiler.Service.Tests/CompilerTestHelpers.fs	kept=1 dropped=0
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.Accessibility.fs	kept=14 dropped=0
@@ -4324,7 +4324,7 @@ tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.ObjectExpressions
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.ObjectInitializers.fs	kept=17 dropped=0
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.OpenDirectives.fs	kept=24 dropped=2
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.Operators.fs	kept=9 dropped=0
-tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.PatternMatching.fs	kept=22 dropped=1
+tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.PatternMatching.fs	kept=23 dropped=0
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.PrintfFormat.fs	kept=8 dropped=0
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.Properties.fs	kept=29 dropped=0
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.Queries.fs	kept=30 dropped=0
@@ -4338,7 +4338,7 @@ tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.TypeAnnotations.f
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.TypeExtensions.fs	kept=7 dropped=0
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.TypeProviders.fs	kept=14 dropped=0
 tests/FSharp.Compiler.Service.Tests/Completion/CompletionTests.UnitsOfMeasure.fs	kept=8 dropped=0
-tests/FSharp.Compiler.Service.Tests/CompletionTests.fs	kept=100 dropped=13
+tests/FSharp.Compiler.Service.Tests/CompletionTests.fs	kept=103 dropped=10
 tests/FSharp.Compiler.Service.Tests/ConsoleOnlyOptionsTests.fs	kept=8 dropped=1
 tests/FSharp.Compiler.Service.Tests/ConstraintSolverTests.fs	kept=16 dropped=4
 tests/FSharp.Compiler.Service.Tests/DeltaMetadata/CodedIndexTests.fs	kept=26 dropped=3
@@ -4346,7 +4346,7 @@ tests/FSharp.Compiler.Service.Tests/DeltaMetadata/FSharpDeltaMetadataWriterTests
 tests/FSharp.Compiler.Service.Tests/DeltaMetadata/MetadataDeltaTestHelpers.fs	kept=56 dropped=28
 tests/FSharp.Compiler.Service.Tests/DeltaMetadata/SrmReaderParityTests.fs	kept=17 dropped=7
 tests/FSharp.Compiler.Service.Tests/EditDistance.fs	kept=7 dropped=0
-tests/FSharp.Compiler.Service.Tests/EditorServiceAsserts.fs	kept=59 dropped=9
+tests/FSharp.Compiler.Service.Tests/EditorServiceAsserts.fs	kept=61 dropped=7
 tests/FSharp.Compiler.Service.Tests/EditorTests.fs	kept=55 dropped=19
 tests/FSharp.Compiler.Service.Tests/ErrorList/ErrorListTests.fs	kept=44 dropped=0
 tests/FSharp.Compiler.Service.Tests/ErrorList/ScriptDiagnosticsTests.fs	kept=55 dropped=0
@@ -4376,8 +4376,8 @@ tests/FSharp.Compiler.Service.Tests/ILBinaryReaderMemoryTests.fs	kept=9 dropped=
 tests/FSharp.Compiler.Service.Tests/IncrementalBuilderRaceTests.fs	kept=8 dropped=2
 tests/FSharp.Compiler.Service.Tests/InteractiveCheckerTests.fs	kept=18 dropped=1
 tests/FSharp.Compiler.Service.Tests/ManglingNameOfProvidedTypes.fs	kept=12 dropped=7
-tests/FSharp.Compiler.Service.Tests/ModuleReaderCancellationTests.fs	kept=39 dropped=12
-tests/FSharp.Compiler.Service.Tests/ModuleReaderNamespaceTests.fs	kept=35 dropped=19
+tests/FSharp.Compiler.Service.Tests/ModuleReaderCancellationTests.fs	kept=41 dropped=10
+tests/FSharp.Compiler.Service.Tests/ModuleReaderNamespaceTests.fs	kept=37 dropped=17
 tests/FSharp.Compiler.Service.Tests/MultiProjectAnalysisTests.fs	kept=101 dropped=12
 tests/FSharp.Compiler.Service.Tests/OpenDeclarationInsertionTests.fs	kept=20 dropped=1
 tests/FSharp.Compiler.Service.Tests/OverloadCacheTests.fs	kept=14 dropped=4
@@ -4428,7 +4428,7 @@ tests/FSharp.Compiler.Service.Tests/SourceTextTests.fs	kept=8 dropped=1
 tests/FSharp.Compiler.Service.Tests/StructureTests.fs	kept=48 dropped=2
 tests/FSharp.Compiler.Service.Tests/SuggestionBuffer.fs	kept=10 dropped=0
 tests/FSharp.Compiler.Service.Tests/SurfaceArea.fs	kept=3 dropped=1
-tests/FSharp.Compiler.Service.Tests/Symbols.fs	kept=80 dropped=47
+tests/FSharp.Compiler.Service.Tests/Symbols.fs	kept=82 dropped=45
 tests/FSharp.Compiler.Service.Tests/SynExprTests.fs	kept=9 dropped=2
 tests/FSharp.Compiler.Service.Tests/SynPatTests.fs	kept=6 dropped=1
 tests/FSharp.Compiler.Service.Tests/SyntaxTreeTests.fs	kept=11 dropped=4
@@ -4451,7 +4451,7 @@ tests/FSharp.Compiler.Service.Tests/Tooltip/TooltipTests.TypeProviders.fs	kept=3
 tests/FSharp.Compiler.Service.Tests/Tooltip/TooltipTests.Types.fs	kept=23 dropped=1
 tests/FSharp.Compiler.Service.Tests/TooltipTests.fs	kept=80 dropped=8
 tests/FSharp.Compiler.Service.Tests/TreeVisitorTests.fs	kept=4 dropped=13
-tests/FSharp.Compiler.Service.Tests/TypeChecker/Obsolete.fs	kept=12 dropped=1
+tests/FSharp.Compiler.Service.Tests/TypeChecker/Obsolete.fs	kept=13 dropped=0
 tests/FSharp.Compiler.Service.Tests/TypeChecker/TypeCheckerRecoveryTests.fs	kept=27 dropped=1
 tests/FSharp.Compiler.Service.Tests/UnlinkedEntityTests.fs	kept=3 dropped=1
 tests/FSharp.Compiler.Service.Tests/VisualStudioVersusConsoleContextTests.fs	kept=5 dropped=0
@@ -4530,14 +4530,14 @@ tests/FSharp.Core.UnitTests/SurfaceArea.fs	kept=4 dropped=1
 tests/FSharp.Core.UnitTests/TestFrameworkHelpers.fs	kept=12 dropped=7
 tests/FSharp.Test.Utilities/Assert.fs	kept=7 dropped=9
 tests/FSharp.Test.Utilities/Compiler.fs	kept=234 dropped=81
-tests/FSharp.Test.Utilities/CompilerAssert.fs	kept=36 dropped=21
+tests/FSharp.Test.Utilities/CompilerAssert.fs	kept=37 dropped=20
 tests/FSharp.Test.Utilities/DataAttributeBase.fs	kept=7 dropped=1
 tests/FSharp.Test.Utilities/DirectoryAttribute.fs	kept=11 dropped=2
 tests/FSharp.Test.Utilities/FileInlineDataAttribute.fs	kept=15 dropped=4
 tests/FSharp.Test.Utilities/FnGuard.fs	kept=4 dropped=2
 tests/FSharp.Test.Utilities/ILChecker.fs	kept=16 dropped=5
 tests/FSharp.Test.Utilities/ILVerifierModule.fs	kept=9 dropped=4
-tests/FSharp.Test.Utilities/ProjectGeneration.fs	kept=60 dropped=38
+tests/FSharp.Test.Utilities/ProjectGeneration.fs	kept=61 dropped=37
 tests/FSharp.Test.Utilities/ReflectionHelper.fs	kept=4 dropped=7
 tests/FSharp.Test.Utilities/RichTextHelpers.fs	kept=5 dropped=0
 tests/FSharp.Test.Utilities/ScriptHelpers.fs	kept=12 dropped=1
@@ -5505,15 +5505,15 @@ tests/service/data/SyntaxTree/Expression/DotLambda - _ Recovery - Eof.fsx	parse 
 tests/service/data/SyntaxTree/Expression/DotLambda - _ Recovery.fsx	parse errors
 tests/service/data/SyntaxTree/Expression/DotLambda - _. Recovery - Eof.fsx	parse errors
 tests/service/data/SyntaxTree/Expression/DotLambda - _. Recovery.fsx	parse errors
-tests/service/data/SyntaxTree/Expression/DotLambda_ArgumentExpressionInInnerAppExpression.fs	kept=0 dropped=1
-tests/service/data/SyntaxTree/Expression/DotLambda_FunctionWithUnderscoreDotLambda.fs	kept=0 dropped=1
-tests/service/data/SyntaxTree/Expression/DotLambda_NestedPropertiesAfterUnderscore.fs	kept=0 dropped=1
-tests/service/data/SyntaxTree/Expression/DotLambda_NotAllowedFunctionExpressionWithArg.fs	kept=0 dropped=1
+tests/service/data/SyntaxTree/Expression/DotLambda_ArgumentExpressionInInnerAppExpression.fs	kept=1 dropped=0
+tests/service/data/SyntaxTree/Expression/DotLambda_FunctionWithUnderscoreDotLambda.fs	kept=1 dropped=0
+tests/service/data/SyntaxTree/Expression/DotLambda_NestedPropertiesAfterUnderscore.fs	kept=1 dropped=0
+tests/service/data/SyntaxTree/Expression/DotLambda_NotAllowedFunctionExpressionWithArg.fs	kept=1 dropped=0
 tests/service/data/SyntaxTree/Expression/DotLambda_TopLevelLet.fs	kept=0 dropped=1
 tests/service/data/SyntaxTree/Expression/DotLambda_TopLevelStandaloneDotLambda.fs	kept=0 dropped=1
-tests/service/data/SyntaxTree/Expression/DotLambda_UnderscoreToFunctionCallWithSpaceAndUnitApplication.fs	kept=0 dropped=1
+tests/service/data/SyntaxTree/Expression/DotLambda_UnderscoreToFunctionCallWithSpaceAndUnitApplication.fs	kept=1 dropped=0
 tests/service/data/SyntaxTree/Expression/DotLambda_UnderscoreToString.fs	kept=0 dropped=1
-tests/service/data/SyntaxTree/Expression/DotLambda_WithNonTupledFunctionCall.fs	kept=0 dropped=1
+tests/service/data/SyntaxTree/Expression/DotLambda_WithNonTupledFunctionCall.fs	kept=1 dropped=0
 tests/service/data/SyntaxTree/Expression/DotLambda_WithoutDot.fs	kept=1 dropped=0
 tests/service/data/SyntaxTree/Expression/DotLambda_WithoutUnderscore.fs	parse errors
 tests/service/data/SyntaxTree/Expression/Downcast 01.fs	parse errors

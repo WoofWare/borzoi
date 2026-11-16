@@ -5,6 +5,9 @@
 //! types let through a value F# cannot express, and both are bugs. So the leaves
 //! lean on the edges: keywords and reserved words as names, names that need
 //! quoting, every operator character, literal extremes, NaNs, lone surrogates.
+//!
+//! The strategies are generic over the tree's language version, and offer a
+//! gated construct exactly where the version's gate has a witness.
 
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
@@ -13,6 +16,7 @@ use borzoi_print::tree::{
     NamespaceName, NestedModule, Pat, RecordField, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
 };
 use borzoi_print::vec::{Vec1, Vec2};
+use borzoi_print::version::{Gate, Version};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 
@@ -273,7 +277,7 @@ fn pat() -> BoxedStrategy<Pat> {
     .boxed()
 }
 
-fn attributes(arg: BoxedStrategy<Expr>) -> BoxedStrategy<Vec<Attribute>> {
+fn attributes<V: Version>(arg: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Vec<Attribute<V>>> {
     prop_oneof![
         3 => Just(Vec::new()),
         1 => prop::collection::vec(
@@ -288,7 +292,7 @@ fn attributes(arg: BoxedStrategy<Expr>) -> BoxedStrategy<Vec<Attribute>> {
     .boxed()
 }
 
-fn binding(expr: BoxedStrategy<Expr>) -> BoxedStrategy<Binding> {
+fn binding<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Binding<V>> {
     let head = prop_oneof![
         (any::<bool>(), access(), value_name()).prop_map(|(is_mutable, access, name)| {
             BindingHead::Name {
@@ -316,7 +320,7 @@ fn binding(expr: BoxedStrategy<Expr>) -> BoxedStrategy<Binding> {
         .boxed()
 }
 
-fn let_bindings(expr: BoxedStrategy<Expr>) -> BoxedStrategy<LetBindings> {
+fn let_bindings<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<LetBindings<V>> {
     prop_oneof![
         binding(expr.clone()).prop_map(|b| LetBindings::NonRec(Box::new(b))),
         prop::collection::vec(binding(expr), 1..=2)
@@ -325,7 +329,7 @@ fn let_bindings(expr: BoxedStrategy<Expr>) -> BoxedStrategy<LetBindings> {
     .boxed()
 }
 
-fn clauses(expr: BoxedStrategy<Expr>) -> BoxedStrategy<Vec1<MatchClause>> {
+fn clauses<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Vec1<MatchClause<V>>> {
     prop::collection::vec(
         (pat(), prop::option::weighted(0.25, expr.clone()), expr)
             .prop_map(|(pat, guard, result)| MatchClause { pat, guard, result }),
@@ -335,13 +339,22 @@ fn clauses(expr: BoxedStrategy<Expr>) -> BoxedStrategy<Vec1<MatchClause>> {
     .boxed()
 }
 
-pub fn expr() -> BoxedStrategy<Expr> {
-    let leaf = prop_oneof![
-        3 => constant().prop_map(Expr::Const),
-        1 => Just(Expr::Null),
-        4 => long_ident().prop_map(Expr::Name),
-        1 => operator().prop_map(Expr::OpValue),
+pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
+    let mut leaves: Vec<(u32, BoxedStrategy<Expr<V>>)> = vec![
+        (3, constant().prop_map(Expr::Const).boxed()),
+        (1, Just(Expr::Null).boxed()),
+        (4, long_ident().prop_map(Expr::Name).boxed()),
+        (1, operator().prop_map(Expr::OpValue).boxed()),
     ];
+    if let Some(gate) = V::AccessorFunctionShorthand::WITNESS {
+        leaves.push((
+            1,
+            long_ident()
+                .prop_map(move |path| Expr::DotLambda { gate, path })
+                .boxed(),
+        ));
+    }
+    let leaf = proptest::strategy::Union::new_weighted(leaves);
     leaf.prop_recursive(4, 24, 3, |inner| {
         let b = inner.clone().prop_map(Box::new);
         let items = prop::collection::vec(inner.clone(), 0..=2);
@@ -432,7 +445,7 @@ fn union_case() -> BoxedStrategy<UnionCase> {
         .boxed()
 }
 
-fn type_defn() -> BoxedStrategy<TypeDefn> {
+fn type_defn<V: Version>() -> BoxedStrategy<TypeDefn<V>> {
     let repr = prop_oneof![
         ty().prop_map(TypeRepr::Abbrev),
         prop::collection::vec(
@@ -464,7 +477,7 @@ fn type_defn() -> BoxedStrategy<TypeDefn> {
         .boxed()
 }
 
-fn decls() -> BoxedStrategy<Vec<ModuleDecl>> {
+fn decls<V: Version>() -> BoxedStrategy<Vec<ModuleDecl<V>>> {
     let leaf = prop_oneof![
         4 => let_bindings(expr()).prop_map(ModuleDecl::Let),
         2 => expr().prop_map(ModuleDecl::Expr),
@@ -496,7 +509,7 @@ fn decls() -> BoxedStrategy<Vec<ModuleDecl>> {
     prop::collection::vec(decl, 0..=3).boxed()
 }
 
-pub fn impl_file() -> BoxedStrategy<ImplFile> {
+pub fn impl_file<V: Version>() -> BoxedStrategy<ImplFile<V>> {
     prop_oneof![
         decls().prop_map(ImplFile::AnonModule),
         (

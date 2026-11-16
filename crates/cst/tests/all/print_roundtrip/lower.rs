@@ -23,6 +23,7 @@ use borzoi_print::tree::{
     NamespaceName, NestedModule, Pat, RecordField, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
 };
 use borzoi_print::vec::{Vec1, Vec2};
+use borzoi_print::version::{Gate, Version};
 
 use crate::common::normalised_ast::{
     NamedKind, NormalisedAccess, NormalisedArgPats, NormalisedAttribute, NormalisedBinding,
@@ -54,14 +55,14 @@ pub struct Tally {
 }
 
 /// `root` as a tree, dropping every declaration that does not lower.
-pub fn lower_file_lossy(root: &NormalisedRoot) -> L<(ImplFile, Tally)> {
+pub fn lower_file_lossy<V: Version>(root: &NormalisedRoot) -> L<(ImplFile<V>, Tally)> {
     let mut tally = Tally::default();
     let file = file(root, &mut tally)?;
     Ok((file, tally))
 }
 
 /// `root` as a tree, or why some part of it has none.
-pub fn lower_file_strict(root: &NormalisedRoot) -> L<ImplFile> {
+pub fn lower_file_strict<V: Version>(root: &NormalisedRoot) -> L<ImplFile<V>> {
     let mut tally = Tally::default();
     let file = file(root, &mut tally)?;
     match tally.dropped.first() {
@@ -70,7 +71,7 @@ pub fn lower_file_strict(root: &NormalisedRoot) -> L<ImplFile> {
     }
 }
 
-fn file(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile> {
+fn file<V: Version>(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile<V>> {
     let NormalisedRoot::Impl(f) = root else {
         return decline("signature file");
     };
@@ -130,7 +131,7 @@ fn file(root: &NormalisedRoot, tally: &mut Tally) -> L<ImplFile> {
     }
 }
 
-fn decls_lossy(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<ModuleDecl> {
+fn decls_lossy<V: Version>(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<ModuleDecl<V>> {
     let mut out = Vec::new();
     for d in decls {
         if let NormalisedDecl::NestedModule {
@@ -170,7 +171,7 @@ fn decls_lossy(decls: &[NormalisedDecl], tally: &mut Tally) -> Vec<ModuleDecl> {
     out
 }
 
-fn decl(d: &NormalisedDecl) -> L<ModuleDecl> {
+fn decl<V: Version>(d: &NormalisedDecl) -> L<ModuleDecl<V>> {
     match d {
         NormalisedDecl::Expr(e) => Ok(ModuleDecl::Expr(expr(e)?)),
         NormalisedDecl::Let { is_rec, bindings } => {
@@ -206,7 +207,7 @@ fn decl(d: &NormalisedDecl) -> L<ModuleDecl> {
     }
 }
 
-fn type_defn(d: &NormalisedTypeDefn) -> L<TypeDefn> {
+fn type_defn<V: Version>(d: &NormalisedTypeDefn) -> L<TypeDefn<V>> {
     if d.head_type.is_some() || !d.constraints.is_empty() || d.implicit_ctor.is_some() {
         return decline("type head, constraints or constructor");
     }
@@ -288,7 +289,7 @@ fn union_case(c: &NormalisedUnionCase) -> L<UnionCase> {
     })
 }
 
-fn let_bindings(is_rec: bool, bindings: &[NormalisedBinding]) -> L<LetBindings> {
+fn let_bindings<V: Version>(is_rec: bool, bindings: &[NormalisedBinding]) -> L<LetBindings<V>> {
     if is_rec {
         Ok(LetBindings::Rec(vec1(bindings, binding)?))
     } else {
@@ -299,7 +300,7 @@ fn let_bindings(is_rec: bool, bindings: &[NormalisedBinding]) -> L<LetBindings> 
     }
 }
 
-fn binding(b: &NormalisedBinding) -> L<Binding> {
+fn binding<V: Version>(b: &NormalisedBinding) -> L<Binding<V>> {
     use NormalisedLeadingKeyword as K;
     if !matches!(b.leading_keyword, K::Let | K::LetRec | K::And) {
         return decline("binding keyword other than let/and");
@@ -356,7 +357,7 @@ fn binding(b: &NormalisedBinding) -> L<Binding> {
     })
 }
 
-fn attributes_of(lists: &[Vec<NormalisedAttribute>]) -> L<Vec<Attribute>> {
+fn attributes_of<V: Version>(lists: &[Vec<NormalisedAttribute>]) -> L<Vec<Attribute<V>>> {
     lists
         .iter()
         .flatten()
@@ -380,7 +381,7 @@ fn lower_access(a: NormalisedAccess) -> Access {
     }
 }
 
-fn expr(e: &NormalisedExpr) -> L<Expr> {
+fn expr<V: Version>(e: &NormalisedExpr) -> L<Expr<V>> {
     use NormalisedExpr as N;
     let b = |e: &NormalisedExpr| expr(e).map(Box::new);
     Ok(match e {
@@ -619,6 +620,18 @@ fn expr(e: &NormalisedExpr) -> L<Expr> {
         N::Lazy { expr: e } => Expr::Lazy(b(e)?),
         N::Assert { expr: e } => Expr::Assert(b(e)?),
         N::Do(e) => Expr::Do(b(e)?),
+        N::DotLambda { expr: body } => {
+            let path = match &**body {
+                N::Ident(name) => LongIdent::single(ident(name)?),
+                N::LongIdent(path) => long_ident(path)?,
+                _ => return decline("expr: dot lambda of a non-path"),
+            };
+            Expr::DotLambda {
+                gate: V::AccessorFunctionShorthand::WITNESS
+                    .ok_or(Decline("expr: dot lambda before its version"))?,
+                path,
+            }
+        }
         other => return decline(expr_kind(other)),
     })
 }
@@ -660,7 +673,6 @@ fn expr_kind(e: &NormalisedExpr) -> &'static str {
         N::Tuple { .. } => "expr: struct tuple",
         N::App { .. } => "expr: indexer application",
         N::Dynamic { .. } => "expr: dynamic",
-        N::DotLambda { .. } => "expr: dot lambda",
         N::DotIndexedGet { .. } => "expr: dot indexed get",
         N::IndexRange { .. } => "expr: index range",
         N::IndexFromEnd { .. } => "expr: index from end",
@@ -699,7 +711,7 @@ fn expr_kind(e: &NormalisedExpr) -> &'static str {
     }
 }
 
-fn match_clause(c: &NormalisedMatchClause) -> L<MatchClause> {
+fn match_clause<V: Version>(c: &NormalisedMatchClause) -> L<MatchClause<V>> {
     Ok(MatchClause {
         pat: pat(&c.pat)?,
         guard: c.when.as_deref().map(expr).transpose()?,

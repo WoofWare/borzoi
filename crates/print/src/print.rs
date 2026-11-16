@@ -23,6 +23,7 @@ use crate::tree::{
     Access, Attribute, Binding, BindingHead, Const, Expr, ForDirection, ImplFile, LetBindings,
     MatchClause, ModuleDecl, NamespaceName, NestedModule, Pat, Type, TypeDefn, TypeRepr, UnionCase,
 };
+use crate::version::Version;
 
 /// `file` as F# source.
 ///
@@ -30,7 +31,7 @@ use crate::tree::{
 /// expression, pattern and type is parenthesised, every expression sits on one
 /// line, and expressions use the verbose forms (`let … in`, `do … done`); the
 /// module docs of the printer say why each choice is made.
-pub fn print_impl_file(file: &ImplFile) -> String {
+pub fn print_impl_file<V: Version>(file: &ImplFile<V>) -> String {
     let mut p = Printer { out: String::new() };
     match file {
         ImplFile::AnonModule(decls) => p.decls(decls, 0),
@@ -78,13 +79,13 @@ impl Printer {
 
     // ---- declarations: one per line, at `depth` ----
 
-    fn decls(&mut self, decls: &[ModuleDecl], depth: usize) {
+    fn decls<V: Version>(&mut self, decls: &[ModuleDecl<V>], depth: usize) {
         for decl in decls {
             self.decl(decl, depth);
         }
     }
 
-    fn decl(&mut self, decl: &ModuleDecl, depth: usize) {
+    fn decl<V: Version>(&mut self, decl: &ModuleDecl<V>, depth: usize) {
         if let ModuleDecl::NestedModule(m) = decl {
             return self.nested_module(m, depth);
         }
@@ -123,7 +124,7 @@ impl Printer {
         self.out.push('\n');
     }
 
-    fn nested_module(&mut self, m: &NestedModule, depth: usize) {
+    fn nested_module<V: Version>(&mut self, m: &NestedModule<V>, depth: usize) {
         self.attribute_line(&m.attributes, depth);
         self.indent(depth);
         self.out.push_str("module");
@@ -151,7 +152,7 @@ impl Printer {
     /// A `let` group. Each `and` starts a line in the `let`'s column: on the
     /// `let`'s own line, the body's offside context is still open, and F#
     /// rejects the `and`.
-    fn let_bindings(&mut self, bindings: &LetBindings) {
+    fn let_bindings<V: Version>(&mut self, bindings: &LetBindings<V>) {
         match bindings {
             LetBindings::NonRec(b) => {
                 self.out.push_str("let");
@@ -174,7 +175,7 @@ impl Printer {
     }
 
     /// A binding after its `let`/`and` keyword: ` [attrs] [inline] head = body`.
-    fn binding(&mut self, b: &Binding) {
+    fn binding<V: Version>(&mut self, b: &Binding<V>) {
         self.attributes(&b.attributes);
         if b.is_inline {
             self.out.push_str(" inline");
@@ -214,7 +215,7 @@ impl Printer {
         self.expr(&b.body);
     }
 
-    fn type_defn(&mut self, d: &TypeDefn) {
+    fn type_defn<V: Version>(&mut self, d: &TypeDefn<V>) {
         self.attributes(&d.attributes);
         self.access(d.access);
         self.out.push(' ');
@@ -274,7 +275,7 @@ impl Printer {
     /// A module's attributes, on a line of their own at `depth`, or nothing.
     /// After the `module` keyword, FCS's offside rule misreads a `let` with
     /// attributes inside an attribute's argument.
-    fn attribute_line(&mut self, attrs: &[Attribute], depth: usize) {
+    fn attribute_line<V: Version>(&mut self, attrs: &[Attribute<V>], depth: usize) {
         if attrs.is_empty() {
             return;
         }
@@ -284,7 +285,7 @@ impl Printer {
     }
 
     /// ` [<A; B(arg)>]`, or nothing.
-    fn attributes(&mut self, attrs: &[Attribute]) {
+    fn attributes<V: Version>(&mut self, attrs: &[Attribute<V>]) {
         if attrs.is_empty() {
             return;
         }
@@ -293,7 +294,7 @@ impl Printer {
     }
 
     /// `[<A; B(arg)>]`.
-    fn attribute_list(&mut self, attrs: &[Attribute]) {
+    fn attribute_list<V: Version>(&mut self, attrs: &[Attribute<V>]) {
         self.out.push_str("[<");
         for (i, a) in attrs.iter().enumerate() {
             if i > 0 {
@@ -320,7 +321,7 @@ impl Printer {
 
     // ---- expressions: each `(…)`, on one line ----
 
-    fn expr(&mut self, e: &Expr) {
+    fn expr<V: Version>(&mut self, e: &Expr<V>) {
         self.out.push('(');
         match e {
             Expr::Const(c) => self.constant(c),
@@ -479,22 +480,26 @@ impl Printer {
             Expr::Lazy(e) => self.keyword_expr("lazy ", e),
             Expr::Assert(e) => self.keyword_expr("assert ", e),
             Expr::Do(e) => self.keyword_expr("do ", e),
+            Expr::DotLambda { gate: _, path } => {
+                self.out.push_str("_.");
+                self.long_ident(path);
+            }
         }
         self.out.push(')');
     }
 
-    fn keyword_expr(&mut self, keyword: &str, e: &Expr) {
+    fn keyword_expr<V: Version>(&mut self, keyword: &str, e: &Expr<V>) {
         self.out.push_str(keyword);
         self.expr(e);
     }
 
-    fn expr_and_type(&mut self, e: &Expr, op: &str, ty: &Type) {
+    fn expr_and_type<V: Version>(&mut self, e: &Expr<V>, op: &str, ty: &Type) {
         self.expr(e);
         self.out.push_str(op);
         self.ty(ty);
     }
 
-    fn clauses(&mut self, clauses: &[MatchClause]) {
+    fn clauses<V: Version>(&mut self, clauses: &[MatchClause<V>]) {
         for c in clauses {
             self.out.push_str(" | ");
             self.pat(&c.pat);
@@ -732,10 +737,16 @@ impl Printer {
 mod tests {
     use super::print_impl_file;
     use crate::names::{Ident, LongIdent, Operator, ValueName};
-    use crate::tree::{
-        Binding, BindingHead, Const, Expr, ImplFile, LetBindings, ModuleDecl, NestedModule, Pat,
-    };
+    use crate::tree::{BindingHead, Const, Pat};
     use crate::vec::Vec1;
+    use crate::version::{Available, DefaultVersion};
+
+    type Binding = crate::tree::Binding<DefaultVersion>;
+    type Expr = crate::tree::Expr<DefaultVersion>;
+    type ImplFile = crate::tree::ImplFile<DefaultVersion>;
+    type LetBindings = crate::tree::LetBindings<DefaultVersion>;
+    type ModuleDecl = crate::tree::ModuleDecl<DefaultVersion>;
+    type NestedModule = crate::tree::NestedModule<DefaultVersion>;
 
     fn id(s: &str) -> Ident {
         Ident::new(s).unwrap()
@@ -847,6 +858,15 @@ mod tests {
             let_x(e),
             "let x = ((``é``) (let rec f = (1)\n                  and g = (2) in (f)))\n"
         );
+    }
+
+    #[test]
+    fn an_accessor_shorthand_is_a_bare_path() {
+        let e = Expr::DotLambda {
+            gate: Available,
+            path: LongIdent(Vec1::new(id("A"), vec![id("type")])),
+        };
+        assert_eq!(let_x(e), "let x = (_.A.``type``)\n");
     }
 
     #[test]

@@ -7,12 +7,18 @@
 //! fully parenthesised and one line per expression, so that it is easy to see
 //! it is right, and every tree prints as source F# parses back to that tree.
 //!
-//! The crate has no dependencies. Its correctness oracle lives in
+//! A tree's types say which F# language version it targets ([`version`]): an
+//! `ImplFile<V7_0>` cannot hold a construct F# 7 lacks, and prints as source
+//! that F# 7 and every later version parse back to that tree.
+//!
+//! The crate depends only on `borzoi-cst`, for its [`LanguageVersion`] and
+//! feature table. Its correctness oracle lives in
 //! `borzoi-cst`'s tests (`tests/all/print_roundtrip/`), which have the
 //! FCS-graded parser differential to hand: for every generated tree, and every
 //! tree read off a corpus file, the printed text must parse cleanly under both
-//! FCS and `borzoi-cst`, the two parses must agree, and the parse must read back
-//! as the tree that was printed.
+//! FCS and `borzoi-cst` at the tree's version and at `preview`, the parses must
+//! agree, and the parse must read back as the tree that was printed. Below a
+//! gate's version, FCS must reject the construct the gate admits.
 //!
 //! What "parses back to that tree" covers is the parse, not type checking.
 //! F#'s checker reads some syntax more finely than the parse tree records:
@@ -25,5 +31,7 @@ pub mod names;
 mod print;
 pub mod tree;
 pub mod vec;
+pub mod version;
 
 pub use print::print_impl_file;
+pub use version::LanguageVersion;
