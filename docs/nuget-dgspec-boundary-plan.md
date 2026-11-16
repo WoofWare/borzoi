@@ -1677,9 +1677,13 @@ On SDK 10.0.401 (six corpus projects, three fixtures):
 | `MSBuildThisFile*`, per file | 6 | 3 |
 | **committed and wrong** | **0** | **0** |
 
-The single-target projects read four properties off:
-- `MSBuildAssemblyVersion` and `MSBuildStartupDirectory`, which the walk does
-  not seed;
+The toolset row was two names on each of the nine cones,
+`MSBuildAssemblyVersion` and `MSBuildStartupDirectory`. The walk now seeds the
+first (item 3 below), so its nine reads agree with MSBuild and the row holds
+the second alone.
+
+The single-target projects read three properties off:
+- `MSBuildStartupDirectory`, which the walk does not seed;
 - `TargetFrameworkMoniker`, which rests on unmodelled text;
 - `RuntimeIdentifierGraphPath`, an SDK package input.
 
@@ -1711,7 +1715,9 @@ So A₁.3b's work, in order, is:
 2. expose the dedicated buckets as item lists the executor can read
    (every dependency type and `ProjectReference` landed; see the *A₁.3b*
    sections below);
-3. seed the two toolset names.
+3. seed the two toolset names (`MSBuildAssemblyVersion` landed: the walk
+   seeds it at SDK resolution from the toolset's probed product version;
+   `MSBuildStartupDirectory` is open, #674).
 
 Nothing in the census argues against going on. No trusted read is wrong,
 and the gaps have known causes.

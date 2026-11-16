@@ -1822,9 +1822,12 @@ impl<'r> State<'r> {
     /// `MSBuildExtensionsPath` *with* a trailing separator, the others
     /// without — `MSBuildSDKsPath` is its `Sdks` child, and
     /// `MSBuildToolsVersion`/`MSBuildRuntimeType` are the fixed strings
-    /// `Current`/`Core`. Writability was probed the same way:
-    /// `MSBuildToolsPath`, `MSBuildBinPath`, `MSBuildToolsVersion` and
-    /// `MSBuildRuntimeType` are reserved (a project write is MSB4004;
+    /// `Current`/`Core`. `MSBuildAssemblyVersion` is the toolset's product
+    /// version where that is probed ([`toolset_assembly_version`]).
+    /// Writability was probed the same way:
+    /// `MSBuildToolsPath`, `MSBuildBinPath`, `MSBuildToolsVersion`,
+    /// `MSBuildRuntimeType` and `MSBuildAssemblyVersion` are reserved (a
+    /// project write is MSB4004;
     /// this walker's model for protected names is to drop the write),
     /// while `MSBuildExtensionsPath`, `MSBuildExtensionsPath32` and
     /// `MSBuildSDKsPath` accept project writes.
@@ -1843,12 +1846,21 @@ impl<'r> State<'r> {
         let version_dir = observed::canonicalize(self.observer, version_dir)
             .unwrap_or_else(|_| version_dir.to_path_buf());
         let dir = version_dir.to_string_lossy().replace('\\', "/");
-        let reserved = [
+        // The toolset is the first canonical SDK's, so a later resolution
+        // seeds nothing the first one declined to.
+        let first_toolset = !self.reserved.contains("msbuildtoolspath");
+        let mut reserved = vec![
             ("MSBuildToolsPath", dir.clone()),
             ("MSBuildBinPath", dir.clone()),
             ("MSBuildToolsVersion", "Current".to_string()),
             ("MSBuildRuntimeType", "Core".to_string()),
         ];
+        // A toolset whose product version is not probed gets no seed, and a
+        // read of the name stays undefined and inexact
+        // (`is_toolset_initial_property_name`).
+        if first_toolset && let Some(value) = toolset_assembly_version(&version_dir) {
+            reserved.push(("MSBuildAssemblyVersion", value.to_string()));
+        }
         for (name, value) in reserved {
             let lower = name.to_ascii_lowercase();
             // First canonical seed wins over later SDK resolutions, and a
@@ -4764,22 +4776,30 @@ fn toolset_honours_env_extensions_path(version_dir: &Path) -> Option<bool> {
     Some(major >= 10)
 }
 
-/// The `VisualStudioVersion` a canonical .NET SDK version directory's toolset
-/// defines: MSBuild's compiled-in `CurrentVisualStudioVersion`, which tracks
-/// the MSBuild major version. `None` — the read stays undefined and declines —
-/// for a directory that does not name a release SDK of a major probed here.
+/// The product version compiled into the MSBuild of a canonical .NET SDK
+/// version directory: `17.0` for MSBuild 17, `18.0` for MSBuild 18. It is the
+/// value of two properties the toolset defines, `VisualStudioVersion`
+/// ([`toolset_visual_studio_version`]) and `MSBuildAssemblyVersion`
+/// ([`toolset_assembly_version`]). `None` for a directory that does not name
+/// a release SDK of a major probed here.
 ///
-/// Probed with `dotnet msbuild` and no `VisualStudioVersion` in the
-/// environment: `17.0` under 6.0.418, 8.0.425, 9.0.200 and 9.0.315; `18.0` under
-/// 10.0.109, 10.0.112, 10.0.300, 10.0.400 and 10.0.401. A prerelease commits only
-/// where its exact version was probed ([`PROBED_PRERELEASE_VISUAL_STUDIO_VERSIONS`]):
-/// a preview SDK can ship the previous MSBuild major (the early .NET 10
-/// previews carried MSBuild 17), and an unprobed major may have moved on.
-/// `tests/toolset_visual_studio_version_diff.rs` holds every SDK the devshell
-/// installs to its MSBuild.
-pub(crate) fn toolset_visual_studio_version(version_dir: &Path) -> Option<&'static str> {
+/// It is not the version of a file in the directory: `Microsoft.Build.dll`
+/// has assembly version `15.1.0.0`, and its file version (`18.9.11` under
+/// 10.0.401) is `MSBuildVersion`.
+///
+/// Probed with `dotnet msbuild -getProperty:` and no `VisualStudioVersion` in
+/// the environment. `VisualStudioVersion` reads `17.0` under 6.0.418, 8.0.425,
+/// 9.0.200 and 9.0.315, and `18.0` under 10.0.109, 10.0.112, 10.0.300, 10.0.400
+/// and 10.0.401. `MSBuildAssemblyVersion` reads `18.0` under 10.0.112 and
+/// 10.0.401. A prerelease commits only where its exact version was probed
+/// ([`PROBED_PRERELEASE_PRODUCT_VERSIONS`]): a preview SDK can ship the
+/// previous MSBuild major (the early .NET 10 previews carried MSBuild 17), and
+/// an unprobed major may have moved on.
+/// `tests/toolset_visual_studio_version_diff.rs` holds both properties to the
+/// MSBuild of every SDK the devshell installs.
+fn toolset_product_version(version_dir: &Path) -> Option<&'static str> {
     let name = version_dir.file_name()?.to_str()?;
-    if let Some((_, value)) = PROBED_PRERELEASE_VISUAL_STUDIO_VERSIONS
+    if let Some((_, value)) = PROBED_PRERELEASE_PRODUCT_VERSIONS
         .iter()
         .find(|(version, _)| *version == name)
     {
@@ -4800,16 +4820,37 @@ pub(crate) fn toolset_visual_studio_version(version_dir: &Path) -> Option<&'stat
     }
 }
 
-/// Prerelease SDKs whose MSBuild's `VisualStudioVersion` was probed (as for
-/// [`toolset_visual_studio_version`]): SDK 11.0.100-rc.1.26425.128 ships
-/// MSBuild 18.11.0, whose `VisualStudioVersion` is `18.0`.
-const PROBED_PRERELEASE_VISUAL_STUDIO_VERSIONS: &[(&str, &str)] =
-    &[("11.0.100-rc.1.26425.128", "18.0")];
+/// Prerelease SDKs whose MSBuild's product version was probed (as for
+/// [`toolset_product_version`]): SDK 11.0.100-rc.1.26425.128 ships MSBuild
+/// 18.11.0, whose `VisualStudioVersion` and `MSBuildAssemblyVersion` are
+/// `18.0`.
+const PROBED_PRERELEASE_PRODUCT_VERSIONS: &[(&str, &str)] = &[("11.0.100-rc.1.26425.128", "18.0")];
+
+/// The `VisualStudioVersion` a canonical .NET SDK version directory's toolset
+/// defines: MSBuild's compiled-in `CurrentVisualStudioVersion`, which is its
+/// product version ([`toolset_product_version`]). `None` (the read stays
+/// undefined and declines) where that is not probed.
+pub(crate) fn toolset_visual_studio_version(version_dir: &Path) -> Option<&'static str> {
+    toolset_product_version(version_dir)
+}
+
+/// The `MSBuildAssemblyVersion` a canonical .NET SDK version directory's
+/// toolset defines: its product version ([`toolset_product_version`]), not
+/// the version of the MSBuild assembly. `None` (the read stays undefined and
+/// declines) where that is not probed.
+///
+/// The name is reserved. A project write to it is MSB4004, a `-p:` of it is
+/// MSB4177, and an environment variable of the name is ignored (each probed
+/// under 10.0.401), so nothing displaces the toolset's value.
+pub(crate) fn toolset_assembly_version(version_dir: &Path) -> Option<&'static str> {
+    toolset_product_version(version_dir)
+}
 
 /// The property names MSBuild's toolset defines, non-empty, before any
 /// project text is evaluated: the toolset seeds of
-/// [`State::seed_toolset_properties`], and `VisualStudioVersion` (seeded only
-/// where the SDK's version says what the toolset defines). Lowercase.
+/// [`State::seed_toolset_properties`], among them `VisualStudioVersion` and
+/// `MSBuildAssemblyVersion` (each seeded only where the SDK's version says
+/// what the toolset defines). Lowercase.
 ///
 /// Whenever the walk holds no value for one of these, the real build still
 /// does, so the absence is never a fact (see
@@ -4824,6 +4865,7 @@ pub(crate) const TOOLSET_PREDEFINED_NAMES: &[&str] = &[
     "msbuildbinpath",
     "msbuildtoolsversion",
     "msbuildruntimetype",
+    "msbuildassemblyversion",
     "msbuildextensionspath",
     "msbuildextensionspath32",
     "msbuildsdkspath",
@@ -6567,11 +6609,11 @@ fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
 
 #[cfg(test)]
 mod toolset_tests {
-    use super::toolset_visual_studio_version;
+    use super::{toolset_assembly_version, toolset_visual_studio_version};
     use std::path::Path;
 
     #[test]
-    fn visual_studio_version_commits_only_for_probed_release_majors() {
+    fn the_product_version_commits_only_for_probed_release_majors() {
         for (dir, expected) in [
             ("/dotnet/sdk/6.0.418", Some("17.0")),
             ("/dotnet/sdk/8.0.425", Some("17.0")),
@@ -6597,6 +6639,7 @@ mod toolset_tests {
                 expected,
                 "{dir}"
             );
+            assert_eq!(toolset_assembly_version(Path::new(dir)), expected, "{dir}");
         }
     }
 }

@@ -183,6 +183,7 @@ fn predefined_names_without_an_sdk_are_exact_or_declined() {
         "MSBuildBinPath",
         "MSBuildToolsVersion",
         "MSBuildRuntimeType",
+        "MSBuildAssemblyVersion",
     ];
     // The list under test and the names this test reads must not drift apart.
     let read: BTreeSet<String> = OVERRIDABLE

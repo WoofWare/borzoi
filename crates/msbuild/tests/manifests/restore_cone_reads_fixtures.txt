@@ -89,7 +89,7 @@
 10.0.401 resolved cpm/app/App.fsproj reads property IsAotCompatible	unset agrees
 10.0.401 resolved cpm/app/App.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved cpm/app/App.fsproj reads property Language	value agrees
-10.0.401 resolved cpm/app/App.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved cpm/app/App.fsproj reads property MSBuildAssemblyVersion	value agrees
 10.0.401 resolved cpm/app/App.fsproj reads property MSBuildProjectDirectory	value agrees
 10.0.401 resolved cpm/app/App.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved cpm/app/App.fsproj reads property MSBuildProjectFile	value agrees
@@ -317,7 +317,7 @@
 10.0.401 resolved hooked/App.fsproj reads property IsAotCompatible	unset agrees
 10.0.401 resolved hooked/App.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved hooked/App.fsproj reads property Language	value agrees
-10.0.401 resolved hooked/App.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved hooked/App.fsproj reads property MSBuildAssemblyVersion	value agrees
 10.0.401 resolved hooked/App.fsproj reads property MSBuildProjectDirectory	value agrees
 10.0.401 resolved hooked/App.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved hooked/App.fsproj reads property MSBuildProjectFullPath	value agrees
@@ -543,7 +543,7 @@
 10.0.401 resolved net10/App.fsproj reads property IsAotCompatible	unset agrees
 10.0.401 resolved net10/App.fsproj reads property IsTrimmable	unset agrees
 10.0.401 resolved net10/App.fsproj reads property Language	value agrees
-10.0.401 resolved net10/App.fsproj reads property MSBuildAssemblyVersion	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved net10/App.fsproj reads property MSBuildAssemblyVersion	value agrees
 10.0.401 resolved net10/App.fsproj reads property MSBuildProjectDirectory	value agrees
 10.0.401 resolved net10/App.fsproj reads property MSBuildProjectExtensionsPath	value agrees
 10.0.401 resolved net10/App.fsproj reads property MSBuildProjectFullPath	value agrees
