@@ -12,7 +12,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::{BatchChild, BoundedCommand};
+use crate::{BatchChild, BatchFailure, BoundedCommand};
 
 /// Budget for the one `dotnet build` this driver runs.
 ///
@@ -259,9 +259,27 @@ impl Oracle {
     pub fn request(&mut self, req: &serde_json::Value) -> serde_json::Value {
         let line = serde_json::to_string(req).expect("serialise request");
         let response = self.child.request(&line);
+        Self::answer(&line, &response)
+    }
 
+    /// [`Self::request`], with the conversation's failure returned rather
+    /// than panicked on, once every attempt [`BatchChild::try_request`] makes
+    /// has failed: for a caller to whom an oracle that never answers is a
+    /// result, such as a restore NuGet itself never finishes.
+    pub fn try_request(
+        &mut self,
+        req: &serde_json::Value,
+    ) -> Result<serde_json::Value, BatchFailure> {
+        let line = serde_json::to_string(req).expect("serialise request");
+        let response = self.child.try_request(&line)?;
+        Ok(Self::answer(&line, &response))
+    }
+
+    /// The JSON of `response`, the answer to `line`, panicking on an
+    /// `{"error": ..}` one.
+    fn answer(line: &str, response: &str) -> serde_json::Value {
         let value: serde_json::Value =
-            serde_json::from_str(&response).expect("nuget-oracle response is JSON");
+            serde_json::from_str(response).expect("nuget-oracle response is JSON");
         if let Some(err) = value.get("error") {
             panic!("nuget-oracle errored on {line}: {err}");
         }

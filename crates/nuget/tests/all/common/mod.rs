@@ -8,6 +8,21 @@ pub use borzoi_oracle_harness::nuget_oracle::{EnvironmentChange, Oracle, sdk_dir
 
 pub mod host_fs;
 
+/// While held, a panic on this thread is followed by how to replay the
+/// fresh-seed soak that held it: the environment that fixes its seed and
+/// volume. A failure deep in a soak (an assertion, or the oracle wedging)
+/// then names the seed beside it, not only in the line the soak printed
+/// when it began.
+pub struct ReplayOnPanic(pub String);
+
+impl Drop for ReplayOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("replay this soak with: {}", self.0);
+        }
+    }
+}
+
 // ============================================================================
 // Deterministic input generation (shared by the differential tests)
 // ============================================================================

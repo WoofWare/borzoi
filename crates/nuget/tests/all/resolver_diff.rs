@@ -40,12 +40,13 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use crate::common::{Oracle, SplitMix64, gen_version_string};
+use crate::common::{Oracle, ReplayOnPanic, SplitMix64, gen_version_string};
 use borzoi_nuget::{
     DirectPackageRequirement, NuGetFramework, NuGetVersion, PackageId, PackageIdentity,
     PackagePaths, ProjectGraph, ResolveDecline, TargetContext, VersionRange, resolve_graph,
     resolve_offline,
 };
+use borzoi_oracle_harness::BatchFailure;
 use serde_json::json;
 
 // ============================================================================
@@ -256,7 +257,11 @@ fn restore_pinned(
             .map(|(id_, range_)| json!({ "id": id_, "range": range_ }))
             .collect();
     }
-    EngineOutcome::parse(&oracle.request(&request))
+    match oracle.try_request(&request) {
+        Ok(response) => EngineOutcome::parse(&response),
+        Err(BatchFailure::Wedged { .. }) => EngineOutcome::Hung,
+        Err(failure) => panic!("nuget-oracle failed on {request}: {failure}"),
+    }
 }
 
 /// The resolver's graph for `direct`, pinning transitively by `pins` when
@@ -420,6 +425,16 @@ enum EngineOutcome {
     /// Restore threw, by the exception's full type name: how it refuses a
     /// package whose `minClientVersion` is above its own.
     Threw(String),
+    /// Restore never answered: the oracle wedged on the request on every
+    /// attempt, each under the child deadline. The default engine does so,
+    /// spinning past every deadline tried, on some graphs where twins
+    /// (versions NuGet orders as one and tells apart by identity, see
+    /// [`generate_twins`]) meet a dependency cycle (#922,
+    /// [`twins_in_a_cycle_spin_the_default_engine`]); `dotnet restore` spins
+    /// on them too. It wrote no closure and failed with nothing: a closure
+    /// no resolution may commit to, and a claim it can neither confirm nor
+    /// refute.
+    Hung,
 }
 
 impl EngineOutcome {
@@ -461,6 +476,7 @@ impl EngineOutcome {
                 "threw-{}",
                 exception.rsplit('.').next().unwrap_or(exception)
             ),
+            EngineOutcome::Hung => "hung".to_owned(),
         }
     }
 
@@ -655,6 +671,9 @@ fn compare_pinned(
                 describe(tfm, packages, direct),
             );
         }
+        // A claim is still a decline: against an engine that never answered
+        // there is nothing to hold it to.
+        (OurOutcome::ClaimsFails(_), EngineOutcome::Hung) => {}
         (OurOutcome::ClaimsFails(claim), theirs) => {
             assert!(
                 theirs.fails_with(*claim),
@@ -664,6 +683,7 @@ fn compare_pinned(
                     EngineOutcome::Resolved(set) => format!("resolves to {set:?}"),
                     EngineOutcome::Failed(failures) => format!("fails with {failures:?}"),
                     EngineOutcome::Threw(exception) => format!("threw {exception}"),
+                    EngineOutcome::Hung => unreachable!("matched above"),
                 },
                 result.as_ref().expect_err("a claim is a decline"),
                 describe(tfm, packages, direct),
@@ -2673,8 +2693,9 @@ fn env_u64(name: &str) -> Option<u64> {
 /// runs a real restore walk. CI runs it on every relevant change.
 ///
 /// The seed is the wall clock unless `BORZOI_NUGET_RESOLVER_SOAK_SEED` fixes
-/// it, and is printed first so a failure reproduces;
-/// `BORZOI_NUGET_RESOLVER_SOAK_GRAPHS` sets the volume.
+/// it, and is printed first, and again after any panic, so a failure
+/// reproduces; `BORZOI_NUGET_RESOLVER_SOAK_GRAPHS` sets the volume. A restore
+/// the oracle never answers is [`EngineOutcome::Hung`], not a failure (#922).
 #[test]
 #[ignore = "fresh-seed soak; CI runs it, run it locally when touching the resolver"]
 fn randomised_soundness_soak() {
@@ -2687,6 +2708,9 @@ fn randomised_soundness_soak() {
     });
     let graphs = env_u64("BORZOI_NUGET_RESOLVER_SOAK_GRAPHS").unwrap_or(3000) as usize;
     println!("resolver soak seed: {seed} (graphs={graphs})");
+    let _replay = ReplayOnPanic(format!(
+        "BORZOI_NUGET_RESOLVER_SOAK_SEED={seed} BORZOI_NUGET_RESOLVER_SOAK_GRAPHS={graphs}"
+    ));
 
     let mut oracle = Oracle::spawn();
     let mut rng = SplitMix64(seed);
@@ -2731,6 +2755,73 @@ fn randomised_soundness_soak() {
         }
     }
     census.assert_floors(graphs / 300);
+}
+
+// ============================================================================
+// Twins in a cycle: the graph the default engine never finishes (#922)
+// ============================================================================
+
+/// The fresh-seed soak's wide generator met this graph (reduced from its
+/// 18 packages, and its versions respelled): twins `9.0.0.1-0` and
+/// `9.0.0.1--0` (NuGet's comparer orders them as one and its equality tells
+/// them apart), the one installed and the other asked for exactly, below a
+/// cycle `P3 → P4 → P5 → P3`.
+fn twins_in_a_cycle() -> (Vec<Pkg>, [(&'static str, &'static str); 2]) {
+    let packages = vec![
+        Pkg::simple(
+            "P0",
+            "100.0.0",
+            vec![Dep::new("P1", "[9.0.0]"), Dep::new("P5", "[9.0.0, )")],
+        ),
+        Pkg::simple("P1", "9.0.0", vec![Dep::new("P3", "9.0.0")]),
+        Pkg::simple("P2", "9.0.0.1-0", vec![Dep::new("P4", "[1.0.0]")]),
+        Pkg::simple("P3", "9.0.0", vec![Dep::new("P4", "[9.0.0.1--0]")]),
+        Pkg::simple("P4", "1.0.0", vec![Dep::new("P5", "[9.0.0.1-0, 100.0.0]")]),
+        Pkg::simple("P5", "9.0.0", vec![Dep::new("P3", "[100.0.0, )")]),
+    ];
+    (packages, [("p0", "[100.0.0, )"), ("P2", "[9.0.0.1--0]")])
+}
+
+/// NuGet's default engine spins on [`twins_in_a_cycle`] on one core for as
+/// long as it was watched (ten minutes), where the legacy engine fails it at
+/// once (`NU1102`, `NU1106`); `dotnet restore` of the same project and feed
+/// spins too, and with `RestoreUseLegacyDependencyResolver` fails in a
+/// second. So the oracle
+/// wedges on it, which [`restore_pinned`] reads as [`EngineOutcome::Hung`].
+/// Ignored: the oracle's two attempts each wait out the child deadline.
+#[test]
+#[ignore = "waits out the oracle's deadline twice; run it when touching the restore engines' outcomes"]
+fn twins_in_a_cycle_spin_the_default_engine() {
+    let (packages, direct) = twins_in_a_cycle();
+    let comparison = scenario(&mut Oracle::spawn(), &packages, &direct);
+    assert_eq!(comparison.restore.default, EngineOutcome::Hung);
+    assert_eq!(
+        comparison.restore.legacy,
+        failed_with(&[RestoreFailure::Missing, RestoreFailure::Undecided])
+    );
+}
+
+/// The resolver declines [`twins_in_a_cycle`], so the soak, meeting it,
+/// holds nothing against the engine that never answers.
+#[test]
+fn twins_in_a_cycle_are_declined() {
+    let (packages, direct) = twins_in_a_cycle();
+    let root = tempfile::tempdir().expect("root");
+    materialize(root.path(), &packages);
+    let direct: Vec<_> = direct
+        .iter()
+        .map(|(id_, range_)| req(id_, range_))
+        .collect();
+    let result = resolve_graph(
+        root.path(),
+        &framework("net8.0"),
+        &TargetContext::default(),
+        &pinned_graph(&direct, None),
+    );
+    assert!(
+        !matches!(OurOutcome::of(&result), OurOutcome::Resolved(_)),
+        "{result:?}"
+    );
 }
 
 // ============================================================================

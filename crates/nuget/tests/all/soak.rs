@@ -60,6 +60,10 @@ fn fresh_seed_soak_agrees_with_oracle() {
     let n_versions = env_u64("BORZOI_NUGET_SOAK_VERSIONS", 100_000) as usize;
     let n_ranges = env_u64("BORZOI_NUGET_SOAK_RANGES", 70_000) as usize;
     println!("soak seed: {seed} (versions={n_versions}, ranges={n_ranges})");
+    let _replay = crate::common::ReplayOnPanic(format!(
+        "BORZOI_NUGET_SOAK_SEED={seed} BORZOI_NUGET_SOAK_VERSIONS={n_versions} \
+         BORZOI_NUGET_SOAK_RANGES={n_ranges}"
+    ));
 
     let mut rng = SplitMix64(seed);
     let mut oracle = Oracle::spawn();
