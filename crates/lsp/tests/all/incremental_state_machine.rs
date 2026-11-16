@@ -3793,7 +3793,12 @@ fn install_sdk(version: &str, define: Option<Sym>) -> Vec<Cmd> {
             format!("dotnet/sdk/{version}/Sdks/Microsoft.NET.Sdk/Sdk/{file}").into_boxed_str(),
         )
     };
+    // The `dotnet.dll` hostfxr requires before it counts the version
+    // (`borzoi_msbuild::test_support::install_host_sdk_dir`).
+    let dotnet_dll: &'static str =
+        Box::leak(format!("dotnet/sdk/{version}/dotnet.dll").into_boxed_str());
     vec![
+        Cmd::Install(dotnet_dll, String::new()),
         Cmd::Install(dir("Sdk.props"), props),
         Cmd::Install(dir("Sdk.targets"), "<Project />\n".to_string()),
     ]

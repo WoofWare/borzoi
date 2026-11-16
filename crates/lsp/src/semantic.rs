@@ -6423,6 +6423,7 @@ mod tests {
         let install = |dotnet: &Path| {
             let sdk = dotnet.join("sdk/9.0.100/Sdks/Microsoft.NET.Sdk/Sdk");
             std::fs::create_dir_all(&sdk).unwrap();
+            borzoi_msbuild::test_support::install_host_sdk_of(&sdk);
             std::fs::write(sdk.join("Sdk.props"), "<Project/>").unwrap();
             std::fs::write(sdk.join("Sdk.targets"), "<Project/>").unwrap();
         };

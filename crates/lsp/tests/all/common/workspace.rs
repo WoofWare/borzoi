@@ -139,6 +139,7 @@ fn an_environment_without_a_real_sdk_is_accepted() {
     let stub = tmp.path().join("dotnet");
     let sdk = stub.join("sdk/10.0.100/Sdks/Microsoft.NET.Sdk/Sdk");
     std::fs::create_dir_all(&sdk).unwrap();
+    borzoi_msbuild::test_support::install_host_sdk_of(&sdk);
     std::fs::write(sdk.join("Sdk.props"), "<Project/>").unwrap();
     let env = SdkDiscoveryEnv {
         dotnet_root: Some(stub),

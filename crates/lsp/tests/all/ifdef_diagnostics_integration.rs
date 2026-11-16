@@ -132,6 +132,7 @@ fn sdk_supplied_define_constants_suppress_dead_branch_diagnostics() {
         .join("Test.Sdk")
         .join("Sdk");
     fs::create_dir_all(&sdk_root).unwrap();
+    borzoi_msbuild::test_support::install_host_sdk_of(&sdk_root);
     fs::write(
         sdk_root.join("Sdk.props"),
         "<Project><PropertyGroup><DefineConstants>FOO</DefineConstants></PropertyGroup></Project>",
@@ -192,6 +193,7 @@ fn build_paths_fixture(tmp: &TempDir, paths_json: &str) -> (PathBuf, SdkDiscover
         .join("Test.Sdk")
         .join("Sdk");
     fs::create_dir_all(&local_sdk_root).unwrap();
+    borzoi_msbuild::test_support::install_host_sdk_of(&local_sdk_root);
     fs::write(
         local_sdk_root.join("Sdk.props"),
         "<Project><PropertyGroup>\

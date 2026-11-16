@@ -33,6 +33,7 @@ fn install_sdk(dotnet_root: &Path, version: &str, sdk_name: &str) {
         .join(sdk_name)
         .join("Sdk");
     fs::create_dir_all(&sdk_root).unwrap();
+    borzoi_msbuild::test_support::install_host_sdk_of(&sdk_root);
     fs::write(sdk_root.join("Sdk.props"), "<Project/>").unwrap();
     fs::write(sdk_root.join("Sdk.targets"), "<Project/>").unwrap();
 }
@@ -1745,6 +1746,7 @@ fn non_empty_dotnet_cli_home_wins_over_home() {
 fn install_workload_layout(dotnet_root: &Path) -> PathBuf {
     let version_dir = dotnet_root.join("sdk").join("10.0.300");
     fs::create_dir_all(&version_dir).unwrap();
+    borzoi_msbuild::test_support::install_host_sdk_dir(&version_dir);
     fs::write(version_dir.join("KnownWorkloadManifests.txt"), "w.workload").unwrap();
     let manifest_dir = dotnet_root.join("sdk-manifests/10.0.300/w.workload/1.0.0");
     fs::create_dir_all(&manifest_dir).unwrap();

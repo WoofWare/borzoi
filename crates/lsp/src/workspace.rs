@@ -7269,6 +7269,7 @@ mod tests {
                 .join(sdk_name)
                 .join("Sdk");
             fs::create_dir_all(&sdk_root).unwrap();
+            borzoi_msbuild::test_support::install_host_sdk_of(&sdk_root);
             fs::write(sdk_root.join("Sdk.props"), sdk_props_body).unwrap();
             fs::write(sdk_root.join("Sdk.targets"), "<Project/>").unwrap();
         }
@@ -7583,6 +7584,7 @@ mod tests {
         fn install_sdk(dotnet: &Path, version: &str, define: &str) {
             let sdk = dotnet.join(format!("sdk/{version}/Sdks/Microsoft.NET.Sdk/Sdk"));
             fs::create_dir_all(&sdk).unwrap();
+            borzoi_msbuild::test_support::install_host_sdk_of(&sdk);
             fs::write(
                 sdk.join("Sdk.props"),
                 format!(

@@ -1146,6 +1146,7 @@ mod tests {
             .join(sdk_name)
             .join("Sdk");
         fs::create_dir_all(&sdk_root).unwrap();
+        borzoi_msbuild::test_support::install_host_sdk_of(&sdk_root);
         fs::write(sdk_root.join("Sdk.props"), "<Project/>").unwrap();
         fs::write(sdk_root.join("Sdk.targets"), "<Project/>").unwrap();
     }
@@ -1971,6 +1972,7 @@ mod tests {
             .join("Microsoft.NET.Sdk")
             .join("Sdk");
         fs::create_dir_all(&sdk_root).unwrap();
+        borzoi_msbuild::test_support::install_host_sdk_of(&sdk_root);
         fs::write(
             sdk_root.join("Sdk.props"),
             r#"<Project>

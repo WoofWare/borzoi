@@ -33,6 +33,7 @@ fn write(path: &Path, content: &str) {
 /// Build a dotnet root with one host SDK version dir and a known-list.
 fn host_sdk(root: &Path, version: &str, known: &[&str]) -> PathBuf {
     let version_dir = root.join("sdk").join(version);
+    crate::test_support::install_host_sdk_dir(&version_dir);
     write(
         &version_dir.join("KnownWorkloadManifests.txt"),
         &known.join("\n"),

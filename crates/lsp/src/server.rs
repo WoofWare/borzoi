@@ -3237,6 +3237,7 @@ mod tests {
             let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
             let sdk = root.join("dotnet/sdk/10.0.100/Sdks/Microsoft.NET.Sdk/Sdk");
             fs::create_dir_all(&sdk).unwrap();
+            borzoi_msbuild::test_support::install_host_sdk_of(&sdk);
             fs::write(sdk.join("Sdk.props"), "<Project />").unwrap();
             fs::write(sdk.join("Sdk.targets"), "<Project />").unwrap();
             let env = crate::sdk_discovery::SdkDiscoveryEnv {

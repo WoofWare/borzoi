@@ -760,3 +760,111 @@ fn the_running_sdk_s_copy_is_served_before_nuget_s() {
         cases.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Which installed SDK runs.
+
+/// What a host-selection case puts at `dotnet.dll` in a stray version
+/// directory that outranks every real SDK.
+#[derive(Clone, Copy, Debug)]
+enum StrayDll {
+    Absent,
+    Regular,
+    Odd(Odd),
+}
+
+/// The SDK directory hostfxr resolved, from its trace, running `dotnet
+/// --version` in `project` under the dotnet root `fake`.
+fn hostfxr_resolved_sdk(fake: &Path, project: &Path, trace: &Path) -> Option<PathBuf> {
+    let mut cmd = Command::new(fake.join("dotnet"));
+    cmd.current_dir(project)
+        .env_clear()
+        .envs(base_environment())
+        .env("DOTNET_ROOT", fake)
+        .env("COREHOST_TRACE", "1")
+        .env("COREHOST_TRACEFILE", trace)
+        .arg("--version");
+    // The stray SDK cannot run; only hostfxr's choice, in the trace, counts.
+    let _ = BoundedCommand::new(cmd)
+        .timeout(Duration::from_secs(120))
+        .run();
+    let text = host_fs::read_to_string(trace).expect("hostfxr writes its trace");
+    std::fs::remove_file(trace).unwrap();
+    text.lines().find_map(|line| {
+        line.strip_prefix("SDK path resolved to [")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .map(PathBuf::from)
+    })
+}
+
+/// hostfxr runs the highest installed SDK whose directory holds a
+/// `dotnet.dll` that `access(F_OK)` finds: an SDK directory without one is
+/// passed over, and so is one whose `dotnet.dll` is a dangling link or a
+/// loop, while a directory, a socket or a FIFO of that name counts. The
+/// resolver order then serves that SDK's copy of a name, so a stray version
+/// directory decides which copy we commit to.
+#[test]
+fn hostfxr_runs_the_highest_sdk_holding_a_dotnet_dll() {
+    let real = PathBuf::from(
+        std::env::var_os("DOTNET_ROOT").expect("DOTNET_ROOT is set; run under nix develop"),
+    );
+    let versions = installed_versions(&real);
+    let high = versions.last().expect("an installed SDK").1.clone();
+    let scratch = tempfile::TempDir::new().unwrap();
+    let aside = scratch.path().join("aside");
+    let trace = scratch.path().join("trace.txt");
+    let mut shapes = vec![StrayDll::Absent, StrayDll::Regular];
+    shapes.extend(Odd::ALL.iter().map(|&odd| StrayDll::Odd(odd)));
+    let mut failures = Vec::new();
+    for (index, shape) in shapes.iter().enumerate() {
+        let case_dir = scratch.path().join(format!("case{index}"));
+        let fake = case_dir.join("dotnet");
+        copy_dotnet_root(&real, &fake);
+        let stray = fake.join("sdk").join("99.0.0");
+        complete(&stray.join("Sdks").join(SDK).join("Sdk"), "stray");
+        complete(
+            &fake
+                .join("sdk")
+                .join(&high)
+                .join("Sdks")
+                .join(SDK)
+                .join("Sdk"),
+            "high",
+        );
+        let dll = stray.join("dotnet.dll");
+        match shape {
+            StrayDll::Absent => {}
+            StrayDll::Regular => std::fs::write(&dll, "").unwrap(),
+            StrayDll::Odd(odd) => odd_entry::place(*odd, &dll, "", &aside),
+        }
+        let project = case_dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("global.json"), "{}").unwrap();
+        let ours = locate_dotnet_sdk(&fake, None, SDK, None, None, &Observer::new())
+            .map(|paths| picked_in(&paths.root));
+        let theirs = hostfxr_resolved_sdk(&fake, &project, &trace).map(|dir| {
+            if dir.ends_with("99.0.0") {
+                "stray".to_owned()
+            } else if dir.ends_with(&high) {
+                "high".to_owned()
+            } else {
+                format!("elsewhere: {}", dir.display())
+            }
+        });
+        println!("{shape:?}: ours {ours:?}, hostfxr ran {theirs:?}");
+        if let Ok(ours) = &ours
+            && Some(ours) != theirs.as_ref()
+        {
+            failures.push(format!(
+                "{shape:?}: we serve {ours}, hostfxr runs {theirs:?}"
+            ));
+        }
+        if ours.is_err() {
+            failures.push(format!(
+                "{shape:?}: we decline where both SDKs ship the name: {ours:?}"
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&case_dir);
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
