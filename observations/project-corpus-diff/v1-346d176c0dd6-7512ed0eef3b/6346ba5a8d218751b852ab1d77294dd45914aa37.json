@@ -1,0 +1,1743 @@
+{
+  "observation_schema_version": 1,
+  "series": "v1-346d176c0dd6-7512ed0eef3b",
+  "repository": "WoofWare/borzoi",
+  "commit": "6346ba5a8d218751b852ab1d77294dd45914aa37",
+  "measured_at": "2026-11-16T05:17:12Z",
+  "workflow": {
+    "run_id": 43807865636,
+    "run_number": 460,
+    "run_attempt": 1,
+    "url": "https://github.com/WoofWare/borzoi/actions/runs/43807865636"
+  },
+  "corpus": {
+    "source": "WoofWare/borzoi-project-corpus",
+    "revision": "346d176c0dd66cafec34a907d1501b1154ea43a3"
+  },
+  "flake_lock_hash": "1d8fecb61977dd5f76129f28d2eaeb8d9adb5eaf6e494ffcb42283bd56035227",
+  "generator": {
+    "schema_version": 1,
+    "measurement": "project-corpus-diff",
+    "configuration": {
+      "build_properties": {},
+      "selection": {
+        "max_files": null,
+        "source": "list"
+      }
+    },
+    "statistics": {
+      "coverage": {
+        "basis_points": 6620
+      },
+      "decline_census": {
+        "assembly": {
+          "attributed": 224,
+          "by_cause": {
+            "abbreviation_opaque": 0,
+            "alias_companion_module": 0,
+            "alias_owned_tail": 0,
+            "alias_target_unchaseable": 63,
+            "assembly_auto_open_shadow": 0,
+            "assembly_case_head_contends": 0,
+            "assembly_case_slot_contested": 0,
+            "assembly_case_unordered": 0,
+            "assembly_case_untargeted": 0,
+            "attribute_in_file_unreliable": 0,
+            "attribute_opaque_leaf": 0,
+            "attribute_unrulable": 101,
+            "authoritative_module_leaf": 0,
+            "case_pattern_head_occupied": 0,
+            "case_qualifier_head": 0,
+            "case_representation_inaccessible": 0,
+            "contested_rooting": 0,
+            "custom_operation_may_take": 0,
+            "custom_operations_unknown": 0,
+            "descends_into_nested_module": 0,
+            "dropped_type_could_root": 0,
+            "earlier_block_root_type": 0,
+            "earlier_type_name_reused": 0,
+            "earlier_type_namespace_shared": 0,
+            "earlier_type_opened_over": 0,
+            "earlier_type_outside_namespace": 0,
+            "global_marker_head": 0,
+            "head_slot_unordered": 0,
+            "implicit_surface_unfolded": 0,
+            "in_file_arity_mismatch": 0,
+            "in_file_type_name_reused": 0,
+            "in_file_type_opened_over": 0,
+            "in_file_type_outside_namespace": 0,
+            "incomplete_assemblies": 0,
+            "manifest_surface_arity_fallback": 0,
+            "manifest_surface_contest": 0,
+            "manifest_surface_uncertain": 0,
+            "opaque_binder": 0,
+            "opaque_open": 0,
+            "opaque_value_head": 0,
+            "open_barrier_staled": 0,
+            "open_fold_collision": 0,
+            "open_fold_residue": 0,
+            "opened_exception_shadowed": 0,
+            "opened_overload_set": 0,
+            "opened_type_name": 0,
+            "project_auto_open_shadow": 0,
+            "project_path_shadow": 34,
+            "project_type_path_shadow": 1,
+            "project_type_shadow": 0,
+            "qualified_attribute": 0,
+            "qualified_name_declared_twice": 0,
+            "qualifier_arity_namesake": 0,
+            "recursive_module_active": 0,
+            "recursive_module_head": 0,
+            "same_file_auto_open_type": 0,
+            "same_file_case_shadow": 0,
+            "self_module_shadowed": 0,
+            "signature_screened": 3,
+            "unknowable_abbreviation_shadow": 0,
+            "unmodelled_contributor": 0,
+            "unmodelled_open_root": 0,
+            "value_evicted": 0,
+            "wrong_arity_occupant": 22
+          },
+          "by_pair": {
+            "abbreviation_opaque": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "alias_companion_module": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "alias_owned_tail": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "alias_target_unchaseable": {
+              "enclosing_namespace": 0,
+              "explicit_open": 63,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_auto_open_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_case_head_contends": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_case_slot_contested": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_case_unordered": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_case_untargeted": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "attribute_in_file_unreliable": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "attribute_opaque_leaf": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "attribute_unrulable": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 101,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "authoritative_module_leaf": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "case_pattern_head_occupied": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "case_qualifier_head": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "case_representation_inaccessible": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "contested_rooting": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "custom_operation_may_take": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "custom_operations_unknown": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "descends_into_nested_module": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "dropped_type_could_root": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_block_root_type": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_type_name_reused": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_type_namespace_shared": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_type_opened_over": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_type_outside_namespace": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "global_marker_head": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "head_slot_unordered": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "implicit_surface_unfolded": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "in_file_arity_mismatch": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "in_file_type_name_reused": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "in_file_type_opened_over": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "in_file_type_outside_namespace": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "incomplete_assemblies": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "manifest_surface_arity_fallback": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "manifest_surface_contest": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "manifest_surface_uncertain": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opaque_binder": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opaque_open": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opaque_value_head": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "open_barrier_staled": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "open_fold_collision": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "open_fold_residue": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opened_exception_shadowed": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opened_overload_set": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opened_type_name": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "project_auto_open_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "project_path_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 34,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "project_type_path_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 1,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "project_type_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "qualified_attribute": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "qualified_name_declared_twice": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "qualifier_arity_namesake": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "recursive_module_active": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "recursive_module_head": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "same_file_auto_open_type": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "same_file_case_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "self_module_shadowed": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "signature_screened": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 3,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "unknowable_abbreviation_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "unmodelled_contributor": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "unmodelled_open_root": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "value_evicted": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "wrong_arity_occupant": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 22
+            }
+          },
+          "by_shape": {
+            "assembly_type_member": 16,
+            "attribute_argument": 64,
+            "declaration_path": 154,
+            "field_label": 26,
+            "indexer": 1,
+            "measure": 1,
+            "member_access_on_expression": 34,
+            "member_access_on_value": 410,
+            "member_definition_name": 12,
+            "member_signature": 0,
+            "named_argument": 1,
+            "object_expression_body": 0,
+            "operator": 95,
+            "qualifier": 86,
+            "signature_file": 399,
+            "type_parameter": 0
+          },
+          "by_tier": {
+            "enclosing_namespace": 0,
+            "explicit_open": 98,
+            "implicit_open": 0,
+            "pre_walk": 104,
+            "root": 0,
+            "whole_walk": 22
+          },
+          "unattributed": 1401,
+          "unexplained": 102
+        },
+        "project": {
+          "attributed": 282,
+          "by_cause": {
+            "abbreviation_opaque": 0,
+            "alias_companion_module": 0,
+            "alias_owned_tail": 0,
+            "alias_target_unchaseable": 0,
+            "assembly_auto_open_shadow": 0,
+            "assembly_case_head_contends": 0,
+            "assembly_case_slot_contested": 0,
+            "assembly_case_unordered": 0,
+            "assembly_case_untargeted": 0,
+            "attribute_in_file_unreliable": 0,
+            "attribute_opaque_leaf": 0,
+            "attribute_unrulable": 0,
+            "authoritative_module_leaf": 0,
+            "case_pattern_head_occupied": 0,
+            "case_qualifier_head": 0,
+            "case_representation_inaccessible": 0,
+            "contested_rooting": 0,
+            "custom_operation_may_take": 0,
+            "custom_operations_unknown": 0,
+            "descends_into_nested_module": 0,
+            "dropped_type_could_root": 0,
+            "earlier_block_root_type": 0,
+            "earlier_type_name_reused": 58,
+            "earlier_type_namespace_shared": 0,
+            "earlier_type_opened_over": 71,
+            "earlier_type_outside_namespace": 0,
+            "global_marker_head": 0,
+            "head_slot_unordered": 6,
+            "implicit_surface_unfolded": 0,
+            "in_file_arity_mismatch": 0,
+            "in_file_type_name_reused": 1,
+            "in_file_type_opened_over": 0,
+            "in_file_type_outside_namespace": 0,
+            "incomplete_assemblies": 0,
+            "manifest_surface_arity_fallback": 0,
+            "manifest_surface_contest": 0,
+            "manifest_surface_uncertain": 0,
+            "opaque_binder": 3,
+            "opaque_open": 0,
+            "opaque_value_head": 0,
+            "open_barrier_staled": 0,
+            "open_fold_collision": 0,
+            "open_fold_residue": 0,
+            "opened_exception_shadowed": 0,
+            "opened_overload_set": 0,
+            "opened_type_name": 0,
+            "project_auto_open_shadow": 9,
+            "project_path_shadow": 111,
+            "project_type_path_shadow": 2,
+            "project_type_shadow": 8,
+            "qualified_attribute": 0,
+            "qualified_name_declared_twice": 0,
+            "qualifier_arity_namesake": 0,
+            "recursive_module_active": 0,
+            "recursive_module_head": 0,
+            "same_file_auto_open_type": 0,
+            "same_file_case_shadow": 0,
+            "self_module_shadowed": 0,
+            "signature_screened": 13,
+            "unknowable_abbreviation_shadow": 0,
+            "unmodelled_contributor": 0,
+            "unmodelled_open_root": 0,
+            "value_evicted": 0,
+            "wrong_arity_occupant": 0
+          },
+          "by_pair": {
+            "abbreviation_opaque": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "alias_companion_module": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "alias_owned_tail": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "alias_target_unchaseable": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_auto_open_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_case_head_contends": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_case_slot_contested": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_case_unordered": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "assembly_case_untargeted": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "attribute_in_file_unreliable": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "attribute_opaque_leaf": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "attribute_unrulable": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "authoritative_module_leaf": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "case_pattern_head_occupied": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "case_qualifier_head": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "case_representation_inaccessible": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "contested_rooting": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "custom_operation_may_take": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "custom_operations_unknown": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "descends_into_nested_module": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "dropped_type_could_root": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_block_root_type": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_type_name_reused": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 58,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_type_namespace_shared": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_type_opened_over": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 71,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "earlier_type_outside_namespace": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "global_marker_head": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "head_slot_unordered": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 6,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "implicit_surface_unfolded": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "in_file_arity_mismatch": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "in_file_type_name_reused": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 1,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "in_file_type_opened_over": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "in_file_type_outside_namespace": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "incomplete_assemblies": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "manifest_surface_arity_fallback": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "manifest_surface_contest": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "manifest_surface_uncertain": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opaque_binder": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 3,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opaque_open": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opaque_value_head": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "open_barrier_staled": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "open_fold_collision": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "open_fold_residue": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opened_exception_shadowed": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opened_overload_set": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "opened_type_name": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "project_auto_open_shadow": {
+              "enclosing_namespace": 5,
+              "explicit_open": 4,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "project_path_shadow": {
+              "enclosing_namespace": 75,
+              "explicit_open": 3,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 33,
+              "whole_walk": 0
+            },
+            "project_type_path_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 2,
+              "whole_walk": 0
+            },
+            "project_type_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 8,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "qualified_attribute": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "qualified_name_declared_twice": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "qualifier_arity_namesake": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "recursive_module_active": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "recursive_module_head": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "same_file_auto_open_type": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "same_file_case_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "self_module_shadowed": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "signature_screened": {
+              "enclosing_namespace": 2,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 11,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "unknowable_abbreviation_shadow": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "unmodelled_contributor": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "unmodelled_open_root": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "value_evicted": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            },
+            "wrong_arity_occupant": {
+              "enclosing_namespace": 0,
+              "explicit_open": 0,
+              "implicit_open": 0,
+              "pre_walk": 0,
+              "root": 0,
+              "whole_walk": 0
+            }
+          },
+          "by_shape": {
+            "assembly_type_member": 0,
+            "attribute_argument": 0,
+            "declaration_path": 177,
+            "field_label": 358,
+            "indexer": 0,
+            "measure": 39,
+            "member_access_on_expression": 17,
+            "member_access_on_value": 1460,
+            "member_definition_name": 237,
+            "member_signature": 10,
+            "named_argument": 2,
+            "object_expression_body": 0,
+            "operator": 0,
+            "qualifier": 1464,
+            "signature_file": 1404,
+            "type_parameter": 485
+          },
+          "by_tier": {
+            "enclosing_namespace": 82,
+            "explicit_open": 7,
+            "implicit_open": 0,
+            "pre_walk": 158,
+            "root": 35,
+            "whole_walk": 0
+          },
+          "unattributed": 5739,
+          "unexplained": 86
+        }
+      },
+      "deferrals": {
+        "assembly": 1625,
+        "project": 6021,
+        "total": 7646
+      },
+      "divergences": {
+        "assembly": 0,
+        "project": 0,
+        "reverse": 0,
+        "total": 0
+      },
+      "files_compared": 106,
+      "hover_types": {
+        "by_class": {
+          "active-pattern-case": {
+            "agrees": 0,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 0,
+            "resolver-declined": 0,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "assembly-entity": {
+            "agrees": 0,
+            "no-hover": 1,
+            "not-a-symbol": 0,
+            "not-a-value": 798,
+            "resolver-declined": 392,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "assembly-field": {
+            "agrees": 0,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 0,
+            "resolver-declined": 19,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 2,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "assembly-member": {
+            "agrees": 0,
+            "no-hover": 2,
+            "not-a-symbol": 0,
+            "not-a-value": 0,
+            "resolver-declined": 197,
+            "shown-signature": 10,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "assembly-union-case": {
+            "agrees": 0,
+            "no-hover": 6,
+            "not-a-symbol": 0,
+            "not-a-value": 209,
+            "resolver-declined": 3,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "assembly-value": {
+            "agrees": 0,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 0,
+            "resolver-declined": 53,
+            "shown-signature": 747,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 11,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "constructor": {
+            "agrees": 0,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 93,
+            "resolver-declined": 120,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "earlier-file-value": {
+            "agrees": 43,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 0,
+            "resolver-declined": 2,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 11,
+            "withheld-earlier-file-untyped-at-definition": 131,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "in-file-value": {
+            "agrees": 38,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 0,
+            "resolver-declined": 0,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 151,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 18,
+            "wrong": 0
+          },
+          "local": {
+            "agrees": 297,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 0,
+            "resolver-declined": 15,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 21,
+            "withheld-in-file-parameter": 1143,
+            "withheld-in-file-pattern-local": 267,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 570,
+            "wrong": 0
+          },
+          "project-entity": {
+            "agrees": 0,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 783,
+            "resolver-declined": 940,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "project-field": {
+            "agrees": 0,
+            "no-hover": 0,
+            "not-a-symbol": 4,
+            "not-a-value": 0,
+            "resolver-declined": 533,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "project-member": {
+            "agrees": 0,
+            "no-hover": 2,
+            "not-a-symbol": 0,
+            "not-a-value": 0,
+            "resolver-declined": 170,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 1,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "project-union-case": {
+            "agrees": 0,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 169,
+            "resolver-declined": 9,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "type-parameter": {
+            "agrees": 0,
+            "no-hover": 158,
+            "not-a-symbol": 0,
+            "not-a-value": 834,
+            "resolver-declined": 316,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          },
+          "unknown": {
+            "agrees": 0,
+            "no-hover": 0,
+            "not-a-symbol": 0,
+            "not-a-value": 0,
+            "resolver-declined": 3,
+            "shown-signature": 0,
+            "shown-ungraded": 0,
+            "unread": 0,
+            "withheld-assembly-arg-groups": 0,
+            "withheld-assembly-measures": 0,
+            "withheld-assembly-other": 0,
+            "withheld-assembly-target-typars": 0,
+            "withheld-declared-elsewhere": 0,
+            "withheld-earlier-file-typed-at-definition": 0,
+            "withheld-earlier-file-untyped-at-definition": 0,
+            "withheld-in-file-active-pattern": 0,
+            "withheld-in-file-enum-case": 0,
+            "withheld-in-file-function": 0,
+            "withheld-in-file-parameter": 0,
+            "withheld-in-file-pattern-local": 0,
+            "withheld-in-file-static-member": 0,
+            "withheld-in-file-value": 0,
+            "wrong": 0
+          }
+        },
+        "by_verdict": {
+          "agrees": 378,
+          "no-hover": 169,
+          "not-a-symbol": 4,
+          "not-a-value": 2886,
+          "resolver-declined": 2772,
+          "shown-signature": 757,
+          "shown-ungraded": 0,
+          "unread": 2,
+          "withheld-assembly-arg-groups": 0,
+          "withheld-assembly-measures": 11,
+          "withheld-assembly-other": 0,
+          "withheld-assembly-target-typars": 0,
+          "withheld-declared-elsewhere": 0,
+          "withheld-earlier-file-typed-at-definition": 11,
+          "withheld-earlier-file-untyped-at-definition": 131,
+          "withheld-in-file-active-pattern": 0,
+          "withheld-in-file-enum-case": 0,
+          "withheld-in-file-function": 172,
+          "withheld-in-file-parameter": 1143,
+          "withheld-in-file-pattern-local": 267,
+          "withheld-in-file-static-member": 1,
+          "withheld-in-file-value": 588,
+          "wrong": 0
+        },
+        "total": 9292
+      },
+      "matches": {
+        "assembly": 4423,
+        "project": 10554,
+        "total": 14977
+      },
+      "project_assets_by_status": {
+        "dotnet_root_unavailable": 0,
+        "missing": 0,
+        "not_checked": 0,
+        "project_directory_unavailable": 0,
+        "resolution_failed": 0,
+        "resolved": 6
+      },
+      "projects": {
+        "comparable": 5,
+        "discovered": 6,
+        "discovery_errors": 0,
+        "skipped": 1,
+        "skipped_basis_points": 1667,
+        "visited": 6
+      },
+      "skipped_uses": {
+        "ambiguous_oracle_range": 66,
+        "compiler_generated": 33,
+        "definitions": 5097,
+        "no_oracle_declaration": 0,
+        "non_project_declarations": 0,
+        "out_of_project_declarations": 0,
+        "shadowed_constructor_use": 321,
+        "total": 5517,
+        "zero_width": 0
+      },
+      "unmodelled_binders": 0,
+      "unoracled_definitions": 0,
+      "unoracled_or_pattern_aliases": 0,
+      "uses": {
+        "assembly_considered": 6048,
+        "attribute_commits_compared": 158,
+        "fcs_reported": 28140,
+        "member_commits_compared": 14,
+        "project_considered": 16575,
+        "total_considered": 22623
+      }
+    }
+  }
+}
