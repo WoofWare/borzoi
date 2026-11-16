@@ -139,8 +139,9 @@ fn hidden_content_may_define_an_unbound_path_so_an_unreached_point_declines() {
 /// The same opacity with no `Directory.Build.*` file anywhere charges nothing
 /// for the import points: the walk's doubt about them is a doubt about whether
 /// the default file is imported, and there is none. (A file the hidden content
-/// names is hidden content like any other, which withdraws the Compile set
-/// and the reference list on its own account, #821, #848.)
+/// names is hidden content like any other, which withdraws the Compile set,
+/// the reference list and the define set on its own account, #821, #848,
+/// #862.)
 #[test]
 fn an_import_the_walk_cannot_decide_charges_nothing_without_a_directory_build_file() {
     let tmp = tempfile::tempdir().unwrap();
@@ -171,7 +172,18 @@ fn an_import_the_walk_cannot_decide_charges_nothing_without_a_directory_build_fi
         parsed.compile_item_uncertainties
     );
     assert!(parsed.project_references_uncertain);
-    assert!(!parsed.define_constants_uncertain);
+    assert!(
+        parsed.define_constants_uncertain
+            && parsed
+                .define_constants_uncertainties
+                .iter()
+                .all(|cause| matches!(
+                    cause.kind,
+                    crate::DefineConstantsUncertaintyCauseKind::HiddenContent(_)
+                )),
+        "the hidden import withdraws the define set, the points nothing: {:?}",
+        parsed.define_constants_uncertainties
+    );
 }
 
 /// The body names the file outright, so the SDK's discovery never runs and

@@ -64,10 +64,10 @@ use crate::document::attribute;
 use super::condition;
 use super::diagnostic::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
-    CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause, Diagnostic, DiagnosticKind,
-    DiagnosticOrigin, ImportFailReason, PackageReferenceUncertaintyCause,
-    PackageReferenceUncertaintyCauseKind, StructuralCompileItemUncertainty,
-    StructuralPackageReferenceUncertainty,
+    CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause,
+    DefineConstantsUncertaintyCauseKind, Diagnostic, DiagnosticKind, DiagnosticOrigin,
+    ImportFailReason, PackageReferenceUncertaintyCause, PackageReferenceUncertaintyCauseKind,
+    StructuralCompileItemUncertainty, StructuralPackageReferenceUncertainty,
 };
 use super::dotnet_io;
 use super::imports::normalise;
@@ -1116,9 +1116,10 @@ struct State<'r> {
     /// `<PropertyGroup>` condition gating one. A diagnostic [`Self::push`]ed
     /// here means the evaluated `$(DefineConstants)` may diverge from MSBuild,
     /// so files would parse under the wrong `#if` branches. SDK-internal define
-    /// manipulation is tolerated (gated `!in_sdk_subtree` at the set sites, like
-    /// `compile_context`) — we already don't model the framework defines the
-    /// SDK adds in targets.
+    /// manipulation the walk entered is tolerated (gated `!in_sdk_subtree` at
+    /// the set sites, like `compile_context`) — we already don't model the
+    /// framework defines the SDK adds in targets. Content it did not enter is
+    /// not: [`Self::latch_walk_opaque`] withdraws the set for it.
     define_context: bool,
     /// `true` only while expanding a `<DefineConstants>` *value* (not its
     /// condition). The `$(DefineConstants)` self-reference exemption
@@ -1952,9 +1953,9 @@ impl<'r> State<'r> {
              the walk produces its result"
         );
         // Content the walk could not see may hold or import anything, so
-        // neither the Compile order (#819, #821) nor the reference list (#848)
-        // is certain after it: every site that latches opacity withdraws both,
-        // in an SDK file as anywhere.
+        // neither the Compile order (#819, #821), the reference list (#848)
+        // nor the define set (#843, #862) is certain after it: every site that
+        // latches opacity withdraws all three, in an SDK file as anywhere.
         debug_assert!(
             self.walk_opaque.is_none() || self.items_uncertain,
             "the walk hid content ({:?}) but kept its Compile set certain",
@@ -1963,6 +1964,11 @@ impl<'r> State<'r> {
         debug_assert!(
             self.walk_opaque.is_none() || self.project_references_uncertain,
             "the walk hid content ({:?}) but kept its reference list certain",
+            self.walk_opaque
+        );
+        debug_assert!(
+            self.walk_opaque.is_none() || self.define_constants_uncertain,
+            "the walk hid content ({:?}) but kept its define set certain",
             self.walk_opaque
         );
         // The output-name verdict and the property reads need `&self`, so
@@ -2156,7 +2162,7 @@ impl<'r> State<'r> {
             });
             define_constants_uncertain = true;
             define_constants_uncertainties.push(DefineConstantsUncertaintyCause {
-                kind: kind.clone(),
+                kind: DefineConstantsUncertaintyCauseKind::Diagnostic(kind.clone()),
                 span: span.clone(),
                 origin: origin.clone(),
             });
@@ -2332,7 +2338,7 @@ impl<'r> State<'r> {
         // or import, a malformed Choose (which fails MSBuild's evaluation
         // outright). An undecided Choose does not come here: its branch
         // writes are enumerated per name instead.
-        self.latch_walk_opaque(OpacityCause::Unentered(format!("{kind:?}")));
+        self.latch_walk_opaque(OpacityCause::Unentered(format!("{kind:?}")), span.clone());
         self.record_package_reference_uncertainty(
             PackageReferenceUncertaintyCauseKind::Structural(kind),
             span,
@@ -2408,7 +2414,7 @@ impl<'r> State<'r> {
         // the walk — after it, an undefined read could be of a name that
         // hidden content defined (see [`State::walk_opaque`]).
         if is_structural_compile_risk(&kind) {
-            self.latch_walk_opaque(OpacityCause::Unentered(format!("{kind:?}")));
+            self.latch_walk_opaque(OpacityCause::Unentered(format!("{kind:?}")), span.clone());
         }
         let compile_uncertain =
             self.compile_context || self.import_gate_context || is_structural_compile_risk(&kind);
@@ -2420,7 +2426,8 @@ impl<'r> State<'r> {
         // symbol set may be wrong. `define_context` is only set outside the SDK
         // tree, so no further provenance check. The one exception is the
         // `$(DefineConstants);FOO` append idiom's own read, which the caller
-        // names.
+        // names. (Hidden content withdraws the set where it is latched,
+        // [`Self::latch_walk_opaque`].)
         let define_uncertain = self.define_context && define_axis == DefineAxis::Doubts;
         if define_uncertain {
             self.define_constants_uncertain = true;
@@ -2480,7 +2487,7 @@ impl<'r> State<'r> {
         if define_uncertain {
             self.define_constants_uncertainties
                 .push(DefineConstantsUncertaintyCause {
-                    kind: kind.clone(),
+                    kind: DefineConstantsUncertaintyCauseKind::Diagnostic(kind.clone()),
                     span: span.clone(),
                     origin: origin.clone(),
                 });
@@ -2666,10 +2673,23 @@ impl<'r> State<'r> {
     /// ([`Trust::stale`]): the content just passed may have rewritten it. A
     /// reserved name or a caller global cannot be rewritten by any file, so
     /// neither goes stale.
-    fn latch_walk_opaque(&mut self, cause: OpacityCause) {
+    ///
+    /// The first latch also withdraws the define set, in an SDK file as
+    /// anywhere, recording the construct at `span` as the cause
+    /// ([`DefineConstantsUncertaintyCauseKind::HiddenContent`] says why).
+    fn latch_walk_opaque(&mut self, cause: OpacityCause, span: Range<usize>) {
         self.lookup
             .go_stale(&std::sync::Arc::new(cause.clone()), &self.protected);
         if self.walk_opaque.is_none() {
+            self.define_constants_uncertain = true;
+            self.define_constants_uncertainties
+                .push(DefineConstantsUncertaintyCause {
+                    kind: DefineConstantsUncertaintyCauseKind::HiddenContent(
+                        crate::UntrustedCause::of_opacity(&cause),
+                    ),
+                    span: self.effective_span(span),
+                    origin: self.current_origin(),
+                });
             self.walk_opaque = Some(cause);
         }
         // Content the walk could not see may hold the root that settles
@@ -2889,8 +2909,13 @@ impl<'r> State<'r> {
         // decided here, on the name this read substituted, and nowhere else:
         // a root re-surfaced from another property ([`Self::push_root`]) is one
         // witness of that value's doubt, and an independent cause may have
-        // lost the race to be it.
-        let define_axis = if self.in_define_value && is_define_self_reference(&name) {
+        // lost the race to be it. It holds only while the read is undefined
+        // for want of the SDK's own defines alone
+        // ([`Self::self_append_reads_the_sdk_free_view`]).
+        let define_axis = if self.in_define_value
+            && is_define_self_reference(&name)
+            && self.self_append_reads_the_sdk_free_view()
+        {
             DefineAxis::SelfAppend
         } else {
             DefineAxis::Doubts
@@ -2902,6 +2927,18 @@ impl<'r> State<'r> {
         );
         self.diagnostic_roots.insert(index, root);
         define_axis
+    }
+
+    /// Whether an undefined `$(DefineConstants)` read is undefined only in
+    /// the view the define set is published in: the project's own, without
+    /// the defines the SDK adds ([`crate::ParsedProject::define_constants_uncertain`]).
+    /// Not once the walk has passed content it did not see, which may have
+    /// written it (#843), nor when the environment names it in spellings
+    /// promotion skipped, where MSBuild holds one of their values. A write the
+    /// walk refused does not end the view: in a user's file that write raised
+    /// the flag itself, and in an SDK file it is the SDK's own define.
+    fn self_append_reads_the_sdk_free_view(&self) -> bool {
+        self.walk_opaque.is_none() && !self.env_property_names.contains("defineconstants")
     }
 
     fn note_package_uncertain_from_sdk_property_taint(&mut self, raw: &str) {
@@ -3441,7 +3478,7 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                 || matches!(gate, CondGate::Unsupported);
             if gate_raised_doubt {
                 let cause = state.gate_opacity_cause(node, diagnostics_before_gate);
-                state.latch_walk_opaque(cause);
+                state.latch_walk_opaque(cause, node.range());
             }
             match gate {
                 CondGate::Run => {
@@ -4857,7 +4894,9 @@ enum DefineAxis {
 /// the accumulator append idiom (`$(DefineConstants);FOO`). The define set is
 /// the project's own view, without the defines the SDK adds in targets
 /// ([`crate::ParsedProject::define_constants_uncertain`]), so the read is ""
-/// in that view and must not flag [`State::define_constants_uncertain`].
+/// in that view and must not flag [`State::define_constants_uncertain`],
+/// while nothing else may have written it
+/// ([`State::self_append_reads_the_sdk_free_view`]).
 ///
 /// Every *other* undefined/unsupported reference in a define value or condition
 /// is a genuine divergence (the referenced property may be set in the real
@@ -5074,7 +5113,7 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
         state.diagnostics.len() != diagnostics_before_gate || matches!(gate, CondGate::Unsupported);
     if gate_raised_doubt {
         let cause = state.gate_opacity_cause(node, diagnostics_before_gate);
-        state.latch_walk_opaque(cause);
+        state.latch_walk_opaque(cause, node.range());
     }
     match gate {
         CondGate::Run => {}

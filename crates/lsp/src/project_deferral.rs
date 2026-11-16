@@ -37,9 +37,10 @@
 
 use borzoi_msbuild::{
     CompileConditionReason, CompileConditionUncertainty, CompileItemUncertaintyCause,
-    CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause, DiagnosticKind,
-    DiagnosticOrigin, ImplicitImportKind, ImportFailReason, ParsedProject, RejectionCause,
-    StructuralCompileItemUncertainty, UnloadableImport, UntrustedCause,
+    CompileItemUncertaintyCauseKind, DefineConstantsUncertaintyCause,
+    DefineConstantsUncertaintyCauseKind, DiagnosticKind, DiagnosticOrigin, ImplicitImportKind,
+    ImportFailReason, ParsedProject, RejectionCause, StructuralCompileItemUncertainty,
+    UnloadableImport, UntrustedCause,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -806,11 +807,15 @@ fn render_compile_cause(cause: &CompileItemUncertaintyCause) -> String {
 }
 
 fn render_define_cause(cause: &DefineConstantsUncertaintyCause) -> String {
-    with_origin(
-        format!(
-            "the `#if` symbols may be wrong: {}",
-            render_diagnostic_kind(&cause.kind)
+    let why = match &cause.kind {
+        DefineConstantsUncertaintyCauseKind::Diagnostic(kind) => render_diagnostic_kind(kind),
+        DefineConstantsUncertaintyCauseKind::HiddenContent(hidden) => format!(
+            "part of the build I couldn't see into may set them; that part depends on {}",
+            untrusted_cause_phrase(hidden)
         ),
+    };
+    with_origin(
+        format!("the `#if` symbols may be wrong: {why}"),
         &cause.origin,
     )
 }

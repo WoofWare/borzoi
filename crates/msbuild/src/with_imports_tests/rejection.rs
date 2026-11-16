@@ -41,7 +41,7 @@ fn assert_withdrawn(parsed: &ParsedProject, names: &[&str]) {
         parsed
             .define_constants_uncertainties
             .iter()
-            .any(|c| may_be_rejected(&c.kind))
+            .any(|c| matches!(&c.kind, DefineConstantsUncertaintyCauseKind::Diagnostic(k) if may_be_rejected(k)))
     );
     assert!(
         parsed
