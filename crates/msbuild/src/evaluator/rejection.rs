@@ -31,9 +31,9 @@
 //! site too ([`illegal_condition_at`]), and so is one MSBuild may evaluate
 //! where the walk does not: under a gate the walk could not decide from
 //! certain inputs ([`judge_unwalked`]), and every condition of the item pass,
-//! judged group by group ([`judge_deferred`]) because MSBuild evaluates an
-//! item's condition, and an `Include` item's metadata conditions, whatever
-//! its group's or its own gate holds.
+//! judged group by group ([`judge_deferred`]) where a build evaluates it
+//! (below), since the walk's item capture gates an illegal condition's
+//! contents as an unmodelled one's.
 //!
 //! **Certain.** A [`RejectionCertainty::Certain`] site is a claim the
 //! differentials grade, so it needs MSBuild to reach the construct for
@@ -60,22 +60,22 @@
 //! Short of that, the same construct is a Possible site.
 //!
 //! Where MSBuild evaluates a condition at all is pinned against the oracle in
-//! `tests/condition_diff.rs`'s `where_msbuild_evaluates_a_condition`: never
-//! under a false `<PropertyGroup>`, `<ItemDefinitionGroup>` (or false item
+//! `tests/condition_diff.rs`'s `where_msbuild_evaluates_a_condition`, which
+//! also holds these judgements to it: never under a false `<PropertyGroup>`,
+//! `<ItemGroup>` (or false item), `<ItemDefinitionGroup>` (or false item
 //! definition) or `<ImportGroup>`, an unchosen `<When>` (nor a `<When>` after
 //! the chosen one), on or inside a `<Target>`, or on a write of a global
-//! property; always for an `<ItemGroup>`'s items and an `Include` item's
-//! metadata; an `Update` item's metadata only when the update applies.
+//! property; an `Update` item's metadata only when the update applies.
 //!
-//! "Always" is design-time evaluation's rule (the editable `Project`, which
-//! `dotnet msbuild -getProperty:` with no target also builds), and the one
-//! these judgements follow. A build (`ProjectInstance`: `dotnet build`, `dotnet
-//! restore`) evaluates an item under a false gate not at all, so it accepts
-//! every project whose only illegal condition sits there. Design-time
-//! evaluation rejects every project a build rejects, so a withdrawal by this
-//! rule commits nothing a build rejects; a Certain claim on such an item is a
-//! claim about design-time evaluation. The same test pins which projects only
-//! design-time evaluation rejects.
+//! That is a build's evaluation (`ProjectInstance`: `dotnet build`, `dotnet
+//! restore`), the compilation the LSP models, and the one these judgements
+//! follow. Under a false `<ItemGroup>` or item it evaluates nothing of the
+//! item: not its condition (under a false group), its `Include`, `Exclude` or
+//! metadata, nor the item operation it would build. Design-time evaluation
+//! (the editable `Project`, which `dotnet msbuild -getProperty:` with no target
+//! also builds) evaluates all of those but an `Update`'s, so it rejects
+//! projects a build accepts; the same test pins which, and the walk evaluates
+//! each as a build does.
 //!
 //! **What is not judged.** Content the walk did not see may hold an import
 //! that fails, or rewrite a value so that one the walk reached fails; the walk
@@ -471,17 +471,21 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
 }
 
 /// Judge the `<ItemGroup>` at `node`, which MSBuild reaches as `reached` says.
-/// MSBuild evaluates each item's condition whatever the group's holds, and an
-/// `Include` item's metadata conditions whatever the item's holds; an
-/// `Update`'s metadata only where the update applies. Metadata that reads
-/// item metadata (`%(…)`) or an item list (`@(…)`) is evaluated item by item,
-/// so not at all when the `Include` names no item: then its conditions are
-/// only possibly evaluated.
+/// A build evaluates an item's condition only under a true group, and the
+/// rest of the item (the operation it builds, and an `Include` item's
+/// metadata conditions) only under a true item; an `Update`'s metadata only
+/// where the update applies. Metadata that reads item metadata (`%(…)`) or an
+/// item list (`@(…)`) is evaluated item by item, so not at all when the
+/// `Include` names no item: then its conditions are only possibly evaluated.
 fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
-    judge_condition(node, &entry_dir, reached, state);
+    let Some(inner) = judge_gate(node, &entry_dir, reached, state).inner(reached) else {
+        return;
+    };
     for item in node.children().filter(Node::is_element) {
-        judge_condition(item, &entry_dir, reached, state);
+        let Some(reached) = judge_gate(item, &entry_dir, inner, state).inner(inner) else {
+            continue;
+        };
         if let Some(sure) = loader::remove_matching_more_than_items(item) {
             state.note_rejection(
                 certain_if(reached && sure),

@@ -553,13 +553,11 @@ fn an_illegal_condition_msbuild_evaluates_is_rejected() {
         "<PropertyGroup><W>abc</W><R Condition=\"$(W) &gt; 1\">x</R></PropertyGroup>",
         // A scalar outside the boolean vocabulary.
         "<PropertyGroup><R Condition=\"$(Unset)\">x</R></PropertyGroup>",
-        // An item's condition, whatever its group's holds.
+        // An item's condition under a true group, and an `Include` item's
+        // metadata under a true item.
         "<ItemGroup><I Include=\"x\" Condition=\"tr ue\" /></ItemGroup>",
-        "<ItemGroup Condition=\"false\"><I Include=\"x\" Condition=\"1 &lt; abc\" /></ItemGroup>",
-        "<ItemGroup Condition=\"false\"><I Remove=\"x\" Condition=\"tr ue\" /></ItemGroup>",
-        // An `Include` item's metadata, whatever the item's holds.
-        "<ItemGroup><I Include=\"x\" Condition=\"false\"><M Condition=\"tr ue\">m</M></I></ItemGroup>",
-        "<ItemGroup Condition=\"false\"><I Include=\"x\"><M Condition=\"1 &lt; abc\">m</M></I></ItemGroup>",
+        "<ItemGroup><I Remove=\"x\" Condition=\"tr ue\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\"><M Condition=\"1 &lt; abc\">m</M></I></ItemGroup>",
         "<ItemDefinitionGroup Condition=\"tr ue\" />",
         "<ItemDefinitionGroup><I Condition=\"tr ue\" /></ItemDefinitionGroup>",
         "<ItemDefinitionGroup><I><M Condition=\"1 &lt; abc\">m</M></I></ItemDefinitionGroup>",
@@ -593,6 +591,13 @@ fn an_illegal_condition_msbuild_never_evaluates_is_not_rejected() {
         "<PropertyGroup Condition=\"false\"><R Condition=\"tr ue\">x</R></PropertyGroup>",
         "<PropertyGroup Condition=\"false\"><R Condition=\"1 &lt; abc\">x</R></PropertyGroup>",
         "<ItemGroup Condition=\"false and 1 &lt; abc\"><I Include=\"x\" /></ItemGroup>",
+        // Nothing of a false-gated item, in a build.
+        "<ItemGroup Condition=\"false\"><I Include=\"x\" Condition=\"1 &lt; abc\" /></ItemGroup>",
+        "<ItemGroup Condition=\"false\"><I Remove=\"x\" Condition=\"tr ue\" /></ItemGroup>",
+        "<ItemGroup Condition=\"false\"><I Remove=\"x\" MatchOnMetadata=\"k\" /></ItemGroup>",
+        "<ItemGroup><I Remove=\"x\" MatchOnMetadata=\"k\" Condition=\"false\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" Condition=\"false\"><M Condition=\"tr ue\">m</M></I></ItemGroup>",
+        "<ItemGroup Condition=\"false\"><I Include=\"x\"><M Condition=\"1 &lt; abc\">m</M></I></ItemGroup>",
         "<ItemDefinitionGroup Condition=\"false\"><I><M Condition=\"tr ue\">m</M></I></ItemDefinitionGroup>",
         "<ItemDefinitionGroup><I Condition=\"false\"><M Condition=\"tr ue\">m</M></I></ItemDefinitionGroup>",
         "<ImportGroup Condition=\"false\"><Import Project=\"nope.props\" Condition=\"tr ue\" /></ImportGroup>",

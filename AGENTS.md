@@ -105,8 +105,10 @@ This is a Cargo workspace with ten members:
   toolset name such as `MSBuildSDKsPath` is a global like any other. The
   editable `Project` a design-time host loads (`"designTime": true` on
   `project`) also evaluates the items under a false gate, so it rejects every
-  project a build rejects and more; the walk's rejection model is its rule, and
-  `where_msbuild_evaluates_a_condition` pins where the two differ. The five
+  project a build rejects and more. The walk's rejection model is the build's
+  (`evaluator/rejection.rs`): nothing of an item under a false `<ItemGroup>`
+  or item condition is judged. `where_msbuild_evaluates_a_condition` pins
+  where the two evaluations differ, and holds the walk to the build there. The five
   differentials that ride on these ops:
   `condition_diff.rs`, `property_expr_diff.rs`,
   `fsproj_property_table_diff.rs`,

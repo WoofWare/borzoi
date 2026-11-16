@@ -4905,11 +4905,19 @@ fn an_update_leaving_batched_entries_marks_the_set_uncertain() {
     // `Update` named) removes its earlier fragments by text, not by the
     // batch's full-path key, so they stay and are applied at the next
     // flush, after the `Include`. Probed (dotnet 10): `Beta` gets the
-    // override. The leaving `Update` need not write a package metadatum,
-    // and need not run: a condition-false one is batched too.
-    for first in [
-        r#"<PackageReference Update="Alpha;Alpha" />"#,
-        r#"<PackageReference Update="Alpha;Alpha" Condition="'$(NeverSet)' == 'true'" />"#,
+    // override. The leaving `Update` need not write a package metadatum. A
+    // condition-false one is not batched in a build (`ProjectInstance`, probed
+    // likewise), so after one `Beta` gets no override, and the set is certain.
+    for (first, uncertain) in [
+        (r#"<PackageReference Update="Alpha;Alpha" />"#, true),
+        (
+            r#"<PackageReference Update="Alpha;Alpha" Condition="'$(NeverSet)' == 'true'" />"#,
+            false,
+        ),
+        (
+            r#"<PackageReference Update="Alpha;Alpha" Condition="$([System.String]::IsNullOrWhiteSpace(''))" />"#,
+            true,
+        ),
     ] {
         let src = format!(
             r#"<Project>
@@ -4921,10 +4929,15 @@ fn an_update_leaving_batched_entries_marks_the_set_uncertain() {
 </Project>"#
         );
         let p = parse(&src);
-        assert!(
-            p.package_references_uncertain,
-            "{first}: the second Update leaves Beta's override in the batch"
+        assert_eq!(
+            p.package_references_uncertain, uncertain,
+            "{first}: whether the second Update leaves Beta's override in the batch: {:?}",
+            p.package_reference_uncertainties
         );
+        if !uncertain {
+            let beta = p.package_references.iter().find(|r| r.id == "Beta");
+            assert_eq!(beta.map(|r| r.version_override.as_deref()), Some(None));
+        }
     }
     // Two single-fragment Updates of one identity leave nothing: the second
     // fails at its first fragment, before adding any.

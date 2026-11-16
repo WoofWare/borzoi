@@ -1182,3 +1182,52 @@ fn stranded_update_prefix_reaches_a_later_include() {
         parsed.diagnostics
     );
 }
+
+/// An `Update` that strands a fragment of its own (`A.fs;./A.fs`, as in
+/// [`stranded_update_prefix_reaches_a_later_include`]), under a false
+/// condition. A build builds no operation for a condition-false item, so it
+/// joins no batch of updates and strands nothing, and the walk, which models
+/// the build, commits the order MSBuild computes. (Design-time evaluation
+/// batches it.) Under a true condition the walk declines.
+#[test]
+fn a_condition_false_update_joins_no_batch() {
+    for (condition, certain) in [
+        (" Condition=\"'$(NeverSet)' == 'true'\"", true),
+        ("", false),
+    ] {
+        let body: &'static str = Box::leak(
+            format!(
+                r#"    <Compile Include="A.fs" />
+    <Compile Update="A.fs;./A.fs" CompileOrder="CompileLast"{condition} />
+    <Compile Include="A.fs" />
+    <Compile Include="B.fs" />"#
+            )
+            .into_boxed_str(),
+        );
+        let fixture = Fixture {
+            sdk_props: Vec::new(),
+            project: vec![Group::Raw(body)],
+            sdk_targets: Vec::new(),
+        };
+        let (laid, parsed) = write_and_parse(&fixture);
+        assert_eq!(
+            !parsed.items_uncertain, certain,
+            "{body}\n{:#?}",
+            parsed.diagnostics
+        );
+        if certain {
+            let theirs = shared()
+                .oracle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .target_items(&laid.proj, "FSharpSourceCodeCompileOrder", "Compile")
+                .expect("MSBuild evaluates the project");
+            let ours: Vec<String> = parsed
+                .items
+                .iter()
+                .map(|item| full_path(&item.include))
+                .collect();
+            assert_eq!(ours, theirs, "{body}");
+        }
+    }
+}

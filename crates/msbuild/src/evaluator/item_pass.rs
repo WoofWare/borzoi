@@ -838,7 +838,8 @@ fn walk_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
 
 fn walk_item_child_unattributed(node: Node<'_, '_>, state: &mut State<'_>) {
     // MSBuild's batch of `Update`s, followed for the types whose `Update`s the
-    // walk models, before any condition: see [`update_strands_late`].
+    // walk models, before the item's condition gates the rest: see
+    // [`update_strands_late`].
     let batched = match package_item_kind_for_element(node) {
         Some(PackageItemKind::PackageReference) => Some("PackageReference"),
         Some(_) => None,
@@ -2441,8 +2442,10 @@ pub(super) struct UpdateBatchRun {
 /// Whether `node`, an element of an item type whose `Update`s the walk models
 /// (`Compile`, `PackageReference`), leaves entries in MSBuild's batch of
 /// updates that it applies late, out of document order; feeding the batch as
-/// it goes. Run for every such element, before its condition: MSBuild batches
-/// a condition-false `Update` too (probed).
+/// it goes. Run for every such element, before its condition is acted on: a
+/// build batches no condition-false `Update` (it builds no operation for one;
+/// probed, `ProjectInstance`, dotnet 10), though design-time evaluation does,
+/// and one whose condition the walk cannot decide may or may not join.
 ///
 /// The mechanism is `LazyItemList.ComputeItems`. Consecutive `Update`s of one
 /// type join a batch keyed by full path (`NormalizePathForComparisonNoThrow`,
@@ -2466,15 +2469,12 @@ pub(super) struct UpdateBatchRun {
 fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> bool {
     let key = item_key(item_type);
     let (include, update) = (attribute(node, "Include"), attribute(node, "Update"));
+    let gate = evaluate_item_condition_silent(node, state);
     let update = match (include.as_deref(), update.as_deref()) {
         (None, Some(update)) => update,
         _ => {
             // Another operation flushes a pending batch, if it runs.
-            let runs = matches!(
-                evaluate_item_condition_silent(node, state),
-                (CondGate::Run, false)
-            );
-            if runs
+            if matches!(gate, (CondGate::Run, false))
                 && let Some(run) = state.update_batches.get_mut(&key)
                 && run.pending
             {
@@ -2483,6 +2483,13 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
             return false;
         }
     };
+    // A build builds no operation for an item whose condition is false, so
+    // such an `Update` joins no batch.
+    if matches!(gate, (CondGate::Skip, false)) {
+        return false;
+    }
+    // One whose condition the walk cannot decide may or may not have joined.
+    let may_not_run = !matches!(gate, (CondGate::Run, false));
     let expansion = expand_silent(update, state);
     let project_dir = state.entry_project_dir.clone();
     let run = state.update_batches.entry(key).or_default();
@@ -2523,13 +2530,14 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
     }
     match left_at {
         None => {
-            run.pending = true;
+            // An `Update` that may not run may leave the batch as it was.
+            run.pending = !may_not_run;
             false
         }
-        Some(i) if undecided => {
-            // It may have joined (no flush) or left (a flush, if pending): keep
-            // every key, take no batch as pending, and count a strand whether
-            // or not one was.
+        Some(i) if undecided || may_not_run => {
+            // It may have joined (no flush) or left (a flush, if pending), or
+            // not run at all: keep every key, take no batch as pending, and
+            // count a strand whether or not one was.
             run.pending = false;
             i > 0 && strandable
         }

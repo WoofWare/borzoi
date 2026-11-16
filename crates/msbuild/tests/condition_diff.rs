@@ -22,6 +22,7 @@
 
 mod common;
 
+use borzoi_msbuild::{PropertyRead, RejectionCertainty};
 use common::case_axis::{CaseContext, gen_case_comparison, respell_case, respell_keys};
 use common::{
     Oracle, SplitMix64, Verdict, breaks_inside_quote, check_certain_implies_exact, gen_bool_expr,
@@ -814,17 +815,22 @@ fn whitespace_variant_sweep_fixed_seed() {
 
 /// Which of a document's conditions MSBuild evaluates, so an illegal one
 /// rejects the project: the facts a consumer of `Outcome::Illegal` stands on,
-/// pinned through the `project` op. A condition behind a false
-/// `<PropertyGroup>`, `<ItemDefinitionGroup>` or `<ImportGroup>`, an unchosen
-/// `<When>`, or a `<Target>` is never evaluated, syntax errors included, nor is
-/// one on a write of a global property. In design-time evaluation (the
-/// editable `Project`), an item's condition is evaluated under a false
-/// `<ItemGroup>`, and an `Include` item's metadata's under a false item or
-/// group, type errors included; a build (`ProjectInstance`) evaluates neither,
-/// so it accepts every such project. An `Update` item's metadata's condition is
-/// evaluated only where the update applies. `evaluator/rejection.rs` judges
-/// conditions by design-time evaluation's facts, which reject every project a
-/// build rejects.
+/// pinned through the `project` op, and the walk's rejection judgement held to
+/// them. In a build (`ProjectInstance`), a condition behind a false
+/// `<PropertyGroup>`, `<ItemGroup>`, item, `<ItemDefinitionGroup>` (or item
+/// definition) or `<ImportGroup>`, an unchosen `<When>`, or a `<Target>` is
+/// never evaluated, syntax errors included, nor is one on a write of a global
+/// property; nor is anything else of a false-gated item: its `Include`,
+/// `Exclude` and metadata, or the item operation it would build. An `Update`
+/// item's metadata's condition is evaluated only where the update applies.
+///
+/// Design-time evaluation (the editable `Project`) evaluates the items of a
+/// false `<ItemGroup>`, and an `Include` item's metadata under a false item or
+/// group, so it rejects every project a build rejects and more
+/// (`Rejects::DesignTimeOnly`). The walk models the build
+/// (`evaluator/rejection.rs`): where only design-time evaluation rejects, it
+/// must withdraw nothing; where a build rejects, it must commit nothing; and
+/// where a build evaluates the project, it must claim no rejection.
 #[test]
 fn where_msbuild_evaluates_a_condition() {
     /// Whether MSBuild rejects a document, in each of its two evaluations.
@@ -838,14 +844,52 @@ fn where_msbuild_evaluates_a_condition() {
         /// items whatever their conditions hold, and a build does not.
         DesignTimeOnly,
     }
-    fn rejects(oracle: &mut Oracle, xml: &str, globals: &[(String, String)]) -> Rejects {
-        let both = oracle.project_both(xml, &["R".to_string()], None, globals);
-        match (both.design_time.is_none(), both.build.is_none()) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).expect("canonicalize");
+    let path = dir.join("Demo.fsproj");
+    let check = |oracle: &mut Oracle, body: &str, globals: &[(String, String)], expected| {
+        let xml = format!("<Project>{body}</Project>");
+        std::fs::write(&path, &xml).expect("write");
+        let both = oracle.project_both(&xml, &["R".to_string()], Some(&path), globals);
+        let rejected = match (both.design_time.is_none(), both.build.is_none()) {
             (false, _) => Rejects::Neither,
             (true, true) => Rejects::Both,
             (true, false) => Rejects::DesignTimeOnly,
+        };
+        assert_eq!(rejected, expected, "{xml}");
+        let parsed = common::parse_fsproj_with_imports(
+            &xml,
+            &path,
+            &globals.iter().cloned().collect(),
+            &common::oracle_environment(),
+            None,
+            None,
+        )
+        .expect("well-formed");
+        let certainty = parsed.rejection.as_ref().map(|r| r.certainty);
+        match (&both.build, parsed.property("R")) {
+            (None, read) => assert!(
+                !matches!(read, PropertyRead::Value(_) | PropertyRead::Unset),
+                "a build rejects the project, and the walk commits R as {read:?}:\n{xml}"
+            ),
+            (Some(theirs), read) => {
+                assert_ne!(
+                    certainty,
+                    Some(RejectionCertainty::Certain),
+                    "a build evaluates the project, and the walk claims it rejects it:\n{xml}"
+                );
+                if let Some(ours) = read.value() {
+                    assert_eq!(Some(ours), theirs.get("R").map(String::as_str), "{xml}");
+                }
+            }
         }
-    }
+        if rejected == Rejects::DesignTimeOnly {
+            assert_eq!(
+                parsed.rejection, None,
+                "only design-time evaluation rejects the project, and the walk withdraws:\n{xml}"
+            );
+        }
+    };
     let mut oracle = Oracle::spawn();
     for (body, rejected) in [
         (
@@ -1025,9 +1069,61 @@ fn where_msbuild_evaluates_a_condition() {
             r#"<ItemGroup><I Include="x" Condition="false and '@(I)' == ''"/></ItemGroup>"#,
             Rejects::Neither,
         ),
+        // Nothing of a false-gated item is evaluated in a build: not its
+        // condition under a false group, nor its `Include`, `Exclude` or
+        // metadata under a false item, nor the item operation it would build
+        // (a `Remove` with `MatchOnMetadata` that names more than item types).
+        // Design-time evaluation evaluates each but an `Update`'s.
+        (
+            r#"<ItemGroup><I Include="x"/><I Remove="x" MatchOnMetadata="k" Condition="false"/></ItemGroup>"#,
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            r#"<ItemGroup Condition="false"><I Remove="x" MatchOnMetadata="k"/></ItemGroup>"#,
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            r#"<ItemGroup><I Remove="x" MatchOnMetadata="k"/></ItemGroup>"#,
+            Rejects::Both,
+        ),
+        (
+            r#"<ItemGroup Condition="false"><I Remove="x" Condition="tr ue"/></ItemGroup>"#,
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            r#"<ItemGroup Condition="'$(Undefined)' == 'yes'"><I Include="x" Condition="tr ue"/></ItemGroup>"#,
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            r#"<Choose><When Condition="true"><ItemGroup Condition="false"><I Include="x" Condition="tr ue"/></ItemGroup></When></Choose>"#,
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            r#"<ItemGroup Condition="false"><I Include="x"><M Condition="true">m</M></I><I Include="y" Condition="1 &lt; abc"/></ItemGroup>"#,
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            r#"<ItemGroup Condition="false"><I Include="$([System.String]::Nope())"/></ItemGroup>"#,
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            r#"<ItemGroup><I Include="x" Condition="false"><M>$([System.String]::Nope())</M></I></ItemGroup>"#,
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            r#"<ItemGroup><I Include="x" Exclude="$([System.String]::Nope())" Condition="false"/></ItemGroup>"#,
+            Rejects::DesignTimeOnly,
+        ),
+        (
+            r#"<ItemGroup><I Include="x"/><I Update="x" Condition="false"><M>$([System.String]::Nope())</M></I></ItemGroup>"#,
+            Rejects::Neither,
+        ),
+        (
+            r#"<ItemGroup><I Include="x" Condition="false" KeepMetadata="$([System.String]::Nope())"/></ItemGroup>"#,
+            Rejects::Neither,
+        ),
     ] {
-        let xml = format!("<Project>{body}</Project>");
-        assert_eq!(rejects(&mut oracle, &xml, &[]), rejected, "{xml}");
+        check(&mut oracle, body, &[], rejected);
     }
     // A write of a global property is discarded with its condition
     // unevaluated; its group's condition is still evaluated.
@@ -1042,8 +1138,7 @@ fn where_msbuild_evaluates_a_condition() {
             Rejects::Both,
         ),
     ] {
-        let xml = format!("<Project>{body}</Project>");
-        assert_eq!(rejects(&mut oracle, &xml, &globals), rejected, "{xml}");
+        check(&mut oracle, body, &globals, rejected);
     }
 }
 /// Fresh-seed twin of [`whitespace_variant_sweep_fixed_seed`].

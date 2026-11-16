@@ -291,10 +291,10 @@ pub enum RejectionCause {
     /// A construct MSBuild refuses when it loads the file holding it, before
     /// it evaluates any of it, whatever any condition in the file holds.
     LoadTime(LoadTimeError),
-    /// An item operation MSBuild refuses as it builds it, for an item of an
-    /// item group it evaluates whatever the group's or the item's condition
-    /// holds: a `Remove` with `MatchOnMetadata` that names more than item
-    /// types. `item` is the item's type.
+    /// An item operation MSBuild refuses as it builds it, which a build does
+    /// for an item whose group's and own conditions hold: a `Remove` with
+    /// `MatchOnMetadata` that names more than item types. `item` is the
+    /// item's type.
     IllegalItemOperation { item: String },
 }
 
