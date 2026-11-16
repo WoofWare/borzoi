@@ -94,6 +94,7 @@ mod prescan;
 mod state;
 #[cfg(feature = "surface-reference")]
 mod surface_reference;
+mod surfaces;
 mod types;
 mod unknowables;
 mod windows;
@@ -107,6 +108,10 @@ pub use model::{
 pub use state::ActivePatternShape;
 pub(crate) use state::ImplicitSeed;
 use state::{Resolver, implicit_open_groups, implicit_shortening_prefixes};
+pub use surfaces::{
+    ProjectSurfaces, TargetResolution, resolve_project_surfaces,
+    resolve_project_surfaces_incremental, resolve_target,
+};
 
 /// `$body`, inside the `fold-counts` span `crate::fold_counts::$span` when that
 /// feature is on. The value is `$body`'s; the span closes once it is computed.
@@ -1484,54 +1489,192 @@ fn resolve_project_files_impl(
     files: &[ProjectFile],
     horizon: usize,
     assemblies: &AssemblyEnv,
-    _labels: Option<&[String]>,
+    labels: Option<&[String]>,
 ) -> ResolvedProject {
-    assert!(
-        horizon <= files.len(),
-        "fold horizon {horizon} exceeds the Compile list ({})",
-        files.len()
-    );
-    let partners = signature_partners(files);
-    let mut state = FoldState::new(assemblies);
-    let mut resolved: Vec<Arc<ResolvedFile>> = Vec::with_capacity(files.len());
-    for (index, pf) in files.iter().take(horizon).enumerate() {
-        let mut rf = match &pf.file {
+    let folded = fold::<ResolvedFile>(None, files, horizon, assemblies, labels);
+    #[cfg(feature = "surface-reference")]
+    surface_reference::assert_surface_fold_agrees(files, assemblies, &folded.files);
+    ResolvedProject {
+        files: folded.files,
+    }
+}
+
+/// What the Compile-order fold builds at each item it does not reuse: the
+/// full walk ([`ResolvedFile`]) or the surface alone ([`FileSurface`]). Both
+/// thread the same state forward, since [`FoldState::advance`] reads only
+/// the surface.
+pub(crate) trait FoldOutput: PartialEq {
+    /// Build the output of `pf` against `state`, the state entering it.
+    fn build(pf: &ProjectFile, state: &FoldState, assemblies: &AssemblyEnv) -> Self;
+    /// What the item contributes to later files.
+    fn surface(&self) -> &FileSurface;
+    /// The surface, for [`FoldSlot::complete`].
+    fn surface_mut(&mut self) -> &mut FileSurface;
+}
+
+impl FoldOutput for ResolvedFile {
+    fn build(pf: &ProjectFile, state: &FoldState, assemblies: &AssemblyEnv) -> Self {
+        match &pf.file {
             // A signature file owns no `ItemId` range and records nothing at
             // its own slot; it carries its screen, its exported idents'
             // arena, and the stashed surface the paired implementation's
             // slot materialises.
             SourceFile::Sig(sig) => signature_slot(sig, pf, state.preceding(), assemblies),
             SourceFile::Impl(file) => {
-                // Per-file span so the fold's cost is attributable in the LSP's
-                // traces: `file` is the Compile item's path (empty when
-                // unlabelled), `index` its Compile-order position, `bytes` its
-                // source length as a size proxy. Only compiled under `otel`; the
-                // default build has no `tracing` dependency.
-                #[cfg(feature = "otel")]
-                let _span = {
-                    let file_path = _labels
-                        .and_then(|l| l.get(index))
-                        .map(String::as_str)
-                        .unwrap_or_default();
-                    tracing::info_span!(
-                        "resolve_file",
-                        index = index,
-                        bytes = u32::from(file.syntax().text_range().len()),
-                        file = file_path,
-                    )
-                    .entered()
-                };
                 let mut rf = resolve_file(file, state.preceding(), assemblies, &pf.recovery);
                 state.stamp(&mut rf);
                 rf
             }
-        };
-        let slot = FoldSlot::of(files, &partners, &resolved, index);
-        slot.complete(&mut rf.surface, assemblies.names());
-        state.advance(&rf.surface, &slot, assemblies.names());
-        resolved.push(Arc::new(rf));
+        }
     }
-    ResolvedProject { files: resolved }
+
+    fn surface(&self) -> &FileSurface {
+        &self.surface
+    }
+
+    fn surface_mut(&mut self) -> &mut FileSurface {
+        &mut self.surface
+    }
+}
+
+impl FoldOutput for FileSurface {
+    fn build(pf: &ProjectFile, state: &FoldState, assemblies: &AssemblyEnv) -> Self {
+        match &pf.file {
+            SourceFile::Sig(sig) => signature_slot(sig, pf, state.preceding(), assemblies).surface,
+            SourceFile::Impl(file) => {
+                surface_file(file, state.preceding(), assemblies, &pf.recovery)
+            }
+        }
+    }
+
+    fn surface(&self) -> &FileSurface {
+        self
+    }
+
+    fn surface_mut(&mut self) -> &mut FileSurface {
+        self
+    }
+}
+
+/// What [`fold`] returns: each item's output, whether it was reused, and the
+/// state entering the item after the horizon.
+pub(crate) struct Folded<T> {
+    pub(crate) files: Vec<Arc<T>>,
+    pub(crate) reused: Vec<bool>,
+    pub(crate) state: FoldState,
+}
+
+/// The Compile-order fold over `files[..horizon]`, with pairing from the whole
+/// `files` list, building a `T` at each item. With `prev`, an earlier fold of
+/// `prev.0` that returned `prev.1`, an item is reused rather than rebuilt
+/// while the state entering it still equals the earlier fold's and its tree
+/// and pairing are the same. `labels`, when present, tags each rebuilt item's
+/// span (`file`) for trace attribution; it is read only under the `otel`
+/// feature and never influences the result.
+pub(crate) fn fold<T: FoldOutput>(
+    prev: Option<(&[ProjectFile], &[Arc<T>])>,
+    files: &[ProjectFile],
+    horizon: usize,
+    assemblies: &AssemblyEnv,
+    _labels: Option<&[String]>,
+) -> Folded<T> {
+    assert!(
+        horizon <= files.len(),
+        "fold horizon {horizon} exceeds the Compile list ({})",
+        files.len()
+    );
+    let partners_prev = prev.map(|(prev_files, _)| signature_partners(prev_files));
+    let partners = signature_partners(files);
+    let mut state = FoldState::new(assemblies);
+    let mut built: Vec<Arc<T>> = Vec::with_capacity(horizon);
+    let mut reused = Vec::with_capacity(horizon);
+    // True while the threaded state entering this file still equals the
+    // earlier fold's at the same index — the reuse precondition. Monotone
+    // true→false: once a rebuilt file's contribution differs, every later
+    // file sees a different `preceding`, so reuse can never resume.
+    let mut in_sync = prev.is_some();
+    for (i, pf) in files.iter().take(horizon).enumerate() {
+        let earlier = prev
+            .zip(partners_prev.as_deref())
+            .filter(|((prev_files, prev_built), _)| i < prev_built.len() && i < prev_files.len());
+        // Pairing is an input to the file's boundary *contribution* (a paired
+        // implementation's value/case exports are dropped, a paired
+        // signature publishes its screen — `ProjectItems::extend_with`), so
+        // both reuse and sync require the pairing-partner index to match.
+        // While the prefix is in sync an equal index implies an equal
+        // screen: the signature's own contribution (its screen,
+        // `FileSurface::same_contribution`) was compared at the signature's
+        // earlier slot.
+        let same_pairing = earlier.is_some_and(|((prev_files, _), partners_prev)| {
+            partners_prev[i] == partners[i]
+                // The implicit-module shadow of an unpaired headerless file
+                // derives from its QNOF, so a rename must invalidate exactly
+                // like a pairing change (reuse already requires it via
+                // `same_tree`; this covers the rebuilt-but-in-sync path).
+                && prev_files[i].qnof == pf.qnof
+        });
+        let reuse = in_sync
+            && same_pairing
+            && earlier.is_some_and(|((prev_files, _), _)| same_tree(&prev_files[i], pf));
+        reused.push(reuse);
+        let output: Arc<T> = if let (true, Some(((_, prev_built), _))) = (reuse, earlier) {
+            // Same entering state + same tree ⇒ building would return an
+            // identical output. Reuse it — an `Arc` refcount bump, *not* a
+            // deep clone, so a keystroke's reuse is O(1) per file rather than
+            // O(occurrences). `in_sync` stays true (its contribution is the
+            // earlier fold's own); a reused file's stamped
+            // `preceding_extension_names` already equals the state's, which
+            // matches the earlier fold's entering value while `in_sync`.
+            Arc::clone(&prev_built[i])
+        } else {
+            // Per-file span *only* for a rebuilt file (otel), so the fold's
+            // cost is attributable per Compile item: `file` is its path
+            // (empty when unlabelled), `index` its Compile-order position,
+            // `bytes` its source length as a size proxy. A reused file does
+            // no work, so it gets no span — its absence is the diagnostic
+            // that an edit left it untouched.
+            #[cfg(feature = "otel")]
+            let _span = {
+                let file_path = _labels
+                    .and_then(|l| l.get(i))
+                    .map(String::as_str)
+                    .unwrap_or_default();
+                tracing::info_span!(
+                    "resolve_file",
+                    index = i,
+                    bytes = u32::from(pf.file.syntax().text_range().len()),
+                    file = file_path,
+                )
+                .entered()
+            };
+            let mut output = T::build(pf, &state, assemblies);
+            // Completed before the in-sync comparison: the earlier fold's
+            // slot holds the completed surface too.
+            FoldSlot::of(files, &partners, &built, i)
+                .complete(output.surface_mut(), assemblies.names());
+            if let (true, Some(((_, prev_built), _))) = (in_sync, earlier) {
+                // Entering state matched the earlier fold's, so the item base
+                // matched and the exports are comparable. Does the rebuild
+                // leave what `FoldState::advance` threads unchanged? If so,
+                // and the pairing is the same, the tail stays reusable.
+                in_sync = same_pairing
+                    && output
+                        .surface()
+                        .same_contribution(prev_built[i].surface(), assemblies.names());
+            } else {
+                in_sync = false;
+            }
+            Arc::new(output)
+        };
+        let slot = FoldSlot::of(files, &partners, &built, i);
+        state.advance(output.surface(), &slot, assemblies.names());
+        built.push(output);
+    }
+    Folded {
+        files: built,
+        reused,
+        state,
+    }
 }
 
 /// The state the Compile-order fold threads from one file to the next: what
@@ -1629,17 +1772,17 @@ pub(crate) struct FoldSlot<'a> {
 impl<'a> FoldSlot<'a> {
     /// The slot of `files[index]`, with `partners` its fold's pairing and
     /// `earlier` the files before it.
-    fn of(
+    fn of<T: FoldOutput>(
         files: &'a [ProjectFile],
         partners: &[Option<usize>],
-        earlier: &'a [Arc<ResolvedFile>],
+        earlier: &'a [Arc<T>],
         index: usize,
     ) -> Self {
         // A signature's own partner is the *later* implementation, so for a
         // signature this is always `None`.
         let paired_signature = partners[index]
             .filter(|&p| p < index)
-            .map(|sig| (sig, &earlier[sig].surface));
+            .map(|sig| (sig, earlier[sig].surface()));
         FoldSlot {
             file: &files[index],
             partner: partners[index],
@@ -1969,101 +2112,21 @@ fn resolve_project_files_incremental_impl(
     new_files: &[ProjectFile],
     horizon: usize,
     assemblies: &AssemblyEnv,
-    _labels: Option<&[String]>,
+    labels: Option<&[String]>,
 ) -> (ResolvedProject, Vec<bool>) {
-    assert!(
-        horizon <= new_files.len(),
-        "fold horizon {horizon} exceeds the Compile list ({})",
-        new_files.len()
+    let folded = fold(
+        Some((prev_files, &prev.files)),
+        new_files,
+        horizon,
+        assemblies,
+        labels,
     );
-    let partners_prev = signature_partners(prev_files);
-    let partners_new = signature_partners(new_files);
-    let mut state = FoldState::new(assemblies);
-    let mut resolved: Vec<Arc<ResolvedFile>> = Vec::with_capacity(horizon);
-    let mut reused = Vec::with_capacity(horizon);
-    // True while the threaded state entering this file still
-    // equals prev's at the same index — the reuse precondition. Monotone
-    // true→false: once a recomputed file's contribution differs, every later file
-    // sees a different `preceding`, so reuse can never resume.
-    let mut in_sync = true;
-    for (i, pf) in new_files.iter().take(horizon).enumerate() {
-        let have_prev = i < prev.files.len() && i < prev_files.len();
-        // Pairing is an input to the file's boundary *contribution* (a paired
-        // implementation's value/case exports are dropped, a paired
-        // signature publishes its screen — `ProjectItems::extend_with`), so
-        // both reuse and sync require the pairing-partner index to match.
-        // While the prefix is in sync an equal index implies an equal
-        // screen: the signature's own contribution (its screen,
-        // `FileSurface::same_contribution`) was compared at the signature's
-        // earlier slot.
-        let same_pairing = have_prev
-            && partners_prev[i] == partners_new[i]
-            // The implicit-module shadow of an unpaired headerless file
-            // derives from its QNOF, so a rename must invalidate exactly
-            // like a pairing change (reuse already requires it via
-            // `same_tree`; this covers the recomputed-but-in-sync path).
-            && prev_files[i].qnof == pf.qnof;
-        let reuse = in_sync && same_pairing && same_tree(&prev_files[i], pf);
-        reused.push(reuse);
-        // Per-file span *only* for a recomputed file (otel): mirrors the cold
-        // labeled fold's attribution (`file`/`index`/`bytes`) so an edited
-        // project's re-resolution cost is still traceable per Compile item. A
-        // reused file does no `resolve_file` work, so it gets no span — its
-        // absence is the diagnostic that the edit left it untouched. The inner
-        // `resolve_file` phase spans nest under this, exactly as in the cold fold.
-        #[cfg(feature = "otel")]
-        let _span = (!reuse).then(|| {
-            let file_path = _labels
-                .and_then(|l| l.get(i))
-                .map(String::as_str)
-                .unwrap_or_default();
-            tracing::info_span!(
-                "resolve_file",
-                index = i,
-                bytes = u32::from(pf.file.syntax().text_range().len()),
-                file = file_path,
-            )
-            .entered()
-        });
-        let rf: Arc<ResolvedFile> = if reuse {
-            // Same entering state + same tree ⇒ `resolve_file` would return an
-            // identical `ResolvedFile`. Reuse it — an `Arc` refcount bump, *not* a
-            // deep clone of the resolution map / arena / exports, so a keystroke's
-            // reuse is O(1) per file rather than O(occurrences). `in_sync` stays
-            // true (its contribution is prev's own); its stamped
-            // `preceding_extension_names` already equals the state's, which
-            // matches prev's entering value while `in_sync`.
-            Arc::clone(&prev.files[i])
-        } else {
-            let mut rf = match &pf.file {
-                SourceFile::Sig(sig) => signature_slot(sig, pf, state.preceding(), assemblies),
-                SourceFile::Impl(file) => {
-                    let mut rf = resolve_file(file, state.preceding(), assemblies, &pf.recovery);
-                    state.stamp(&mut rf);
-                    rf
-                }
-            };
-            // Completed before the in-sync comparison: the prior fold's slot
-            // holds the completed surface too.
-            FoldSlot::of(new_files, &partners_new, &resolved, i)
-                .complete(&mut rf.surface, assemblies.names());
-            if in_sync {
-                // Entering state matched prev's, so the item base matched and
-                // the exports are comparable. Does the recompute leave what
-                // `FoldState::advance` threads unchanged? If so, and the
-                // pairing is the same, the tail stays reusable.
-                in_sync = same_pairing
-                    && rf
-                        .surface
-                        .same_contribution(&prev.files[i].surface, assemblies.names());
-            }
-            Arc::new(rf)
-        };
-        let slot = FoldSlot::of(new_files, &partners_new, &resolved, i);
-        state.advance(&rf.surface, &slot, assemblies.names());
-        resolved.push(rf);
-    }
-    (ResolvedProject { files: resolved }, reused)
+    (
+        ResolvedProject {
+            files: folded.files,
+        },
+        folded.reused,
+    )
 }
 
 /// The source position that stamps a top-level module / namespace header's

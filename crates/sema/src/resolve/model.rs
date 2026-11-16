@@ -3778,9 +3778,8 @@ pub(super) struct FieldLabelEntry {
 }
 
 /// What later files may read of one file: everything the Compile-order
-/// fold's per-file transition ([`FoldState::advance`](super::FoldState::advance))
-/// and the cross-file reads ([`ResolvedProject::item_def`]) take, and nothing
-/// else (`docs/resolve-what-a-request-reads-plan.md`, D1). Its contents are
+/// fold's per-file transition and the cross-file reads
+/// ([`ResolvedProject::item_def`]) take, and nothing else (`docs/resolve-what-a-request-reads-plan.md`, D1). Its contents are
 /// whatever those compile against: a field a later file reads belongs here,
 /// and one only the file's own requests read belongs on [`ResolvedFile`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4277,6 +4276,11 @@ impl ResolvedFile {
                 );
             }
         }
+    }
+
+    /// What this file contributes to later files.
+    pub fn surface(&self) -> &FileSurface {
+        &self.surface
     }
 
     /// The [`ResolvedFile`] a `.fsi` **signature file** occupies a Compile
@@ -4934,28 +4938,7 @@ impl ResolvedProject {
     /// def directly. Returns `None` for any other resolution or an
     /// out-of-range handle.
     pub fn item_def(&self, res: Resolution) -> Option<(usize, &Def)> {
-        let id = match res {
-            Resolution::Item(id) => id,
-            Resolution::EarlierFileType { file, index } => {
-                let idx = file as usize;
-                let rf = self.files.get(idx)?;
-                let def = rf.surface.placed_types.get(index as usize)?.def;
-                return Some((idx, rf.surface.def(def)?));
-            }
-            _ => return None,
-        };
-        // The per-file ranges partition the id space contiguously in Compile
-        // order, so the first file whose range contains the handle is its
-        // unique owner (an earlier file's `get` fails the upper bound).
-        let (idx, item) = self.files.iter().enumerate().find_map(|(idx, f)| {
-            let base = f.surface.item_base as usize;
-            let local = id.index().checked_sub(base)?;
-            f.surface.exports.items.get(local).map(|item| (idx, item))
-        })?;
-        match item.def {
-            ExportDef::Own(def) => Some((idx, self.files[idx].surface.def(def)?)),
-            ExportDef::Sig { file, def } => Some((file, self.files.get(file)?.surface.def(def)?)),
-        }
+        item_def_in(&self.files, res)
     }
 
     /// project and its referenced assemblies**:
@@ -4991,5 +4974,36 @@ impl ResolvedProject {
                     _ => None,
                 })
         }))
+    }
+}
+
+/// [`ResolvedProject::item_def`] over any fold's outputs: it reads only each
+/// file's [`FileSurface`], so the surface fold answers it too
+/// ([`ProjectSurfaces::item_def`](super::ProjectSurfaces::item_def)).
+pub(super) fn item_def_in<T: super::FoldOutput>(
+    files: &[Arc<T>],
+    res: Resolution,
+) -> Option<(usize, &Def)> {
+    let id = match res {
+        Resolution::Item(id) => id,
+        Resolution::EarlierFileType { file, index } => {
+            let idx = file as usize;
+            let surface = files.get(idx)?.surface();
+            let def = surface.placed_types.get(index as usize)?.def;
+            return Some((idx, surface.def(def)?));
+        }
+        _ => return None,
+    };
+    // The per-file ranges partition the id space contiguously in Compile
+    // order, so the first file whose range contains the handle is its
+    // unique owner (an earlier file's `get` fails the upper bound).
+    let (idx, item) = files.iter().enumerate().find_map(|(idx, f)| {
+        let surface = f.surface();
+        let local = id.index().checked_sub(surface.item_base as usize)?;
+        surface.exports.items.get(local).map(|item| (idx, item))
+    })?;
+    match item.def {
+        ExportDef::Own(def) => Some((idx, files[idx].surface().def(def)?)),
+        ExportDef::Sig { file, def } => Some((file, files.get(file)?.surface().def(def)?)),
     }
 }

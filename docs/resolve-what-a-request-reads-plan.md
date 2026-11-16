@@ -418,6 +418,33 @@ takes an edited earlier file's contribution from its surface walk.
   that moves positions but not the threaded contribution re-walks no later
   file, and `item_def` reports the moved positions.
 
+**As built.** The cold and incremental folds are one function, `fold`,
+generic over what it builds at each item: a full `ResolvedFile` or a
+`FileSurface`. Both share the cutoff and `FoldState::advance`. The cached
+fold is the surface fold, `resolve_project_surfaces`, and its incremental
+twin; `ProjectSurfaces::resolve_file(j)` replays the state entering `j` and
+walks `j` against it, and `ProjectSurfaces::item_def` answers as
+`ResolvedProject::item_def` does. `resolve_target(files, i, env)` is the
+surface fold to `i` plus a full walk of `i`, against the state the fold ends
+with, so it replays nothing.
+
+The oracle has two halves:
+
+- `tests/all/resolve_target_fold.rs` generates projects of named modules,
+  headerless files, signature-paired implementations and unions, each
+  reading earlier files. It holds every target, every replayed walk and
+  every `item_def` to the cold full fold, and the incremental surface fold
+  to a cold one across edit scripts. The edits are body edits, padding that
+  moves every position, added values, renames of headerless files, and
+  signatures dropped and restored; a body edit re-walks only the edited
+  file. Three planted bugs fail it: a replay one file short, a target walk
+  without signature completion, and an incremental fold that ignores its
+  cutoff.
+- Under `surface-reference`, every cold full fold also runs the surface fold
+  and the target fold of its last file, and panics unless they agree with
+  its own files. The whole-project gate thereby checks every project's cold
+  folds.
+
 ### Stage 5: resolution requests use the target fold
 
 **Dependencies**: Stage 4. **Implements**: D4, LSP side.
