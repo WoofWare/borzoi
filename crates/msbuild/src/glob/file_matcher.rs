@@ -499,89 +499,116 @@ impl FileSpecRegex {
     /// `RegexOptions.IgnoreCase` under `culture`, against `input`.
     pub fn is_match(&self, input: &str, culture: Culture) -> bool {
         let input = utf16(input);
-        let mut memo = vec![None; (self.toks.len() + 1) * (input.len() + 1)];
-        self.match_at(&input, 0, 0, culture, &mut memo)
-    }
-
-    fn match_at(
-        &self,
-        input: &[u16],
-        tok: usize,
-        pos: usize,
-        culture: Culture,
-        memo: &mut [Option<bool>],
-    ) -> bool {
-        let slot = tok * (input.len() + 1) + pos;
-        if let Some(answer) = memo[slot] {
-            return answer;
-        }
+        // A simulation of the expression's automaton, one position at a time,
+        // so it runs in time linear in the input and space linear in the
+        // expression whatever their lengths. Each token has two states: its
+        // entry, and, for the constructs that loop (`[^/\\]*`, `[^\.]*`,
+        // `[/\\]+` and the `.*` inside `LeftDirs` and `MiddleDirs`), being inside
+        // the loop. The end of the token list is the accepting entry.
+        let end = self.toks.len();
+        let mut current = vec![false; 2 * (end + 1)];
+        self.enter(&mut current, 0);
         let line_feed = u16::from(b'\n');
-        let answer = match self.toks.get(tok) {
-            // `$` matches at the end, or before a final line feed.
-            None => pos == input.len() || (pos + 1 == input.len() && input[pos] == line_feed),
-            Some(&t) => {
-                let next = |memo: &mut [Option<bool>], p: usize| {
-                    self.match_at(input, tok + 1, p, culture, memo)
-                };
-                match t {
+        // `$` matches at the end, or before a final line feed.
+        let accepts = |states: &[bool], pos: usize| {
+            states[2 * end]
+                && (pos == input.len() || (pos + 1 == input.len() && input[pos] == line_feed))
+        };
+        for (pos, &unit) in input.iter().enumerate() {
+            if accepts(&current, pos) {
+                return true;
+            }
+            let mut next = vec![false; 2 * (end + 1)];
+            for tok in 0..end {
+                let (entered, inside) = (current[2 * tok], current[2 * tok + 1]);
+                if !entered && !inside {
+                    continue;
+                }
+                match self.toks[tok] {
                     RegexTok::Unit(u) => {
-                        pos < input.len()
-                            && culture.regex_key(input[pos]) == culture.regex_key(u)
-                            && next(memo, pos + 1)
+                        if entered && culture.regex_key(unit) == culture.regex_key(u) {
+                            self.enter(&mut next, tok + 1);
+                        }
                     }
                     RegexTok::SingleCharacter => {
-                        pos < input.len() && input[pos] != line_feed && next(memo, pos + 1)
+                        if entered && unit != line_feed {
+                            self.enter(&mut next, tok + 1);
+                        }
                     }
                     RegexTok::NotDot => {
-                        pos < input.len() && input[pos] != u16::from(b'.') && next(memo, pos + 1)
+                        if entered && unit != u16::from(b'.') {
+                            self.enter(&mut next, tok + 1);
+                        }
                     }
-                    RegexTok::AnyNonSeparator => {
-                        let run = input[pos..]
-                            .iter()
-                            .take_while(|&&u| !is_any_slash(u))
-                            .count();
-                        (pos..=pos + run).any(|p| next(memo, p))
-                    }
-                    RegexTok::AnythingButDot => {
-                        let run = input[pos..]
-                            .iter()
-                            .take_while(|&&u| u != u16::from(b'.'))
-                            .count();
-                        (pos..=pos + run).any(|p| next(memo, p))
+                    RegexTok::AnyNonSeparator | RegexTok::AnythingButDot => {
+                        let stays = match self.toks[tok] {
+                            RegexTok::AnyNonSeparator => !is_any_slash(unit),
+                            _ => unit != u16::from(b'.'),
+                        };
+                        if entered && stays {
+                            self.enter(&mut next, tok);
+                        }
                     }
                     RegexTok::DirSeparator => {
-                        let run = input[pos..]
-                            .iter()
-                            .take_while(|&&u| is_any_slash(u))
-                            .count();
-                        (pos + 1..=pos + run).any(|p| next(memo, p))
+                        if is_any_slash(unit) {
+                            self.inside(&mut next, tok);
+                        }
                     }
                     RegexTok::LeftDirs => {
-                        // `.*` then a separator, or nothing.
-                        let run = input[pos..].iter().take_while(|&&u| u != line_feed).count();
-                        next(memo, pos)
-                            || (pos..pos + run)
-                                .filter(|&k| is_any_slash(input[k]))
-                                .any(|k| next(memo, k + 1))
+                        if inside && unit != line_feed {
+                            self.inside(&mut next, tok);
+                            if is_any_slash(unit) {
+                                self.enter(&mut next, tok + 1);
+                            }
+                        }
                     }
                     RegexTok::MiddleDirs => {
-                        // A separator, or a separator, `.*` and a separator.
-                        pos < input.len() && is_any_slash(input[pos]) && {
-                            let run = input[pos + 1..]
-                                .iter()
-                                .take_while(|&&u| u != line_feed)
-                                .count();
-                            next(memo, pos + 1)
-                                || (pos + 1..pos + 1 + run)
-                                    .filter(|&k| is_any_slash(input[k]))
-                                    .any(|k| next(memo, k + 1))
+                        if entered && is_any_slash(unit) {
+                            self.enter(&mut next, tok + 1);
+                            next[2 * tok + 1] = true;
+                        }
+                        if inside && unit != line_feed {
+                            next[2 * tok + 1] = true;
+                            if is_any_slash(unit) {
+                                self.enter(&mut next, tok + 1);
+                            }
                         }
                     }
                 }
             }
-        };
-        memo[slot] = Some(answer);
-        answer
+            current = next;
+        }
+        accepts(&current, input.len())
+    }
+
+    /// Mark token `tok`'s entry in `states`, and every state that follows
+    /// from it without consuming a unit.
+    fn enter(&self, states: &mut [bool], mut tok: usize) {
+        loop {
+            if states[2 * tok] {
+                return;
+            }
+            states[2 * tok] = true;
+            match self.toks.get(tok) {
+                // Each may match nothing: the next token is entered too.
+                Some(RegexTok::AnyNonSeparator | RegexTok::AnythingButDot) => tok += 1,
+                // `.*` then a separator, or nothing.
+                Some(RegexTok::LeftDirs) => {
+                    states[2 * tok + 1] = true;
+                    tok += 1;
+                }
+                _ => return,
+            }
+        }
+    }
+
+    /// Mark token `tok` as inside its loop: for `[/\\]+`, having matched at
+    /// least one separator, which may end it.
+    fn inside(&self, states: &mut [bool], tok: usize) {
+        states[2 * tok + 1] = true;
+        if matches!(self.toks[tok], RegexTok::DirSeparator) {
+            self.enter(states, tok + 1);
+        }
     }
 }
 

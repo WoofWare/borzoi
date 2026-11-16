@@ -128,6 +128,85 @@ fn a_turkish_culture_keeps_i_apart_in_a_regular_expression() {
     );
 }
 
+/// A backtracking reading of the expression, construct by construct, as a
+/// reference for the automaton [`FileSpecRegex::is_match`] simulates.
+fn regex_reference(toks: &[RegexTok], input: &[u16], culture: Culture) -> bool {
+    let line_feed = u16::from(b'\n');
+    let Some((&tok, rest)) = toks.split_first() else {
+        return input.is_empty() || input == [line_feed];
+    };
+    let next = |at: usize| regex_reference(rest, &input[at..], culture);
+    let run = |stop: &dyn Fn(u16) -> bool, from: usize| {
+        input[from..].iter().take_while(|&&u| !stop(u)).count()
+    };
+    match tok {
+        RegexTok::Unit(u) => {
+            input
+                .first()
+                .is_some_and(|&c| culture.regex_key(c) == culture.regex_key(u))
+                && next(1)
+        }
+        RegexTok::SingleCharacter => input.first().is_some_and(|&c| c != line_feed) && next(1),
+        RegexTok::NotDot => input.first().is_some_and(|&c| c != u16::from(b'.')) && next(1),
+        RegexTok::AnyNonSeparator => (0..=run(&|u| is_any_slash(u), 0)).any(next),
+        RegexTok::AnythingButDot => (0..=run(&|u| u == u16::from(b'.'), 0)).any(next),
+        RegexTok::DirSeparator => (1..=run(&|u| !is_any_slash(u), 0)).any(next),
+        RegexTok::LeftDirs => {
+            next(0)
+                || (0..run(&|u| u == line_feed, 0))
+                    .filter(|&k| is_any_slash(input[k]))
+                    .any(|k| next(k + 1))
+        }
+        RegexTok::MiddleDirs => {
+            input.first().copied().is_some_and(is_any_slash)
+                && (next(1)
+                    || (1..1 + run(&|u| u == line_feed, 1))
+                        .filter(|&k| is_any_slash(input[k]))
+                        .any(|k| next(k + 1)))
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(4000))]
+
+    /// The automaton accepts exactly what the backtracking reading does, on
+    /// specs over every construct and inputs over the units they treat apart.
+    #[test]
+    fn the_automaton_is_the_backtracking_reading(
+        fixed in "(/|a|\\./|//)*",
+        wildcard in "((\\*\\*|\\*|\\?|a|\\.)/){0,4}",
+        filename in "[a.*?I]{0,5}",
+        input in "[a/.\\\\iI\n]{0,9}",
+    ) {
+        let regex = FileSpecRegex::new(&fixed, &wildcard, &filename);
+        let units = utf16(&input);
+        for culture in Culture::ALL {
+            prop_assert_eq!(
+                regex.is_match(&input, culture),
+                regex_reference(&regex.toks, &units, culture),
+                "{:?} {:?} {:?} {:?}", fixed, wildcard, filename, input
+            );
+        }
+    }
+}
+
+/// Long inputs neither recurse per unit nor allocate per pair of positions.
+#[test]
+fn the_regular_expression_matches_long_inputs_on_a_small_stack() {
+    let spec = format!("{}*", "a".repeat(4000));
+    let input = "a".repeat(4000);
+    let answer = std::thread::Builder::new()
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            regex(&format!("s*/{spec}")).is_match(&format!("sub/{input}"), Culture::Invariant)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(answer);
+}
+
 /// Naive whole-path glob over segments: `**` any run of segments, `*` any run
 /// within one, case folded.
 fn path_glob_naive(pattern: &[&str], path: &[&str]) -> bool {

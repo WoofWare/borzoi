@@ -308,7 +308,9 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
             } else {
                 format!("{base_norm}/{path}")
             };
-            out.push(Path::new("/").join(split_segments(&absolute).join("/")));
+            // MSBuild's `FullPath` of the item: `.` and `..` resolved
+            // lexically, as the walk's root was.
+            out.push(host_path(&absolute));
         }
     }
     Ok(out)
@@ -898,6 +900,12 @@ mod tests {
         assert_eq!(try_resolve(tmp.path(), "./*.fs", &[]), Ok(4));
         assert_eq!(try_resolve(tmp.path(), "*/./**/*.fs", &[]), Ok(0));
         assert_eq!(run_rel(tmp.path(), "**/./*.fs", &[]).len(), 6);
+        // `..` is resolved lexically, through a directory that does not exist,
+        // and the paths returned are the items' full paths.
+        assert_eq!(
+            run_rel(tmp.path(), "absent/../*.fs", &[]),
+            ["a.fs", "b.fs", "m.fs", "z.fs"]
+        );
         assert_eq!(run_rel(tmp.path(), "*.*", &["*.fs"]), ["noext"]);
         assert_eq!(run_rel(tmp.path(), "*", &["%2a.%2a"]), Vec::<String>::new());
     }

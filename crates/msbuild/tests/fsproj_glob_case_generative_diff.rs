@@ -556,12 +556,13 @@ fn case_corners() {
     let declining = [
         // An exclude read by regular expression under one culture takes what
         // it leaves under the other, while the include is matched name by
-        // name (#976).
+        // name (#976, whose `Sub/` spelling finds a directory only on a
+        // case-insensitive file system).
         (
             corner(
                 &["sub/Deep/in.fs", "SUB/", "sub/deep/"],
-                "Sub/**/IN.FS",
-                Some("Sub/D*/I*.fs"),
+                "sub/**/IN.FS",
+                Some("sub/D*/I*.fs"),
             ),
             "CultureDependentCase",
         ),
