@@ -8,8 +8,9 @@
 //! while the real build has no value at all, so the two must refuse alike:
 //!
 //! - **The reserved list** ([`test_support::MSBUILD_RESERVED_NAMES`]) is the
-//!   installed MSBuild's own, read by reflection (the oracle's `reservedNames`
-//!   op), in both directions.
+//!   MSBuild's own, read by reflection (the oracle's `reservedNames` op), in
+//!   both directions, for the MSBuild `dotnet` resolves and for each SDK of
+//!   the devshell's dotnet root.
 //! - **Each name** of a candidate set is put to both sides as the only global:
 //!   every reserved name in several spellings, near misses of each (one
 //!   character added, dropped, swapped, or replaced by a non-ASCII letter whose
@@ -22,7 +23,10 @@
 mod common;
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use borzoi_msbuild::observed::host_fs;
+use borzoi_msbuild::observed::host_fs::HostPath as _;
 
 use borzoi_msbuild::{ParseError, parse_fsproj, test_support};
 use common::case_axis::{non_ascii_lookalike, respell_name};
@@ -193,6 +197,50 @@ fn our_reserved_names_are_msbuilds() {
         missing.is_empty() && extra.is_empty(),
         "reserved by MSBuild, not by us: {missing:?}; reserved by us, not by MSBuild: {extra:?}"
     );
+}
+
+/// Every SDK under the devshell's dotnet root, each `<root>/sdk/<version>`
+/// holding an MSBuild, by its real path (as the muxer reaches it).
+///
+/// The corpus root's SDK 11 is not among them: its MSBuild needs the .NET 11
+/// runtime, and the oracle runs on .NET 10.
+fn installed_sdks() -> Vec<PathBuf> {
+    let root = common::dotnet_root_from_env();
+    let mut sdks: Vec<PathBuf> = host_fs::read_dir(root.join("sdk"))
+        .expect("the dotnet root has an sdk directory")
+        .map(|entry| entry.expect("sdk directory entry").path())
+        .filter(|path| path.join("MSBuild.dll").host_is_file())
+        .map(|path| host_fs::canonicalize(&path).expect("an installed SDK resolves"))
+        .collect();
+    sdks.sort();
+    sdks
+}
+
+#[test]
+fn every_installed_msbuild_reserves_our_names() {
+    // An MSBuild that reserves a name we do not would refuse a global we
+    // commit. Each SDK of the devshell is asked, so an SDK added to it that
+    // reserves a new name fails here.
+    let ours: BTreeSet<String> = test_support::MSBUILD_RESERVED_NAMES
+        .iter()
+        .map(|n| n.to_ascii_lowercase())
+        .collect();
+    let sdks = installed_sdks();
+    assert!(!sdks.is_empty(), "no SDK installed");
+    for sdk in sdks {
+        let dir = tempfile::TempDir::new().unwrap();
+        let theirs: BTreeSet<String> = Oracle::spawn_for_sdk(&sdk, dir.path())
+            .reserved_names()
+            .iter()
+            .map(|n| n.to_ascii_lowercase())
+            .collect();
+        assert_eq!(
+            theirs,
+            ours,
+            "the MSBuild of {} reserves a different set",
+            sdk.display()
+        );
+    }
 }
 
 #[test]
