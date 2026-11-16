@@ -23,6 +23,7 @@ use super::state::{
     RecordedFold, Resolver, SameFileQualified, ScopeEntry, ShadowVeto, ShorteningPrefix,
     TieredResolution,
 };
+use super::types::FoundUnion;
 use super::unknowables::Unknowable;
 
 #[cfg(test)]
@@ -4772,19 +4773,19 @@ impl<'a> Resolver<'a> {
     /// `case_seg`): the head → the enum *type* def and the whole span → the case
     /// def, mirroring FCS. Shared by expression ([`resolve_long_ident`](Self::resolve_long_ident))
     /// and pattern ([`resolve_pat_types`](Self::resolve_pat_types)) position, both
-    /// of which FCS resolves identically. Returns `true` iff it matched: it then
+    /// of which FCS resolves identically. Returns `Some` iff it matched: it then
     /// records both, or — when a namesake of lower arity may be the type FCS
     /// binds ([`Self::lower_arity_namesake_possible`]) — records the path's
-    /// decline. Otherwise it records nothing (the path defers, never a wrong
-    /// member).
+    /// decline, and says whether the head binds its arguments all the same
+    /// ([`Self::namesake_declined_case_head_binds`]); `Some(false)` for any
+    /// other outcome. Otherwise it records nothing (the path defers, never a
+    /// wrong member).
     pub(super) fn record_type_case_path(
         &mut self,
         type_seg: &SyntaxToken,
         case_seg: &SyntaxToken,
-    ) -> bool {
-        let Some((type_id, case_res, reach)) = self.type_case_path(type_seg, case_seg) else {
-            return false;
-        };
+    ) -> Option<bool> {
+        let (type_id, case_res, reach) = self.type_case_path(type_seg, case_seg)?;
         let type_pos =
             Self::reached_type_slot_pos(reach, u32::from(self.out.defs[type_id].range.start()));
         if let Some(cause) = self.reached_type_contested(&id_text(type_seg), reach, type_pos) {
@@ -4793,7 +4794,7 @@ impl<'a> Resolver<'a> {
                 &[type_seg.clone(), case_seg.clone()],
                 DeclineSite::pre_walk(cause),
             );
-            return true;
+            return Some(false);
         }
         if self.lower_arity_namesake_possible(&id_text(type_seg), type_id, None) {
             self.defer_with_cause(
@@ -4801,10 +4802,15 @@ impl<'a> Resolver<'a> {
                 &[type_seg.clone(), case_seg.clone()],
                 DeclineSite::pre_walk(DeclineCause::QualifierArityNamesake),
             );
-            return true;
+            return Some(self.namesake_declined_case_head_binds(
+                &id_text(type_seg),
+                &id_text(case_seg),
+                case_res,
+                FoundUnion::InFile,
+            ));
         }
         self.record_type_qualifier(type_seg, case_seg, type_id, case_res);
-        true
+        Some(false)
     }
 
     /// Classify a **same-file module-qualified** type-qualified case `Pal.Color.Red`
@@ -5888,7 +5894,12 @@ impl<'a> Resolver<'a> {
     /// or `open type` open could supply the head `Color` as an unmodelled
     /// module/type/value that out-ranks the type for the qualifier, so defer while
     /// one is in scope.
-    pub(super) fn record_qualified_case_pattern(&mut self, segs: &[SyntaxToken]) {
+    ///
+    /// Returns whether the head, though it commits no resolution, certainly
+    /// resolves to a case that binds its arguments
+    /// ([`Self::namesake_declined_case_head_binds`]); `false` whenever it
+    /// commits one, as the caller reads that from the resolutions.
+    pub(super) fn record_qualified_case_pattern(&mut self, segs: &[SyntaxToken]) -> bool {
         if self.scope.opacity.any() {
             // Enumerable project-module opens are checked against the head
             // instead (a pattern head is never a value, so no value test).
@@ -5896,12 +5907,12 @@ impl<'a> Resolver<'a> {
                 let written: Vec<String> = segs.iter().map(|t| id_text(t).to_string()).collect();
                 if let Some(id) = self.type_qualified_case_past_project_opens(&written) {
                     self.record_qualified_item(segs, id);
-                    return;
+                    return false;
                 }
             }
             // A definite decline by a named gate, so the census says so.
             self.record_path_decline(segs, DeclineSite::pre_walk(DeclineCause::OpaqueOpen));
-            return;
+            return false;
         }
         // A `global.`-rooted head (now parseable — see `pat.rs`) is the
         // namespace-root marker (FCS's `MangledGlobalName`), not a real segment.
@@ -5915,18 +5926,18 @@ impl<'a> Resolver<'a> {
         // `decls.rs`.
         if segs.first().is_some_and(|t| t.text() == "global") {
             self.record_path_decline(segs, DeclineSite::pre_walk(DeclineCause::GlobalMarkerHead));
-            return;
+            return false;
         }
         if let [type_seg, case_seg] = segs
-            && self.record_type_case_path(type_seg, case_seg)
+            && let Some(binds) = self.record_type_case_path(type_seg, case_seg)
         {
-            return;
+            return binds;
         }
         // A same-file module-qualified case `Pal.Color.Red` (Gap A), tried before the
         // cross-file index — a same-file type shadows an earlier file's same-named one.
         // Pattern position (`in_pattern = true`): an active-pattern segment contends.
         if self.record_same_file_module_qualified_case(segs, true) {
-            return;
+            return false;
         }
         if segs.len() >= 2 {
             // A leading `global` was deferred above, so `segs` here is an ordinary
@@ -5942,7 +5953,7 @@ impl<'a> Resolver<'a> {
                     segs,
                     DeclineSite::pre_walk(DeclineCause::SignatureScreened),
                 );
-                return;
+                return false;
             }
             // A same-file type owning this exact case roots the reference in
             // this file, so the cross-file index must not commit an earlier
@@ -5952,17 +5963,37 @@ impl<'a> Resolver<'a> {
                     segs,
                     DeclineSite::pre_walk(DeclineCause::SameFileCaseShadow),
                 );
-                return;
+                return false;
             }
-            let project = match self.cross_file_type_case_tiered(&written, false) {
-                CrossFileCase::Hit(tier, id) => Some((tier, id)),
-                CrossFileCase::Miss => None,
-                CrossFileCase::Declined => {
+            let project = match self.cross_file_type_case_located(&written, false) {
+                Some((CrossFileCase::Hit(tier, id), _)) => Some((tier, id)),
+                None | Some((CrossFileCase::Miss, _)) => None,
+                Some((CrossFileCase::Declined, full)) => {
                     self.record_path_decline(
                         segs,
                         DeclineSite::pre_walk(DeclineCause::QualifierArityNamesake),
                     );
-                    return;
+                    // Which namesake FCS binds is undecided, but whether the
+                    // head binds its arguments may not be.
+                    let [type_name, case] = written.as_slice() else {
+                        return false;
+                    };
+                    let (Some(id), [type_path @ .., _]) = (
+                        self.preceding.type_qualified_case(
+                            self.assemblies.names(),
+                            &full,
+                            &self.lexical.container_path,
+                        ),
+                        full.as_slice(),
+                    ) else {
+                        return false;
+                    };
+                    return self.namesake_declined_case_head_binds(
+                        type_name,
+                        case,
+                        Resolution::Item(id),
+                        FoundUnion::EarlierFile(type_path),
+                    );
                 }
             };
             // Order the project reading against the referenced assemblies by the
@@ -6055,6 +6086,7 @@ impl<'a> Resolver<'a> {
                 self.record_path_decline(segs, site);
             }
         }
+        false
     }
 
     /// Whether an **explicit** `open` puts a referenced-assembly entity named

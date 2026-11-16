@@ -14280,6 +14280,8 @@ WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assem
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:811:36-811:40	main Parameter use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:814:50-814:56	method PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:816:23-816:29	method PatternLocal use agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:817:33-817:45	instructions PatternLocal def agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:818:21-818:33	instructions PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:819:39-819:41	op Parameter def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:819:43-819:48	index Parameter def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:819:65-819:67	op Parameter use agree-none
@@ -14287,11 +14289,17 @@ WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assem
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:823:46-823:75	DelegateCtor UnionCase cross-file-use agree-doc
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:825:46-825:77	DelegateInvoke UnionCase cross-file-use agree-doc
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:827:47-827:78	UnsafeAccessor UnionCase cross-file-use agree-doc
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:827:80-827:84	kind PatternLocal def agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:827:86-827:96	targetName PatternLocal def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:828:25-828:32	nameStr Value { is_function: false } def agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:829:31-829:41	targetName PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:830:32-830:33	n PatternLocal def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:830:44-830:45	n PatternLocal use agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:833:78-833:82	kind PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:833:95-833:102	nameStr Value { is_function: false } use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:834:47-834:76	Unrecognised UnionCase cross-file-use agree-doc
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:834:77-834:81	name PatternLocal def agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:835:75-835:79	name PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:838:17-838:33	applyGenericArgs Value { is_function: true } def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:839:10-839:21	genericArgs Parameter def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Assembly.fs:839:39-839:47	TypeDefn Type cross-file-use agree-none
@@ -18386,6 +18394,8 @@ WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Metho
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:228:82-228:93	'methodVars TypeParam use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:228:9-228:14	tryIl Value { is_function: true } def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:229:15-229:19	body Parameter use agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:230:25-230:30	instr PatternLocal def agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:230:39-230:44	instr PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:236:23-236:25	'a TypeParam def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:236:27-236:29	'b TypeParam def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:236:9-236:22	mapMethodVars Value { is_function: true } def agree-none
@@ -18400,7 +18410,11 @@ WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj Metho
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:239:11-239:21	MethodBody Type use agree-doc
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:239:22-239:24	'b TypeParam use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:241:15-241:19	body Parameter use agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:242:25-242:30	instr PatternLocal def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:242:49-242:50	f Parameter use agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:242:51-242:56	instr PatternLocal use agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:245:38-245:40	rb PatternLocal def agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:245:71-245:73	rb PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:252:17-252:30	'typeGenerics TypeParam def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:252:32-252:47	'methodGenerics TypeParam def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj MethodInfo.fs:252:49-252:60	'methodVars TypeParam def agree-none
@@ -20092,8 +20106,10 @@ WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeC
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:10:16-10:34	ConcreteTypeHandle Type use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:10:7-10:12	Byref UnionCase def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1100:19-1100:25	method Parameter use agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1101:29-1101:34	instr PatternLocal def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1102:21-1102:27	locals Value { is_function: false } def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1102:29-1102:39	updatedCtx Value { is_function: false } def agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1103:27-1103:32	instr PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1104:37-1104:44	concCtx Value { is_function: false } use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1105:28-1105:32	vars PatternLocal def agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1106:29-1106:36	handles Value { is_function: false } def agree-none
@@ -20110,12 +20126,15 @@ WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeC
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1115:39-1115:42	ctx Value { is_function: false } use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1117:32-1117:63	setLocalVars Value { is_function: true } cross-file-use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1117:64-1117:70	locals Value { is_function: false } use agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1117:71-1117:76	instr PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1117:79-1117:89	updatedCtx Value { is_function: false } use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1118:67-1118:74	concCtx Value { is_function: false } use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1119:57-1119:64	concCtx Value { is_function: false } use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:111:11-111:29	ConcreteTypeHandle Type use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:111:11-111:38	Concrete UnionCase use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:111:39-111:41	id PatternLocal def agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1120:42-1120:44	rb PatternLocal def agree-none
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1120:75-1120:77	rb PatternLocal use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1120:79-1120:86	concCtx Value { is_function: false } use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1121:59-1121:66	concCtx Value { is_function: false } use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj TypeConcretisation.fs:1124:13-1124:27	genericHandles Value { is_function: false } def agree-none

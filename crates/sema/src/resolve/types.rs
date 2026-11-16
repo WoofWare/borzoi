@@ -17,6 +17,7 @@ use crate::binders::{BinderRole, pattern_names};
 use crate::def::{Def, DefId, DefKind};
 
 use super::contributors::RequireQualifiedAccess;
+use super::decls::CaseExport;
 use super::id_text;
 use super::model::{
     CaseKind, DeclineCause, DeclineSite, DeclineTier, DeferredReason, EarlierType, ExportDeclKind,
@@ -102,6 +103,16 @@ pub(super) enum TypePathResolution {
     /// shell records nothing, the signal a consumer reads as "no shadow
     /// possible" (see [`Resolver::defer_shadowable_type`]).
     NoMatch,
+}
+
+/// The union a declined qualified case head's case reading found
+/// ([`Resolver::namesake_declined_case_head_binds`]).
+#[derive(Clone, Copy)]
+pub(super) enum FoundUnion<'a> {
+    /// An earlier file's, at this full path (`[container.., T]`).
+    EarlierFile(&'a [String]),
+    /// This file's.
+    InFile,
 }
 
 /// One attribute candidate's verdict (EX-3 §2(d); see
@@ -383,6 +394,12 @@ impl<'a> Resolver<'a> {
             .get(&self.lexical.container_path.id())
             .and_then(|m| m.get(&type_key))
             .copied();
+        // What FCS checks of a case heading a pattern before its arguments:
+        // its attributes and its type's. Taken over every case, since FCS
+        // resolves a duplicated case name (FS0023) to its first declaration,
+        // which need not be the one the case index keeps.
+        let case_attributed = defn.attributes().next().is_some()
+            || u.cases().any(|case| case.attributes().next().is_some());
         for case in u.cases() {
             // An operator-named case (`([])` / `( :: )`, FSharp.Core's `list`) has
             // no identifier token; FCS records its compiled `op_Nil` /
@@ -434,10 +451,13 @@ impl<'a> Resolver<'a> {
                     name,
                     id,
                     &type_key,
-                    type_is_private,
-                    repr_access_root.clone(),
-                    CaseKind::Union {
-                        require_qualified: true,
+                    CaseExport {
+                        type_is_private,
+                        repr_access_root: repr_access_root.clone(),
+                        kind: CaseKind::Union {
+                            require_qualified: true,
+                        },
+                        case_attributed,
                     },
                 ) {
                     Some(item_id) => Resolution::Item(item_id),
@@ -447,10 +467,13 @@ impl<'a> Resolver<'a> {
                 match self.export_case(
                     name,
                     id,
-                    type_is_private,
-                    repr_access_root.clone(),
-                    CaseKind::Union {
-                        require_qualified: false,
+                    CaseExport {
+                        type_is_private,
+                        repr_access_root: repr_access_root.clone(),
+                        kind: CaseKind::Union {
+                            require_qualified: false,
+                        },
+                        case_attributed,
                     },
                 ) {
                     Some(item_id) => {
@@ -609,11 +632,14 @@ impl<'a> Resolver<'a> {
                 case_name,
                 id,
                 &type_key,
-                type_is_private,
-                // An enum's representation takes no modifier
-                // (`parsEnumTypesCannotHaveVisibilityDeclarations`).
-                None,
-                CaseKind::Enum,
+                CaseExport {
+                    type_is_private,
+                    // An enum's representation takes no modifier
+                    // (`parsEnumTypesCannotHaveVisibilityDeclarations`).
+                    repr_access_root: None,
+                    kind: CaseKind::Enum,
+                    case_attributed: false,
+                },
             ) {
                 Some(item_id) => Resolution::Item(item_id),
                 None => Resolution::Local(id),
@@ -656,7 +682,13 @@ impl<'a> Resolver<'a> {
         // declaration, frame entry, and cross-file open (so find-references spans
         // its cross-file uses); an anonymous-root constructor stays `Local` and its
         // module is marked hidden.
-        let res = match self.export_case(entry_name, id, is_private, None, CaseKind::Exception) {
+        let exception = CaseExport {
+            type_is_private: is_private,
+            repr_access_root: None,
+            kind: CaseKind::Exception,
+            case_attributed: false,
+        };
+        let res = match self.export_case(entry_name, id, exception) {
             Some(item_id) => Resolution::Item(item_id),
             None => {
                 self.note_hidden_value_module(self.lexical.container_path.to_vec());
@@ -835,6 +867,7 @@ impl<'a> Resolver<'a> {
                         access_root_len: self.export_access_root_len(is_private),
                         repr_access_root: None,
                         attributed: false,
+                        case_attributed: false,
                     });
                     Some((item_idx, item_id))
                 };
@@ -3313,6 +3346,143 @@ impl<'a> Resolver<'a> {
             })
     }
 
+    /// Whether a qualified pattern head `T.C` the namesake guard declined
+    /// ([`Self::earlier_case_type_namesake_possible`] for an earlier file's
+    /// case, [`Self::lower_arity_namesake_possible`] for this file's) still
+    /// certainly binds the arguments under it: whichever type named `T` FCS
+    /// settles on, the head resolves to a union case. `case_res` is the case
+    /// the guard found, and `found` the union declaring it.
+    ///
+    /// FCS resolves the head by trying every type of the name in scope, of
+    /// any arity, and taking the first that finds `C` in itself
+    /// (`ResolvePatternLongIdentPrim`'s `tyconSearch`, before any module or
+    /// namespace). A union case binds every pattern under the head, whatever
+    /// its field count, and so does every case that may be the one. Anything
+    /// else the lookup can find abandons the sub-pattern, so nothing under it
+    /// binds: an IL field (`String.Empty`), a literal one included
+    /// (`Int32.MaxValue`), an F# record or class field, or a nested type. The
+    /// found type always finds `C`, so some type succeeds; the head binds
+    /// when the found case is a union's (an enum case is a literal) and no
+    /// other type of the name could find anything:
+    ///
+    /// * `T` is no module alias, so the types tried are those named `T`;
+    /// * the project declares no type named `T` but the found union: its one
+    ///   declaration of the name, exceptions included, in an earlier file or
+    ///   this one;
+    /// * an earlier file's union is one FCS sees by its simple name
+    ///   ([`Self::sees_types_declared_in`]): the case index's container walk
+    ///   also reaches an enclosing namespace's ancestors, which FCS does not
+    ///   open;
+    /// * the found union and its cases carry no attribute list, since an
+    ///   error-level attribute (`[<Obsolete(…, true)>]`) abandons the
+    ///   sub-pattern before its arguments are checked, and a duplicated case
+    ///   name resolves to its first declaration;
+    /// * every referenced assembly's type named `T` under a prefix the type
+    ///   walk visits finds nothing named `C`
+    ///   ([`AssemblyEnv::pattern_lookup_in_type_finds_nothing`](crate::AssemblyEnv::pattern_lookup_in_type_finds_nothing)), and no
+    ///   surface the walk cannot enumerate (an `[<AutoOpen>]` one, a dropped
+    ///   type, an open's unenumerable residue, a referenced assembly whose
+    ///   projection was skipped whole) may supply another.
+    pub(super) fn namesake_declined_case_head_binds(
+        &self,
+        type_name: &str,
+        case: &str,
+        case_res: Resolution,
+        found: FoundUnion<'_>,
+    ) -> bool {
+        if !self.resolves_to_plain_union_case(case_res)
+            || self.lexical_alias_target(type_name).is_some()
+        {
+            return false;
+        }
+        let earlier = self.preceding.earlier_type_arities.get(type_name);
+        let project_only_found = match found {
+            FoundUnion::EarlierFile(type_path) => {
+                type_path
+                    .split_last()
+                    .is_some_and(|(last, container)| {
+                        last == type_name && self.sees_types_declared_in(container)
+                    })
+                    && !self.prescan.own_type_simple_names.contains(type_name)
+                    // Two declarations at one path are two types (at two
+                    // arities, or an FS0037 duplicate). A signature's
+                    // implementation exports no type-qualified case, so the
+                    // union is no signature pair's.
+                    && earlier.is_some_and(|decls| {
+                        matches!(decls.as_slice(), [d] if d.path.as_deref() == Some(type_path))
+                    })
+            }
+            FoundUnion::InFile => {
+                self.prescan.own_type_decl_counts.get(type_name) == Some(&1)
+                    && !self.prescan.own_exception_simple_names.contains(type_name)
+                    && earlier.is_none_or(Vec::is_empty)
+            }
+        };
+        let names = [type_name.to_string()];
+        project_only_found
+            && !self.assemblies.retained_auto_open_is_uncertain()
+            && !self.assemblies.identities_incomplete()
+            && !self.assemblies.manifest_auto_open_surface_declares(
+                type_name,
+                ManifestSurfacePosition::TypeAnyArity,
+            )
+            && !self.assemblies.contested_auto_open_surface_declares(
+                type_name,
+                ManifestSurfacePosition::TypeAnyArity,
+            )
+            && !self.dropped_type_could_root_this_path(&names)
+            && self.assembly_prefixes_by_priority().all(|(_, prefix)| {
+                self.assemblies
+                    .entities_named(prefix.path, type_name)
+                    .into_iter()
+                    .all(|t| {
+                        self.assemblies
+                            .pattern_lookup_in_type_finds_nothing(t, case)
+                    })
+                    && !(self.assemblies.has_namespace(prefix.path)
+                        && self
+                            .assemblies
+                            .open_namespace_fold_surfaces(prefix.path)
+                            .iter()
+                            .any(|s| s.residue || s.entries.iter().any(|e| e.name == type_name)))
+            })
+    }
+
+    /// Whether a type declared directly in project container `container` is
+    /// in scope here by its simple name: `container` is the root, this
+    /// block's own namespace or one of its enclosing modules, or an explicit
+    /// open's. A namespace block opens its own namespace alone, so inside
+    /// `namespace N.Inner` the types of `N` are not in scope.
+    fn sees_types_declared_in(&self, container: &[String]) -> bool {
+        let path = &self.lexical.container_path;
+        let own_namespace = self.lexical.namespace_depth.min(path.len());
+        container.is_empty()
+            || (container.len() >= own_namespace && path.get(..container.len()) == Some(container))
+            || self
+                .scope
+                .open_shortening_prefixes
+                .iter()
+                .any(|prefix| prefix.path == container)
+    }
+
+    /// Whether `res` names a union case whose union carries no attribute list
+    /// on itself or any case ([`ExportedItem::case_attributed`](super::model::ExportedItem::case_attributed)),
+    /// as an export of this file's or an earlier one's
+    /// ([`ProjectItems::is_plain_union_case_item`](super::model::ProjectItems::is_plain_union_case_item)):
+    /// not an enum case, an exception constructor, or a case with no handle.
+    fn resolves_to_plain_union_case(&self, res: Resolution) -> bool {
+        match res {
+            Resolution::Item(id) => match id.index().checked_sub(self.item_base as usize) {
+                Some(local) => self.out.items.get(local).is_some_and(|it| {
+                    matches!(it.case, Some(super::model::CaseKind::Union { .. }))
+                        && !it.case_attributed
+                }),
+                None => self.preceding.is_plain_union_case_item(id),
+            },
+            _ => false,
+        }
+    }
+
     /// Whether a type named `name` with fewer than `arity` generic parameters
     /// may be in scope anywhere FCS's unqualified type-name lookup reads —
     /// see [`Self::lower_arity_namesake_possible`] for the channels.
@@ -3536,8 +3706,8 @@ impl<'a> Resolver<'a> {
                 // sub-pattern), so the default "recurse every arg" fallthrough must
                 // not run and re-process them through the constructor namespace.
                 let mut split_applied = false;
-                // Set when this head is qualified and unresolved, so the binders
-                // under it are undecided.
+                // Set when this head is qualified, unresolved, and not certain to
+                // resolve to a case, so the binders under it are undecided.
                 let mut undecided = false;
                 if let Some(head) = p.head().filter(|_| !head_names_active_pat) {
                     let segs: Vec<SyntaxToken> = head.idents().collect();
@@ -3549,8 +3719,8 @@ impl<'a> Resolver<'a> {
                         // case), nullary or applied alike. `binders` drops a
                         // multi-segment head, and `case_reference` (single-segment)
                         // does not see it.
-                        self.record_qualified_case_pattern(&segs);
-                        undecided = applied && !self.pattern_head_committed(&segs);
+                        let binds_anyway = self.record_qualified_case_pattern(&segs);
+                        undecided = applied && !binds_anyway && !self.pattern_head_committed(&segs);
                         // An enclosing undecided head has marked this whole
                         // subtree already; marking it again at every level would
                         // make a nest of them quadratic.
@@ -3684,7 +3854,9 @@ impl<'a> Resolver<'a> {
 
     /// Record every name occurrence in an applied pattern's arguments as
     /// [undecided](crate::resolve::indexes::Indexes::undecided_pattern_binders):
-    /// the head is qualified and the walk committed no resolution for it.
+    /// the head is qualified, the walk committed no resolution for it, and
+    /// it is not certain to resolve to a union case whichever reading FCS
+    /// takes ([`Self::namesake_declined_case_head_binds`]).
     ///
     /// FCS binds an applied pattern's arguments only once it has resolved the
     /// head. A qualified head it cannot resolve is an error that abandons the
@@ -3692,8 +3864,8 @@ impl<'a> Resolver<'a> {
     /// alone). A *single-segment* head it cannot resolve is a new definition
     /// instead (`TcPatLongIdentNewDef`), which reports FS0039 and still binds
     /// the arguments, so that form is not marked. Whether a qualified head the
-    /// walk declines would resolve is unknown, so the binders under it are
-    /// declined rather than committed.
+    /// walk declines would resolve is otherwise unknown, so the binders under
+    /// it are declined rather than committed.
     fn mark_undecided_pattern_args(&mut self, p: &LongIdentPat) {
         let mut args: Vec<Pat> = p.args().collect();
         if let Some(group) = p.name_pat_pairs() {

@@ -7487,6 +7487,58 @@ impl AssemblyEnv {
         Some(group)
     }
 
+    /// Whether FCS's lookup of `name` *in* the type `handle`, as the qualifier
+    /// of a pattern head (`T.name`, `ResolveLongIdentInTypePrim` under
+    /// `LookupKind.Pattern`), provably finds nothing: no union case, IL or F#
+    /// field, nor nested type of the name, on the type or anything it
+    /// inherits from (`FoldPrimaryHierarchyOfType`: the base chain, and an
+    /// interface's inherited interfaces).
+    ///
+    /// Deliberately name-only about members: any member, skipped member or
+    /// nested type spelled `name`, at any accessibility, answers no, though a
+    /// method, property or event of the name finds nothing in pattern
+    /// position. Only the kinds whose whole surface is their IL one are
+    /// judged — a class, struct, interface, enum or delegate. The F# kinds
+    /// answer no: FCS reads a union's cases and a record's or exception's
+    /// fields from the F# signature rather than the IL, and an abbreviation
+    /// stands for a type it does not hold. So do a level whose namespace
+    /// dropped a type (it may have been one nested there) and a type whose
+    /// inheritance [`Self::base_chain`] cannot complete.
+    pub(crate) fn pattern_lookup_in_type_finds_nothing(
+        &self,
+        handle: EntityHandle,
+        name: &str,
+    ) -> bool {
+        let levels = match self.entity(handle).kind {
+            EntityKind::Class | EntityKind::Struct | EntityKind::Enum | EntityKind::Delegate => {
+                match self.base_chain(handle) {
+                    BaseChain::Complete(levels) | BaseChain::ObjectCapped(levels) => levels,
+                    BaseChain::Incomplete => return false,
+                }
+            }
+            EntityKind::Interface => match self.interface_member_chain(handle) {
+                InterfaceChain::Complete(levels) | InterfaceChain::ObjectCapped(levels) => levels,
+                InterfaceChain::Incomplete => return false,
+            },
+            EntityKind::Module
+            | EntityKind::Union
+            | EntityKind::Record
+            | EntityKind::Abbreviation
+            | EntityKind::Exception
+            | EntityKind::Measure => return false,
+        };
+        levels.into_iter().all(|level| {
+            let e = self.entity(level);
+            !self.namespace_has_dropped_type(&e.namespace)
+                && !e.members.iter().any(|m| member_name(m) == name)
+                && !e.skipped_members.iter().any(|m| m.name == name)
+                && !self.children(level).iter().any(|&child| {
+                    let c = self.entity(child);
+                    c.name == name || c.source_name.as_deref() == Some(name)
+                })
+        })
+    }
+
     /// Walk `handle`'s base-type chain, nearest first, resolving each base to its
     /// interned handle. See [`BaseChain`] for the three outcomes. Only *non-generic,
     /// top-level, present* bases extend the chain ([`Self::resolve_base`]); the

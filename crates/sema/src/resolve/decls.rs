@@ -159,6 +159,21 @@ fn abbrev_names_itself(defn: &TypeDefn, abbrev: &TypeAbbrev) -> bool {
     id_text(&target) == id_text(&name)
 }
 
+/// What a case's export records beyond its name and definition, which
+/// [`Resolver::export_case`] and [`Resolver::export_require_qualified_case`]
+/// copy onto its [`ExportedItem`].
+pub(super) struct CaseExport {
+    /// The case's type is `private`, so the case is scoped to the type's
+    /// container ([`ExportedItem::access_root_len`]).
+    pub(super) type_is_private: bool,
+    /// [`ExportedItem::repr_access_root`].
+    pub(super) repr_access_root: Option<Vec<String>>,
+    /// [`ExportedItem::case`].
+    pub(super) kind: CaseKind,
+    /// [`ExportedItem::case_attributed`].
+    pub(super) case_attributed: bool,
+}
+
 impl<'a> Resolver<'a> {
     /// The qualified path a later file uses to reach a `let` value declared
     /// here at `decl_path` (`["Shared", "foo"]`): the declaration's own path
@@ -231,10 +246,14 @@ impl<'a> Resolver<'a> {
         &mut self,
         name: &str,
         def: DefId,
-        type_is_private: bool,
-        repr_access_root: Option<Vec<String>>,
-        kind: CaseKind,
+        case: CaseExport,
     ) -> Option<ItemId> {
+        let CaseExport {
+            type_is_private,
+            repr_access_root,
+            kind,
+            case_attributed,
+        } = case;
         let decl_path = self.decl_path(&[name]);
         let pos = self.out.defs[def].range.start();
         if self.lexical.anonymous_root {
@@ -268,6 +287,7 @@ impl<'a> Resolver<'a> {
             access_root_len: self.export_access_root_len(type_is_private),
             repr_access_root,
             attributed: false,
+            case_attributed,
         });
         self.push_export_decl(
             decl_path,
@@ -339,9 +359,7 @@ impl<'a> Resolver<'a> {
         name: &str,
         def: DefId,
         type_name: &str,
-        type_is_private: bool,
-        repr_access_root: Option<Vec<String>>,
-        kind: CaseKind,
+        case: CaseExport,
     ) -> Option<ItemId> {
         if self.lexical.anonymous_root {
             // No cross-file handle and — unlike `export_case` — no hidden-value
@@ -349,6 +367,12 @@ impl<'a> Resolver<'a> {
             // of the (anonymous, unmodelled) container brings no bare name.
             return None;
         }
+        let CaseExport {
+            type_is_private,
+            repr_access_root,
+            kind,
+            case_attributed,
+        } = case;
         let item_idx = self.out.items.len();
         let item_id = ItemId::new(self.item_base as usize + item_idx);
         self.out.items.push(ExportedItem {
@@ -363,6 +387,7 @@ impl<'a> Resolver<'a> {
             access_root_len: self.export_access_root_len(type_is_private),
             repr_access_root,
             attributed: false,
+            case_attributed,
         });
         // The export-decl-list twin: a case `Item` decl (no value path). Its
         // type-qualified path is threaded by `export_type_qualified_case` below,

@@ -575,6 +575,14 @@ pub struct ProjectItems {
     /// [`Resolution::Item`] as a case ([`Resolver::case_classification`](super::state::Resolver::case_classification)) — for
     /// pattern-position resolution and case/module collision soundness.
     pub(super) case_item_ids: HashSet<ItemId>,
+    /// The project-global [`ItemId`]s of earlier files' **union** cases whose
+    /// union carries no attribute list on itself or any case
+    /// ([`ExportedItem::case_attributed`]), of every accessibility and
+    /// [`CaseKind::Union`] flavour: the [type-qualified
+    /// cases](Self::type_qualified_cases) certain to bind the patterns applied
+    /// to them, unlike an enum case (a literal) or an attributed case
+    /// ([`Resolver::namesake_declined_case_head_binds`](super::state::Resolver::namesake_declined_case_head_binds)).
+    pub(super) plain_union_case_ids: HashSet<ItemId>,
     /// The project-global [`ItemId`]s of earlier files' **attributed**
     /// module-level `let` values ([`ExportedItem::attributed`]) — maybe-literal
     /// constant-pattern contestants. A `[<Literal>]` value enters FCS's pattern
@@ -1734,6 +1742,7 @@ impl ProjectItems {
         for id in idx.case_item_ids {
             self.case_item_ids.insert(id);
         }
+        self.plain_union_case_ids.extend(idx.plain_union_case_ids);
         for id in idx.attributed_value_ids {
             self.attributed_value_ids.insert(id);
         }
@@ -1758,6 +1767,12 @@ impl ProjectItems {
     /// [`Self::case_item_ids`]).
     pub(super) fn is_case_item(&self, id: ItemId) -> bool {
         self.case_item_ids.contains(&id)
+    }
+
+    /// Whether `id` is an earlier file's unattributed **union** case (see
+    /// [`Self::plain_union_case_ids`]).
+    pub(super) fn is_plain_union_case_item(&self, id: ItemId) -> bool {
+        self.plain_union_case_ids.contains(&id)
     }
 
     /// Whether `id` is an earlier file's **attributed** module-level value
@@ -1903,6 +1918,7 @@ struct FileExportIndices {
     opaque_cases: Vec<(DeclPath, bool)>,
     type_qualified_cases: Vec<(DeclPath, QualifiedCaseExport)>,
     type_paths: Vec<(DeclPath, ExportedTypeFacts)>,
+    plain_union_case_ids: Vec<ItemId>,
     auto_open_module_paths: Vec<DeclPath>,
     namespace_shadow_names: Vec<(Vec<String>, String)>,
 }
@@ -2117,6 +2133,9 @@ impl FileExportIndices {
                         }
                         if it.is_case() {
                             fi.case_item_ids.push(it.id);
+                        }
+                        if matches!(it.case, Some(CaseKind::Union { .. })) && !it.case_attributed {
+                            fi.plain_union_case_ids.push(it.id);
                         }
                         if it.attributed {
                             fi.attributed_value_ids.push(it.id);
@@ -3647,6 +3666,17 @@ pub struct ExportedItem {
     /// and never contests. Always `false` for cases and active-pattern case
     /// handles.
     pub(super) attributed: bool,
+    /// For a union case, `true` when its union type or any of the union's
+    /// cases may carry an attribute list: FCS checks the attributes of a case
+    /// heading a pattern before its arguments (`CheckUnionCaseAttributes`),
+    /// and an error-level one (`[<Obsolete(…, true)>]`) abandons the whole
+    /// sub-pattern, so only an unattributed case certainly binds them. Any
+    /// case counts, since a duplicated case name (FS0023) resolves to its
+    /// first declaration, which need not be the one exported
+    /// ([`Resolver::namesake_declined_case_head_binds`](super::state::Resolver::namesake_declined_case_head_binds)).
+    /// A signature-derived union case answers `true`. `false` for every
+    /// other export.
+    pub(super) case_attributed: bool,
 }
 
 impl ExportedItem {
@@ -4203,6 +4233,7 @@ impl ResolvedFile {
                 // so no signature-derived case has a restricted representation.
                 repr_access_root: None,
                 attributed: ex.attributed,
+                case_attributed: matches!(ex.case, Some(CaseKind::Union { .. })),
             });
             self.export_decls.push(ExportDecl {
                 path: ex.path.clone(),
