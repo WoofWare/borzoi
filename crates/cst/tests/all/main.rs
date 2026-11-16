@@ -56,6 +56,7 @@ mod parser_diff_cons;
 mod parser_diff_control_flow;
 mod parser_diff_decl_sequence_grid;
 mod parser_diff_dot_access;
+mod parser_diff_dot_dot_grid;
 mod parser_diff_dot_index_spacing;
 mod parser_diff_dot_lambda;
 mod parser_diff_dynamic;

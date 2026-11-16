@@ -1753,13 +1753,14 @@ impl<'src> Parser<'src> {
                 star_end.and_then(|end| self.next_non_trivia_raw_after(end)),
             )
         } else {
-            let op_end = self
-                .filtered
-                .tokens()
-                .get(self.filtered.pos() + 1)
-                .map(|(_, s)| s.end);
+            // The operator's last token: the range-step's name is two.
+            let op_last = self.filtered.pos()
+                + self
+                    .paren_op_value_len_at(self.filtered.pos(), true)
+                    .unwrap_or(1);
+            let op_end = self.filtered.tokens().get(op_last).map(|(_, s)| s.end);
             (
-                self.next_non_trivia_filtered_after_index(self.filtered.pos() + 1),
+                self.next_non_trivia_filtered_after_index(op_last),
                 op_end.and_then(|end| self.raw_after_paren_op_close(end)),
             )
         }

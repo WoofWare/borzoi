@@ -177,11 +177,24 @@ fn classify(spelling: &str) -> OpSpelling {
     }
     if let Some(&(_, compiled)) = OP_NAME_TABLE.iter().find(|&&(k, _)| k == spelling) {
         OpSpelling::Table(compiled)
+    } else if is_spaced_range_step(spelling) {
+        OpSpelling::Table("op_RangeStep")
     } else if spelling.contains(' ') {
         OpSpelling::NotOperator
     } else {
         OpSpelling::Custom
     }
+}
+
+/// Whether `spelling` is the range-step operator: two `..`s with one or more
+/// spaces between them (the table holds the one-space `.. ..`). F# reads its name from two `..` tokens whatever
+/// separates them, and a parser that keeps the name as one token spanning both
+/// spells it with the spaces the source has.
+fn is_spaced_range_step(spelling: &str) -> bool {
+    spelling
+        .strip_prefix("..")
+        .and_then(|s| s.strip_suffix(".."))
+        .is_some_and(|gap| !gap.is_empty() && gap.bytes().all(|b| b == b' '))
 }
 
 /// Whether `spelling` is an operator: a table entry, or a non-empty run of
@@ -282,6 +295,15 @@ mod tests {
         assert_eq!(compile_op_name("|>"), "op_PipeRight");
         assert_eq!(compile_op_name("~-"), "op_UnaryNegation");
         assert_eq!(compile_op_name("::"), "op_ColonColon");
+    }
+
+    #[test]
+    fn the_range_step_operator_is_named_whatever_its_spacing() {
+        assert_eq!(compile_op_name(".. .."), "op_RangeStep");
+        assert_eq!(compile_op_name("..   .."), "op_RangeStep");
+        assert_eq!(compile_op_name(".."), "op_Range");
+        assert_eq!(compile_op_name("...."), "op_DotDotDotDot");
+        assert!(!is_operator_spelling(". ."));
     }
 
     #[test]
@@ -390,10 +412,22 @@ mod tests {
         }
     }
 
+    /// The reference for the range-step operator spelt with any run of
+    /// spaces: two `..` words and nothing else.
+    fn reference_is_range_step(spelling: &str) -> bool {
+        !spelling.starts_with(' ')
+            && !spelling.ends_with(' ')
+            && spelling
+                .split(' ')
+                .filter(|w| !w.is_empty())
+                .eq(["..", ".."])
+    }
+
     /// The reference for [`is_operator_spelling`]: `IsOperatorDisplayName`
     /// read off the two tables by linear scan, character by character.
     fn reference_is_operator_spelling(spelling: &str) -> bool {
         OP_NAME_TABLE.iter().any(|&(k, _)| k == spelling)
+            || reference_is_range_step(spelling)
             || (!spelling.is_empty()
                 && spelling
                     .chars()
@@ -404,6 +438,9 @@ mod tests {
     fn reference_compile_op_name(spelling: &str) -> Cow<'_, str> {
         if let Some(&(_, compiled)) = OP_NAME_TABLE.iter().find(|&&(k, _)| k == spelling) {
             return Cow::Borrowed(compiled);
+        }
+        if reference_is_range_step(spelling) {
+            return Cow::Borrowed("op_RangeStep");
         }
         if !reference_is_operator_spelling(spelling) {
             return Cow::Borrowed(spelling);
@@ -422,15 +459,18 @@ mod tests {
     /// Spellings built from pieces weighted towards what the fast paths
     /// branch on: whole table entries (so spliced into other text when
     /// several are drawn), operator characters, the space that only table
-    /// entries may hold, identifier characters, backticks, and non-ASCII
-    /// characters (whose UTF-8 bytes must not read as operator characters).
+    /// entries (and the range-step `..  ..` with more spaces) may hold,
+    /// identifier characters, backticks, and non-ASCII characters (whose
+    /// UTF-8 bytes must not read as operator characters).
     fn spelling() -> impl proptest::strategy::Strategy<Value = String> {
         use proptest::prelude::*;
         let table_entry =
             proptest::sample::select(OP_NAME_TABLE.iter().map(|&(k, _)| k).collect::<Vec<_>>())
                 .prop_map(String::from);
         // The entries with a space are few, and only such an entry, exactly,
-        // makes a spelling with a space an operator.
+        // or the range-step with a longer run of spaces
+        // ([`spaced_range_steps_agree`]), makes a spelling with a space an
+        // operator.
         let spaced_entry = proptest::sample::select(
             OP_NAME_TABLE
                 .iter()
@@ -537,6 +577,29 @@ mod tests {
                 "{s:?}"
             );
             assert_eq!(compile_op_name(&s), reference_compile_op_name(&s), "{s:?}");
+        }
+    }
+
+    /// The range-step operator spelt with more than one space, which the
+    /// generator reaches only rarely, and its near misses.
+    #[test]
+    fn spaced_range_steps_agree() {
+        for s in [
+            "..  ..",
+            "..     ..",
+            " .. ..",
+            ".. .. ",
+            "..  .",
+            ".  ..",
+            ".. .. ..",
+            "..\t..",
+        ] {
+            assert_eq!(
+                is_operator_spelling(s),
+                reference_is_operator_spelling(s),
+                "{s:?}"
+            );
+            assert_eq!(compile_op_name(s), reference_compile_op_name(s), "{s:?}");
         }
     }
 

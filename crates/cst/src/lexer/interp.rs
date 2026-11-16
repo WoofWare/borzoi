@@ -116,6 +116,12 @@ pub struct InterpDriver<'a> {
     ///
     /// [`LanguageFeature::ExtendedStringInterpolation`]: crate::language_version::LanguageFeature::ExtendedStringInterpolation
     extended_interpolation: bool,
+    /// No operator of two or more leading `ignored_op_char`s starts before
+    /// this byte ([`scan_operator`]'s [`OperatorScan::NoneBefore`]). Every
+    /// start inside a run of ignored characters shares the run's verdict, so
+    /// remembering it keeps a long run of dots linear rather than rescanned
+    /// from each token in it.
+    no_operator_before: usize,
 }
 
 impl<'a> InterpDriver<'a> {
@@ -140,6 +146,7 @@ impl<'a> InterpDriver<'a> {
             base: 0,
             frames,
             extended_interpolation,
+            no_operator_before: 0,
         }
     }
 
@@ -327,6 +334,22 @@ impl<'a> Iterator for InterpDriver<'a> {
             return Some((Ok(Token::Equals), abs.start..abs.start + 1));
         }
 
+        // An operator with two or more leading `ignored_op_char`s (`..-`,
+        // `..|`, `.?+`), which [`Token::Op`]'s regex cannot take: the token
+        // Logos found (`..`, `.`) is a prefix of the operator FCS's longer
+        // match reads.
+        if tok.is_ok() && abs.start >= self.no_operator_before {
+            match scan_operator(&self.source.as_bytes()[abs.start..]) {
+                OperatorScan::Operator(len) if len > abs.len() => {
+                    let end = abs.start + len;
+                    self.restart_inner(end);
+                    return Some((Ok(Token::Op(&self.source[abs.start..end])), abs.start..end));
+                }
+                OperatorScan::Operator(_) => {}
+                OperatorScan::NoneBefore(n) => self.no_operator_before = abs.start + n,
+            }
+        }
+
         // An extended opener below F# 8.0, whether or not the Logos arm found
         // its end: lex it as triple-quoted.
         if !self.extended_interpolation
@@ -422,6 +445,61 @@ impl<'a> Iterator for InterpDriver<'a> {
             }
             other => Some((other, abs)),
         }
+    }
+}
+
+/// What `lex.fsl`'s general operator rules (`ignored_op_char* SIG op_char*`,
+/// lines 961-989, where `ignored_op_char` is `.`, `$` or `?` and the
+/// significant `SIG` is any `op_char` but `.`, `?` and `:`) read at the start
+/// of some text.
+enum OperatorScan {
+    /// An operator of this many bytes: the whole run of `op_char`s, since a
+    /// significant character sits in it after nothing but ignored ones.
+    Operator(usize),
+    /// No operator, at the start or at any of the first this-many bytes,
+    /// which are the run of ignored characters the text opens with: every
+    /// start inside it meets the same character after it, and none of the
+    /// run is the significant `$`.
+    NoneBefore(usize),
+}
+
+fn scan_operator(rest: &[u8]) -> OperatorScan {
+    const fn is_op_char(b: u8) -> bool {
+        matches!(
+            b,
+            b'!' | b'$'
+                | b'%'
+                | b'&'
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b'<'
+                | b'='
+                | b'>'
+                | b'?'
+                | b'@'
+                | b'^'
+                | b'|'
+                | b'~'
+                | b':'
+        )
+    }
+    let ignored = rest
+        .iter()
+        .take_while(|&&b| matches!(b, b'.' | b'$' | b'?'))
+        .count();
+    // `$` is ignored and significant both; past the ignored run, any
+    // `op_char` but `:` is significant.
+    let significant = rest[..ignored].contains(&b'$')
+        || rest
+            .get(ignored)
+            .is_some_and(|&b| is_op_char(b) && b != b':');
+    if significant {
+        OperatorScan::Operator(rest.iter().take_while(|&&b| is_op_char(b)).count())
+    } else {
+        OperatorScan::NoneBefore(ignored)
     }
 }
 

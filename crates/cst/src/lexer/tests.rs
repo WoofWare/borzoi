@@ -321,6 +321,13 @@ fn operators() {
     assert_eq!(toks(":?>"), vec![Token::ColonQMarkGreater]);
     assert_eq!(toks(".."), vec![Token::DotDot]);
     assert_eq!(toks("..^"), vec![Token::DotDotHat]);
+    // Two or more leading `ignored_op_char`s: one operator, as FCS reads it.
+    assert_eq!(toks("..-"), vec![Token::Op("..-")]);
+    assert_eq!(toks(".?+"), vec![Token::Op(".?+")]);
+    assert_eq!(toks("..|]"), vec![Token::Op("..|"), Token::RBrack]);
+    assert_eq!(toks("..^-"), vec![Token::Op("..^-")]);
+    assert_eq!(toks("..."), vec![Token::DotDotDot]);
+    assert_eq!(toks("...."), vec![Token::DotDotDot, Token::Dot]);
     assert_eq!(toks("=>"), vec![Token::Op("=>")]);
     assert_eq!(toks("|>"), vec![Token::Op("|>")]);
     assert_eq!(toks("<="), vec![Token::Op("<=")]);
@@ -879,4 +886,24 @@ fn extended_interp_trailing_b_is_separate_ident() {
             Token::Ident("B"),
         ]
     );
+}
+
+/// A long run of ignored operator characters lexes in time linear in its
+/// length: the driver's operator lookahead from each `..` or `?` token in the
+/// run is answered once for the whole run, not rescanned from every token.
+/// Rescanned, the 2 MB here take minutes; linear, well under a second.
+#[test]
+fn a_long_run_of_ignored_operator_characters_lexes_in_linear_time() {
+    for unit in ["..", "?", ".?", "..$", "..:"] {
+        let src = unit.repeat(2_000_000 / unit.len());
+        let started = std::time::Instant::now();
+        let count = lex(&src).count();
+        let elapsed = started.elapsed();
+        assert!(count > 0);
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "lexing {} bytes of {unit:?} took {elapsed:?}",
+            src.len()
+        );
+    }
 }

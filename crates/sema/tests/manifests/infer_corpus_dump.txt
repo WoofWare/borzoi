@@ -303,7 +303,7 @@ src/FSharp.Core/nativeptr.fs	alone 5d4811b4e53dad20/4 dir d9050b7b72e36efe/0
 src/FSharp.Core/observable.fs	alone 57e541bb2ccb1796/0 dir 45b581d81c18e002/0
 src/FSharp.Core/option.fs	alone 92f38ec6e217e152/0 dir d09a354ef8fd9d8d/0
 src/FSharp.Core/prim-types-prelude.fs	alone 92f38ec6e217e152/0 dir 0d1eb72880c96ebb/0
-src/FSharp.Core/prim-types.fs	alone 79d21fb01fe1113f/80 dir 7aa81fcddad1b2d8/70
+src/FSharp.Core/prim-types.fs	alone 79d21fb01fe1113f/80 dir e1cd0b8b6d539d38/70
 src/FSharp.Core/printf.fs	alone cea24a3b31def871/135 dir e7d99f6d5ef4686d/12
 src/FSharp.Core/quotations.fs	alone 6b6ac5a5ff9c77bf/20 dir 4bfc40dcc0d84245/5
 src/FSharp.Core/reflect.fs	alone 6f6756177b94d8b8/162 dir 2aec91e6852180dd/2
@@ -3462,7 +3462,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/Parsing01.fs	alone 92f
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/Parsing02.fs	alone 7b292da420316ac6/0 dir d78db0ebddd1a763/0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/UseStatementCallDisposeOnNullValue01.fs	alone 92f38ec6e217e152/0 dir 0d1eb72880c96ebb/0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/UserCodeSnippet01.fs	alone bc9ad9d010af3c9e/0 dir none
-tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/productioncoverage01.fs	alone 58e9d56fd4cb3be0/12 dir 9df8aff2c10f6eb9/12
+tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/productioncoverage01.fs	alone 59b11ce8930da370/12 dir c1cc96d2b2f8fe77/12
 tests/FSharp.Compiler.LanguageServer.Tests/Protocol.fs	alone 35c9ec058a9fff7c/0 dir c4f9c64592bf3120/0
 tests/FSharp.Compiler.Private.Scripting.UnitTests/CompletionTests.fs	alone 92f38ec6e217e152/0 dir 0d1eb72880c96ebb/0
 tests/FSharp.Compiler.Private.Scripting.UnitTests/DependencyManagerInteractiveTests.fs	alone 92f38ec6e217e152/0 dir 0d1eb72880c96ebb/0

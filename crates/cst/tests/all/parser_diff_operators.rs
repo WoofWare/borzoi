@@ -2,7 +2,7 @@
 //! application, and infix/prefix operators. Split out of the former
 //! monolithic `parser_diff.rs`.
 
-use crate::common::{assert_asts_match, assert_asts_match_allow_errors};
+use crate::common::{assert_asts_match, assert_asts_match_allow_errors, assert_sig_asts_match};
 
 /// `( 1 )` — paren expression around an int. FCS produces
 /// `SynExpr.Paren(SynExpr.Const(SynConst.Int32 1), …)`; we emit
@@ -1008,4 +1008,58 @@ fn diff_ast_op_value_hpa_arg_then_member() {
 #[test]
 fn diff_ast_op_value_spaced_arg_member_folds() {
     assert_asts_match("f (+).Bar\n");
+}
+
+/// `( .. .. )` — the range-step operator's name (`op_RangeStep`), FCS's
+/// `operatorName: DOT_DOT DOT_DOT`, two `..` tokens, as a value, defined by a
+/// `let`, and as a static member of a type and of an augmentation; with
+/// `( .. )` (`op_Range`) beside it. Spacing between the two `..`s is free.
+/// The neighbours are graded by `parser_diff_dot_dot_grid`.
+#[test]
+fn diff_ast_paren_op_value_range_step() {
+    assert_asts_match("( .. .. )\n");
+    assert_asts_match("let x = (..   ..) 1 2 10\n");
+    assert_asts_match("let ( .. .. ) a b c = [a .. b .. c]\n");
+    assert_asts_match(concat!(
+        "type T() =\n",
+        "    static member ( .. ) (a: T, b: T) = [a; b]\n",
+        "    static member ( .. .. ) (a: T, b: int, c: T) = [a; c]\n",
+    ));
+    assert_asts_match(concat!(
+        "type System.String with\n",
+        "    static member (*) (a: string, b: int) = 0L\n",
+        "    static member ( .. ) (a: string, b: int) = 0L\n",
+        "    static member ( .. .. ) (a: string, b: int, c: int) = 0L\n",
+    ));
+}
+
+/// The range-step operator's name in a signature file: a `val` and a member.
+#[test]
+fn diff_sig_paren_op_value_range_step() {
+    assert_sig_asts_match(concat!(
+        "module M\n",
+        "val ( .. .. ) : int -> int -> int -> int list\n",
+        "type T =\n",
+        "    static member ( .. .. ) : T * int * T -> T list\n",
+    ));
+}
+
+/// A comment between the range-step operator's `..`s: FCS reads the name
+/// through it, and our parser does not (`range_step_op_at` takes only
+/// spaces, recorded in `docs/fcs-divergences.md`), so the file is an error
+/// on our side. Pinned so the divergence is seen to close if it ever does.
+#[test]
+fn range_step_name_with_a_comment_inside_is_our_error() {
+    use std::io::Write;
+    let source = "let ( .. (* c *) .. ) a b c = [a .. b .. c]\n";
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".fs").expect("create tempfile");
+    tmp.write_all(source.as_bytes()).expect("write source");
+    let json = crate::common::fcs_ast_batch(tmp.path());
+    assert!(
+        !crate::common::fcs_parse_had_errors(&json),
+        "FCS accepts {source:?}"
+    );
+    let parse = borzoi_cst::parser::parse(source);
+    assert!(!parse.errors.is_empty(), "we reject {source:?}");
+    assert_eq!(parse.root.text().to_string(), source);
 }

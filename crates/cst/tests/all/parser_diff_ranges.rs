@@ -700,3 +700,29 @@ fn open_lower_range_as_prefix_operand_clean_error() {
         assert_clean_error(src);
     }
 }
+
+/// An open-upper range after a receiver, `s..`, outside any list, array or
+/// slice: FCS's parser reads it as `IndexRange(Some s, None)` and reports
+/// nothing. Its FS0751 ("invalid use of indexer syntax") is the type
+/// checker's (`CheckExpressions.fs`, `SynExpr.IndexRange`), so the parse is
+/// clean on both sides. The neighbours, and these shapes in every place a
+/// range is legal, are graded by `parser_diff_dot_dot_grid`.
+#[test]
+fn diff_ast_range_open_upper_after_receiver() {
+    assert_asts_match("let f (s: string) = s..\n");
+    assert_asts_match("let f (s: string) = s.. 1\n");
+    assert_asts_match("let f (s: string) = s..Length\n");
+}
+
+/// `..` glued to a significant operator character is one operator to FCS's
+/// lexer (`ignored_op_char* SIG op_char*`), so `s..-1` is `s ..- 1`, an
+/// infix application of the operator `..-`, not a range to `-1`; and in an
+/// array, `s..|]` is the operator `..|` and a `]`, which leaves the `[|`
+/// unclosed. `1..-1` stays a range: `1..` is one token.
+#[test]
+fn diff_ast_dot_dot_glued_to_an_operator_character() {
+    assert_asts_match("let r = [s..-1]\n");
+    assert_asts_match("let r = [1..-1]\n");
+    assert_asts_match("let r = [s..|t]\n");
+    assert_clean_error("let r = [|s..|]\n");
+}

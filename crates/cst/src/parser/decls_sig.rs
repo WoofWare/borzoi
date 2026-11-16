@@ -855,6 +855,16 @@ impl<'src> Parser<'src> {
             Some(Token::LParen) => match sig.next() {
                 // Active-pattern name (`(|Foo|_|)`): `(` then a bare `|`.
                 Some(Token::Bar) => true,
+                // `( .. )`, or the range-step operator's name `( .. .. )`. The
+                // spaces-only gap between the two `..`s that the parser also
+                // requires ([`Parser::paren_op_value_len_at`]) is not visible
+                // to this token-only gate; a pair it admits with a comment
+                // between fails in [`Parser::parse_member_sig`] instead.
+                Some(Token::DotDot) => match sig.next() {
+                    Some(Token::RParen) => true,
+                    Some(Token::DotDot) => matches!(sig.next(), Some(Token::RParen)),
+                    _ => false,
+                },
                 // Operator name (`(+)`, `( * )`): `( op )`.
                 Some(t) if is_paren_operator_name(&t) || matches!(t, Token::Op("*")) => {
                     matches!(sig.next(), Some(Token::RParen))

@@ -248,7 +248,6 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/E_t
 tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/PipingWithDirectives.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/E_productioncoverage01.fs	both-reject exact 3/3/4
 tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/E_productioncoverage03.fs	both-reject outside-damage 1/1/7
-tests/FSharp.Compiler.ComponentTests/resources/tests/Misc/productioncoverage01.fs	we-reject-fcs-accepts outside-damage 27/27/28
 tests/FSharp.Core.UnitTests/FSharp.Core/ComparersRegression.fs	fcs-error
 tests/FSharp.Core.UnitTests/FSharp.Core/RecordTypes.fs	we-reject-fcs-accepts divergent 27/27/29 at:module[0]/Types@3329
 tests/fsharp/core/attributes/test.fsx	range-divergent
@@ -266,7 +265,7 @@ tests/fsharp/core/members/basics-hw/test.fsx	we-reject-fcs-accepts divergent 177
 tests/fsharp/core/members/basics/test.fs	range-divergent
 tests/fsharp/core/members/console/console2.fs	both-reject divergent 5/5/7 at:module[0]/Expr@22
 tests/fsharp/core/nested/test.fsx	range-divergent
-tests/fsharp/core/printing/test.fsx	we-reject-fcs-accepts outside-damage 586/586/587
+tests/fsharp/core/printing/test.fsx	range-divergent
 tests/fsharp/core/quotes/test.fsx	we-reject-fcs-accepts outside-damage 965/965/967
 tests/fsharp/core/recordResolution/test.fsx	we-reject-fcs-accepts divergent 34/40/42 at:module[0]/Types@989,module[0]/Types@1013,module[0]/Types@1037,module[0]/Types@1060,module[0]/Let@1096,module[0]/Let@1118,module[0]/nested@927/Types@989,module[0]/nested@927/Types@1013,+4#e82d19e6
 tests/fsharp/core/unicode/kanji-unicode-utf16.fs	non-utf8

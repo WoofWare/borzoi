@@ -4080,23 +4080,61 @@ impl<'src> Parser<'src> {
     /// dot-qualification and pattern position, false at a bare expression atom
     /// where `( * )` is the whole-dimension wildcard).
     fn paren_op_value_at(&self, lparen_pos: usize, allow_star: bool) -> bool {
+        self.paren_op_value_len_at(lparen_pos, allow_star).is_some()
+    }
+
+    /// How many filtered tokens spell the operator of the `( op )` at
+    /// `lparen_pos` (see [`Self::paren_op_value_at`]), or `None` when there
+    /// is none there. One for every operator name but the range-step's
+    /// ([`Self::range_step_op_at`]), which is two.
+    pub(super) fn paren_op_value_len_at(
+        &self,
+        lparen_pos: usize,
+        allow_star: bool,
+    ) -> Option<usize> {
         if self.filtered.tokens().kind_at(lparen_pos)
             != Some(FilteredKind::Token(TokenKind::LParen))
         {
-            return false;
+            return None;
         }
-        let Some((Ok(FilteredToken::Raw(op)), op_span)) =
-            self.filtered.tokens().get(lparen_pos + 1)
-        else {
-            return false;
+        let (op_len, op_end) = if let Some(end) = self.range_step_op_at(lparen_pos + 1) {
+            (2, end)
+        } else {
+            let Some((Ok(FilteredToken::Raw(op)), op_span)) =
+                self.filtered.tokens().get(lparen_pos + 1)
+            else {
+                return None;
+            };
+            if !(is_paren_operator_name(&op) || (allow_star && matches!(op, Token::Op("*")))) {
+                return None;
+            }
+            (1, op_span.end)
         };
-        if !(is_paren_operator_name(&op) || (allow_star && matches!(op, Token::Op("*")))) {
-            return false;
-        }
-        matches!(
-            self.next_non_trivia_raw_after(op_span.end),
-            Some(Token::RParen)
-        )
+        matches!(self.next_non_trivia_raw_after(op_end), Some(Token::RParen)).then_some(op_len)
+    }
+
+    /// The end byte of the range-step operator's name at filtered index `idx`:
+    /// two `..` tokens with only spaces between them (FCS's `operatorName:
+    /// DOT_DOT DOT_DOT { ".. .." }`, `op_RangeStep`), or `None` when `idx`
+    /// starts no such pair.
+    ///
+    /// FCS takes any trivia between the two (a comment, too); a line break
+    /// inside the parentheses it rejects. Only spaces are taken here, so a
+    /// comment between the two `..`s is a parse error, recorded in
+    /// `docs/fcs-divergences.md`: the name is one token spanning both `..`s
+    /// ([`Self::consume_paren_op_value`]), whose spelling `op_name` reads as
+    /// `op_RangeStep` only when what separates them is spaces.
+    fn range_step_op_at(&self, idx: usize) -> Option<usize> {
+        let tokens = self.filtered.tokens();
+        let (
+            Some((Ok(FilteredToken::Raw(Token::DotDot)), first)),
+            Some((Ok(FilteredToken::Raw(Token::DotDot)), second)),
+        ) = (tokens.get(idx), tokens.get(idx + 1))
+        else {
+            return None;
+        };
+        let gap = self.source.get(first.end..second.start)?;
+        (!gap.is_empty() && gap.bytes().all(|b| b == b' ')).then_some(second.end)
     }
 
     /// Parse a bare parenthesised operator-value as an atomic expression →
@@ -4168,9 +4206,33 @@ impl<'src> Parser<'src> {
     /// present. The operator token (`Op`, `Equals`, `Less`, …) is bumped into
     /// an `IDENT_TOK`, the same encoding the infix/prefix paths use
     /// ([`Parser::emit_infix_op_as_long_ident`]).
+    ///
+    /// The range-step operator's two `..` tokens ([`Self::range_step_op_at`])
+    /// are one `IDENT_TOK` spanning both and the spaces between them, so the
+    /// path has one segment, spelt `.. ..` (with as many spaces as the source
+    /// has), and its range is FCS's ident range for it, which spans both `..`s.
     pub(super) fn consume_paren_op_value(&mut self) {
         self.bump_into(SyntaxKind::LPAREN_TOK);
-        self.bump_into(SyntaxKind::IDENT_TOK);
+        if let Some(end) = self.range_step_op_at(self.filtered.pos()) {
+            let (_, first) = self
+                .filtered
+                .tokens()
+                .get(self.filtered.pos())
+                .expect("range_step_op_at found a token here");
+            self.drain_raw_up_to(first.start);
+            self.emit_text(SyntaxKind::IDENT_TOK, first.start..end);
+            self.filtered.advance();
+            self.filtered.advance();
+            while let Some((_, raw_span)) = self.raw_tokens.get(self.raw_pos) {
+                if raw_span.end <= end {
+                    self.raw_pos += 1;
+                } else {
+                    break;
+                }
+            }
+        } else {
+            self.bump_into(SyntaxKind::IDENT_TOK);
+        }
         self.bump_swallowed_rparen(SyntaxKind::RPAREN_TOK);
     }
 
