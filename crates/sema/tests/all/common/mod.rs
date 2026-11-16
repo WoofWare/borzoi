@@ -2011,6 +2011,29 @@ pub fn ensure_overload_corpus_built(csharp: &str) -> &'static Path {
         .as_path()
 }
 
+/// Build the **error-level attribute** fixture (`tests/fixtures/case_attr_env`,
+/// `SemaCaseAttrFixture.dll`) once per test binary from `fsharp`, which
+/// becomes its `Generated.fs`, and return its `.dll` path. Its source is
+/// `case_head_grid`'s, so the fixture and the probes written against it
+/// cannot drift apart.
+pub fn ensure_case_attr_fixture_built(fsharp: &str) -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let project =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/case_attr_env");
+            let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
+            std::fs::write(project.join("Generated.fs"), fsharp).expect("write Generated.fs");
+            dotnet_build(&project, "dotnet build error-level attribute fixture");
+            project
+                .join("bin")
+                .join("Release")
+                .join("net10.0")
+                .join("SemaCaseAttrFixture.dll")
+        })
+        .as_path()
+}
+
 /// Build the **member-hiding** corpus (`tests/fixtures/member_hiding`) once per
 /// test binary and return its `.dll` path, writing `csharp` as its `Generated.cs`
 /// first.

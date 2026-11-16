@@ -209,8 +209,9 @@ fn walk_entity_tree(
 // Source-name overlay (Stream-2 PR1)
 // ---------------------------------------------------------------------------
 
-/// One entity the entity overlay stamps, plus the two host-pickle facts it
-/// carries onto its row: its F# source name and its declaration range. Module
+/// One entity the entity overlay stamps, plus the host-pickle facts it
+/// carries onto its row: its F# source name, its declaration range, and the
+/// error-level attributes F# checks at a use of it. Module
 /// *member* source names are not this overlay's business: the pickle-driven
 /// member list ([`apply_module_member_projection`]) sets them per claimed
 /// member.
@@ -239,6 +240,10 @@ struct EntityOverlayTarget {
     /// The entity's `entity_range`, resolved to a source range. `None` on a bad
     /// file index or the degenerate `"unknown"` file.
     definition_range: Option<FsharpSourceRange>,
+    /// The pickle's `[<Obsolete>]` and `[<CompilerMessage>]` on a module or
+    /// type, which is what F# reads when it checks a use of one
+    /// (`CheckFSharpAttributes`).
+    attributes: (Option<Obsolete>, Option<CompilerMessage>),
 }
 
 /// Apply the two per-entity host-pickle facts to the ECMA tree: each entity's
@@ -312,6 +317,14 @@ pub(crate) fn apply_entity_overlay(
                     },
                     is_module_or_type,
                     definition_range: resolve_entity_range(pickled, entity),
+                    attributes: if is_module_or_type {
+                        (
+                            pickled_obsolete(pickled, &entity.attribs),
+                            pickled_compiler_message(pickled, &entity.attribs),
+                        )
+                    } else {
+                        (None, None)
+                    },
                 });
             }
             Ok(())
@@ -327,6 +340,15 @@ pub(crate) fn apply_entity_overlay(
         }
         if let Some(range) = target.definition_range {
             ecma.definition_range = Some(range);
+        }
+        // fsc writes a module's or type's attributes on its TypeDef too, but
+        // not an exception's, so the pickle's are the ones FCS sees.
+        let (obsolete, compiler_message) = target.attributes;
+        if obsolete.is_some() {
+            ecma.obsolete = obsolete;
+        }
+        if compiler_message.is_some() {
+            ecma.compiler_message = compiler_message;
         }
     }
     Ok(())
@@ -861,6 +883,8 @@ pub(crate) fn apply_union_cases(
                             declaration_index: u32::try_from(i)
                                 .expect("a union has fewer than 2^32 cases"),
                             fields: case_fields(pickled, c),
+                            obsolete: pickled_obsolete(pickled, &c.attribs),
+                            compiler_message: pickled_compiler_message(pickled, &c.attribs),
                         })
                         .collect(),
                     published(),

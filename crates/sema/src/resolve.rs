@@ -261,6 +261,12 @@ fn walk_file(
                     && decls::header_is_private(module.syntax()))
                 .then(|| block_key.len().saturating_sub(1)),
                 in_exporting_module: prefix.is_some(),
+                // A `module` header's own attributes: FCS checks them where a
+                // later file names the module.
+                attributed_module: prefix
+                    .as_ref()
+                    .filter(|_| decls::attributes_may_be_error_level(module.attributes()))
+                    .map(|path| assemblies.names().intern_path(path)),
                 recursive: module.is_rec(),
             },
         );
@@ -1020,6 +1026,7 @@ fn collect_sig_container_exports(
             type_qualified,
             attributed,
             case_attributes,
+            under_attributed_module: false,
             pos,
         });
     };
@@ -1144,6 +1151,22 @@ fn collect_sig_container_exports(
     }
 }
 
+/// Mark `exports`, a signature module's direct surface, as under a module
+/// that may carry an error-level attribute
+/// ([`model::ExportedItem::under_attributed_module`]) when its header's
+/// `attributes` may: a later file sees the module's attributes as its
+/// signature declares them.
+fn mark_under_attributed_module(
+    exports: &mut [model::SigExport],
+    attributes: impl Iterator<Item = borzoi_cst::syntax::AttributeList>,
+) {
+    if decls::attributes_may_be_error_level(attributes) {
+        for export in exports {
+            export.under_attributed_module = true;
+        }
+    }
+}
+
 /// A `.fsi` file's fold contribution — the screen (see
 /// [`SigScreen`](model::SigScreen): the module roots it constrains, the
 /// signature's `[<AutoOpen>]` verdicts (authoritative — conclusion 6), and
@@ -1180,6 +1203,7 @@ fn signature_surface(
                     // delivers both verdicts).
                     let access_floor =
                         decls::header_is_private(fragment.syntax()).then(|| path.len() - 1);
+                    let first = exports.len();
                     collect_sig_container_exports(
                         names,
                         &path,
@@ -1189,6 +1213,7 @@ fn signature_surface(
                         &mut exports,
                         &mut auto_open_type_containers,
                     );
+                    mark_under_attributed_module(&mut exports[first..], fragment.attributes());
                     roots.push(model::SigRoot {
                         path,
                         auto_open: attrs_auto_open(fragment.attributes()),
@@ -1216,6 +1241,7 @@ fn signature_surface(
                             // (FCS-probed: sibling-visible, outside-erroring).
                             let access_floor =
                                 decls::header_is_private(nm.syntax()).then(|| path.len() - 1);
+                            let first = exports.len();
                             collect_sig_container_exports(
                                 names,
                                 &path,
@@ -1225,6 +1251,7 @@ fn signature_surface(
                                 &mut exports,
                                 &mut auto_open_type_containers,
                             );
+                            mark_under_attributed_module(&mut exports[first..], nm.attributes());
                             let auto_open = attrs_auto_open(nm.attributes());
                             if auto_open {
                                 auto_open_nested.push(path.clone());
@@ -2201,6 +2228,7 @@ impl<'a> Resolver<'a> {
                     rec_module_names: HashSet::default(),
                     access_floor: None,
                     in_exporting_module: false,
+                    attributed_module: None,
                     recursive: false,
                 },
             ),
@@ -2465,14 +2493,21 @@ impl<'a> Resolver<'a> {
 
     /// Add `def` to the file's arena: to the local space while the walk is
     /// inside an expression ([`Windows::in_expression`]), and to the
-    /// declaration space otherwise.
+    /// declaration space otherwise. A declaration under a module whose
+    /// attributes may be error-level is filed against the innermost one
+    /// ([`Indexes::under_attributed_module`](indexes::Indexes::under_attributed_module));
+    /// a local one is used only inside it.
     fn intern(&mut self, def: Def) -> DefId {
         let space = if self.windows.in_expression() {
             DefSpace::Local
         } else {
             DefSpace::Declaration
         };
-        self.out.defs.push(space, def)
+        let id = self.out.defs.push(space, def);
+        if let (DefSpace::Declaration, Some(module)) = (space, self.scope.attributed_module) {
+            self.index.under_attributed_module.insert(id, module);
+        }
+        id
     }
 
     /// Record **why** the occurrence at `range` declined, for the census
@@ -2559,17 +2594,80 @@ impl<'a> Resolver<'a> {
     /// `private` to a container this site is outside
     /// ([`Self::case_usable_here`]). Every route that reaches such a case —
     /// an `open`, `U.X`, `M.X`, a pattern — declines here, with the cause.
+    ///
+    /// Nor may a use commit to a name behind an entity that may carry an
+    /// error-level attribute ([`Self::behind_attributed_entity`]).
     fn record(&mut self, range: TextRange, res: Resolution) {
-        let res = if self.case_usable_here(res) {
-            res
+        let declined = if !self.case_usable_here(res) {
+            Some(DeclineCause::CaseRepresentationInaccessible)
+        } else if self.behind_attributed_entity(res) {
+            Some(DeclineCause::EntityAttributed)
         } else {
-            self.record_decline(
-                range,
-                model::DeclineSite::pre_walk(DeclineCause::CaseRepresentationInaccessible),
-            );
-            Resolution::Deferred(DeferredReason::UnboundName)
+            None
+        };
+        let res = match declined {
+            None => res,
+            Some(cause) => {
+                self.record_decline(range, model::DeclineSite::pre_walk(cause));
+                Resolution::Deferred(DeferredReason::UnboundName)
+            }
         };
         self.out.resolutions.insert(range, res);
+    }
+
+    /// Whether `res` names something FCS may leave unresolved at this site
+    /// because an entity it is reached through may carry an error-level
+    /// attribute: `[<Obsolete(…, true)>]` or `[<CompilerMessage(…, IsError =
+    /// true)>]` (`CheckEntityAttributes`).
+    ///
+    /// FCS checks every module and type a qualified path names on its way to
+    /// the item (`SendEntityPathToSink`), and an error-level attribute on one
+    /// raises before the item is recorded; it checks the module an `open` or
+    /// a module abbreviation names, and the same attribute abandons the
+    /// declaration, so nothing it would bring into scope is. A use outside a
+    /// module reaches what the module declares through one or the other, so:
+    ///
+    /// - a project declaration under a module that may carry one
+    ///   ([`attributes_may_be_error_level`](decls::attributes_may_be_error_level)),
+    ///   when the site is outside that module
+    ///   ([`Indexes::under_attributed_module`](indexes::Indexes::under_attributed_module),
+    ///   [`ProjectItems::is_attributed_module_item`](model::ProjectItems::is_attributed_module_item));
+    ///   a site inside it names the declaration by a path that starts below
+    ///   it, which FCS does not check against it;
+    /// - a referenced-assembly entity, member or union case any entity of
+    ///   whose enclosing chain, itself included, carries one
+    ///   ([`AssemblyEnv::use_rejected_on_path`](crate::AssemblyEnv::use_rejected_on_path)).
+    ///
+    /// Both over-approximate: an `open` of a module nested in an attributed
+    /// one checks only the nested module, and an attributed type named
+    /// where it is the item is recorded, with the error. Neither is a wrong
+    /// commit to decline.
+    ///
+    /// A type an earlier file declares directly in a namespace
+    /// ([`Resolution::EarlierFileType`]) is under no module.
+    pub(super) fn behind_attributed_entity(&self, res: Resolution) -> bool {
+        let def = match res {
+            Resolution::Local(def) => def,
+            Resolution::Item(id) => match id.index().checked_sub(self.item_base as usize) {
+                Some(local) => match self.out.items.get(local).and_then(ExportedItem::def) {
+                    Some(def) => def,
+                    None => return false,
+                },
+                None => return self.preceding.is_attributed_module_item(id),
+            },
+            Resolution::Entity(handle)
+            | Resolution::Member { parent: handle, .. }
+            | Resolution::UnionCase { union: handle, .. } => {
+                return self.assemblies.use_rejected_on_path(handle);
+            }
+            Resolution::EarlierFileType { .. }
+            | Resolution::Deferred(_)
+            | Resolution::Unresolved => return false,
+        };
+        self.index
+            .under_attributed_module
+            .get(&def)
+            .is_some_and(|module| !self.lexical.container_path.prefix_ids().contains(module))
     }
 
     /// Whether a use at the current walk position may commit to `res`.

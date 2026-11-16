@@ -273,6 +273,9 @@ pub(super) struct SigExport {
     /// For a case, where its signature declares an error-level attribute may
     /// sit ([`ExportedItem::case_attributes`]).
     pub(super) case_attributes: CaseAttributes,
+    /// Whether the signature's module header may carry an error-level
+    /// attribute ([`ExportedItem::under_attributed_module`]).
+    pub(super) under_attributed_module: bool,
     /// Source position of the declaring ident in the `.fsi` (provenance,
     /// like [`ExportDecl::pos`] — note it is a position in the *signature's*
     /// coordinate space).
@@ -593,6 +596,16 @@ pub struct ProjectItems {
     /// exception cases that may carry an error-level attribute
     /// ([`ExportedItem::case_attributes`]), with where it may sit.
     pub(super) attributed_case_ids: HashMap<ItemId, CaseAttributes>,
+    /// The project-global [`ItemId`]s of earlier files' exports declared
+    /// under a module that may carry an error-level attribute
+    /// ([`ExportedItem::under_attributed_module`]).
+    pub(super) attributed_module_item_ids: HashSet<ItemId>,
+    /// The names of earlier files' union cases and exceptions whose use FCS
+    /// may reject on account of an error-level attribute, on the case, its
+    /// type or an enclosing module ([`Self::attributed_case_ids`],
+    /// [`Self::attributed_module_item_ids`]): what a pattern head the walk
+    /// did not resolve may be to FCS.
+    pub(super) rejecting_case_names: HashSet<String>,
     /// The project-global [`ItemId`]s of earlier files' **attributed**
     /// module-level `let` values ([`ExportedItem::attributed`]) — maybe-literal
     /// constant-pattern contestants. A `[<Literal>]` value enters FCS's pattern
@@ -1757,6 +1770,9 @@ impl ProjectItems {
         }
         self.plain_union_case_ids.extend(idx.plain_union_case_ids);
         self.attributed_case_ids.extend(idx.attributed_case_ids);
+        self.attributed_module_item_ids
+            .extend(idx.attributed_module_item_ids);
+        self.rejecting_case_names.extend(idx.rejecting_case_names);
         for id in idx.attributed_value_ids {
             self.attributed_value_ids.insert(id);
         }
@@ -1796,6 +1812,18 @@ impl ProjectItems {
             .get(&id)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Whether an earlier file's union case or exception named `name` may be
+    /// one whose use FCS rejects (see [`Self::rejecting_case_names`]).
+    pub(super) fn may_name_rejecting_case(&self, name: &str) -> bool {
+        self.rejecting_case_names.contains(name)
+    }
+
+    /// Whether `id` is an earlier file's export under a module that may carry
+    /// an error-level attribute (see [`Self::attributed_module_item_ids`]).
+    pub(super) fn is_attributed_module_item(&self, id: ItemId) -> bool {
+        self.attributed_module_item_ids.contains(&id)
     }
 
     /// Whether `id` is an earlier file's **attributed** module-level value
@@ -1943,6 +1971,8 @@ struct FileExportIndices {
     type_paths: Vec<(DeclPath, ExportedTypeFacts)>,
     plain_union_case_ids: Vec<ItemId>,
     attributed_case_ids: Vec<(ItemId, CaseAttributes)>,
+    attributed_module_item_ids: Vec<ItemId>,
+    rejecting_case_names: Vec<String>,
     auto_open_module_paths: Vec<DeclPath>,
     namespace_shadow_names: Vec<(Vec<String>, String)>,
 }
@@ -2076,7 +2106,26 @@ impl FileExportIndices {
     fn derive(file: &FileSurface, names: &NameTable, screened: Option<(&SigScreen, bool)>) -> Self {
         let screen = screened.map(|(screen, _)| screen);
         let trust_attribute_spellings = screened.is_some_and(|(_, trust)| trust);
-        let mut fi = Self::default();
+        let mut fi = Self {
+            attributed_module_item_ids: file
+                .exports
+                .items
+                .iter()
+                .filter(|it| it.under_attributed_module)
+                .map(|it| it.id)
+                .collect(),
+            rejecting_case_names: file
+                .exports
+                .items
+                .iter()
+                .filter(|it| {
+                    it.is_case()
+                        && (it.case_attributes.may_abandon_pattern() || it.under_attributed_module)
+                })
+                .map(|it| it.name.text(names).to_string())
+                .collect(),
+            ..Self::default()
+        };
         let ordinals = decl_ordinals(&file.export_decls);
         for (decl, &ordinal) in file.export_decls.iter().zip(&ordinals) {
             if let Some(path) = decl.member_path(&file.exports.items, screen.is_some()) {
@@ -3084,6 +3133,14 @@ pub enum DeclineCause {
     /// type on a qualified path while resolving it, and such an attribute
     /// leaves the path unresolved.
     CaseTypeAttributed,
+    /// A name declared under a module that may carry an error-level
+    /// attribute, used from outside it, or a referenced-assembly entity that
+    /// carries one or sits in one that does
+    /// (`Resolver::behind_attributed_entity`):
+    /// FCS checks every entity a qualified path names on its way to the item
+    /// (`SendEntityPathToSink`), and the module an `open` names, and such an
+    /// attribute leaves the path unresolved or abandons the `open`.
+    EntityAttributed,
     /// A dotted path whose head is a constructor **case**: a nullary case has
     /// no dottable members, so FCS reads it as a qualifier into a same-named
     /// module or type we could not resolve.
@@ -3251,6 +3308,7 @@ impl DeclineCause {
         DeclineCause::EarlierBlockRootType,
         DeclineCause::QualifierArityNamesake,
         DeclineCause::CaseTypeAttributed,
+        DeclineCause::EntityAttributed,
         DeclineCause::CaseQualifierHead,
         DeclineCause::GlobalMarkerHead,
         DeclineCause::SignatureScreened,
@@ -3322,6 +3380,7 @@ impl DeclineCause {
             DeclineCause::EarlierBlockRootType => "earlier_block_root_type",
             DeclineCause::QualifierArityNamesake => "qualifier_arity_namesake",
             DeclineCause::CaseTypeAttributed => "case_type_attributed",
+            DeclineCause::EntityAttributed => "entity_attributed",
             DeclineCause::CaseQualifierHead => "case_qualifier_head",
             DeclineCause::GlobalMarkerHead => "global_marker_head",
             DeclineCause::SignatureScreened => "signature_screened",
@@ -3701,6 +3760,15 @@ pub struct ExportedItem {
     /// For a union, enum or exception case, where an error-level attribute
     /// may sit ([`CaseAttributes`]). Nowhere for every other export.
     pub(super) case_attributes: CaseAttributes,
+    /// Whether a module enclosing the declaration may carry an error-level
+    /// attribute ([`attributes_may_be_error_level`](super::decls::attributes_may_be_error_level)).
+    /// FCS checks every module a qualified path names
+    /// (`SendEntityPathToSink`), and the module an `open` or a module
+    /// abbreviation names; an error-level attribute leaves the path
+    /// unresolved or abandons the declaration. A later file reaches the
+    /// export through one or the other, so it may not commit to it
+    /// ([`ProjectItems::attributed_module_item_ids`]).
+    pub(super) under_attributed_module: bool,
 }
 
 /// Where a union case, an enum case or an exception may carry an
@@ -4100,6 +4168,7 @@ impl FileSurface {
                 repr_access_root: None,
                 attributed: ex.attributed,
                 case_attributes: ex.case_attributes,
+                under_attributed_module: ex.under_attributed_module,
             });
             self.export_decls.push(ExportDecl {
                 path: ex.path.clone(),

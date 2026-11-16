@@ -198,6 +198,13 @@ pub(super) struct OpenScope {
     /// [`module_path`](Resolver::module_path); a flag rather than a copy, since a
     /// copy per nested module is quadratic in the nesting depth.
     pub(super) in_exporting_module: bool,
+    /// The innermost module enclosing the walk whose attributes may be
+    /// error-level ([`attributes_may_be_error_level`](super::decls::attributes_may_be_error_level)),
+    /// by its container path, or `None`. Each def the walk interns under one
+    /// is filed against it ([`Indexes::under_attributed_module`](super::indexes::Indexes::under_attributed_module)), and
+    /// each export it publishes is marked
+    /// ([`ExportedItem::under_attributed_module`](super::model::ExportedItem::under_attributed_module)).
+    pub(super) attributed_module: Option<PathId>,
     /// `true` while walking a `module rec` / `namespace rec` block. Later type
     /// declarations are in scope for earlier type annotations there, so a bare
     /// single-segment type name must defer unless already resolved in-file.
@@ -300,6 +307,7 @@ impl OpenScope {
             rec_module_names: Rc::new(header.rec_module_names),
             access_floor: header.access_floor,
             in_exporting_module: header.in_exporting_module,
+            attributed_module: header.attributed_module,
             recursive_module_active: header.recursive,
             rec_block: None,
         }
@@ -354,6 +362,9 @@ pub(super) struct BlockHeader {
     pub(super) access_floor: Option<usize>,
     /// Whether the header is a `module`, whose path qualifies its exports.
     pub(super) in_exporting_module: bool,
+    /// The header module, by its container path, when its attributes may be
+    /// error-level ([`OpenScope::attributed_module`]).
+    pub(super) attributed_module: Option<PathId>,
     /// Whether the block is `rec`.
     pub(super) recursive: bool,
 }

@@ -515,10 +515,19 @@ const MAX_ARRAY_RANK: u32 = 32;
 /// carrying an attribute F# would not consult there, which is not a shape a
 /// C# compiler emits.
 pub(crate) fn rejected_by_attributes(entity: &borzoi_assembly::Entity) -> bool {
-    error_obsolete(entity) || error_compiler_message(entity)
+    error_obsolete(entity.obsolete.as_ref())
+        || error_compiler_message(entity.compiler_message.as_ref())
 }
 
-/// Whether an entity is marked `[<Obsolete(_, true)>]` — obsolete **as an
+/// Whether F# **rejects a use** of a referenced-assembly union case on account
+/// of its own attributes, which `CheckUnionCaseAttributes` checks after its
+/// union's ([`rejected_by_attributes`]): the same two error-level forms, read
+/// from the case's signature data.
+pub(crate) fn case_rejected_by_attributes(case: &borzoi_assembly::UnionCase) -> bool {
+    error_obsolete(case.obsolete.as_ref()) || error_compiler_message(case.compiler_message.as_ref())
+}
+
+/// Whether an `[<Obsolete>]` is `[<Obsolete(_, true)>]` — obsolete **as an
 /// error** rather than as a warning.
 ///
 /// F# rejects an annotation naming one (FS0101) and recovers the binder to
@@ -528,24 +537,21 @@ pub(crate) fn rejected_by_attributes(entity: &borzoi_assembly::Entity) -> bool {
 /// while `[<Obsolete("…", true)>] Old<int>` types as `System.Object`, and an
 /// error-obsolete type used as a generic *argument* sinks the whole application
 /// the same way.
-fn error_obsolete(entity: &borzoi_assembly::Entity) -> bool {
-    entity.obsolete.as_ref().is_some_and(|o| o.is_error)
+fn error_obsolete(obsolete: Option<&borzoi_assembly::Obsolete>) -> bool {
+    obsolete.is_some_and(|o| o.is_error)
 }
 
-/// Whether an entity carries `[<CompilerMessage(_, n, IsError = true)>]` at a
-/// message number F# does not suppress.
+/// Whether a `[<CompilerMessage>]` is `[<CompilerMessage(_, n, IsError =
+/// true)>]` at a message number F# does not suppress.
 ///
 /// F#'s `CheckCompilerMessageAttribute` errors when `IsError` holds, with two
 /// exemptions: number **3501** is suppressed outright (FSharp.Core's `nameof`
 /// marker), and 1204 is suppressed only while compiling FSharp.Core itself,
 /// which we never are. An *undecodable* marker is read as "not suppressed",
 /// so a payload we could not parse declines rather than commits.
-fn error_compiler_message(entity: &borzoi_assembly::Entity) -> bool {
+pub(crate) fn error_compiler_message(message: Option<&borzoi_assembly::CompilerMessage>) -> bool {
     /// FSharp.Core's `nameof` marker, which F# suppresses whatever `IsError`
     /// says.
     const NAMEOF_MARKER: i32 = 3501;
-    entity
-        .compiler_message
-        .as_ref()
-        .is_some_and(|m| m.is_error && m.marker != Some(NAMEOF_MARKER))
+    message.is_some_and(|m| m.is_error && m.marker != Some(NAMEOF_MARKER))
 }

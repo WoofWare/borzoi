@@ -3397,9 +3397,12 @@ impl<'a> Resolver<'a> {
         {
             self.record_decline(range, DeclineSite::pre_walk(cause));
         }
+        // A case behind an entity that may carry an error-level attribute
+        // ([`Self::behind_attributed_entity`]) may be out of FCS's reach, and
+        // the head a variable to it.
         let a_variable = match res {
             None => self.unfolded_implicit_surface(name).is_none(),
-            Some(r) => matches!(r, Resolution::Deferred(_)),
+            Some(r) => matches!(r, Resolution::Deferred(_)) || self.behind_attributed_entity(r),
         };
         if a_variable {
             self.out.opaque_binders.insert(range);
@@ -3411,6 +3414,17 @@ impl<'a> Resolver<'a> {
                 Resolution::Deferred(DeferredReason::UnboundName),
                 self.scope.open_generation,
             )
+        })
+    }
+
+    /// Whether a nullary pattern head `name` is certainly a reference to a
+    /// case, so no binder: [`Self::case_reference`] commits, to a case not
+    /// behind an entity that may carry an error-level attribute
+    /// ([`Self::behind_attributed_entity`]), which FCS may leave out of
+    /// reach and so read the head as a variable.
+    pub(super) fn certain_case_reference(&self, name: &str) -> bool {
+        self.case_reference(name).is_some_and(|r| {
+            !matches!(r, Resolution::Deferred(_)) && !self.behind_attributed_entity(r)
         })
     }
 

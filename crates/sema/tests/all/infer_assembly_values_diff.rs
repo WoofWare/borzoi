@@ -956,9 +956,15 @@ fn a_member_of_a_module_f_sharp_rejects_is_not_read() {
         must.len(),
         "a warned module's function is not typed: {c:?}\n{src}"
     );
+    // Name resolution declines a path through a rejected module
+    // (`DeclineCause::EntityAttributed`), so inference meets a declined
+    // qualified path there before its own check of the module chain would
+    // reject the member.
     assert!(
-        c.reasons
-            .contains(&Incomplete::AssemblyValue(FunctionTyGap::Rejected)),
+        c.reasons.iter().any(|r| matches!(
+            r,
+            Incomplete::AssemblyValue(FunctionTyGap::Rejected) | Incomplete::QualifiedPath
+        )),
         "no use records the rejection: {:?}",
         c.reasons
     );

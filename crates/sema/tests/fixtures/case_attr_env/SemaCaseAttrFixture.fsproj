@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The referenced assembly behind case_head_grid's assembly families
+       (tests/all/case_head_grid.rs): union cases, exceptions, modules and
+       types carrying error-level attributes, read from metadata.
+
+       `Generated.fs` is NOT checked in: it is emitted from the grid's cells
+       before this project is built, so the fixture and the probes written
+       against it cannot drift apart. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>SemaCaseAttrFixture</AssemblyName>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Generated.fs" />
+  </ItemGroup>
+
+</Project>

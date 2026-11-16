@@ -575,7 +575,10 @@ use syntax::*;
 use typar_constraints::*;
 use values::Use;
 
-pub(crate) use annotations::{constrained_parameter, rejected_by_attributes};
+pub(crate) use annotations::{
+    case_rejected_by_attributes, constrained_parameter, error_compiler_message,
+    rejected_by_attributes,
+};
 pub(crate) use builtins::is_conversion_target;
 #[cfg(feature = "test-support")]
 pub(crate) use project_types::rekey_records;

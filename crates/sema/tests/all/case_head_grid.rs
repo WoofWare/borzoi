@@ -1,10 +1,10 @@
 //! A generated, FCS-graded grid of **what a union case or exception head
 //! resolves to and whether the patterns under it bind**, as one project.
 //!
-//! Two families of cells, each probed by the same four uses — a
-//! type-qualified head in a pattern and in an expression, and the bare head
-//! in each — with an outer `x` that a use reaches when the pattern under its
-//! head binds nothing:
+//! Four families of cells. The first two are probed by the same four uses
+//! — a type-qualified head in a pattern and in an expression, and the bare
+//! head in each — with an outer `x` that a use reaches when the pattern
+//! under its head binds nothing:
 //!
 //! - [`NamesakeCell`]: a union `T<'a>` owning `C`, and another type named
 //!   `T` ([`Namesake`]) of lower, the same or higher generic arity
@@ -24,7 +24,26 @@
 //!   arguments of a pattern it heads (`CheckUnionCaseAttributes`, or
 //!   `CheckEntityAttributes` for an exception), and an error-level one
 //!   (`[<Obsolete(…, true)>]`, `[<CompilerMessage(…, IsError = true)>]`)
-//!   abandons the pattern under the head.
+//!   abandons the pattern under the head. The union or exception sits in
+//!   an earlier file, the use's module, or the referenced fixture assembly
+//!   ([`DeclAt`]), where a case's and an exception's attributes live in
+//!   its F# signature data alone.
+//!
+//! The other two probe qualified paths:
+//!
+//! - [`PathCell`]: an attribute on a module, on a module nested in it, or
+//!   on the types the nested module declares ([`PathAttrOn`]), wherever
+//!   [`DeclAt`] puts them, probed by every kind of path through them — a
+//!   value, a static member, a case qualified by its type or its module, a
+//!   pattern head, an annotation, a record label, a module abbreviation —
+//!   and by the names an `open` of the nested module brings into scope.
+//!   FCS checks every module and type a path names on its way to the item
+//!   (`SendEntityPathToSink`) and the module an `open` or an abbreviation
+//!   names, and an error-level attribute leaves the path unresolved or
+//!   abandons the declaration.
+//! - [`HeaderCell`]: the same on a file's top-level `module` header, in an
+//!   implementation or its signature ([`HeaderSig`]); a later file sees
+//!   the signature's attributes, not the implementation's.
 //!
 //! Every use is held to certain-implies-exact against FCS's record at the
 //! site ([`wrong`]), but an argument FCS never checked
@@ -36,10 +55,16 @@
 //! or a commit that starts to decline, shows as manifest movement.
 
 use crate::common::corpus_manifest::{check_manifest, regenerate};
-use crate::common::full_bcl_env;
-use crate::common::use_grade::{FileBuilder, Graded, OurVerdict, Site, grade_project};
+use crate::common::use_grade::{
+    FileBuilder, Graded, GradedProject, OurVerdict, Site, grade_project_with_refs,
+};
+use crate::common::{
+    ensure_case_attr_fixture_built, ensure_fsharp_core_dll, ensure_system_runtime_dll,
+};
+use crate::unmodelled_contributor_grid::{agrees, env_of};
 use borzoi_cst::syntax::TextRange;
 use borzoi_oracle_harness::manifest::Manifest;
+use borzoi_sema::{AssemblyEnv, Resolution};
 use std::collections::HashMap;
 
 /// The site of the `nth` whole-word occurrence of `word` in `line`, once
@@ -80,6 +105,10 @@ struct Probes<'a> {
 struct Collected {
     sites: Vec<Site>,
     binders: Vec<Site>,
+    /// The site of each dotted path's last segment, to the site of the whole
+    /// path: FCS records a referenced assembly's type over the path ending at
+    /// it, where the walk records it at its own segment.
+    whole_of: HashMap<String, String>,
 }
 
 impl Collected {
@@ -482,24 +511,60 @@ impl AttrOn {
     }
 }
 
+/// Where an [`AttributeCell`]'s or a [`PathCell`]'s declarations sit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeclAt {
+    /// An earlier file's namespace.
+    EarlierFile,
+    /// The use's module.
+    UseModule,
+    /// A namespace of the referenced fixture assembly
+    /// (`tests/fixtures/case_attr_env`), read from its metadata.
+    Referenced,
+}
+
+impl DeclAt {
+    const ALL: [DeclAt; 3] = [DeclAt::EarlierFile, DeclAt::UseModule, DeclAt::Referenced];
+
+    fn tag(self) -> &'static str {
+        match self {
+            DeclAt::EarlierFile => "Earlier",
+            DeclAt::UseModule => "Local",
+            DeclAt::Referenced => "Referenced",
+        }
+    }
+}
+
+/// The files the cells write: the earlier project file, the use's file,
+/// and the referenced fixture assembly's source.
+struct Files {
+    earlier: FileBuilder,
+    main: FileBuilder,
+    fixture: FileBuilder,
+}
+
+/// The fixture assembly's root namespace.
+const FIXTURE_NAMESPACE: &str = "CaFix";
+
 struct AttributeCell {
-    at: UnionAt,
+    at: DeclAt,
     attr: Attr,
     on: AttrOn,
 }
 
 impl AttributeCell {
     fn label(&self) -> String {
-        let at = match self.at {
-            UnionAt::EarlierFile => "declEarlier",
-            UnionAt::UseModule => "declLocal",
-        };
-        format!("{at}/{}/{}", self.on.tag(), self.attr.tag())
+        format!(
+            "decl{}/{}/{}",
+            self.at.tag(),
+            self.on.tag(),
+            self.attr.tag()
+        )
     }
 
     fn all() -> Vec<AttributeCell> {
         let mut out = Vec::new();
-        for at in UnionAt::ALL {
+        for at in DeclAt::ALL {
             for attr in Attr::ALL {
                 let ons: &[AttrOn] = match attr {
                     Attr::None => &[AttrOn::Case, AttrOn::Exception],
@@ -519,13 +584,7 @@ impl AttributeCell {
         out
     }
 
-    fn write(
-        &self,
-        j: usize,
-        earlier: &mut FileBuilder,
-        main: &mut FileBuilder,
-        c: &mut Collected,
-    ) {
+    fn write(&self, j: usize, files: &mut Files, c: &mut Collected) {
         let a = self.attr.text();
         let on = |o: AttrOn| if self.on == o { a } else { "" };
         let ind = "    ";
@@ -539,11 +598,12 @@ impl AttributeCell {
                 on(AttrOn::OtherCase)
             )
         };
+        let main = &mut files.main;
         main.line(&format!("module Q{j} ="));
         let (qualified, bare, scrutinee, between) = match (self.on, self.at) {
-            (AttrOn::Exception, UnionAt::EarlierFile) => {
-                earlier.line(&format!("namespace X{j}"));
-                lines(earlier, "", &decl);
+            (AttrOn::Exception, DeclAt::EarlierFile) => {
+                files.earlier.line(&format!("namespace X{j}"));
+                lines(&mut files.earlier, "", &decl);
                 (
                     format!("X{j}.E{j}"),
                     format!("E{j}"),
@@ -551,7 +611,7 @@ impl AttributeCell {
                     Some(format!("open X{j}")),
                 )
             }
-            (AttrOn::Exception, UnionAt::UseModule) => {
+            (AttrOn::Exception, DeclAt::UseModule) => {
                 main.line(&format!("{ind}module Ex{j} ="));
                 lines(main, &format!("{ind}    "), &decl);
                 (
@@ -561,14 +621,35 @@ impl AttributeCell {
                     Some(format!("open Ex{j}")),
                 )
             }
-            (_, UnionAt::EarlierFile) => {
-                earlier.line(&format!("namespace X{j}"));
-                lines(earlier, "", &decl);
+            (AttrOn::Exception, DeclAt::Referenced) => {
+                files
+                    .fixture
+                    .line(&format!("namespace {FIXTURE_NAMESPACE}.X{j}"));
+                lines(&mut files.fixture, "", &decl);
+                main.line(&format!("{ind}open {FIXTURE_NAMESPACE}"));
+                (
+                    format!("X{j}.E{j}"),
+                    format!("E{j}"),
+                    ": exn",
+                    Some(format!("open X{j}")),
+                )
+            }
+            (_, DeclAt::EarlierFile) => {
+                files.earlier.line(&format!("namespace X{j}"));
+                lines(&mut files.earlier, "", &decl);
                 main.line(&format!("{ind}open X{j}"));
                 (format!("V{j}.K{j}"), format!("K{j}"), "", None)
             }
-            (_, UnionAt::UseModule) => {
+            (_, DeclAt::UseModule) => {
                 lines(main, ind, &decl);
+                (format!("V{j}.K{j}"), format!("K{j}"), "", None)
+            }
+            (_, DeclAt::Referenced) => {
+                files
+                    .fixture
+                    .line(&format!("namespace {FIXTURE_NAMESPACE}.X{j}"));
+                lines(&mut files.fixture, "", &decl);
+                main.line(&format!("{ind}open {FIXTURE_NAMESPACE}.X{j}"));
                 (format!("V{j}.K{j}"), format!("K{j}"), "", None)
             }
         };
@@ -586,6 +667,392 @@ impl AttributeCell {
     }
 }
 
+/// Which entity on a qualified path carries a [`PathCell`]'s attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathAttrOn {
+    /// The outer module `O`.
+    Outer,
+    /// The module `I` nested in `O`.
+    Inner,
+    /// The types `I` declares: a type with a static member, a union, a
+    /// record and an exception.
+    Types,
+}
+
+impl PathAttrOn {
+    const ALL: [PathAttrOn; 3] = [PathAttrOn::Outer, PathAttrOn::Inner, PathAttrOn::Types];
+
+    fn tag(self) -> &'static str {
+        match self {
+            PathAttrOn::Outer => "onOuter",
+            PathAttrOn::Inner => "onInner",
+            PathAttrOn::Types => "onTypes",
+        }
+    }
+}
+
+/// The attributes a [`PathCell`] tries: none, a warning written without a
+/// tuple, a warning written with one (which the walk cannot tell from an
+/// error without resolving its name), and the two error-level ones.
+const PATH_ATTRS: [Attr; 5] = [
+    Attr::None,
+    Attr::ObsoleteWarning,
+    Attr::ObsoleteWarningExplicit,
+    Attr::ObsoleteError,
+    Attr::CompilerMessageError,
+];
+
+/// An attribute ([`Attr`]) on an entity along qualified paths
+/// ([`PathAttrOn`]): a module `O` declaring a value and a module `I`, which
+/// declares a value, a type with a static member, a union, a record and an
+/// exception. FCS checks every module and type a qualified path names on
+/// its way to the item (`SendEntityPathToSink`), and an error-level
+/// attribute on one leaves the path unresolved; an `open` (or a module
+/// abbreviation) checks the module it names, and an error-level attribute
+/// there abandons the declaration, so nothing it would bring into scope is.
+struct PathCell {
+    at: DeclAt,
+    attr: Attr,
+    on: PathAttrOn,
+}
+
+impl PathCell {
+    fn label(&self) -> String {
+        format!(
+            "path{}/{}/{}",
+            self.at.tag(),
+            self.on.tag(),
+            self.attr.tag()
+        )
+    }
+
+    fn all() -> Vec<PathCell> {
+        let mut out = Vec::new();
+        for at in DeclAt::ALL {
+            for attr in PATH_ATTRS {
+                for on in PathAttrOn::ALL {
+                    if attr == Attr::None && on != PathAttrOn::Outer {
+                        continue;
+                    }
+                    out.push(PathCell { at, attr, on });
+                }
+            }
+        }
+        out
+    }
+
+    fn write(&self, k: usize, files: &mut Files, c: &mut Collected) {
+        let a = self.attr.text();
+        let on = |o: PathAttrOn| if self.on == o { a } else { "" };
+        // Names no other family spells.
+        let n = |stem: &str| format!("{stem}{k}");
+        let (o, i, s, t, r) = (n("Po"), n("Pi"), n("Ps"), n("Pt"), n("Pr"));
+        let (case, nullary, field, exn) = (n("Pc"), n("Pd"), n("Pf"), n("Pe"));
+        let (v, w, p, abbrev) = (n("pv"), n("pw"), n("Pp"), n("Pa"));
+        let decl = format!(
+            "{outer}module {o} =\n    \
+             let {v} = 1\n    \
+             {inner}module {i} =\n        \
+             let {w} = 2\n        \
+             {ty}type {s} =\n            static member {p} = 3\n        \
+             {ty}type {t} =\n            | {case} of int\n            | {nullary}\n        \
+             {ty}type {r} = {{ {field}: int }}\n        \
+             {ty}exception {exn} of int",
+            outer = on(PathAttrOn::Outer).replace("] ", "]\n"),
+            inner = on(PathAttrOn::Inner).replace("] ", "]\n    "),
+            ty = on(PathAttrOn::Types).replace("] ", "]\n        "),
+        );
+        let ind = "    ";
+        let main = &mut files.main;
+        main.line(&format!("module {} =", n("Pz")));
+        match self.at {
+            DeclAt::EarlierFile => {
+                files.earlier.line(&format!("namespace {}", n("Py")));
+                lines(&mut files.earlier, "", &decl);
+                main.line(&format!("{ind}open {}", n("Py")));
+            }
+            DeclAt::UseModule => lines(main, ind, &decl),
+            DeclAt::Referenced => {
+                files
+                    .fixture
+                    .line(&format!("namespace {FIXTURE_NAMESPACE}.{}", n("Py")));
+                lines(&mut files.fixture, "", &decl);
+                main.line(&format!("{ind}open {FIXTURE_NAMESPACE}.{}", n("Py")));
+            }
+        }
+        let label = self.label();
+        main.line(&format!("{ind}let x = 1"));
+        // Expressions.
+        c.path_expr(main, ind, &format!("{o}.{v}"), &label, "value");
+        c.path_expr(main, ind, &format!("{o}.{i}.{w}"), &label, "nestedValue");
+        c.path_expr(
+            main,
+            ind,
+            &format!("{o}.{i}.{s}.{p}"),
+            &label,
+            "staticMember",
+        );
+        c.path_expr(
+            main,
+            ind,
+            &format!("{o}.{i}.{t}.{nullary}"),
+            &label,
+            "typeCase",
+        );
+        c.path_expr(
+            main,
+            ind,
+            &format!("{o}.{i}.{nullary}"),
+            &label,
+            "moduleCase",
+        );
+        // Patterns.
+        c.path_pattern(
+            main,
+            ind,
+            &format!("{o}.{i}.{case}"),
+            "",
+            &label,
+            "modulePat",
+        );
+        c.path_pattern(
+            main,
+            ind,
+            &format!("{o}.{i}.{t}.{case}"),
+            "",
+            &label,
+            "typePat",
+        );
+        c.path_pattern(
+            main,
+            ind,
+            &format!("{o}.{i}.{exn}"),
+            ": exn",
+            &label,
+            "exnPat",
+        );
+        // A type annotation, and a type-qualified record label.
+        let annotated = format!("{o}.{i}.{t}");
+        let line = format!("{ind}let ann (b: {annotated}) = b");
+        c.path_line(main, &line, &annotated, &label, "annotation");
+        let labelled = format!("{o}.{i}.{r}.{field}");
+        let line = format!("{ind}let lbl = {{ {labelled} = 1 }}");
+        c.path_line(main, &line, &labelled, &label, "label");
+        // A module abbreviation, then a path through it.
+        let target = format!("{o}.{i}");
+        let line = format!("{ind}module {abbrev} = {target}");
+        c.path_line(main, &line, &target, &label, "abbrevTarget");
+        c.path_expr(main, ind, &format!("{abbrev}.{w}"), &label, "viaAbbrev");
+        // An `open` of the inner module, then its names bare.
+        let line = format!("{ind}open {target}");
+        c.path_line(main, &line, &target, &label, "openTarget");
+        c.path_expr(main, ind, &w, &label, "openedValue");
+        c.path_expr(main, ind, &format!("{s}.{p}"), &label, "openedStatic");
+        c.path_pattern(main, ind, &case, "", &label, "openedPat");
+        c.path_pattern(main, ind, &exn, ": exn", &label, "openedExnPat");
+        // A nullary head, a variable to FCS where no case of its name is in
+        // scope; binder completeness grades what it declares there.
+        let line = format!("{ind}let nul b = match b with {nullary} -> 0 | _ -> 1");
+        c.path_line(main, &line, &nullary, &label, "openedNullary");
+        let line = format!("{ind}let ann2 (b: {t}) = b");
+        c.path_line(main, &line, &t, &label, "openedAnnotation");
+        let line = format!("{ind}let lbl2 = {{ {field} = 1 }}");
+        c.path_line(main, &line, &field, &label, "openedLabel");
+    }
+}
+
+/// Which half of a [`HeaderCell`]'s module carries its attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderSig {
+    /// No signature: the implementation's header.
+    NoSignature,
+    /// A signature's header, its implementation's bare: what a later file
+    /// sees of the module.
+    OnSignature,
+    /// The implementation's header, its signature's bare, which a later
+    /// file never sees.
+    OnImplementation,
+}
+
+impl HeaderSig {
+    const ALL: [HeaderSig; 3] = [
+        HeaderSig::NoSignature,
+        HeaderSig::OnSignature,
+        HeaderSig::OnImplementation,
+    ];
+
+    fn tag(self) -> &'static str {
+        match self {
+            HeaderSig::NoSignature => "noSig",
+            HeaderSig::OnSignature => "onSig",
+            HeaderSig::OnImplementation => "onImpl",
+        }
+    }
+}
+
+/// An attribute ([`Attr`]) on a file's top-level `module` header, in an
+/// implementation or its signature ([`HeaderSig`]), probed from a later
+/// file through paths and an `open` of the module.
+struct HeaderCell {
+    attr: Attr,
+    sig: HeaderSig,
+}
+
+impl HeaderCell {
+    fn label(&self) -> String {
+        format!("header/{}/{}", self.sig.tag(), self.attr.tag())
+    }
+
+    fn all() -> Vec<HeaderCell> {
+        let mut out = Vec::new();
+        for attr in [
+            Attr::None,
+            Attr::ObsoleteWarningExplicit,
+            Attr::ObsoleteError,
+            Attr::CompilerMessageError,
+        ] {
+            for sig in HeaderSig::ALL {
+                if attr == Attr::None && sig != HeaderSig::NoSignature {
+                    continue;
+                }
+                out.push(HeaderCell { attr, sig });
+            }
+        }
+        out
+    }
+
+    /// The cell's files, in Compile order: `(name, source)`.
+    fn files(&self, n: usize) -> Vec<(String, String)> {
+        let a = self.attr.text().replace("] ", "]\n");
+        let on = |half: HeaderSig| {
+            if self.sig == half { a.as_str() } else { "" }
+        };
+        let union = format!("type Ht{n} =\n    | Hc{n} of int\n    | Hd{n}\n");
+        let implementation = |attr: &str| format!("{attr}module Ph{n}\nlet hv{n} = 1\n{union}");
+        match self.sig {
+            HeaderSig::NoSignature => vec![(format!("h{n}.fs"), implementation(&a))],
+            HeaderSig::OnSignature | HeaderSig::OnImplementation => vec![
+                (
+                    format!("h{n}.fsi"),
+                    format!(
+                        "{}module Ph{n}\nval hv{n} : int\n{union}",
+                        on(HeaderSig::OnSignature)
+                    ),
+                ),
+                (
+                    format!("h{n}.fs"),
+                    implementation(on(HeaderSig::OnImplementation)),
+                ),
+            ],
+        }
+    }
+
+    fn write(&self, n: usize, main: &mut FileBuilder, c: &mut Collected) {
+        let ind = "    ";
+        let label = self.label();
+        let module = format!("Ph{n}");
+        main.line(&format!("module Hz{n} ="));
+        main.line(&format!("{ind}let x = 1"));
+        c.path_expr(main, ind, &format!("{module}.hv{n}"), &label, "value");
+        c.path_expr(
+            main,
+            ind,
+            &format!("{module}.Ht{n}.Hd{n}"),
+            &label,
+            "typeCase",
+        );
+        c.path_pattern(
+            main,
+            ind,
+            &format!("{module}.Hc{n}"),
+            "",
+            &label,
+            "modulePat",
+        );
+        let line = format!("{ind}open {module}");
+        c.path_line(main, &line, &module, &label, "openTarget");
+        c.path_expr(main, ind, &format!("hv{n}"), &label, "openedValue");
+        c.path_pattern(main, ind, &format!("Hc{n}"), "", &label, "openedPat");
+        let line = format!("{ind}let nul b = match b with Hd{n} -> 0 | _ -> 1");
+        c.path_line(main, &line, &format!("Hd{n}"), &label, "openedNullary");
+    }
+}
+
+impl Collected {
+    /// A site for each segment of the dotted `path`, at its first
+    /// occurrence in `line` (the next line `f` appends), and, for a path of
+    /// more than one segment, one for the whole path: `{label}/{form}/{n}`
+    /// for the `n`th segment, `{label}/{form}/whole`.
+    fn path_sites(&mut self, f: &FileBuilder, line: &str, path: &str, label: &str, form: &str) {
+        let start = line.find(path).expect("path occurs in its line");
+        let base = f.text.len() + start;
+        let site = |from: usize, len: usize, label: String| Site {
+            file: f.index,
+            range: TextRange::new(
+                u32::try_from(from).unwrap().into(),
+                u32::try_from(from + len).unwrap().into(),
+            ),
+            label,
+        };
+        let segments: Vec<&str> = path.split('.').collect();
+        let mut offset = 0;
+        for (n, seg) in segments.iter().enumerate() {
+            self.sites.push(site(
+                base + offset,
+                seg.len(),
+                format!("{label}/{form}/{n}"),
+            ));
+            offset += seg.len() + 1;
+        }
+        if segments.len() > 1 {
+            let whole = format!("{label}/{form}/whole");
+            self.whole_of.insert(
+                format!("{label}/{form}/{}", segments.len() - 1),
+                whole.clone(),
+            );
+            self.sites.push(site(base, path.len(), whole));
+        }
+    }
+
+    /// Append `line`, with a site for each segment of `path` in it
+    /// ([`Self::path_sites`]).
+    fn path_line(&mut self, f: &mut FileBuilder, line: &str, path: &str, label: &str, form: &str) {
+        self.path_sites(f, line, path, label, form);
+        f.line(line);
+    }
+
+    /// The expression probe `let {form} = {path}`.
+    fn path_expr(&mut self, f: &mut FileBuilder, ind: &str, path: &str, label: &str, form: &str) {
+        self.path_line(f, &format!("{ind}let {form} = {path}"), path, label, form);
+    }
+
+    /// The pattern probe `match b with {path} x -> ignore x | _ -> ()`:
+    /// the head's segments ([`Self::path_sites`]), the binder and the use.
+    fn path_pattern(
+        &mut self,
+        f: &mut FileBuilder,
+        ind: &str,
+        path: &str,
+        scrutinee: &str,
+        label: &str,
+        form: &str,
+    ) {
+        let line =
+            format!("{ind}let {form} (b{scrutinee}) = match b with {path} x -> ignore x | _ -> ()");
+        self.path_sites(f, &line, path, label, form);
+        self.binders.push(word_site(
+            f,
+            &line,
+            "x",
+            0,
+            format!("{label}/{form}/binder"),
+        ));
+        self.sites
+            .push(word_site(f, &line, "x", 1, format!("{label}/{form}/use")));
+        f.line(&line);
+    }
+}
+
 /// FCS's diagnostics that judge a use rather than resolve it: an
 /// error-level `[<Obsolete>]` (FS0101) or `[<CompilerMessage>]` (its own
 /// number), a type mismatch (FS0001) or wrong argument count (FS0727) under
@@ -596,14 +1063,35 @@ fn judges_the_use(number: i64) -> bool {
     matches!(number, 1 | 101 | 727 | 1124 | 9001)
 }
 
-/// FCS's resolution at a site, when it has one: its record, unless an error
-/// at the site is about something other than the use.
+/// Whether FCS's record at a site is its resolution: no error at the site
+/// is about something other than the use.
+fn record_is_resolution(g: &Graded) -> bool {
+    g.errors.iter().all(|&n| judges_the_use(n))
+}
+
+/// FCS's resolution at a site to a project declaration, when it has one.
 fn fcs_resolution(g: &Graded) -> Option<(usize, TextRange)> {
-    g.errors
-        .iter()
-        .all(|&n| judges_the_use(n))
-        .then_some(g.record)
-        .flatten()
+    record_is_resolution(g).then_some(g.record).flatten()
+}
+
+/// Whether FCS resolves the site to anything, a project declaration or a
+/// referenced assembly's.
+fn fcs_resolves(g: &Graded) -> bool {
+    record_is_resolution(g)
+        && g.record_use
+            .as_ref()
+            .is_some_and(|u| u.decl.is_some() || u.assembly.is_some())
+}
+
+/// Whether the walk's answer at a site names a referenced assembly's
+/// entity, member or union case.
+fn assembly_answer(g: &Graded) -> Option<Resolution> {
+    g.resolution.filter(|r| {
+        matches!(
+            r,
+            Resolution::Entity(_) | Resolution::Member { .. } | Resolution::UnionCase { .. }
+        )
+    })
 }
 
 /// Whether FCS never checked an expression's argument: it recorded nothing
@@ -615,41 +1103,90 @@ fn unchecked_argument(g: &Graded, by_label: &HashMap<&str, &Graded>) -> bool {
     let Some(cell) = g.label.strip_suffix("ExprArg") else {
         return false;
     };
-    g.record.is_none()
+    g.record_use.is_none()
         && by_label
             .get(format!("{cell}ExprHead").as_str())
             .is_some_and(|head| !head.errors.is_empty())
 }
 
-/// We commit a site to anything but FCS's resolution there.
-fn wrong(g: &Graded) -> bool {
+/// We commit a site to anything but FCS's resolution there. An answer in a
+/// referenced assembly at a path's last segment, where FCS records nothing,
+/// is graded against FCS's record over the whole path (`whole`, the site
+/// [`Collected::whole_of`] names).
+fn wrong(g: &Graded, whole: Option<&Graded>, env: &AssemblyEnv, graded: &GradedProject) -> bool {
+    if let Some(res) = assembly_answer(g) {
+        let reading = match (&g.record_use, whole) {
+            (None, Some(whole)) => whole,
+            _ => g,
+        };
+        return !(record_is_resolution(reading)
+            && reading
+                .record_use
+                .as_ref()
+                .is_some_and(|u| agrees(env, &graded.proj, &graded.paths, 0, res, u)));
+    }
     match &g.ours {
         OurVerdict::Declined => false,
         OurVerdict::Committed(f, r) => fcs_resolution(g) != Some((*f, *r)),
     }
 }
 
+/// Whether the walk commits the site.
+fn commits(g: &Graded) -> bool {
+    matches!(g.ours, OurVerdict::Committed(..)) || assembly_answer(g).is_some()
+}
+
 #[test]
 fn case_heads_and_their_binders_agree_with_fcs() {
-    let mut earlier = FileBuilder::new(0);
-    let mut main = FileBuilder::new(1);
-    main.line("module Use");
-    main.line("");
+    let header_cells = HeaderCell::all();
+    let header_files: Vec<(String, String)> = header_cells
+        .iter()
+        .enumerate()
+        .flat_map(|(n, cell)| cell.files(n))
+        .collect();
+    let mut files = Files {
+        earlier: FileBuilder::new(0),
+        main: FileBuilder::new(1 + header_files.len()),
+        fixture: FileBuilder::new(usize::MAX),
+    };
+    files.main.line("module Use");
+    files.main.line("");
     let mut c = Collected::default();
     let namesake_cells = NamesakeCell::all();
     for (i, cell) in namesake_cells.iter().enumerate() {
-        cell.write(i, &mut earlier, &mut main, &mut c);
+        cell.write(i, &mut files.earlier, &mut files.main, &mut c);
     }
     let attribute_cells = AttributeCell::all();
     for (j, cell) in attribute_cells.iter().enumerate() {
-        cell.write(j, &mut earlier, &mut main, &mut c);
+        cell.write(j, &mut files, &mut c);
     }
-    let files = vec![("earlier.fs", earlier.text), ("main.fs", main.text)];
-    let graded = grade_project("chg", &files, &c.sites, &c.binders, full_bcl_env());
+    let path_cells = PathCell::all();
+    for (k, cell) in path_cells.iter().enumerate() {
+        cell.write(k, &mut files, &mut c);
+    }
+    for (n, cell) in header_cells.iter().enumerate() {
+        cell.write(n, &mut files.main, &mut c);
+    }
+    let fixture = ensure_case_attr_fixture_built(&files.fixture.text);
+    let runtime = ensure_system_runtime_dll();
+    let netstandard = runtime.parent().expect("ref dir").join("netstandard.dll");
+    let fsharp_core = ensure_fsharp_core_dll();
+    let env = env_of(&[&fsharp_core, &runtime, &netstandard, fixture]);
+    let mut sources = vec![("earlier.fs", files.earlier.text)];
+    sources.extend(
+        header_files
+            .iter()
+            .map(|(name, src)| (name.as_str(), src.clone())),
+    );
+    sources.push(("main.fs", files.main.text));
+    let graded = grade_project_with_refs("chg", &sources, &c.sites, &c.binders, &env, &[fixture]);
     eprintln!(
-        "case head grid: {} namesake cells, {} attribute cells, {} uses, {} binders",
+        "case head grid: {} namesake cells, {} attribute cells, {} path cells, {} header cells, \
+         {} uses, {} binders",
         namesake_cells.len(),
         attribute_cells.len(),
+        path_cells.len(),
+        header_cells.len(),
         graded.sites.len(),
         graded.binders.len()
     );
@@ -661,27 +1198,38 @@ fn case_heads_and_their_binders_agree_with_fcs() {
     for g in &graded.sites {
         if report {
             eprintln!(
-                "  {:<70} fcs {:?} errors {:?} | ours {:?}",
-                g.label, g.record, g.errors, g.ours
+                "  {:<70} fcs {:?} {:?} errors {:?} | ours {:?} {:?}",
+                g.label,
+                g.record,
+                g.record_use.as_ref().and_then(|u| u.full_name.as_deref()),
+                g.errors,
+                g.ours,
+                assembly_answer(g)
             );
         }
         let unchecked = unchecked_argument(g, &by_label);
-        if wrong(g) && !unchecked {
+        let whole = c
+            .whole_of
+            .get(&g.label)
+            .and_then(|w| by_label.get(w.as_str()).copied());
+        if wrong(g, whole, &env, &graded) && !unchecked {
             failures.push(format!(
-                "[{}] FCS {:?} (errors {:?}) | we gave {:?}",
-                g.label, g.record, g.errors, g.ours
+                "[{}] FCS {:?} {:?} (errors {:?}) | we gave {:?} {:?}",
+                g.label,
+                g.record,
+                g.record_use.as_ref().and_then(|u| u.full_name.as_deref()),
+                g.errors,
+                g.ours,
+                assembly_answer(g)
             ));
         }
-        let fcs = match (fcs_resolution(g), g.errors.is_empty()) {
+        let fcs = match (fcs_resolves(g), g.errors.is_empty()) {
             _ if unchecked => "unchecked",
-            (Some(_), true) => "resolved",
-            (Some(_), false) => "resolved with error",
-            (None, _) => "unresolved",
+            (true, true) => "resolved",
+            (true, false) => "resolved with error",
+            (false, _) => "unresolved",
         };
-        let ours = match g.ours {
-            OurVerdict::Committed(..) => "commit",
-            OurVerdict::Declined => "decline",
-        };
+        let ours = if commits(g) { "commit" } else { "decline" };
         entries.push(format!("{}\tfcs {fcs} | ours {ours}", g.label));
     }
     for b in &graded.binders {
@@ -710,20 +1258,33 @@ fn case_heads_and_their_binders_agree_with_fcs() {
         };
         entries.push(format!("{}\tfcs {fcs} | ours {ours}", b.label));
     }
-    failures.extend(graded.completeness_failures);
+    failures.extend(graded.completeness_failures.iter().cloned());
     assert!(
         failures.is_empty(),
         "{} failure(s):\n{}",
         failures.len(),
         failures.join("\n")
     );
-    // Liveness: both families commit heads and intern binders somewhere, so
-    // certain-implies-exact is not passing by declining.
-    for family in ["union", "decl"] {
+    // Liveness: every family commits heads and interns binders somewhere,
+    // so certain-implies-exact is not passing by declining.
+    for family in [
+        "union",
+        "declEarlier",
+        "declLocal",
+        "declReferenced",
+        "pathEarlier",
+        "pathLocal",
+        "pathReferenced",
+        "header",
+    ] {
+        let pattern_head = |label: &str| {
+            label.ends_with("PatHead") || (label.contains("Pat/") && !label.ends_with("/use"))
+        };
         assert!(
-            graded.sites.iter().any(|g| g.label.starts_with(family)
-                && g.label.ends_with("PatHead")
-                && matches!(g.ours, OurVerdict::Committed(..))),
+            graded
+                .sites
+                .iter()
+                .any(|g| g.label.starts_with(family) && pattern_head(&g.label) && commits(g)),
             "no {family} cell commits a pattern head"
         );
         assert!(

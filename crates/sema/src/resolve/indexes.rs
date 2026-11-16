@@ -80,6 +80,13 @@ pub(super) struct Indexes {
     /// error-level attribute, for those that may carry one anywhere
     /// ([`CaseAttributes`](super::model::CaseAttributes)).
     pub(super) case_attributes: HashMap<DefId, super::model::CaseAttributes>,
+    /// Each def interned under a module whose attributes may be error-level,
+    /// to the innermost such module's container path
+    /// ([`OpenScope::attributed_module`](super::open_scope::OpenScope::attributed_module)).
+    /// A use outside that module reaches the def through a path naming it
+    /// or an `open` of it, either of which FCS checks
+    /// ([`Resolver::behind_attributed_entity`](crate::resolve::Resolver::behind_attributed_entity)).
+    pub(super) under_attributed_module: HashMap<DefId, crate::names::PathId>,
     /// The **complete declared-name view of each container** — keyed by the
     /// container's [`PathId`], like [`Self::type_defs`], mapping each
     /// declared name to the namespaces it occupies ([`DeclKinds`]); read by
