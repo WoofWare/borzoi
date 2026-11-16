@@ -3451,13 +3451,12 @@ impl<'a> Resolver<'a> {
     /// Whether a type declared directly in project container `container` is
     /// in scope here by its simple name: `container` is the root, this
     /// block's own namespace or one of its enclosing modules, or an explicit
-    /// open's. A namespace block opens its own namespace alone, so inside
-    /// `namespace N.Inner` the types of `N` are not in scope.
+    /// open's ([`Self::container_prefix_in_scope`]). A namespace block opens
+    /// its own namespace alone, so inside `namespace N.Inner` the types of
+    /// `N` are not in scope.
     fn sees_types_declared_in(&self, container: &[String]) -> bool {
-        let path = &self.lexical.container_path;
-        let own_namespace = self.lexical.namespace_depth.min(path.len());
-        container.is_empty()
-            || (container.len() >= own_namespace && path.get(..container.len()) == Some(container))
+        (self.lexical.container_path.get(..container.len()) == Some(container)
+            && self.container_prefix_in_scope(container.len()))
             || self
                 .scope
                 .open_shortening_prefixes

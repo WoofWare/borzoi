@@ -14,6 +14,7 @@ static ALLOC: borzoi_oracle_harness::alloc_limit::LimitedAlloc =
 mod common;
 
 mod abbreviation_case_diff;
+mod ancestor_namespace_grid;
 mod assembly_container_precedence_grid;
 mod assembly_env;
 mod assembly_union_case_table;

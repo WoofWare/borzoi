@@ -1074,8 +1074,7 @@ impl<'a> Resolver<'a> {
             // are reachable only at the enclosing-namespace base.
             let modules = self.project_module_completions(written);
             let reach = self.assembly_open_reach();
-            for k in (self.lexical.namespace_depth.max(1)..=self.lexical.container_path.len()).rev()
-            {
+            for k in self.implicitly_open_container_lens().rev() {
                 if k <= reach
                     || k == self.lexical.namespace_depth
                     || modules.binary_search(&k).is_ok()
@@ -1309,6 +1308,32 @@ impl<'a> Resolver<'a> {
             .lexical
             .namespace_depth
             .min(self.lexical.container_path.len())]
+    }
+
+    /// The enclosing containers whose contents are in scope here with no
+    /// `open` written, as the lengths `k ≥ 1` of `container_path[..k]`: this
+    /// block's own namespace and the modules enclosing the use. Iterate it
+    /// `.rev()` for innermost first.
+    ///
+    /// A namespace block opens its own namespace alone
+    /// (`ImplicitlyOpenOwnNamespace`), so inside `namespace N.Inner` the
+    /// contents of `N` are not in scope (FCS reports FS0039 for a type, case,
+    /// module or value declared there), whichever file or block declares
+    /// them. The root (`k == 0`) is in scope too, and is each caller's
+    /// as-written tier ([`Self::container_prefix_in_scope`] counts it).
+    /// Every walk that resolves a name relative to the enclosing containers
+    /// reads this one window; `ancestor_namespace_grid` grades them against
+    /// FCS.
+    pub(super) fn implicitly_open_container_lens(&self) -> std::ops::RangeInclusive<usize> {
+        let len = self.lexical.container_path.len();
+        self.lexical.namespace_depth.min(len).max(1)..=len
+    }
+
+    /// Whether the contents of `container_path[..k]` are in scope here with
+    /// no `open` written: the root, or one of
+    /// [`Self::implicitly_open_container_lens`].
+    pub(super) fn container_prefix_in_scope(&self, k: usize) -> bool {
+        k == 0 || self.implicitly_open_container_lens().contains(&k)
     }
 
     /// `path`'s key in the env's name table, looked up.
@@ -2059,13 +2084,18 @@ impl<'a> Resolver<'a> {
                 .get(&self.lexical.container_path.prefix_id(k))
                 .is_some_and(|names| names.contains(name))
         })?;
-        // Follow it only if that nearest declaration is a resolvable alias.
+        // Follow it only if that nearest declaration is a resolvable alias in
+        // scope here: one this block declares (`ModuleAlias::block_start`), or
+        // a root one, which an earlier `namespace global` block leaves in the
+        // environment of every later block.
         let mut alias_path = self.lexical.container_path[..scope].to_vec();
         alias_path.push(name.to_string());
+        let block_start = self.index.block_starts.last().copied().unwrap_or(0);
         self.index
             .module_aliases
             .get(&alias_path)
-            .map(Vec::as_slice)
+            .filter(|alias| scope == 0 || alias.block_start == block_start)
+            .map(|alias| alias.target.as_slice())
     }
 
     /// Record the **current container** as a module that brings value-space names
@@ -2144,12 +2174,13 @@ impl<'a> Resolver<'a> {
                     return Some(spell(prefix));
                 }
             }
-            // Tier 2 — enclosing namespace/module nesting, innermost first.
+            // Tier 2 — the enclosing namespace and modules, innermost first
+            // ([`Self::implicitly_open_container_lens`]).
             if let Some(&k) = self
                 .project_module_completions(written)
                 .iter()
                 .rev()
-                .find(|&&k| k >= 1)
+                .find(|&&k| k >= 1 && self.container_prefix_in_scope(k))
             {
                 let mut full = self.lexical.container_path[..k].to_vec();
                 full.extend_from_slice(written);
@@ -2347,10 +2378,11 @@ impl<'a> Resolver<'a> {
                     return Some(found);
                 }
             }
-            // Tier 2 — enclosing namespace/module nesting, innermost first.
-            // Only a completion the case index holds can hit, and its trie
-            // names them all in one walk along the container path, so no
-            // other completion is built.
+            // Tier 2 — the enclosing namespace and modules, innermost first
+            // ([`Self::implicitly_open_container_lens`]). Only a completion
+            // the case index holds can hit, and its trie names them all in
+            // one walk along the container path, so no other completion is
+            // built.
             let names = self.assemblies.names();
             let completions: Vec<usize> = self.preceding.type_qualified_case_prefix_lens(
                 names,
@@ -2358,7 +2390,11 @@ impl<'a> Resolver<'a> {
                     .container_prefixes()
                     .extended(names, &names.lookup_names(written)),
             );
-            for &k in completions.iter().rev().filter(|&&k| k >= 1) {
+            for &k in completions
+                .iter()
+                .rev()
+                .filter(|&&k| k >= 1 && self.container_prefix_in_scope(k))
+            {
                 let mut full = self.lexical.container_path[..k].to_vec();
                 full.extend_from_slice(written);
                 if let Some(found) = hit(full, CaseTier::Namespace) {
@@ -4866,8 +4902,7 @@ impl<'a> Resolver<'a> {
         // whose segment classification finds nothing (`None` below) *continues* to
         // the next candidate; only when every same-file candidate declines may the
         // caller fall through to cross-file resolution.
-        let relative =
-            (self.lexical.namespace_depth.max(1)..=self.lexical.container_path.len()).rev();
+        let relative = self.implicitly_open_container_lens().rev();
         let root_tier: &[usize] = &[0];
         for k in relative.chain(root_tier.iter().copied()) {
             let parent = &self.lexical.container_path[..k];
@@ -5453,7 +5488,7 @@ impl<'a> Resolver<'a> {
     /// tier for tier. `Some(DeferStop)` for any other rival, whose contents
     /// are not walked here.
     fn root_head_rival(&self, head: &str, res: QualifiedResidual<'_>) -> Option<SameFileQualified> {
-        for k in (self.lexical.namespace_depth.max(1)..=self.lexical.container_path.len()).rev() {
+        for k in self.implicitly_open_container_lens().rev() {
             let mut p = self.lexical.container_path[..k].to_vec();
             p.push(head.to_string());
             let mut case_path = p.clone();
@@ -7351,9 +7386,6 @@ impl<'a> Resolver<'a> {
         // probes, not `d` copies and hashes of paths up to `d` long.
         let names = self.assemblies.names();
         let path = self.container_prefixes();
-        let written = |k: usize| {
-            k == 0 || (self.lexical.namespace_depth.max(1)..=path.text.len()).contains(&k)
-        };
         let head_name = [names.lookup(head)];
         let question = path.extended(names, &head_name);
         let contests_written = self
@@ -7370,7 +7402,7 @@ impl<'a> Resolver<'a> {
                 self.preceding
                     .real_module_suffix_prefix_lens(names, &question),
             )
-            .filter(|&k| written(k))
+            .filter(|&k| self.container_prefix_in_scope(k))
             .any(|k| !self.enclosing_module_like_transparent_for(k, head, residual));
         // Each open's child of the head, by id: a child the table never
         // interned is in no module set, and the path is spelled only for the

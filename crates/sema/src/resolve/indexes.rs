@@ -16,6 +16,18 @@ use super::state::{DeclKinds, TypeMemberSet, TypeSlotDef};
 use crate::def::DefId;
 use crate::names::{ChildMap, PathId, PathMap};
 
+/// A module abbreviation [`Indexes::module_aliases`] records.
+pub(super) struct ModuleAlias {
+    /// The canonical path of the module it abbreviates.
+    pub(super) target: Vec<String>,
+    /// The start of the top-level block declaring it ([`Indexes::block_starts`]).
+    /// An abbreviation is no member of its namespace: FCS adds it to the
+    /// environment of its own block alone, so a later block, even of the same
+    /// namespace and even under an `open` of it, does not see it. A root
+    /// abbreviation (a `namespace global` block's) stays in scope.
+    pub(super) block_start: u32,
+}
+
 /// The walk's indexes; see the [module docs](self).
 #[derive(Default)]
 pub(super) struct Indexes {
@@ -275,7 +287,7 @@ pub(super) struct Indexes {
     /// stays in [`Self::modules_with_hidden_values`] (conservative). A *file-level*
     /// accumulator keyed by absolute path; not yet merged across files, so an alias
     /// declared in an earlier file stays conservative.
-    pub(super) module_aliases: HashMap<Vec<String>, Vec<String>>,
+    pub(super) module_aliases: HashMap<Vec<String>, ModuleAlias>,
     /// The ident-token ranges of active-pattern *parameter* arguments the
     /// shape-keyed split has resolved as expressions (Stage 2 of
     /// `docs/parameterized-active-pattern-args-plan.md`): in `match n with DivBy
