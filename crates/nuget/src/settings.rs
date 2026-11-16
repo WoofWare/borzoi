@@ -1093,9 +1093,9 @@ mod fifo_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().to_path_buf();
         make_fifo(&dir.join("NuGet.Config"));
-        std::os::unix::fs::symlink(dir.join("NuGet.Config"), dir.join("nuget.config")).unwrap();
+        std::os::unix::fs::symlink(dir.join("NuGet.Config"), dir.join("linked.config")).unwrap();
         within_deadline("reading a FIFO", move || {
-            for name in ["NuGet.Config", "nuget.config"] {
+            for name in ["NuGet.Config", "linked.config"] {
                 let error = HostFs.read(&dir.join(name)).unwrap_err();
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{name}");
             }
