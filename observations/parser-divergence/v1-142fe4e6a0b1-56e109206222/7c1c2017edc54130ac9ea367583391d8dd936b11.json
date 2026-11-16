@@ -1,0 +1,49 @@
+{
+  "observation_schema_version": 1,
+  "series": "v1-142fe4e6a0b1-56e109206222",
+  "repository": "WoofWare/borzoi",
+  "commit": "7c1c2017edc54130ac9ea367583391d8dd936b11",
+  "measured_at": "2026-11-16T12:49:47Z",
+  "workflow": {
+    "run_id": 43868274531,
+    "run_number": 478,
+    "run_attempt": 1,
+    "url": "https://github.com/WoofWare/borzoi/actions/runs/43868274531"
+  },
+  "corpus": {
+    "source": "dotnet/fsharp",
+    "revision": "142fe4e6a0b1cbef6f8e18e473e03b9137644cc0"
+  },
+  "flake_lock_hash": "1d8fecb61977dd5f76129f28d2eaeb8d9adb5eaf6e494ffcb42283bd56035227",
+  "generator": {
+    "schema_version": 1,
+    "measurement": "parser-divergence",
+    "configuration": {
+      "corpus": "fsharp-src",
+      "defines": [
+        "COMPILED",
+        "EDITING"
+      ],
+      "file_extensions": [
+        "fs",
+        "fsi"
+      ]
+    },
+    "statistics": {
+      "ast_divergences": 0,
+      "both_reject": 643,
+      "fcs_unmodeled": 0,
+      "match_rate": {
+        "basis_points": 8839,
+        "matched": 5285,
+        "seen": 5979
+      },
+      "matches": 5285,
+      "other": 13,
+      "our_panics": 0,
+      "records": 5979,
+      "we_accept_fcs_rejects": 25,
+      "we_reject_fcs_accepts": 13
+    }
+  }
+}
