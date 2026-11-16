@@ -20,9 +20,9 @@
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
     Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, BangKind, Binding, BindingHead,
-    Comp, CompClause, Const, Expr, Float32, Float64, ForDirection, ImplFile, LetBindings,
-    MatchClause, ModuleDecl, NamedModule, Namespace, NamespaceName, NestedModule, Pat, RecordField,
-    Stmt, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
+    Comp, CompClause, Const, Expr, Float32, Float64, ForDirection, ForSource, ImplFile,
+    LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace, NamespaceName, NestedModule, Pat,
+    Range, RecordField, Stmt, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -554,7 +554,7 @@ fn expr<V: Version>(e: &NormalisedExpr) -> L<Expr<V>> {
             body,
         } => Expr::ForEach {
             pat: pat(p)?,
-            source: b(enum_expr)?,
+            source: Box::new(for_source(enum_expr)?),
             body: b(body)?,
         },
         N::TryWith { body, clauses } => Expr::TryWith {
@@ -882,9 +882,10 @@ fn stmt<V: Version>(e: &NormalisedExpr) -> L<Stmt<V>> {
             body,
         } => Stmt::ForEach {
             pat: pat(p)?,
-            source: expr(enum_expr)?,
+            source: for_source(enum_expr)?,
             body: c(body)?,
         },
+        N::IndexRange { .. } => Stmt::Range(range(e)?),
         N::TryWith { body, clauses } => Stmt::TryWith {
             body: c(body)?,
             clauses: vec1(clauses, comp_clause)?,
@@ -897,6 +898,41 @@ fn stmt<V: Version>(e: &NormalisedExpr) -> L<Stmt<V>> {
             return decline("comp: block where a statement belongs");
         }
         other => Stmt::Expr(expr(other)?),
+    })
+}
+
+fn for_source<V: Version>(e: &NormalisedExpr) -> L<ForSource<V>> {
+    Ok(match e {
+        NormalisedExpr::IndexRange { .. } => ForSource::Range(range(e)?),
+        other => ForSource::Expr(expr(other)?),
+    })
+}
+
+/// `a .. b`, or `a .. s .. b`, which FCS nests as `(a .. s) .. b` with no
+/// parentheses. A range missing a bound is a slice's, not this.
+fn range<V: Version>(e: &NormalisedExpr) -> L<Range<V>> {
+    let NormalisedExpr::IndexRange {
+        lower: Some(lower),
+        upper: Some(upper),
+    } = e
+    else {
+        return decline("expr: index range without both bounds");
+    };
+    let to = expr(upper)?;
+    Ok(match &**lower {
+        NormalisedExpr::IndexRange {
+            lower: Some(from),
+            upper: Some(step),
+        } => Range {
+            from: expr(from)?,
+            step: Some(expr(step)?),
+            to,
+        },
+        from => Range {
+            from: expr(from)?,
+            step: None,
+            to,
+        },
     })
 }
 

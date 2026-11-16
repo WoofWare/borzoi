@@ -399,7 +399,7 @@ pub enum Expr<V: Version> {
     /// `for p in e do e done`
     ForEach {
         pat: Pat,
-        source: Box<Expr<V>>,
+        source: Box<ForSource<V>>,
         body: Box<Expr<V>>,
     },
     /// `lazy e`
@@ -527,9 +527,11 @@ pub enum Stmt<V: Version> {
     /// `for p in e do c done`
     ForEach {
         pat: Pat,
-        source: Expr<V>,
+        source: ForSource<V>,
         body: Box<Comp<V>>,
     },
+    /// `a .. b` or `a .. step .. b`
+    Range(Range<V>),
     /// `try c with | p -> c …`
     TryWith {
         body: Box<Comp<V>>,
@@ -540,6 +542,23 @@ pub enum Stmt<V: Version> {
         body: Box<Comp<V>>,
         finally: Expr<V>,
     },
+}
+
+/// What a `for … in` loop runs over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForSource<V: Version> {
+    Expr(Expr<V>),
+    Range(Range<V>),
+}
+
+/// `from .. to`, or `from .. step .. to`. F# has a range only as a
+/// computation expression's (or list's) statement and as a `for … in` loop's
+/// source; it is not an expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Range<V: Version> {
+    pub from: Expr<V>,
+    pub step: Option<Expr<V>>,
+    pub to: Expr<V>,
 }
 
 /// `| pat [when guard] -> body` in a computation expression.

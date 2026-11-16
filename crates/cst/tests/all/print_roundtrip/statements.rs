@@ -13,8 +13,8 @@
 
 use borzoi_print::names::{Ident, LongIdent, ValueName};
 use borzoi_print::tree::{
-    BangKind, Binding, BindingHead, Comp, CompClause, Expr, ForDirection, ImplFile, LetBindings,
-    ModuleDecl, Pat, Stmt,
+    BangKind, Binding, BindingHead, Comp, CompClause, Expr, ForDirection, ForSource, ImplFile,
+    LetBindings, ModuleDecl, Pat, Range, Stmt,
 };
 use borzoi_print::vec::Vec1;
 use borzoi_print::version::{Gate, Preview, V4_6, Version};
@@ -82,7 +82,16 @@ fn statements<V: Version>(body: &Comp<V>) -> Vec<Stmt<V>> {
         },
         Stmt::ForEach {
             pat: var("x"),
-            source: name("xs"),
+            source: ForSource::Expr(name("xs")),
+            body: b(),
+        },
+        Stmt::ForEach {
+            pat: var("x"),
+            source: ForSource::Range(Range {
+                from: name("a"),
+                step: Some(name("s")),
+                to: name("b"),
+            }),
             body: b(),
         },
         Stmt::TryWith {
@@ -113,6 +122,11 @@ fn simple<V: Version>() -> Vec<Stmt<V>> {
         Stmt::ReturnFrom(name("e")),
         Stmt::Yield(name("e")),
         Stmt::YieldFrom(name("e")),
+        Stmt::Range(Range {
+            from: name("a"),
+            step: None,
+            to: name("b"),
+        }),
     ]
 }
 

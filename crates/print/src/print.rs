@@ -27,8 +27,8 @@
 use crate::names::{Ident, LongIdent, Operator, TyparName, ValueName};
 use crate::tree::{
     Access, Args, Attribute, AttributeArgs, BangKind, Binding, BindingHead, Comp, CompClause,
-    Const, Expr, ForDirection, ImplFile, LetBindings, MatchClause, ModuleDecl, NamespaceName,
-    NestedModule, Pat, Stmt, Type, TypeDefn, TypeRepr, UnionCase,
+    Const, Expr, ForDirection, ForSource, ImplFile, LetBindings, MatchClause, ModuleDecl,
+    NamespaceName, NestedModule, Pat, Range, Stmt, Type, TypeDefn, TypeRepr, UnionCase,
 };
 use crate::version::Version;
 
@@ -478,7 +478,7 @@ impl Printer {
                 self.out.push_str("for ");
                 self.pat(pat);
                 self.out.push_str(" in ");
-                self.expr(source);
+                self.for_source(source);
                 self.out.push_str(" do ");
                 self.expr(body);
                 self.out.push_str(" done");
@@ -713,11 +713,12 @@ impl Printer {
                 self.out.push_str("for ");
                 self.pat(pat);
                 self.out.push_str(" in ");
-                self.expr(source);
+                self.for_source(source);
                 self.out.push_str(" do ");
                 self.comp(body);
                 self.out.push_str(" done");
             }
+            Stmt::Range(r) => self.range(r),
             Stmt::TryWith { body, clauses } => {
                 self.out.push_str("try ");
                 self.comp(body);
@@ -732,6 +733,25 @@ impl Printer {
                 self.keyword_expr("finally ", finally);
             }
         }
+    }
+
+    fn for_source<V: Version>(&mut self, source: &ForSource<V>) {
+        match source {
+            ForSource::Expr(e) => self.expr(e),
+            ForSource::Range(r) => self.range(r),
+        }
+    }
+
+    /// `(a) .. (b)` or `(a) .. (s) .. (b)`, bare: in parentheses a range is
+    /// an expression, which F# has no range as.
+    fn range<V: Version>(&mut self, r: &Range<V>) {
+        self.expr(&r.from);
+        if let Some(step) = &r.step {
+            self.out.push_str(" .. ");
+            self.expr(step);
+        }
+        self.out.push_str(" .. ");
+        self.expr(&r.to);
     }
 
     /// `while c do body done`.
@@ -1007,6 +1027,7 @@ mod tests {
     use super::print_impl_file;
     use crate::names::{Ident, LongIdent, Operator, ValueName};
     use crate::tree::{BangKind, BindingHead, Const, Pat};
+    type ForSource = crate::tree::ForSource<DefaultVersion>;
     use crate::vec::{Vec1, Vec2};
     use crate::version::{Available, DefaultVersion};
 
@@ -1214,7 +1235,7 @@ mod tests {
         assert_eq!(let_x(literal), "let x = ([(a); (b)])\n");
         let comprehension = Expr::Array(Some(Box::new(Comp::Last(Stmt::ForEach {
             pat: Pat::Name(LongIdent::single(id("y"))),
-            source: name("ys"),
+            source: ForSource::Expr(name("ys")),
             body: Box::new(Comp::Then(
                 Stmt::Yield(name("y")),
                 Box::new(Comp::Last(Stmt::Expr(name("z")))),

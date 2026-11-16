@@ -12,9 +12,9 @@
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
     Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, BangKind, Binding, BindingHead,
-    Comp, CompClause, Const, Expr, Float32, Float64, ForDirection, ImplFile, LetBindings,
-    MatchClause, ModuleDecl, NamedModule, Namespace, NamespaceName, NestedModule, Pat, RecordField,
-    Stmt, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
+    Comp, CompClause, Const, Expr, Float32, Float64, ForDirection, ForSource, ImplFile,
+    LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace, NamespaceName, NestedModule, Pat,
+    Range, RecordField, Stmt, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -370,6 +370,20 @@ fn comp_clauses<V: Version>(
     .boxed()
 }
 
+fn range<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Range<V>> {
+    (expr.clone(), prop::option::of(expr.clone()), expr)
+        .prop_map(|(from, step, to)| Range { from, step, to })
+        .boxed()
+}
+
+fn for_source<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<ForSource<V>> {
+    prop_oneof![
+        2 => expr.clone().prop_map(ForSource::Expr),
+        1 => range(expr).prop_map(ForSource::Range),
+    ]
+    .boxed()
+}
+
 /// A list's body: as often a literal's elements as a comprehension.
 fn comp_or_exprs<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Comp<V>> {
     prop_oneof![
@@ -389,7 +403,8 @@ fn comp<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Comp<V>> {
         1 => e.clone().prop_map(Stmt::Return),
         1 => e.clone().prop_map(Stmt::ReturnFrom),
         1 => e.clone().prop_map(Stmt::Yield),
-        1 => e.prop_map(Stmt::YieldFrom),
+        1 => e.clone().prop_map(Stmt::YieldFrom),
+        1 => range(e).prop_map(Stmt::Range),
     ]
     .boxed();
     simple
@@ -448,7 +463,7 @@ fn comp<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Comp<V>> {
                 ),
                 (
                     1,
-                    (pat(), e.clone(), c.clone())
+                    (pat(), for_source(e.clone()), c.clone())
                         .prop_map(|(pat, source, body)| Stmt::ForEach { pat, source, body })
                         .boxed(),
                 ),
@@ -600,11 +615,12 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
                     to,
                     body,
                 }),
-            (pat(), b.clone(), b.clone()).prop_map(|(pat, source, body)| Expr::ForEach {
-                pat,
-                source,
-                body
-            }),
+            (
+                pat(),
+                for_source(inner.clone()).prop_map(Box::new),
+                b.clone()
+            )
+                .prop_map(|(pat, source, body)| Expr::ForEach { pat, source, body }),
             (
                 prop_oneof![
                     3 => long_ident().prop_map(Expr::Name),
