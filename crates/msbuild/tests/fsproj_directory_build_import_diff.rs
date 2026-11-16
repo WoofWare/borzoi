@@ -310,7 +310,8 @@ fn evaluate(
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
-                global_json_pins_workload_set: false,
+                global_json: Default::default(),
+                process_architecture: None,
             },
             observer,
         )
@@ -372,7 +373,8 @@ fn evaluate_gate(oracle: &mut Oracle, dir: &Path, value: &str) -> (Option<String
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
-                global_json_pins_workload_set: false,
+                global_json: Default::default(),
+                process_architecture: None,
             },
             observer,
         )

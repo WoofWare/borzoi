@@ -805,7 +805,8 @@ fn web_sdk_before_common_targets_is_imported() {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
         // The fixture tempdir has no global.json above it.
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
         borzoi_msbuild::resolve_sdk(

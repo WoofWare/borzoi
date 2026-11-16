@@ -309,7 +309,8 @@ fn assert_sdk_captures_match(xml: &str, extras: &[(&str, &str)]) {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
         // The fixture tempdir has no global.json above it.
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
         resolve_sdk(
@@ -416,7 +417,8 @@ fn sdk_style_netcoreapp_fsharp_property_functions_leave_no_cause() {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
         // The fixture tempdir has no global.json above it.
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
         resolve_sdk(
@@ -499,7 +501,8 @@ fn sdk_style_netcoreapp_workflow_gate_no_longer_cascades() {
     let workload_env = workloads::WorkloadEnvironment {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
         resolve_sdk(
@@ -569,7 +572,8 @@ fn sdk_style_netcoreapp_fsharp_path_property_default_is_inert() {
     let workload_env = workloads::WorkloadEnvironment {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
         resolve_sdk(
@@ -1165,7 +1169,8 @@ fn eval_cpm_fixture_both_ways(
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
         // The fixture tempdir has no global.json above it.
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let resolver = |name: &str, observer: &borzoi_msbuild::observed::Observer| {
         resolve_sdk(

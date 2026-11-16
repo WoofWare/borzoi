@@ -219,7 +219,8 @@ fn evaluate(root: &Path, project: &Path, source: &str, through: Through<'_>) -> 
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: None,
                 overrides_present: false,
-                global_json_pins_workload_set: false,
+                global_json: Default::default(),
+                process_architecture: None,
             },
             observer,
         )
@@ -437,7 +438,8 @@ fn a_file_read_as_text_and_as_xml_is_read_once() {
                     &workloads::WorkloadEnvironment {
                         user_dotnet_root: None,
                         overrides_present: false,
-                        global_json_pins_workload_set: false,
+                        global_json: Default::default(),
+                        process_architecture: None,
                     },
                     observer,
                 )

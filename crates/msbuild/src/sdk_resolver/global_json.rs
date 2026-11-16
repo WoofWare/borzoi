@@ -44,19 +44,10 @@ use crate::observed::{self, Observer};
 pub struct GlobalJson {
     pub sdk: Option<GlobalJsonSettings>,
     pub msbuild_sdks: BTreeMap<String, SdkVersion>,
-    /// Whether the *workload* reader's view of this document engages
-    /// workload-set selection. MSBuild's workload manifest provider
-    /// re-reads `global.json` through its own parser
-    /// (`SdkDirectoryWorkloadManifestProvider.GlobalJsonReader`, which
-    /// matches keys case-insensitively — unlike the host's `sdk` block
-    /// reader mirrored by the rest of this module): an
-    /// `sdk.workloadVersion` pin selects a workload set or fails the
-    /// evaluation when that set is not installed. True also for shapes
-    /// that reader rejects outright (a non-object `sdk` value, or a
-    /// non-string `workloadVersion`/`workloads-update-mode`), since a
-    /// real evaluation errors there. Consumers treat `true` as "outside
-    /// the workload locator resolution envelope" and degrade.
-    pub pins_workload_set: bool,
+    /// What MSBuild's workload manifest provider reads of this document
+    /// through its own parser (`SdkDirectoryWorkloadManifestProvider.GlobalJsonReader`):
+    /// see [`GlobalJsonWorkloads`].
+    pub workloads: GlobalJsonWorkloads,
 }
 
 /// One entry of the `sdk.paths` array from a `global.json`.
@@ -273,11 +264,11 @@ pub fn parse_global_json(text: &str) -> Result<GlobalJson, GlobalJsonError> {
     };
     let sdk = parse_sdk_block(&top)?;
     let msbuild_sdks = parse_msbuild_sdks(&top)?;
-    let pins_workload_set = detect_workload_set_pin(&top);
+    let workloads = read_workload_settings(text);
     Ok(GlobalJson {
         sdk,
         msbuild_sdks,
-        pins_workload_set,
+        workloads,
     })
 }
 
@@ -331,40 +322,105 @@ pub(super) fn parse_strict_json(text: &str, trailing_commas: bool) -> Option<Jso
     Some(value)
 }
 
-/// Transcription of the *effect* of
-/// `SdkDirectoryWorkloadManifestProvider.GlobalJsonReader.ParseGlobalJson`
-/// (dotnet/sdk, fetched 2026-07-10): does the workload manifest
-/// provider's own read of this document influence workload manifest
-/// selection?
+/// What MSBuild's workload manifest provider reads of a `global.json`
+/// (`SdkDirectoryWorkloadManifestProvider.GlobalJsonReader`, dotnet/sdk): a
+/// workload set version to pin (`sdk.workloadVersion`), and whether to prefer
+/// workload sets to loose manifests (`sdk.workloads-update-mode`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum GlobalJsonWorkloads {
+    /// What the reader reads: the last `workloadVersion` string under any
+    /// `sdk` key, and the update mode the last `workload-set` or
+    /// `manifests` string chose (`None` when neither appears, as another
+    /// string leaves it).
+    Reads {
+        workload_version: Option<String>,
+        use_workload_sets: Option<bool>,
+    },
+    /// No `global.json` governs the evaluation, or none says anything to the
+    /// workload reader.
+    #[default]
+    Silent,
+    /// A document the reader throws on (a non-object `sdk`, a non-string
+    /// `workloadVersion` or `workloads-update-mode`), or reads in a way the
+    /// host-side parse may not agree with: a key outside ASCII, which its
+    /// ordinal-case-insensitive match may fold differently, or a comment
+    /// beside a lone `\r` (which ends a `//` comment there and not in
+    /// the host-side comment stripper).
+    Unmodelled,
+}
+
+/// [`GlobalJsonWorkloads`] of a document whose text is `text`.
 ///
-/// That reader matches property names ordinal-case-insensitively (so
-/// `"SDK"`/`"WorkloadVersion"` count, unlike the host's case-sensitive
-/// `sdk` block), and walks *every* top-level `sdk` occurrence:
+/// The reader reads the whole document, whatever it holds, so one it throws
+/// on fails the resolution even when it names no workload setting. So the
+/// document, comments stripped, must parse as `System.Text.Json` with
+/// trailing commas allowed parses it ([`parse_strict_json`]; the host-side
+/// parse is more lenient, skipping a form feed, say), or it is
+/// [`GlobalJsonWorkloads::Unmodelled`].
 ///
-/// - a non-object `sdk` value (including `null`) throws
-///   `JsonFormatException` inside the provider — the real evaluation
-///   fails, so the document "pins" in the sense that we cannot resolve
-///   as if it weren't there;
-/// - `workloadVersion` with a string value selects that workload set
-///   (or fails the evaluation when it isn't installed) — pin;
-/// - `workloadVersion` with a non-string value throws — pin;
-/// - `workloads-update-mode` with a non-string value throws — pin;
-/// - `workloads-update-mode` with a string value only toggles the
-///   preference between workload sets and loose manifests, which can
-///   change the outcome only when the host feature band has a
-///   `workloadsets` directory on disk — a layout the workload locator
-///   resolution already degrades on — so it is *not* a pin here.
-fn detect_workload_set_pin(top: &[(String, JsonValue)]) -> bool {
-    top.iter()
-        .filter(|(key, _)| key.eq_ignore_ascii_case("sdk"))
-        .any(|(_, value)| match value {
-            JsonValue::Object(fields) => fields.iter().any(|(key, value)| {
-                key.eq_ignore_ascii_case("workloadVersion")
-                    || (key.eq_ignore_ascii_case("workloads-update-mode")
-                        && !matches!(value, JsonValue::String(_)))
-            }),
-            _ => true,
-        })
+/// The reader matches property names ordinal-case-insensitively (so
+/// `"SDK"` and `"WorkloadVersion"` count, unlike the host's case-sensitive
+/// `sdk` block) and walks every top-level `sdk` occurrence in order, a later
+/// value replacing an earlier one.
+fn read_workload_settings(text: &str) -> GlobalJsonWorkloads {
+    let lone_cr = text
+        .char_indices()
+        .any(|(i, c)| c == '\r' && !text[i + 1..].starts_with('\n'));
+    if lone_cr && (text.contains("//") || text.contains("/*")) {
+        return GlobalJsonWorkloads::Unmodelled;
+    }
+    let Some(JsonValue::Object(top)) = strip_jsonc_comments(text)
+        .ok()
+        .and_then(|stripped| parse_strict_json(&stripped, true))
+    else {
+        return GlobalJsonWorkloads::Unmodelled;
+    };
+    let mut workload_version = None;
+    let mut use_workload_sets = None;
+    let mut said = false;
+    for (key, value) in &top {
+        if !key.is_ascii() {
+            return GlobalJsonWorkloads::Unmodelled;
+        }
+        if !key.eq_ignore_ascii_case("sdk") {
+            continue;
+        }
+        let JsonValue::Object(fields) = value else {
+            return GlobalJsonWorkloads::Unmodelled;
+        };
+        for (key, value) in fields {
+            if !key.is_ascii() {
+                return GlobalJsonWorkloads::Unmodelled;
+            }
+            if key.eq_ignore_ascii_case("workloadVersion") {
+                let JsonValue::String(version) = value else {
+                    return GlobalJsonWorkloads::Unmodelled;
+                };
+                workload_version = Some(version.clone());
+                said = true;
+            } else if key.eq_ignore_ascii_case("workloads-update-mode") {
+                let JsonValue::String(mode) = value else {
+                    return GlobalJsonWorkloads::Unmodelled;
+                };
+                if mode.eq_ignore_ascii_case("workload-set") {
+                    use_workload_sets = Some(true);
+                } else if mode.eq_ignore_ascii_case("manifests") {
+                    use_workload_sets = Some(false);
+                } else if !mode.is_ascii() {
+                    return GlobalJsonWorkloads::Unmodelled;
+                }
+                said = true;
+            }
+        }
+    }
+    if said {
+        GlobalJsonWorkloads::Reads {
+            workload_version,
+            use_workload_sets,
+        }
+    } else {
+        GlobalJsonWorkloads::Silent
+    }
 }
 
 /// Pull the `sdk` block out of the top-level object. `None` covers

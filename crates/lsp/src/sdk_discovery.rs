@@ -18,7 +18,7 @@
 //! breadcrumb the .NET host uses: if `$DOTNET_ROOT` is unset, walk
 //! `$PATH` for a `dotnet` binary, canonicalise it (the installer often
 //! lays down `/usr/local/bin/dotnet` as a symlink into the real install
-//! root), and take the parent of the resolved path.
+//! ), and take the parent of the resolved path.
 //!
 //! Discovery is filesystem-only: it never executes `dotnet`. Running
 //! `dotnet` runs the managed code of whichever SDK the muxer selects, and
@@ -26,7 +26,7 @@
 //! directory the repository ships, so executing it would run
 //! repository-chosen code before the user has opted in to trusting the
 //! repository. Wrapper layouts (Nix's `makeWrapper`, asdf/mise shims, …)
-//! therefore name no host root: the canonicalised wrapper sits in a
+//! therefore name no host : the canonicalised wrapper sits in a
 //! directory with no `sdk/` sibling, and nothing on disk says where it
 //! forwards to. Users of such layouts must set `$DOTNET_ROOT`. A
 //! `global.json` whose `sdk.paths` lists only relative entries needs no
@@ -436,14 +436,12 @@ pub struct SdkDiscovery {
     user_dotnet_root: Option<PathBuf>,
     /// See [`SdkDiscoveryEnv::workload_overrides_present`].
     workload_overrides_present: bool,
-    /// Whether the discovered `global.json` engages workload-set
-    /// selection (`sdk.workloadVersion` — see
-    /// `GlobalJson::pins_workload_set`). Workload locator resolution
-    /// degrades when set: MSBuild hands the same `global.json` to its
-    /// workload manifest provider, which then selects a workload set
-    /// (or fails) instead of the loose manifests we enumerate. `false`
-    /// when no `global.json` was found.
-    global_json_pins_workload_set: bool,
+    /// What MSBuild's workload manifest provider reads of the discovered
+    /// `global.json` (`GlobalJson::workloads`): MSBuild hands it the same
+    /// file, where `sdk.workloadVersion` selects a workload set and
+    /// `sdk.workloads-update-mode` opts in or out of the default one.
+    /// Silent when no `global.json` was found.
+    global_json_workloads: borzoi_msbuild::GlobalJsonWorkloads,
     /// The non-empty `MSBuildSDKsPath` the build environment carried, if
     /// any. MSBuild routes `<Project Sdk="…">` resolution through this
     /// directory when it is set — probed against dotnet 8.0.420 and
@@ -515,7 +513,7 @@ impl SdkDiscovery {
         // optional when `sdk.paths` is set (it may name explicit
         // alternatives that don't need the host). The decision lives
         // in [`expand_sdk_paths`] so this site doesn't have to know.
-        let (roots, spec, msbuild_sdks, global_json_path, global_json_pins_workload_set) =
+        let (roots, spec, msbuild_sdks, global_json_path, global_json_workloads) =
             match find_global_json(&walk_start, observer)
                 .map_err(DiscoveryError::GlobalJsonUndecided)?
             {
@@ -548,7 +546,7 @@ impl SdkDiscovery {
                         spec,
                         parsed.msbuild_sdks,
                         Some(path),
-                        parsed.pins_workload_set,
+                        parsed.workloads,
                     )
                 }
                 None => {
@@ -559,18 +557,17 @@ impl SdkDiscovery {
                         VersionSpec::any_version(env.host_default_allow_prerelease),
                         BTreeMap::new(),
                         None,
-                        false,
+                        borzoi_msbuild::GlobalJsonWorkloads::Silent,
                     )
                 }
             };
-
         Ok(Self {
             roots,
             nuget_packages,
             spec,
             msbuild_sdks,
             global_json_path,
-            global_json_pins_workload_set,
+            global_json_workloads,
             // First *non-empty* candidate, mirroring .NET's
             // `string.IsNullOrEmpty` fallback chain. `from_env_lookup`
             // already filters empties from the process env; this guard
@@ -666,7 +663,10 @@ impl SdkDiscovery {
         let workload_env = workloads::WorkloadEnvironment {
             user_dotnet_root: self.user_dotnet_root.as_deref(),
             overrides_present: self.workload_overrides_present,
-            global_json_pins_workload_set: self.global_json_pins_workload_set,
+            global_json: self.global_json_workloads.clone(),
+            // Not said yet (#953): the locators then decline on any
+            // install-state file, as they did before they read one.
+            process_architecture: None,
         };
         let locate = |root: &Path, name: &str| {
             resolve_sdk(
