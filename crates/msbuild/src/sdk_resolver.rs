@@ -761,7 +761,7 @@ pub fn nuget_package_version(
 
 /// The `{dotnet_root}/sdk/{version}` directory of the SDK hostfxr runs from
 /// `dotnet_root` under `spec` (the highest installed version when
-/// unconstrained): [`host_sdk_versions`], selected by version alone, as
+/// unconstrained): `host_sdk_versions`, selected by version alone, as
 /// [`locate_dotnet_sdk`] selects it. It is the SDK whose
 /// `KnownWorkloadManifests.txt` drives workload locator resolution, and,
 /// across a `global.json`'s `sdk.paths`, hostfxr runs from the first root

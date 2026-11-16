@@ -48,9 +48,14 @@ fn synthetic_nuget_pinned_sdk_resolves_to_the_same_props_as_msbuild() {
         .expect("real MSBuild resolves the synthetic NuGet-pinned SDK");
 
     // Our resolver, over the same global-packages folder. A dummy dotnet root
-    // keeps discovery's roots non-empty; the per-import pin drives NuGet
-    // resolution, which does not consult it.
-    let env = common::sdk_oracle_discovery_env(&gpf, tmp.path().join("dotnet"));
+    // with a stub SDK, which ships no SDK of its own: hostfxr runs no build
+    // from a root without one (#912), and the per-import pin drives NuGet
+    // resolution.
+    let dotnet = tmp.path().join("dotnet");
+    let stub = dotnet.join("sdk").join("10.0.100");
+    std::fs::create_dir_all(&stub).unwrap();
+    std::fs::write(stub.join("dotnet.dll"), "").unwrap();
+    let env = common::sdk_oracle_discovery_env(&gpf, dotnet);
     let disc = SdkDiscovery::for_project(
         &project_path,
         &env,
