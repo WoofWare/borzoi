@@ -26,7 +26,8 @@
 //!
 //! Only the launch is serialised. The lock is a leaf — nothing else is acquired
 //! while it is held, and it never spans a wait or a read — so children still run
-//! concurrently and there is no ordering hazard.
+//! concurrently and there is no ordering hazard. [`without_spawns`] holds it
+//! too, for a moment no child may be launched in.
 //!
 //! **The unbounded wait.** A child that never answers (a wedged FCS, a `dotnet`
 //! on a broken toolchain) turns a test suite or an LSP request into a hang, which
@@ -60,6 +61,22 @@ const EXIT_POLL: Duration = Duration::from_millis(20);
 pub fn spawn_serialised(cmd: &mut Command) -> io::Result<Child> {
     let _guard = SPAWN_LOCK.lock().expect("spawn lock poisoned");
     cmd.spawn()
+}
+
+/// `f`, run while no child can be launched through this crate: for a caller
+/// that briefly holds a descriptor no child may inherit. Between a spawn's
+/// fork and its `exec`, the child holds a copy of every descriptor the process
+/// has open, close-on-exec ones included, and [`Command::spawn`] returns only
+/// once that has passed, so no child holds a descriptor `f` opens and closes.
+///
+/// The soundness sweep's FIFO watch (`borzoi_msbuild::observed::soundness`)
+/// is the one user: the FIFO it opens to read and write, inherited by a child
+/// that has yet to `exec`, is a writer that a later open of that FIFO could
+/// meet unseen. `f` must be short and
+/// take no lock: it holds the lock every spawn takes.
+pub fn without_spawns<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = SPAWN_LOCK.lock().expect("spawn lock poisoned");
+    f()
 }
 
 /// [`Command::status`] over [`spawn_serialised`]: stdio inherited, the wait

@@ -235,10 +235,14 @@ impl Disk for HostDisk {
     }
 
     fn read(&self, path: &Path) -> std::io::Result<(Stamp, Vec<u8>)> {
-        let mut file = std::fs::File::open(path)?;
+        // Opened only if it is a regular file, as an evaluation's reads open:
+        // the open of a FIFO would wait for a writer. The failure is the one
+        // an evaluation's read records, which the workspace confirms through
+        // this disk.
+        let (mut file, meta) = borzoi_msbuild::observed::open_regular(path)?;
         // Stamp first: a write after this moves the stamp, so the next
         // generation re-reads whatever the read below saw.
-        let stamp = stamp_of(&file.metadata()?);
+        let stamp = stamp_of(&meta);
         let mut bytes = Vec::with_capacity(stamp.size as usize);
         file.read_to_end(&mut bytes)?;
         Ok((stamp, bytes))
@@ -463,6 +467,31 @@ pub(crate) mod host_fs {
         options.open(path)
     }
 
+    /// Make a FIFO at `path`, which `std` cannot.
+    pub fn make_fifo(path: &Path) {
+        let mut mkfifo = std::process::Command::new("mkfifo");
+        mkfifo.arg(path);
+        borzoi_spawn::BoundedCommand::new(mkfifo)
+            .timeout(std::time::Duration::from_secs(30))
+            .run_ok(format_args!("mkfifo {}", path.display()));
+    }
+
+    /// A FIFO in a temporary directory of its own ([`make_fifo`]), for a
+    /// sweep's `borzoi_msbuild::observed::soundness::fifo_perturbations`.
+    pub struct Fifo {
+        pub path: PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Fifo {
+        pub fn new() -> Fifo {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = canonicalize(dir.path()).unwrap().join("fifo");
+            make_fifo(&path);
+            Fifo { path, _dir: dir }
+        }
+    }
+
     /// The `Path` probes, under names that do not collide with the inherent
     /// methods (which would win method resolution).
     pub trait HostPath {
@@ -591,5 +620,43 @@ mod tests {
             HostDisk.stat(&tmp.path().join("B.fs")).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
+    }
+
+    /// A source that is a FIFO, or a link to one, fails its read without
+    /// being opened (the open would wait for a writer), with the failure an
+    /// evaluation's read of it records; and so does a directory. Run on a
+    /// thread under a deadline, so that an open fails the test rather than
+    /// hangs it.
+    #[test]
+    #[cfg(unix)]
+    fn a_host_read_never_opens_a_fifo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let fifo = dir.join("A.fs");
+        host_fs::make_fifo(&fifo);
+        std::os::unix::fs::symlink(&fifo, dir.join("B.fs")).unwrap();
+        std::fs::create_dir(dir.join("C.fs")).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for name in ["A.fs", "B.fs", "C.fs"] {
+                let path = dir.join(name);
+                let failure = borzoi_msbuild::observed::Failure::of(
+                    &HostDisk.read(&path).map(|_| ()).unwrap_err(),
+                );
+                let recorded = borzoi_msbuild::observed::read_to_string(
+                    &borzoi_msbuild::observed::Observer::new(),
+                    &path,
+                )
+                .unwrap_err();
+                sender.send((name, failure, recorded)).unwrap();
+            }
+        });
+        for _ in 0..3 {
+            let (name, failure, recorded) = receiver
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .expect("a read of a FIFO returns");
+            assert_eq!(failure.kind(), std::io::ErrorKind::InvalidInput, "{name}");
+            assert_eq!(failure, recorded, "{name}");
+        }
     }
 }

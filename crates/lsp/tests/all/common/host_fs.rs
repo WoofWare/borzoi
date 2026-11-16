@@ -74,3 +74,24 @@ impl HostPath for Path {
         self.canonicalize()
     }
 }
+
+/// A FIFO in a temporary directory of its own, made by `mkfifo` since `std`
+/// cannot, for a sweep's
+/// `borzoi_msbuild::observed::soundness::fifo_perturbations`.
+pub struct Fifo {
+    pub path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl Fifo {
+    pub fn new() -> Fifo {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = canonicalize(dir.path()).unwrap().join("fifo");
+        let mut mkfifo = std::process::Command::new("mkfifo");
+        mkfifo.arg(&path);
+        borzoi_spawn::BoundedCommand::new(mkfifo)
+            .timeout(std::time::Duration::from_secs(30))
+            .run_ok(format_args!("mkfifo {}", path.display()));
+        Fifo { path, _dir: dir }
+    }
+}

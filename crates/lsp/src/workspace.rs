@@ -7749,7 +7749,14 @@ mod tests {
                         )],
                     },
                 ];
+                // Every file a link to a FIFO in turn, which no read may open.
+                let fifo = crate::observed::host_fs::Fifo::new();
+                let extra: Vec<Perturbation> = extra
+                    .into_iter()
+                    .chain(soundness::fifo_perturbations(&root, &fifo.path))
+                    .collect();
                 let tally = soundness::sweep(&root, &|| evaluation(&project, &env), &extra);
+                assert!(tally.moved(Why::Fifo) > 0, "{tally:#?}");
                 assert_eq!(
                     tally.moved(Why::Extra),
                     2,
@@ -7806,7 +7813,12 @@ mod tests {
                         ..evaluation_of(&project, evaluation.evaluated)
                     }
                 };
-                let tally = soundness::sweep(&root.join("repo"), &checked, &[]);
+                let fifo = crate::observed::host_fs::Fifo::new();
+                let tally = soundness::sweep(
+                    &root.join("repo"),
+                    &checked,
+                    &soundness::fifo_perturbations(&root.join("repo"), &fifo.path),
+                );
                 assert!(
                     tally.moved(Why::Rewrite) > 0 && tally.moved(Why::CreateAbsent) > 0,
                     "{}: {tally:#?}",
@@ -8684,6 +8696,13 @@ mod tests {
                     nuget_config(&root.join("pkg-b")).into_bytes(),
                 )],
             }];
+            // Every file a link to a FIFO in turn, a settings file among
+            // them, which no read may open.
+            let fifo = crate::observed::host_fs::Fifo::new();
+            let extra: Vec<Perturbation> = extra
+                .into_iter()
+                .chain(soundness::fifo_perturbations(&root, &fifo.path))
+                .collect();
             let tally = soundness::sweep(&root, &|| evaluation(&project, &env), &extra);
             assert_eq!(
                 tally.moved(Why::Extra),

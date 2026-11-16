@@ -305,6 +305,9 @@ enum MarkerKind {
     DanglingLink,
     /// A symlink to itself: `stat` fails, `lstat` does not.
     LinkLoop,
+    /// A FIFO: a file to `File.Exists`, which does not open it, as the walk
+    /// must not either.
+    Fifo,
 }
 
 /// The probe both intrinsics make is .NET's `File.Exists`, not the OS's idea of
@@ -326,6 +329,7 @@ fn file_above_marker_kinds_are_exact_or_declined() {
         MarkerKind::LinkToDirectory,
         MarkerKind::DanglingLink,
         MarkerKind::LinkLoop,
+        MarkerKind::Fifo,
     ] {
         let root = tmp.path().join(format!("{kind:?}"));
         let project_path = build_tree(&root, 0b0001);
@@ -341,6 +345,12 @@ fn file_above_marker_kinds_are_exact_or_declined() {
             MarkerKind::LinkToDirectory => symlink("c", &marker).unwrap(),
             MarkerKind::DanglingLink => symlink("missing.props", &marker).unwrap(),
             MarkerKind::LinkLoop => symlink(MARKER, &marker).unwrap(),
+            MarkerKind::Fifo => common::odd_entry::place(
+                common::odd_entry::Odd::Fifo,
+                &marker,
+                "",
+                &tmp.path().join("aside"),
+            ),
         }
         for form in [Form::Path, Form::Dir] {
             let xml = project_xml(&form.expression(STARTS[0].1));
@@ -355,5 +365,5 @@ fn file_above_marker_kinds_are_exact_or_declined() {
         }
     }
     assert!(divergences.is_empty(), "{}", divergences.join("\n"));
-    assert_eq!(committed, 12, "every case commits");
+    assert_eq!(committed, 14, "every case commits");
 }

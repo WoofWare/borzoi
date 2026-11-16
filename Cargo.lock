@@ -243,6 +243,7 @@ dependencies = [
  "borzoi-msbuild",
  "borzoi-nuget",
  "borzoi-oracle-harness",
+ "borzoi-spawn",
  "proptest",
  "roxmltree",
  "self_cell",

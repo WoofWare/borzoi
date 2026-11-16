@@ -593,6 +593,12 @@ fn check(world: &World, reached: &mut Reached) {
     let (extras, must_stale) = extras(&root, &laid, world, |bin| {
         reads.reads().iter().any(|read| read.path == bin)
     });
+    // Every file a link to a FIFO in turn, which no read may open.
+    let fifo = host_fs::Fifo::new();
+    let mut extras = extras;
+    extras.extend(borzoi_msbuild::observed::soundness::fifo_perturbations(
+        &root, &fifo.path,
+    ));
     let tally = sweep_with(&root, &compute, &extras);
     assert!(
         tally.stale.get(&Why::Extra).copied().unwrap_or(0) >= must_stale,
