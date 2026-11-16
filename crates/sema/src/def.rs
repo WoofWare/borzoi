@@ -305,16 +305,80 @@ impl std::fmt::Debug for DefId {
     }
 }
 
-/// A file's defs, in two arenas ([`DefSpace`]): each [`DefId`] indexes the
-/// arena its space names.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The defs of one [`DefSpace`], each [`DefId`] of that space indexing them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpaceDefs {
+    space: DefSpace,
+    defs: Vec<Def>,
+}
+
+impl SpaceDefs {
+    pub(crate) fn new(space: DefSpace) -> Self {
+        SpaceDefs {
+            space,
+            defs: Vec::new(),
+        }
+    }
+
+    /// Add `def`, returning its id.
+    pub(crate) fn push(&mut self, def: Def) -> DefId {
+        let id = DefId::new(self.space, self.defs.len());
+        self.defs.push(def);
+        id
+    }
+
+    /// The def `id` names, or `None` when `id` is of another space or past
+    /// the end.
+    pub(crate) fn get(&self, id: DefId) -> Option<&Def> {
+        (id.space == self.space)
+            .then(|| self.defs.get(id.index as usize))
+            .flatten()
+    }
+
+    /// Every def, in interning order.
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, Def> {
+        self.defs.iter()
+    }
+
+    /// Every def, mutably, in interning order.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, Def> {
+        self.defs.iter_mut()
+    }
+}
+
+impl std::ops::Index<DefId> for SpaceDefs {
+    type Output = Def;
+
+    fn index(&self, id: DefId) -> &Def {
+        assert_eq!(
+            id.space, self.space,
+            "a {:?} def indexed into the {:?} defs",
+            id.space, self.space
+        );
+        &self.defs[id.index as usize]
+    }
+}
+
+/// A file's defs as the walk interns them, in two arenas ([`DefSpace`]):
+/// each [`DefId`] indexes the arena its space names.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DefArena {
-    declarations: Vec<Def>,
-    locals: Vec<Def>,
+    declarations: SpaceDefs,
+    locals: SpaceDefs,
+}
+
+impl Default for DefArena {
+    fn default() -> Self {
+        DefArena {
+            declarations: SpaceDefs::new(DefSpace::Declaration),
+            locals: SpaceDefs::new(DefSpace::Local),
+        }
+    }
 }
 
 impl DefArena {
-    fn arena(&self, space: DefSpace) -> &Vec<Def> {
+    fn arena(&self, space: DefSpace) -> &SpaceDefs {
         match space {
             DefSpace::Declaration => &self.declarations,
             DefSpace::Local => &self.locals,
@@ -323,28 +387,15 @@ impl DefArena {
 
     /// Add `def` to `space`'s arena, returning its id.
     pub(crate) fn push(&mut self, space: DefSpace, def: Def) -> DefId {
-        let arena = match space {
-            DefSpace::Declaration => &mut self.declarations,
-            DefSpace::Local => &mut self.locals,
-        };
-        let id = DefId::new(space, arena.len());
-        arena.push(def);
-        id
+        match space {
+            DefSpace::Declaration => self.declarations.push(def),
+            DefSpace::Local => self.locals.push(def),
+        }
     }
 
-    /// The def `id` names, if this arena holds it.
-    pub(crate) fn get(&self, id: DefId) -> Option<&Def> {
-        self.arena(id.space).get(id.index as usize)
-    }
-
-    /// Every def: the declarations, then the locals, each in interning order.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Def> + '_ {
-        self.declarations.iter().chain(&self.locals)
-    }
-
-    /// Every def, mutably, in [`Self::iter`]'s order.
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Def> + '_ {
-        self.declarations.iter_mut().chain(&mut self.locals)
+    /// The two arenas: the declarations, then the locals.
+    pub(crate) fn into_spaces(self) -> (SpaceDefs, SpaceDefs) {
+        (self.declarations, self.locals)
     }
 }
 
@@ -352,7 +403,7 @@ impl std::ops::Index<DefId> for DefArena {
     type Output = Def;
 
     fn index(&self, id: DefId) -> &Def {
-        &self.arena(id.space)[id.index as usize]
+        &self.arena(id.space)[id]
     }
 }
 

@@ -98,8 +98,8 @@ mod windows;
 pub use extension_names::{ExtensionNames, NamesUnknowable};
 pub use model::{
     CaseKind, DeclineCause, DeclineSite, DeclineTier, DeferredReason, ExportedItem, ExportedItems,
-    FieldLabel, ItemId, OpaqueRegion, OpenOpacity, OpenTrace, ProjectItems, Resolution,
-    ResolutionTrace, ResolvedFile, ResolvedProject,
+    FieldLabel, FileSurface, ItemId, OpaqueRegion, OpenOpacity, OpenTrace, ProjectItems,
+    Resolution, ResolutionTrace, ResolvedFile, ResolvedProject,
 };
 pub use state::ActivePatternShape;
 pub(crate) use state::ImplicitSeed;
@@ -412,8 +412,8 @@ pub fn resolve_file(
     let _phase = tracing::info_span!("resolve_finish").entered();
     let item_base = r.item_base;
     let mut rf = r.finish().into_resolved_file(prescan, item_base, recovery);
-    rf.extension_names = rf.syntactic_extension_names(file.syntax(), assemblies);
-    rf.damage = extension_names::damage(file.syntax(), recovery);
+    rf.surface.extension_names = rf.syntactic_extension_names(file.syntax(), assemblies);
+    rf.surface.damage = extension_names::damage(file.syntax(), recovery);
     rf
 }
 
@@ -1449,25 +1449,15 @@ fn resolve_project_files_impl(
         files.len()
     );
     let partners = signature_partners(files);
-    let mut preceding = ProjectItems {
-        assembly_core_attribute_aliases: Arc::new(assemblies.core_attribute_aliases().clone()),
-        ..ProjectItems::default()
-    };
+    let mut state = FoldState::new(assemblies);
     let mut resolved: Vec<Arc<ResolvedFile>> = Vec::with_capacity(files.len());
-    // Accumulate the project's extension-member names in **Compile order**: a
-    // later file sees an earlier file's extension (in a shared namespace, with
-    // no `open`; or through one), never the reverse. Each file is stamped with
-    // the union over the files before it; its own names are its own. Scope-
-    // blind: a preceding extension in an unrelated namespace still names its
-    // call, which only declines more.
-    let mut ext = ExtensionNames::default();
     for (index, pf) in files.iter().take(horizon).enumerate() {
         let mut rf = match &pf.file {
             // A signature file owns no `ItemId` range and records nothing at
             // its own slot; it carries its screen, its exported idents'
             // arena, and the stashed surface the paired implementation's
             // slot materialises.
-            SourceFile::Sig(sig) => signature_slot(sig, pf, &preceding, assemblies),
+            SourceFile::Sig(sig) => signature_slot(sig, pf, state.preceding(), assemblies),
             SourceFile::Impl(file) => {
                 // Per-file span so the fold's cost is attributable in the LSP's
                 // traces: `file` is the Compile item's path (empty when
@@ -1488,83 +1478,143 @@ fn resolve_project_files_impl(
                     )
                     .entered()
                 };
-                let mut rf = resolve_file(file, &preceding, assemblies, &pf.recovery);
-                rf.preceding_extension_names = ext.clone();
+                let mut rf = resolve_file(file, state.preceding(), assemblies, &pf.recovery);
+                state.stamp(&mut rf);
                 rf
             }
         };
-        // Stage 2: materialise the paired signature's stashed surface as
-        // THIS implementation's contribution (provenance = impl slot, def =
-        // the `.fsi` — conclusion 4). The sig sits strictly earlier, so its
-        // resolved slot already exists.
-        if matches!(&pf.file, SourceFile::Impl(_))
-            && let Some(sig_idx) = partners[index].filter(|&p| p < index)
-        {
-            rf.append_signature_exports(&resolved[sig_idx], sig_idx, assemblies.names());
-        }
-        // The screen of the signature this file is the paired implementation
-        // of, if any — the sig sits strictly earlier in Compile order, so its
-        // resolved slot already exists. (A signature's own partner is the
-        // *later* impl, so for a sig this is always `None`.)
-        let screen = partners[index]
-            .filter(|&p| p < index)
-            .and_then(|sig| resolved[sig].sig_screen.clone());
-        thread_forward(
-            &mut preceding,
-            &mut ext,
-            &rf,
-            assemblies,
-            screen.as_deref(),
-            partners[index],
-        );
-        // An unpaired headerless implementation: its values live under the
-        // implicit filename module, which sema's export model cannot address
-        // — shadow the path so a colliding assembly member defers rather
-        // than committing where FCS binds the project value. (A paired
-        // headerless impl is screened per-name by its signature instead.)
-        if partners[index].is_none()
-            && matches!(&pf.file, SourceFile::Impl(_))
-            && pf.file.is_headerless()
-        {
-            let path = implicit_module_path(&pf.qnof);
-            if !path.is_empty() {
-                preceding.note_implicit_module_shadow(assemblies.names(), path);
-            }
-        }
+        let slot = FoldSlot::of(files, &partners, &resolved, index);
+        slot.complete(&mut rf.surface, assemblies.names());
+        state.advance(&rf.surface, &slot, assemblies.names());
         resolved.push(Arc::new(rf));
     }
     ResolvedProject { files: resolved }
 }
 
-/// Advance the Compile-order threaded state past `rf` (the resolution of
-/// `file`), exactly as the fold does: fold this file's exports into `preceding`
-/// and its extension-member names into `ext`. The single writer
-/// of the forward threading — shared by the cold ([`resolve_project_files_impl`]) and
-/// incremental ([`resolve_project_incremental`]) folds so the two can never
-/// disagree on what a file contributes downstream.
+/// The state the Compile-order fold threads from one file to the next: what
+/// the earlier files export ([`ProjectItems`]) and the union of their
+/// extension-member names ([`ExtensionNames`]). Its one transition,
+/// [`Self::advance`], reads only a file's [`FileSurface`] and its
+/// [`FoldSlot`], and is shared by the cold ([`resolve_project_files_impl`])
+/// and incremental ([`resolve_project_files_incremental_impl`]) folds, so the
+/// two can never disagree on what a file contributes downstream.
 ///
-/// The caller stamps `rf`'s `preceding_*` fields from the value of `ext`
-/// *entering* the file before calling this (the fields record the state the
-/// file saw, whereas this bumps `ext` for the *next* file).
-///
-/// `paired_screen` is the screen of the signature `rf` is the paired
-/// implementation of, if any — it parameterises the boundary derivation
-/// (the paired impl's value/case identity exports are dropped; see
-/// [`ProjectItems::extend_with`]). `partner` is `rf`'s pairing-partner
-/// Compile index, if any: a signature publishes its screen only when a
-/// following implementation consumes it (an unpaired signature constrains
-/// nothing — FCS-probed), and the implementation's index is the screen's
-/// materialisation rank.
-fn thread_forward(
-    preceding: &mut ProjectItems,
-    ext: &mut ExtensionNames,
-    rf: &ResolvedFile,
-    assemblies: &AssemblyEnv,
-    paired_screen: Option<&model::SigScreen>,
+/// A later file sees an earlier file's extension (in a shared namespace, with
+/// no `open`; or through one), never the reverse, so each file is stamped with
+/// the union over the files before it; its own names are its own. Scope-blind:
+/// a preceding extension in an unrelated namespace still names its call, which
+/// only declines more.
+pub(crate) struct FoldState {
+    preceding: ProjectItems,
+    ext: ExtensionNames,
+}
+
+impl FoldState {
+    /// The state entering the first Compile item.
+    fn new(assemblies: &AssemblyEnv) -> Self {
+        FoldState {
+            preceding: ProjectItems {
+                assembly_core_attribute_aliases: Arc::new(
+                    assemblies.core_attribute_aliases().clone(),
+                ),
+                ..ProjectItems::default()
+            },
+            ext: ExtensionNames::default(),
+        }
+    }
+
+    /// What the earlier files export, which the next file resolves against.
+    fn preceding(&self) -> &ProjectItems {
+        &self.preceding
+    }
+
+    /// Record on `rf` the extension-member names of the files before it,
+    /// which its own requests read
+    /// ([`ResolvedFile::preceding_extension_names`]).
+    fn stamp(&self, rf: &mut ResolvedFile) {
+        rf.preceding_extension_names = self.ext.clone();
+    }
+
+    /// Advance past the file at `slot`, whose surface is `surface` (already
+    /// [completed](FoldSlot::complete)): fold its exports into the project's
+    /// items, its extension-member names into the threaded union, and, for an
+    /// unpaired headerless implementation, a shadow of its implicit module.
+    ///
+    /// A signature publishes its screen only when a following implementation
+    /// consumes it (an unpaired signature constrains nothing — FCS-probed),
+    /// and the implementation's index is the screen's materialisation rank;
+    /// the paired implementation's own value and case exports are dropped
+    /// under its signature's screen ([`ProjectItems::extend_with`]).
+    pub(crate) fn advance(
+        &mut self,
+        surface: &FileSurface,
+        slot: &FoldSlot<'_>,
+        names: &NameTable,
+    ) {
+        let paired_screen = slot
+            .paired_signature
+            .and_then(|(_, sig)| sig.sig_screen.as_deref());
+        self.preceding
+            .extend_with(surface, names, paired_screen, slot.partner);
+        self.ext.absorb(&surface.extension_names());
+        // An unpaired headerless implementation: its values live under the
+        // implicit filename module, which sema's export model cannot address
+        // — shadow the path so a colliding assembly member defers rather
+        // than committing where FCS binds the project value. (A paired
+        // headerless impl is screened per-name by its signature instead.)
+        if slot.partner.is_none()
+            && matches!(&slot.file.file, SourceFile::Impl(_))
+            && slot.file.file.is_headerless()
+        {
+            let path = implicit_module_path(&slot.file.qnof);
+            if !path.is_empty() {
+                self.preceding.note_implicit_module_shadow(names, path);
+            }
+        }
+    }
+}
+
+/// What the fold knows of a Compile item besides its own surface: the item,
+/// its pairing partner's index, and, for an implementation whose signature
+/// sits earlier, that signature's index and surface.
+pub(crate) struct FoldSlot<'a> {
+    file: &'a ProjectFile,
     partner: Option<usize>,
-) {
-    preceding.extend_with(rf, assemblies.names(), paired_screen, partner);
-    ext.absorb(&rf.extension_names());
+    paired_signature: Option<(usize, &'a FileSurface)>,
+}
+
+impl<'a> FoldSlot<'a> {
+    /// The slot of `files[index]`, with `partners` its fold's pairing and
+    /// `earlier` the files before it.
+    fn of(
+        files: &'a [ProjectFile],
+        partners: &[Option<usize>],
+        earlier: &'a [Arc<ResolvedFile>],
+        index: usize,
+    ) -> Self {
+        // A signature's own partner is the *later* implementation, so for a
+        // signature this is always `None`.
+        let paired_signature = partners[index]
+            .filter(|&p| p < index)
+            .map(|sig| (sig, &earlier[sig].surface));
+        FoldSlot {
+            file: &files[index],
+            partner: partners[index],
+            paired_signature,
+        }
+    }
+
+    /// Complete a freshly built `surface` for this slot: an implementation
+    /// whose signature sits earlier takes the signature's stashed exports as
+    /// its own contribution (provenance = the implementation's slot, def =
+    /// the `.fsi`'s; [`FileSurface::append_signature_exports`]).
+    fn complete(&self, surface: &mut FileSurface, names: &NameTable) {
+        if matches!(&self.file.file, SourceFile::Impl(_))
+            && let Some((sig_idx, sig)) = self.paired_signature
+        {
+            surface.append_signature_exports(sig, sig_idx, names);
+        }
+    }
 }
 
 /// The [`ResolvedFile`] a signature file's Compile slot holds, as both the
@@ -1586,21 +1636,22 @@ fn signature_slot(
         surface.exports,
     );
     contributors::signature_contributions(sig, preceding, assemblies, &mut rf);
-    (rf.unplaced_types, rf.unplaced_type_places) = signature_type_decls(sig);
+    (rf.surface.unplaced_types, rf.surface.unplaced_type_places) = signature_type_decls(sig);
     // The walk resolves no attribute of a signature, so every attribute counts
     // as possibly `[<Extension>]` or `[<AutoOpen>]`. Later files see the
     // signature's declarations, so its extension names are what they read.
-    rf.extension_names = extension_names::file_extension_names(sig.syntax(), false, &|_, _| true);
-    rf.damage = extension_names::damage(sig.syntax(), &pf.recovery);
+    rf.surface.extension_names =
+        extension_names::file_extension_names(sig.syntax(), false, &|_, _| true);
+    rf.surface.damage = extension_names::damage(sig.syntax(), &pf.recovery);
     rf.recovery = pf.recovery.clone();
     rf
 }
 
 /// A signature's type and exception names, each declaration unplaced: a
 /// later file sees the signature's type, which may not be the
-/// implementation's ([`ResolvedFile::unplaced_types`]). With them, each
+/// implementation's ([`FileSurface::unplaced_types`]). With them, each
 /// declaration's full path and generic arity where the module structure
-/// gives it ([`ResolvedFile::unplaced_type_places`]); an exception's arity
+/// gives it ([`FileSurface::unplaced_type_places`]); an exception's arity
 /// is 0.
 fn signature_type_decls(sig: &SigFile) -> (HashMap<String, usize>, model::TypePlaces) {
     let mut counts: HashMap<String, usize> = HashMap::default();
@@ -1748,8 +1799,8 @@ pub(crate) fn same_tree(prev: &ProjectFile, new: &ProjectFile) -> bool {
 /// contribution diverges, every later file sees a different `preceding`), a file
 /// whose tree is byte-identical (`same_tree`) is reused verbatim, and a
 /// recomputed file that leaves the threaded state unchanged
-/// (`ResolvedFile::same_export_contribution` plus an unchanged own
-/// extension-source signal) keeps the tail reusable too.
+/// (`FileSurface::same_contribution`, its extension-member names included)
+/// keeps the tail reusable too.
 pub fn resolve_project_incremental(
     prev_files: &[ImplFile],
     prev: &ResolvedProject,
@@ -1884,14 +1935,10 @@ fn resolve_project_files_incremental_impl(
     );
     let partners_prev = signature_partners(prev_files);
     let partners_new = signature_partners(new_files);
-    let mut preceding = ProjectItems {
-        assembly_core_attribute_aliases: Arc::new(assemblies.core_attribute_aliases().clone()),
-        ..ProjectItems::default()
-    };
-    let mut ext = ExtensionNames::default();
+    let mut state = FoldState::new(assemblies);
     let mut resolved: Vec<Arc<ResolvedFile>> = Vec::with_capacity(horizon);
     let mut reused = Vec::with_capacity(horizon);
-    // True while the threaded state (`preceding`, `ext`) entering this file still
+    // True while the threaded state entering this file still
     // equals prev's at the same index — the reuse precondition. Monotone
     // true→false: once a recomputed file's contribution differs, every later file
     // sees a different `preceding`, so reuse can never resume.
@@ -1904,7 +1951,7 @@ fn resolve_project_files_incremental_impl(
         // both reuse and sync require the pairing-partner index to match.
         // While the prefix is in sync an equal index implies an equal
         // screen: the signature's own contribution (its screen,
-        // `same_export_contribution`) was compared at the signature's
+        // `FileSurface::same_contribution`) was compared at the signature's
         // earlier slot.
         let same_pairing = have_prev
             && partners_prev[i] == partners_new[i]
@@ -1940,65 +1987,37 @@ fn resolve_project_files_incremental_impl(
             // identical `ResolvedFile`. Reuse it — an `Arc` refcount bump, *not* a
             // deep clone of the resolution map / arena / exports, so a keystroke's
             // reuse is O(1) per file rather than O(occurrences). `in_sync` stays
-            // true (its contribution is prev's own); the shared
-            // `preceding_extension_names` already equals `ext`, since `ext`
+            // true (its contribution is prev's own); its stamped
+            // `preceding_extension_names` already equals the state's, which
             // matches prev's entering value while `in_sync`.
             Arc::clone(&prev.files[i])
         } else {
             let mut rf = match &pf.file {
-                SourceFile::Sig(sig) => signature_slot(sig, pf, &preceding, assemblies),
+                SourceFile::Sig(sig) => signature_slot(sig, pf, state.preceding(), assemblies),
                 SourceFile::Impl(file) => {
-                    let mut rf = resolve_file(file, &preceding, assemblies, &pf.recovery);
-                    rf.preceding_extension_names = ext.clone();
+                    let mut rf = resolve_file(file, state.preceding(), assemblies, &pf.recovery);
+                    state.stamp(&mut rf);
                     rf
                 }
             };
-            // Stage 2: materialise the paired signature's surface — exactly
-            // as the cold fold does, and BEFORE the in-sync comparison (the
-            // prior fold's slot includes the materialised items too).
-            if matches!(&pf.file, SourceFile::Impl(_))
-                && let Some(sig_idx) = partners_new[i].filter(|&p| p < i)
-            {
-                rf.append_signature_exports(&resolved[sig_idx], sig_idx, assemblies.names());
-            }
+            // Completed before the in-sync comparison: the prior fold's slot
+            // holds the completed surface too.
+            FoldSlot::of(new_files, &partners_new, &resolved, i)
+                .complete(&mut rf.surface, assemblies.names());
             if in_sync {
-                // Entering state matched prev's, so the item base matched and the
-                // exports are comparable. Does the recompute leave the threaded
-                // state unchanged (all halves: the export contribution — a
-                // signature's screen included — the pairing, and the
-                // extension-member names)?
-                // If so, the tail stays reusable. The quantities compared are
-                // exactly what `thread_forward` folds, so the incremental
-                // fold can never disagree with the cold one about a file's
-                // downstream contribution.
+                // Entering state matched prev's, so the item base matched and
+                // the exports are comparable. Does the recompute leave what
+                // `FoldState::advance` threads unchanged? If so, and the
+                // pairing is the same, the tail stays reusable.
                 in_sync = same_pairing
-                    && rf.same_export_contribution(&prev.files[i], assemblies.names())
-                    && rf.extension_names() == prev.files[i].extension_names();
+                    && rf
+                        .surface
+                        .same_contribution(&prev.files[i].surface, assemblies.names());
             }
             Arc::new(rf)
         };
-        let screen = partners_new[i]
-            .filter(|&p| p < i)
-            .and_then(|sig| resolved[sig].sig_screen.clone());
-        thread_forward(
-            &mut preceding,
-            &mut ext,
-            &rf,
-            assemblies,
-            screen.as_deref(),
-            partners_new[i],
-        );
-        // The unpaired-headerless implicit-module shadow — exactly as the
-        // cold fold pushes it (see `resolve_project_files_impl`).
-        if partners_new[i].is_none()
-            && matches!(&pf.file, SourceFile::Impl(_))
-            && pf.file.is_headerless()
-        {
-            let path = implicit_module_path(&pf.qnof);
-            if !path.is_empty() {
-                preceding.note_implicit_module_shadow(assemblies.names(), path);
-            }
-        }
+        let slot = FoldSlot::of(new_files, &partners_new, &resolved, i);
+        state.advance(&rf.surface, &slot, assemblies.names());
         resolved.push(rf);
     }
     (ResolvedProject { files: resolved }, reused)
@@ -2776,7 +2795,7 @@ mod def_space_tests {
     /// What a later file names an earlier one's declarations by.
     fn declaration_defs(rf: &ResolvedFile) -> (Vec<model::ExportDef>, Vec<DefId>) {
         (
-            rf.exports.items.iter().map(|e| e.def).collect(),
+            rf.surface.exports.items.iter().map(|e| e.def).collect(),
             rf.placed_type_defs().collect(),
         )
     }
@@ -2848,7 +2867,9 @@ mod contribution_tests {
         let before = resolve_one("module M\nlet f x = x\nlet g = 1\n", &env);
         let after = resolve_one("module M\nlet f x = (let y = x in y)\nlet g = 1\n", &env);
         assert!(
-            before.same_export_contribution(&after, env.names()),
+            before
+                .surface
+                .same_contribution(&after.surface, env.names()),
             "a body-local binder must not change the downstream contribution"
         );
         assert_ne!(
@@ -2866,7 +2887,9 @@ mod contribution_tests {
         let before = resolve_one("module M\nlet f = 1\n", &env);
         let after = resolve_one("module M\nlet f = 1\nlet h = 2\n", &env);
         assert!(
-            !before.same_export_contribution(&after, env.names()),
+            !before
+                .surface
+                .same_contribution(&after.surface, env.names()),
             "a new top-level export must change the contribution"
         );
     }
@@ -3068,7 +3091,7 @@ mod export_decl_tests {
             // extension gate and the fold's extension names consult), are
             // the fields that may differ.
             without.recovery = of_parse.recovery.clone();
-            without.damage = of_parse.damage.clone();
+            without.surface.damage = of_parse.surface.damage.clone();
             assert_eq!(
                 of_parse, without,
                 "resolution of {src:?} must not depend on the recovery reading"
@@ -3093,13 +3116,15 @@ mod export_decl_tests {
         // (the anonymous root) folds into `modules_with_hidden_values`.
         let rf = resolve_one("type U = A | B\n");
         assert!(
-            rf.exports
+            rf.surface
+                .exports
                 .items
                 .iter()
                 .all(|i| i.name(env()) != "A" && i.name(env()) != "B"),
             "an anonymous-root union case must not be exported"
         );
         let marker_decls: Vec<_> = rf
+            .surface
             .export_decls
             .iter()
             .filter(|d| {
@@ -3110,11 +3135,11 @@ mod export_decl_tests {
             marker_decls.len(),
             2,
             "expected an anon hidden-marker decl per case, got {:?}",
-            rf.export_decls
+            rf.surface.export_decls
         );
 
         let mut pi = ProjectItems::default();
-        pi.extend_with(&rf, env().names(), None, None);
+        pi.extend_with(&rf.surface, env().names(), None, None);
         assert!(
             pi.modules_with_hidden_values
                 .contains(&Vec::<String>::new()),
@@ -3134,7 +3159,7 @@ mod export_decl_tests {
         // bring a `private` module into another file's `open` scope) — pitfall 3.
         let rf = resolve_one("[<AutoOpen>]\nmodule private M\nlet x = 1\n");
         assert!(
-            rf.export_decls.iter().any(|d| matches!(
+            rf.surface.export_decls.iter().any(|d| matches!(
                 &d.kind,
                 ExportDeclKind::Module {
                     header: true,
@@ -3143,11 +3168,11 @@ mod export_decl_tests {
                 }
             )),
             "expected a private auto-open header decl: {:?}",
-            rf.export_decls
+            rf.surface.export_decls
         );
 
         let mut pi = ProjectItems::default();
-        pi.extend_with(&rf, env().names(), None, None);
+        pi.extend_with(&rf.surface, env().names(), None, None);
         assert!(
             pi.auto_open_module_paths.is_empty(),
             "a private auto-open module must not be exportable: {:?}",
@@ -3158,7 +3183,7 @@ mod export_decl_tests {
         // in order.
         let rf2 = resolve_one("[<AutoOpen>]\nmodule M\nlet x = 1\n");
         assert!(
-            rf2.export_decls.iter().any(|d| matches!(
+            rf2.surface.export_decls.iter().any(|d| matches!(
                 &d.kind,
                 ExportDeclKind::Module {
                     header: true,
@@ -3167,10 +3192,10 @@ mod export_decl_tests {
                 }
             )),
             "expected a non-private auto-open header decl: {:?}",
-            rf2.export_decls
+            rf2.surface.export_decls
         );
         let mut pi2 = ProjectItems::default();
-        pi2.extend_with(&rf2, env().names(), None, None);
+        pi2.extend_with(&rf2.surface, env().names(), None, None);
         assert_eq!(pi2.auto_open_module_paths, vec![(segs(&["M"]), 0)]);
     }
 
@@ -3184,15 +3209,16 @@ mod export_decl_tests {
         for src in ["module M\ntype exception\n", "module M\ntype = int\n"] {
             let rf = resolve_lenient(src);
             assert!(
-                rf.export_decls
+                rf.surface
+                    .export_decls
                     .iter()
                     .all(|d| !matches!(d.kind, ExportDeclKind::Type { .. })),
                 "a nameless type must contribute no Type decl for {src:?}: {:?}",
-                rf.export_decls
+                rf.surface.export_decls
             );
             let mut pi = ProjectItems::default();
             let names = env().names();
-            pi.extend_with(&rf, names, None, None);
+            pi.extend_with(&rf.surface, names, None, None);
             assert!(
                 !pi.nested_module_paths.contains_path(names, &segs(&["M"])),
                 "nameless type spuriously shadowed its container for {src:?}"
@@ -3214,7 +3240,7 @@ mod export_decl_tests {
 
         let mut pi = ProjectItems::default();
         let names = env().names();
-        pi.extend_with(&rf, names, None, None);
+        pi.extend_with(&rf.surface, names, None, None);
         assert!(pi.is_namespace(&segs(&["A"])));
         assert!(pi.is_namespace(&segs(&["A", "B"])));
         assert!(

@@ -81,8 +81,8 @@ pub const OTHER_SHAPES: &[&str] = &[
 pub enum Decl {
     /// `let {name} = {body}`, optionally attributed (`[<System.Obsolete>]`). The
     /// attribute flips the file's extension-source signal *without* changing its
-    /// exports — the case that needs the incremental fold's separate
-    /// augmentation/attribute check, not just `same_export_contribution`.
+    /// exports — the case `FileSurface::same_contribution` covers through
+    /// `extends_wholesale`, beside the exports.
     Val {
         name: String,
         attr: bool,

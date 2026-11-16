@@ -10,8 +10,8 @@ use borzoi_cst::syntax::TextRange;
 use super::contributors::{FileContributions, OpenContributions};
 use super::extension_names::ExtensionNames;
 use super::model::{
-    DeclaredType, DeclineSite, ExportDecl, ExportedItem, ExportedItems, FieldLabelEntry, OpenTrace,
-    Resolution, ResolutionTrace, ResolvedFile,
+    DeclaredType, DeclineSite, ExportDecl, ExportedItem, ExportedItems, FieldLabelEntry,
+    FileSurface, OpenTrace, Resolution, ResolutionTrace, ResolvedFile,
 };
 use super::prescan::Prescan;
 use super::state::ActivePatternShape;
@@ -65,7 +65,7 @@ pub(super) struct Output {
     /// See [`ResolvedFile::field_label_on_unknown_receiver`](super::model::ResolvedFile::field_label_on_unknown_receiver).
     pub(super) field_labels: HashMap<TextRange, FieldLabelEntry>,
     /// The type definitions the walk placed, in walk order, for
-    /// [`ResolvedFile::placed_types`](super::model::ResolvedFile). Only a
+    /// [`FileSurface::placed_types`](super::model::FileSurface). Only a
     /// definition with a real path — not under an anonymous (headerless)
     /// root — is placed; [`Prescan::own_type_decl_counts`](crate::resolve::prescan::Prescan::own_type_decl_counts) says how many
     /// declarations of the name there are in all.
@@ -148,55 +148,60 @@ impl Output {
             module_opens,
             namespace_opens,
         } = contributions;
+        let (declaration_defs, local_defs) = defs.into_spaces();
         ResolvedFile {
-            defs,
+            local_defs,
+            surface: FileSurface {
+                defs: declaration_defs,
+                own_type_simple_names: prescan.own_type_simple_names,
+                placed_types,
+                unplaced_types,
+                unplaced_type_places: HashMap::default(),
+                own_module_simple_names: prescan.own_module_simple_names,
+                contributions: FileContributions {
+                    root,
+                    extension_statics: prescan.extension_statics,
+                    module_opens,
+                    namespace_opens,
+                    custom_operations: prescan.custom_operations,
+                    declares_custom_operation_alias: prescan.declares_custom_operation_alias,
+                    declares_slot_attribute_alias: prescan.declares_slot_attribute_alias,
+                },
+                declares_core_attribute_alias: prescan.declares_core_attribute_alias,
+                // Read off the tree by `resolve_file`, after the walk has
+                // given every attribute its verdict.
+                extension_names: ExtensionNames::default(),
+                exports: ExportedItems { items },
+                item_base,
+                export_decls,
+                sig_screen: None,
+                sig_exports: Vec::new(),
+                // Read with the extension names, by `resolve_file`.
+                damage: None,
+            },
             resolutions,
             or_pattern_aliases,
             opaque_binders,
             opaque_regions,
             attribute_resolutions,
             field_labels,
-            placed_types,
-            unplaced_types,
-            unplaced_type_places: HashMap::default(),
-            own_type_simple_names: prescan.own_type_simple_names,
-            own_module_simple_names: prescan.own_module_simple_names,
             own_abbrev_type_simple_names: prescan.own_abbrev_type_simple_names,
-            contributions: FileContributions {
-                root,
-                extension_statics: prescan.extension_statics,
-                module_opens,
-                namespace_opens,
-                custom_operations: prescan.custom_operations,
-                declares_custom_operation_alias: prescan.declares_custom_operation_alias,
-                declares_slot_attribute_alias: prescan.declares_slot_attribute_alias,
-            },
-            declares_core_attribute_alias: prescan.declares_core_attribute_alias,
             unknowables,
-            // Read off the tree by `resolve_file`, after the walk has given
-            // every attribute its verdict.
-            extension_names: ExtensionNames::default(),
             // Stamped by the Compile-order fold; a single file has no
             // preceding files.
             preceding_extension_names: ExtensionNames::default(),
-            exports: ExportedItems { items },
-            item_base,
             namespace_paths,
             open_extension_namespaces,
             active_pattern_shape,
             diagnostics,
             resolution_trace: ResolutionTrace { opens: trace_opens },
             decline_sites,
-            export_decls,
-            sig_screen: None,
-            sig_exports: Vec::new(),
             recovery: recovery.clone(),
-            damage: None,
         }
     }
 }
 
-/// [`ResolvedFile::unplaced_types`](super::ResolvedFile::unplaced_types): how
+/// [`FileSurface::unplaced_types`](super::FileSurface::unplaced_types): how
 /// many declarations of each name the file makes — a type, an exception, an
 /// augmentation head — that the walk did not place. An augmentation head
 /// alone declares nothing, but counts as one: it may name a type of another
