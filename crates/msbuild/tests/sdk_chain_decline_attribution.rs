@@ -106,7 +106,8 @@ fn not_yet_seeded() -> Vec<(String, String)> {
         ("MSBuildNodeCount", "1"),
         ("VisualStudioVersion", "18.0"),
         ("MSBuildProjectDefaultTargets", "Build"),
-        // (c) unknowable for an LSP, measured only to keep the figure an
+        // (c) unknowable to an evaluation of a build nobody launched, which
+        //     is what this walk is, measured only to keep the figure an
         //     over-statement rather than an under-one
         ("MSBuildStartupDirectory", "/repo"),
     ]

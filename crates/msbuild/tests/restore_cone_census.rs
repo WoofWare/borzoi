@@ -87,6 +87,14 @@ const HASH_DIGITS: usize = 16;
 /// The task that writes the spec: every cone that produced one ran it.
 const WRITE_TASK: &str = "WriteRestoreGraphTask";
 
+/// The directory every build of `project` here starts in, as `restore.rs`
+/// starts `dotnet` (`child_start_directory`): the project's own. MSBuild
+/// exposes it to the build as `MSBuildStartupDirectory`, so our evaluation is
+/// handed it too.
+fn start_directory(project: &Path) -> &Path {
+    project.parent().expect("a project path has a parent")
+}
+
 /// `dotnet <args>` from `dir`, under the oracle children's scrubbed
 /// environment; its standard output.
 fn dotnet(dir: &Path, args: &[&std::ffi::OsStr]) -> String {
@@ -114,7 +122,7 @@ fn installed_sdks() -> Vec<String> {
 /// The SDK `dotnet` resolves for `project`: the one its directory's
 /// `global.json` selects, as `restore.rs` resolves it by running there.
 fn resolved_sdk(project: &Path) -> String {
-    dotnet(project.parent().unwrap(), &["--version".as_ref()])
+    dotnet(start_directory(project), &["--version".as_ref()])
         .trim()
         .to_owned()
 }
@@ -186,7 +194,7 @@ fn generated_by_cli(project: &Path) -> (Executed, Value) {
         args.push(arg);
     }
     let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
-    dotnet(project.parent().unwrap(), &args);
+    dotnet(start_directory(project), &args);
     let spec = host_fs::read_to_string(&scratch.output)
         .unwrap_or_else(|e| panic!("{}: dotnet msbuild wrote no spec: {e}", project.display()));
     let cone: Value =
@@ -773,7 +781,9 @@ fn cause(cause: &borzoi_msbuild::UntrustedCause) -> String {
 /// compares ([`metadata_verdict`]).
 ///
 /// Our evaluation resolves the SDK the cone ran under, at its real path, as
-/// the oracle does.
+/// the oracle does, and is started in the oracle's working directory
+/// ([`start_directory`]), so `MSBuildStartupDirectory` is a fact on both
+/// sides.
 fn reads(
     oracle: &mut Oracle,
     subject: &Subject,
@@ -855,17 +865,25 @@ fn reads(
             ..ExecutionProbe::default()
         }),
     };
-    let (parsed, ours) = parse_fsproj_reads(
-        &source,
-        &subject.project,
-        &extra,
-        &common::oracle_environment(),
-        Some(&resolver),
-        Some(&glob_resolver::resolve as &borzoi_msbuild::GlobResolver<'_>),
-        &probe,
-    )
-    .unwrap_or_else(|e| panic!("{}: our evaluation failed: {e}", subject.key));
-    // The probe reads the walk's end state and changes nothing in it.
+    let evaluate = |start: Option<&Path>, probe: &ReadProbe| {
+        parse_fsproj_reads(
+            &source,
+            &subject.project,
+            &extra,
+            &common::oracle_environment(),
+            Some(&resolver),
+            Some(&glob_resolver::resolve as &borzoi_msbuild::GlobResolver<'_>),
+            start,
+            probe,
+        )
+        .unwrap_or_else(|e| panic!("{}: our evaluation failed: {e}", subject.key))
+    };
+    // The evaluation of the process the oracle stands in for, started where
+    // it starts.
+    let (parsed, ours) = evaluate(Some(start_directory(&subject.project)), &probe);
+    // The probe reads the walk's end state and changes nothing in it, with a
+    // startup directory or without one (as every evaluation the LSP serves
+    // runs).
     let unprobed = common::parse_fsproj_with_imports(
         &source,
         &subject.project,
@@ -876,8 +894,18 @@ fn reads(
     )
     .unwrap();
     assert!(
-        parsed == unprobed,
+        evaluate(None, &probe).0 == unprobed,
         "{}: probing the walk changed its result",
+        subject.key
+    );
+    assert!(
+        parsed
+            == evaluate(
+                Some(start_directory(&subject.project)),
+                &ReadProbe::default()
+            )
+            .0,
+        "{}: probing the walk started in its directory changed its result",
         subject.key
     );
 
@@ -1163,7 +1191,7 @@ fn census(subjects: &[Subject]) -> (Manifest, Manifest, String) {
             };
             // One oracle per project, from its directory: MSBuild fixes the
             // startup directory once per process.
-            let mut oracle = Oracle::spawn_for_sdk(&sdk_dir, subject.project.parent().unwrap());
+            let mut oracle = Oracle::spawn_for_sdk(&sdk_dir, start_directory(&subject.project));
             let cone = cone(&mut oracle, &subject.project, sdk, &sdk_dir);
             if let Some((before, spec)) = previous.replace((sdk.clone(), cone.spec.clone())) {
                 let mut places = BTreeSet::new();

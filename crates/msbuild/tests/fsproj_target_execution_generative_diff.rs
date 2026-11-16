@@ -397,6 +397,7 @@ fn check(oracle: &mut Oracle, xml: &str, tally: &mut Tally) {
         &common::oracle_environment(),
         None,
         None,
+        None,
         &probe,
     )
     .unwrap();
@@ -545,6 +546,7 @@ fn an_empty_request_declines() {
         &path,
         &HashMap::new(),
         &common::oracle_environment(),
+        None,
         None,
         None,
         &probe,

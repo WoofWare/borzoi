@@ -1670,6 +1670,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         &environment,
         Some(&resolver),
         None,
+        None,
         &probe,
     )
     .expect("well-formed XML parses");

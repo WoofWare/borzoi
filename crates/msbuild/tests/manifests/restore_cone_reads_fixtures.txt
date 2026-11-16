@@ -96,7 +96,7 @@
 10.0.401 resolved cpm/app/App.fsproj reads property MSBuildProjectFullPath	value agrees
 10.0.401 resolved cpm/app/App.fsproj reads property MSBuildProjectName	value agrees
 10.0.401 resolved cpm/app/App.fsproj reads property MSBuildRuntimeType	value agrees
-10.0.401 resolved cpm/app/App.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved cpm/app/App.fsproj reads property MSBuildStartupDirectory	value agrees
 10.0.401 resolved cpm/app/App.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved cpm/app/App.fsproj reads property NETCoreAppMaximumVersion	value agrees
 10.0.401 resolved cpm/app/App.fsproj reads property NETCoreSdkPortableRuntimeIdentifier	value agrees
@@ -323,7 +323,7 @@
 10.0.401 resolved hooked/App.fsproj reads property MSBuildProjectFullPath	value agrees
 10.0.401 resolved hooked/App.fsproj reads property MSBuildProjectName	value agrees
 10.0.401 resolved hooked/App.fsproj reads property MSBuildRuntimeType	value agrees
-10.0.401 resolved hooked/App.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved hooked/App.fsproj reads property MSBuildStartupDirectory	value agrees
 10.0.401 resolved hooked/App.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved hooked/App.fsproj reads property NETCoreAppMaximumVersion	value agrees
 10.0.401 resolved hooked/App.fsproj reads property NETCoreSdkPortableRuntimeIdentifier	value agrees
@@ -549,7 +549,7 @@
 10.0.401 resolved net10/App.fsproj reads property MSBuildProjectFullPath	value agrees
 10.0.401 resolved net10/App.fsproj reads property MSBuildProjectName	value agrees
 10.0.401 resolved net10/App.fsproj reads property MSBuildRuntimeType	value agrees
-10.0.401 resolved net10/App.fsproj reads property MSBuildStartupDirectory	unset, inexact (the toolset); set in MSBuild
+10.0.401 resolved net10/App.fsproj reads property MSBuildStartupDirectory	value agrees
 10.0.401 resolved net10/App.fsproj reads property MSBuildThisFileFullPath	per file
 10.0.401 resolved net10/App.fsproj reads property NETCoreAppMaximumVersion	value agrees
 10.0.401 resolved net10/App.fsproj reads property NETCoreSdkPortableRuntimeIdentifier	value agrees

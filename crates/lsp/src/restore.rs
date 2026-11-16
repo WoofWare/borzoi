@@ -989,13 +989,25 @@ fn offline_restore_command(
     // under the same globals, so a project conditioned on it restores and
     // generates alike.
     .arg("-p:NuGetInteractive=false");
-    // Resolve the SDK from the project's own `global.json` tree, not the LSP
-    // process's working directory.
-    if let Some(dir) = project.parent() {
+    if let Some(dir) = child_start_directory(project) {
         cmd.current_dir(dir);
     }
     apply_env(&mut cmd, env);
     Some(cmd)
+}
+
+/// The directory the restore child for `project` starts in: the project's
+/// own, so that `dotnet` resolves the SDK from the project's `global.json`
+/// tree rather than the LSP process's working directory.
+///
+/// MSBuild exposes it to the build as `MSBuildStartupDirectory`, so it is an
+/// input to the evaluation the child runs. An evaluation that models the child
+/// (the restore cone's, A₁ in `docs/nuget-dgspec-boundary-plan.md`) takes its
+/// startup directory from here, so the two cannot drift. `None` when the
+/// project path has no parent: the child then inherits this process's working
+/// directory, which no such evaluation may claim to know.
+fn child_start_directory(project: &Path) -> Option<&Path> {
+    project.parent()
 }
 
 /// The detailed log a restore into `scratch` writes.

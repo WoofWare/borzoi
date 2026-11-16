@@ -1656,42 +1656,41 @@ The probe classifies each property read as one of:
   environment, the toolset, or opacity);
 - untrusted, with its cause.
 
-For an item type it reports the evaluated table with its taint. The probe
-changes nothing about the walk: the census asserts that the probed
-`ParsedProject` equals the unprobed one. A trusted value MSBuild disagrees
-with panics. Every other verdict is pinned, in
+For an item type it reports the evaluated table with its taint. Our
+evaluation is started in the oracle's working directory, the project's own,
+which is where `restore.rs` starts `dotnet` (`child_start_directory`), so
+`MSBuildStartupDirectory` is a fact on both sides. The probe changes nothing
+about the walk: the census asserts that the probed `ParsedProject` equals the
+unprobed one, started in that directory and not. A trusted value MSBuild
+disagrees with panics. Every other verdict is pinned, in
 `restore_cone_reads_projects.txt` and `restore_cone_reads_fixtures.txt`.
 A verdict says whether the cone itself writes the name, which separates the
 targets' own locals from what they read off the evaluation.
 
-On SDK 10.0.401 (six corpus projects, three fixtures):
+On SDK 10.0.401 (six corpus projects, three fixtures), as the manifests stand
+on 2026-11-16:
 
 | property reads | corpus | fixtures |
 |---|---|---|
-| value agrees with MSBuild | 319 | 169 |
-| unset, and unset in MSBuild | 440 | 205 |
-| unset, inexact (opacity), unset in MSBuild | 96 | 124 |
-| unset, inexact (opacity), set in MSBuild | 1 | 2 |
-| unset, inexact (the toolset), set in MSBuild | 12 | 6 |
-| untrusted | 12 | 9 |
+| value agrees with MSBuild | 336 | 181 |
+| unset, and unset in MSBuild | 537 | 329 |
+| unset, inexact (the toolset), set in MSBuild | 0 | 0 |
+| untrusted | 7 | 5 |
 | `MSBuildThisFile*`, per file | 6 | 3 |
 | **committed and wrong** | **0** | **0** |
 
 The toolset row was two names on each of the nine cones,
-`MSBuildAssemblyVersion` and `MSBuildStartupDirectory`. The walk now seeds the
-first (item 3 below), so its nine reads agree with MSBuild and the row holds
-the second alone.
+`MSBuildAssemblyVersion` and `MSBuildStartupDirectory`. The walk now seeds
+both (item 3 below), so all eighteen reads agree with MSBuild and the row is
+empty. The opacity rows an earlier run of the census had, on the outer builds
+of the multi-targeting projects (`TypeEquality` and the `cpm` fixture), are
+empty too.
 
-The single-target projects read three properties off:
-- `MSBuildStartupDirectory`, which the walk does not seed;
-- `TargetFrameworkMoniker`, which rests on unmodelled text;
-- `RuntimeIdentifierGraphPath`, an SDK package input.
-
-The remaining inexact and untrusted reads belong to the outer builds of the
-multi-targeting projects (`TypeEquality`, the `cpm` fixture). An undefined
-`TargetFramework` is kept inexact there, by design, so everything past it is
-opaque. Those reads matter only to the outer build's dispatch. The inner
-builds run under a `TargetFramework` global, which A₁.5 evaluates.
+The untrusted reads are two properties:
+- `TargetFrameworkMoniker`, which rests on unmodelled text (five corpus cones,
+  two fixtures);
+- `RuntimeIdentifierGraphPath`, an SDK package input (two corpus cones, three
+  fixtures).
 
 The item side is the gap the census was built to size:
 - **The SDK's `Known*` tables** (`KnownFrameworkReference`,
@@ -1715,9 +1714,20 @@ So A₁.3b's work, in order, is:
 2. expose the dedicated buckets as item lists the executor can read
    (every dependency type and `ProjectReference` landed; see the *A₁.3b*
    sections below);
-3. seed the two toolset names (`MSBuildAssemblyVersion` landed: the walk
-   seeds it at SDK resolution from the toolset's probed product version;
-   `MSBuildStartupDirectory` is open, #674).
+3. seed the two toolset names (landed). The walk seeds
+   `MSBuildAssemblyVersion` at SDK resolution from the toolset's probed
+   product version. `MSBuildStartupDirectory` is an input to the evaluation,
+   not a seed the walk can find for itself: the restore cone's evaluation is
+   handed the directory its process starts in (`startup_directory` on the
+   crate-internal `parse_fsproj_probed` and on
+   `test_support::parse_fsproj_reads`), which the walk resolves through the
+   observer and splices raw. The public entry points, which the LSP serves
+   from, take no such directory, so a served evaluation never carries a
+   guessed one. `tests/startup_directory_diff.rs` holds the value to MSBuild
+   started in chosen directories (links, a space, `;`, `%20`, `$`), and holds
+   a walk with no directory to committing nothing that moves with it. When
+   A₁ gets a runtime entry point, that entry point takes the directory from
+   `restore.rs`'s `child_start_directory`.
 
 Nothing in the census argues against going on. No trusted read is wrong,
 and the gaps have known causes.

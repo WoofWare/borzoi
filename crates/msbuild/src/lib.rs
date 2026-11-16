@@ -1357,6 +1357,7 @@ pub fn parse_fsproj_with_imports(
         environment,
         sdk_resolver,
         glob_resolver,
+        None,
         #[cfg(any(test, feature = "test-support"))]
         None,
     )
@@ -1388,6 +1389,7 @@ pub fn parse_fsproj_with_imports_reusing(
         environment,
         sdk_resolver,
         glob_resolver,
+        None,
         observer,
         #[cfg(any(test, feature = "test-support"))]
         None,
@@ -1416,6 +1418,7 @@ pub fn parse_fsproj_with_imports_asking_every_time(
         environment,
         sdk_resolver,
         glob_resolver,
+        None,
         observed::Observer::asking_every_time(),
         None,
     )
@@ -1423,10 +1426,20 @@ pub fn parse_fsproj_with_imports_asking_every_time(
     .map(|walked| walked.project)
 }
 
-/// [`parse_fsproj_with_imports`], also answering `probe` from the end of the
-/// walk when one is given (see `evaluator::reads`). Only the differential
-/// tests pass a probe, so a build without them has neither that module nor
-/// the `probe` parameter.
+/// [`parse_fsproj_with_imports`] of the build a process started in
+/// `startup_directory` runs, when one is given, also answering `probe` from
+/// the end of the walk when one is given (see `evaluator::reads`). Only the
+/// differential tests pass a probe, so a build without them has neither that
+/// module nor the `probe` parameter.
+///
+/// `startup_directory` is the working directory of a build process the caller
+/// itself launches, which MSBuild exposes as `MSBuildStartupDirectory`. It is
+/// a host fact, not a global property, and only an evaluation that models such
+/// a process may supply it: the restore cone's (A₁ in
+/// `docs/nuget-dgspec-boundary-plan.md`). The public entry points, which
+/// model a build nobody launched, have no such parameter and pass `None`, so
+/// what they return never carries a guessed startup directory.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_fsproj_probed(
     source: &str,
     project_path: &Path,
@@ -1434,6 +1447,7 @@ pub(crate) fn parse_fsproj_probed(
     environment: &HashMap<String, String>,
     sdk_resolver: Option<&SdkResolver<'_>>,
     glob_resolver: Option<&GlobResolver<'_>>,
+    startup_directory: Option<&Path>,
     #[cfg(any(test, feature = "test-support"))] probe: Option<&evaluator::reads::ReadProbe>,
 ) -> Result<evaluator::Walked, ParseError> {
     parse_fsproj_observed(
@@ -1443,6 +1457,7 @@ pub(crate) fn parse_fsproj_probed(
         environment,
         sdk_resolver,
         glob_resolver,
+        startup_directory,
         observed::Observer::new(),
         #[cfg(any(test, feature = "test-support"))]
         probe,
@@ -1460,6 +1475,7 @@ fn parse_fsproj_observed(
     environment: &HashMap<String, String>,
     sdk_resolver: Option<&SdkResolver<'_>>,
     glob_resolver: Option<&GlobResolver<'_>>,
+    startup_directory: Option<&Path>,
     observer: observed::Observer,
     #[cfg(any(test, feature = "test-support"))] probe: Option<&evaluator::reads::ReadProbe>,
 ) -> (
@@ -1507,6 +1523,7 @@ fn parse_fsproj_observed(
         cpm_props_path.as_deref(),
         sdk_resolver,
         glob_resolver,
+        startup_directory,
         &observer,
         #[cfg(any(test, feature = "test-support"))]
         probe,
@@ -1580,6 +1597,10 @@ fn validate_inputs(
         // and rejects both project writes and property injection
         // ("property is reserved, and cannot be modified").
         "msbuilddisablefeaturesfromversion",
+        // The working directory of the build process (`-p:` of it is
+        // MSB4177). An evaluation of a process the caller launches supplies
+        // it as such, through `parse_fsproj_probed`'s `startup_directory`.
+        "msbuildstartupdirectory",
     ] {
         reserved_lower.insert(name.to_string());
     }

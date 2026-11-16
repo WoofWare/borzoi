@@ -5,8 +5,10 @@
 > `fsproj_msbuild_diff.rs`'s `path_derivable_reserved_properties_match_msbuild`.
 > Part (b) stands as recommended (not done) for every name but two, which
 > gained a consumer: `VisualStudioVersion` and `MSBuildAssemblyVersion` are
-> seeded from a probed per-SDK table (see (b)). Part (c) is permanently
-> declined.
+> seeded from a probed per-SDK table (see (b)). Part (c) holds for every
+> evaluation of a build nobody launched, which is every evaluation the LSP
+> serves; an evaluation of a process borzoi launches itself (the restore cone's)
+> takes the startup directory as an input (see (c)).
 > The measurement below
 > prices the work at **+4 call expressions and +30 conditions** on the SDK-chain
 > census, against populations of 398 and 2 758, with a sound ceiling of 54 and
@@ -53,8 +55,8 @@ The middle step (+11 and +16) is not work at all — it is the census not seedin
 reserved names on its own side, since MSBuild rejects `-p:` for them.
 
 And that +4/+30 is an over-statement: the table it measures includes
-`MSBuildStartupDirectory`, which cannot be known at all (see (c) below), and the
-whole toolset group that (b) recommends against.
+`MSBuildStartupDirectory`, which no evaluation of a build nobody launched can
+know (see (c) below), and the whole toolset group that (b) recommends against.
 
 ### The ceiling, which is the bound the conclusion actually needs
 
@@ -183,17 +185,35 @@ every installed SDK. An SDK the table has not probed gets no seed.
 `Microsoft.Build.dll` is `15.1.0.0` under SDK 10.0.401, where the property
 reads `18.0`. The other three stay unseeded.
 
-### (c) Unknowable — and this is the interesting one
+### (c) Unknowable to a served evaluation — and this is the interesting one
 
-`MSBuildStartupDirectory` is the working directory of the MSBuild *process*. For
-an LSP there is no such process: the value depends on where a build the user has
-not run would have been launched from. It is not expensive to model, it is
-**undefined for us**, permanently.
+`MSBuildStartupDirectory` is the working directory of the MSBuild *process*.
+For the evaluations the LSP serves there is no such process: they model a build
+the user has not run, and the value depends on where it would have been launched
+from. There it is not expensive to model, it is **undefined**: no default launch
+directory exists, so a value would be a guess published as fact.
+
+An evaluation of a process borzoi launches itself is different. The restore
+cone (A₁ in `docs/nuget-dgspec-boundary-plan.md`) models the `dotnet` child
+that `crates/lsp/src/restore.rs` starts, in a directory `restore.rs` chooses
+(`child_start_directory`). For that evaluation the directory is a fact borzoi
+controls, like the `-p:` set it passes, and the evaluation takes it as an input:
+`startup_directory` on the crate-internal `parse_fsproj_probed` and on
+`test_support::parse_fsproj_reads`. It is a third kind of input, neither a
+global property (`-p:MSBuildStartupDirectory=…` is MSB4177, and
+`extra_properties` rejects it) nor an environment value (MSBuild ignores one).
+The public entry points, which the LSP serves from, have no such parameter, so a
+served evaluation never carries a guessed startup directory, by construction.
+Where it is supplied, the walk seeds the directory as the file system resolves
+it (MSBuild reports the physical directory, not a symlink to it), raw as the
+`MSBuildThisFile*` names are (a directory named `a%20b;c` reads `…/a b;c`), on
+Unix only; `tests/startup_directory_diff.rs` holds both rules to MSBuild started
+in chosen directories.
 
 That matters beyond the one name, because it refutes the framing the census
 comments used. "Trusted seeding turns the reserved names on wholesale" cannot be
-true of a set with a permanently-unknowable member. The reserved set is not
-uniformly seedable, so any plan phrased as *seed the reserved names* is
+true of a set with a member no served evaluation can know. The reserved set is
+not uniformly seedable, so any plan phrased as *seed the reserved names* is
 mis-shaped; the shape that survives is *seed the path-derivable ones, decline
 the rest, and say which is which*.
 

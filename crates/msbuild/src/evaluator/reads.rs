@@ -412,6 +412,7 @@ mod tests {
             &HashMap::new(),
             None,
             None,
+            None,
             Some(&probe),
         )
         .unwrap();
@@ -720,6 +721,7 @@ mod target_tests {
             &HashMap::new(),
             None,
             None,
+            None,
             Some(&probe),
         )
         .unwrap();
@@ -816,6 +818,7 @@ mod import_point_target_tests {
             &HashMap::new(),
             &HashMap::new(),
             Some(&resolver),
+            None,
             None,
             Some(&probe),
         )
