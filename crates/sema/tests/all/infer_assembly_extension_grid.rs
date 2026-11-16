@@ -62,6 +62,7 @@ use std::path::Path;
 
 use crate::common::ext_scope::{Probe, check_files};
 use crate::common::{
+    ensure_ext_assembly_grid_auto_built, ensure_ext_assembly_grid_auto_internal_built,
     ensure_ext_assembly_grid_built, ensure_ext_assembly_grid_internal_built,
     ensure_fsharp_core_dll, ensure_system_runtime_dll, invoke_fcs_dump_extension_members,
     temp_fs_tree,
@@ -812,22 +813,46 @@ fn cell_source(n: usize, cell: Cell) -> String {
     out.join("\n") + "\n"
 }
 
+/// Which fixture assembly declares a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Assembly {
+    Main,
+    /// The cells an assembly-level auto-open reaches: the attribute opens its
+    /// target for every cell of the assembly that declares it, so they live
+    /// apart from every other cell.
+    AutoOpen,
+}
+
+impl Cell {
+    fn assembly(self) -> Assembly {
+        if self.home == Home::AssemblyAutoOpen {
+            Assembly::AutoOpen
+        } else {
+            Assembly::Main
+        }
+    }
+}
+
+/// One FCS-checked project: its cells' assembly and drop, and its cells.
+type FcsProject = ((Assembly, Drop), Vec<(usize, Cell)>);
+
 /// The projects the gate test has FCS check: each cell is its own namespace
-/// and calling file, so the cells (split by whether the reader is made to
-/// drop their type) are checked in independent projects of at most
-/// [`CHUNK`] calling files.
-fn fcs_projects(cells: &[Cell]) -> Vec<(Drop, Vec<(usize, Cell)>)> {
-    [Drop::No, Drop::Yes]
+/// and calling file, so the cells (split by their assembly and by whether
+/// the reader is made to drop their type) are checked in independent
+/// projects of at most [`CHUNK`] calling files.
+fn fcs_projects(cells: &[Cell]) -> Vec<FcsProject> {
+    [Assembly::Main, Assembly::AutoOpen]
         .into_iter()
-        .flat_map(|drop| {
+        .flat_map(|assembly| [Drop::No, Drop::Yes].map(|drop| (assembly, drop)))
+        .flat_map(|key| {
             let mine: Vec<(usize, Cell)> = cells
                 .iter()
                 .copied()
                 .enumerate()
-                .filter(|(_, c)| c.drop == drop)
+                .filter(|(_, c)| (c.assembly(), c.drop) == key)
                 .collect();
             mine.chunks(CHUNK)
-                .map(|chunk| (drop, chunk.to_vec()))
+                .map(|chunk| (key, chunk.to_vec()))
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -863,14 +888,17 @@ fn internalize(block: String) -> String {
 /// The cells one generated fixture file holds.
 const CELLS_PER_FILE: usize = 1000;
 
-/// The fixture's source files: the friendship header, then the cells'
-/// blocks in batches of [`CELLS_PER_FILE`].
-fn fixture_source(cells: &[Cell], internal: bool) -> Vec<String> {
+/// The source files of `assembly`'s fixture: the friendship header, then
+/// its cells' blocks in batches of [`CELLS_PER_FILE`].
+fn fixture_source(cells: &[Cell], internal: bool, assembly: Assembly) -> Vec<String> {
     // Friendship for the calling projects of the internal-module cells. The
     // oracle names each project after one of its files, so the first and
     // last file of every project the gate test checks is a friend.
     let mut friends = vec!["Shared".to_string()];
-    for (_, chunk) in fcs_projects(cells) {
+    for ((of, _), chunk) in fcs_projects(cells) {
+        if of != assembly {
+            continue;
+        }
         for &(n, _) in [chunk.first(), chunk.last()].into_iter().flatten() {
             friends.push(format!("Use{n}"));
         }
@@ -886,7 +914,7 @@ fn fixture_source(cells: &[Cell], internal: bool) -> Vec<String> {
         cells
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.home == Home::AssemblyAutoOpen)
+            .filter(|(_, c)| c.home == Home::AssemblyAutoOpen && c.assembly() == assembly)
             .map(|(n, _)| {
                 format!(
                     "    [<assembly: AutoOpen(\"{}.AutoMod{n}\")>]",
@@ -899,6 +927,7 @@ fn fixture_source(cells: &[Cell], internal: bool) -> Vec<String> {
     let blocks: Vec<String> = cells
         .iter()
         .enumerate()
+        .filter(|(_, c)| c.assembly() == assembly)
         .map(|(n, &c)| {
             let block = cell_source(n, c);
             if internal { internalize(block) } else { block }
@@ -1114,6 +1143,31 @@ fn env_of(fixture: &Path, drop: Vec<(Vec<String>, &'static str)>) -> AssemblyEnv
     AssemblyEnv::from_views(&views).expect("build the grid's env")
 }
 
+/// The name the control call spells, which no extension of the fixtures
+/// declares.
+const CONTROL: &str = "ToString";
+
+/// A control calling file beside cell `n`'s: a call no extension names
+/// (`ToString`, which FCS binds to `System.Object`'s) on its receiver,
+/// written in full, with no `open`, so only what reaches every call (the
+/// implicit and assembly-level auto-opens) is in scope. The gate must let
+/// each stand, or the grid could pass with a gate that declines every call.
+/// Placed second in its project, so the file the oracle names the project
+/// after (its first or last) is unchanged.
+fn control_source(n: usize) -> (String, Probe) {
+    let ns = namespace(n);
+    let binder = format!("ctl{n}");
+    let text = format!("x.{CONTROL}()");
+    (
+        format!("module Control{n}\nlet {binder} (x: {ns}.Receiver) = {text}\n"),
+        Probe {
+            file: 0,
+            binder,
+            text,
+        },
+    )
+}
+
 /// The cells FCS must bind to the extension: the plain shape of each kind
 /// and style, reached by an `open` of what holds it. A fixture that stops
 /// producing extensions fails here instead of passing vacuously.
@@ -1137,7 +1191,9 @@ fn liveness(cell: Cell) -> bool {
 #[test]
 fn the_gate_declines_every_extension_fcs_binds_through_an_assembly() {
     let cells = Cell::all();
-    let dll = ensure_ext_assembly_grid_built(|| fixture_source(&cells, false));
+    let dll = ensure_ext_assembly_grid_built(|| fixture_source(&cells, false, Assembly::Main));
+    let auto_dll =
+        ensure_ext_assembly_grid_auto_built(|| fixture_source(&cells, false, Assembly::AutoOpen));
     let drops: Vec<(Vec<String>, &'static str)> = cells
         .iter()
         .enumerate()
@@ -1151,14 +1207,20 @@ fn the_gate_declines_every_extension_fcs_binds_through_an_assembly() {
         .collect();
     let whole = env_of(dll, Vec::new());
     let dropped = env_of(dll, drops);
+    let auto = env_of(auto_dll, Vec::new());
 
     let mut failures = Vec::new();
     let mut bound = 0usize;
     let mut graded = 0usize;
+    let mut controls = 0usize;
     let chunks = fcs_projects(&cells);
     let results = par_map(chunks.len(), |i| {
-        let (drop, mine) = &chunks[i];
-        let env = if *drop == Drop::No { &whole } else { &dropped };
+        let ((assembly, drop), mine) = &chunks[i];
+        let (env, fixture) = match (assembly, drop) {
+            (Assembly::AutoOpen, _) => (&auto, auto_dll),
+            (Assembly::Main, Drop::No) => (&whole, dll),
+            (Assembly::Main, Drop::Yes) => (&dropped, dll),
+        };
         let shared: String = mine
             .iter()
             .filter_map(|&(n, c)| shared_source(n, c))
@@ -1169,17 +1231,23 @@ fn the_gate_declines_every_extension_fcs_binds_through_an_assembly() {
             sources.push(("Shared.fs".to_string(), shared));
         }
         let mut probes = Vec::new();
-        for &(n, c) in mine {
+        for (k, &(n, c)) in mine.iter().enumerate() {
             let (src, mut probe) = use_source(n, c);
             probe.file = sources.len();
             sources.push((format!("Use{n}.fs"), src));
             probes.push(probe);
+            if k == 0 {
+                let (src, mut probe) = control_source(n);
+                probe.file = sources.len();
+                sources.push((format!("Control{n}.fs"), src));
+                probes.push(probe);
+            }
         }
         let refs: Vec<(&str, String)> = sources
             .iter()
             .map(|(p, s)| (p.as_str(), s.clone()))
             .collect();
-        check_files(env, &[dll], &refs, &probes)
+        check_files(env, &[fixture], &refs, &probes)
     });
     for ((drop, mine), checked) in chunks.iter().zip(&results) {
         failures.extend(
@@ -1188,15 +1256,34 @@ fn the_gate_declines_every_extension_fcs_binds_through_an_assembly() {
                 .iter()
                 .map(|u| format!("{drop:?}: unsound: {u}")),
         );
-        if checked.calls.len() != mine.len() {
+        if checked.calls.len() != mine.len() + 1 {
             failures.push(format!(
                 "{drop:?}: {} of {} calls graded",
                 checked.calls.len(),
-                mine.len()
+                mine.len() + 1
             ));
             continue;
         }
-        for (&(n, cell), outcome) in mine.iter().zip(&checked.calls) {
+        // The control is the second probe. An assembly-level auto-open of an
+        // `[<Extension>]` alias lends every name to every call against its
+        // assembly, so only the main assembly's projects hold a control.
+        let control = &checked.calls[1];
+        let main = drop.0 == Assembly::Main;
+        controls += usize::from(main);
+        if main && (control.fcs.as_deref() != Some("System.String") || control.gate.is_some()) {
+            failures.push(format!(
+                "{drop:?}: the control call `{CONTROL}`, which FCS types {:?}, reads as {:?}: \
+                 the gate must let it stand",
+                control.fcs, control.gate
+            ));
+        }
+        let cells_calls = checked
+            .calls
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != 1)
+            .map(|(_, outcome)| outcome);
+        for (&(n, cell), outcome) in mine.iter().zip(cells_calls) {
             let label = format!("C{n} {cell:?}");
             let Some(fcs) = outcome.fcs.as_deref() else {
                 if liveness(cell) {
@@ -1227,9 +1314,10 @@ fn the_gate_declines_every_extension_fcs_binds_through_an_assembly() {
         }
     }
     eprintln!(
-        "{} cells: {graded} graded, FCS binds the extension in {bound}",
+        "{} cells: {graded} graded, FCS binds the extension in {bound}, {controls} controls",
         cells.len()
     );
+    assert!(controls > 0, "no control call was graded");
     assert!(
         failures.is_empty(),
         "{} failures:\n{}",
@@ -1241,27 +1329,21 @@ fn the_gate_declines_every_extension_fcs_binds_through_an_assembly() {
 #[test]
 fn every_extension_fcs_reads_in_the_assembly_is_projected() {
     let cells = Cell::all();
-    let dll = ensure_ext_assembly_grid_built(|| fixture_source(&cells, false));
-    let whole = env_of(dll, Vec::new());
-    let (root, written) = temp_fs_tree("ext_assembly_grid", &[("Anchor.fs", "module Anchor\n")]);
-    let members = invoke_fcs_dump_extension_members(&written[0].0, dll);
-    let _ = std::fs::remove_dir_all(&root);
+    let dll = ensure_ext_assembly_grid_built(|| fixture_source(&cells, false, Assembly::Main));
+    let auto_dll =
+        ensure_ext_assembly_grid_auto_built(|| fixture_source(&cells, false, Assembly::AutoOpen));
     let mut failures = Vec::new();
-    for m in &members {
-        let is_static = !m.is_instance;
-        let namespace: Vec<String> = m.namespace.split('.').map(str::to_owned).collect();
-        let label = format!(
-            "{} `{}` ({}, compiled `{}`)",
-            m.entity, m.name, m.style, m.compiled_name
-        );
-        if !borzoi_sema::test_support::extension_named_in_namespace(
-            &whole, &namespace, &m.name, is_static,
-        ) {
-            failures.push(format!(
-                "{label}: not in the answer for namespace {}",
-                m.namespace
-            ));
+    let mut members = Vec::new();
+    for fixture in [dll, auto_dll] {
+        let whole = env_of(fixture, Vec::new());
+        let (root, written) =
+            temp_fs_tree("ext_assembly_grid", &[("Anchor.fs", "module Anchor\n")]);
+        let read = invoke_fcs_dump_extension_members(&written[0].0, fixture);
+        let _ = std::fs::remove_dir_all(&root);
+        for m in &read {
+            check_member(&whole, m, &mut failures);
         }
+        members.extend(read);
     }
     let candidates = cells
         .iter()
@@ -1284,6 +1366,31 @@ fn every_extension_fcs_reads_in_the_assembly_is_projected() {
     );
 }
 
+/// Whether `whole`'s namespace query answers for `m`, an extension member
+/// FCS reads in the fixture; a failure line if not.
+fn check_member(
+    whole: &AssemblyEnv,
+    m: &crate::common::FcsExtensionMember,
+    failures: &mut Vec<String>,
+) {
+    {
+        let is_static = !m.is_instance;
+        let namespace: Vec<String> = m.namespace.split('.').map(str::to_owned).collect();
+        let label = format!(
+            "{} `{}` ({}, compiled `{}`)",
+            m.entity, m.name, m.style, m.compiled_name
+        );
+        if !borzoi_sema::test_support::extension_named_in_namespace(
+            whole, &namespace, &m.name, is_static,
+        ) {
+            failures.push(format!(
+                "{label}: not in the answer for namespace {}",
+                m.namespace
+            ));
+        }
+    }
+}
+
 /// One calling project: its `(path, source)` files and, per calling file,
 /// its index and the call's method name.
 type CallingProject = (Vec<(String, String)>, Vec<(usize, String)>);
@@ -1304,10 +1411,15 @@ fn calling_projects(cells: &[(usize, Cell)]) -> Vec<CallingProject> {
                 sources.push(("Shared.fs".to_string(), shared));
             }
             let mut calls = Vec::new();
-            for &(n, c) in chunk {
+            for (k, &(n, c)) in chunk.iter().enumerate() {
                 let (src, _) = use_source(n, c);
                 calls.push((sources.len(), c.call_name(n)));
                 sources.push((format!("Use{n}.fs"), src));
+                if k == 0 {
+                    let (src, _) = control_source(n);
+                    calls.push((sources.len(), CONTROL.to_string()));
+                    sources.push((format!("Control{n}.fs"), src));
+                }
             }
             (sources, calls)
         })
@@ -1364,22 +1476,75 @@ fn gate_declines(env: &AssemblyEnv, project: &CallingProject) -> Vec<bool> {
 #[test]
 fn turning_an_extension_internal_never_makes_it_absent() {
     let cells = Cell::all();
-    let public = ensure_ext_assembly_grid_built(|| fixture_source(&cells, false));
-    let internal = ensure_ext_assembly_grid_internal_built(|| fixture_source(&cells, true));
-    let public_env = env_of(public, Vec::new());
-    let internal_env = env_of(internal, Vec::new());
-    let indexed: Vec<(usize, Cell)> = cells.iter().copied().enumerate().collect();
-    let projects = calling_projects(&indexed);
+    let main = (
+        env_of(
+            ensure_ext_assembly_grid_built(|| fixture_source(&cells, false, Assembly::Main)),
+            Vec::new(),
+        ),
+        env_of(
+            ensure_ext_assembly_grid_internal_built(|| {
+                fixture_source(&cells, true, Assembly::Main)
+            }),
+            Vec::new(),
+        ),
+    );
+    let auto = (
+        env_of(
+            ensure_ext_assembly_grid_auto_built(|| {
+                fixture_source(&cells, false, Assembly::AutoOpen)
+            }),
+            Vec::new(),
+        ),
+        env_of(
+            ensure_ext_assembly_grid_auto_internal_built(|| {
+                fixture_source(&cells, true, Assembly::AutoOpen)
+            }),
+            Vec::new(),
+        ),
+    );
+    let mut projects: Vec<(Assembly, CallingProject)> = Vec::new();
+    for assembly in [Assembly::Main, Assembly::AutoOpen] {
+        let indexed: Vec<(usize, Cell)> = cells
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, c)| c.assembly() == assembly)
+            .collect();
+        projects.extend(
+            calling_projects(&indexed)
+                .into_iter()
+                .map(|p| (assembly, p)),
+        );
+    }
     let answers = par_map(projects.len(), |i| {
+        let (assembly, project) = &projects[i];
+        let (public_env, internal_env) = match assembly {
+            Assembly::Main => (&main.0, &main.1),
+            Assembly::AutoOpen => (&auto.0, &auto.1),
+        };
         (
-            gate_declines(&public_env, &projects[i]),
-            gate_declines(&internal_env, &projects[i]),
+            gate_declines(public_env, project),
+            gate_declines(internal_env, project),
         )
     });
     let mut failures = Vec::new();
     let mut declined = 0usize;
-    for ((_, calls), (public, internal)) in projects.iter().zip(&answers) {
+    let mut controls = 0usize;
+    for ((assembly, (_, calls)), (public, internal)) in projects.iter().zip(&answers) {
         for (k, (file, name)) in calls.iter().enumerate() {
+            if name == CONTROL {
+                // As in the soundness test: only the main assembly holds one.
+                let main = *assembly == Assembly::Main;
+                controls += usize::from(main);
+                if main && (public[k] || internal[k]) {
+                    failures.push(format!(
+                        "file {file}: the control call `{CONTROL}` is declined (public: {}, \
+                         internal: {})",
+                        public[k], internal[k]
+                    ));
+                }
+                continue;
+            }
             declined += usize::from(public[k]);
             if public[k] && !internal[k] {
                 let n: usize = name
@@ -1403,6 +1568,7 @@ fn turning_an_extension_internal_never_makes_it_absent() {
         declined * 2 > cells.len(),
         "only {declined} declines to perturb"
     );
+    assert!(controls > 0, "no control call was checked");
     assert!(
         failures.is_empty(),
         "{} failures:\n{}",

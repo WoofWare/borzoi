@@ -2496,6 +2496,55 @@ pub fn ensure_ext_assembly_grid_built(source: impl FnOnce() -> Vec<String>) -> &
         .as_path()
 }
 
+/// Write `source` into the generated fixture `dir` (`tests/fixtures/<dir>`)
+/// and build it, returning the path of its `<dll>.dll`.
+fn build_generated_fixture(dir: &str, dll: &str, source: Vec<String>) -> PathBuf {
+    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(dir);
+    let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
+    write_generated_files(&project, source);
+    dotnet_build(&project, &format!("dotnet build {dir}"));
+    project
+        .join("bin")
+        .join("Release")
+        .join("net10.0")
+        .join(format!("{dll}.dll"))
+}
+
+/// [`ensure_ext_assembly_grid_built`] for the cells an assembly-level
+/// auto-open reaches (`tests/fixtures/ext_assembly_grid_auto_env`), kept in
+/// an assembly of their own: the attribute opens its target for every cell
+/// of the assembly that declares it.
+pub fn ensure_ext_assembly_grid_auto_built(source: impl FnOnce() -> Vec<String>) -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_generated_fixture(
+                "ext_assembly_grid_auto_env",
+                "ExtAssemblyGridAutoFixture",
+                source(),
+            )
+        })
+        .as_path()
+}
+
+/// [`ensure_ext_assembly_grid_auto_built`]'s visibility-perturbed twin.
+pub fn ensure_ext_assembly_grid_auto_internal_built(
+    source: impl FnOnce() -> Vec<String>,
+) -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            build_generated_fixture(
+                "ext_assembly_grid_auto_internal_env",
+                "ExtAssemblyGridAutoInternalFixture",
+                source(),
+            )
+        })
+        .as_path()
+}
+
 /// Replace `project`'s `Generated*.fs` with `files`, in order
 /// (`Generated000.fs`, …), so its wildcard `<Compile>` takes them as given.
 fn write_generated_files(project: &Path, files: Vec<String>) {
