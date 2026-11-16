@@ -1284,3 +1284,11 @@ fn a_dangling_targets_link_keeps_its_directory() {
     let result = resolve_targets(root, &version_dir, &no_user_env()).unwrap();
     assert_eq!(result, SdkResolution::Roots(vec![alpha]));
 }
+
+#[test]
+fn the_known_list_splits_as_read_all_lines_splits() {
+    assert_eq!(super::read_all_lines("a\nb\r\nc\rd"), ["a", "b", "c", "d"]);
+    assert_eq!(super::read_all_lines("a\n\nb\n"), ["a", "", "b"]);
+    assert_eq!(super::read_all_lines(" a \r\n"), [" a "]);
+    assert!(super::read_all_lines("").is_empty());
+}

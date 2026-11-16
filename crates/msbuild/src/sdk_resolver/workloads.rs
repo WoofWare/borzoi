@@ -45,7 +45,11 @@
 //!   `workloadsets` folder name) is skipped everywhere.
 //! * Import order is known-list line order first, then the remaining
 //!   ids ordinal-case-insensitively alphabetical — this matches the
-//!   observed `-preprocess` import order.
+//!   observed `-preprocess` import order. The known list is read as
+//!   `File.ReadAllLines` reads it (every non-empty line, untrimmed, split
+//!   at a lone `\r` too); a manifest takes the order of the line spelled
+//!   exactly as its id, while it counts as found against a line spelled in
+//!   any case.
 //! * The targets locator keeps only manifest directories that contain
 //!   `WorkloadManifest.targets`; the auto-import locator returns the
 //!   `{pack}/Sdk` folders of installed SDK-kind packs whose
@@ -80,6 +84,10 @@
 //! since MSBuild's import of it (and the walk's) would read it, and so does a
 //! relative root, which the resolver takes against a working directory we
 //! cannot see.
+//! The auto-import locator also declines unless the workload resolver
+//! certainly loads every resolved manifest (`manifest::check_manifests_load`:
+//! the reader's grammar, the localization catalogs, and the composition's
+//! `depends-on` and conflict checks).
 //!
 //! Every existence probe asks what CLR `File.Exists` answers
 //! (`dotnet_io::file_exists`), which `tools/workload-oracle` grades with a

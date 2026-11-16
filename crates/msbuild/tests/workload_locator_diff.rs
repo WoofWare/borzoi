@@ -1058,7 +1058,7 @@ const CONTENTS: &[Content] = &[
     Content::Throws("an array", "[]"),
     Content::Declined("an integer version", r#"{"version": 1}"#),
     Content::Declined("a comment", r#"{"version": "1.0.0" /* c */}"#),
-    Content::Declined("a trailing comma", r#"{"version": "1.0.0",}"#),
+    Content::Loads("trailing commas", r#"{"version": "1.0.0",}"#),
     Content::Declined("input after the object", r#"{"version": "1.0.0"} x"#),
 ];
 
@@ -1360,4 +1360,86 @@ fn the_known_list_is_read_as_the_resolver_reads_it() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Prerelease spellings a `depends-on` compares: the orders `FXVersion.Compare`
+/// takes from the first differing character rather than whole identifiers.
+const FX_VERSIONS: &[&str] = &[
+    "1.0.0",
+    "1.0.1",
+    "1.0.0-rc",
+    "1.0.0-rc.1",
+    "1.0.0-rc.2",
+    "1.0.0-rc.10",
+    "1.0.0-rc.1.2",
+    "1.0.0-rc.a",
+    "1.0.0-rc-1",
+    "1.0.0-preview.9",
+    "1.0.0-a",
+    "1.0.0-a-b",
+    "1.0.0-a.b",
+    "1.0.0-1",
+    "1.0.0-10",
+    "1.0.0-x.-1",
+    "1.0.0-x.-10",
+];
+
+/// A manifest that depends on itself at another version: the auto-import
+/// locator loads it exactly where the resolver's `FXVersion.Compare` puts the
+/// needed version at or below its own, over every pair of [`FX_VERSIONS`].
+#[test]
+fn a_dependency_s_versions_compare_as_the_resolver_compares_them() {
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let (mut met, mut unmet) = (0, 0);
+        for own in FX_VERSIONS {
+            for needed in FX_VERSIONS {
+                let dir = tempfile::TempDir::new().unwrap();
+                let dotnet_root = host_fs::canonicalize(dir.path()).unwrap().join("dotnet");
+                std::fs::create_dir_all(dotnet_root.join("sdk/10.0.100")).unwrap();
+                write(
+                    &dotnet_root.join("sdk-manifests/10.0.100/contoso.one/WorkloadManifest.json"),
+                    &format!(
+                        r#"{{"version": "{own}", "depends-on": {{"contoso.one": "{needed}"}}}}"#
+                    ),
+                );
+                let layout = Layout {
+                    _dir: dir,
+                    dotnet_root,
+                    user_root: None,
+                    host: Host {
+                        version: "10.0.100".to_owned(),
+                        major: 10,
+                        minor: 0,
+                        hundreds: 1,
+                        pre: None,
+                    },
+                    in_domain: true,
+                    description: format!("contoso.one {own} depends on itself at {needed}\n"),
+                };
+                let ours = ours(&layout, WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR);
+                let theirs = theirs(&mut oracle, &layout, WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR);
+                if theirs.is_ok() {
+                    met += 1;
+                } else {
+                    unmet += 1;
+                }
+                if ours.is_some() != theirs.is_ok() && failures.len() < 8 {
+                    failures.push(format!(
+                        "{}: {}we answer {ours:?}, the resolver {theirs:?}",
+                        sdk.display(),
+                        layout.description
+                    ));
+                }
+            }
+        }
+        println!("{}: {met} met, {unmet} unmet", sdk.display());
+        assert!(
+            met > 0 && unmet > 0,
+            "{}: the sweep graded one side only",
+            sdk.display()
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

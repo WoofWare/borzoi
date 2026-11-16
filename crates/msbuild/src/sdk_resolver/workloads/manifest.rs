@@ -12,7 +12,8 @@
 //!
 //! [`check_manifests_load`] certifies a strict subset of what loads, and
 //! declines everything else: a document the strict JSON reader refuses (so
-//! comments and trailing commas, which the reference skips, decline too), an
+//! comments, which the reference skips, decline too; trailing commas, which
+//! real manifests carry, are read as the reference reads them), an
 //! integer `version`, an id outside plain ASCII path components, a version
 //! outside the plain spellings, a kind outside the named ones. Within the
 //! subset each rule is the reference's, transcribed from dotnet/sdk
@@ -21,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::super::global_json::{JsonValue, parse_json_string_map, parse_strict_json};
+use super::super::global_json::{JsonValue, parse_strict_json};
 use super::{is_plain_release_version, unsupported};
 use crate::SdkResolveError;
 use crate::dotnet_io;
@@ -134,7 +135,7 @@ fn localization_catalogs(
         let catalog = observed::is_file(observer, &path)
             .then(|| observed::read_to_string(observer, &path).ok())
             .flatten()
-            .and_then(|text| parse_json_string_map(&text))
+            .and_then(|text| read_catalog(&text))
             .filter(|entries| {
                 // `ReadStringDictionary` throws on a key it has already read.
                 entries
@@ -155,6 +156,21 @@ fn localization_catalogs(
     Ok(catalogs)
 }
 
+/// `ReadLocalizationCatalog` over `text`: an object of strings, read with
+/// trailing commas allowed, as the manifest is.
+fn read_catalog(text: &str) -> Option<Vec<(String, String)>> {
+    let JsonValue::Object(entries) = parse_strict_json(text, true)? else {
+        return None;
+    };
+    entries
+        .into_iter()
+        .map(|(key, value)| match value {
+            JsonValue::String(value) => Some((key, value)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// `ComposeWorkloadManifests`: every `depends-on` met, and no workload or pack
 /// defined twice.
 fn compose(all: &[(&Resolved<'_>, Facts)]) -> Result<(), SdkResolveError> {
@@ -173,15 +189,8 @@ fn compose(all: &[(&Resolved<'_>, Facts)]) -> Result<(), SdkResolveError> {
             else {
                 return decline(format!("{} depends on missing {dependency}", manifest.id));
             };
-            let (Some(needed), Some(have)) =
-                (release_triple(version), release_triple(&found.version))
-            else {
-                return decline(format!(
-                    "{}'s dependency on {dependency} compares versions we do not certify",
-                    manifest.id
-                ));
-            };
-            if needed > have {
+            // Both spellings are plain (`read_manifest` admits no other).
+            if fx_compare(version, &found.version) == std::cmp::Ordering::Greater {
                 return decline(format!("{} needs {dependency} {version}", manifest.id));
             }
         }
@@ -203,14 +212,91 @@ fn compose(all: &[(&Resolved<'_>, Facts)]) -> Result<(), SdkResolveError> {
     Ok(())
 }
 
-/// `major.minor.patch` with no prerelease, as numbers, for an `FXVersion`
-/// comparison we certify.
-fn release_triple(version: &str) -> Option<(u64, u64, u64)> {
-    if !is_plain_release_version(version) || version.contains('-') {
-        return None;
+/// `FXVersion.Compare` of two plain version spellings
+/// (`is_plain_release_version`), transcribed: the numeric core compared
+/// part by part, a release above any prerelease, and two prereleases
+/// compared from their first differing character, by the identifiers it
+/// falls in (both `int.TryParse`-numeric: numerically; one numeric: it is
+/// lower; neither: by that character).
+fn fx_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let split = |v: &str| -> (Vec<u64>, String) {
+        let (core, pre) = match v.split_once('-') {
+            Some((core, pre)) => (core, format!("-{pre}")),
+            None => (v, String::new()),
+        };
+        let core = core.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+        (core, pre)
+    };
+    let ((core_a, pre_a), (core_b, pre_b)) = (split(a), split(b));
+    match core_a.cmp(&core_b) {
+        Ordering::Equal => {}
+        other => return other,
     }
-    let mut parts = version.split('.').map(|part| part.parse::<u64>().ok());
-    Some((parts.next()??, parts.next()??, parts.next()??))
+    match (pre_a.is_empty(), pre_b.is_empty()) {
+        (true, true) => return Ordering::Equal,
+        (true, false) => return Ordering::Greater,
+        (false, true) => return Ordering::Less,
+        (false, false) => {}
+    }
+    let (sa, sb) = (pre_a.as_bytes(), pre_b.as_bytes());
+    let at = |s: &[u8], i: usize| s.get(i).copied().unwrap_or(0);
+    // `GetId`: from `start` up to the next `.` or the end.
+    let id = |s: &[u8], start: usize| -> String {
+        let end = s[start..]
+            .iter()
+            .position(|&c| c == b'.')
+            .map_or(s.len(), |p| start + p);
+        String::from_utf8_lossy(&s[start..end]).into_owned()
+    };
+    // `int.TryParse` of an identifier, which has no whitespace: a sign, then
+    // digits, within `int`.
+    let number = |s: &str| -> Option<i64> {
+        let digits = s.strip_prefix('-').unwrap_or(s);
+        if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        s.parse::<i64>().ok().filter(|n| i32::try_from(*n).is_ok())
+    };
+    let mut start = 1;
+    let mut i = 1;
+    loop {
+        let (ca, cb) = (at(sa, i), at(sb, i));
+        if ca != cb {
+            if ca == 0 && cb == b'.' {
+                return Ordering::Less;
+            }
+            if cb == 0 && ca == b'.' {
+                return Ordering::Greater;
+            }
+            let (ia, ib) = (id(sa, start), id(sb, start));
+            return match (number(&ia), number(&ib)) {
+                (Some(x), Some(y)) => {
+                    if x > y {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => {
+                    if ca > cb {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+            };
+        }
+        if ca == 0 {
+            return Ordering::Equal;
+        }
+        if ca == b'.' {
+            start = i + 1;
+        }
+        i += 1;
+    }
 }
 
 /// A workload or pack id `PathComponentUtilities.IsValidPathComponent`
@@ -308,7 +394,7 @@ fn string_map<'v>(
 /// `WorkloadManifestReader.ReadWorkloadManifest` over `text`, within the
 /// certified subset.
 fn read_manifest(text: &str) -> Result<Facts, &'static str> {
-    let document = parse_strict_json(text).ok_or("not JSON the strict reader accepts")?;
+    let document = parse_strict_json(text, true).ok_or("not JSON the strict reader accepts")?;
     let top = fields(
         &document,
         &[
@@ -479,5 +565,53 @@ fn read_pack(value: &JsonValue) -> Result<(), &'static str> {
         Ok(())
     } else {
         Err("a pack without a version or a kind")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn fx_versions_compare_from_the_first_differing_character() {
+        // `workload_locator_diff` grades these against the resolver; here the
+        // orders a whole-identifier comparison would get wrong are pinned.
+        assert_eq!(fx_compare("1.0.0", "1.0.0-rc.1"), Ordering::Greater);
+        assert_eq!(fx_compare("1.0.0-rc.2", "1.0.0-rc.10"), Ordering::Less);
+        assert_eq!(fx_compare("1.0.0-rc.1", "1.0.0-rc.a"), Ordering::Less);
+        assert_eq!(fx_compare("1.0.0-rc", "1.0.0-rc.1"), Ordering::Less);
+        // `-` sorts before `.`, though `a-b` is the longer identifier.
+        assert_eq!(fx_compare("1.0.0-a-b", "1.0.0-a.b"), Ordering::Less);
+        // `int.TryParse` reads `-1` as a number.
+        assert_eq!(fx_compare("1.0.0-x.-1", "1.0.0-x.a"), Ordering::Less);
+        assert_eq!(fx_compare("1.0.0-x.-10", "1.0.0-x.-1"), Ordering::Less);
+        assert_eq!(fx_compare("2.0.0-rc.1", "2.0.0-rc.1"), Ordering::Equal);
+    }
+
+    #[test]
+    fn a_manifest_is_certified_only_within_the_reader_s_grammar() {
+        let loads = |text: &str| read_manifest(text).is_ok();
+        assert!(loads(r#"{"version": "1.0.0"}"#));
+        assert!(loads(r#"{"Version": "1.0.0", "data": [1, {"x": null}],}"#));
+        assert!(loads(
+            r#"{"version": "1.0.0", "workloads": {"w": {"packs": []}}, "packs": {"p": {"version": "1", "kind": "SDK"}}}"#
+        ));
+        assert!(!loads(
+            r#"{"version": "1.0.0", "workloads": {"w": {"kind": "dev"}}}"#
+        ));
+        assert!(!loads(r#"{"version": "1.0.0", "other": 1}"#));
+        assert!(!loads(r#"{"version": "1.0.0", "VERSION": "1.0.0"}"#));
+        assert!(!loads(r#"{"version": 1}"#));
+        assert!(!loads(r#"{"version": "1.0.0" /* c */}"#));
+        assert!(!loads(
+            r#"{"version": "1.0.0", "packs": {"p": {"version": "1"}}}"#
+        ));
+        assert!(!loads(
+            r#"{"version": "1.0.0", "workloads": {"w": {"replace-with": "v"}}}"#
+        ));
+        assert!(!loads(
+            r#"{"version": "1.0.0", "workloads": {"w": {}, "W": {}}}"#
+        ));
     }
 }
