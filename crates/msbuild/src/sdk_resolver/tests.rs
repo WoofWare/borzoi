@@ -59,6 +59,8 @@ fn install_sdk_nuget_cased(
         .join(version)
         .join(inner);
     fs::create_dir_all(&sdk_root).unwrap();
+    // NuGet's marker that the version is restored.
+    fs::write(sdk_root.parent().unwrap().join(".nupkg.metadata"), "{}").unwrap();
     fs::write(sdk_root.join("Sdk.props"), "<Project/>").unwrap();
     fs::write(sdk_root.join("Sdk.targets"), "<Project/>").unwrap();
     sdk_root
@@ -194,11 +196,14 @@ fn stable_beats_prerelease_at_same_numeric_prefix() {
 }
 
 #[test]
-fn missing_targets_falls_back_to_lower_version() {
+fn missing_targets_in_the_selected_sdk_declines() {
+    // MSBuild's default resolver serves the selected SDK's
+    // `Sdks/{name}/Sdk` on `Directory.Exists` alone and then fails to
+    // import the missing `Sdk.targets` (MSB4019); it never falls back to
+    // 8.0.100. So the resolution declines rather than commit to either.
     let tmp = TempDir::new().unwrap();
     install_sdk(tmp.path(), "8.0.100", "Microsoft.NET.Sdk");
 
-    // 9.0.100 has props but no targets — must be skipped.
     let broken = tmp
         .path()
         .join("sdk")
@@ -209,7 +214,7 @@ fn missing_targets_falls_back_to_lower_version() {
     fs::create_dir_all(&broken).unwrap();
     fs::write(broken.join("Sdk.props"), "<Project/>").unwrap();
 
-    let paths = locate_dotnet_sdk(
+    let err = locate_dotnet_sdk(
         tmp.path(),
         None,
         "Microsoft.NET.Sdk",
@@ -217,8 +222,68 @@ fn missing_targets_falls_back_to_lower_version() {
         None,
         &Observer::new(),
     )
-    .unwrap();
-    assert_eq!(version_dir_name(&paths.props), "8.0.100");
+    .expect_err("a selected SDK without Sdk.targets must not resolve");
+    assert!(
+        matches!(err, SdkResolveError::UnsupportedLayout { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_selected_sdk_without_the_name_does_not_fall_back_to_a_lower_one() {
+    // MSBuild's default resolver serves the running SDK's `Sdks/{name}/Sdk`
+    // or fails (MSB4236); it never looks in 8.0.100.
+    let tmp = TempDir::new().unwrap();
+    install_sdk(tmp.path(), "8.0.100", "Microsoft.NET.Sdk");
+    install_sdk(tmp.path(), "9.0.100", "Microsoft.NET.Sdk.Web");
+    let err = locate_dotnet_sdk(
+        tmp.path(),
+        None,
+        "Microsoft.NET.Sdk",
+        None,
+        None,
+        &Observer::new(),
+    )
+    .expect_err("9.0.100 is selected and lacks Microsoft.NET.Sdk");
+    assert_eq!(err, SdkResolveError::NotFound);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_sdk_directory_is_served() {
+    // `Directory.Exists` follows the link.
+    let tmp = TempDir::new().unwrap();
+    let real = install_sdk(tmp.path(), "8.0.100", "Real.Sdk");
+    let sdks = tmp.path().join("sdk").join("8.0.100").join("Sdks");
+    fs::create_dir_all(sdks.join("Linked.Sdk")).unwrap();
+    std::os::unix::fs::symlink(&real, sdks.join("Linked.Sdk").join("Sdk")).unwrap();
+    let paths =
+        locate_dotnet_sdk(tmp.path(), None, "Linked.Sdk", None, None, &Observer::new()).unwrap();
+    assert_eq!(paths.root, sdks.join("Linked.Sdk").join("Sdk"));
+}
+
+#[test]
+fn a_nuget_version_without_a_restore_marker_is_not_installed() {
+    let dotnet = TempDir::new().unwrap();
+    let nuget = TempDir::new().unwrap();
+    let root = install_sdk_nuget_cased(nuget.path(), "1.2.3", "MySdk", "Sdk");
+    fs::remove_file(root.parent().unwrap().join(".nupkg.metadata")).unwrap();
+    let err = locate_dotnet_sdk(
+        dotnet.path(),
+        Some(nuget.path()),
+        "MySdk/1.2.3",
+        None,
+        None,
+        &Observer::new(),
+    )
+    .expect_err("NuGet restores a version without its marker again");
+    assert!(
+        matches!(
+            err,
+            SdkResolveError::NotFound | SdkResolveError::VersionNotSatisfied { .. }
+        ),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -1536,6 +1601,7 @@ fn end_to_end_per_import_pin_resolves_from_nuget() {
     let nuget = TempDir::new().unwrap();
     let sdk_root = nuget.path().join("mysdk").join("1.2.3").join("sdk");
     fs::create_dir_all(&sdk_root).unwrap();
+    fs::write(sdk_root.parent().unwrap().join(".nupkg.metadata"), "{}").unwrap();
     fs::write(
         sdk_root.join("Sdk.props"),
         r#"<Project><PropertyGroup><SdkSeed>fromnuget</SdkSeed></PropertyGroup></Project>"#,

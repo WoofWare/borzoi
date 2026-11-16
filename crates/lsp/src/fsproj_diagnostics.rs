@@ -2005,13 +2005,15 @@ mod tests {
         MissingDotnetRoot,
         GlobalJsonRead,
         GlobalJsonParse,
+        GlobalJsonUndecided,
     }
 
     impl DiscoveryFailure {
-        const ALL: [Self; 3] = [
+        const ALL: [Self; 4] = [
             Self::MissingDotnetRoot,
             Self::GlobalJsonRead,
             Self::GlobalJsonParse,
+            Self::GlobalJsonUndecided,
         ];
 
         /// Lay the failure out under `dir`, returning the `global.json` it
@@ -2030,6 +2032,12 @@ mod tests {
                     fs::write(&global_json, "{").unwrap();
                     Some(global_json)
                 }
+                Self::GlobalJsonUndecided => {
+                    // A directory of that name, which the .NET host and SDK
+                    // read differently.
+                    fs::create_dir(&global_json).unwrap();
+                    Some(global_json)
+                }
             }
         }
 
@@ -2041,6 +2049,10 @@ mod tests {
                     | (
                         Self::GlobalJsonParse,
                         DiscoveryError::GlobalJsonParse { .. }
+                    )
+                    | (
+                        Self::GlobalJsonUndecided,
+                        DiscoveryError::GlobalJsonUndecided(_)
                     )
             )
         }

@@ -72,13 +72,23 @@
 //! reproduce MSBuild's comparison for those), and any directory or
 //! known-list file that exists but cannot be enumerated/read (the
 //! real provider throws there; an empty answer would be wrongly
-//! certified as exact).
+//! certified as exact), and any file the resolver reads (a known list,
+//! the runtime identifier chain, a flat manifest, or for the auto-import
+//! locator any manifest) that CLR `File.Exists` finds but that is no
+//! regular file: a read of a dangling link or a socket throws, and one of a
+//! FIFO never returns.
+//!
+//! Every existence probe asks what CLR `File.Exists` answers
+//! ([`dotnet_io::file_exists`]), which `tools/workload-oracle` grades with a
+//! dangling link, a link loop, a directory, a link to one, a socket and a FIFO
+//! at each probed path (`workload_locator_diff`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::{SdkResolveError, SdkVersion};
 use crate::SdkResolution;
+use crate::dotnet_io;
 use crate::observed::{self, EntryKind, Failure, Observer};
 
 mod feature_band;
@@ -156,7 +166,9 @@ fn unsupported(reason: impl Into<String>) -> SdkResolveError {
 /// is merely conservative.) Entry-iteration and per-entry type-probe
 /// errors degrade for the same reason. The type probe follows symlinks
 /// (`metadata`, not `file_type`), matching `Directory.GetDirectories`,
-/// which includes a symlink to a directory and excludes one to a file.
+/// which includes a symlink to a directory and excludes one to a file, and
+/// one it cannot follow (dangling, or a loop): to it that is no directory
+/// (`workload_locator_diff` grades it).
 fn read_dir_or_degrade(
     dir: &Path,
     observer: &Observer,
@@ -178,11 +190,16 @@ fn read_dir_or_degrade(
         // entry's own type, which does not follow a symlink and would report
         // a symlink to a directory as a non-directory. `Directory.GetDirectories` includes a
         // symlinked directory (package-manager and user-local layouts create
-        // them), so we must follow the link. A dangling symlink errors here and
-        // degrades — conservative, and MSBuild's own later enumeration of it
-        // would fail too.
-        if observed::kind(observer, &entry.path).map_err(enumeration_failed)? == EntryKind::Dir {
-            dirs.push(entry);
+        // them), so we must follow the link. A link that cannot be followed is
+        // no directory to it, and is skipped; any other failure degrades.
+        match observed::kind(observer, &entry.path) {
+            Ok(EntryKind::Dir) => dirs.push(entry),
+            Ok(_) => {}
+            Err(err) => {
+                if observed::link_kind(observer, &entry.path) != Ok(EntryKind::Symlink) {
+                    return Err(enumeration_failed(err));
+                }
+            }
         }
     }
     Ok(dirs)
@@ -211,18 +228,34 @@ pub fn resolve_workload_locator(
         ));
     }
     let band = host_feature_band(sdk_version_dir)?;
+    check_runtime_identifier_chain(sdk_version_dir, observer)?;
     let roots = workload_roots(dotnet_root, &band, env, observer)?;
     let manifest_roots = enumerate_manifest_roots(sdk_version_dir, &band, &roots, observer)?;
 
     if sdk_name.eq_ignore_ascii_case(WORKLOAD_MANIFEST_TARGETS_LOCATOR) {
         // `CachingWorkloadResolver` keeps only the manifest directories
-        // that actually contain the targets file; the rest are silently
+        // where CLR `File.Exists` finds the targets file (a dangling link
+        // included: MSBuild then fails to import it); the rest are silently
         // skipped, not an error.
         let with_targets: Vec<PathBuf> = manifest_roots
             .into_iter()
-            .filter(|dir| observed::is_file(observer, &dir.join("WorkloadManifest.targets")))
+            .filter(|dir| dotnet_io::file_exists(observer, &dir.join("WorkloadManifest.targets")))
             .collect();
         return Ok(SdkResolution::Roots(with_targets));
+    }
+
+    // The auto-import locator asks the workload resolver for installed packs,
+    // which first opens and parses every resolved manifest. A manifest that
+    // is no regular file (a dangling link, a socket) throws there, and a FIFO
+    // blocks for good.
+    for dir in &manifest_roots {
+        let manifest = dir.join("WorkloadManifest.json");
+        if !observed::is_file(observer, &manifest) {
+            return Err(unsupported(format!(
+                "the workload resolver would open a manifest that is no regular file: {}",
+                manifest.display()
+            )));
+        }
     }
 
     // Auto-import locator: MSBuild returns the `{pack}/Sdk` folder of
@@ -243,6 +276,37 @@ pub fn resolve_workload_locator(
         }
     }
     Ok(SdkResolution::Roots(Vec::new()))
+}
+
+/// The text of `path`, which CLR `File.Exists` found, or the decline where
+/// the resolver's `File.ReadAllLines` of it throws (a dangling link, a socket,
+/// a file it cannot open) or never returns (a FIFO). A file that is not UTF-8
+/// declines too, though `ReadAllLines` would decode it with replacements.
+fn read_existing_text(path: &Path, observer: &Observer) -> Result<String, SdkResolveError> {
+    if !observed::is_file(observer, path) {
+        return Err(unsupported(format!(
+            "the workload resolver would read a file that is no regular file: {}",
+            path.display()
+        )));
+    }
+    observed::read_to_string(observer, path)
+        .map_err(|err| unsupported(format!("cannot read {}: {err}", path.display())))
+}
+
+/// `WorkloadResolver.Create`, which both locators run, reads the host SDK's
+/// `NETCoreSdkRuntimeIdentifierChain.txt` wherever CLR `File.Exists` finds it.
+/// Neither locator's answer depends on the runtime identifiers it lists, but
+/// a read that throws fails the resolution, so the file must be absent or
+/// readable.
+fn check_runtime_identifier_chain(
+    sdk_version_dir: &Path,
+    observer: &Observer,
+) -> Result<(), SdkResolveError> {
+    let path = sdk_version_dir.join("NETCoreSdkRuntimeIdentifierChain.txt");
+    if dotnet_io::file_exists(observer, &path) {
+        read_existing_text(&path, observer)?;
+    }
+    Ok(())
 }
 
 /// The feature band of the host SDK (`10.0.301` → `10.0.300`,
@@ -367,12 +431,10 @@ fn workload_roots(
         .join(&release_band)
         .join("userlocal");
     let mut user = None;
-    // CLR `File.Exists` (what `WorkloadFileBasedInstall.IsUserLocal` uses)
-    // is false for a directory or a symlink to one, so `is_file` — not
-    // `exists` — faithfully transcribes the marker check. A malformed
-    // `userlocal` *directory* must read as "no marker" (global install),
-    // not as a present marker that would consult/shadow the user root.
-    if observed::is_file(observer, &marker) {
+    // `WorkloadFileBasedInstall.IsUserLocal` asks CLR `File.Exists`: a
+    // `userlocal` directory (or a link to one) is no marker, and a dangling
+    // link, a socket or a FIFO is one.
+    if dotnet_io::file_exists(observer, &marker) {
         match env.user_dotnet_root {
             Some(user_root) => {
                 if user_root != dotnet_root && observed::is_dir(observer, user_root) {
@@ -407,9 +469,9 @@ fn workload_roots(
             .join("installertype")
             .join("msi");
         // `GetWorkloadInstallType` tests this marker with CLR `File.Exists`
-        // too, so `is_file` (not `exists`): a directory named `msi` is not
-        // the marker.
-        if observed::is_file(observer, &msi_marker) {
+        // too: a directory named `msi` is not the marker, and a dangling link
+        // is.
+        if dotnet_io::file_exists(observer, &msi_marker) {
             return Err(unsupported(format!(
                 "MSI-based workload install: {}",
                 msi_marker.display()
@@ -437,8 +499,10 @@ fn workload_roots(
                     .join("default.json"),
             );
         }
+        // `InstallStateContents.FromPath` reads the file wherever CLR
+        // `File.Exists` finds one, and a read of a dangling link throws.
         for install_state in candidates {
-            if observed::is_file(observer, &install_state) {
+            if dotnet_io::file_exists(observer, &install_state) {
                 return Err(unsupported(format!(
                     "workload install-state pin present: {}",
                     install_state.display()
@@ -469,50 +533,37 @@ fn enumerate_manifest_roots(
 ) -> Result<Vec<PathBuf>, SdkResolveError> {
     let band_name = band.to_string();
     // Known-id list: `KnownWorkloadManifests.txt`, falling back to the
-    // older `IncludedWorkloadManifests.txt`; a missing file just means
-    // no fallback pass and no preferential ordering. A file that
-    // exists but cannot be read degrades — upstream `File.ReadAllLines`
-    // would throw and fail the evaluation, and treating the list as
-    // absent would silently change ordering and fallback.
+    // older `IncludedWorkloadManifests.txt`, each tried where CLR
+    // `File.Exists` finds it; a missing file just means no fallback pass and
+    // no preferential ordering. A file that exists but cannot be read
+    // degrades — upstream `File.ReadAllLines` would throw and fail the
+    // evaluation, and treating the list as absent would silently change
+    // ordering and fallback.
     let mut known_ids: Option<Vec<String>> = None;
     for name in [
         "KnownWorkloadManifests.txt",
         "IncludedWorkloadManifests.txt",
     ] {
         let path = sdk_version_dir.join(name);
-        match observed::read_to_string(observer, &path) {
-            Ok(contents) => {
-                // Upstream reads this with `File.ReadAllLines`, whose
-                // BOM-detecting `StreamReader` consumes a leading UTF-8 BOM.
-                // Rust's `read_to_string` keeps it, and `str::trim` does *not*
-                // remove U+FEFF (no longer White_Space), so without this the
-                // first id would carry the BOM and fail its lookup / safe-id
-                // check, degrading a valid layout.
-                let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
-                known_ids = Some(
-                    contents
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                        .map(str::to_owned)
-                        .collect(),
-                );
-                break;
-            }
-            // `IsADirectory`: upstream guards with `File.Exists`, which
-            // is false for a directory, so that shape is "absent" too.
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::IsADirectory
-                ) => {}
-            Err(err) => {
-                return Err(unsupported(format!(
-                    "cannot read {}: {err}",
-                    path.display()
-                )));
-            }
+        if !dotnet_io::file_exists(observer, &path) {
+            continue;
         }
+        let contents = read_existing_text(&path, observer)?;
+        // Upstream reads this with `File.ReadAllLines`, whose BOM-detecting
+        // `StreamReader` consumes a leading UTF-8 BOM. Rust's `read_to_string`
+        // keeps it, and `str::trim` does *not* remove U+FEFF (no longer
+        // White_Space), so without this the first id would carry the BOM and
+        // fail its lookup / safe-id check, degrading a valid layout.
+        let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
+        known_ids = Some(
+            contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        );
+        break;
     }
 
     check_workload_sets(band, roots, observer)?;
@@ -871,7 +922,9 @@ fn resolve_manifest_directory(
     let mut best: Option<(SdkVersion, PathBuf)> = None;
     for entry in read_dir_or_degrade(id_dir, observer)? {
         let candidate = entry.path;
-        if !observed::is_file(observer, &candidate.join("WorkloadManifest.json")) {
+        // CLR `File.Exists`, as `ResolveManifestDirectory` asks it: a
+        // dangling link makes its directory a manifest directory too.
+        if !dotnet_io::file_exists(observer, &candidate.join("WorkloadManifest.json")) {
             continue;
         }
         let Some(name) = entry.name.to_str().map(str::to_owned) else {
@@ -890,7 +943,18 @@ fn resolve_manifest_directory(
     if let Some((_, directory)) = best {
         return Ok(Some(directory));
     }
-    if observed::is_file(observer, &id_dir.join("WorkloadManifest.json")) {
+    let flat = id_dir.join("WorkloadManifest.json");
+    if dotnet_io::file_exists(observer, &flat) {
+        // `ResolveManifestDirectory` then opens a flat manifest for its
+        // version, and keeps the directory whatever the open throws. An open
+        // of a FIFO never returns, so a special file is declined rather than
+        // told apart.
+        if observed::kind(observer, &flat) == Ok(EntryKind::Other) {
+            return Err(unsupported(format!(
+                "a flat workload manifest is a special file: {}",
+                flat.display()
+            )));
+        }
         return Ok(Some(id_dir.to_path_buf()));
     }
     Ok(None)
@@ -930,7 +994,7 @@ fn find_any_auto_import_props(
                 version.path.join("Sdk").join("AutoImport.props"),
                 version.path.join("AutoImport.props"),
             ] {
-                if observed::is_file(observer, &candidate) {
+                if dotnet_io::file_exists(observer, &candidate) {
                     return Ok(Some(candidate));
                 }
             }
