@@ -12,7 +12,21 @@
 //! Gated behind the `test-support` feature: nothing at runtime compares against
 //! an oracle.
 
-use crate::{AssemblyEnv, EntityHandle, Resolution};
+use crate::{AssemblyEnv, EntityHandle, GateInput, Resolution, ResolvedFile};
+
+/// Which input of the extension-scope gate declines a call of a method named
+/// `name` in the file `resolved` (`is_static`: a type-qualified call), or
+/// `None` when the gate lets the
+/// intrinsic group stand. The extension-scope grid asserts the input, not
+/// only the verdict, so a cell that declines for the wrong reason fails.
+pub fn extension_gate_decline(
+    resolved: &ResolvedFile,
+    env: &AssemblyEnv,
+    name: &str,
+    is_static: bool,
+) -> Option<GateInput> {
+    crate::infer::ExtensionScope::of(resolved).decline(env, name, is_static)
+}
 
 pub mod binder_completeness;
 pub mod entity_placement;

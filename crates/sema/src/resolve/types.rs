@@ -26,7 +26,6 @@ use super::open_scope::PrefixRef;
 use super::state::{
     ActivePatternShape, MemberEntry, Resolver, ScopeEntry, ShadowVeto, TieredResolution,
 };
-use super::unknowables::Unknowable;
 use crate::names::{NameKey, PathKey, Segments};
 use crate::recovery::SyntaxRecovery;
 
@@ -2359,12 +2358,10 @@ impl<'a> Resolver<'a> {
                         .opaque_regions
                         .push(super::model::OpaqueRegion::Range(arg.syntax().text_range()));
                 }
+                // An attribute with no name node records no verdict; the
+                // extension names read that as possibly any attribute.
                 if let Some(type_name) = attr.type_name() {
                     self.resolve_attribute_type(&type_name);
-                } else {
-                    // No name node at all: the gate cannot key this attribute
-                    // and must keep the presence defer for the file.
-                    self.out.unknowables.raise(Unknowable::AttributeShape);
                 }
             }
         }
@@ -2406,9 +2403,8 @@ impl<'a> Resolver<'a> {
     fn resolve_attribute_type(&mut self, type_name: &borzoi_cst::syntax::LongIdent) {
         let toks: Vec<SyntaxToken> = type_name.idents().collect();
         let (Some(first), Some(last)) = (toks.first(), toks.last()) else {
-            // A name node with no ident tokens: unkeyable, like the nameless
-            // case — the gate keeps the presence defer.
-            self.out.unknowables.raise(Unknowable::AttributeShape);
+            // A name node with no ident tokens: no range to key a verdict by,
+            // like the nameless case.
             return;
         };
         // FCS records the attribute-type use at the written path's range
@@ -4124,123 +4120,6 @@ impl<'a> Resolver<'a> {
             self.index
                 .unindexed_augmented_names
                 .insert(id_text(last).to_string());
-        }
-    }
-
-    /// EX-3 §2(a): collect the member **names** a `type … with` augmentation
-    /// contributes, keyed by staticness, into
-    /// [`Output::augmentation_instance_names`](crate::resolve::output::Output::augmentation_instance_names) /
-    /// [`Output::augmentation_static_names`](crate::resolve::output::Output::augmentation_static_names) — the extension gate defers
-    /// exactly those names instead of every call in the file. Unlike the
-    /// *emission* index ([`Self::index_augmentation_members`], which needs the
-    /// head to resolve), the names are walkable for **every** augmentation
-    /// shape; only a member whose name itself cannot be extracted (an
-    /// active-pattern head, an `inherit`) raises
-    /// [`Unknowable::AugmentationNames`], keeping the wholesale
-    /// defer. Deliberately over-approximate where classification is uncertain:
-    /// an unknown staticness lands in both sets, an `override` counts as an
-    /// instance name — spurious entries only defer that one name.
-    pub(super) fn collect_augmentation_extension_names(&mut self, defn: &TypeDefn) {
-        let mut members: Vec<MemberDefn> = defn.members().collect();
-        if let Some(TypeDefnRepr::ObjectModel(om)) = defn.repr() {
-            members.extend(om.members());
-        }
-        for m in &members {
-            match m {
-                MemberDefn::Member(mm) => {
-                    if mm.leading_keyword() == MemberLeading::New {
-                        // A constructor never joins a named method group.
-                        continue;
-                    }
-                    let name = mm.binding().and_then(|b| b.pat()).and_then(|p| match p {
-                        Pat::LongIdent(l) => {
-                            if l.syntax()
-                                .children()
-                                .any(|c| ActivePatName::can_cast(c.kind()))
-                            {
-                                return None;
-                            }
-                            let tok = l.head().and_then(|h| h.idents().last())?;
-                            // An operator member (`static member (+.) …`)
-                            // joins its group under its compiled name
-                            // (`op_PlusDot`), which is what `id_text` gives.
-                            Some(id_text(&tok).to_string())
-                        }
-                        _ => None,
-                    });
-                    match name {
-                        Some(name) => {
-                            if mm.leading_keyword() == MemberLeading::StaticMember {
-                                self.out.augmentation_static_names.insert(name);
-                            } else {
-                                self.out.augmentation_instance_names.insert(name);
-                            }
-                        }
-                        None => self.out.unknowables.raise(Unknowable::AugmentationNames),
-                    }
-                }
-                MemberDefn::GetSetMember(g) => {
-                    match g
-                        .name()
-                        .and_then(|n| n.idents().last())
-                        .map(|t| id_text(&t).to_string())
-                    {
-                        Some(name) => {
-                            if g.is_static() {
-                                self.out.augmentation_static_names.insert(name);
-                            } else {
-                                self.out.augmentation_instance_names.insert(name);
-                            }
-                        }
-                        None => self.out.unknowables.raise(Unknowable::AugmentationNames),
-                    }
-                }
-                MemberDefn::AutoProperty(a) => match a.ident() {
-                    Some(name) => {
-                        let name = id_text(&name).to_string();
-                        if a.is_static() {
-                            self.out.augmentation_static_names.insert(name);
-                        } else {
-                            self.out.augmentation_instance_names.insert(name);
-                        }
-                    }
-                    None => self.out.unknowables.raise(Unknowable::AugmentationNames),
-                },
-                // These shapes are illegal in an augmentation (FCS rejects
-                // them), but a name we *can* read defers that name in both
-                // groups rather than trusting the illegality.
-                MemberDefn::AbstractSlot(s) => match s.val_sig().and_then(|v| v.ident()) {
-                    Some(name) => {
-                        let name = id_text(&name).to_string();
-                        self.out.augmentation_instance_names.insert(name.clone());
-                        self.out.augmentation_static_names.insert(name);
-                    }
-                    None => self.out.unknowables.raise(Unknowable::AugmentationNames),
-                },
-                MemberDefn::ValField(v) => match v.ident() {
-                    Some(name) => {
-                        let name = id_text(&name).to_string();
-                        self.out.augmentation_instance_names.insert(name.clone());
-                        self.out.augmentation_static_names.insert(name);
-                    }
-                    None => self.out.unknowables.raise(Unknowable::AugmentationNames),
-                },
-                MemberDefn::MemberSig(ms) => match ms.val_sig().and_then(|v| v.ident()) {
-                    Some(name) => {
-                        let name = id_text(&name).to_string();
-                        self.out.augmentation_instance_names.insert(name.clone());
-                        self.out.augmentation_static_names.insert(name);
-                    }
-                    None => self.out.unknowables.raise(Unknowable::AugmentationNames),
-                },
-                // An `inherit` pulls the base's members in under names we
-                // cannot enumerate.
-                MemberDefn::Inherit(_) => self.out.unknowables.raise(Unknowable::AugmentationNames),
-                // Class-local bindings are lexically private; an interface
-                // implementation's members are reachable only through the
-                // interface, never the receiver's own name group.
-                MemberDefn::Interface(_) | MemberDefn::LetBindings(_) | MemberDefn::Do(_) => {}
-            }
         }
     }
 

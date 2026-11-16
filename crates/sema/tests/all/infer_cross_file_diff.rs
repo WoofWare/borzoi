@@ -1103,10 +1103,23 @@ fn cross_file_uses_commit_what_their_in_file_twin_commits() {
             (idx, census_by_binding(&cross, idx), lines, nodes)
         })
         .collect();
+    // Whether the extension gate declines every method call of a later file
+    // for an `open` it does not enumerate (an `open` of a project module,
+    // #794 PR 2): asked about a name nothing declares, so only a file-wide
+    // input can answer.
+    let opens_not_enumerated = |idx: usize| {
+        borzoi_sema::test_support::extension_gate_decline(
+            cross.resolved.file(idx),
+            full_bcl_env(),
+            "",
+            false,
+        ) == Some(borzoi_sema::GateInput::OpenNotEnumerated)
+    };
 
     let mut obligations = 0usize;
     let mut committed_cells = 0usize;
     let mut resolver_declined = 0usize;
+    let mut open_declined = 0usize;
     let mut failures = Vec::new();
     for (k, cell) in cells.iter().enumerate() {
         let v = &EARLIER[cell.value];
@@ -1145,6 +1158,12 @@ fn cross_file_uses_commit_what_their_in_file_twin_commits() {
                          {preceding:?}",
                         cell.cross
                     ));
+                }
+                // The twin, in a file with no `open`, owes nothing a method
+                // call behind an un-enumerated `open` can match.
+                if reasons.contains(&Incomplete::ExtensionInScope) && opens_not_enumerated(*idx) {
+                    open_declined += 1;
+                    continue;
                 }
                 if let Some(ty) = tg.binders[0].get(&binder(k, true)) {
                     obligations += 1;
@@ -1186,9 +1205,10 @@ fn cross_file_uses_commit_what_their_in_file_twin_commits() {
         }
     }
     eprintln!(
-        "cross-file well-typed: {} cells ({resolver_declined} the resolver declined), \
-         {obligations} obligations, {committed_cells} cells committed at their twin's type, {} \
-         commits ungraded",
+        "cross-file well-typed: {} cells ({resolver_declined} the resolver declined, \
+         {open_declined} a method call behind an un-enumerated `open`), {obligations} \
+         obligations, {committed_cells} cells committed at their twin's type, {} commits \
+         ungraded",
         cells.len(),
         cg.ungraded + tg.ungraded
     );

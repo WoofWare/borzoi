@@ -25,14 +25,6 @@ pub(super) enum Unknowable {
     /// [`Output::open_extension_namespaces`](crate::resolve::output::Output::open_extension_namespaces):
     /// an `open` in a nested module counts for the whole file.
     OpenExtensionSurface,
-    /// Some attribute in the file has no resolvable *name shape*, a nameless
-    /// `[<>]` or an ident-less path, so the extension gate cannot key it and
-    /// keeps the presence defer (EX-3 §2(d) stage 5).
-    AttributeShape,
-    /// Some `type … with` augmentation member's *name* is not walkable (an
-    /// operator head, an `inherit`), so the extension gate keeps the
-    /// wholesale defer (EX-3 §2(a)).
-    AugmentationNames,
     /// An earlier `namespace global` block of this file held an `open`. FCS
     /// carries what such an open brings into the blocks after it (probed: a
     /// later block's `Alpha.Color.Red` binds the opened module's `Alpha`
@@ -44,10 +36,8 @@ pub(super) enum Unknowable {
 impl Unknowable {
     /// Every reason, each once.
     #[cfg(test)]
-    pub(super) const ALL: [Unknowable; 4] = [
+    pub(super) const ALL: [Unknowable; 2] = [
         Unknowable::OpenExtensionSurface,
-        Unknowable::AttributeShape,
-        Unknowable::AugmentationNames,
         Unknowable::GlobalBlockOpen,
     ];
 
@@ -95,13 +85,6 @@ mod tests {
             rf.open_extension_unknowable(),
             rf.unknowables.contains(Unknowable::OpenExtensionSurface)
         );
-        assert_eq!(
-            rf.augmentation_names_unknowable(),
-            rf.unknowables.contains(Unknowable::AugmentationNames)
-        );
-        if rf.unknowables.contains(Unknowable::AttributeShape) {
-            assert!(rf.attributes_may_declare_extension(&env));
-        }
         Unknowable::ALL
             .into_iter()
             .filter(|&r| rf.unknowables.contains(r))
@@ -122,11 +105,6 @@ mod tests {
             (
                 "module M\nopen type Nowhere.T\nlet x = 1\n",
                 &[Unknowable::OpenExtensionSurface],
-            ),
-            ("module M\n[<>]\nlet x = 1\n", &[Unknowable::AttributeShape]),
-            (
-                "module M\ntype T() =\n    member _.X = 1\ntype T with\n    member _.(|Big|_|) x = None\n",
-                &[Unknowable::AugmentationNames],
             ),
             (
                 "namespace global\nopen System\ntype U = int\nnamespace A\ntype V = int\n",

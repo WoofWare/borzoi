@@ -23,6 +23,7 @@ use crate::diagnostics::SemaDiagnostic;
 
 use super::contributors::{Contribution, FileContributions};
 use super::decl_path::{DeclPath, ExportName};
+use super::extension_names::{Damage, ExtensionNames, MarkerQuestion};
 use super::path_set::{Extended, PathPrefixes, PathSet};
 use super::state::ActivePatternShape;
 use super::unknowables::{Unknowable, Unknowables};
@@ -3834,14 +3835,9 @@ pub struct ResolvedFile {
     pub(super) own_module_simple_names: HashSet<String>,
     /// The abbreviation-declared subset of [`Self::own_type_simple_names`] —
     /// a committed [`Resolution::Local`] attribute resolution of such a name
-    /// may alias `ExtensionAttribute`, so
-    /// [`Self::attributes_may_declare_extension`] treats it as a possible
-    /// marker.
+    /// may alias `ExtensionAttribute`, so [`Self::attribute_may_be`] treats it
+    /// as possibly any attribute.
     pub(super) own_abbrev_type_simple_names: HashSet<String>,
-    /// The written name of every attribute on a type abbreviation in the
-    /// file ([`super::prescan::abbreviation_attributes`]), read by
-    /// [`Self::attributes_may_declare_extension`].
-    pub(super) abbreviation_attributes: Vec<Option<TextRange>>,
     /// What the file contributes to later files through routes the walk does
     /// not model ([`FileContributions`]), carried into
     /// [`ProjectItems`] by the Compile-order fold.
@@ -3850,23 +3846,16 @@ pub struct ResolvedFile {
     /// carried into [`ProjectItems::core_attribute_alias_declared`].
     pub(super) declares_core_attribute_alias: bool,
     /// The file-wide unknowables the walk raised ([`Unknowables`]), read
-    /// through [`Self::attributes_may_declare_extension`],
-    /// [`Self::augmentation_names_unknowable`] and
-    /// [`Self::open_extension_unknowable`].
+    /// through [`Self::open_extension_unknowable`].
     pub(super) unknowables: Unknowables,
-    /// The instance / static member names this file's `type … with`
-    /// augmentations declare (EX-3 §2(a); whether any member's name was not
-    /// walkable is [`Unknowable::AugmentationNames`]; see
-    /// [`Resolver::collect_augmentation_extension_names`](super::state::Resolver)).
-    pub(super) augmentation_instance_names: HashSet<String>,
-    pub(super) augmentation_static_names: HashSet<String>,
-    /// The augmentation member names **preceding Compile-order files**
-    /// declare, accumulated by the fold (EX-3 §2(b)) — empty for a
-    /// single-file caller. The cross-file sibling of the own-file sets above;
-    /// preceding files' *un-walkable* members fold into
-    /// [`Self::preceding_declares_extension_source`] instead (wholesale).
-    pub(super) preceding_augmentation_instance_names: HashSet<String>,
-    pub(super) preceding_augmentation_static_names: HashSet<String>,
+    /// The extension-member names this file's tree declares, read from its
+    /// syntax and its attribute verdicts. [`Self::extension_names`] adds
+    /// what [`Self::damage`] may.
+    pub(super) extension_names: ExtensionNames,
+    /// The union of [`Self::extension_names`] over every **preceding**
+    /// Compile-order file, stamped by the fold; empty for a single-file
+    /// caller.
+    pub(super) preceding_extension_names: ExtensionNames,
     pub(super) exports: ExportedItems,
     /// The project-global [`ItemId`] of this file's *first* export — the base
     /// of the contiguous range its items occupy. Zero for a single-file caller;
@@ -3880,20 +3869,6 @@ pub struct ResolvedFile {
     /// *cross-file* namespace index now derives from the `Namespace`
     /// [`ExportDecl`]s (see [`ProjectItems::extend_with`]).
     pub(super) namespace_paths: Vec<Vec<String>>,
-    /// Whether a **preceding** Compile-order file declares a project **extension
-    /// source** the fold could not name-key — an augmentation member with an
-    /// un-walkable name (EX-3 §2(b)) or an attribute that may declare a C#-style
-    /// `[<Extension>]` (EX-3 §2(d)) — that a later same-namespace file sees with
-    /// no explicit `open` (the OV-6 gate's *cross-file* extension signal; the
-    /// walkable augmentation names thread as the `preceding_augmentation_*` sets
-    /// instead, and an auto-open module *as such* contributes nothing — AO-1: its
-    /// extension-capable contents are exactly those two signals). Set by
-    /// [`resolve_project`](super::resolve_project) as the forward accumulation
-    /// over Compile order (F# is order-sensitive — a later file's source is not
-    /// in scope earlier); the single-file [`resolve_file`](super::resolve_file)
-    /// leaves it `false` (no preceding files). The gate defers wholesale when
-    /// true.
-    pub(super) preceding_declares_extension_source: bool,
     /// EX-2 (`docs/extension-scope-enumeration-plan.md`): the **assembly**
     /// namespace paths this file's explicit `open <namespace>` clauses bring into
     /// scope. The overload engine's extension-absence gate asks the same
@@ -3962,6 +3937,13 @@ pub struct ResolvedFile {
     /// commits about itself, never what it exports, so a later file's fold
     /// slot cannot observe it.
     pub(super) recovery: SyntaxRecovery,
+    /// What the text [`Self::recovery`] reports damaged may declare or open
+    /// (`resolve::extension_names::damage`), or `None` for a clean file.
+    /// Like the reading it is read under, resolution never consults it: only
+    /// the extension gate ([`Self::extension_names`],
+    /// [`Self::open_extension_unknowable`]) and the fold's threading of
+    /// extension names do.
+    pub(super) damage: Option<Damage>,
 }
 
 /// Build the end-offset index a token classifier queries, from a set of
@@ -4125,19 +4107,15 @@ impl ResolvedFile {
             unplaced_type_places: HashMap::default(),
             own_module_simple_names: HashSet::default(),
             own_abbrev_type_simple_names: HashSet::default(),
-            // Filled by the fold from the signature's own declarations.
-            abbreviation_attributes: Vec::new(),
             contributions: FileContributions::default(),
             declares_core_attribute_alias: false,
             unknowables: Unknowables::default(),
-            augmentation_instance_names: HashSet::default(),
-            augmentation_static_names: HashSet::default(),
-            preceding_augmentation_instance_names: HashSet::default(),
-            preceding_augmentation_static_names: HashSet::default(),
+            // Filled from the signature's own syntax by `signature_slot`.
+            extension_names: ExtensionNames::default(),
+            preceding_extension_names: ExtensionNames::default(),
             exports: ExportedItems::default(),
             item_base,
             namespace_paths: Vec::new(),
-            preceding_declares_extension_source: false,
             open_extension_namespaces: Vec::new(),
             active_pattern_shape: HashMap::default(),
             diagnostics: Vec::new(),
@@ -4146,10 +4124,12 @@ impl ResolvedFile {
             export_decls: Vec::new(),
             sig_screen: Some(screen),
             sig_exports,
-            // A signature file's slot contributes a screen and exports, never
-            // an inferred type — nothing reads this — so the value that claims
-            // the least is the right one.
+            // A signature file's slot contributes a screen, exports and
+            // extension names, never an inferred type. The fold sets the
+            // signature's own reading (`signature_slot`); until then, the
+            // value that claims the least.
             recovery: SyntaxRecovery::Unretained,
+            damage: None,
         }
     }
 
@@ -4362,7 +4342,7 @@ impl ResolvedFile {
     ) -> Option<FieldLabel> {
         let entry = self.field_labels.get(&label)?;
         (self.recovery.clean_before(label.end())
-            && crate::infer::ExtensionScope::of(self, env).absent(env, &entry.name, false))
+            && crate::infer::ExtensionScope::of(self).absent(env, &entry.name, false))
         .then_some(entry.label)
     }
 
@@ -4384,106 +4364,58 @@ impl ResolvedFile {
         &self.attribute_resolutions
     }
 
-    /// The instance-member names this file's augmentations declare (EX-3 §2(a)).
-    pub fn augmentation_instance_names(&self) -> &HashSet<String> {
-        &self.augmentation_instance_names
+    /// The extension-member names this file may declare: what its tree
+    /// declares (read off its syntax by `resolve::extension_names`), and, if
+    /// the parser recovered from it, every name its damaged text spells
+    /// (`resolve::extension_names::damage`).
+    pub fn extension_names(&self) -> ExtensionNames {
+        let mut names = self.extension_names.clone();
+        if let Some(damage) = &self.damage {
+            names.absorb(&damage.names);
+        }
+        names
     }
 
-    /// The static-member sibling of [`Self::augmentation_instance_names`].
-    pub fn augmentation_static_names(&self) -> &HashSet<String> {
-        &self.augmentation_static_names
+    /// The union of [`Self::extension_names`] over every preceding
+    /// Compile-order file (empty for a single-file caller).
+    pub fn preceding_extension_names(&self) -> &ExtensionNames {
+        &self.preceding_extension_names
     }
 
-    /// Whether some augmentation member's name was not walkable — the gate
-    /// keeps the wholesale defer (EX-3 §2(a)).
-    pub fn augmentation_names_unknowable(&self) -> bool {
-        self.unknowables.contains(Unknowable::AugmentationNames)
-    }
-
-    /// The instance-member names preceding Compile-order files' augmentations
-    /// declare (EX-3 §2(b); empty for a single-file caller).
-    pub fn preceding_augmentation_instance_names(&self) -> &HashSet<String> {
-        &self.preceding_augmentation_instance_names
-    }
-
-    /// The static-member sibling of
-    /// [`Self::preceding_augmentation_instance_names`].
-    pub fn preceding_augmentation_static_names(&self) -> &HashSet<String> {
-        &self.preceding_augmentation_static_names
-    }
-
-    /// Whether a same-file `type … with` augmentation could contribute an
-    /// extension member **named `name`** to a call of the given shape —
-    /// EX-3 §2(a)'s name-keyed refinement of the old "any augmentation ⇒
-    /// defer" trigger. `true` also when some augmentation member's name was
-    /// not walkable (the unknowable bit — wholesale, like every other
-    /// unknowable surface).
-    pub fn augmentation_declares_extension_named(&self, name: &str, is_static: bool) -> bool {
-        self.augmentation_names_unknowable()
-            || if is_static {
-                self.augmentation_static_names.contains(name)
-            } else {
-                self.augmentation_instance_names.contains(name)
-            }
-    }
-
-    /// Whether some attribute in this file **may declare an extension** — the
-    /// EX-3 §2(d) stage-5 refinement of the old "any attribute ⇒ defer"
-    /// trigger, derived from the per-attribute resolutions the stage-3/4
-    /// differentials validate:
-    ///
-    /// - an attribute with an unkeyable *shape* (nameless `[<>]`) — defer;
-    /// - a [`Resolution::Deferred`] verdict — the resolver could not pin the
-    ///   type, so it could be (an alias of) `ExtensionAttribute` — defer;
-    /// - a committed [`Resolution::Entity`] — an extension marker exactly
-    ///   when it **is** `System.Runtime.CompilerServices.ExtensionAttribute`
-    ///   ([`AssemblyEnv::is_extension_attribute`]); any other concrete type
-    ///   provably is not, while an **abbreviation** may alias the marker
-    ///   (FCS strips it before matching) — defer on those;
-    /// - a committed [`Resolution::Local`] — provably not the marker when the
-    ///   in-file declaration is a concrete type (its own tycon, never the
-    ///   SRCS one); possibly the marker when it is an **abbreviation** (the
-    ///   resolver does not chase in-file targets) — defer on those;
-    /// - an attribute with **no record** — both candidates missed everywhere
-    ///   with no shadow possible (the differential's decline-by-absence
-    ///   agreement: FCS errors and binds nothing) — contributes nothing.
-    ///
-    /// An attribute on a type **abbreviation** is asked a wider question
-    /// (#831): one that may be `[<Extension>]` *or* `[<AutoOpen>]` brings the
-    /// extension members of the abbreviated type into scope wherever the
-    /// abbreviation is (FCS reads either attribute off the abbreviation and
-    /// then works on its target), and that target's members are not
-    /// enumerated here. Such an attribute with no verdict at all (the walk
-    /// never reached it, or it names nothing FCS can bind) is taken to be
-    /// either: no verdict is no proof.
-    pub fn attributes_may_declare_extension(&self, env: &AssemblyEnv) -> bool {
-        self.unknowables.contains(Unknowable::AttributeShape)
-            || self
-                .attribute_resolutions
-                .keys()
-                .any(|&range| self.attribute_may_be(range, env, |h| env.is_extension_attribute(h)))
-            || self
-                .abbreviation_attributes
-                .iter()
-                .any(|range| match range {
-                    None => true,
-                    Some(range) => {
-                        !self.attribute_resolutions.contains_key(range)
-                            || self.attribute_may_be(*range, env, |h| {
-                                env.is_extension_attribute(h) || env.is_auto_open_attribute(h)
-                            })
-                    }
+    /// [`super::extension_names::file_extension_names`] of `root`, this
+    /// file's tree, asking this file's attribute verdicts. An attribute with
+    /// no verdict (the walk never reached it, or neither candidate names
+    /// anything) may be either attribute: no verdict is no proof.
+    pub(super) fn syntactic_extension_names(
+        &self,
+        root: &borzoi_cst::syntax::SyntaxNode,
+        env: &AssemblyEnv,
+    ) -> ExtensionNames {
+        super::extension_names::file_extension_names(root, false, &|range, question| {
+            !self.attribute_resolutions.contains_key(&range)
+                || self.attribute_may_be(range, env, |h| {
+                    env.is_extension_attribute(h)
+                        || (question == MarkerQuestion::ExtensionOrAutoOpen
+                            && env.is_auto_open_attribute(h))
                 })
+        })
     }
 
     /// Whether the attribute written at `range` (its name's range, the
     /// [`Self::attribute_resolutions`] key) may denote a type `is_target`
-    /// picks out, by the rules [`Self::attributes_may_declare_extension`]
-    /// lists: a deferred verdict may be anything; a committed assembly type
-    /// is the target exactly when `is_target` says so, and an abbreviation
-    /// (in-file or assembly) may be, since its target is not chased here; and
-    /// no record at all means FCS binds nothing there. `is_target` is only
-    /// ever asked about a concrete type.
+    /// picks out:
+    ///
+    /// - a [`Resolution::Deferred`] verdict may be anything;
+    /// - a committed [`Resolution::Entity`] is the target exactly when
+    ///   `is_target` says so, while an **abbreviation** may alias it (FCS
+    ///   strips it before matching);
+    /// - a committed [`Resolution::Local`] is its own tycon when the in-file
+    ///   declaration is a concrete type, and may be anything when it is an
+    ///   **abbreviation** (the resolver does not chase in-file targets);
+    /// - no record at all means both candidates missed everywhere with no
+    ///   shadow possible: FCS errors and binds nothing.
+    ///
+    /// `is_target` is only ever asked about a concrete type.
     pub fn attribute_may_be(
         &self,
         range: TextRange,
@@ -4581,16 +4513,6 @@ impl ResolvedFile {
         &self.diagnostics
     }
 
-    /// Whether a preceding Compile-order file declares a project extension source
-    /// the fold could not name-key (an un-walkable augmentation member name or an
-    /// attribute that may declare a `[<Extension>]`) — the OV-6 gate's *cross-file*
-    /// extension signal (see the field
-    /// [`Self::preceding_declares_extension_source`]). The LSP inference layer
-    /// reads it.
-    pub fn preceding_declares_extension_source(&self) -> bool {
-        self.preceding_declares_extension_source
-    }
-
     /// The **assembly** namespace paths this file's explicit `open <namespace>`
     /// clauses bring into scope (EX-2 — see the field
     /// [`Self::open_extension_namespaces`]). The overload engine's
@@ -4600,10 +4522,12 @@ impl ResolvedFile {
     }
 
     /// Whether some `open` in this file brings an extension surface whose names the
-    /// resolver cannot enumerate (EX-2).
+    /// resolver cannot enumerate (EX-2), or may: an `open` in text the parser
+    /// recovered from.
     /// The gate defers wholesale when true.
     pub fn open_extension_unknowable(&self) -> bool {
         self.unknowables.contains(Unknowable::OpenExtensionSurface)
+            || self.damage.as_ref().is_some_and(|d| d.opens)
     }
 
     /// The file's declared project **namespace** paths, each with its ancestor

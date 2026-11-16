@@ -284,6 +284,115 @@ impl SyntaxRecovery {
     }
 }
 
+impl SyntaxRecovery {
+    /// The text of the file rooted at `root` that a recovery may have
+    /// mis-parsed or dropped: for each reported error, the declaration it sits
+    /// in (or the one before it, for junk flushed out between declarations),
+    /// from the start of the declaration before *that* (recovery can hoist a
+    /// declaration's junk into a fresh sibling node, which then holds the
+    /// error) to the end of its recovery extent. `None` for a clean parse; the
+    /// whole file for a reading that kept no spans.
+    ///
+    /// The regions come back sorted, disjoint and non-adjacent. Linear in the
+    /// file, however many errors there are: spans are taken in order against
+    /// one pass over the tokens, an error whose declaration is the previous
+    /// error's only extends that region, and the walk back from flushed junk
+    /// to the declaration before it stops at the previous region.
+    pub(crate) fn damaged_regions(&self, root: &SyntaxNode) -> Option<Vec<TextRange>> {
+        let spans = match self {
+            SyntaxRecovery::Unretained => return Some(vec![root.text_range()]),
+            SyntaxRecovery::Reported(spans) if spans.is_empty() => return None,
+            SyntaxRecovery::Reported(spans) => spans,
+        };
+        let mut sorted: Vec<TextRange> = spans.to_vec();
+        sorted.sort_by_key(|s| (s.start(), s.end()));
+        let mut regions: Vec<TextRange> = Vec::new();
+        let mut last_decl: Option<SyntaxNode> = None;
+        let mut tokens = root
+            .descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+            .peekable();
+        let mut previous: Option<SyntaxToken> = None;
+        for span in sorted {
+            // The token at the span's start: the first that reaches past it,
+            // or a zero-width one exactly there (the error marker itself).
+            while let Some(t) = tokens.peek() {
+                let r = t.text_range();
+                if r.end() < span.start() || (r.end() == span.start() && !r.is_empty()) {
+                    previous = tokens.next();
+                } else {
+                    break;
+                }
+            }
+            let token = tokens.peek().cloned().or_else(|| previous.clone());
+            let covered = regions.last().map_or(TextSize::from(0), |r| r.end());
+            let region = match damaged_declaration(token, covered) {
+                Damaged::Declaration(decl) if last_decl.as_ref() == Some(&decl) => {
+                    TextRange::new(span.start(), span.end())
+                }
+                Damaged::Declaration(decl) => {
+                    let start = decl
+                        .prev_sibling()
+                        .map_or(decl.text_range().start(), |p| p.text_range().start());
+                    let end = declaration_extent(&decl).end().max(span.end());
+                    last_decl = Some(decl);
+                    TextRange::new(start, end)
+                }
+                Damaged::From(start) => TextRange::new(start.min(span.start()), span.end()),
+            };
+            regions.push(region);
+        }
+        // A region can begin before the one found for an earlier error (it
+        // starts at its declaration's predecessor), so sort and merge.
+        regions.sort_by_key(|r| r.start());
+        let mut merged: Vec<TextRange> = Vec::with_capacity(regions.len());
+        for region in regions {
+            match merged.last_mut() {
+                Some(last) if region.start() <= last.end() => *last = last.cover(region),
+                _ => merged.push(region),
+            }
+        }
+        Some(merged)
+    }
+}
+
+/// Where the damage an error span reports begins ([`damaged_declaration`]).
+enum Damaged {
+    /// In this declaration, from the one before it.
+    Declaration(SyntaxNode),
+    /// At this offset: no declaration to blame, or the previous region
+    /// already covers the declaration before flushed junk.
+    From(TextSize),
+}
+
+/// The declaration an error damages, given the token at its start: the one
+/// the token sits in, or, for junk flushed out between declarations, the one
+/// before it. The walk back over junk stops at `covered`, the end of the
+/// regions already found, so it never re-crosses text an earlier error
+/// accounted for.
+fn damaged_declaration(token: Option<SyntaxToken>, covered: TextSize) -> Damaged {
+    let Some(token) = token else {
+        return Damaged::From(TextSize::from(0));
+    };
+    let Some(parent) = token.parent() else {
+        return Damaged::From(TextSize::from(0));
+    };
+    if !holds_a_declaration_list(parent.kind()) {
+        return Damaged::Declaration(enclosing_declaration(&parent));
+    }
+    let mut element = token.prev_sibling_or_token();
+    while let Some(el) = element {
+        if el.text_range().start() < covered {
+            return Damaged::From(covered);
+        }
+        match el {
+            borzoi_cst::syntax::NodeOrToken::Node(node) => return Damaged::Declaration(node),
+            borzoi_cst::syntax::NodeOrToken::Token(t) => element = t.prev_sibling_or_token(),
+        }
+    }
+    Damaged::From(parent.text_range().start())
+}
+
 /// The text a recovery inside `node`'s enclosing declaration can occupy: the
 /// declaration's own range, extended forward over the loose tokens that follow
 /// it up to the next sibling **node**.

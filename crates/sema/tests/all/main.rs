@@ -59,6 +59,8 @@ mod infer_cross_file_diff;
 mod infer_dropped_namespace_perturbation;
 mod infer_entry_order_diff;
 mod infer_equality_constraints_diff;
+mod infer_extension_damage_sweep;
+mod infer_extension_scope_grid;
 mod infer_fsharp_core_abbreviation_diff;
 mod infer_group_shape_diff;
 mod infer_headerless_type_diff;

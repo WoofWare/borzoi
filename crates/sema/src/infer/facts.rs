@@ -77,7 +77,7 @@ impl<'a> FileFacts<'a> {
             resolved,
             preceding,
             env,
-            ext_scope: ExtensionScope::of(resolved, env),
+            ext_scope: ExtensionScope::of(resolved),
             anonymous_module,
             project_types: HashMap::default(),
             project_cases: HashMap::default(),

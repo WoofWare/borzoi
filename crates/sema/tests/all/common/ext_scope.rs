@@ -12,7 +12,7 @@ use super::{
 use borzoi_cst::parser::parse;
 use borzoi_cst::syntax::{AstNode, ImplFile, TextRange, TextSize};
 use borzoi_sema::{
-    Incomplete, ProjectFile, SourceFile, SyntaxRecovery, infer_project, qualified_names,
+    GateInput, Incomplete, ProjectFile, SourceFile, SyntaxRecovery, infer_project, qualified_names,
     resolve_project_files,
 };
 
@@ -33,6 +33,11 @@ pub struct CallOutcome {
     pub fcs: Option<String>,
     /// The census of the call's binding.
     pub census: Vec<Incomplete>,
+    /// Which input of the extension-scope gate declines a value-receiver
+    /// call of the method's name in the last file, asked directly
+    /// ([`borzoi_sema::test_support::extension_gate_decline`]): whether or not
+    /// inference reaches the gate at this call.
+    pub gate: Option<GateInput>,
 }
 
 impl CallOutcome {
@@ -51,6 +56,14 @@ pub struct Checked {
     pub unsound: Vec<String>,
     /// Per probed call, in order.
     pub calls: Vec<CallOutcome>,
+}
+
+/// The method a call's text names: the identifier between its last `.` and
+/// the `(` after it.
+fn method_name(call: Call) -> &'static str {
+    let dot = call.text.rfind('.').expect("a method call");
+    let rest = &call.text[dot + 1..];
+    &rest[..rest.find('(').expect("an argument list")]
 }
 
 /// The range of `call`'s text on the line that binds `call.binder`.
@@ -164,13 +177,18 @@ pub fn check(sources: &[(&str, String)], calls: &[Call]) -> Checked {
         None => unsound.push(format!("{} was not inferred", sources[last].0)),
         Some(file) => {
             let census = file.incompleteness();
-            assert!(
-                census.len() >= calls.len(),
-                "{}: {} census entries for {} calls",
-                sources[last].0,
-                census.len(),
-                calls.len()
-            );
+            if census.len() < calls.len() {
+                unsound.push(format!(
+                    "{}: {} census entries for {} calls",
+                    sources[last].0,
+                    census.len(),
+                    calls.len()
+                ));
+                return Checked {
+                    unsound,
+                    calls: outcomes,
+                };
+            }
             let tail = &census[census.len() - calls.len()..];
             for (k, call) in calls.iter().enumerate() {
                 outcomes.push(CallOutcome {
@@ -179,6 +197,12 @@ pub fn check(sources: &[(&str, String)], calls: &[Call]) -> Checked {
                         .map(|t| t.render(env)),
                     fcs: fcs_at[k].clone(),
                     census: tail[k].clone(),
+                    gate: borzoi_sema::test_support::extension_gate_decline(
+                        resolved.file(last),
+                        env,
+                        method_name(*call),
+                        false,
+                    ),
                 });
             }
         }

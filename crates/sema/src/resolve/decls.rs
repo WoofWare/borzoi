@@ -742,15 +742,6 @@ impl<'a> Resolver<'a> {
                 //    self-recorded by `define_type`) — and the type uses inside
                 //    each definition's right-hand side.
                 for defn in &defns {
-                    if is_type_augmentation(defn) {
-                        // EX-3 §2(a): the augmentation's member *names* join
-                        // the extension gate's name sets, so the gate defers
-                        // exactly those calls instead of the whole file.
-                        // Before the head guard below — the names need no
-                        // head, and a head-less (parser-degraded) augmentation
-                        // must not silently skip the gate.
-                        self.collect_augmentation_extension_names(defn);
-                    }
                     if is_type_augmentation(defn)
                         && let Some(li) = defn.long_id()
                     {

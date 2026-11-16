@@ -8,6 +8,7 @@ use crate::hash::{HashMap, HashSet};
 use borzoi_cst::syntax::TextRange;
 
 use super::contributors::{FileContributions, OpenContributions};
+use super::extension_names::ExtensionNames;
 use super::model::{
     DeclaredType, DeclineSite, ExportDecl, ExportedItem, ExportedItems, FieldLabelEntry, OpenTrace,
     Resolution, ResolutionTrace, ResolvedFile,
@@ -69,15 +70,6 @@ pub(super) struct Output {
     /// root — is placed; [`Prescan::own_type_decl_counts`](crate::resolve::prescan::Prescan::own_type_decl_counts) says how many
     /// declarations of the name there are in all.
     pub(super) placed_types: Vec<DeclaredType>,
-    /// The **instance** member names this file's `type … with` augmentations
-    /// declare (EX-3 §2(a)): an augmentation member joins its own name's
-    /// call group, so the gate defers exactly those names instead of every
-    /// call. Collected from *every* augmentation shape (intrinsic or optional,
-    /// single-ident or dotted head — member names need no head resolution).
-    pub(super) augmentation_instance_names: HashSet<String>,
-    /// The **static** sibling of [`Self::augmentation_instance_names`]. A
-    /// member whose staticness is not walkable lands in both sets.
-    pub(super) augmentation_static_names: HashSet<String>,
     /// What this file's declarations contribute to later files through routes
     /// the walk does not model, as far as the walk records it
     /// ([`OpenContributions`]).
@@ -143,8 +135,6 @@ impl Output {
             attribute_resolutions,
             field_labels,
             placed_types,
-            augmentation_instance_names,
-            augmentation_static_names,
             contributions,
             active_pattern_shape,
             diagnostics,
@@ -172,7 +162,6 @@ impl Output {
             own_type_simple_names: prescan.own_type_simple_names,
             own_module_simple_names: prescan.own_module_simple_names,
             own_abbrev_type_simple_names: prescan.own_abbrev_type_simple_names,
-            abbreviation_attributes: prescan.abbreviation_attributes,
             contributions: FileContributions {
                 root,
                 extension_statics: prescan.extension_statics,
@@ -184,18 +173,15 @@ impl Output {
             },
             declares_core_attribute_alias: prescan.declares_core_attribute_alias,
             unknowables,
-            augmentation_instance_names,
-            augmentation_static_names,
+            // Read off the tree by `resolve_file`, after the walk has given
+            // every attribute its verdict.
+            extension_names: ExtensionNames::default(),
             // Stamped by the Compile-order fold; a single file has no
             // preceding files.
-            preceding_augmentation_instance_names: HashSet::default(),
-            preceding_augmentation_static_names: HashSet::default(),
+            preceding_extension_names: ExtensionNames::default(),
             exports: ExportedItems { items },
             item_base,
             namespace_paths,
-            // The *cross-file* (preceding-files) signal is set by
-            // `resolve_project`; a single file has no preceding files.
-            preceding_declares_extension_source: false,
             open_extension_namespaces,
             active_pattern_shape,
             diagnostics,
@@ -205,6 +191,7 @@ impl Output {
             sig_screen: None,
             sig_exports: Vec::new(),
             recovery: recovery.clone(),
+            damage: None,
         }
     }
 }
