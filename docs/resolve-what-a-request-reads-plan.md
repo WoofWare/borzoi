@@ -36,9 +36,8 @@ a file reads, as far as reading the code finds:
   `placed_types`, `unplaced_types`, `unplaced_type_places`,
   `own_module_simple_names`, `own_type_simple_names`, `sig_screen` and
   `declares_core_attribute_alias`;
-- in `thread_forward`: `augmentation_instance_names` and
-  `augmentation_static_names`, and through `wholesale_extension_contribution`,
-  `attributes_may_declare_extension` and `augmentation_names_unknowable`;
+- in `thread_forward`: `extension_names()`, which reads `extension_names`
+  and `damage`;
 - in the fold loop around it: a paired signature's `sig_exports` and screen
   (`append_signature_exports`), and, for an unpaired headerless
   implementation, a shadow of its implicit module, derived from its
@@ -352,6 +351,15 @@ whatever makes these compile.
 **Oracle**: it compiles with no field of `ResolvedFile` outside the surface
 reachable from `advance` or from a cross-file read. Every gate is unchanged,
 and every manifest moves zero lines.
+
+**As built.** The transition is two steps, not one. `FoldSlot::complete`
+materialises a signature's exports into its implementation's surface; it runs
+once, when the surface is built, because a reused file's surface is already
+materialised. `FoldState::advance` threads the surface into the preceding
+items, the extension-member names and the implicit-module shadow; both folds
+call it on every file. `ResolvedProject::item_def` reads the surface.
+Inference's cross-file reads (`infer_project`) and the LSP's still take the
+whole `ResolvedFile`; Stages 5 and 7 move them.
 
 ### Stage 3: the surface walk, unconsumed
 

@@ -18,7 +18,7 @@ use borzoi_cst::syntax::{TextRange, TextSize};
 use crate::assembly_env::{
     AssemblyEnv, CustomOperationNames, EntityHandle, MemberIndex, UnionCaseIndex,
 };
-use crate::def::{Def, DefArena, DefId, SemanticClass};
+use crate::def::{Def, DefArena, DefId, DefSpace, SemanticClass, SpaceDefs};
 use crate::diagnostics::SemaDiagnostic;
 
 use super::contributors::{Contribution, FileContributions};
@@ -131,7 +131,7 @@ pub(super) struct SigRoot {
     /// (FCS's `ComputeAnonModuleName`). A paired headerless implementation
     /// publishes no module header of its own (its fragments are anonymous),
     /// yet FCS treats the implicit module as a real, openable module — so
-    /// the materialisation ([`ResolvedFile::append_signature_exports`])
+    /// the materialisation ([`FileSurface::append_signature_exports`])
     /// publishes a header decl for such a root at the implementation's slot.
     pub(super) implicit: bool,
 }
@@ -237,7 +237,7 @@ pub(super) struct SigScreen {
 /// everything the materialised [`ExportedItem`] needs except the [`ItemId`],
 /// which is assigned only when the implementation's slot is reached (the
 /// signature owns no id range). The `def` indexes the **signature slot's**
-/// arena — [`ResolvedFile::append_signature_exports`] wraps it in
+/// arena — [`FileSurface::append_signature_exports`] wraps it in
 /// [`ExportDef::Sig`], so go-to-definition lands on the `.fsi` ident while
 /// provenance stays with the implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,7 +309,7 @@ impl DeclaredType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct EarlierType {
     pub(super) file: usize,
-    /// Its position in the file's [`ResolvedFile::placed_types`].
+    /// Its position in the file's [`FileSurface::placed_types`].
     pub(super) index: u32,
     pub(super) path: Vec<String>,
     pub(super) arity: usize,
@@ -413,7 +413,7 @@ pub struct ProjectItems {
     pub(super) augmentation_head_paths: PathSet,
     /// Every earlier-file project **type**'s simple name, from each file's
     /// syntactic whole-file pre-scan
-    /// ([`ResolvedFile::own_type_simple_names`]). The attribute resolution's
+    /// ([`FileSurface::own_type_simple_names`]). The attribute resolution's
     /// cross-file guard (EX-3 §2(d)): a `[<Foo>]` candidate must defer when a
     /// preceding file could declare `type FooAttribute = …` — the tiered walk
     /// does not index bare cross-file project types, so without this set a
@@ -423,7 +423,7 @@ pub struct ProjectItems {
     /// spurious name match only defers).
     pub(super) project_type_simple_names: HashSet<String>,
     /// Every earlier file's type declarations, by simple name
-    /// ([`ResolvedFile::placed_types`], [`ResolvedFile::unplaced_types`]): the
+    /// ([`FileSurface::placed_types`], [`FileSurface::unplaced_types`]): the
     /// placed ones with their file and position, and a
     /// `None` for each the declaring file could not place or whose
     /// implementation a signature screens. What lets a later file prove that
@@ -440,7 +440,7 @@ pub struct ProjectItems {
     pub(super) earlier_type_arities: HashMap<String, Vec<EarlierArity>>,
     /// Every earlier-file project **module**'s simple name, from each file's
     /// syntactic whole-file pre-scan
-    /// ([`ResolvedFile::own_module_simple_names`]). The dotted half of the
+    /// ([`FileSurface::own_module_simple_names`]). The dotted half of the
     /// project `[<AutoOpen>]` shadow
     /// ([`Resolver::project_module_named`](super::state::Resolver)): a module
     /// nested inside such a module is not indexed for the tiered walk, so
@@ -560,7 +560,7 @@ pub struct ProjectItems {
     pub(super) slot_attribute_alias_declared: bool,
     /// Whether some file folded so far declares a type spelled like
     /// `[<AutoOpen>]` or `[<RequireQualifiedAccess>]`, or an abbreviation of
-    /// one ([`ResolvedFile::declares_core_attribute_alias`]).
+    /// one ([`FileSurface::declares_core_attribute_alias`]).
     pub(super) core_attribute_alias_declared: bool,
     /// Per project module, what earlier files' declarations add to an `open`
     /// of it beyond its folded values ([`FileContributions::module_opens`]).
@@ -1506,7 +1506,7 @@ impl ProjectItems {
     ///
     /// **Lockstep invariant:** the set of [`ResolvedFile`] fields read here *is*
     /// a file's contribution to the Compile-order threaded state.
-    /// [`ResolvedFile::same_export_contribution`] compares exactly this set to
+    /// [`FileSurface::same_contribution`] compares exactly this set to
     /// decide whether a recomputed file leaves the accumulator unchanged (so the
     /// incremental fold may reuse the suffix). A field added here that is *not*
     /// added there would let the incremental fold reuse a stale suffix; the
@@ -1531,7 +1531,7 @@ impl ProjectItems {
     /// (see [`Self::sig_screens`]).
     pub(super) fn extend_with(
         &mut self,
-        file: &ResolvedFile,
+        file: &FileSurface,
         names: &NameTable,
         paired_screen: Option<&SigScreen>,
         partner: Option<usize>,
@@ -1875,7 +1875,7 @@ type QualifiedCaseExport = (ItemId, Option<usize>);
 /// `HashSet`/`HashMap`, so their order is irrelevant.
 ///
 /// `PartialEq` is the contribution currency of
-/// [`ResolvedFile::same_export_contribution`]: comparing the *derived indices*
+/// [`FileSurface::same_contribution`]: comparing the *derived indices*
 /// (rather than re-listing the source fields that feed them) makes that
 /// comparison drift-proof — a new fold input is included automatically, and
 /// provenance the fold never reads (a decl's `pos`) is excluded automatically,
@@ -1990,7 +1990,7 @@ fn push_container_hidden(
 impl FileExportIndices {
     /// Derive the file's cross-file index contributions from its source-ordered
     /// [`ExportDecl`] list.
-    fn from_decls(file: &ResolvedFile, names: &NameTable) -> Self {
+    fn from_decls(file: &FileSurface, names: &NameTable) -> Self {
         Self::derive(file, names, None)
     }
 
@@ -2025,7 +2025,7 @@ impl FileExportIndices {
     /// every dropped identity marks its container hidden, as it would with no
     /// signature model at all.
     fn from_decls_screened(
-        file: &ResolvedFile,
+        file: &FileSurface,
         names: &NameTable,
         screen: &SigScreen,
         trust_attribute_spellings: bool,
@@ -2033,11 +2033,7 @@ impl FileExportIndices {
         Self::derive(file, names, Some((screen, trust_attribute_spellings)))
     }
 
-    fn derive(
-        file: &ResolvedFile,
-        names: &NameTable,
-        screened: Option<(&SigScreen, bool)>,
-    ) -> Self {
+    fn derive(file: &FileSurface, names: &NameTable, screened: Option<(&SigScreen, bool)>) -> Self {
         let screen = screened.map(|(screen, _)| screen);
         let trust_attribute_spellings = screened.is_some_and(|(_, trust)| trust);
         let mut fi = Self::default();
@@ -2610,7 +2606,7 @@ impl ExportDecl {
     /// such a member, and an anonymous-root declaration has no cross-file
     /// path.
     ///
-    /// `items` is the declaring file's [`ResolvedFile::exports`]`.items`;
+    /// `items` is the declaring file's [`FileSurface::exports`]`.items`;
     /// `screened` says the file is a signature's paired implementation, whose
     /// own identities the signature replaces (so they are not counted twice
     /// beside the signature-derived ones).
@@ -2653,7 +2649,7 @@ pub(super) enum ExportDeclKind {
     /// A value-namespace item — a `let` value, a non-RQA union case, or an
     /// `exception` constructor. `path` = container + name.
     ///
-    /// `item` indexes [`ResolvedFile::exports`]`.items` — the stored
+    /// `item` indexes [`FileSurface::exports`]`.items` — the stored
     /// [`ExportedItem`] this decl mirrors, from which `value_exports` /
     /// `case_item_ids` derive. It is `None` for an **anonymous-root** union/enum
     /// exception case, where [`export_case`](super::Resolver::export_case) creates no
@@ -2730,7 +2726,7 @@ pub(super) enum ExportDeclKind {
     /// splits its arguments exactly as a same-file one does) and
     /// [`case_item_ids`](ProjectItems::case_item_ids).
     ///
-    /// `item` indexes [`ResolvedFile::exports`]`.items` — the AP case's own
+    /// `item` indexes [`FileSurface::exports`]`.items` — the AP case's own
     /// [`ExportedItem`] (with `qualified: None`, so value-namespace queries never
     /// see it; its `def` is the per-case recognizer-span use, so a cross-file
     /// `Resolution::Item` points go-to-def at the recognizer). It is `None` under
@@ -2805,7 +2801,7 @@ pub enum Resolution {
     Item(ItemId),
     /// A type an **earlier** Compile-order file declares, by that file's
     /// Compile index and the type's position among the types the file
-    /// declares (`ResolvedFile::placed_types`), which an edit elsewhere in
+    /// declares (`FileSurface::placed_types`), which an edit elsewhere in
     /// the file does not move. A use of the file's own type is
     /// [`Self::Local`]; [`ResolvedProject::item_def`] maps this one to its
     /// definition.
@@ -3751,59 +3747,18 @@ pub(super) struct FieldLabelEntry {
     pub(super) label: FieldLabel,
 }
 
-/// The result of resolving a single file: the definition arena, a map from each
-/// name-use range to its [`Resolution`], and the items the file exports.
-///
-/// [`PartialEq`] is by *value* — two `ResolvedFile`s are equal when their whole
-/// modelled content matches (the resolutions map, binder arena, exports, every
-/// threaded field, and diagnostics), independent of the source-tree instance
-/// they were resolved from. This is what lets the incremental fold be
-/// differentially tested against the cold fold (`incremental ≡ batch`): two
-/// independent parses of the same text resolve to *equal* files even though
-/// their syntax nodes differ by identity.
+/// What later files may read of one file: everything the Compile-order
+/// fold's per-file transition ([`FoldState::advance`](super::FoldState::advance))
+/// and the cross-file reads ([`ResolvedProject::item_def`]) take, and nothing
+/// else (`docs/resolve-what-a-request-reads-plan.md`, D1). Its contents are
+/// whatever those compile against: a field a later file reads belongs here,
+/// and one only the file's own requests read belongs on [`ResolvedFile`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedFile {
-    /// All binders introduced in the file, indexed by [`DefId`].
-    pub(super) defs: DefArena,
-    /// Every resolved occurrence (uses *and* the binders' own self-references),
-    /// keyed by the occurrence's source range.
-    pub(super) resolutions: HashMap<TextRange, Resolution>,
-    /// The subset of [`Self::resolutions`] whose occurrence is an **or-pattern
-    /// alias**: a later alternative's spelling of a name the first alternative
-    /// binds (`A v | B v` — the second `v`). Its resolution is the canonical
-    /// binder, exactly as an ordinary use of it would be.
-    ///
-    /// The set exists because such an occurrence sits in *binding* position
-    /// while resolving elsewhere, which no other occurrence does — and a
-    /// consumer diffing us against FCS has to know: FCS reports these for an
-    /// ordinary name but is **silent** for one starting with `_`, so a
-    /// comparison that read the occurrence as a plain use would score our
-    /// correct answer as a resolution the oracle contradicts.
-    pub(super) or_pattern_aliases: HashSet<TextRange>,
-    /// The ranges of binders the walk knows are there but does not intern: it
-    /// puts a declining entry for the name in scope instead, so every use the
-    /// binder captures declines rather than reaching an outer same-named
-    /// target. A binder FCS reports that is in neither this set nor
-    /// [`Self::defs`] is one the walk does not know about at all.
-    pub(super) opaque_binders: HashSet<TextRange>,
-    /// The parts of the file whose binders the walk knows it does not walk
-    /// ([`OpaqueRegion`]).
-    pub(super) opaque_regions: Vec<OpaqueRegion>,
-    /// The *type* each written attribute resolved to (EX-3 §2(d),
-    /// `docs/extension-scope-enumeration-plan.md`), keyed by the written
-    /// attribute name's range (the full dotted path, matching FCS's
-    /// `rangeOfLid`). Kept apart from [`Self::resolutions`] — the attribute
-    /// name is a *type* use resolved through FCS's suffix-first candidate
-    /// order, a different query than the ranges the main map's differentials
-    /// pin. [`Resolution::Entity`] / [`Resolution::Local`] are commitments
-    /// (certain-implies-exact against the `attrs` oracle);
-    /// [`Resolution::Deferred`] makes no claim; an attribute neither candidate
-    /// matches is *absent* (FCS errors and sinks nothing there).
-    pub(super) attribute_resolutions: HashMap<TextRange, Resolution>,
-    /// What FCS's record-label table answers at each member-access label the
-    /// walk could answer for, keyed by the label token's range
-    /// ([`Self::field_label_on_unknown_receiver`]).
-    pub(super) field_labels: HashMap<TextRange, FieldLabelEntry>,
+pub struct FileSurface {
+    /// The file's declaration defs
+    /// ([`DefSpace::Declaration`]), which every
+    /// export and placed type names.
+    pub(super) defs: SpaceDefs,
     /// The file's syntactic whole-file type-simple-name pre-scan (see
     /// [`Resolver::own_type_simple_names`](super::state::Resolver)), carried
     /// into [`ProjectItems::project_type_simple_names`] by the Compile-order
@@ -3833,11 +3788,6 @@ pub struct ResolvedFile {
     /// into [`ProjectItems::project_module_simple_names`] by the Compile-order
     /// fold beside [`Self::own_type_simple_names`].
     pub(super) own_module_simple_names: HashSet<String>,
-    /// The abbreviation-declared subset of [`Self::own_type_simple_names`] —
-    /// a committed [`Resolution::Local`] attribute resolution of such a name
-    /// may alias `ExtensionAttribute`, so [`Self::attribute_may_be`] treats it
-    /// as possibly any attribute.
-    pub(super) own_abbrev_type_simple_names: HashSet<String>,
     /// What the file contributes to later files through routes the walk does
     /// not model ([`FileContributions`]), carried into
     /// [`ProjectItems`] by the Compile-order fold.
@@ -3845,66 +3795,16 @@ pub struct ResolvedFile {
     /// See [`Resolver::declares_core_attribute_alias`](super::state::Resolver),
     /// carried into [`ProjectItems::core_attribute_alias_declared`].
     pub(super) declares_core_attribute_alias: bool,
-    /// The file-wide unknowables the walk raised ([`Unknowables`]), read
-    /// through [`Self::open_extension_unknowable`].
-    pub(super) unknowables: Unknowables,
     /// The extension-member names this file's tree declares, read from its
-    /// syntax and its attribute verdicts. [`Self::extension_names`] adds
+    /// syntax and its attribute verdicts. [`Self::extension_names()`] adds
     /// what [`Self::damage`] may.
     pub(super) extension_names: ExtensionNames,
-    /// The union of [`Self::extension_names`] over every **preceding**
-    /// Compile-order file, stamped by the fold; empty for a single-file
-    /// caller.
-    pub(super) preceding_extension_names: ExtensionNames,
     pub(super) exports: ExportedItems,
     /// The project-global [`ItemId`] of this file's *first* export — the base
     /// of the contiguous range its items occupy. Zero for a single-file caller;
-    /// set by the Compile-order fold otherwise. Lets [`Self::resolved_def`] map
+    /// set by the Compile-order fold otherwise. Lets [`ResolvedFile::resolved_def`] map
     /// an own-item handle back to a local export index.
     pub(super) item_base: u32,
-    /// The file's declared project **namespace** paths (`["Outer", "Inner"]`),
-    /// from its `namespace` header(s), each with its ancestor prefixes. Retained
-    /// as a file-level fact because the OV-6 extension gate reads it through the
-    /// public [`Self::namespace_paths`] accessor (`crates/sema/src/infer/extension_scope.rs`); the
-    /// *cross-file* namespace index now derives from the `Namespace`
-    /// [`ExportDecl`]s (see [`ProjectItems::extend_with`]).
-    pub(super) namespace_paths: Vec<Vec<String>>,
-    /// EX-2 (`docs/extension-scope-enumeration-plan.md`): the **assembly**
-    /// namespace paths this file's explicit `open <namespace>` clauses bring into
-    /// scope. The overload engine's extension-absence gate asks the same
-    /// `extension_named_in_scope` query about these as about the file's declared
-    /// namespace chain — an extension in an opened assembly namespace is in scope
-    /// exactly as one in an enclosing namespace is. See
-    /// [`Resolver::open_extension_namespaces`](super::state::Resolver).
-    pub(super) open_extension_namespaces: Vec<Vec<String>>,
-    /// The [`ActivePatternShape`] of each same-file active-pattern recognizer,
-    /// keyed by each of its per-case *use def ids* (the `Resolution::Local`
-    /// identity a case use resolves to). Read through
-    /// [`Self::active_pattern_shape`]; see
-    /// [`Output::active_pattern_shape`](crate::resolve::output::Output::active_pattern_shape).
-    pub(super) active_pattern_shape: HashMap<DefId, ActivePatternShape>,
-    /// Always-sound semantic diagnostics found while walking the file (today
-    /// only `use rec`; see [`SemaDiagnostic`]). Source-ordered.
-    pub(super) diagnostics: Vec<SemaDiagnostic>,
-    /// The **resolution-explain trace**: every `open` in the file with the
-    /// opaque-open flags it set ([`ResolutionTrace`]). Purely diagnostic — no
-    /// cross-file fold or use-site resolver reads it — so it is excluded from
-    /// [`Self::same_export_contribution`]; deterministic from source, so it does
-    /// not perturb the `incremental ≡ batch` value-equality differential. Read
-    /// through [`Self::resolution_trace`].
-    pub(super) resolution_trace: ResolutionTrace,
-    /// The **decline census**: which guard declined each declined occurrence,
-    /// and the ladder tier it spoke from, keyed by the occurrence's source range
-    /// exactly as [`Self::resolutions`] is. Read through
-    /// [`Self::decline_site`].
-    ///
-    /// Purely diagnostic, on the same terms as [`Self::resolution_trace`]: no
-    /// cross-file fold or use-site resolver reads it, so it is excluded from
-    /// [`Self::same_export_contribution`]; and it is deterministic from source,
-    /// so it does not perturb the `incremental ≡ batch` value-equality
-    /// differential. It is the *per-token* half the per-open
-    /// [`ResolutionTrace`] cannot supply.
-    pub(super) decline_sites: HashMap<TextRange, DeclineSite>,
     /// The file's cross-file declarations, in source order — the single currency
     /// [`ProjectItems::extend_with`] folds (`docs/export-decl-model-plan.md`
     /// Stage 2). Every cross-file index derives from this list.
@@ -3920,80 +3820,38 @@ pub struct ResolvedFile {
     /// materialised **at the paired implementation's slot**
     /// ([`Self::append_signature_exports`]). Empty for implementation files
     /// and for signatures with no modelled surface. Part of the file's fold
-    /// contribution ([`Self::same_export_contribution`]): a `.fsi` edit that
+    /// contribution ([`FileSurface::same_contribution`]): a `.fsi` edit that
     /// changes the surface must invalidate the incremental fold's suffix.
     pub(super) sig_exports: Vec<SigExport>,
-    /// What the parser had to recover from in this file.
-    ///
-    /// Unlike [`Self::decline_sites`] and [`Self::resolution_trace`], which are
-    /// documented as purely diagnostic, this one is **load-bearing**:
-    /// [`crate::infer_file`] reads it to decide whether a declaration's syntax
-    /// may be believed, so a caller that supplies
-    /// [`SyntaxRecovery::Unretained`] gets a quieter answer, not merely a
-    /// thinner report.
-    ///
-    /// It is deliberately *not* part of
-    /// [`Self::same_export_contribution`]: recovery gates what this file
-    /// commits about itself, never what it exports, so a later file's fold
-    /// slot cannot observe it.
-    pub(super) recovery: SyntaxRecovery,
-    /// What the text [`Self::recovery`] reports damaged may declare or open
-    /// (`resolve::extension_names::damage`), or `None` for a clean file.
-    /// Like the reading it is read under, resolution never consults it: only
-    /// the extension gate ([`Self::extension_names`],
-    /// [`Self::open_extension_unknowable`]) and the fold's threading of
-    /// extension names do.
+    /// What the text [`ResolvedFile::recovery`] reports damaged may declare
+    /// or open (`resolve::extension_names::damage`), or `None` for a clean
+    /// file. Later files read the names it may declare
+    /// ([`Self::extension_names()`]); whether it may open something is read
+    /// only by the file's own gate
+    /// ([`ResolvedFile::open_extension_unknowable`]). Like the reading it is
+    /// read under, resolution never consults it.
     pub(super) damage: Option<Damage>,
 }
 
-/// Build the end-offset index a token classifier queries, from a set of
-/// resolved occurrences and a per-resolution classify function. The shared core
-/// of [`ResolvedFile::token_classifier`] and [`ResolvedProject::token_classifier`]:
-/// index each *committed* occurrence by its **end** offset, keeping the widest
-/// (smallest-start) occurrence ending there, so a qualified tail token maps to
-/// the whole dotted path it closes while a qualifier head keeps its own segment.
-/// Built once (O(occurrences)). The two callers differ only in `classify` — a
-/// single file classifies from its own arena; a project also follows a cross-file
-/// `Item` to its declaring file.
-///
-/// Returning the *owned* index — rather than a closure over it — is what keeps
-/// the public classifiers detached: `classify` borrows the resolved file, but the
-/// returned `HashMap` does not, so [`end_index_classifier`] can wrap it into an
-/// `impl Fn(..) + use<>` that outlives the file it was built from.
-fn build_end_index(
-    occurrences: &HashMap<TextRange, Resolution>,
-    classify: impl Fn(Resolution) -> Option<SemanticClass>,
-) -> HashMap<TextSize, (TextSize, SemanticClass)> {
-    let mut by_end: HashMap<TextSize, (TextSize, SemanticClass)> = HashMap::default();
-    for (occ, res) in occurrences {
-        if let Some(class) = classify(*res) {
-            let entry = by_end.entry(occ.end()).or_insert((occ.start(), class));
-            if occ.start() < entry.0 {
-                *entry = (occ.start(), class);
-            }
+impl FileSurface {
+    /// The declaration def `id` names, or `None` when `id` is a local def or
+    /// past the end.
+    pub(super) fn def(&self, id: DefId) -> Option<&Def> {
+        self.defs.get(id)
+    }
+
+    /// The extension-member names this file may declare: what its tree
+    /// declares (read off its syntax by `resolve::extension_names`), and, if
+    /// the parser recovered from it, every name its damaged text spells
+    /// (`resolve::extension_names::damage`).
+    pub fn extension_names(&self) -> ExtensionNames {
+        let mut names = self.extension_names.clone();
+        if let Some(damage) = &self.damage {
+            names.absorb(&damage.names);
         }
+        names
     }
-    by_end
-}
 
-/// Wrap an owned end-offset index (from [`build_end_index`]) into a token
-/// classifier: each query is O(1). The `+ use<>` bound keeps the opaque return
-/// type precisely captured — it owns `by_end` and borrows nothing, so callers may
-/// retain the classifier after the resolved file it was built from is dropped, or
-/// require a `'static` classifier.
-fn end_index_classifier(
-    by_end: HashMap<TextSize, (TextSize, SemanticClass)>,
-) -> impl Fn(TextRange) -> Option<SemanticClass> + use<> {
-    move |token: TextRange| {
-        by_end
-            .get(&token.end())
-            // The occurrence ending here must contain the token — always true for
-            // a segment of a qualified path; guarded defensively.
-            .and_then(|&(start, class)| (start <= token.start()).then_some(class))
-    }
-}
-
-impl ResolvedFile {
     /// Whether `self` and `other` fold into the Compile-order [`ProjectItems`]
     /// accumulator *identically* — i.e. [`ProjectItems::extend_with`] would grow
     /// the accumulator the same way from either. Compares exactly the three things
@@ -4038,11 +3896,9 @@ impl ResolvedFile {
     /// `incremental ≡ batch` differential (blind to over-comparison — it stays
     /// green when reuse is merely *missed*) cannot see.
     ///
-    /// The extension-source signal has a *second* half, the file's own
-    /// augmentation/attribute syntax, that is not a [`ResolvedFile`] field; the
-    /// incremental fold checks it separately (it needs the source tree, which
-    /// this method does not take).
-    pub(super) fn same_export_contribution(&self, other: &ResolvedFile, names: &NameTable) -> bool {
+    /// It also compares the extension-member names the fold threads
+    /// ([`Self::extension_names()`], the damaged text's included).
+    pub(super) fn same_contribution(&self, other: &FileSurface, names: &NameTable) -> bool {
         self.exports.items.len() == other.exports.items.len()
             && FileExportIndices::from_decls(self, names)
                 == FileExportIndices::from_decls(other, names)
@@ -4076,61 +3932,8 @@ impl ResolvedFile {
             // refold. (Contains the defs' source positions, so a
             // range-shifting .fsi edit invalidates too — conservative.)
             && self.sig_exports == other.sig_exports
-    }
-
-    /// The [`ResolvedFile`] a `.fsi` **signature file** occupies a Compile
-    /// slot with (`docs/fsi-signature-restriction-plan.md`): no resolutions
-    /// and no exports of its own — it owns no `ItemId` range (`item_base` is
-    /// the running count, its range empty) — only its screen, the arena of
-    /// its exported idents' binders, and the stashed surface the paired
-    /// implementation's slot materialises
-    /// ([`Self::append_signature_exports`]).
-    pub(super) fn signature_slot(
-        item_base: u32,
-        screen: Arc<SigScreen>,
-        defs: DefArena,
-        sig_exports: Vec<SigExport>,
-    ) -> ResolvedFile {
-        ResolvedFile {
-            defs,
-            resolutions: HashMap::default(),
-            or_pattern_aliases: HashSet::default(),
-            opaque_binders: HashSet::default(),
-            // The walk resolves nothing in a signature file.
-            opaque_regions: vec![OpaqueRegion::WholeFile],
-            attribute_resolutions: HashMap::default(),
-            field_labels: HashMap::default(),
-            own_type_simple_names: HashSet::default(),
-            placed_types: Vec::new(),
-            // Filled by the fold from the signature's own declarations.
-            unplaced_types: HashMap::default(),
-            unplaced_type_places: HashMap::default(),
-            own_module_simple_names: HashSet::default(),
-            own_abbrev_type_simple_names: HashSet::default(),
-            contributions: FileContributions::default(),
-            declares_core_attribute_alias: false,
-            unknowables: Unknowables::default(),
-            // Filled from the signature's own syntax by `signature_slot`.
-            extension_names: ExtensionNames::default(),
-            preceding_extension_names: ExtensionNames::default(),
-            exports: ExportedItems::default(),
-            item_base,
-            namespace_paths: Vec::new(),
-            open_extension_namespaces: Vec::new(),
-            active_pattern_shape: HashMap::default(),
-            diagnostics: Vec::new(),
-            resolution_trace: ResolutionTrace::default(),
-            decline_sites: HashMap::default(),
-            export_decls: Vec::new(),
-            sig_screen: Some(screen),
-            sig_exports,
-            // A signature file's slot contributes a screen, exports and
-            // extension names, never an inferred type. The fold sets the
-            // signature's own reading (`signature_slot`); until then, the
-            // value that claims the least.
-            recovery: SyntaxRecovery::Unretained,
-            damage: None,
-        }
+            // The extension-member names `FoldState::advance` threads.
+            && self.extension_names() == other.extension_names()
     }
 
     /// Materialise the paired signature's stashed surface as **this**
@@ -4146,7 +3949,7 @@ impl ResolvedFile {
     /// sig-redirected identities while dropping the implementation's own.
     pub(super) fn append_signature_exports(
         &mut self,
-        sig: &ResolvedFile,
+        sig: &FileSurface,
         sig_idx: usize,
         names: &NameTable,
     ) {
@@ -4213,6 +4016,247 @@ impl ResolvedFile {
                     type_qualified: ex.type_qualified.clone(),
                 },
             });
+        }
+    }
+}
+
+/// The result of resolving a single file: the definition arena, a map from each
+/// name-use range to its [`Resolution`], and the items the file exports.
+///
+/// [`PartialEq`] is by *value* — two `ResolvedFile`s are equal when their whole
+/// modelled content matches (the resolutions map, binder arena, exports, every
+/// threaded field, and diagnostics), independent of the source-tree instance
+/// they were resolved from. This is what lets the incremental fold be
+/// differentially tested against the cold fold (`incremental ≡ batch`): two
+/// independent parses of the same text resolve to *equal* files even though
+/// their syntax nodes differ by identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedFile {
+    /// The file's local defs ([`DefSpace::Local`]):
+    /// the binders the walk interned inside expressions. Its declaration
+    /// defs are its surface's ([`FileSurface::defs`]).
+    pub(super) local_defs: SpaceDefs,
+    /// What later files may read of this one ([`FileSurface`]).
+    pub(super) surface: FileSurface,
+    /// Every resolved occurrence (uses *and* the binders' own self-references),
+    /// keyed by the occurrence's source range.
+    pub(super) resolutions: HashMap<TextRange, Resolution>,
+    /// The subset of [`Self::resolutions`] whose occurrence is an **or-pattern
+    /// alias**: a later alternative's spelling of a name the first alternative
+    /// binds (`A v | B v` — the second `v`). Its resolution is the canonical
+    /// binder, exactly as an ordinary use of it would be.
+    ///
+    /// The set exists because such an occurrence sits in *binding* position
+    /// while resolving elsewhere, which no other occurrence does — and a
+    /// consumer diffing us against FCS has to know: FCS reports these for an
+    /// ordinary name but is **silent** for one starting with `_`, so a
+    /// comparison that read the occurrence as a plain use would score our
+    /// correct answer as a resolution the oracle contradicts.
+    pub(super) or_pattern_aliases: HashSet<TextRange>,
+    /// The ranges of binders the walk knows are there but does not intern: it
+    /// puts a declining entry for the name in scope instead, so every use the
+    /// binder captures declines rather than reaching an outer same-named
+    /// target. A binder FCS reports that is in neither this set nor
+    /// [`Self::defs`] is one the walk does not know about at all.
+    pub(super) opaque_binders: HashSet<TextRange>,
+    /// The parts of the file whose binders the walk knows it does not walk
+    /// ([`OpaqueRegion`]).
+    pub(super) opaque_regions: Vec<OpaqueRegion>,
+    /// The *type* each written attribute resolved to (EX-3 §2(d),
+    /// `docs/extension-scope-enumeration-plan.md`), keyed by the written
+    /// attribute name's range (the full dotted path, matching FCS's
+    /// `rangeOfLid`). Kept apart from [`Self::resolutions`] — the attribute
+    /// name is a *type* use resolved through FCS's suffix-first candidate
+    /// order, a different query than the ranges the main map's differentials
+    /// pin. [`Resolution::Entity`] / [`Resolution::Local`] are commitments
+    /// (certain-implies-exact against the `attrs` oracle);
+    /// [`Resolution::Deferred`] makes no claim; an attribute neither candidate
+    /// matches is *absent* (FCS errors and sinks nothing there).
+    pub(super) attribute_resolutions: HashMap<TextRange, Resolution>,
+    /// What FCS's record-label table answers at each member-access label the
+    /// walk could answer for, keyed by the label token's range
+    /// ([`Self::field_label_on_unknown_receiver`]).
+    pub(super) field_labels: HashMap<TextRange, FieldLabelEntry>,
+    /// The abbreviation-declared subset of [`FileSurface::own_type_simple_names`] —
+    /// a committed [`Resolution::Local`] attribute resolution of such a name
+    /// may alias `ExtensionAttribute`, so [`Self::attribute_may_be`] treats it
+    /// as possibly any attribute.
+    pub(super) own_abbrev_type_simple_names: HashSet<String>,
+    /// The file-wide unknowables the walk raised ([`Unknowables`]), read
+    /// through [`Self::open_extension_unknowable`].
+    pub(super) unknowables: Unknowables,
+    /// The union of [`FileSurface::extension_names()`] over every **preceding**
+    /// Compile-order file, stamped by the fold; empty for a single-file
+    /// caller.
+    pub(super) preceding_extension_names: ExtensionNames,
+    /// The file's declared project **namespace** paths (`["Outer", "Inner"]`),
+    /// from its `namespace` header(s), each with its ancestor prefixes. Retained
+    /// as a file-level fact because the OV-6 extension gate reads it through the
+    /// public [`Self::namespace_paths`] accessor (`crates/sema/src/infer/extension_scope.rs`); the
+    /// *cross-file* namespace index now derives from the `Namespace`
+    /// [`ExportDecl`]s (see [`ProjectItems::extend_with`]).
+    pub(super) namespace_paths: Vec<Vec<String>>,
+    /// EX-2 (`docs/extension-scope-enumeration-plan.md`): the **assembly**
+    /// namespace paths this file's explicit `open <namespace>` clauses bring into
+    /// scope. The overload engine's extension-absence gate asks the same
+    /// `extension_named_in_scope` query about these as about the file's declared
+    /// namespace chain — an extension in an opened assembly namespace is in scope
+    /// exactly as one in an enclosing namespace is. See
+    /// [`Resolver::open_extension_namespaces`](super::state::Resolver).
+    pub(super) open_extension_namespaces: Vec<Vec<String>>,
+    /// The [`ActivePatternShape`] of each same-file active-pattern recognizer,
+    /// keyed by each of its per-case *use def ids* (the `Resolution::Local`
+    /// identity a case use resolves to). Read through
+    /// [`Self::active_pattern_shape`]; see
+    /// [`Output::active_pattern_shape`](crate::resolve::output::Output::active_pattern_shape).
+    pub(super) active_pattern_shape: HashMap<DefId, ActivePatternShape>,
+    /// Always-sound semantic diagnostics found while walking the file (today
+    /// only `use rec`; see [`SemaDiagnostic`]). Source-ordered.
+    pub(super) diagnostics: Vec<SemaDiagnostic>,
+    /// The **resolution-explain trace**: every `open` in the file with the
+    /// opaque-open flags it set ([`ResolutionTrace`]). Purely diagnostic — no
+    /// cross-file fold or use-site resolver reads it — so it is excluded from
+    /// [`FileSurface::same_contribution`]; deterministic from source, so it does
+    /// not perturb the `incremental ≡ batch` value-equality differential. Read
+    /// through [`Self::resolution_trace`].
+    pub(super) resolution_trace: ResolutionTrace,
+    /// The **decline census**: which guard declined each declined occurrence,
+    /// and the ladder tier it spoke from, keyed by the occurrence's source range
+    /// exactly as [`Self::resolutions`] is. Read through
+    /// [`Self::decline_site`].
+    ///
+    /// Purely diagnostic, on the same terms as [`Self::resolution_trace`]: no
+    /// cross-file fold or use-site resolver reads it, so it is excluded from
+    /// [`FileSurface::same_contribution`]; and it is deterministic from source,
+    /// so it does not perturb the `incremental ≡ batch` value-equality
+    /// differential. It is the *per-token* half the per-open
+    /// [`ResolutionTrace`] cannot supply.
+    pub(super) decline_sites: HashMap<TextRange, DeclineSite>,
+    /// What the parser had to recover from in this file.
+    ///
+    /// Unlike [`Self::decline_sites`] and [`Self::resolution_trace`], which are
+    /// documented as purely diagnostic, this one is **load-bearing**:
+    /// [`crate::infer_file`] reads it to decide whether a declaration's syntax
+    /// may be believed, so a caller that supplies
+    /// [`SyntaxRecovery::Unretained`] gets a quieter answer, not merely a
+    /// thinner report.
+    ///
+    /// It is deliberately *not* part of
+    /// [`FileSurface::same_contribution`]: recovery gates what this file
+    /// commits about itself, never what it exports, so a later file's fold
+    /// slot cannot observe it.
+    pub(super) recovery: SyntaxRecovery,
+}
+
+/// Build the end-offset index a token classifier queries, from a set of
+/// resolved occurrences and a per-resolution classify function. The shared core
+/// of [`ResolvedFile::token_classifier`] and [`ResolvedProject::token_classifier`]:
+/// index each *committed* occurrence by its **end** offset, keeping the widest
+/// (smallest-start) occurrence ending there, so a qualified tail token maps to
+/// the whole dotted path it closes while a qualifier head keeps its own segment.
+/// Built once (O(occurrences)). The two callers differ only in `classify` — a
+/// single file classifies from its own arena; a project also follows a cross-file
+/// `Item` to its declaring file.
+///
+/// Returning the *owned* index — rather than a closure over it — is what keeps
+/// the public classifiers detached: `classify` borrows the resolved file, but the
+/// returned `HashMap` does not, so [`end_index_classifier`] can wrap it into an
+/// `impl Fn(..) + use<>` that outlives the file it was built from.
+fn build_end_index(
+    occurrences: &HashMap<TextRange, Resolution>,
+    classify: impl Fn(Resolution) -> Option<SemanticClass>,
+) -> HashMap<TextSize, (TextSize, SemanticClass)> {
+    let mut by_end: HashMap<TextSize, (TextSize, SemanticClass)> = HashMap::default();
+    for (occ, res) in occurrences {
+        if let Some(class) = classify(*res) {
+            let entry = by_end.entry(occ.end()).or_insert((occ.start(), class));
+            if occ.start() < entry.0 {
+                *entry = (occ.start(), class);
+            }
+        }
+    }
+    by_end
+}
+
+/// Wrap an owned end-offset index (from [`build_end_index`]) into a token
+/// classifier: each query is O(1). The `+ use<>` bound keeps the opaque return
+/// type precisely captured — it owns `by_end` and borrows nothing, so callers may
+/// retain the classifier after the resolved file it was built from is dropped, or
+/// require a `'static` classifier.
+fn end_index_classifier(
+    by_end: HashMap<TextSize, (TextSize, SemanticClass)>,
+) -> impl Fn(TextRange) -> Option<SemanticClass> + use<> {
+    move |token: TextRange| {
+        by_end
+            .get(&token.end())
+            // The occurrence ending here must contain the token — always true for
+            // a segment of a qualified path; guarded defensively.
+            .and_then(|&(start, class)| (start <= token.start()).then_some(class))
+    }
+}
+
+impl ResolvedFile {
+    /// The [`ResolvedFile`] a `.fsi` **signature file** occupies a Compile
+    /// slot with (`docs/fsi-signature-restriction-plan.md`): no resolutions
+    /// and no exports of its own — it owns no `ItemId` range (`item_base` is
+    /// the running count, its range empty) — only its screen, the arena of
+    /// its exported idents' binders, and the stashed surface the paired
+    /// implementation's slot materialises
+    /// ([`FileSurface::append_signature_exports`]).
+    pub(super) fn signature_slot(
+        item_base: u32,
+        screen: Arc<SigScreen>,
+        defs: DefArena,
+        sig_exports: Vec<SigExport>,
+    ) -> ResolvedFile {
+        let (declaration_defs, local_defs) = defs.into_spaces();
+        debug_assert!(
+            local_defs.iter().next().is_none(),
+            "a signature binds nothing inside an expression"
+        );
+        ResolvedFile {
+            local_defs,
+            surface: FileSurface {
+                defs: declaration_defs,
+                own_type_simple_names: HashSet::default(),
+                placed_types: Vec::new(),
+                // Filled by the fold from the signature's own declarations.
+                unplaced_types: HashMap::default(),
+                unplaced_type_places: HashMap::default(),
+                own_module_simple_names: HashSet::default(),
+                contributions: FileContributions::default(),
+                declares_core_attribute_alias: false,
+                // Filled from the signature's own syntax by `signature_slot`.
+                extension_names: ExtensionNames::default(),
+                exports: ExportedItems::default(),
+                item_base,
+                export_decls: Vec::new(),
+                sig_screen: Some(screen),
+                sig_exports,
+                // Read with the extension names, by `signature_slot`.
+                damage: None,
+            },
+            resolutions: HashMap::default(),
+            or_pattern_aliases: HashSet::default(),
+            opaque_binders: HashSet::default(),
+            // The walk resolves nothing in a signature file.
+            opaque_regions: vec![OpaqueRegion::WholeFile],
+            attribute_resolutions: HashMap::default(),
+            field_labels: HashMap::default(),
+            own_abbrev_type_simple_names: HashSet::default(),
+            unknowables: Unknowables::default(),
+            preceding_extension_names: ExtensionNames::default(),
+            namespace_paths: Vec::new(),
+            open_extension_namespaces: Vec::new(),
+            active_pattern_shape: HashMap::default(),
+            diagnostics: Vec::new(),
+            resolution_trace: ResolutionTrace::default(),
+            decline_sites: HashMap::default(),
+            // A signature file's slot contributes a screen, exports and
+            // extension names, never an inferred type. The fold sets the
+            // signature's own reading (`signature_slot`); until then, the
+            // value that claims the least.
+            recovery: SyntaxRecovery::Unretained,
         }
     }
 
@@ -4369,11 +4413,7 @@ impl ResolvedFile {
     /// the parser recovered from it, every name its damaged text spells
     /// (`resolve::extension_names::damage`).
     pub fn extension_names(&self) -> ExtensionNames {
-        let mut names = self.extension_names.clone();
-        if let Some(damage) = &self.damage {
-            names.absorb(&damage.names);
-        }
-        names
+        self.surface.extension_names()
     }
 
     /// The union of [`Self::extension_names`] over every preceding
@@ -4428,7 +4468,7 @@ impl ResolvedFile {
             Some(Resolution::Entity(h)) => env.is_abbreviation(*h) || is_target(*h),
             Some(Resolution::Local(id)) => self
                 .own_abbrev_type_simple_names
-                .contains(env.names().text(self.defs[*id].name())),
+                .contains(env.names().text(self.def(*id).name())),
             // No other variant is ever recorded for an attribute; if one
             // appears, defer rather than trust it.
             Some(_) => true,
@@ -4456,9 +4496,13 @@ impl ResolvedFile {
         self.or_pattern_aliases.contains(&range)
     }
 
-    /// The binder a [`DefId`] names.
+    /// The binder a [`DefId`] names: a declaration def from the surface, a
+    /// local def from the file's own.
     pub fn def(&self, id: DefId) -> &Def {
-        &self.defs[id]
+        match id.space() {
+            DefSpace::Declaration => &self.surface.defs[id],
+            DefSpace::Local => &self.local_defs[id],
+        }
     }
 
     /// Whether the walk declines every use spelled `name`, wherever it is: the
@@ -4499,12 +4543,12 @@ impl ResolvedFile {
     /// Every binder the walk interned: the declarations, then the locals, each
     /// in interning order.
     pub fn defs(&self) -> impl Iterator<Item = &Def> + '_ {
-        self.defs.iter()
+        self.surface.defs.iter().chain(self.local_defs.iter())
     }
 
     /// The items this file exports.
     pub fn exports(&self) -> &ExportedItems {
-        &self.exports
+        &self.surface.exports
     }
 
     /// The always-sound semantic diagnostics found in this file (today only
@@ -4527,7 +4571,7 @@ impl ResolvedFile {
     /// The gate defers wholesale when true.
     pub fn open_extension_unknowable(&self) -> bool {
         self.unknowables.contains(Unknowable::OpenExtensionSurface)
-            || self.damage.as_ref().is_some_and(|d| d.opens)
+            || self.surface.damage.as_ref().is_some_and(|d| d.opens)
     }
 
     /// The file's declared project **namespace** paths, each with its ancestor
@@ -4542,7 +4586,7 @@ impl ResolvedFile {
     /// The project-global base of this file's items — the [`ItemId`] of its
     /// first export. See [`Self::item_base`].
     pub fn item_base(&self) -> u32 {
-        self.item_base
+        self.surface.item_base
     }
 
     /// The in-file [`Def`] a resolution points at, if it points at a local or
@@ -4553,8 +4597,8 @@ impl ResolvedFile {
         match res {
             Resolution::Local(id) => Some(self.def(id)),
             Resolution::Item(id) => {
-                let local = id.index().checked_sub(self.item_base as usize)?;
-                let item = self.exports.items.get(local)?;
+                let local = id.index().checked_sub(self.surface.item_base as usize)?;
+                let item = self.surface.exports.items.get(local)?;
                 // A signature-derived export's def lives in the paired
                 // `.fsi`'s arena — cross-file from here, like the handles
                 // outside this file's range.
@@ -4592,8 +4636,8 @@ impl ResolvedFile {
             // exported use-def, then the shape. A cross-file `Item` (out of this
             // file's range) is `None` — same-file-only, like `resolved_def`.
             Resolution::Item(id) => {
-                let local = id.index().checked_sub(self.item_base as usize)?;
-                let item = self.exports.items.get(local)?;
+                let local = id.index().checked_sub(self.surface.item_base as usize)?;
+                let item = self.surface.exports.items.get(local)?;
                 let ExportDef::Own(def) = item.def else {
                     return None;
                 };
@@ -4621,7 +4665,7 @@ impl ResolvedFile {
     }
 
     /// The [`SemanticClass`] a resolution commits to, or `None` where we decline.
-    /// [`Self::resolved_def`] is itself the commit gate: it yields a `Def` only
+    /// [`ResolvedFile::resolved_def`] is itself the commit gate: it yields a `Def` only
     /// for a [`Resolution::Local`] or a same-file [`Resolution::Item`], and
     /// `None` for a cross-file item, an `Entity` / `Member`, `Deferred`, and
     /// `Unresolved` — exactly the cases we decline.
@@ -4655,7 +4699,7 @@ impl ResolvedFile {
     }
 
     /// The [`DefId`] a resolution points at, if it names a local or an item
-    /// **of this file** — the [`Self::resolved_def`] companion that returns the
+    /// **of this file** — the [`ResolvedFile::resolved_def`] companion that returns the
     /// identity rather than the [`Def`]. Used by inference to key a binder's
     /// inference variable by a stable handle so a value *use* can be unified
     /// with its binding. Same in-file restriction: a cross-file
@@ -4667,8 +4711,8 @@ impl ResolvedFile {
     /// is still this file's).
     pub fn owns_item(&self, id: ItemId) -> bool {
         id.index()
-            .checked_sub(self.item_base as usize)
-            .is_some_and(|local| local < self.exports.items.len())
+            .checked_sub(self.surface.item_base as usize)
+            .is_some_and(|local| local < self.surface.exports.items.len())
     }
 
     /// The position of the type definition `def` among the types this file
@@ -4676,22 +4720,26 @@ impl ResolvedFile {
     /// [`Resolution::EarlierFileType`] names it by — or `None` when `def` is
     /// not a type the walk placed.
     pub fn placed_type_index(&self, def: DefId) -> Option<u32> {
-        let index = self.placed_types.iter().position(|t| t.def == def)?;
+        let index = self
+            .surface
+            .placed_types
+            .iter()
+            .position(|t| t.def == def)?;
         Some(u32::try_from(index).expect("more than u32::MAX types in a file"))
     }
 
     /// Each placed type's def, by its position: what a later file's
     /// [`Resolution::EarlierFileType`] `index` denotes.
     pub(crate) fn placed_type_defs(&self) -> impl Iterator<Item = DefId> + '_ {
-        self.placed_types.iter().map(|t| t.def)
+        self.surface.placed_types.iter().map(|t| t.def)
     }
 
     pub fn resolved_def_id(&self, res: Resolution) -> Option<DefId> {
         match res {
             Resolution::Local(id) => Some(id),
             Resolution::Item(id) => {
-                let local = id.index().checked_sub(self.item_base as usize)?;
-                let item = self.exports.items.get(local)?;
+                let local = id.index().checked_sub(self.surface.item_base as usize)?;
+                let item = self.surface.exports.items.get(local)?;
                 item.def()
             }
             // Another file's arena.
@@ -4746,18 +4794,23 @@ impl ResolvedProject {
                 .iter()
                 .map(|file| {
                     let mut file = ResolvedFile::clone(file);
-                    for def in file.defs.iter_mut() {
+                    for def in file
+                        .surface
+                        .defs
+                        .iter_mut()
+                        .chain(file.local_defs.iter_mut())
+                    {
                         *def = def.rekey(from, to);
                     }
-                    for decl in &mut file.export_decls {
+                    for decl in &mut file.surface.export_decls {
                         decl.path = decl.path.rekey(from, to);
                         decl.kind = rekey_kind(&decl.kind);
                     }
-                    for item in &mut file.exports.items {
+                    for item in &mut file.surface.exports.items {
                         item.name = item.name.rekey(from, to);
                         item.qualified = item.qualified.as_ref().map(|p| p.rekey(from, to));
                     }
-                    for export in &mut file.sig_exports {
+                    for export in &mut file.surface.sig_exports {
                         export.name = export.name.rekey(from, to);
                         export.path = export.path.rekey(from, to);
                         export.type_qualified =
@@ -4803,8 +4856,8 @@ impl ResolvedProject {
             Resolution::EarlierFileType { file, index } => {
                 let idx = file as usize;
                 let rf = self.files.get(idx)?;
-                let def = rf.placed_types.get(index as usize)?.def;
-                return Some((idx, rf.defs.get(def)?));
+                let def = rf.surface.placed_types.get(index as usize)?.def;
+                return Some((idx, rf.surface.def(def)?));
             }
             _ => return None,
         };
@@ -4812,13 +4865,13 @@ impl ResolvedProject {
         // order, so the first file whose range contains the handle is its
         // unique owner (an earlier file's `get` fails the upper bound).
         let (idx, item) = self.files.iter().enumerate().find_map(|(idx, f)| {
-            let base = f.item_base() as usize;
+            let base = f.surface.item_base as usize;
             let local = id.index().checked_sub(base)?;
-            f.exports.items.get(local).map(|item| (idx, item))
+            f.surface.exports.items.get(local).map(|item| (idx, item))
         })?;
         match item.def {
-            ExportDef::Own(def) => Some((idx, self.files[idx].defs.get(def)?)),
-            ExportDef::Sig { file, def } => Some((file, self.files.get(file)?.defs.get(def)?)),
+            ExportDef::Own(def) => Some((idx, self.files[idx].surface.def(def)?)),
+            ExportDef::Sig { file, def } => Some((file, self.files.get(file)?.surface.def(def)?)),
         }
     }
 

@@ -86,7 +86,7 @@ pub(super) struct RecBlock {
 
 /// What one file's declarations contribute to later files through routes the
 /// walk does not model. Part of the file's export contribution
-/// ([`ResolvedFile::same_export_contribution`](super::model::ResolvedFile)).
+/// ([`FileSurface::same_contribution`](super::model::FileSurface::same_contribution)).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct FileContributions {
     /// What the file adds to the root scope of every later file
@@ -1067,7 +1067,7 @@ pub(super) fn signature_contributions(
     rf: &mut ResolvedFile,
 ) {
     let renames = super::prescan::declares_core_attribute_alias(sig.syntax());
-    rf.declares_core_attribute_alias = renames;
+    rf.surface.declares_core_attribute_alias = renames;
     let aliases = assemblies.core_attribute_aliases();
     let may_auto_open = |attrs: &mut dyn Iterator<Item = AttributeList>| {
         let spellings = attribute_spellings(attrs);
@@ -1086,16 +1086,16 @@ pub(super) fn signature_contributions(
     // (`super::custom_operations::signature_custom_operations`).
     let custom_operation_alias =
         super::custom_operations::signature_renames_custom_operation(sig.syntax());
-    rf.contributions.declares_custom_operation_alias = custom_operation_alias;
+    rf.surface.contributions.declares_custom_operation_alias = custom_operation_alias;
     let co_alias_declared = custom_operation_alias || preceding.custom_operation_alias_declared;
     // A signature that aliases `StructAttribute` lets a later file's
     // attribute be `[<Struct>]` whatever it is spelled.
-    rf.contributions.declares_slot_attribute_alias =
+    rf.surface.contributions.declares_slot_attribute_alias =
         sig.syntax().descendants_of::<TypeDefn>().any(|defn| {
             super::type_defn_renames_attribute(&defn, crate::assembly_env::SLOT_ATTRIBUTE_NAMES)
         });
     let co_aliases = assemblies.custom_operation_aliases();
-    rf.contributions.custom_operations =
+    rf.surface.contributions.custom_operations =
         super::custom_operations::signature_custom_operations(sig.syntax(), &|s| {
             super::custom_operations::CUSTOM_OPERATION_SPELLINGS.contains(&s)
                 || !core_attribute_spellings_trusted(co_alias_declared, co_aliases, [s])
@@ -1106,7 +1106,7 @@ pub(super) fn signature_contributions(
             && may_auto_open(&mut module.attributes());
         if root_module || matches!(module.kind(), ModuleOrNamespaceKind::GlobalNamespace) {
             let names = declared_identifiers(module.syntax());
-            rf.contributions.root.names.extend(names);
+            rf.surface.contributions.root.names.extend(names);
         }
     }
 }

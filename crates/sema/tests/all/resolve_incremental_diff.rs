@@ -13,7 +13,7 @@
 //! i.e. *whatever* it reuses, it must return exactly what a cold fold of the new
 //! files would. This is the machine check on the reuse logic — in particular on
 //! the lockstep between [`ProjectItems::extend_with`] and
-//! `ResolvedFile::same_export_contribution` (mutate either out of step and a
+//! `FileSurface::same_contribution` (mutate either out of step and a
 //! generated edit that changes a file's exports will make the incremental fold
 //! reuse a stale suffix, which this differential catches).
 //!
@@ -166,7 +166,7 @@ fn check(scenario: &Scenario) -> Result<Tally, TestCaseError> {
 /// is byte-for-byte identical — only source *positions* move, and they move for
 /// *every* declaration in the file (unlike an edit inside the last body, which
 /// shifts nothing after it). That is exactly the spurious-invalidation trap:
-/// [`ResolvedFile::same_export_contribution`] must ignore declaration provenance
+/// `FileSurface::same_contribution` must ignore declaration provenance
 /// (a decl's `pos`), or this maximal position shift would wrongly report an
 /// export change and recompute the whole suffix. This property is the generative
 /// guard on that direction — the one [`incremental_equals_batch`] is blind to,
