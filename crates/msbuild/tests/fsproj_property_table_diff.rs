@@ -1423,6 +1423,15 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
             "<ItemGroup><I Update=\"x\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
             false,
         ),
+        // Metadata evaluated item by item, for no item and for one.
+        (
+            "<ItemGroup><I Include=\"$(Missing)\"><O>%(Filename)</O><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            false,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\"><O>%(Filename)</O><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            false,
+        ),
         ("<ItemDefinitionGroup Condition=\"{c}\" />", false),
         (
             "<ItemDefinitionGroup Condition=\"false\"><I Condition=\"{c}\" /></ItemDefinitionGroup>",

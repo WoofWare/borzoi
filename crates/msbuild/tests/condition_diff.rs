@@ -886,6 +886,16 @@ fn where_msbuild_evaluates_a_condition() {
             r#"<ItemGroup><I Include="x" Condition="false"><M Condition="1 &lt; abc">m</M></I></ItemGroup>"#,
             true,
         ),
+        // Metadata that reads item metadata is evaluated item by item: not at
+        // all for an `Include` that names no item.
+        (
+            r#"<ItemGroup><I Include="$(Missing)"><O>%(Filename)</O><M Condition="tr ue">m</M></I></ItemGroup>"#,
+            false,
+        ),
+        (
+            r#"<ItemGroup><I Include="x"><O>%(Filename)</O><M Condition="tr ue">m</M></I></ItemGroup>"#,
+            true,
+        ),
         (
             r#"<ItemGroup><I Include="x"/><I Remove="x" Condition="tr ue"/></ItemGroup>"#,
             true,

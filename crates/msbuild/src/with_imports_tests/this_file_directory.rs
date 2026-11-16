@@ -187,3 +187,29 @@ fn an_import_path_collapses_before_it_opens() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_wildcard_import_lists_the_collapsed_directory() {
+    // MSBuild collapses `link/..` before it globs, so `link/../*.props`
+    // lists the project's directory, not the parent of `link`'s target.
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("proj")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("real/inner")).unwrap();
+    std::os::unix::fs::symlink("../real/inner", tmp.path().join("proj/link")).unwrap();
+    write_at(
+        tmp.path(),
+        "real/x.props",
+        "<Project><PropertyGroup><Q>real</Q></PropertyGroup></Project>",
+    );
+    let project_path = write_at(
+        tmp.path(),
+        "proj/p.proj",
+        "<Project><Import Project=\"link/../*.props\" />\
+         <PropertyGroup><After>1</After></PropertyGroup></Project>",
+    );
+    let parsed = parse_file(&project_path);
+    assert_eq!(parsed.rejection, None, "{:#?}", parsed.diagnostics);
+    assert_eq!(parsed.property("Q"), PropertyRead::Unset);
+    assert_eq!(parsed.property("After"), PropertyRead::Value("1".into()));
+}

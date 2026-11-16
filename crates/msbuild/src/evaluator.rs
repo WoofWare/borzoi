@@ -5609,12 +5609,26 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // property or an escape supplies is still `\` here.
         let decoded = segment.unescape();
         if segment.is_filespec_wildcard() {
+            // MSBuild collapses the path before it globs, so the directory
+            // listed is the collapsed one; a `\` a property supplied is not
+            // modelled (below).
+            let supplied_backslash = decoded.contains('\\');
+            let saved_path_certain = state.taken_import_path_certain;
+            if supplied_backslash {
+                state.taken_import_path_certain = false;
+                state.reach_doubted += 1;
+            }
             follow_wildcard_import(
                 &decoded.replace('\\', "/"),
+                !supplied_backslash,
                 current_file_dir,
                 node.range(),
                 state,
             );
+            if supplied_backslash {
+                state.reach_doubted -= 1;
+                state.taken_import_path_certain = saved_path_certain;
+            }
             continue;
         }
         // An escaped separator (`%2f`, `%5c`) is data when MSBuild decides
@@ -5746,8 +5760,13 @@ fn sdk_import_path(root: &Path, under_root: &str) -> std::io::Result<PathBuf> {
 /// sorted set, and a deterministic order is required here anyway.
 /// A wildcard *directory* component falls back to the conservative
 /// structural skip: the un-followed files could have carried anything.
+///
+/// With `collapse`, the directory is collapsed as text before it is listed,
+/// as MSBuild collapses the fixed part of a wildcard path, so the files
+/// listed are the ones beside a symlink's text, not its target's.
 fn follow_wildcard_import(
     normalised: &str,
+    collapse: bool,
     current_file_dir: &Path,
     span: Range<usize>,
     state: &mut State<'_>,
@@ -5757,7 +5776,13 @@ fn follow_wildcard_import(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let dir = path.parent().unwrap_or(current_file_dir);
+    let written_dir = path.parent().unwrap_or(current_file_dir);
+    let dir = if written_dir.to_string_lossy().contains(['*', '?']) {
+        written_dir.to_path_buf()
+    } else {
+        import_open_path(written_dir, collapse)
+    };
+    let dir = dir.as_path();
     if dir.to_string_lossy().contains(['*', '?']) || file_pattern.is_empty() {
         // Push the diagnostic too, not just the uncertainty: silently
         // returning would leave `is_partial` false with imports dropped.
@@ -5831,7 +5856,7 @@ fn follow_wildcard_import(
         key(a).cmp(&key(b)).then_with(|| a.cmp(b))
     });
     for matched in matches {
-        walk_external_file(&matched, span.clone(), state);
+        walk_import_file(&matched, span.clone(), collapse, state);
     }
 }
 

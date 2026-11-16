@@ -418,13 +418,28 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
 /// Judge the `<ItemGroup>` at `node`, which MSBuild reaches as `reached` says.
 /// MSBuild evaluates each item's condition whatever the group's holds, and an
 /// `Include` item's metadata conditions whatever the item's holds; an
-/// `Update`'s metadata only where the update applies.
+/// `Update`'s metadata only where the update applies. Metadata that reads
+/// item metadata (`%(…)`) or an item list (`@(…)`) is evaluated item by item,
+/// so not at all when the `Include` names no item: then its conditions are
+/// only possibly evaluated.
 fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
     judge_condition(node, &entry_dir, reached, state);
     for item in node.children().filter(Node::is_element) {
         judge_condition(item, &entry_dir, reached, state);
-        let metadata_reached = reached && attribute(item, "Include").is_some();
+        let reads_items = |text: &str| text.contains("%(") || text.contains("@(");
+        let per_item = item.attributes().any(|a| reads_items(a.value()))
+            || item.children().filter(Node::is_element).any(|metadata| {
+                // Text the reader declines (a CDATA section) counts as reading.
+                let text: Option<String> = metadata
+                    .descendants()
+                    .filter(|n| n.is_text())
+                    .map(crate::document::text)
+                    .collect();
+                text.is_none_or(|t| reads_items(&t))
+                    || metadata.attributes().any(|a| reads_items(a.value()))
+            });
+        let metadata_reached = reached && attribute(item, "Include").is_some() && !per_item;
         for metadata in item.children().filter(Node::is_element) {
             judge_condition(metadata, &entry_dir, metadata_reached, state);
         }

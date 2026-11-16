@@ -725,3 +725,17 @@ fn an_import_msbuild_fails_before_it_collapses_the_path_is_withdrawn() {
         assert_withdrawn(&parse_file(&project_path), &["Before", "After", "Alpha"]);
     }
 }
+
+#[test]
+fn metadata_evaluated_item_by_item_is_not_claimed() {
+    // Metadata that reads `%(…)` is evaluated once per item, so not at all
+    // for an `Include` that names none (`where_msbuild_evaluates_a_condition`).
+    let body = "<ItemGroup><I Include=\"$(Missing)\"><O>%(Filename)</O>\
+                <M Condition=\"tr ue\">m</M></I></ItemGroup>";
+    for parsed in both_walkers(&format!("  {body}")) {
+        assert_ne!(
+            parsed.rejection.map(|r| r.certainty),
+            Some(RejectionCertainty::Certain)
+        );
+    }
+}
