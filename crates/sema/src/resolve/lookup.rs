@@ -745,9 +745,18 @@ impl<'a> Resolver<'a> {
             return;
         }
         let implicit_screened = self.preceding.implicit_module_open_screened(gp);
+        let screen = self.preceding.open_name_screen(gp);
         for surface in &mut group.surfaces {
             for entry in &mut surface.entries {
-                if implicit_screened || self.preceding.sig_screened_open_name(gp, &entry.name) {
+                let screened = screen.screens(&entry.name);
+                #[cfg(debug_assertions)]
+                assert_eq!(
+                    screened,
+                    self.preceding.sig_screened_open_name(gp, &entry.name),
+                    "the per-open signature screen differs from the per-name rule on {gp:?} folding {:?}",
+                    entry.name
+                );
+                if implicit_screened || screened {
                     entry.target = OpenFoldTarget::Opaque(DeclineCause::SignatureScreened);
                 }
             }

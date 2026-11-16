@@ -1462,6 +1462,12 @@ impl ProjectItems {
     ///   `open <namespace>` can fold an `[<AutoOpen>]` submodule's members,
     ///   whose provenance the entry no longer carries): screen on the name
     ///   alone — coarser, deferral-only.
+    ///
+    /// An open asks it of every name through
+    /// [`Self::open_name_screen`](super::open_name_screen), which takes what
+    /// depends on `opened` alone once; this per-name form is that screen's
+    /// reference, which a debug build checks it against on every name.
+    #[cfg(any(test, debug_assertions))]
     pub(super) fn sig_screened_open_name(&self, opened: &[String], name: &str) -> bool {
         // The exactly-modelled exemption (Stage 2), as for
         // [`Self::sig_screened_path`] (value-namespace half only — a
