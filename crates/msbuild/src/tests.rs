@@ -2681,16 +2681,10 @@ fn whitespace_only_text_child_drops_per_node_not_per_value() {
 
 #[test]
 fn unmodellable_element_bodies_degrade() {
-    // Entity-encoded whitespace is a shape we cannot derive a value for, so we
-    // must not commit one: MSBuild is inconsistent — `&#32;` and `&#9;` are
-    // kept (length 1), `&#x20;` is dropped (length 0) — so we decline rather
-    // than pick a side.
-    for body in [
-        "&#32;",
-        "&#x20;",
-        "<![CDATA[x]]>&#x20;",
-        "&#32;<![CDATA[x]]>",
-    ] {
+    // A body holding an element or a processing instruction, which MSBuild
+    // reads as inner XML, re-spelling the markup, is a shape we do not derive
+    // a value for, so we must not commit one.
+    for body in ["a<x/>b", "a<?p q?>b", "&#32;<x/>", "<![CDATA[x]]><x/>"] {
         let src = format!(
             "<Project>\n  <PropertyGroup>\n    <P>{body}</P>\n  </PropertyGroup>\n</Project>"
         );
@@ -2706,6 +2700,42 @@ fn unmodellable_element_bodies_degrade() {
             )),
             "body {body:?}: {:?}",
             p.diagnostics
+        );
+    }
+}
+
+/// Whitespace written as a character reference: a run holding a decimal
+/// reference is kept whole, and one of literal whitespace and hexadecimal
+/// references is dropped, as MSBuild's reader classifies it
+/// (`fsproj_property_table_diff` pins each against `dotnet msbuild`).
+#[test]
+fn whitespace_references_read_as_msbuild_reads_them() {
+    for (body, value) in [
+        ("&#32;", " "),
+        ("&#032;", " "),
+        ("&#x20;", ""),
+        ("&#9;", "\t"),
+        ("&#x9;", ""),
+        (" &#32; ", "   "),
+        (" &#x20; ", ""),
+        ("&#x20;&#32;", "  "),
+        ("&#xA;&#xD;", ""),
+        ("\r\n&#32;\r\n", "\r\n \r\n"),
+        ("x<!--c-->&#x20;", "x"),
+        ("x<!--c-->&#32;", "x "),
+        ("&#x20;<![CDATA[x]]>", "x"),
+        ("&#32;<![CDATA[x]]>", " x"),
+        ("y<![CDATA[a]]>&#x20;", "y<![CDATA[a]]>"),
+        ("y<![CDATA[a]]>&#32;", "y<![CDATA[a]]> "),
+        ("y&#x20;<![CDATA[a]]>", "y <![CDATA[a]]>"),
+    ] {
+        let src = format!(
+            "<Project>\n  <PropertyGroup>\n    <P>{body}</P>\n  </PropertyGroup>\n</Project>"
+        );
+        assert_eq!(
+            parse(&src).properties.get("P").map(String::as_str),
+            Some(value),
+            "{body:?}"
         );
     }
 }

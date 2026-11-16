@@ -1856,7 +1856,7 @@ fn an_undecided_gate_withdraws_every_item_facet_not_just_compile() {
 
 #[test]
 fn an_unmodellable_body_then_a_clean_overwrite_still_decides_the_import_point() {
-    // An unmodellable body (entity-encoded whitespace) is refused: we
+    // An unmodellable body (an element) is refused: we
     // store no value and unpin the name. Both of those are dischargeable by a
     // later clean unconditional overwrite — last write wins on both sides, and
     // the final value is one we computed ourselves from ordinary text.
@@ -1869,7 +1869,7 @@ fn an_unmodellable_body_then_a_clean_overwrite_still_decides_the_import_point() 
     // agree on exactly.
     let p = parse_with_body(
         r#"  <PropertyGroup>
-    <ImportDirectoryBuildTargets>&#32;</ImportDirectoryBuildTargets>
+    <ImportDirectoryBuildTargets>fa<x/>lse</ImportDirectoryBuildTargets>
     <ImportDirectoryBuildTargets>true</ImportDirectoryBuildTargets>
   </PropertyGroup>"#,
     );

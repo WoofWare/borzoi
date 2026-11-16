@@ -1753,7 +1753,7 @@ fn read_compile_order_metadata_write(
     {
         match evaluate_item_condition(child, state) {
             CondGate::Run => {
-                // A body we cannot model (entity-encoded whitespace, an element
+                // A body we cannot model (an element or processing instruction
                 // — see `collect_element_text`) degrades the whole order update,
                 // exactly like an unsupported condition below.
                 let Some(raw) = collect_element_text(child) else {
@@ -3190,7 +3190,7 @@ fn read_item_metadata(node: Node<'_, '_>, name: &str, state: &mut State<'_>) -> 
         state.note_package_uncertain_if_condition_uses_sdk_taint(child);
         match evaluate_item_condition(child, state) {
             CondGate::Run => {
-                // A body we cannot model (entity-encoded whitespace, an element
+                // A body we cannot model (an element or processing instruction
                 // — see `collect_element_text`): degrade the dependency set, and
                 // clear the metadatum rather than let a prior write stand for a
                 // value we don't know. Same shape as `expand_trimmed`'s
@@ -3672,11 +3672,10 @@ fn read_generic_metadata_child(
     let (gate, condition_tainted) = evaluate_item_condition_silent_with_sdk_taint(child, state);
     match gate {
         CondGate::Run => {
-            // An unmodellable body (entity-encoded whitespace, an element
-            // or processing instruction — see `collect_element_text`)
-            // drops the metadatum and marks it uncertain, exactly like an
-            // expansion we couldn't evaluate. Any other body is read as
-            // MSBuild reads it.
+            // An unmodellable body (an element or processing instruction —
+            // see `collect_element_text`) drops the metadatum and marks it
+            // uncertain, exactly like an expansion we couldn't evaluate. Any
+            // other body is read as MSBuild reads it.
             match collect_element_text(child) {
                 Some(raw) => {
                     set_generic_metadata_value(name, &raw, condition_tainted, true, state, metadata)
@@ -4653,7 +4652,7 @@ fn resolve_string_metadata(
                 continue;
             }
         }
-        // An unmodellable body (entity-encoded whitespace, an element — see
+        // An unmodellable body (an element or processing instruction — see
         // `collect_element_text`) is a write whose effect we can't determine:
         // `Unknown`, like an unevaluable expansion below.
         let Some(raw) = collect_element_text(child) else {
