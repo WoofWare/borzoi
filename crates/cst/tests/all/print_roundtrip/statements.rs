@@ -8,7 +8,8 @@
 //! rarely nests the one in the other, so this checks the pairs exhaustively:
 //! each statement shape, as the whole of each body slot of each statement,
 //! and as the last statement of that body, both with a statement after the
-//! outer one and without.
+//! outer one and without, in each bracket a body can be in (`builder { }`,
+//! `[ ]`, `[| |]`).
 
 use borzoi_print::names::{Ident, LongIdent, ValueName};
 use borzoi_print::tree::{
@@ -152,12 +153,24 @@ fn bodies<V: Version>() -> Vec<Comp<V>> {
     out
 }
 
-/// `let x = builder { body }`.
-fn file<V: Version>(body: Comp<V>) -> ImplFile<V> {
-    let e = Expr::Computation {
-        builder: Box::new(name("builder")),
-        body: Box::new(body),
-    };
+/// `let x = builder { body }`, `[ body ]` or `[| body |]`.
+fn files<V: Version>(body: Comp<V>) -> Vec<ImplFile<V>> {
+    let body = Box::new(body);
+    [
+        Expr::Computation {
+            builder: Box::new(name("builder")),
+            body: body.clone(),
+        },
+        Expr::List(Some(body.clone())),
+        Expr::Array(Some(body)),
+    ]
+    .into_iter()
+    .map(file)
+    .collect()
+}
+
+/// `let x = e`.
+fn file<V: Version>(e: Expr<V>) -> ImplFile<V> {
     ImplFile::AnonModule(vec![ModuleDecl::Let(LetBindings::NonRec(Box::new(
         Binding {
             attributes: Vec::new(),
@@ -177,11 +190,11 @@ fn every_statement_nests<V: Version>() {
     for body in bodies::<V>() {
         for outer in statements(&body) {
             let after = last(Stmt::Return(name("z")));
-            files.push(file(Comp::Then(outer.clone(), Box::new(after))));
-            files.push(file(last(outer)));
+            files.extend(self::files(Comp::Then(outer.clone(), Box::new(after))));
+            files.extend(self::files(last(outer)));
         }
     }
-    assert!(files.len() > 500, "only {} files", files.len());
+    assert!(files.len() > 1500, "only {} files", files.len());
     let failures: Vec<String> = par_map(files.len(), |i| round_trips(&files[i]).err())
         .into_iter()
         .flatten()

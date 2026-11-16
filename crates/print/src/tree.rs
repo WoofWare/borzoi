@@ -302,10 +302,12 @@ pub enum Expr<V: Version> {
     },
     /// `a, b`
     Tuple(Vec2<Expr<V>>),
-    /// `[a; b]`
-    List(Vec<Expr<V>>),
-    /// `[|a; b|]`
-    Array(Vec<Expr<V>>),
+    /// `[]`, or `[ body ]`: `[a; b]` is the body of two expression
+    /// statements ([`Comp::exprs`]), and `[ for x in xs -> f x ]` a
+    /// comprehension; F# parses the two alike.
+    List(Option<Box<Comp<V>>>),
+    /// `[||]`, or `[| body |]`, as [`Expr::List`].
+    Array(Option<Box<Comp<V>>>),
     /// `{ A = a }` or `{ r with A = a }`
     Record {
         copy: Option<Box<Expr<V>>>,
@@ -443,6 +445,21 @@ pub enum Comp<V: Version> {
         ands: Vec<AndBang<V>>,
         rest: Box<Comp<V>>,
     },
+}
+
+impl<V: Version> Comp<V> {
+    /// `a; b; …`: each item an expression statement, as a list literal's
+    /// elements are.
+    pub fn exprs(items: crate::vec::Vec1<Expr<V>>) -> Self {
+        let mut items = items.into_vec();
+        let last = items.pop().expect("non-empty");
+        items
+            .into_iter()
+            .rev()
+            .fold(Comp::Last(Stmt::Expr(last)), |rest, e| {
+                Comp::Then(Stmt::Expr(e), Box::new(rest))
+            })
+    }
 }
 
 /// Whether a bang binding is `let!` or `use!`.

@@ -370,6 +370,16 @@ fn comp_clauses<V: Version>(
     .boxed()
 }
 
+/// A list's body: as often a literal's elements as a comprehension.
+fn comp_or_exprs<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Comp<V>> {
+    prop_oneof![
+        prop::collection::vec(expr.clone(), 1..=3)
+            .prop_map(|es| Comp::exprs(Vec1::from_vec(es).expect("non-empty"))),
+        comp(expr),
+    ]
+    .boxed()
+}
+
 /// A computation expression's body over the expressions `expr` draws.
 fn comp<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Comp<V>> {
     let e = expr.clone();
@@ -515,7 +525,6 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
     let leaf = proptest::strategy::Union::new_weighted(leaves);
     leaf.prop_recursive(4, 24, 3, |inner| {
         let b = inner.clone().prop_map(Box::new);
-        let items = prop::collection::vec(inner.clone(), 0..=2);
         prop_oneof![
             (b.clone(), b.clone()).prop_map(|(func, arg)| Expr::App { func, arg }),
             // A tuple argument is where `App` and `MethodApp` meet, and a
@@ -535,8 +544,10 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
             }),
             prop::collection::vec(inner.clone(), 2..=3)
                 .prop_map(|es| Expr::Tuple(Vec2::from_vec(es).expect("two"))),
-            items.clone().prop_map(Expr::List),
-            items.prop_map(Expr::Array),
+            prop::option::weighted(0.8, comp_or_exprs(inner.clone()).prop_map(Box::new))
+                .prop_map(Expr::List),
+            prop::option::weighted(0.8, comp_or_exprs(inner.clone()).prop_map(Box::new))
+                .prop_map(Expr::Array),
             (
                 prop::option::weighted(0.3, b.clone()),
                 prop::collection::vec((long_ident(), inner.clone()), 1..=2),

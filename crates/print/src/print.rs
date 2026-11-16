@@ -355,16 +355,8 @@ impl Printer {
                 self.expr(rhs);
             }
             Expr::Tuple(items) => self.separated(items.as_slice(), ", ", Self::expr),
-            Expr::List(items) => {
-                self.out.push('[');
-                self.separated(items, "; ", Self::expr);
-                self.out.push(']');
-            }
-            Expr::Array(items) => {
-                self.out.push_str("[|");
-                self.separated(items, "; ", Self::expr);
-                self.out.push_str("|]");
-            }
+            Expr::List(body) => self.bracketed("[", body.as_deref(), "]"),
+            Expr::Array(body) => self.bracketed("[|", body.as_deref(), "|]"),
             Expr::Record { copy, fields } => {
                 self.out.push_str("{ ");
                 if let Some(copy) = copy {
@@ -563,6 +555,15 @@ impl Printer {
         self.out.push(')');
     }
 
+    /// `open body close`, or `open close` (`[]`, `[||]`) with no body.
+    fn bracketed<V: Version>(&mut self, open: &str, body: Option<&Comp<V>>, close: &str) {
+        self.out.push_str(open);
+        if let Some(body) = body {
+            self.comp(body);
+        }
+        self.out.push_str(close);
+    }
+
     /// A line break, then spaces to `column`.
     fn newline_at(&mut self, column: usize) {
         self.out.push('\n');
@@ -582,6 +583,16 @@ impl Printer {
                 Comp::Then(s, rest) => {
                     self.stmt(s);
                     c = rest;
+                    // Between two expression statements, each parenthesised,
+                    // `;` is unambiguous, so a list literal stays on its line.
+                    if let (
+                        Stmt::Expr(_),
+                        Comp::Then(Stmt::Expr(_), _) | Comp::Last(Stmt::Expr(_)),
+                    ) = (s, &**rest)
+                    {
+                        self.out.push_str("; ");
+                        continue;
+                    }
                 }
                 Comp::Let(bindings, rest) => {
                     self.let_bindings(bindings);
@@ -1192,6 +1203,28 @@ mod tests {
             let_x(computation(body)),
             "let x = (async { if (c) then if (d) then return (a)\n                 else\n                   if (d) then return (a)\n                   return (b) })\n"
         );
+    }
+
+    #[test]
+    fn a_list_literal_is_one_line_and_a_comprehension_one_statement_per_line() {
+        let literal = Expr::List(Some(Box::new(Comp::exprs(Vec1::new(
+            name("a"),
+            vec![name("b")],
+        )))));
+        assert_eq!(let_x(literal), "let x = ([(a); (b)])\n");
+        let comprehension = Expr::Array(Some(Box::new(Comp::Last(Stmt::ForEach {
+            pat: Pat::Name(LongIdent::single(id("y"))),
+            source: name("ys"),
+            body: Box::new(Comp::Then(
+                Stmt::Yield(name("y")),
+                Box::new(Comp::Last(Stmt::Expr(name("z")))),
+            )),
+        }))));
+        assert_eq!(
+            let_x(comprehension),
+            "let x = ([|for (y) in (ys) do yield (y)\n                              (z) done|])\n"
+        );
+        assert_eq!(let_x(Expr::Array(None)), "let x = ([||])\n");
     }
 
     #[test]

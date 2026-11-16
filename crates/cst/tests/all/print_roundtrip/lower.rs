@@ -582,22 +582,21 @@ fn expr<V: Version>(e: &NormalisedExpr) -> L<Expr<V>> {
             })?,
         },
         N::ArrayOrList { is_array, elements } => {
-            let items = elements.iter().map(expr).collect::<L<Vec<_>>>()?;
+            if !elements.is_empty() {
+                return decline("expr: list of elements outside a body");
+            }
             if *is_array {
-                Expr::Array(items)
+                Expr::Array(None)
             } else {
-                Expr::List(items)
+                Expr::List(None)
             }
         }
         N::ArrayOrListComputed { is_array, inner } => {
-            let items = match &**inner {
-                N::Sequential(items) => items.iter().map(expr).collect::<L<Vec<_>>>()?,
-                one => vec![expr(one)?],
-            };
+            let body = Some(Box::new(comp(inner)?));
             if *is_array {
-                Expr::Array(items)
+                Expr::Array(body)
             } else {
-                Expr::List(items)
+                Expr::List(body)
             }
         }
         N::Typed { expr: e, ty: t } => Expr::Typed {
