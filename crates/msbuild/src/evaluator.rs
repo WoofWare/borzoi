@@ -6623,8 +6623,18 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     // as `/` (`FileUtilities.FixFilePath`), and refuses the project where
     // that names no file. A `\` that reaches here came from a name a wildcard
     // matched, or from an SDK's directory: the file the walk would open is
-    // not the one MSBuild opens, so decline.
+    // not the one MSBuild opens, so decline. MSBuild may name no file there
+    // and refuse the project, so nothing after this commits either.
     if cfg!(unix) && path.as_os_str().as_encoded_bytes().contains(&b'\\') {
+        state.note_rejection(
+            crate::RejectionCertainty::Possible,
+            crate::RejectionCause::Import {
+                project: path.display().to_string(),
+                gate_undecided: false,
+                why: crate::UnloadableImport::PathUndecided,
+            },
+            span.clone(),
+        );
         state.push(
             DiagnosticKind::UnsupportedConstruct {
                 element: format!(

@@ -696,7 +696,11 @@ fn an_import_path_holding_a_backslash_is_read_as_msbuild_reads_it() {
     ] {
         std::fs::write(dir.join(name), imported(which)).unwrap();
     }
-    let names: Vec<String> = ["Which", "ImpFull", "ImpFile"].map(str::to_string).to_vec();
+    // `After` is written after the import, unconditionally: where MSBuild
+    // refuses the project it must not commit either.
+    let names: Vec<String> = ["Which", "ImpFull", "ImpFile", "After"]
+        .map(str::to_string)
+        .to_vec();
     let imports = [
         "sub\\i.props",
         "sub%5Ci.props",
@@ -709,7 +713,8 @@ fn an_import_path_holding_a_backslash_is_read_as_msbuild_reads_it() {
     let plain = dir.join("Demo.fsproj");
     for import in imports {
         let xml = format!(
-            "<Project>\n  <Import Project=\"{}\" />\n</Project>\n",
+            "<Project>\n  <Import Project=\"{}\" />\n  <PropertyGroup>\n    \
+             <After>committed</After>\n  </PropertyGroup>\n</Project>\n",
             raw_attribute(import)
         );
         std::fs::write(&plain, &xml).unwrap();
