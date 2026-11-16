@@ -140,6 +140,9 @@ enum Container {
     /// target a marked C#-style holder: an auto-open abbreviation brings its
     /// target's extensions into scope.
     AutoOpenAlias,
+    /// `[<Extension>] type Holder = G.C<n>.AliasImpl<n>.AliasTarget<int>`:
+    /// an attributed abbreviation of a generic type's instantiation.
+    GenericAlias,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,7 +323,10 @@ struct Cell {
 impl Cell {
     /// Whether the container is an abbreviation of a holder elsewhere.
     fn aliased(self) -> bool {
-        matches!(self.container, Container::Alias | Container::AutoOpenAlias)
+        matches!(
+            self.container,
+            Container::Alias | Container::AutoOpenAlias | Container::GenericAlias
+        )
     }
 
     fn csharp(self) -> bool {
@@ -542,6 +548,7 @@ impl Cell {
                                 (Container::Record, Synth::Yes),
                                 (Container::Alias, Synth::No),
                                 (Container::AutoOpenAlias, Synth::No),
+                                (Container::GenericAlias, Synth::No),
                             ] {
                                 for home in [
                                     Home::Namespace,
@@ -676,9 +683,17 @@ fn member_lines(n: usize, cell: Cell) -> Vec<String> {
                 } else {
                     format!("[<{EXTENSION}>]")
                 };
+                let instantiation = if cell.container == Container::GenericAlias {
+                    "<int>"
+                } else {
+                    ""
+                };
                 return vec![
                     marker,
-                    format!("type Holder = {}.AliasImpl{n}.AliasTarget", namespace(n)),
+                    format!(
+                        "type Holder = {}.AliasImpl{n}.AliasTarget{instantiation}",
+                        namespace(n)
+                    ),
                 ];
             }
             let mut out = Vec::new();
@@ -715,19 +730,28 @@ fn member_lines(n: usize, cell: Cell) -> Vec<String> {
 /// `[<AutoOpen>]`), then the cell's namespace again.
 fn alias_target(n: usize, cell: Cell) -> Vec<String> {
     let ns = namespace(n);
+    let target = if cell.container == Container::GenericAlias {
+        Container::Generic
+    } else {
+        Container::Plain
+    };
     let plain = member_lines(
         n,
         Cell {
-            container: Container::Plain,
+            container: target,
             ..cell
         },
     );
     let mut out = vec![format!("namespace {ns}.AliasImpl{n}"), String::new()];
     // Every line of the plain holder, its own marker only where the alias
     // does not carry one.
-    let skip = usize::from(cell.container == Container::Alias);
+    let skip = usize::from(matches!(
+        cell.container,
+        Container::Alias | Container::GenericAlias
+    ));
     out.extend(plain.into_iter().skip(skip).map(|l| {
         l.replace("type Holder =", "type AliasTarget =")
+            .replace("type Holder<'U> =", "type AliasTarget<'U> =")
             .replace("r: Receiver", &format!("r: {ns}.Receiver"))
     }));
     out.push(String::new());

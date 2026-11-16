@@ -7510,6 +7510,114 @@ let private entityHasAttribute (logicalPath: string) (e: FSharpEntity) : bool =
         let t = a.AttributeType
         t.AccessPath + "." + t.LogicalName = logicalPath)
 
+/// One FCS row of the `assembly-entities` extension universe: a member that
+/// might be an extension, whatever its container and its accessibility.
+type private ExtensionMemberRow =
+    { Namespace: string
+      Enclosing: string[]
+      LogicalName: string
+      CompiledName: string
+      IsInstance: bool
+      Style: string }
+
+/// Whether `m` carries `System.Runtime.CompilerServices.ExtensionAttribute`,
+/// identified by its logical path, as [`entityHasAttribute`] identifies it.
+let private memberHasExtensionAttribute (m: FSharpMemberOrFunctionOrValue) : bool =
+    m.Attributes
+    |> Seq.exists (fun a ->
+        let t = a.AttributeType
+        t.AccessPath + "." + t.LogicalName = "System.Runtime.CompilerServices.ExtensionAttribute")
+
+/// Append `m`'s extension-universe row, of `style`, to `out`; a read that
+/// throws is recorded in `readErrors` instead.
+let private addExtensionMemberRow
+    (namespc: string)
+    (enclosing: string[])
+    (style: string)
+    (out: System.Collections.Generic.List<ExtensionMemberRow>)
+    (readErrors: System.Collections.Generic.List<string>)
+    (m: FSharpMemberOrFunctionOrValue)
+    : unit =
+    let name =
+        try m.LogicalName
+        with _ -> "?"
+    try
+        out.Add
+            { Namespace = namespc
+              Enclosing = enclosing
+              LogicalName = m.LogicalName
+              CompiledName = m.CompiledName
+              IsInstance = m.IsInstanceMember
+              Style = style }
+    with ex ->
+        readErrors.Add(
+            sprintf "%s.%s (namespace %s): %s extension row: %s" (String.Join("/", enclosing)) name namespc style ex.Message)
+
+/// The accessors of `m`, a property or an event carrying `[<Extension>]`:
+/// getter and setter, or add and remove. A read that throws is recorded.
+let private extensionAccessors
+    (where: string)
+    (readErrors: System.Collections.Generic.List<string>)
+    (m: FSharpMemberOrFunctionOrValue)
+    : FSharpMemberOrFunctionOrValue list =
+    let read (field: string) (f: unit -> FSharpMemberOrFunctionOrValue option) =
+        try f ()
+        with ex ->
+            readErrors.Add(sprintf "%s: %s: %s" where field ex.Message)
+            None
+    if m.IsProperty then
+        [ read "GetterMethod" (fun () -> if m.HasGetterMethod then Some m.GetterMethod else None)
+          read "SetterMethod" (fun () -> if m.HasSetterMethod then Some m.SetterMethod else None) ]
+        |> List.choose id
+    else
+        [ read "EventAddMethod" (fun () -> Some m.EventAddMethod)
+          read "EventRemoveMethod" (fun () -> Some m.EventRemoveMethod) ]
+        |> List.choose id
+
+/// Append to `out` every member of `e` that might be an extension: one
+/// FCS reads as an F# extension member (`IsExtensionMember`, style
+/// `fsharp`), and every method or accessor carrying `[<Extension>]` (style
+/// `csharp`), whatever its container, a property's or event's accessors when
+/// the property or event carries it. `enclosing` names the enclosing entities,
+/// `e` included, outermost first.
+///
+/// An abbreviation declares no members, and FCS answers its
+/// `MembersFunctionsAndValues` with its target's properties and events, so
+/// the caller does not ask for one.
+let private collectEntityExtensionMembers
+    (namespc: string)
+    (enclosing: string[])
+    (e: FSharpEntity)
+    (out: System.Collections.Generic.List<ExtensionMemberRow>)
+    (readErrors: System.Collections.Generic.List<string>)
+    : unit =
+    let where (name: string) =
+        sprintf "%s.%s (namespace %s)" (String.Join("/", enclosing)) name namespc
+    let add style = addExtensionMemberRow namespc enclosing style out readErrors
+    let members =
+        try Ok e.MembersFunctionsAndValues
+        with ex -> Error ex.Message
+    match members with
+    | Error msg -> readErrors.Add(sprintf "%s: MembersFunctionsAndValues: %s" (where "") msg)
+    | Ok ms ->
+        for m in ms do
+            let name =
+                try m.LogicalName
+                with _ -> "?"
+            let read (field: string) (f: unit -> 'T) : 'T option =
+                try Some(f ())
+                with ex ->
+                    readErrors.Add(sprintf "%s: %s: %s" (where name) field ex.Message)
+                    None
+            if read "IsExtensionMember" (fun () -> m.IsExtensionMember) = Some true then
+                add "fsharp" m
+            let marked = read "ExtensionAttribute" (fun () -> memberHasExtensionAttribute m)
+            let shape = read "IsProperty/IsEvent" (fun () -> m.IsProperty || m.IsEvent)
+            match marked, shape with
+            | Some true, Some true -> extensionAccessors (where name) readErrors m |> List.iter (add "csharp")
+            | Some true, Some false -> add "csharp" m
+            | _ -> ()
+
 /// Walk `entities` (an assembly's `Contents.Entities`, or a `NestedEntities`
 /// list) depth first, appending one row per non-namespace entity FCS
 /// surfaces to `rows`, whatever its accessibility, nested entities included.
@@ -7518,6 +7626,9 @@ let private entityHasAttribute (logicalPath: string) (e: FSharpEntity) : bool =
 /// when there is none to inherit. `FSharpAssemblySignature.Entities` flattens
 /// namespaces away, so a top-level entity reads its own `Namespace`, and a
 /// nested one inherits it.
+///
+/// Each placed entity's possible extension members go to `extRows`
+/// ([`collectEntityExtensionMembers`]).
 ///
 /// A property read that throws drops that entity's row and records why in
 /// `readErrors`, naming the entity; its nested entities are still walked when
@@ -7532,6 +7643,7 @@ let rec private collectAssemblyEntityRows
     (enclosing: string list)
     (entities: System.Collections.Generic.IList<FSharpEntity>)
     (rows: System.Collections.Generic.List<AssemblyEntityRow>)
+    (extRows: System.Collections.Generic.List<ExtensionMemberRow>)
     (readErrors: System.Collections.Generic.List<string>)
     : unit =
     let where (name: string) =
@@ -7580,6 +7692,11 @@ let rec private collectAssemblyEntityRows
                           AutoOpen = ao
                           Extension = ext }
                 | _ -> ()
+                match ownNs, name, read "IsFSharpAbbreviation" (fun () -> e.IsFSharpAbbreviation) with
+                | Some namespc, Some n, Some false ->
+                    let self = List.rev (n :: enclosing) |> List.toArray
+                    collectEntityExtensionMembers namespc self e extRows readErrors
+                | _ -> ()
             let nested =
                 try Ok e.NestedEntities
                 with ex -> Error ex.Message
@@ -7587,10 +7704,10 @@ let rec private collectAssemblyEntityRows
             | Error msg -> readErrors.Add(sprintf "%s: NestedEntities: %s" (where shown) msg)
             | Ok children ->
                 if isNs then
-                    collectAssemblyEntityRows None enclosing children rows readErrors
+                    collectAssemblyEntityRows None enclosing children rows extRows readErrors
                 else
                     match ownNs, name with
-                    | Some _, Some n -> collectAssemblyEntityRows ownNs (n :: enclosing) children rows readErrors
+                    | Some _, Some n -> collectAssemblyEntityRows ownNs (n :: enclosing) children rows extRows readErrors
                     // The namespace or name read failed, and is recorded: the
                     // children cannot be placed, so each is recorded as dropped.
                     | _ ->
@@ -7670,25 +7787,98 @@ let rec private ilTypeDefPlace
         let p = md.GetTypeDefinition parent
         ilTypeDefPlace md p (md.GetString p.Name :: acc)
 
+/// One IL row of the `assembly-entities` extension universe: a
+/// `MethodDefinition` that carries `ExtensionAttribute`, or is an accessor of
+/// a property or event that does (or carries an attribute whose type cannot
+/// be named, which might be it).
+type private IlExtensionMethodRow =
+    { Namespace: string
+      Enclosing: string[]
+      Name: string
+      IsStatic: bool
+      UnreadableAttribute: bool }
+
+/// Whether `attrs` might mark an extension, and whether an unreadable
+/// attribute is why it might: `Some false` when one is
+/// `System.Runtime.CompilerServices.ExtensionAttribute` and none is
+/// unreadable, `Some true` when one is unreadable, `None` otherwise.
+let private ilExtensionMark
+    (md: System.Reflection.Metadata.MetadataReader)
+    (attrs: System.Reflection.Metadata.CustomAttributeHandleCollection)
+    : bool option =
+    let names = [ for ca in attrs -> ilAttributeTypeName md ca ]
+    if names |> List.exists Option.isNone then Some true
+    elif names |> List.contains (Some("System.Runtime.CompilerServices", "ExtensionAttribute")) then Some false
+    else None
+
+/// Every extension-universe row of the metadata `md`, in method order: each
+/// method whose own attributes might mark it, and each accessor (getter,
+/// setter, adder, remover, raiser, others) of a property or event whose
+/// attributes might. A method counted twice is one row, unreadable when
+/// either reason is.
+let private ilExtensionMethodRows (md: System.Reflection.Metadata.MetadataReader) : IlExtensionMethodRow[] =
+    let counted = System.Collections.Generic.Dictionary<System.Reflection.Metadata.MethodDefinitionHandle, bool>()
+    let count (unreadable: bool) (h: System.Reflection.Metadata.MethodDefinitionHandle) =
+        if not h.IsNil then
+            match counted.TryGetValue h with
+            | true, prior -> counted.[h] <- prior || unreadable
+            | false, _ -> counted.[h] <- unreadable
+    for th in md.TypeDefinitions do
+        let td = md.GetTypeDefinition th
+        for mh in td.GetMethods() do
+            ilExtensionMark md (md.GetMethodDefinition(mh).GetCustomAttributes())
+            |> Option.iter (fun unreadable -> count unreadable mh)
+        for ph in td.GetProperties() do
+            let pd = md.GetPropertyDefinition ph
+            match ilExtensionMark md (pd.GetCustomAttributes()) with
+            | Some unreadable ->
+                let a = pd.GetAccessors()
+                for h in Seq.append [ a.Getter; a.Setter ] a.Others do
+                    count unreadable h
+            | None -> ()
+        for eh in td.GetEvents() do
+            let ed = md.GetEventDefinition eh
+            match ilExtensionMark md (ed.GetCustomAttributes()) with
+            | Some unreadable ->
+                let a = ed.GetAccessors()
+                for h in Seq.append [ a.Adder; a.Remover; a.Raiser ] a.Others do
+                    count unreadable h
+            | None -> ()
+    [| for mh in md.MethodDefinitions do
+           match counted.TryGetValue mh with
+           | true, unreadable ->
+               let m = md.GetMethodDefinition mh
+               let td = md.GetTypeDefinition(m.GetDeclaringType())
+               let ns, enclosing = ilTypeDefPlace md td []
+               yield
+                   { Namespace = ns
+                     Enclosing = List.toArray (enclosing @ [ md.GetString td.Name ])
+                     Name = md.GetString m.Name
+                     IsStatic = m.Attributes.HasFlag MethodAttributes.Static
+                     UnreadableAttribute = unreadable }
+           | false, _ -> () |]
+
 /// Every `TypeDefinition` row of the assembly at `path`, `<Module>` and nested
-/// types included, read with `System.Reflection.Metadata`: a reader
-/// independent of FCS's.
-let private ilTypeDefRows (path: string) : IlTypeDefRow[] =
+/// types included, and its extension universe ([`ilExtensionMethodRows`]),
+/// read with `System.Reflection.Metadata`: a reader independent of FCS's.
+let private ilTypeDefRows (path: string) : IlTypeDefRow[] * IlExtensionMethodRow[] =
     use stream = File.OpenRead path
     use pe = new System.Reflection.PortableExecutable.PEReader(stream)
     let md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader pe
-    [| for h in md.TypeDefinitions do
-           let td = md.GetTypeDefinition h
-           let ns, enclosing = ilTypeDefPlace md td []
-           let names = [ for ca in td.GetCustomAttributes() -> ilAttributeTypeName md ca ]
-           let has (n: string) (t: string) = names |> List.contains (Some(n, t))
-           { Namespace = ns
-             Enclosing = List.toArray enclosing
-             Name = md.GetString td.Name
-             Visibility = ilVisibilityName td.Attributes
-             AutoOpen = has "Microsoft.FSharp.Core" "AutoOpenAttribute"
-             Extension = has "System.Runtime.CompilerServices" "ExtensionAttribute"
-             UnreadableAttribute = names |> List.exists Option.isNone } |]
+    let rows: IlTypeDefRow[] =
+        [| for h in md.TypeDefinitions do
+             let td = md.GetTypeDefinition h
+             let ns, enclosing = ilTypeDefPlace md td []
+             let names = [ for ca in td.GetCustomAttributes() -> ilAttributeTypeName md ca ]
+             let has (n: string) (t: string) = names |> List.contains (Some(n, t))
+             { Namespace = ns
+               Enclosing = List.toArray enclosing
+               Name = md.GetString td.Name
+               Visibility = ilVisibilityName td.Attributes
+               AutoOpen = has "Microsoft.FSharp.Core" "AutoOpenAttribute"
+               Extension = has "System.Runtime.CompilerServices" "ExtensionAttribute"
+               UnreadableAttribute = names |> List.exists Option.isNone } |]
+    rows, ilExtensionMethodRows md
 
 /// The `assembly-entities` report for one referenced file: FCS's entities (when
 /// FCS loaded the file as one of `checkResults`' referenced assemblies) and an
@@ -7708,26 +7898,32 @@ let private assemblyEntitiesOf (checkResults: FSharpCheckFileResults) (file: str
                 {| Seen = false
                    Error = (null: string | null)
                    Entities = [||]
+                   ExtensionMembers = [||]
                    ReadErrors = [||] |}
             | Some asm ->
                 let rows = System.Collections.Generic.List<AssemblyEntityRow>()
+                let extRows = System.Collections.Generic.List<ExtensionMemberRow>()
                 let readErrors = System.Collections.Generic.List<string>()
-                collectAssemblyEntityRows None [] asm.Contents.Entities rows readErrors
+                collectAssemblyEntityRows None [] asm.Contents.Entities rows extRows readErrors
                 {| Seen = true
                    Error = null
                    Entities = rows.ToArray()
+                   ExtensionMembers = extRows.ToArray() |> Array.distinct
                    ReadErrors = readErrors.ToArray() |}
         with ex ->
             {| Seen = false
                Error = ex.Message
                Entities = [||]
+               ExtensionMembers = [||]
                ReadErrors = [||] |}
     let il =
         try
+            let rows, extensionMethods = ilTypeDefRows absolute
             {| Error = (null: string | null)
-               Rows = ilTypeDefRows absolute |}
+               Rows = rows
+               ExtensionMethods = extensionMethods |}
         with ex ->
-            {| Error = ex.Message; Rows = [||] |}
+            {| Error = ex.Message; Rows = [||]; ExtensionMethods = [||] |}
     {| File = absolute; Fcs = fcs; Il = il |}
 
 /// Whether the assembly at `path` embeds an F# signature resource: the pickle

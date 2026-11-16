@@ -8463,6 +8463,7 @@ mod tests {
             Ok(borzoi_assembly::ExistenceIndex {
                 il: Vec::new(),
                 pickle: borzoi_assembly::PickleLayer::Unreadable("a synthetic view".to_string()),
+                extensions: Vec::new(),
             })
         }
         fn assembly_refs(&self) -> Vec<AssemblyIdentity> {

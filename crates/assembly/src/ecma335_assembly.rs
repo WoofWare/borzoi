@@ -804,6 +804,7 @@ impl Ecma335Assembly {
     /// in between ([`crate::existence`]).
     pub fn existence_index(&self) -> Result<crate::ExistenceIndex, ImportError> {
         let il = crate::existence::il_rows(&self.image)?;
+        let mut extensions = crate::existence::il_extension_rows(&self.image, &il);
         let pickle = if self.fsharp_interface_data_version()?.is_none() {
             crate::PickleLayer::NotFSharp
         } else {
@@ -821,14 +822,21 @@ impl Ecma335Assembly {
                     match crate::fsharp_pickle::unpickle_signature(&sig.payload, stream_b) {
                         Err(error) => crate::PickleLayer::Unreadable(error.to_string()),
                         Ok(ccu) => match crate::existence::pickled_rows(&ccu) {
-                            Ok(rows) => crate::PickleLayer::Read(rows),
+                            Ok((rows, pickled_extensions)) => {
+                                extensions.extend(pickled_extensions);
+                                crate::PickleLayer::Read(rows)
+                            }
                             Err(reason) => crate::PickleLayer::Unreadable(reason),
                         },
                     }
                 }
             }
         };
-        Ok(crate::ExistenceIndex { il, pickle })
+        Ok(crate::ExistenceIndex {
+            il,
+            pickle,
+            extensions,
+        })
     }
 
     /// The assembly-level `FSharpInterfaceDataVersionAttribute` version triple,

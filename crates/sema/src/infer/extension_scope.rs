@@ -127,7 +127,10 @@ impl ExtensionScope {
         if self.project_open && assemblies.references_not_built() {
             return Some(GateInput::ProjectOpenReferencesNotBuilt);
         }
-        if self.unenumerated_open {
+        // An `open` the gate cannot enumerate may bring any extension the
+        // assemblies declare (the project's are bounded above), so it
+        // declines only a name some assembly may declare somewhere.
+        if self.unenumerated_open && assemblies.extension_named_anywhere(name, is_static) {
             return Some(GateInput::OpenNotEnumerated);
         }
         if assemblies.extension_named_in_scope(&self.in_scope_namespaces, name, is_static) {
@@ -200,13 +203,30 @@ mod tests {
             Some(GateInput::ProjectUnknowable(NamesUnknowable::HashReference))
         );
 
-        // An `open` the resolver does not enumerate declines every name.
+        // An `open` the resolver does not enumerate declines a name some
+        // assembly may declare an extension of, and only that: with no
+        // assembly the universe is empty, and a synthetic env (its entities
+        // the truth, no index) may hold any name.
         let unenumerated = ExtensionScope {
             unenumerated_open: true,
             ..ExtensionScope::default()
         };
         assert_eq!(
             unenumerated.decline(env.extension_view(), "NoSourceDeclaresThis", false),
+            None
+        );
+        let synthetic = AssemblyEnv::from_entities(Vec::new());
+        assert_eq!(
+            unenumerated.decline(synthetic.extension_view(), "NoSourceDeclaresThis", false),
+            Some(GateInput::OpenNotEnumerated)
+        );
+        // A project reference with no built output is missing from the
+        // universe, so it bounds nothing: the open may reach the unbuilt
+        // project's own extensions.
+        let mut missing = AssemblyEnv::default();
+        missing.mark_references_not_built();
+        assert_eq!(
+            unenumerated.decline(missing.extension_view(), "NoSourceDeclaresThis", false),
             Some(GateInput::OpenNotEnumerated)
         );
         // A project `open` declines only under an unbuilt project reference.

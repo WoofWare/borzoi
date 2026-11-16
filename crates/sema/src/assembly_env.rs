@@ -193,14 +193,28 @@ impl ExtensionView<'_> {
         is_static: bool,
     ) -> bool {
         let existence = &self.0.existence;
-        in_scope_namespaces
-            .iter()
-            .chain(&self.0.effective_implicit_open_namespace_paths())
-            .chain(existence.auto_open_bases())
-            .any(|ns| existence.lends_extensions_through_an_abbreviation(ns))
-            || self
-                .0
-                .extension_named_in_scope(in_scope_namespaces, name, is_static)
+        let implicit = self.0.effective_implicit_open_namespace_paths();
+        let containers = || {
+            in_scope_namespaces
+                .iter()
+                .chain(&implicit)
+                .chain(existence.auto_open_bases())
+                .map(Vec::as_slice)
+        };
+        containers().any(|ns| existence.lends_extensions_through_an_abbreviation(ns))
+            || existence.extension_named(containers(), name, is_static)
+            || (existence.extensions_from_entities()
+                && self
+                    .0
+                    .extension_named_in_scope(in_scope_namespaces, name, is_static))
+    }
+
+    /// Whether any referenced assembly may declare an extension of `name`
+    /// anywhere ([`ExistenceSet::extension_named_anywhere`]). A project
+    /// reference with no built output is missing from the universe, so with
+    /// one the universe bounds nothing.
+    pub(crate) fn extension_named_anywhere(self, name: &str, is_static: bool) -> bool {
+        self.0.references_not_built || self.0.existence.extension_named_anywhere(name, is_static)
     }
 
     /// Whether some project reference has no built output yet.
@@ -1777,6 +1791,7 @@ impl AssemblyEnv {
                 // them or even name the identity, and their extensions (if any) are
                 // invisible, so the extension surface is unknowable (review, GPT-5.6).
                 env.extension_surface_unknowable = true;
+                env.existence.mark_unknowable();
             }
             tagged.extend(roots.into_iter().map(move |r| {
                 (
@@ -2218,6 +2233,7 @@ impl AssemblyEnv {
                         // unknowable and the OV-6 gate must defer wholesale (review,
                         // GPT-5.6).
                         self.extension_surface_unknowable = true;
+                        self.existence.mark_unknowable();
                     }
                     continue;
                 }
@@ -5341,6 +5357,9 @@ impl AssemblyEnv {
     /// after building the env, since the projection happens outside this crate.
     pub fn mark_extension_surface_unknowable(&mut self) {
         self.extension_surface_unknowable = true;
+        // The extension universe is unknown too: an unread auto-open list
+        // leaves the containers in every file's scope unknown.
+        self.existence.mark_unknowable();
         self.invalidate_bare_value_index();
         self.invalidate_fold_surfaces();
     }
@@ -8560,6 +8579,7 @@ pub(crate) mod from_views_tests {
             Ok(borzoi_assembly::ExistenceIndex {
                 il: Vec::new(),
                 pickle: borzoi_assembly::PickleLayer::Unreadable("a synthetic view".to_string()),
+                extensions: Vec::new(),
             })
         }
         fn identity(&self) -> &AssemblyIdentity {
@@ -8642,6 +8662,7 @@ pub(crate) mod from_views_tests {
             Ok(borzoi_assembly::ExistenceIndex {
                 il: Vec::new(),
                 pickle: borzoi_assembly::PickleLayer::Unreadable("a synthetic view".to_string()),
+                extensions: Vec::new(),
             })
         }
         fn identity(&self) -> &AssemblyIdentity {
@@ -9991,6 +10012,31 @@ pub(crate) mod from_views_tests {
             has_assembly_references: None,
             qualified_names: None,
         }
+    }
+
+    /// An assembly whose projection kept no root still names its
+    /// `[<AutoOpen>]` targets, which the env cannot resolve: its index reads
+    /// clean, yet the auto-opened container may lend any extension, so the
+    /// universe is unknowable.
+    #[test]
+    fn a_rootless_assembly_with_auto_opens_leaves_the_universe_unknowable() {
+        let mut input = forwarder_input("Rootless", Vec::new(), Vec::new());
+        input.existence = super::ExistenceInput::Read(borzoi_assembly::ExistenceIndex {
+            il: Vec::new(),
+            pickle: borzoi_assembly::PickleLayer::NotFSharp,
+            extensions: Vec::new(),
+        });
+        input.manifest_identity = None;
+        input.auto_opens = vec!["N.M".to_string()];
+        let env = AssemblyEnv::from_assemblies_with_projection_knowability(vec![input]);
+        assert!(
+            env.extension_view()
+                .extension_named_anywhere("Anything", false)
+        );
+        assert!(
+            env.extension_view()
+                .extension_named_in_scope(&[], "Anything", false)
+        );
     }
 
     fn forwarder(ns: &str, name: &str, to: &str) -> borzoi_assembly::TypeForwarder {

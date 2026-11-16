@@ -71,9 +71,30 @@ pub struct ExistenceSet {
     /// assembly also declares is contested, and not opened there): each is a
     /// container whose contents answer to short names in every file.
     auto_open_bases: Vec<Vec<String>>,
+    /// Every member that may be an extension, by every name a call may spell
+    /// it ([`borzoi_assembly::ExtensionRow`]).
+    extensions: HashMap<String, Vec<ExtensionSite>>,
+    /// Some input was synthetic: its entities, not an index, are the truth,
+    /// so the extension query reads them ([`Self::extensions_from_entities`]).
+    synthetic: bool,
     /// Some assembly's declarations are unknown.
     unknowable: bool,
 }
+
+/// Where one possible extension is declared.
+#[derive(Debug, Clone)]
+struct ExtensionSite {
+    /// The declaring entity's namespace, canonical.
+    namespace: Vec<String>,
+    /// The namespace followed by the declaring entity and its enclosers.
+    container: Vec<String>,
+    /// `Some(true)` for an instance extension, `Some(false)` for a static
+    /// one, `None` when either.
+    instance: Option<bool>,
+}
+
+/// The accessor spellings an F# property or event compiles to.
+const ACCESSOR_PREFIXES: [&str; 4] = ["get_", "set_", "add_", "remove_"];
 
 /// `name` in the set's canonical spelling.
 fn canonical(name: &str) -> String {
@@ -95,6 +116,7 @@ impl ExistenceSet {
             ExistenceInput::Read(index) => self.add_index(index),
             ExistenceInput::Unread => self.unknowable = true,
             ExistenceInput::Synthetic => {
+                self.synthetic = true;
                 for root in roots {
                     let namespace = canonical_path(&root.namespace);
                     self.add_entity(&namespace, &namespace, root);
@@ -138,6 +160,21 @@ impl ExistenceSet {
     }
 
     fn add_index(&mut self, index: &ExistenceIndex) {
+        for row in &index.extensions {
+            let namespace = canonical_path(&row.namespace);
+            let mut container = namespace.clone();
+            container.extend(row.enclosing.iter().map(|s| canonical(s)));
+            for name in &row.names {
+                self.extensions
+                    .entry(name.clone())
+                    .or_default()
+                    .push(ExtensionSite {
+                        namespace: namespace.clone(),
+                        container: container.clone(),
+                        instance: row.instance,
+                    });
+            }
+        }
         for row in &index.il {
             let mut path = canonical_path(&row.namespace);
             path.extend(row.enclosing.iter().map(|s| canonical(s)));
@@ -273,6 +310,73 @@ impl ExistenceSet {
         false
     }
 
+    /// Whether some input was synthetic, so that its entities answer the
+    /// extension query rather than the index.
+    pub(crate) fn extensions_from_entities(&self) -> bool {
+        self.synthetic
+    }
+
+    /// Whether a member that may be an extension of `name` (`is_static`: for
+    /// a type-qualified call) is declared anywhere in one of `containers`'
+    /// entity trees: a namespace's whole tree, or a module path's subtree.
+    /// `name` is also read in each accessor spelling, and without one, since
+    /// a call may reach a property or event by either.
+    pub(crate) fn extension_named<'c>(
+        &self,
+        containers: impl IntoIterator<Item = &'c [String]>,
+        name: &str,
+        is_static: bool,
+    ) -> bool {
+        if self.unknowable {
+            return true;
+        }
+        let sites = self.sites(name, is_static);
+        if sites.is_empty() {
+            return false;
+        }
+        containers.into_iter().any(|container| {
+            let container = canonical_path(container);
+            sites.iter().any(|site| {
+                site.namespace == container
+                    || (container.len() > site.namespace.len()
+                        && site.container.starts_with(&container))
+            })
+        })
+    }
+
+    /// The declarations of every member that may be an extension of `name`
+    /// (`is_static`: for a type-qualified call), read in each accessor
+    /// spelling and without one.
+    fn sites(&self, name: &str, is_static: bool) -> Vec<&ExtensionSite> {
+        let bare = ACCESSOR_PREFIXES
+            .iter()
+            .find_map(|p| name.strip_prefix(p))
+            .unwrap_or(name);
+        let mut spellings = vec![name.to_string(), bare.to_string()];
+        spellings.extend(ACCESSOR_PREFIXES.iter().map(|p| format!("{p}{bare}")));
+        spellings.sort();
+        spellings.dedup();
+        spellings
+            .iter()
+            .filter_map(|s| self.extensions.get(s))
+            .flatten()
+            .filter(|site| site.instance.is_none_or(|instance| instance != is_static))
+            .collect()
+    }
+
+    /// Whether any referenced assembly may declare an extension of `name`
+    /// anywhere: the universe an `open` the gate cannot enumerate draws from.
+    /// When it holds none, no `open` can bring one, enumerated or not. An
+    /// unknowable or synthetic set, or any abbreviation marked
+    /// `[<Extension>]` or `[<AutoOpen>]` (whose target the index does not
+    /// record), may hold every name.
+    pub(crate) fn extension_named_anywhere(&self, name: &str, is_static: bool) -> bool {
+        self.unknowable
+            || self.synthetic
+            || !self.abbreviation_lenders.is_empty()
+            || !self.sites(name, is_static).is_empty()
+    }
+
     /// Whether the container at `namespace` (a namespace, or a module's path)
     /// holds, anywhere in its entity tree, an abbreviation marked
     /// `[<Extension>]` or `[<AutoOpen>]` at any accessibility, which brings
@@ -342,6 +446,7 @@ mod tests {
                 alias,
                 nested,
             ]),
+            extensions: Vec::new(),
         };
         let mut set = ExistenceSet::default();
         set.add(&ExistenceInput::Read(index), &[]);
