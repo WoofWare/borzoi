@@ -1249,3 +1249,34 @@ fn what_resolution_observes_does_not_depend_on_hash_order() {
         assert_eq!(observe(), first);
     }
 }
+
+#[test]
+fn a_relative_root_declines() {
+    // The resolver's `File.Exists` takes a relative path against a working
+    // directory we cannot see.
+    let result = resolve_targets(
+        Path::new("dotnet"),
+        Path::new("dotnet/sdk/10.0.300"),
+        &no_user_env(),
+    );
+    assert!(
+        matches!(result, Err(SdkResolveError::UnsupportedLayout { .. })),
+        "{result:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_targets_link_keeps_its_directory() {
+    // CLR `File.Exists` finds a dangling link, so the resolver keeps the
+    // directory and MSBuild's import of the targets then fails
+    // (`workload_locator_diff` grades it).
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let version_dir = host_sdk(root, "10.0.300", &["alpha.workload"]);
+    let alpha = manifest(root, "10.0.300", "alpha.workload", "1.0.0");
+    fs::remove_file(alpha.join("WorkloadManifest.targets")).unwrap();
+    std::os::unix::fs::symlink("missing", alpha.join("WorkloadManifest.targets")).unwrap();
+    let result = resolve_targets(root, &version_dir, &no_user_env()).unwrap();
+    assert_eq!(result, SdkResolution::Roots(vec![alpha]));
+}

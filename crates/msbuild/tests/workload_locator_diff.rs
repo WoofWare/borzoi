@@ -746,12 +746,14 @@ impl Probe {
 
     /// Whether we decline `odd` here on purpose while the resolver answers:
     /// an MSI marker or an install state is outside what we resolve, and a
-    /// flat manifest that is a socket is one we decline rather than tell
-    /// apart from a FIFO, whose read hangs the resolver.
+    /// flat manifest or a targets file that is a socket is one we decline
+    /// rather than tell apart from a FIFO, whose read hangs the resolver (a
+    /// flat manifest) or MSBuild's import and the walk (a targets file).
     fn declines_on_purpose(self, odd: Odd) -> bool {
         match self {
             Probe::Msi | Probe::InstallState => odd.file_exists_to_dotnet(),
             Probe::ManifestJson => odd == Odd::Socket,
+            Probe::Targets => matches!(odd, Odd::Socket | Odd::Fifo),
             _ => false,
         }
     }
@@ -816,7 +818,7 @@ fn files_named(root: &Path, name: &str) -> Vec<PathBuf> {
 /// layout has no such path (no manifest to perturb, or no user root for the
 /// `userlocal` marker to bring in).
 #[cfg(unix)]
-fn perturb(rng: &mut SplitMix64, layout: &mut Layout, probe: Probe, odd: Odd) -> Option<()> {
+fn perturb(rng: &mut SplitMix64, layout: &mut Layout, probe: Probe, odd: Odd) -> Option<PathBuf> {
     let manifest_trees: Vec<PathBuf> = std::iter::once(layout.dotnet_root.join("sdk-manifests"))
         .chain(layout.user_root.iter().map(|u| u.join("sdk-manifests")))
         .collect();
@@ -887,7 +889,7 @@ fn perturb(rng: &mut SplitMix64, layout: &mut Layout, probe: Probe, odd: Odd) ->
     layout
         .description
         .push_str(&format!("{odd:?} at {}\n", shown.display()));
-    Some(())
+    Some(path)
 }
 
 /// Every probe the resolver makes, with every shape it can meet there, on
@@ -921,8 +923,26 @@ fn the_workload_probes_answer_as_the_resolver_s() {
                         sdk.display()
                     );
                     let mut layout = gen_layout(&mut rng, true);
-                    if perturb(&mut rng, &mut layout, probe, odd).is_none() {
+                    let Some(placed) = perturb(&mut rng, &mut layout, probe, odd) else {
                         continue;
+                    };
+                    // The walk would read a special targets file MSBuild
+                    // imports, and a read of a FIFO never returns, so no
+                    // committed root may hold one.
+                    if matches!(probe, Probe::Targets)
+                        && matches!(odd, Odd::Socket | Odd::Fifo)
+                        && ours(&layout, WORKLOAD_MANIFEST_TARGETS_LOCATOR).is_some_and(|roots| {
+                            roots
+                                .iter()
+                                .any(|root| Path::new(root) == placed.parent().unwrap())
+                        })
+                    {
+                        failures.push(format!(
+                            "{}, {probe:?} as {odd:?}: we commit a root whose targets file is \
+                             a special file\n{}",
+                            sdk.display(),
+                            layout.description
+                        ));
                     }
                     graded += 1;
                     let (here, theirs, failure) = grade(&mut oracle, &layout);

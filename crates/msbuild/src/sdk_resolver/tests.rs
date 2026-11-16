@@ -263,6 +263,26 @@ fn a_linked_sdk_directory_is_served() {
 }
 
 #[test]
+fn a_relative_nuget_folder_declines_a_pinned_name() {
+    // NuGet's `File.Exists` of a restore marker takes a relative folder
+    // against a working directory we cannot see.
+    let dotnet = TempDir::new().unwrap();
+    let err = locate_dotnet_sdk(
+        dotnet.path(),
+        Some(Path::new("packages")),
+        "MySdk/1.2.3",
+        None,
+        None,
+        &Observer::new(),
+    )
+    .expect_err("a relative folder cannot be read");
+    assert!(
+        matches!(err, SdkResolveError::UnsupportedLayout { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn a_nuget_version_without_a_restore_marker_is_not_installed() {
     let dotnet = TempDir::new().unwrap();
     let nuget = TempDir::new().unwrap();

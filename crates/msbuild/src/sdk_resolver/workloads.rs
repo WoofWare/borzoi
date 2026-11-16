@@ -76,7 +76,10 @@
 //! the runtime identifier chain, a flat manifest, or for the auto-import
 //! locator any manifest) that CLR `File.Exists` finds but that is no
 //! regular file: a read of a dangling link or a socket throws, and one of a
-//! FIFO never returns.
+//! FIFO never returns. A targets file that is a special file declines too,
+//! since MSBuild's import of it (and the walk's) would read it, and so does a
+//! relative root, which the resolver takes against a working directory we
+//! cannot see.
 //!
 //! Every existence probe asks what CLR `File.Exists` answers
 //! (`dotnet_io::file_exists`), which `tools/workload-oracle` grades with a
@@ -227,6 +230,19 @@ pub fn resolve_workload_locator(
             "global.json pins a workload set (sdk.workloadVersion)",
         ));
     }
+    // The resolver's `File.Exists` takes a relative path against the process's
+    // working directory, which we cannot see.
+    if ![
+        Some(dotnet_root),
+        Some(sdk_version_dir),
+        env.user_dotnet_root,
+    ]
+    .into_iter()
+    .flatten()
+    .all(Path::has_root)
+    {
+        return Err(unsupported("a workload root is a relative path"));
+    }
     let band = host_feature_band(sdk_version_dir)?;
     check_runtime_identifier_chain(sdk_version_dir, observer)?;
     let roots = workload_roots(dotnet_root, &band, env, observer)?;
@@ -236,11 +252,22 @@ pub fn resolve_workload_locator(
         // `CachingWorkloadResolver` keeps only the manifest directories
         // where CLR `File.Exists` finds the targets file (a dangling link
         // included: MSBuild then fails to import it); the rest are silently
-        // skipped, not an error.
-        let with_targets: Vec<PathBuf> = manifest_roots
-            .into_iter()
-            .filter(|dir| dotnet_io::file_exists(observer, &dir.join("WorkloadManifest.targets")))
-            .collect();
+        // skipped, not an error. A special file there is declined: MSBuild's
+        // import of a FIFO never returns, and neither would the walk's.
+        let mut with_targets = Vec::new();
+        for dir in manifest_roots {
+            let targets = dir.join("WorkloadManifest.targets");
+            if !dotnet_io::file_exists(observer, &targets) {
+                continue;
+            }
+            if observed::kind(observer, &targets) == Ok(EntryKind::Other) {
+                return Err(unsupported(format!(
+                    "a workload's targets file is a special file: {}",
+                    targets.display()
+                )));
+            }
+            with_targets.push(dir);
+        }
         return Ok(SdkResolution::Roots(with_targets));
     }
 

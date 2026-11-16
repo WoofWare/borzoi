@@ -348,6 +348,13 @@ pub fn locate_dotnet_sdk(
     let pin_spec: Option<VersionSpec> =
         effective_pin.map(|v| VersionSpec::with_version(v, RollForward::Disable, true));
     let dotnet_spec_ref: Option<&VersionSpec> = pin_spec.as_ref().or(spec);
+    // NuGet's `File.Exists` of a restore marker takes a relative folder
+    // against the process's working directory, which we cannot see.
+    if pin_spec.is_some() && nuget_packages_dir.is_some_and(|dir| !dir.has_root()) {
+        return Err(SdkResolveError::UnsupportedLayout {
+            reason: "the NuGet package folder is a relative path".to_owned(),
+        });
+    }
 
     // The host SDK is chosen by version alone, and only then asked for
     // `name`: MSBuild's default resolver serves

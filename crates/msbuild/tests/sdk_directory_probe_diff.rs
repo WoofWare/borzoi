@@ -375,6 +375,31 @@ enum Package {
     HashOnly,
 }
 
+impl Package {
+    /// Whether the case puts different entries at `Sdk` and `sdk`, which a
+    /// case-insensitive file system cannot hold.
+    fn needs_distinct_spellings(self) -> bool {
+        matches!(
+            self,
+            Package::Upper(_) | Package::UpperEmpty | Package::UpperProps(_)
+        )
+    }
+}
+
+/// The `Picked` that `root`'s `Sdk.props` sets, or why there is none.
+fn picked_in(root: &Path) -> String {
+    match host_fs::read_to_string(root.join("Sdk.props")) {
+        Ok(text) => text
+            .split_once("<Picked>")
+            .and_then(|(_, rest)| rest.split_once("</Picked>"))
+            .map_or_else(
+                || format!("no Picked in {}", root.display()),
+                |(name, _)| name.to_owned(),
+            ),
+        Err(err) => format!("unreadable {}: {err}", root.display()),
+    }
+}
+
 fn nuget_cases() -> Vec<Package> {
     let mut cases = vec![
         Package::Both,
@@ -413,12 +438,21 @@ fn nuget_serves_the_package_s_sdk_directory() {
         "<configuration><packageSources><clear /></packageSources></configuration>",
     )
     .unwrap();
+    let case_sensitive = {
+        let probe = scratch.path().join("Case");
+        std::fs::create_dir(&probe).unwrap();
+        !scratch.path().join("case").host_is_dir()
+    };
     let pins: BTreeMap<String, SdkVersion> =
         [(SDK.to_owned(), SdkVersion::parse("1.0.0").unwrap())].into();
     let mut failures = Vec::new();
     let mut committed = 0;
     let cases = nuget_cases();
     for (index, package) in cases.iter().enumerate() {
+        if !case_sensitive && package.needs_distinct_spellings() {
+            println!("{package:?}: skipped, `Sdk` and `sdk` are one directory here");
+            continue;
+        }
         let packages = scratch.path().join(format!("packages{index}"));
         let version = packages.join(SDK.to_ascii_lowercase()).join("1.0.0");
         std::fs::create_dir_all(&version).unwrap();
@@ -460,15 +494,10 @@ fn nuget_serves_the_package_s_sdk_directory() {
                 complete(&upper, "upper");
             }
         }
-        let name_of = |root: &Path| {
-            if root == upper || root.starts_with(&upper) {
-                "upper".to_owned()
-            } else if root == lower || root.starts_with(&lower) {
-                "lower".to_owned()
-            } else {
-                format!("elsewhere: {}", root.display())
-            }
-        };
+        // Named by what the directory's `Sdk.props` says, which is what the
+        // build reports: on a case-insensitive file system `Sdk` and `sdk`
+        // are one directory, whichever spelling names it.
+        let name_of = |root: &Path| picked_in(root);
         let case = format!("{package:?}");
         let ours = locate_dotnet_sdk(
             &empty_root,
