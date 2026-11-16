@@ -92,3 +92,13 @@ module Suffixed =
     let s = 4
 
 type Suffixed = { S: int }
+
+// An extension holder in the global namespace, whose member vals the pickle
+// keeps in the CCU root, renamed so that only the pickle knows its logical
+// name.
+namespace global
+
+[<System.Runtime.CompilerServices.Extension>]
+type GlobalHolder =
+    [<System.Runtime.CompilerServices.Extension; CompiledName("Physical")>]
+    static member Equals(s: string, i: int) = 0

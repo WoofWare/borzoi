@@ -1791,6 +1791,7 @@ impl AssemblyEnv {
                 // them or even name the identity, and their extensions (if any) are
                 // invisible, so the extension surface is unknowable (review, GPT-5.6).
                 env.extension_surface_unknowable = true;
+                env.existence.mark_unknowable();
             }
             tagged.extend(roots.into_iter().map(move |r| {
                 (
@@ -2232,6 +2233,7 @@ impl AssemblyEnv {
                         // unknowable and the OV-6 gate must defer wholesale (review,
                         // GPT-5.6).
                         self.extension_surface_unknowable = true;
+                        self.existence.mark_unknowable();
                     }
                     continue;
                 }
@@ -10010,6 +10012,31 @@ pub(crate) mod from_views_tests {
             has_assembly_references: None,
             qualified_names: None,
         }
+    }
+
+    /// An assembly whose projection kept no root still names its
+    /// `[<AutoOpen>]` targets, which the env cannot resolve: its index reads
+    /// clean, yet the auto-opened container may lend any extension, so the
+    /// universe is unknowable.
+    #[test]
+    fn a_rootless_assembly_with_auto_opens_leaves_the_universe_unknowable() {
+        let mut input = forwarder_input("Rootless", Vec::new(), Vec::new());
+        input.existence = super::ExistenceInput::Read(borzoi_assembly::ExistenceIndex {
+            il: Vec::new(),
+            pickle: borzoi_assembly::PickleLayer::NotFSharp,
+            extensions: Vec::new(),
+        });
+        input.manifest_identity = None;
+        input.auto_opens = vec!["N.M".to_string()];
+        let env = AssemblyEnv::from_assemblies_with_projection_knowability(vec![input]);
+        assert!(
+            env.extension_view()
+                .extension_named_anywhere("Anything", false)
+        );
+        assert!(
+            env.extension_view()
+                .extension_named_in_scope(&[], "Anything", false)
+        );
     }
 
     fn forwarder(ns: &str, name: &str, to: &str) -> borzoi_assembly::TypeForwarder {

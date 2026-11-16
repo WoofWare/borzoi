@@ -451,11 +451,20 @@ pub(crate) fn pickled_rows(
         }
     };
     let mut extensions = Vec::new();
-    for (stamp, namespace, enclosing) in &order {
+    // The CCU root holds the vals declared under `namespace global`; the
+    // walk's `order` leaves the root out, so it is read here first.
+    let root_vals = std::iter::once((pickled.root_entity, Vec::new(), Vec::new(), true));
+    let entities_vals = order
+        .iter()
+        .map(|(stamp, namespace, enclosing)| (*stamp, namespace.clone(), enclosing.clone(), false));
+    for (stamp, namespace, enclosing, is_root) in root_vals.chain(entities_vals) {
+        let (stamp, namespace, enclosing) = (&stamp, &namespace, &enclosing);
         let entity = &pickled.tables.tycons[*stamp as usize];
         // The vals of a namespace fragment sit in it; a module's or a type's
         // inside the entity.
-        let (namespace, enclosing) = if kind_of(entity) == PickledEntityKind::Namespace {
+        let (namespace, enclosing) = if is_root {
+            (Vec::new(), Vec::new())
+        } else if kind_of(entity) == PickledEntityKind::Namespace {
             let mut ns = namespace.clone();
             ns.push(entity.logical_name.clone());
             (ns, Vec::new())
