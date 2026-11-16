@@ -515,9 +515,28 @@ each graded SDK's compiler lists, and every parameter its `CoreCompile` hands
 the `Fsc` task, is classified as such a carrier or not
 (`sdk_language_diff::every_compiler_switch_is_classified_for_the_floor`,
 `every_compile_task_parameter_is_classified_for_the_floor`), so an SDK that adds
-one fails until it is placed. The same switches are otherwise unmodelled: a
-project whose version is trusted is parsed by the version's rules whatever
-they say.
+one fails until it is placed.
+
+The switches are not mirrored into the parse, so they doubt a trusted version
+too wherever the evaluation shows the build may pass one
+(`sdk_language::feature_switch_evidence`, `LangVersionDoubt::FeatureSwitch`):
+a `$(OtherFlags)` that is not version-neutral switches alone or that the walk
+may have wrong, or a target writing `OtherFlags` or a `DisabledLanguageFeatures`
+item that a document outside the SDK names. Such a build may check by a set of
+rules no version has (`--strict-indentation-` at F# 10 keeps F# 8's string
+lexing but drops its indentation rule), which the shape bands' representatives
+do not bracket, so under it the fold refuses every file whose parse is flagged
+`shape_depends_on_language_version`, unverified; an unflagged tree is the same
+under every set of rules, and its recovery is read off the ladder's ends as
+before. A name the build computes and content the walk did not enter stay
+unmodelled for the switches as they are for the version itself (Nerdbank's
+`PropertyName="%(…)"` writes, in every packable library of the project corpus,
+would otherwise doubt them all), and only hold a guess to the whole ladder.
+When this was decided no project of the project corpus or of the compiler's
+own repository passed a switch, which is why mirroring them is not worth it.
+`sdk_language_diff::a_feature_switch_doubts_a_trusted_version` takes every
+route, spelling and neighbour on each graded SDK through the real build's
+`CoreCompile` arguments and that SDK's compiler.
 
 The project fold's shape gate checks the same range: a band wholly below the
 floor is no build's, so a file whose tree moves only there does not refuse the

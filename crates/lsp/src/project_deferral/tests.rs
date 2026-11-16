@@ -1096,3 +1096,53 @@ fn a_refused_language_version_names_the_compiler_refusal() {
         );
     }
 }
+
+/// A version-shape refusal under a feature switch names the route the switch
+/// may take: removing it is the fix there, and pinning `LangVersion` is not.
+#[test]
+fn a_feature_switch_refusal_names_its_route() {
+    use crate::sdk_language::FeatureSwitchRoute;
+    let parsed = certain_project();
+    for (route, needles) in [
+        (
+            FeatureSwitchRoute::Flags {
+                carrier: "OtherFlags",
+                value: "--strict-indentation-".to_string(),
+            },
+            &["`$(OtherFlags)`", "--strict-indentation-"][..],
+        ),
+        (
+            FeatureSwitchRoute::Untrusted {
+                carrier: "OtherFlags",
+                cause: UntrustedCause::SdkPackageInput,
+            },
+            &["`$(OtherFlags)`", "package"][..],
+        ),
+        (
+            FeatureSwitchRoute::TargetWrite {
+                carrier: "OtherFlags",
+            },
+            &["target", "`$(OtherFlags)`"][..],
+        ),
+        (
+            FeatureSwitchRoute::Item {
+                item: "DisabledLanguageFeatures",
+            },
+            &["`DisabledLanguageFeatures`"][..],
+        ),
+    ] {
+        let refusal = FoldRefusal::LanguageVersionShape {
+            file: PathBuf::from("/w/Straddle.fs"),
+            cause: LangVersionDoubt::FeatureSwitch(route.clone()),
+        };
+        let ds = deferrals(evaluated(&parsed), FoldOutcome::Refused(&refusal));
+        let message =
+            deferral_message(Path::new("/w/Demo.fsproj"), &ds).expect("a fold refusal is reported");
+        for needle in ["Straddle.fs", "language feature"].iter().chain(needles) {
+            assert!(
+                message.contains(needle),
+                "{route:?}: the message must say {needle:?}: {message}"
+            );
+        }
+    }
+}

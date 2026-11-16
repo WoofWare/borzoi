@@ -40,8 +40,8 @@ use std::time::Duration;
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::sdk_language::{
     COMPILER_ENVIRONMENT, COMPILER_SELECTORS, FEATURE_SWITCH_CARRIERS, FEATURE_SWITCH_ITEMS,
-    FEATURE_SWITCHES, LangVersionReading, LangVersionSelection, ProjectCompiler, RefusalKind,
-    SdkLanguageFacts, VERSION_NEUTRAL_SWITCHES,
+    FEATURE_SWITCHES, LangVersionDoubt, LangVersionReading, LangVersionSelection, ProjectCompiler,
+    RefusalKind, SdkLanguageFacts, VERSION_NEUTRAL_SWITCHES,
 };
 use borzoi::workspace::Workspace;
 use borzoi_cst::language_version::LanguageVersion;
@@ -1624,4 +1624,382 @@ fn msbuild_files_under(dir: &Path) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+/// What a route to a feature switch does, as the build and the server see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwitchVerdict {
+    /// The build hands the compiler a feature switch, and the server doubts the
+    /// version.
+    Doubted,
+    /// The build hands the compiler none, and the server trusts the version.
+    Neutral,
+    /// The build hands the compiler a feature switch the evaluation shows no
+    /// sign of, and the server trusts the version: a name the build computes,
+    /// the boundary `sdk_language`'s module docs state.
+    Unmodelled,
+}
+
+/// One way a project may hand the compiler a feature switch: a project body
+/// fragment, a `Directory.Build.props` fragment, the compiler switch it needs
+/// (a compiler that does not list it is not asked), the `<LangVersion>`, and
+/// whether the build skips the compiler's support check.
+struct SwitchRoute {
+    name: &'static str,
+    body: &'static str,
+    props: &'static str,
+    needs: &'static str,
+    lang: Option<&'static str>,
+    support_check_skipped: bool,
+    verdict: SwitchVerdict,
+}
+
+const fn route(
+    name: &'static str,
+    body: &'static str,
+    props: &'static str,
+    needs: &'static str,
+    verdict: SwitchVerdict,
+) -> SwitchRoute {
+    SwitchRoute {
+        name,
+        body,
+        props,
+        needs,
+        lang: None,
+        support_check_skipped: false,
+        verdict,
+    }
+}
+
+/// Every route to a feature switch a project can take, each spelling the
+/// `Fsc` task reads differently, and the neighbours that pass none.
+const SWITCH_ROUTES: &[SwitchRoute] = &[
+    route(
+        "nothing",
+        "",
+        "",
+        "strict-indentation",
+        SwitchVerdict::Neutral,
+    ),
+    route(
+        "version-neutral OtherFlags",
+        "<PropertyGroup><OtherFlags>$(OtherFlags) --warnon:3390 --optimize-</OtherFlags></PropertyGroup>",
+        "",
+        "strict-indentation",
+        SwitchVerdict::Neutral,
+    ),
+    route(
+        "an item of another type",
+        r#"<ItemGroup><DisabledWarnings Include="FS0044" /></ItemGroup>"#,
+        "",
+        "strict-indentation",
+        SwitchVerdict::Neutral,
+    ),
+    route(
+        "OtherFlags",
+        "<PropertyGroup><OtherFlags>--strict-indentation-</OtherFlags></PropertyGroup>",
+        "",
+        "strict-indentation",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "OtherFlags appended to",
+        "<PropertyGroup><OtherFlags>$(OtherFlags) --warnon:3390 --strict-indentation-</OtherFlags></PropertyGroup>",
+        "",
+        "strict-indentation",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "OtherFlags with a single dash",
+        "<PropertyGroup><OtherFlags>-strict-indentation-</OtherFlags></PropertyGroup>",
+        "",
+        "strict-indentation",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "OtherFlags spliced by a quote",
+        "<PropertyGroup><OtherFlags>--strict-&quot;&quot;indentation-</OtherFlags></PropertyGroup>",
+        "",
+        "strict-indentation",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "OtherFlags quoted whole",
+        "<PropertyGroup><OtherFlags>&quot;--strict-indentation-&quot;</OtherFlags></PropertyGroup>",
+        "",
+        "strict-indentation",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "OtherFlags naming a response file",
+        "<PropertyGroup><OtherFlags>@$(MSBuildProjectDirectory)/switches.rsp</OtherFlags></PropertyGroup>",
+        "",
+        "strict-indentation",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "OtherFlags in Directory.Build.props",
+        "",
+        "<PropertyGroup><OtherFlags>--strict-indentation-</OtherFlags></PropertyGroup>",
+        "strict-indentation",
+        SwitchVerdict::Doubted,
+    ),
+    SwitchRoute {
+        lang: Some("7.0"),
+        support_check_skipped: true,
+        ..route(
+            "OtherFlags enforcing strict indentation below F# 8",
+            "<PropertyGroup><OtherFlags>--strict-indentation+</OtherFlags></PropertyGroup>",
+            "",
+            "strict-indentation",
+            SwitchVerdict::Doubted,
+        )
+    },
+    route(
+        "OtherFlags disabling a feature",
+        "<PropertyGroup><OtherFlags>--disableLanguageFeature:StrictIndentation</OtherFlags></PropertyGroup>",
+        "",
+        "disableLanguageFeature",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "a DisabledLanguageFeatures item",
+        r#"<ItemGroup><DisabledLanguageFeatures Include="StrictIndentation" /></ItemGroup>"#,
+        "",
+        "disableLanguageFeature",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "a DisabledLanguageFeatures item in Directory.Build.props",
+        "",
+        r#"<ItemGroup><DisabledLanguageFeatures Include="StrictIndentation" /></ItemGroup>"#,
+        "disableLanguageFeature",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "a target writing OtherFlags",
+        r#"<Target Name="Switch" BeforeTargets="CoreCompile"><PropertyGroup><OtherFlags>$(OtherFlags) --strict-indentation-</OtherFlags></PropertyGroup></Target>"#,
+        "",
+        "strict-indentation",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "a task output writing OtherFlags",
+        r#"<Target Name="Switch" BeforeTargets="CoreCompile"><CreateProperty Value="--strict-indentation-"><Output TaskParameter="Value" PropertyName="OtherFlags" /></CreateProperty></Target>"#,
+        "",
+        "strict-indentation",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "a target adding a DisabledLanguageFeatures item",
+        r#"<Target Name="Switch" BeforeTargets="CoreCompile"><ItemGroup><DisabledLanguageFeatures Include="StrictIndentation" /></ItemGroup></Target>"#,
+        "",
+        "disableLanguageFeature",
+        SwitchVerdict::Doubted,
+    ),
+    route(
+        "a target writing a computed name",
+        r#"<ItemGroup><Carrier Include="OtherFlags" /></ItemGroup><Target Name="Switch" BeforeTargets="CoreCompile"><CreateProperty Value="--strict-indentation-"><Output TaskParameter="Value" PropertyName="%(Carrier.Identity)" /></CreateProperty></Target>"#,
+        "",
+        "strict-indentation",
+        SwitchVerdict::Unmodelled,
+    ),
+];
+
+/// A file whose parse the language rules may shape, but whose tree is the same
+/// at every band of the version ladder: the end-of-file cascade absorbs the
+/// strict-indentation abort.
+const MID_EDIT: &str = "module M =\n";
+
+/// The environment `route` builds in: the test's own, with the support check
+/// skipped or not as the route says.
+fn env_of(route: &SwitchRoute) -> SdkDiscoveryEnv {
+    environments()
+        .into_iter()
+        .find(|(_, _, skipped)| *skipped == route.support_check_skipped)
+        .map(|(_, env, _)| env)
+        .unwrap()
+}
+
+/// The arguments the build of `fsproj` hands its compiler, read from
+/// `CoreCompile` with the compiler's run skipped (as a design-time build
+/// reads them), after a restore.
+fn compiler_arguments(fsproj: &Path) -> Vec<String> {
+    let mut cmd = Command::new("dotnet");
+    cmd.current_dir(fsproj.parent().unwrap())
+        .arg("msbuild")
+        .arg(fsproj)
+        .args([
+            "-restore",
+            "-nologo",
+            "-nodeReuse:false",
+            "-t:CoreCompile",
+            "-p:SkipCompilerExecution=true",
+            "-p:ProvideCommandLineArgs=true",
+            "-getItem:FscCommandLineArgs",
+        ])
+        .env_remove("SKIP_VERSION_SUPPORTED_CHECK");
+    let output = BoundedCommand::new(cmd)
+        .timeout(Duration::from_secs(300))
+        .run()
+        .unwrap_or_else(|e| panic!("dotnet msbuild {}: {e}", fsproj.display()));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "dotnet msbuild -getItem output is not JSON ({e}):\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    json["Items"]["FscCommandLineArgs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no FscCommandLineArgs in {json}"))
+        .iter()
+        .map(|item| item["Identity"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The error and warning codes `compiler` reports parsing `file` with `args`,
+/// with its support check skipped, so that it checks at any version it lists.
+fn parse_codes(compiler: &Compiler, args: &[String], file: &Path) -> Vec<String> {
+    let mut args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    args.push("--parseonly".into());
+    args.push(file.as_os_str().to_owned());
+    let output = run(compiler, &args, true);
+    let mut codes: Vec<String> = output
+        .lines()
+        .filter_map(|line| {
+            let (_, rest) = line
+                .split_once("error FS")
+                .or_else(|| line.split_once("warning FS"))?;
+            Some(rest.chars().take_while(char::is_ascii_digit).collect())
+        })
+        .filter(|code| code != "0075")
+        .collect();
+    codes.sort();
+    codes
+}
+
+/// A trusted `<LangVersion>` stops being the version the server parses by
+/// wherever the evaluation shows the build may switch a language feature apart
+/// from it: every route in [`SWITCH_ROUTES`], on every graded SDK whose
+/// compiler takes the switch. Each route is held to the real build twice: the
+/// arguments `CoreCompile` hands the compiler carry a feature switch exactly
+/// where the route is meant to pass one, and that compiler, given those
+/// arguments, reads a file that straddles F# 8 otherwise than at the version
+/// alone. So under each doubted route a claim made at the version would be
+/// wrong, and the server makes none: the file refuses the fold. Under a neutral
+/// neighbour the same file folds. A computed name passes a switch the server
+/// does not see, which is pinned as the stated boundary.
+#[test]
+fn a_feature_switch_doubts_a_trusted_version() {
+    let (mut doubted, mut neutral) = (0, 0);
+    for compiler in graded_compilers() {
+        let listed = listed_switches(&compiler);
+        for route in SWITCH_ROUTES {
+            if !listed.contains(route.needs) {
+                continue;
+            }
+            let at = format!("SDK {} ({})", compiler.sdk, route.name);
+            let dir = tempfile::tempdir().unwrap();
+            let fsproj = pinned_project(dir.path(), &compiler.sdk, route.lang, STRADDLING);
+            let text = host_fs::read_to_string(&fsproj).unwrap();
+            let text = text
+                .replace(
+                    "</PropertyGroup>",
+                    "<DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference></PropertyGroup>",
+                )
+                .replace("</Project>", &format!("{}\n</Project>", route.body));
+            std::fs::write(&fsproj, text).unwrap();
+            std::fs::write(
+                dir.path().join("Directory.Build.props"),
+                format!("<Project>{}</Project>", route.props),
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("switches.rsp"), "--strict-indentation-\n").unwrap();
+
+            let mut workspace = Workspace::with_env(env_of(route));
+            let parsed = workspace.project(&fsproj).unwrap().clone();
+            assert!(
+                parsed.property("LangVersion").untrusted_cause().is_none(),
+                "{at}: the version is established"
+            );
+            let selection = workspace.lang_version_selection(&fsproj);
+            assert_eq!(selection.refusal, None, "{at}");
+            let doubt = LangVersionDoubt::of(&parsed, &selection);
+            let mut sema = borzoi::semantic::SemanticState::new();
+            let folds = sema
+                .parses_for_project(&fsproj, &mut workspace, &borzoi::vfs::Vfs::new())
+                .is_some();
+
+            let arguments = compiler_arguments(&fsproj);
+            let switches: Vec<String> = arguments
+                .iter()
+                .filter(|arg| {
+                    arg.starts_with('@')
+                        || FEATURE_SWITCHES.iter().any(|switch| {
+                            arg.strip_prefix("--")
+                                .or_else(|| arg.strip_prefix('-'))
+                                .is_some_and(|arg| arg.starts_with(switch))
+                        })
+                })
+                .cloned()
+                .collect();
+            let version: Vec<String> = route
+                .lang
+                .map(|lang| vec![format!("--langversion:{lang}")])
+                .unwrap_or_default();
+            let passes = !switches.is_empty();
+            assert_eq!(
+                passes,
+                route.verdict != SwitchVerdict::Neutral,
+                "{at}: the build hands the compiler {switches:?} of {arguments:?}"
+            );
+            if passes {
+                let source = dir.path().join("A.fs");
+                let alone = parse_codes(&compiler, &version, &source);
+                let switched = parse_codes(
+                    &compiler,
+                    &[version.clone(), switches.clone()].concat(),
+                    &source,
+                );
+                assert_ne!(
+                    alone, switched,
+                    "{at}: {switches:?} moves nothing the compiler reports on the probe"
+                );
+            }
+
+            match route.verdict {
+                SwitchVerdict::Doubted => {
+                    doubted += 1;
+                    assert!(doubt.is_some(), "{at}: the version is doubted");
+                    assert!(!folds, "{at}: the straddling file refuses the fold");
+                }
+                SwitchVerdict::Neutral | SwitchVerdict::Unmodelled => {
+                    neutral += 1;
+                    assert_eq!(doubt, None, "{at}");
+                    assert!(
+                        folds,
+                        "{at}: the straddling file folds at the trusted version"
+                    );
+                }
+            }
+            // A tree the language rules may shape that agrees at every band of
+            // the ladder (the end-of-file cascade of a mid-edit `module M =`)
+            // still speaks for no set of rules off it.
+            std::fs::write(dir.path().join("A.fs"), MID_EDIT).unwrap();
+            let mut workspace = Workspace::with_env(env_of(route));
+            let mut sema = borzoi::semantic::SemanticState::new();
+            assert_eq!(
+                sema.parses_for_project(&fsproj, &mut workspace, &borzoi::vfs::Vfs::new())
+                    .is_some(),
+                route.verdict != SwitchVerdict::Doubted,
+                "{at}: a mid-edit file folds iff the version is not doubted"
+            );
+        }
+    }
+    assert!(
+        doubted > 0 && neutral > 0,
+        "no installed graded SDK took a route"
+    );
 }

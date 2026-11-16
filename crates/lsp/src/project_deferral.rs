@@ -45,7 +45,7 @@ use borzoi_msbuild::{
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::sdk_language::LangVersionDoubt;
+use crate::sdk_language::{FeatureSwitchRoute, LangVersionDoubt};
 
 /// How many causes a single capability's explanation renders before summarising
 /// the rest. A `window/showMessage` is a one-line toast in most clients, and a
@@ -360,6 +360,14 @@ impl FoldRefusal {
                 "parsing the Compile item {} hit a bug in borzoi's parser",
                 file.display()
             )),
+            FoldRefusal::LanguageVersionShape {
+                file,
+                cause: cause @ LangVersionDoubt::FeatureSwitch(_),
+            } => Some(format!(
+                "{}'s tree may depend on which language rules it is read by, and {}",
+                file.display(),
+                lang_version_doubt_phrase(cause)
+            )),
             FoldRefusal::LanguageVersionShape { file, cause } => Some(format!(
                 "{} parses differently either side of the F# 8 indentation rule, and {}",
                 file.display(),
@@ -385,6 +393,29 @@ fn lang_version_doubt_phrase(doubt: &LangVersionDoubt) -> String {
             "the build checks it at no language version: {}",
             refusal.message()
         ),
+        LangVersionDoubt::FeatureSwitch(route) => format!(
+            "the build may switch a language feature on or off apart from LangVersion, through {}",
+            feature_switch_route_phrase(route)
+        ),
+    }
+}
+
+/// How the build may pass a feature switch, as the end of a sentence.
+fn feature_switch_route_phrase(route: &FeatureSwitchRoute) -> String {
+    match route {
+        FeatureSwitchRoute::Untrusted { carrier, cause } => format!(
+            "`$({carrier})`, which I can't trust: it depends on {}",
+            untrusted_cause_phrase(cause)
+        ),
+        FeatureSwitchRoute::Flags { carrier, value } => format!(
+            "`$({carrier})` (`{value}`), which holds more than switches known to leave the \
+             language alone"
+        ),
+        FeatureSwitchRoute::TargetWrite { carrier } => {
+            format!("a target that writes `$({carrier})` before the compiler is run")
+        }
+        FeatureSwitchRoute::Item { item } => format!("`{item}` items, each a feature turned off"),
+        FeatureSwitchRoute::Hidden(cause) => untrusted_cause_phrase(cause),
     }
 }
 

@@ -1649,7 +1649,7 @@ impl Workspace {
     /// strict-indentation push decision at F# 8); the cross-file fold
     /// covers that exactly, refusing only a doubted version
     /// ([`LangVersionDoubt`](crate::sdk_language::LangVersionDoubt): untrusted
-    /// provenance or a refusal) × a file
+    /// provenance, a refusal or a feature switch) × a file
     /// whose parse shape provably depends on the version
     /// (`Parse::shape_depends_on_language_version` in `build_parses`), while
     /// this accessor keeps serving the best-guess value to the single-file
