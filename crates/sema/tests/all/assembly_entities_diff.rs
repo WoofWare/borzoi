@@ -28,8 +28,8 @@ use crate::common::{
     ensure_abbrev_fixture_built, ensure_active_pattern_fixture_built,
     ensure_attribute_alias_fixture_built, ensure_autoopen_fixture_built,
     ensure_existence_fixture_built, ensure_ext_universe_fixture_built, ensure_fsharp_core_dll,
-    ensure_measure_fixture_built, ensure_module_value_fixture_built,
-    ensure_rqa_union_fixture_built, ensure_system_runtime_dll,
+    ensure_measure_fixture_built, ensure_memberref_attr_dll_built,
+    ensure_module_value_fixture_built, ensure_rqa_union_fixture_built, ensure_system_runtime_dll,
     ensure_union_case_autoopen_fixture_built, temp_fs_file,
 };
 
@@ -210,7 +210,9 @@ fn compare(dlls: &[PathBuf]) -> (Vec<String>, usize, usize) {
 
 /// The reference pack, FSharp.Core and the F# fixtures: the pickles hold
 /// every kind of entity at every accessibility, and the reference pack every
-/// shape of `TypeDef` the compilers write.
+/// shape of `TypeDef` the compilers write. `MemberRefAttr.dll` adds an
+/// attribute constructor no compiler here writes, a `MemberRef` on a local
+/// `TypeDef`.
 #[test]
 fn the_existence_index_is_what_both_readers_report() {
     let ref_dir = ensure_system_runtime_dll()
@@ -235,6 +237,7 @@ fn the_existence_index_is_what_both_readers_report() {
         ensure_ext_universe_fixture_built(),
         ensure_union_case_autoopen_fixture_built(),
         ensure_rqa_union_fixture_built(),
+        ensure_memberref_attr_dll_built(),
     ] {
         dlls.push(fixture.to_path_buf());
     }

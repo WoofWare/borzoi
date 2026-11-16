@@ -1,3 +1,22 @@
+// An attribute whose compiled name, not its logical name, is
+// `Microsoft.FSharp.Core.AutoOpenAttribute`: FCS reads an attribute by its
+// logical identity, so `ByCompiledNameOnly` is no auto-open module.
+namespace Microsoft.FSharp.Core
+
+[<CompiledName("AutoOpenAttribute")>]
+type OtherAttribute() =
+    inherit System.Attribute()
+
+namespace Existence.Markers
+
+[<Microsoft.FSharp.Core.Other>]
+module ByCompiledNameOnly =
+    let b = 0
+
+[<AutoOpen>]
+module ReallyAutoOpen =
+    let r = 0
+
 namespace Existence.Targets
 
 open System.Runtime.CompilerServices

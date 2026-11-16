@@ -1421,6 +1421,9 @@ jobs:
       - name: Gate on whole-assembly projection losses
         run: bash tools/ci/project-corpus-gate.sh assembly-projection
 
+      - name: Gate on the existence index over the corpus's packages
+        run: bash tools/ci/project-corpus-gate.sh existence-index
+
       - name: Gate on the restore-graph oracle
         run: bash tools/ci/project-corpus-gate.sh restore-graph
 

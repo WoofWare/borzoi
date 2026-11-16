@@ -193,6 +193,14 @@ This is a Cargo workspace with nine members:
   TypeSig::ByRef(_))`) silently stops firing when a modifier sits in front of
   it, and the compiler cannot catch that; the probe can, so read it before
   writing such a guard.
+  The projection is name resolution's view, and it filters (undecodable
+  members, compiler output, pickle-only declarations another assembly cannot
+  name), so a question of *existence* — may anything of any accessibility sit
+  at this path — reads `existence::ExistenceIndex` instead: every `TypeDef`
+  row and every entity of the host F# pickle, at every accessibility, with no
+  projection in between. `borzoi-sema`'s `assembly_entities_diff` holds it row
+  for row to FCS's view of the assembly and to a `System.Reflection.Metadata`
+  walk (fcs-dump's `assembly-entities` batch kind).
   A *whole-assembly* skip is a different grade of failure, gated by
   `projection_skip_sweep` (`#[ignore]`d, `BORZOI_DLL_SWEEP_ROOT`): with an
   assembly's types missing, no reading into any *other* assembly is provably
@@ -691,6 +699,8 @@ nix develop -c cargo test -p borzoi-sema --test all infer_corpus_dump:: -- --ign
 nix develop -c cargo test -p borzoi-sema --test all infer_incremental_diff::incremental_equals_batch_over_a_corpus_sample -- --ignored  #  ~40 s
 nix develop -c cargo test -p borzoi-sema --test all infer_extension_damage_sweep::full_sweep -- --ignored  #  ~4 min
 nix develop -c cargo test -p borzoi-sema --test all auto_open_member_sweep:: -- --ignored  # ~10 min
+BORZOI_EXISTENCE_SWEEP_ROOT=~/.cache/borzoi/project-corpus/v2/project-corpus-packages \
+nix develop -c cargo test -p borzoi-sema --test all assembly_entities_diff::the_existence_index_is_what_both_readers_report_over_a_package_cache -- --ignored  #  ~75 s
 nix develop -c cargo test -p borzoi      --test all parser_corpus_sweep:: -- --ignored  #  ~50 s
 nix develop -c cargo test -p borzoi      --test all xml_doc_shipped_sweep:: -- --ignored  #  ~10 s
 nix develop -c cargo test -p borzoi      --test all xml_doc_source_diff::corpus:: -- --ignored  #  ~20 s
@@ -775,7 +785,8 @@ change that could move what the LSP answers, which is most changes to `cst`,
 `sema`, `assembly`, `msbuild`, `nuget`, `lsp` or `corpus-diff`. The steps are
 the project-corpus resolution differential and its exact manifest, the
 `borzoi-corpus-diff` crate's tests (its FCS-driven fixtures included), the
-whole-assembly projection sweep over the corpus's packages, and the
+whole-assembly projection sweep over the corpus's packages, the existence
+index's differential over the same packages (`assembly_entities_diff`), and the
 restore-graph and project source-doc differentials and the restore-cone census
 with their exact manifests (`crates/lsp/tests/manifests/`,
 `crates/msbuild/tests/manifests/`). With every step it keeps going past a

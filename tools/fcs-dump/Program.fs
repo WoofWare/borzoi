@@ -7498,9 +7498,17 @@ let private assemblyEntityAccess (a: FSharpAccessibility) : string =
     elif a.IsProtected then "protected"
     else failwith "FSharpAccessibility is none of Public/Internal/Private/Protected"
 
-/// Whether `e` carries an attribute whose type's full name is `fullName`.
-let private entityHasAttribute (fullName: string) (e: FSharpEntity) : bool =
-    e.Attributes |> Seq.exists (fun a -> a.AttributeType.TryFullName = Some fullName)
+/// Whether `e` carries an attribute whose type's *logical* path, its access
+/// path and logical name (`Microsoft.FSharp.Core.AutoOpenAttribute`), is
+/// `logicalPath`. The logical path, not `TryFullName`'s compiled one: an F#
+/// attribute `OtherAttribute` with `[<CompiledName("AutoOpenAttribute")>]` in
+/// `Microsoft.FSharp.Core` compiles to the name FSharp.Core's attribute has, and
+/// is not that attribute.
+let private entityHasAttribute (logicalPath: string) (e: FSharpEntity) : bool =
+    e.Attributes
+    |> Seq.exists (fun a ->
+        let t = a.AttributeType
+        t.AccessPath + "." + t.LogicalName = logicalPath)
 
 /// Walk `entities` (an assembly's `Contents.Entities`, or a `NestedEntities`
 /// list) depth first, appending one row per non-namespace entity FCS
@@ -7617,9 +7625,10 @@ let private ilVisibilityName (attrs: TypeAttributes) : string =
     | other -> failwithf "visibility %A is outside VisibilityMask's eight values" other
 
 /// The (namespace, name) of a custom attribute's type, read from its
-/// constructor: a `MemberReference` whose parent is a `TypeReference`, or a
-/// `MethodDefinition` whose declaring type is a `TypeDefinition`. `None` for
-/// any other shape (a generic attribute's `TypeSpecification` parent, say).
+/// constructor: a `MemberReference` whose parent is a `TypeReference` or a
+/// `TypeDefinition`, or a `MethodDefinition` whose declaring type is a
+/// `TypeDefinition`. `None` for any other shape (a generic attribute's
+/// `TypeSpecification` parent, say).
 let private ilAttributeTypeName
     (md: System.Reflection.Metadata.MetadataReader)
     (handle: System.Reflection.Metadata.CustomAttributeHandle)
@@ -7630,12 +7639,16 @@ let private ilAttributeTypeName
     | System.Reflection.Metadata.HandleKind.MemberReference ->
         let mr =
             md.GetMemberReference(System.Reflection.Metadata.MemberReferenceHandle.op_Explicit ctor)
-        if mr.Parent.Kind = System.Reflection.Metadata.HandleKind.TypeReference then
+        match mr.Parent.Kind with
+        | System.Reflection.Metadata.HandleKind.TypeReference ->
             let tr =
                 md.GetTypeReference(System.Reflection.Metadata.TypeReferenceHandle.op_Explicit mr.Parent)
             Some(md.GetString tr.Namespace, md.GetString tr.Name)
-        else
-            None
+        | System.Reflection.Metadata.HandleKind.TypeDefinition ->
+            let td =
+                md.GetTypeDefinition(System.Reflection.Metadata.TypeDefinitionHandle.op_Explicit mr.Parent)
+            Some(md.GetString td.Namespace, md.GetString td.Name)
+        | _ -> None
     | System.Reflection.Metadata.HandleKind.MethodDefinition ->
         let m =
             md.GetMethodDefinition(System.Reflection.Metadata.MethodDefinitionHandle.op_Explicit ctor)
@@ -7716,6 +7729,28 @@ let private assemblyEntitiesOf (checkResults: FSharpCheckFileResults) (file: str
         with ex ->
             {| Error = ex.Message; Rows = [||] |}
     {| File = absolute; Fcs = fcs; Il = il |}
+
+/// For an `assembly-entities` request, `switches` (a script's options) without
+/// any reference whose file name is a requested ref's; any other `kind`'s
+/// switches unchanged. `assembly-entities` reports on exactly the files it is
+/// handed, and FCS would load a script reference of the same name (the
+/// implicit FSharp.Core, say) in preference to the appended request, leaving
+/// the requested file unread.
+///
+/// Top-level, and applied inside an existing binding rather than a new `let` in the batch loop,
+/// for the reason [`collectAssemblyEntityRows`] gives: every `let` in that
+/// loop's sequence nests the rest of it one level deeper in the AST.
+let private dropScriptRefsNamedLike (kind: string) (refs: string list) (switches: string[]) : string[] =
+    if kind <> "assembly-entities" then switches else
+    let requested = refs |> List.map (fun r -> Path.GetFileName(r.Trim()))
+    let referencedFile (o: string) =
+        if o.StartsWith("-r:") || o.StartsWith("/r:") then Some(o.Substring 3)
+        elif o.StartsWith("--reference:") then Some(o.Substring "--reference:".Length)
+        else None
+    let isRequested (p: string) =
+        let name = Path.GetFileName p
+        requested |> List.exists (fun r -> String.Equals(r, name, StringComparison.OrdinalIgnoreCase))
+    switches |> Array.filter (fun o -> not (referencedFile o |> Option.exists isRequested))
 
 /// Resident, multi-projection single-file oracle: the amortised-startup engine
 /// behind `sema`'s per-case differential loops (`resolve_diff`, `infer_*_diff`,
@@ -7805,7 +7840,8 @@ let private fileBatchCore () =
                         not (o.StartsWith("--langversion:") || o.StartsWith("/langversion:")))
             let opts =
                 { opts0 with
-                    OtherOptions = Array.concat [ scriptSwitches; refArgs; langVersionArgs ] }
+                    OtherOptions =
+                        Array.concat [ dropScriptRefsNamedLike kind refs scriptSwitches; refArgs; langVersionArgs ] }
             let blocking =
                 scriptDiags
                 |> List.filter (fun d ->

@@ -1689,6 +1689,27 @@ pub fn ensure_existence_fixture_built() -> &'static Path {
         .as_path()
 }
 
+/// Emit `MemberRefAttr.dll` (`tests/fixtures/memberref_attr/emit.fsx`) once
+/// per test binary and return its path: a type whose custom attribute's
+/// constructor is a `MemberRef` on a `TypeDef` of the same assembly, which
+/// ECMA-335 allows and no compiler here writes.
+pub fn ensure_memberref_attr_dll_built() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/memberref_attr/emit.fsx");
+            let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("MemberRefAttr.dll");
+            let mut cmd = Command::new("dotnet");
+            cmd.args(["fsi", "--exec"]).arg(&script).arg(&out);
+            BoundedCommand::new(cmd)
+                .timeout(BUILD_TIMEOUT)
+                .run_ok("emit MemberRefAttr.dll");
+            out
+        })
+        .as_path()
+}
+
 /// Build the **duplicate-identity** fixture (`tests/fixtures/case_pattern_dup_env`)
 /// once per test binary and return its `.dll` path. Its `<AssemblyName>` is
 /// deliberately the *same* as [`ensure_abbrev_fixture_built`]'s, so loading both
