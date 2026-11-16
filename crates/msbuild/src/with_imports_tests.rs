@@ -30,6 +30,7 @@ mod explicit_imports;
 mod foreign_definitions;
 mod fsharp_core_netsdk_props;
 mod globs;
+mod hidden_content_readers;
 mod import_dag;
 mod items_uncertain;
 mod locators;

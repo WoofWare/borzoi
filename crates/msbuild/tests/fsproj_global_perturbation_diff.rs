@@ -926,10 +926,9 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
 /// hidden content must commit `Out` under every global set: an unset name read
 /// before any write is MSBuild's empty, which the walk can know.
 ///
-/// After hidden content the gate is undecided, and the walk follows the import
-/// on one side and trusts what the followed file writes (#791). Those findings
-/// are counted, each must be that shape, and the count is pinned: a fix for
-/// #791 moves it, and must drop the set-aside when it reaches zero.
+/// After hidden content the gate is undecided: the walk follows the import on
+/// one side, and what the followed file writes is a write MSBuild may not
+/// make, so the walk must decline it.
 #[test]
 fn unset_reads_in_import_gates_are_exact_or_declined() {
     use borzoi_msbuild::PropertyRead;
@@ -938,13 +937,11 @@ fn unset_reads_in_import_gates_are_exact_or_declined() {
     const GATES: &[&str] = &["empty", "nonempty", "equals", "derived"];
     const HIDDEN: &[&str] = &["none", "writes", "silent"];
     const READ: &[&str] = &["Out", "Derived"];
-    const HIDDEN_FOLLOWED_791: usize = 56;
 
     let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
     let sets = global_sets();
     let mut must_commit_misses = Vec::new();
-    let mut hidden_followed = 0usize;
     let mut census: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut case = 0usize;
     for (name, value) in NAMES {
@@ -1038,14 +1035,6 @@ fn unset_reads_in_import_gates_are_exact_or_declined() {
                                      committed {read_name} = {claim:?}\n{xml}"
                                 )
                             });
-                            let followed_after_hidden = *hidden != "none"
-                                && *read_name == "Out"
-                                && claim == "from-import"
-                                && theirs.get(*read_name).map(String::as_str) == Some("");
-                            if followed_after_hidden {
-                                hidden_followed += 1;
-                                continue;
-                            }
                             assert_eq!(
                                 Some(&claim),
                                 theirs.get(*read_name),
@@ -1061,12 +1050,6 @@ fn unset_reads_in_import_gates_are_exact_or_declined() {
     for (key, (cases, committed)) in &census {
         eprintln!("  {key:<70} {committed}/{cases} committed");
     }
-    eprintln!("unset gate reads: {hidden_followed} imports followed after hidden content (#791)");
-    assert_eq!(
-        hidden_followed, HIDDEN_FOLLOWED_791,
-        "the #791 set-aside count (an import followed on an undecided gate, its \
-         writes trusted) moved"
-    );
     // Hidden content may write the name, so those cases owe nothing; the rest
     // must each reach a commit somewhere, or the grading above is vacuous.
     let vacuous: Vec<&String> = census

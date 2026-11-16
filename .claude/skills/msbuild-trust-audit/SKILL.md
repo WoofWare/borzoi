@@ -112,7 +112,7 @@ trusted — but only while the walk has hidden nothing (`walk_opaque` is
 unseen (directly, by a copy of a stale value, ...). The value records that
 itself: each opacity latch marks every bound value stale (`Trust::stale`;
 reserved names and caller globals excepted), and a value computed from a stale
-one inherits it. This decision does not consume it (#792), so nothing settles
+one inherits it. This decision does not consume it, so nothing settles
 an unknown operand after opacity. Don't reopen that boundary with a clock or a
 per-name timestamp: codex took four rounds to walk it, and if this decision
 ever consumes staleness, the per-value mark is where it reads it. On a
@@ -137,18 +137,27 @@ if you find yourself wanting it elsewhere, you are about to fabricate
 certainty. The item pass still judges its values by `Expansion`'s scan-based
 flags (entries 6 and 7 above); its `ignoring_trust` sites are P4's worklist.
 
-**Staleness has two readers.** `Trust::stale` is consumed where a value
-decides a `Directory.Build.*` import point (`is_decided_point` in
-`evaluator/directory_build.rs`, through `is_certain`), which is what closed
-#614, and where a Compile item's `Include`
-or `Condition` reads it in a Compile context (`expand_inner`,
-`evaluate_condition_with_exemptions`), which leaves the Compile set uncertain.
-`reference_is_untrusted` and `untrusted_cause` leave it out on purpose: most
-values on a real SDK chain are bound before some opacity, so the generic seam
-would decline wholesale. Every other reader trusting a stale value is the open
-trade-off #792, which the metamorphic gate's opacity tier counts. Adding a reader of it is a measured
-decision (the plan's "#614: what each rule costs" is the template), not a
-tidy-up.
+**Staleness is read where a value is published or decides an import.**
+`Trust::stale` is consumed where a value decides a `Directory.Build.*` import
+point (`is_decided_point` in `evaluator/directory_build.rs`, through
+`is_certain`), which is what closed #614; where a Compile item's `Include` or
+`Condition` reads it in a Compile context (`expand_inner`,
+`evaluate_condition_with_exemptions`), which leaves the Compile set uncertain;
+and at the end of the walk, where `read_property` publishes a stale value as
+`PropertyRead::Untrusted` (so `target_name` is `Unknown` on one, and on a name
+unset after hidden content) (#792). A write made inside an import the
+walk followed on a gate it could not decide is unpinned with that gate's root
+when the import returns, and an import made inside it is not a certain
+duplicate later (#791).
+`reference_is_untrusted` and `untrusted_cause` leave staleness out on purpose:
+they serve the mid-walk condition decisions, where
+`condition_is_decided_exactly` already vouches for nothing once the walk is
+opaque. The end-of-walk readers cost nothing on the crate suite, the F# corpus
+or the LSP project corpus only because a real SDK chain latches no opacity
+after the body (an undefined `TargetFramework` read is exact); a new latch on
+that chain would withdraw `TargetFramework`, `AssemblyName` and the reference
+set with them, so measure one before adding it (the plan's "#614: what each
+rule costs" is the template).
 
 ## 2. Never gate a fold on the generic provenance seam
 

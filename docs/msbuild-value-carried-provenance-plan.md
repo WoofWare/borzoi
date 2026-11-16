@@ -24,24 +24,19 @@
 > **#614 is closed by a fourth channel, `stale`** (see "#614: as landed"): a
 > value bound before content the walk could not see, or computed from one,
 > carries the opacity behind it, and a `Directory.Build.*` import point
-> (#677) and the Compile items decline on it (see "#792: the Compile
-> reader"). Every other reader still trusts a held value under opacity (#792,
-> a measured trade-off the metamorphic gate's opacity tier counts).
+> (#677), the Compile items and every end-of-walk reader decline on it (see
+> "#792: the Compile reader" and "#792, #791: the end-of-walk readers").
 >
 > **P4 step 1 has landed** (see "P4 step 1: one read per name"): the
 > property table is published as one `PropertyRead` per name, and a refused
 > write reads as a name the real build may define, not as one never written
 > (#780).
 >
-> **Open, in order:** the rest of P4; #792 per reader, measured; the three
-> P2″ precision items; P1′.
+> **Open, in order:** the rest of P4; the three P2″ precision items; P1′.
 >
-> **Known wrong commits, reproducible, not fixed:** #792 (a stale value
-> published as trusted by a reader other than the import points, the
-> Compile items and the define set), set aside by the metamorphic gate with
-> its count pinned. #843 (the `DefineConstants` self-append exemption reading
-> a define a user import under an undecided gate may supply as absent) and
-> #862 (hidden content never doubting the define set) are fixed by
+> **Known wrong commits:** #843 (the `DefineConstants` self-append exemption
+> reading a define a user import under an undecided gate may supply as absent)
+> and #862 (hidden content never doubting the define set) are fixed by
 > withdrawing the define set wherever the walk passes content it could not
 > see, as the Compile set is: `define_constants_uncertain` holds whenever
 > `hidden_content` is `Some`, and the self-append's own read is exempt only
@@ -65,7 +60,7 @@
 > MSBuild reaches for certain is a `Certain` rejection, graded against the
 > oracle; the rest are `Possible`. What remains is a failing import in
 > content the walk cannot see, which the import-graph harness carries in
-> `UndecidedImportHidesWrites`.
+> `HiddenPointRejectsTheProject`.
 >
 > **#677 replaced the `Directory.Build.*` splice with the SDK's own import
 > points** (see "#677: the import points, as landed"). Sections written before
@@ -1128,16 +1123,12 @@ No condition reading a stale value is decided exactly, so there is no
 "the known operands settle it" relief to give: a stale value exists only once
 the walk is opaque, where `condition_is_decided_exactly` vouches for nothing.
 
-The other readers stay as they are, each for a reason recorded on #792: the
-published properties and `target_name` (sound declines that cost the LSP
-its reference set on most SDK projects, because content after the body is
-hidden there; a decision for the project owner). The define set no longer
-reads a stale value: #843 and #862 withdraw it on every opacity latch,
-which costs nothing the LSP folds, since the Compile set is withdrawn on the
-same latch. The opacity tier fails a define set that differs from a world's,
-and `hidden_content_withdraws_the_define_set` grids the hidden file's place
-(SDK or user, imported from `Sdk.props` or the body) against what it and the
-body write.
+The define set does not read a stale value: #843 and #862 withdraw it on
+every opacity latch, which costs nothing the LSP folds, since the Compile set
+is withdrawn on the same latch. The opacity tier fails a define set that
+differs from a world's, and `hidden_content_withdraws_the_define_set` grids the
+hidden file's place (SDK or user, imported from `Sdk.props` or the body)
+against what it and the body write.
 
 The opacity tier now holds the Compile items wholly: a Compile set that differs
 from a world's is a violation whatever the difference, not only when it is in
@@ -1154,6 +1145,62 @@ name as certain (an unbound name carries no trust to doubt); the import points
 treat a file whose point the walk never reached as one whose identity is in
 doubt, so those cases decline, and
 `an_unbound_splice_input_hidden_content_defined_declines` passes.
+
+#### #792, #791: the end-of-walk readers
+
+The other readers were first held back: published properties and
+`target_name` each cost the LSP its reference set on most
+SDK projects, because a real SDK chain latched opacity after the body, in
+`Sdk.targets` and the workload manifests, on gates over an undefined
+`TargetFramework`. Since an undefined `$(TargetFramework)` read is exact
+(#853), those latches are gone: over the F# corpus's 148 evaluations, 132 end
+with nothing hidden, and the 16 that do not each rest on a real first cause (an
+import of a file that does not exist, a property function in a condition).
+Re-measured on that footing, they cost nothing, and they have landed:
+
+- **a published property** read from a stale value is
+  `PropertyRead::Untrusted`, with the opacity as its cause (`read_property`);
+- **`target_name`** is `Unknown` on a stale candidate, and on one the walk
+  holds unset after hidden content.
+
+The final `DefineConstants` needs no reader of its own: every opacity latch
+withdraws the define set (#843, #862), and a stale value exists only after one.
+
+The condition decisions mid-walk still do not read staleness
+(`reference_is_untrusted`, `untrusted_cause`).
+
+**#791 needed one rule more.** Staleness covers the import the walk skipped:
+what it would have rewritten is stale. It does not cover the import the walk
+*followed* on a gate it could not decide, whose writes are fresh and which
+MSBuild may never make. Such an import is now a doubted walk, like a
+`Directory.Build.*` fallback's (`directory_build::within_followed_import`):
+inside it the walk follows imports and conditions as in any file, every name
+it wrote is unpinned with the gate's root when it returns, and the imports it
+made register as doubted, so a later import of one of them is not skipped as
+a certain duplicate. Nor is the file walked again, as it is after a fallback
+walk: gated imports of one file may be many, and a file that grows a value on
+each walk would grow it once per import where MSBuild walks it once. What the
+later import would do is content the walk does not see, and the whole
+evaluation is uncertain from there.
+
+Still open is the import that may duplicate one the walk never saw: after
+hidden content, a file the walk imports may already have been imported there,
+and MSBuild then skips it. The item sets are already withdrawn on that account
+(#819); the properties such a file writes are not yet doubted (#891).
+
+The gates moved as the fixes ask. The opacity tier's set-aside (26 stale
+reads) is deleted, and every fact it grades must hold;
+`fsproj_global_perturbation_diff`'s set-aside (56 imports followed after hidden
+content) is deleted; and `Family::UndecidedImportHidesWrites` of
+`fsproj_sdk_import_graph_generative_diff` is narrowed to the two things it
+still held, each a family with its own witness:
+`HiddenImportMakesALaterOneADuplicate` (#891: a hidden repeat, or hidden
+content in a case that names a file twice) and `HiddenPointRejectsTheProject`
+(#820's remainder). The sweep now holds
+every other case the old family set aside, which is #791 itself.
+
+What stays open is the LSP's own reading of a name unset after hidden content:
+`tfm_policy` reads it as unset (#886).
 
 #### #677: the import points, as landed
 
@@ -1202,8 +1249,7 @@ and after the point, and the file's own children, under each kind of doubt.
 
 The metamorphic gate's opacity tier pays for this in reach: its SDK holds a
 `Directory.Build.targets` point, which opacity leaves in doubt, so the whole
-evaluation is withdrawn and the tier commits 328 of its 14,400 facts (26 of
-them stale reads set aside as #792).
+evaluation is withdrawn and the tier commits few of its 14,400 facts.
 
 ### The census, re-run — and what it says about P3's priority
 
@@ -1461,7 +1507,7 @@ reference, package or metadata gate that rests on a refused name is untrusted
 `property`; the motivating one, `tfm_untrusted`, now leaves a node whose body
 `TargetFramework` was refused with an unresolved TFM rather than an
 undeclared one. An unset name after unseen content (`Opaque`) stays trusted by
-those consumers, the #792 trade-off.
+the TFM policy (#886).
 
 `properties` remains, documented as trust-blind: a display map of what the
 project wrote, which no consumer outside the crate's tests reads.
@@ -1635,8 +1681,8 @@ one into the `Directory.Build.targets` gate or path. It generates #614's
 class: 13 wrong splice decisions over 800 cases before the stale channel,
 none after. It also adds Compile items reading a value the hidden file
 rewrites, and hidden writes of an otherwise unbound splice input (#811, set
-aside and pinned); see "#792: the Compile reader". The Compile items must hold;
-every other stale read is #792, counted and pinned. Its plants (the first six
+aside and pinned); see "#792: the Compile reader". Every fact must hold: a
+stale read published as certain by any reader is a violation. Its plants (the first six
 measured before the Compile reader landed and its generator dimensions were
 added, the last two after):
 

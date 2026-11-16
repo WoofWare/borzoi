@@ -255,9 +255,8 @@ pub(crate) fn body_target_framework(parsed: &ParsedProject) -> Option<String> {
 /// evaluator does not (a write it could not compute, or the environment's), or
 /// its value still holds a `$(...)` we did not expand. An unset singular is
 /// the multi-TFM shape (the outer build reads it unset), and one unset only
-/// because content went unseen is the trade-off every reader but the
-/// `Directory.Build.*` import points and the Compile items makes: neither is
-/// untrusted here.
+/// because content went unseen is read as unset too, a trade-off this policy
+/// makes (#886): neither is untrusted here.
 ///
 /// Deliberately the singular only: the plural (the arcade idiom writes it
 /// under `'$(TargetFramework)' == ''`) is consumed by the TFM-invariant

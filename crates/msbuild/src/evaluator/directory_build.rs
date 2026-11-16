@@ -49,6 +49,12 @@
 //! bound, a file the fallback would walk is content the walk does not see, and
 //! the whole evaluation is uncertain from there.
 //!
+//! **Followed imports.** An import the walk followed on a gate it could not
+//! decide is a doubted walk too ([`within_followed_import`], #791), with the
+//! item facets left to the gate's own withdrawal. A later import of a file
+//! such a walk made is not walked again, as one a fallback walk made is: the
+//! whole evaluation is uncertain from there ([`doubted_duplicate`]).
+//!
 //! **What a doubted walk may leave behind.** A fallback walk follows the file
 //! as an ordinary import, but MSBuild may not make that import, so nothing it
 //! does may stand as certain. Every field of the walk state it can change, and
@@ -171,10 +177,13 @@ impl DirectoryBuildFile {
 
     /// The root every fallback product of this file carries.
     fn root(self) -> UnpinnedRoot {
-        UnpinnedRoot::UnsupportedCondition(format!(
-            "the {} import, which the walk could not decide",
-            self.file_name()
-        ))
+        UnpinnedRoot::UnsupportedCondition(
+            format!(
+                "the {} import, which the walk could not decide",
+                self.file_name()
+            )
+            .into(),
+        )
     }
 }
 
@@ -208,6 +217,10 @@ pub(super) struct Bookkeeping {
     /// walk follows its imports and conditions as an ordinary import, so that
     /// doubting the file loses nothing it would do.
     doubted_writes: Vec<String>,
+    /// The names in [`Self::doubted_writes`], lowercased: a name is listed
+    /// once however often it is written, so the list is bounded by the names
+    /// there are.
+    doubted_writes_seen: std::collections::HashSet<String>,
     /// The imports a fallback walk made, by their key ([`import_dedup_key`]),
     /// each with the walk's number: a fallback walk registers its imports here
     /// and never in [`State::imports_seen`], which holds certain imports only.
@@ -219,6 +232,12 @@ pub(super) struct Bookkeeping {
     /// and how many have run.
     doubted_walk: Vec<usize>,
     doubted_walks: usize,
+    /// How many doubted walks have been numbered, the followed imports
+    /// ([`within_followed_import`]) included, which [`MAX_DOUBTED_WALKS`]
+    /// does not count: no file is walked again on their account.
+    doubted_numbered: usize,
+    /// The numbers of the doubted walks that are followed imports.
+    followed_walks: std::collections::HashSet<usize>,
     /// Whether a fallback walked a file that contributes something.
     pub(super) contributed: bool,
     /// Whether a group the walk deferred while inside a fallback walk declares
@@ -233,9 +252,33 @@ impl Bookkeeping {
 
     /// Record a write of `name`, if the walk is inside a fallback walk.
     pub(super) fn note_write(&mut self, name: &str) {
-        if self.fallback.is_some() {
+        if self.fallback.is_some() && self.doubted_writes_seen.insert(name.to_ascii_lowercase()) {
             self.doubted_writes.push(name.to_owned());
         }
+    }
+
+    /// Start an empty list of doubted writes for a doubted walk, returning the
+    /// enclosing walk's.
+    fn take_doubted_writes(&mut self) -> Vec<String> {
+        self.doubted_writes_seen.clear();
+        std::mem::take(&mut self.doubted_writes)
+    }
+
+    /// End a doubted walk's list, returning it, and resume the enclosing
+    /// walk's, `saved`.
+    fn restore_doubted_writes(&mut self, saved: Vec<String>) -> Vec<String> {
+        self.doubted_writes_seen = saved.iter().map(|name| name.to_ascii_lowercase()).collect();
+        std::mem::replace(&mut self.doubted_writes, saved)
+    }
+
+    /// Whether a later import of a file doubted walk `walk` made involves a
+    /// followed import: `walk` is one, or the walk is inside one now.
+    fn involves_followed_import(&self, walk: usize) -> bool {
+        self.followed_walks.contains(&walk)
+            || self
+                .doubted_walk
+                .iter()
+                .any(|inside| self.followed_walks.contains(inside))
     }
 
     /// Register an import: in [`State::imports_seen`] when it is certain, and
@@ -288,22 +331,46 @@ pub(super) enum Doubted {
 /// walked as any other, doubted with it. Outside every one, MSBuild has made
 /// it here or before, and the walk cannot tell which, so it walks it again,
 /// doubted.
+///
+/// Where a followed import is involved (it made the import, or this one is
+/// inside it), the file is not walked again: gated imports of one file may be
+/// many, and a file that grows a value on each walk would grow it once per
+/// import where MSBuild walks it once. What this import would do, which may
+/// reach files the first did not, is then content the walk does not see, and
+/// the whole evaluation is uncertain from here.
 pub(super) fn doubted_duplicate(path: &Path, key: &str, state: &mut State<'_>) -> Doubted {
     let bookkeeping = &state.directory_build;
-    let Some(walk) = bookkeeping.doubted_imports.get(key) else {
+    let Some(&walk) = bookkeeping.doubted_imports.get(key) else {
         return Doubted::Walk;
     };
-    if bookkeeping.doubted_walk.contains(walk) {
+    if bookkeeping.doubted_walk.contains(&walk) {
+        return Doubted::Settled;
+    }
+    if bookkeeping.involves_followed_import(walk) {
+        if !contributes_nothing(path, state) {
+            let root = UnpinnedRoot::UnsupportedCondition(
+                format!(
+                    "the import of {}, which an import MSBuild may not make may already have made",
+                    path.display()
+                )
+                .into(),
+            );
+            state.directory_build.contributed = true;
+            everything_uncertain(&path.display().to_string(), root, state);
+        }
         return Doubted::Settled;
     }
     if !bookkeeping.doubted_walk.is_empty() {
         return Doubted::Walk;
     }
     if !contributes_nothing(path, state) {
-        let root = UnpinnedRoot::UnsupportedCondition(format!(
-            "the import of {}, which a doubted Directory.Build.* file may already have made",
-            path.display()
-        ));
+        let root = UnpinnedRoot::UnsupportedCondition(
+            format!(
+                "the import of {}, which a doubted Directory.Build.* file may already have made",
+                path.display()
+            )
+            .into(),
+        );
         walk_doubted_as(root, &path.display().to_string(), path, state);
     }
     Doubted::Settled
@@ -569,11 +636,12 @@ fn walk_doubted_as(root: UnpinnedRoot, project: &str, file: &Path, state: &mut S
     }
     state.directory_build.contributed = true;
     state.directory_build.doubted_walks += 1;
-    let walk = state.directory_build.doubted_walks;
+    state.directory_build.doubted_numbered += 1;
+    let walk = state.directory_build.doubted_numbered;
     state.directory_build.doubted_walk.push(walk);
     let saved_fallback = state.directory_build.fallback.replace(root.clone());
     let saved_references = std::mem::take(&mut state.directory_build.doubted_references);
-    let saved_writes = std::mem::take(&mut state.directory_build.doubted_writes);
+    let saved_writes = state.directory_build.take_doubted_writes();
     let saved_span = state.import_site_span.take();
     walk_external_file(file, 0..0, state);
     state.import_site_span = saved_span;
@@ -583,11 +651,58 @@ fn walk_doubted_as(root: UnpinnedRoot, project: &str, file: &Path, state: &mut S
     state.directory_build.doubted_references |= saved_references;
     // MSBuild may not make any of these writes, so the value each name holds
     // may be the one before it.
-    let written = std::mem::replace(&mut state.directory_build.doubted_writes, saved_writes);
+    let written = state.directory_build.restore_doubted_writes(saved_writes);
     for name in written {
         unpin(&name, &root, state);
     }
     withdraw_facets(project, root, references, state);
+}
+
+/// Run `walk`, the imports behind a gate the walk took, as imports MSBuild may
+/// not make when the gate was undecided for the root `undecided` holds (#791).
+///
+/// Such an import is a doubted walk like a fallback's: inside it the walk
+/// follows imports and conditions as in any file, so that doubting it loses
+/// nothing it would do; every name it wrote is unpinned when it returns; and
+/// the imports it made register as doubted, so a later import of one of them
+/// is not taken for a certain duplicate ([`doubted_duplicate`]). Inside a
+/// doubted walk already, the enclosing one does all of that.
+pub(super) fn within_followed_import<T>(
+    undecided: Option<UnpinnedRoot>,
+    state: &mut State<'_>,
+    walk: impl FnOnce(&mut State<'_>) -> T,
+) -> T {
+    let Some(root) = undecided else {
+        return walk(state);
+    };
+    if state.directory_build.fallback.is_some() {
+        return walk(state);
+    }
+    state.directory_build.doubted_numbered += 1;
+    let number = state.directory_build.doubted_numbered;
+    state.directory_build.followed_walks.insert(number);
+    state.directory_build.doubted_walk.push(number);
+    state.directory_build.fallback = Some(root.clone());
+    // The item facets are the undecided gate's own to withdraw.
+    let saved_references = state.directory_build.doubted_references;
+    let saved_writes = state.directory_build.take_doubted_writes();
+    let result = walk(state);
+    state.directory_build.fallback = None;
+    state.directory_build.doubted_walk.pop();
+    state.directory_build.doubted_references = saved_references;
+    let written = state.directory_build.restore_doubted_writes(saved_writes);
+    let mut defines = false;
+    for name in written {
+        defines |= name.eq_ignore_ascii_case("DefineConstants");
+        unpin(&name, &root, state);
+    }
+    if defines {
+        let saved = state.define_context;
+        state.define_context = true;
+        state.push_root(root, 0..0);
+        state.define_context = saved;
+    }
+    result
 }
 
 /// Record `root` against `name`, leaving its value alone.
