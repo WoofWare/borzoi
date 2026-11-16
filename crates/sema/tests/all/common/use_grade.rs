@@ -147,6 +147,35 @@ pub struct Graded {
     pub label: String,
     pub fcs: FcsVerdict,
     pub ours: OurVerdict,
+    /// FCS's record at the site whatever its diagnostics: the declaration
+    /// `(file index, range)` a use (or else a definition) there names.
+    /// [`Self::fcs`] reads a site with an error as rejected; a grid whose
+    /// errors are about the use rather than its resolution (an
+    /// `[<Obsolete>]` one) grades against this instead.
+    pub record: Option<(usize, TextRange)>,
+    /// The number of every error diagnostic overlapping the site.
+    pub errors: Vec<i64>,
+}
+
+/// What FCS and the walk do at a probed pattern binder.
+pub struct GradedBinder {
+    pub label: String,
+    /// FCS declares a name at the site.
+    pub fcs_binds: bool,
+    /// The walk interns a definition at the site.
+    pub walk_interns: bool,
+    /// The walk declares the site an opaque binder: it declines it.
+    pub walk_opaque: bool,
+}
+
+/// Everything [`grade_project`] observed.
+pub struct GradedProject {
+    pub sites: Vec<Graded>,
+    pub binders: Vec<GradedBinder>,
+    /// Binder completeness over every file
+    /// ([`super::unmodelled_project_binder_failures`]): each binder FCS
+    /// declares is one the walk interns or declines.
+    pub completeness_failures: Vec<String>,
 }
 
 /// Fold `files` (Compile order, `(relative name, source)`; a `.fsi` is a
@@ -163,6 +192,18 @@ pub fn grade_in(
     sites: &[Site],
     env: &AssemblyEnv,
 ) -> Vec<Graded> {
+    grade_project(tag, files, sites, &[], env).sites
+}
+
+/// [`grade_in`], also grading `binders` (sites FCS may declare a pattern
+/// name at) and checking binder completeness over every file.
+pub fn grade_project(
+    tag: &str,
+    files: &[(&str, String)],
+    sites: &[Site],
+    binders: &[Site],
+    env: &AssemblyEnv,
+) -> GradedProject {
     let tree: Vec<(&str, &str)> = files.iter().map(|(n, s)| (*n, s.as_str())).collect();
     let (root, written) = temp_fs_tree(tag, &tree);
     let paths: Vec<&Path> = written.iter().map(|(p, _)| p.as_path()).collect();
@@ -208,7 +249,30 @@ pub fn grade_in(
             .expect("declaration in a generated file")
     };
 
-    sites
+    let graded_binders = binders
+        .iter()
+        .map(|site| {
+            let path = &written[site.file].0;
+            let fcs_binds = fcs
+                .iter()
+                .find(|f| f.path.file_name() == path.file_name())
+                .is_some_and(|f| {
+                    super::project_oracle_binders(f)
+                        .iter()
+                        .any(|b| b.range == site.range && b.introduces_a_name())
+                });
+            let rf = proj.file(site.file);
+            GradedBinder {
+                label: site.label.clone(),
+                fcs_binds,
+                walk_interns: rf.defs().any(|d| d.range == site.range),
+                walk_opaque: rf.opaque_binders().contains(&site.range),
+            }
+        })
+        .collect();
+    let completeness_failures =
+        super::unmodelled_project_binder_failures(tag, &proj, &written, &fcs);
+    let graded_sites = sites
         .iter()
         .map(|site| {
             let path = &written[site.file].0;
@@ -236,6 +300,15 @@ pub fn grade_in(
                         .or_else(|| f.uses.iter().filter(at).find(|u| u.is_from_definition))
                 })
                 .and_then(|u| u.decl.as_ref().map(|d| (d, u.is_from_definition)));
+            let record_at = record.map(|(d, _)| {
+                (
+                    index_of(&d.file),
+                    TextRange::new(
+                        u32::try_from(d.start).unwrap().into(),
+                        u32::try_from(d.end).unwrap().into(),
+                    ),
+                )
+            });
             let fcs = if here.iter().any(|n| is_accessibility_error(*n)) {
                 FcsVerdict::Inaccessible
             } else if !here.is_empty() {
@@ -278,9 +351,16 @@ pub fn grade_in(
                 label: site.label.clone(),
                 fcs,
                 ours,
+                record: record_at,
+                errors: here,
             }
         })
-        .collect()
+        .collect();
+    GradedProject {
+        sites: graded_sites,
+        binders: graded_binders,
+        completeness_failures,
+    }
 }
 
 /// A site's verdict pair is wrong when we commit anything FCS does not

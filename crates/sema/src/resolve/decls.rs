@@ -2,8 +2,8 @@
 
 use crate::FcsRange as _;
 use borzoi_cst::syntax::{
-    AstNode, Attribute, ModuleDecl, NestedModuleDecl, SyntaxToken, Type, TypeAbbrev, TypeDefn,
-    TypeDefnRepr,
+    AstNode, Attribute, Expr, ModuleDecl, NestedModuleDecl, SyntaxToken, Type, TypeAbbrev,
+    TypeDefn, TypeDefnRepr,
 };
 
 use crate::def::{DefId, DefKind};
@@ -11,8 +11,8 @@ use crate::def::{DefId, DefKind};
 use super::contributors::{Contribution, RequireQualifiedAccess};
 use super::decl_path::{DeclPath, ExportName};
 use super::model::{
-    CaseKind, DeclaredType, ExportDeclKind, ExportedItem, ItemId, OpenTrace, Resolution, SlotClass,
-    TypeSlot,
+    CaseAttributes, CaseKind, DeclaredType, ExportDeclKind, ExportedItem, ItemId, OpenTrace,
+    Resolution, SlotClass, TypeSlot,
 };
 use super::open_scope::{AutoOpenExit, InternedPrefix, ModuleExit, OpenedPrefix};
 use super::state::{Frame, OpenGroup, OpenInterpretation, Resolver, ShorteningPrefix};
@@ -160,6 +160,27 @@ fn abbrev_names_itself(defn: &TypeDefn, abbrev: &TypeAbbrev) -> bool {
     id_text(&target) == id_text(&name)
 }
 
+/// Whether any attribute of `lists` may be error-level when checked at a use
+/// (`CheckFSharpAttributes`): an `[<Obsolete>]` is one only with its
+/// message and a `true` (`Obsolete(s, true)`), and a `[<CompilerMessage>]`
+/// only with its message, number and `IsError = true`, so an attribute whose
+/// argument, parentheses stripped, is no tuple is at most one argument and
+/// never error-level, whatever its name denotes. One with no name may be
+/// anything.
+pub(super) fn attributes_may_be_error_level(
+    mut lists: impl Iterator<Item = borzoi_cst::syntax::AttributeList>,
+) -> bool {
+    lists.any(|list| {
+        list.attributes().any(|attr| {
+            let mut arg = attr.arg();
+            while let Some(Expr::Paren(p)) = &arg {
+                arg = p.inner();
+            }
+            attr.type_name().is_none() || matches!(arg, Some(Expr::Tuple(_)))
+        })
+    })
+}
+
 /// What a case's export records beyond its name and definition, which
 /// [`Resolver::export_case`] and [`Resolver::export_require_qualified_case`]
 /// copy onto its [`ExportedItem`].
@@ -171,8 +192,8 @@ pub(super) struct CaseExport {
     pub(super) repr_access_root: Option<Vec<String>>,
     /// [`ExportedItem::case`].
     pub(super) kind: CaseKind,
-    /// [`ExportedItem::case_attributed`].
-    pub(super) case_attributed: bool,
+    /// [`ExportedItem::case_attributes`].
+    pub(super) case_attributes: CaseAttributes,
 }
 
 impl<'a> Resolver<'a> {
@@ -253,7 +274,7 @@ impl<'a> Resolver<'a> {
             type_is_private,
             repr_access_root,
             kind,
-            case_attributed,
+            case_attributes,
         } = case;
         let decl_path = self.decl_path(&[name]);
         let pos = self.out.defs[def].range.start();
@@ -288,7 +309,7 @@ impl<'a> Resolver<'a> {
             access_root_len: self.export_access_root_len(type_is_private),
             repr_access_root,
             attributed: false,
-            case_attributed,
+            case_attributes,
         });
         self.push_export_decl(
             decl_path,
@@ -372,7 +393,7 @@ impl<'a> Resolver<'a> {
             type_is_private,
             repr_access_root,
             kind,
-            case_attributed,
+            case_attributes,
         } = case;
         let item_idx = self.out.items.len();
         let item_id = ItemId::new(self.item_base as usize + item_idx);
@@ -388,7 +409,7 @@ impl<'a> Resolver<'a> {
             access_root_len: self.export_access_root_len(type_is_private),
             repr_access_root,
             attributed: false,
-            case_attributed,
+            case_attributes,
         });
         // The export-decl-list twin: a case `Item` decl (no value path). Its
         // type-qualified path is threaded by `export_type_qualified_case` below,
@@ -882,7 +903,18 @@ impl<'a> Resolver<'a> {
                     if let Some(target) = exn.abbrev_path().and_then(single_ident) {
                         self.resolve_name_use(&target, false);
                     }
-                    self.define_exception_case(&name, header_is_private(exn.syntax()));
+                    // An abbreviation checks its own attributes, but its
+                    // target's are not read.
+                    let case_attributes = CaseAttributes {
+                        on_type: exn.abbrev_path().is_some()
+                            || attributes_may_be_error_level(exn.attributes()),
+                        on_cases: false,
+                    };
+                    self.define_exception_case(
+                        &name,
+                        header_is_private(exn.syntax()),
+                        case_attributes,
+                    );
                 }
             }
             ModuleDecl::Let(let_decl) => self.module_let(let_decl),

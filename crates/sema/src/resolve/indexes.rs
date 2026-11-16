@@ -76,6 +76,10 @@ pub(super) struct Indexes {
     /// because an anonymous-root file's cases have no export, and still reach a
     /// sibling module through `A.U.X`.
     pub(super) case_repr_roots: HashMap<DefId, Vec<String>>,
+    /// Where each in-file union case or exception def may carry an
+    /// error-level attribute, for those that may carry one anywhere
+    /// ([`CaseAttributes`](super::model::CaseAttributes)).
+    pub(super) case_attributes: HashMap<DefId, super::model::CaseAttributes>,
     /// The **complete declared-name view of each container** — keyed by the
     /// container's [`PathId`], like [`Self::type_defs`], mapping each
     /// declared name to the namespaces it occupies ([`DeclKinds`]); read by
@@ -309,7 +313,8 @@ pub(super) struct Indexes {
     pub(super) excluded_param_ranges: HashSet<TextRange>,
     /// The ident-token ranges of every name occurrence under an applied
     /// pattern whose qualified head the walk could not resolve, nor show
-    /// certain to resolve to a union case
+    /// certain to resolve to a union case, or whose head resolves to a case
+    /// FCS may reject by its attributes
     /// ([`Resolver::mark_undecided_pattern_args`](crate::resolve::Resolver::mark_undecided_pattern_args)).
     /// FCS binds nothing under a qualified head it cannot resolve, and binds
     /// the arguments as usual under one it can, so whether each occurrence

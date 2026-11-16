@@ -270,6 +270,9 @@ pub(super) struct SigExport {
     /// Whether the `val` carried any attribute list (a maybe-`[<Literal>]`,
     /// like [`ExportedItem::attributed`]).
     pub(super) attributed: bool,
+    /// For a case, where its signature declares an error-level attribute may
+    /// sit ([`ExportedItem::case_attributes`]).
+    pub(super) case_attributes: CaseAttributes,
     /// Source position of the declaring ident in the `.fsi` (provenance,
     /// like [`ExportDecl::pos`] — note it is a position in the *signature's*
     /// coordinate space).
@@ -330,6 +333,9 @@ pub(super) struct EarlierArity {
     pub(super) path: Option<Vec<String>>,
     /// Its generic arity, when known.
     pub(super) arity: Option<usize>,
+    /// It is an implementation a signature screens: the signature's own
+    /// declaration of the type, when the fold reads one, is the same type.
+    pub(super) screened: bool,
 }
 
 /// Exported project items visible to a file from *earlier* in Compile order.
@@ -576,13 +582,17 @@ pub struct ProjectItems {
     /// pattern-position resolution and case/module collision soundness.
     pub(super) case_item_ids: HashSet<ItemId>,
     /// The project-global [`ItemId`]s of earlier files' **union** cases whose
-    /// union carries no attribute list on itself or any case
-    /// ([`ExportedItem::case_attributed`]), of every accessibility and
+    /// union may carry no error-level attribute on itself or any case
+    /// ([`ExportedItem::case_attributes`]), of every accessibility and
     /// [`CaseKind::Union`] flavour: the [type-qualified
     /// cases](Self::type_qualified_cases) certain to bind the patterns applied
     /// to them, unlike an enum case (a literal) or an attributed case
     /// ([`Resolver::namesake_declined_case_head_binds`](super::state::Resolver::namesake_declined_case_head_binds)).
     pub(super) plain_union_case_ids: HashSet<ItemId>,
+    /// The project-global [`ItemId`]s of earlier files' union, enum and
+    /// exception cases that may carry an error-level attribute
+    /// ([`ExportedItem::case_attributes`]), with where it may sit.
+    pub(super) attributed_case_ids: HashMap<ItemId, CaseAttributes>,
     /// The project-global [`ItemId`]s of earlier files' **attributed**
     /// module-level `let` values ([`ExportedItem::attributed`]) — maybe-literal
     /// constant-pattern contestants. A `[<Literal>]` value enters FCS's pattern
@@ -1654,6 +1664,7 @@ impl ProjectItems {
                 .push(EarlierArity {
                     path: Some(t.path.clone()),
                     arity: Some(t.arity),
+                    screened: paired_screen.is_some(),
                 });
         }
         for (name, &unplaced) in &file.unplaced_types {
@@ -1669,11 +1680,13 @@ impl ProjectItems {
             arities.extend(known.iter().map(|(path, a)| EarlierArity {
                 path: Some(path.clone()),
                 arity: Some(*a),
+                screened: paired_screen.is_some(),
             }));
             arities.extend(std::iter::repeat_n(
                 EarlierArity {
                     path: None,
                     arity: None,
+                    screened: paired_screen.is_some(),
                 },
                 unplaced.saturating_sub(known.len()),
             ));
@@ -1743,6 +1756,7 @@ impl ProjectItems {
             self.case_item_ids.insert(id);
         }
         self.plain_union_case_ids.extend(idx.plain_union_case_ids);
+        self.attributed_case_ids.extend(idx.attributed_case_ids);
         for id in idx.attributed_value_ids {
             self.attributed_value_ids.insert(id);
         }
@@ -1773,6 +1787,15 @@ impl ProjectItems {
     /// [`Self::plain_union_case_ids`]).
     pub(super) fn is_plain_union_case_item(&self, id: ItemId) -> bool {
         self.plain_union_case_ids.contains(&id)
+    }
+
+    /// Where an earlier file's case `id` may carry an error-level attribute
+    /// (see [`Self::attributed_case_ids`]); nowhere for any other item.
+    pub(super) fn earlier_case_attributes(&self, id: ItemId) -> CaseAttributes {
+        self.attributed_case_ids
+            .get(&id)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Whether `id` is an earlier file's **attributed** module-level value
@@ -1919,6 +1942,7 @@ struct FileExportIndices {
     type_qualified_cases: Vec<(DeclPath, QualifiedCaseExport)>,
     type_paths: Vec<(DeclPath, ExportedTypeFacts)>,
     plain_union_case_ids: Vec<ItemId>,
+    attributed_case_ids: Vec<(ItemId, CaseAttributes)>,
     auto_open_module_paths: Vec<DeclPath>,
     namespace_shadow_names: Vec<(Vec<String>, String)>,
 }
@@ -2130,8 +2154,13 @@ impl FileExportIndices {
                         if it.is_case() {
                             fi.case_item_ids.push(it.id);
                         }
-                        if matches!(it.case, Some(CaseKind::Union { .. })) && !it.case_attributed {
+                        if matches!(it.case, Some(CaseKind::Union { .. }))
+                            && !it.case_attributes.may_abandon_pattern()
+                        {
                             fi.plain_union_case_ids.push(it.id);
+                        }
+                        if it.case_attributes != CaseAttributes::default() {
+                            fi.attributed_case_ids.push((it.id, it.case_attributes));
                         }
                         if it.attributed {
                             fi.attributed_value_ids.push(it.id);
@@ -3050,6 +3079,11 @@ pub enum DeclineCause {
     /// scope: FCS tries same-named types fewest-generic-parameters first, so
     /// the latest declaration of the name need not be the one it binds (#323).
     QualifierArityNamesake,
+    /// A type-qualified case (`U.Case`) whose union type may carry an
+    /// error-level attribute ([`CaseAttributes::on_type`]): FCS checks each
+    /// type on a qualified path while resolving it, and such an attribute
+    /// leaves the path unresolved.
+    CaseTypeAttributed,
     /// A dotted path whose head is a constructor **case**: a nullary case has
     /// no dottable members, so FCS reads it as a qualifier into a same-named
     /// module or type we could not resolve.
@@ -3216,6 +3250,7 @@ impl DeclineCause {
         DeclineCause::HeadSlotUnordered,
         DeclineCause::EarlierBlockRootType,
         DeclineCause::QualifierArityNamesake,
+        DeclineCause::CaseTypeAttributed,
         DeclineCause::CaseQualifierHead,
         DeclineCause::GlobalMarkerHead,
         DeclineCause::SignatureScreened,
@@ -3286,6 +3321,7 @@ impl DeclineCause {
             DeclineCause::HeadSlotUnordered => "head_slot_unordered",
             DeclineCause::EarlierBlockRootType => "earlier_block_root_type",
             DeclineCause::QualifierArityNamesake => "qualifier_arity_namesake",
+            DeclineCause::CaseTypeAttributed => "case_type_attributed",
             DeclineCause::CaseQualifierHead => "case_qualifier_head",
             DeclineCause::GlobalMarkerHead => "global_marker_head",
             DeclineCause::SignatureScreened => "signature_screened",
@@ -3662,17 +3698,45 @@ pub struct ExportedItem {
     /// and never contests. Always `false` for cases and active-pattern case
     /// handles.
     pub(super) attributed: bool,
-    /// For a union case, `true` when its union type or any of the union's
-    /// cases may carry an attribute list: FCS checks the attributes of a case
-    /// heading a pattern before its arguments (`CheckUnionCaseAttributes`),
-    /// and an error-level one (`[<Obsolete(…, true)>]`) abandons the whole
-    /// sub-pattern, so only an unattributed case certainly binds them. Any
-    /// case counts, since a duplicated case name (FS0023) resolves to its
-    /// first declaration, which need not be the one exported
-    /// ([`Resolver::namesake_declined_case_head_binds`](super::state::Resolver::namesake_declined_case_head_binds)).
-    /// A signature-derived union case answers `true`. `false` for every
-    /// other export.
-    pub(super) case_attributed: bool,
+    /// For a union, enum or exception case, where an error-level attribute
+    /// may sit ([`CaseAttributes`]). Nowhere for every other export.
+    pub(super) case_attributes: CaseAttributes,
+}
+
+/// Where a union case, an enum case or an exception may carry an
+/// **error-level**
+/// attribute: an `[<Obsolete(…, true)>]` or a `[<CompilerMessage(…,
+/// IsError = true)>]` (`CheckFSharpAttributes`).
+///
+/// FCS checks a case's attributes and its union's, or an exception's, at
+/// every use of it as a head, before the arguments (`ApplyUnionCaseOrExn`:
+/// `CheckUnionCaseAttributes` / `CheckEntityAttributes` committed). An
+/// error-level one raises there, which abandons the pattern under the head,
+/// so nothing under it binds, and an expression's arguments go unchecked.
+/// A union type on the path of a qualified head (`U.Case`) is checked
+/// earlier still, while the path resolves (`SendEntityPathToSink`), so an
+/// error-level attribute on the type leaves such a head unresolved.
+///
+/// Which attribute a name denotes is not read: every attribute whose
+/// argument may be two or more arguments counts
+/// ([`attributes_may_be_error_level`](super::decls::attributes_may_be_error_level)),
+/// since both error-level forms take at least two.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct CaseAttributes {
+    /// The union or enum type, or the exception itself.
+    pub(super) on_type: bool,
+    /// Any case of the union: FCS checks the case it resolves to, which for
+    /// a duplicated case name (FS0023) is its first declaration, not
+    /// necessarily the one exported.
+    pub(super) on_cases: bool,
+}
+
+impl CaseAttributes {
+    /// Whether a pattern under a head resolving to the case may be
+    /// abandoned.
+    pub(super) fn may_abandon_pattern(self) -> bool {
+        self.on_type || self.on_cases
+    }
 }
 
 impl ExportedItem {
@@ -4036,7 +4100,7 @@ impl FileSurface {
                 // so no signature-derived case has a restricted representation.
                 repr_access_root: None,
                 attributed: ex.attributed,
-                case_attributed: matches!(ex.case, Some(CaseKind::Union { .. })),
+                case_attributes: ex.case_attributes,
             });
             self.export_decls.push(ExportDecl {
                 path: ex.path.clone(),

@@ -2344,10 +2344,12 @@ impl<'a> Resolver<'a> {
                 .filter(|_| !self.value_shadows_case(&full))
             {
                 None => None,
-                Some(_) if self.earlier_case_type_namesake_possible(&full, written.len() > 2) => {
-                    Some((CrossFileCase::Declined, full))
+                Some(id) => {
+                    match self.cross_file_case_reading_declined(&full, id, written.len() > 2) {
+                        Some(cause) => Some((CrossFileCase::Declined(cause), full)),
+                        None => Some((CrossFileCase::Hit(tier, id), full)),
+                    }
                 }
-                Some(id) => Some((CrossFileCase::Hit(tier, id), full)),
             }
         };
         if !rooted {
@@ -3793,6 +3795,14 @@ impl<'a> Resolver<'a> {
                     );
                     return;
                 }
+                if self.case_attributes_of(case_res).on_type {
+                    self.defer_with_cause(
+                        first.fcs_range(),
+                        segments,
+                        DeclineSite::pre_walk(DeclineCause::CaseTypeAttributed),
+                    );
+                    return;
+                }
                 if self.lower_arity_namesake_possible(head, type_id, None) {
                     self.defer_with_cause(
                         first.fcs_range(),
@@ -4126,15 +4136,17 @@ impl<'a> Resolver<'a> {
                 // same-file-rooted whichever reading F# takes, so an earlier
                 // file's same-written-path case is never the target.
                 && !self.cross_file_case_shadowed_same_file(&written_path)
-                && let found = self.cross_file_type_case(&written_path, false)
-                && !matches!(found, CrossFileCase::Miss)
+                && let found @ (CrossFileCase::Hit(..) | CrossFileCase::Declined(_)) =
+                    self.cross_file_type_case(&written_path, false)
             {
                 let CrossFileCase::Hit(_, id) = found else {
-                    self.defer_with_cause(
-                        first.fcs_range(),
-                        segments,
-                        DeclineSite::pre_walk(DeclineCause::QualifierArityNamesake),
-                    );
+                    if let CrossFileCase::Declined(cause) = found {
+                        self.defer_with_cause(
+                            first.fcs_range(),
+                            segments,
+                            DeclineSite::pre_walk(cause),
+                        );
+                    }
                     return;
                 };
                 let whole = TextRange::new(
@@ -4736,6 +4748,14 @@ impl<'a> Resolver<'a> {
             );
             return Some(false);
         }
+        if self.case_attributes_of(case_res).on_type {
+            self.defer_with_cause(
+                type_seg.fcs_range(),
+                &[type_seg.clone(), case_seg.clone()],
+                DeclineSite::pre_walk(DeclineCause::CaseTypeAttributed),
+            );
+            return Some(false);
+        }
         if self.lower_arity_namesake_possible(&id_text(type_seg), type_id, None) {
             self.defer_with_cause(
                 type_seg.fcs_range(),
@@ -4837,6 +4857,12 @@ impl<'a> Resolver<'a> {
         match outcome {
             SameFileQualified::Emit { .. } if self.scope.recursive_module_active => {
                 SameFileQualified::Decline(DeclineCause::RecursiveModuleActive)
+            }
+            // The path runs through the case's type, which FCS checks.
+            SameFileQualified::Emit { case_res, .. }
+                if self.case_attributes_of(case_res).on_type =>
+            {
+                SameFileQualified::Decline(DeclineCause::CaseTypeAttributed)
             }
             SameFileQualified::Emit { .. } | SameFileQualified::Decline(_)
                 if in_pattern && self.pattern_type_head_possible(&id_text(head_seg)) =>
@@ -5907,11 +5933,8 @@ impl<'a> Resolver<'a> {
             let project = match self.cross_file_type_case_located(&written, false) {
                 Some((CrossFileCase::Hit(tier, id), _)) => Some((tier, id)),
                 None | Some((CrossFileCase::Miss, _)) => None,
-                Some((CrossFileCase::Declined, full)) => {
-                    self.record_path_decline(
-                        segs,
-                        DeclineSite::pre_walk(DeclineCause::QualifierArityNamesake),
-                    );
+                Some((CrossFileCase::Declined(cause), full)) => {
+                    self.record_path_decline(segs, DeclineSite::pre_walk(cause));
                     // Which namesake FCS binds is undecided, but whether the
                     // head binds its arguments may not be.
                     let [type_name, case] = written.as_slice() else {

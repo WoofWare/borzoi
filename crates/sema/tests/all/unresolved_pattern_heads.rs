@@ -569,11 +569,6 @@ fn range_of(start: usize, end: usize) -> TextRange {
 struct Observed {
     fcs_binds: bool,
     walk_interns: bool,
-    /// Whether the walk commits the head itself (`T.C`, the first
-    /// occurrence after the prelude): then the binders under it follow from
-    /// the case commit, not from
-    /// `namesake_declined_case_head_binds`.
-    head_committed: bool,
 }
 
 /// Check one multi-file cell against `uses-project`, under the reference
@@ -677,17 +672,9 @@ fn check_project_cell(
     failures.extend(unmodelled_project_binder_failures(
         id, &proj, &written, &fcs,
     ));
-    let head_committed = src[prelude.len()..].find("T.C").is_some_and(|at| {
-        let at = prelude.len() + at;
-        matches!(
-            rf.resolution_at(range_of(at, at + 3)),
-            Some(Resolution::Item(_) | Resolution::Local(_))
-        )
-    });
     Observed {
         fcs_binds: oracle.is_some(),
         walk_interns,
-        head_committed,
     }
 }
 
@@ -779,17 +766,6 @@ const NAMESAKE_GRID_COMPETITORS: &[(&str, &str)] = &[
     ("abbreviation_of_the_union", "type T = N0.T<int>"),
 ];
 
-/// The grid cells where the walk commits the case head itself, through
-/// the namesake guard's `Hit`, and FCS takes the same-arity record in
-/// `N1` or beside the union instead: in pattern position FCS tries a
-/// head's namesakes latest first, not by arity, which the guard assumes
-/// (#884). The binders under a head the walk *declines* are what this
-/// grid grades; these are the case commit's gap, pinned so a fix shows.
-const KNOWN_HEAD_COMMIT_GAPS: &[&str] = &[
-    "same_arity_record_EarlierSameNamespace",
-    "same_arity_record_EarlierOpenedAfter",
-];
-
 /// Where a [`NAMESAKE_GRID_COMPETITORS`] declaration sits, relative to the
 /// use file's `open N0`.
 #[derive(Clone, Copy, Debug)]
@@ -814,7 +790,6 @@ enum Place {
 #[test]
 fn binders_under_namesake_grid_heads_are_certain() {
     let mut failures = Vec::new();
-    let mut head_commit_gaps: Vec<String> = Vec::new();
     let (mut cells, mut fcs_binds, mut walk_interns) = (0, 0, 0);
     for &(competitor, decl) in NAMESAKE_GRID_COMPETITORS {
         let places: &[Place] = if decl.is_empty() {
@@ -855,20 +830,14 @@ fn binders_under_namesake_grid_heads_are_certain() {
                 earlier.push(("GridCompetitor.fs", competitor_file.as_str()));
             }
             let prelude = format!("module P\n{opens}let x = \"outer\"\n");
-            let mut cell_failures = Vec::new();
             let observed = check_project_cell(
                 &id,
                 &earlier,
                 &prelude,
                 "let f (b: N0.T<int>) =\n    match b with\n    | T.C «x» -> ignore ‹x›\n    | _ -> ()\n",
                 None,
-                &mut cell_failures,
+                &mut failures,
             );
-            if observed.head_committed && !cell_failures.is_empty() {
-                head_commit_gaps.push(id.clone());
-            } else {
-                failures.extend(cell_failures);
-            }
             cells += 1;
             fcs_binds += usize::from(observed.fcs_binds);
             walk_interns += usize::from(observed.walk_interns);
@@ -880,10 +849,6 @@ fn binders_under_namesake_grid_heads_are_certain() {
     // Liveness: the rule commits somewhere, so certain-implies-exact is not
     // passing vacuously.
     assert!(walk_interns > 0, "the grid commits no binder");
-    assert_eq!(
-        head_commit_gaps, KNOWN_HEAD_COMMIT_GAPS,
-        "the cells where the walk commits the case head itself and FCS disagrees moved"
-    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

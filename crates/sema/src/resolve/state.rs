@@ -1006,9 +1006,10 @@ impl DeclKinds {
 pub(super) enum CrossFileCase {
     /// An earlier file's case reads the path, at this tier.
     Hit(CaseTier, ItemId),
-    /// An earlier file's case reads the path, but a namesake of its type may
-    /// be what FCS binds: decline, and try no lower tier.
-    Declined,
+    /// An earlier file's case reads the path, but FCS may not bind it there
+    /// ([`Resolver::cross_file_case_reading_declined`]), for this cause:
+    /// decline, and try no lower tier.
+    Declined(DeclineCause),
     /// No earlier file's case reads the path.
     Miss,
 }
