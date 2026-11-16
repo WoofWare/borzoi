@@ -50,7 +50,6 @@ use borzoi::restore::{
     restore_graph, restore_to_scratch,
 };
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
-use borzoi::workspace::Workspace;
 use borzoi_nuget::dgspec::{
     DependencyGraphSpec, DgSpecDecline, DgSpecResolveDecline, EnvironmentVariable, NuGetIdentity,
     PathSegment, ResolvedFramework, environment_variable, parse_dgspec,
@@ -596,7 +595,7 @@ fn installed_sdks() -> Vec<(String, PathBuf)> {
 
 /// What the on-demand restore of `project`, under `env`, says ran it.
 fn shadow_of(project: &Path, env: &SdkDiscoveryEnv) -> borzoi::restore::ShadowRun {
-    let mut workspace = Workspace::with_env(env.clone());
+    let mut workspace = crate::common::workspace(env.clone());
     let served = workspace.served_tfm_for_project(project);
     restore_to_scratch(project, &dotnet_root(), &served, Some(env))
         .shadow
@@ -793,7 +792,7 @@ fn the_on_demand_restore_runs_b1_in_shadow() {
         );
         let project = root.join(&project_file);
         let env = controlled_env();
-        let mut workspace = Workspace::with_env(env.clone());
+        let mut workspace = crate::common::workspace(env.clone());
         let served = workspace.served_tfm_for_project(&project);
         let restored = restore_to_scratch(&project, &dotnet_root(), &served, Some(&env));
         assert!(
@@ -917,7 +916,7 @@ fn the_shadow_judges_nugets_restore_not_the_commands() {
         let root = write_tree(tag, &[("App.fsproj", text), ("App.fs", "module App\n")]);
         let project = root.join("App.fsproj");
         let env = controlled_env();
-        let mut workspace = Workspace::with_env(env.clone());
+        let mut workspace = crate::common::workspace(env.clone());
         let served = workspace.served_tfm_for_project(&project);
         let restored = restore_to_scratch(&project, &dotnet_root(), &served, Some(&env));
         assert!(

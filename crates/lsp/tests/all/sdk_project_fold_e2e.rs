@@ -40,7 +40,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use borzoi::project_deferral::{deferral_message, deferrals};
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::{ProjectId, SemanticState};
-use borzoi::workspace::Workspace;
 
 /// A unique fixture dir per run, in the system temp so `nix develop` sandboxes
 /// and CI caches treat it as scratch.
@@ -59,7 +58,7 @@ fn folds(fsproj: &std::path::Path) -> bool {
 }
 
 fn folds_under(fsproj: &std::path::Path, env: SdkDiscoveryEnv) -> bool {
-    let mut workspace = Workspace::with_env(env);
+    let mut workspace = crate::common::workspace(env);
     let mut sema = SemanticState::new();
     let docs = borzoi::vfs::Vfs::new();
     sema.parses_for_project(fsproj, &mut workspace, &docs)
@@ -250,7 +249,7 @@ fn ordinary_sdk_projects_have_trusted_langversion_provenance() {
         )
         .unwrap();
         std::fs::write(root.join("A.fs"), "module A\n").unwrap();
-        let mut workspace = Workspace::with_env(SdkDiscoveryEnv::from_process_env());
+        let mut workspace = crate::common::workspace(SdkDiscoveryEnv::from_process_env());
         let parsed = workspace
             .project(&fsproj)
             .unwrap_or_else(|| panic!("{tag}: the project must evaluate"));
@@ -350,7 +349,7 @@ fn a_language_version_refusal_names_the_condition_it_rests_on() {
     .unwrap();
     std::fs::write(root.join("A.fs"), "match x with\n").unwrap();
 
-    let mut workspace = Workspace::with_env(every_version_checked());
+    let mut workspace = crate::common::workspace(every_version_checked());
     let mut sema = SemanticState::new();
     let docs = borzoi::vfs::Vfs::new();
     assert!(

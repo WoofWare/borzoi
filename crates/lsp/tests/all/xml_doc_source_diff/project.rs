@@ -383,7 +383,7 @@ fn pinned_projects_docs_agree_with_fcs() {
     let mut bad_sites = Vec::new();
     let mut cross_file_docs = 0usize;
     for project in &projects {
-        let mut workspace = Workspace::with_env(SdkDiscoveryEnv::from_process_env());
+        let mut workspace = crate::common::workspace(SdkDiscoveryEnv::from_process_env());
         let mut sema = SemanticState::new();
         // A pinned corpus project, resolved as `borzoi-corpus-diff` resolves it:
         // as a host that trusts the workspace would, C# project references

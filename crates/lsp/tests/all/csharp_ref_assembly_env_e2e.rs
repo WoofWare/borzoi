@@ -19,7 +19,6 @@ use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::SemanticState;
 use borzoi::server::State;
 use borzoi::uri::UriExt as _;
-use borzoi::workspace::Workspace;
 use borzoi_sema::AssemblyEnv;
 use borzoi_spawn::BoundedCommand;
 use lsp_types::{FileChangeType, FileEvent, Uri};
@@ -47,11 +46,11 @@ fn assembly_env_includes_csharp_project_reference_types() {
     // framework packs (and the sidecar's `dotnet`). Mirrors the hover e2e setup.
     let dotnet_root = std::env::var_os("DOTNET_ROOT").map(PathBuf::from);
     let mut workspace = match &dotnet_root {
-        Some(root) => Workspace::with_env(SdkDiscoveryEnv {
+        Some(root) => crate::common::workspace(SdkDiscoveryEnv {
             dotnet_root: Some(root.clone()),
             ..SdkDiscoveryEnv::from_process_env()
         }),
-        None => Workspace::with_env(SdkDiscoveryEnv::from_process_env()),
+        None => crate::common::workspace(SdkDiscoveryEnv::from_process_env()),
     };
     let resolved_root = workspace.dotnet_root_for_project(&fsproj);
     assert!(
@@ -123,7 +122,7 @@ fn a_cs_edit_and_its_event_rebuild_only_the_env_with_a_csharp_edge() {
 
     let mut state = State::new();
     if let Some(root) = std::env::var_os("DOTNET_ROOT").map(PathBuf::from) {
-        state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+        state.workspace = crate::common::workspace(SdkDiscoveryEnv {
             dotnet_root: Some(root),
             ..SdkDiscoveryEnv::from_process_env()
         });

@@ -66,7 +66,6 @@ use borzoi::inbox::{CHECKPOINT_EVENT, STOPPED_EVENT};
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::server::{Dispatcher, Progress, SERVER_STACK_BYTES, State};
 use borzoi::uri::UriExt as _;
-use borzoi::workspace::Workspace;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::{ClientCapabilities, Uri};
 use proptest::prelude::*;
@@ -902,7 +901,7 @@ impl Session {
         // Hermetic: no `dotnet` is found, so no env is built from the host's
         // packs. The project is SDK-less, so it evaluates and folds all the
         // same.
-        state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+        state.workspace = crate::common::workspace(SdkDiscoveryEnv {
             dotnet_root: Some(root.join("no-dotnet")),
             ..SdkDiscoveryEnv::default()
         });
@@ -1721,7 +1720,7 @@ fn the_loop_reads_every_waiting_message_before_it_handles_one() {
             input.send(message).unwrap();
         }
         let mut state = State::new();
-        state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+        state.workspace = crate::common::workspace(SdkDiscoveryEnv {
             dotnet_root: Some(world.root.join("no-dotnet")),
             ..SdkDiscoveryEnv::default()
         });
@@ -1910,7 +1909,7 @@ fn a_burst_behind_a_rendezvous_transport_is_planned_together() {
         }
         sender.join().expect("the sender ends cleanly");
         let mut state = State::new();
-        state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+        state.workspace = crate::common::workspace(SdkDiscoveryEnv {
             dotnet_root: Some(world.root.join("no-dotnet")),
             ..SdkDiscoveryEnv::default()
         });
@@ -2782,7 +2781,7 @@ fn the_epoch_holds_at_most_its_bound() {
         let (server, _client) = Connection::memory();
         let (input, inbox) = borzoi::inbox::channel(2 * borzoi::server::MAX_PENDING);
         let mut state = State::new();
-        state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+        state.workspace = crate::common::workspace(SdkDiscoveryEnv {
             dotnet_root: Some(world.root.join("no-dotnet")),
             ..SdkDiscoveryEnv::default()
         });

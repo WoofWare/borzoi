@@ -43,7 +43,6 @@ use borzoi::sdk_language::{
     FEATURE_SWITCHES, LangVersionDoubt, LangVersionReading, LangVersionSelection, ProjectCompiler,
     RefusalKind, SdkLanguageFacts, VERSION_NEUTRAL_SWITCHES,
 };
-use borzoi::workspace::Workspace;
 use borzoi_cst::language_version::LanguageVersion;
 use borzoi_msbuild::SdkVersion;
 use borzoi_spawn::BoundedCommand;
@@ -568,7 +567,7 @@ fn a_project_reads_langversion_with_its_sdks_compiler() {
         {
             let dir = tempfile::tempdir().unwrap();
             let fsproj = pinned_project(dir.path(), &compiler.sdk, lang, STRADDLING);
-            let mut workspace = Workspace::with_env(env.clone());
+            let mut workspace = crate::common::workspace(env.clone());
             let facts = SdkLanguageFacts::for_sdk(&compiler.sdk);
             assert_eq!(
                 workspace.compiler_sdk_for_project(&fsproj).as_ref(),
@@ -750,7 +749,7 @@ fn the_build_runs_the_compiler_the_server_names() {
         // The install's workload manifests are held apart from foreign build
         // code, or no project on a real install would have its compiler named.
         let (_, plain, _) = environments().remove(0);
-        let mut workspace = Workspace::with_env(plain);
+        let mut workspace = crate::common::workspace(plain);
         let parsed = workspace.project(&fsproj).unwrap();
         assert!(
             !parsed.workload_definitions.targets.is_empty(),
@@ -758,7 +757,7 @@ fn the_build_runs_the_compiler_the_server_names() {
         );
         assert!(!parsed.foreign_definitions.defines_build_code());
         for (route, env, _) in environments() {
-            let mut workspace = Workspace::with_env(env);
+            let mut workspace = crate::common::workspace(env);
             assert_eq!(
                 workspace.compiler_sdk_for_project(&fsproj).as_ref(),
                 Some(&compiler.sdk),
@@ -857,7 +856,7 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
     let compiler = graded_compilers().remove(0);
     let (_, plain, _) = environments().remove(0);
     let named = |fsproj: &Path, env: &SdkDiscoveryEnv| {
-        Workspace::with_env(env.clone()).compiler_sdk_for_project(fsproj)
+        crate::common::workspace(env.clone()).compiler_sdk_for_project(fsproj)
     };
     let mut cases: Vec<(Site, &str)> = COMPILER_SELECTORS
         .iter()
@@ -912,7 +911,7 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
             .insert(selector.to_string(), "/opt/elsewhere".to_string());
         assert_eq!(named(&fsproj, &env), None, "{selector} in the environment");
         let globals = HashMap::from([(selector.to_string(), "/opt/elsewhere".to_string())]);
-        let mut workspace = Workspace::with_env_and_extra_build_properties(plain.clone(), globals);
+        let mut workspace = crate::common::workspace_with_build_properties(plain.clone(), globals);
         assert_eq!(
             workspace.compiler_sdk_for_project(&fsproj),
             None,
@@ -939,7 +938,7 @@ fn a_compiler_choice_from_outside_the_sdk_declines() {
         "a redirected default target"
     );
     let globals = HashMap::from([("BuildDependsOn".to_string(), "Clean".to_string())]);
-    let mut workspace = Workspace::with_env_and_extra_build_properties(plain.clone(), globals);
+    let mut workspace = crate::common::workspace_with_build_properties(plain.clone(), globals);
     assert_eq!(
         workspace.compiler_sdk_for_project(&fsproj),
         None,
@@ -965,7 +964,7 @@ fn a_build_time_langversion_write_reports_no_refusal() {
     );
     std::fs::write(&fsproj, &text).unwrap();
     let (_, env, _) = environments().remove(0);
-    let mut workspace = Workspace::with_env(env.clone());
+    let mut workspace = crate::common::workspace(env.clone());
     let parsed = workspace.project(&fsproj).unwrap();
     assert!(!parsed.property("LangVersion").untrusted_cause().is_some());
     assert!(borzoi::sdk_language::lang_version_untrusted_cause(parsed).is_some());
@@ -1152,7 +1151,7 @@ fn an_untrusted_langversion_reports_no_refusal() {
     );
     std::fs::write(&fsproj, &text).unwrap();
     let (_, env, _) = environments().remove(0);
-    let mut workspace = Workspace::with_env(env.clone());
+    let mut workspace = crate::common::workspace(env.clone());
     let parsed = workspace.project(&fsproj).unwrap();
     assert!(parsed.property("LangVersion").untrusted_cause().is_some());
     assert_eq!(parsed.lang_version.as_deref(), Some("7.0"));
@@ -1273,7 +1272,7 @@ fn a_global_carrier_reports_no_refusal() {
         let dir = tempfile::tempdir().unwrap();
         let fsproj = pinned_project(dir.path(), &compiler.sdk, project_lang, STRADDLING);
         let globals = HashMap::from([(global.to_string(), value.to_string())]);
-        let workspace = Workspace::with_env_and_extra_build_properties(env.clone(), globals);
+        let workspace = crate::common::workspace_with_build_properties(env.clone(), globals);
         let text = host_fs::read_to_string(&fsproj).unwrap();
         let diags = borzoi::fsproj_diagnostics::diagnostics_for(
             &text,
@@ -1330,7 +1329,7 @@ fn a_guessed_version_is_held_to_the_versions_its_compiler_checks_at() {
                     ),
                 );
                 std::fs::write(&fsproj, &text).unwrap();
-                let mut workspace = Workspace::with_env(env.clone());
+                let mut workspace = crate::common::workspace(env.clone());
                 assert!(
                     workspace
                         .project(&fsproj)
@@ -1918,7 +1917,7 @@ fn a_feature_switch_doubts_a_trusted_version() {
             .unwrap();
             std::fs::write(dir.path().join("switches.rsp"), "--strict-indentation-\n").unwrap();
 
-            let mut workspace = Workspace::with_env(env_of(route));
+            let mut workspace = crate::common::workspace(env_of(route));
             let parsed = workspace.project(&fsproj).unwrap().clone();
             assert!(
                 parsed.property("LangVersion").untrusted_cause().is_none(),
@@ -1988,7 +1987,7 @@ fn a_feature_switch_doubts_a_trusted_version() {
             // the ladder (the end-of-file cascade of a mid-edit `module M =`)
             // still speaks for no set of rules off it.
             std::fs::write(dir.path().join("A.fs"), MID_EDIT).unwrap();
-            let mut workspace = Workspace::with_env(env_of(route));
+            let mut workspace = crate::common::workspace(env_of(route));
             let mut sema = borzoi::semantic::SemanticState::new();
             assert_eq!(
                 sema.parses_for_project(&fsproj, &mut workspace, &borzoi::vfs::Vfs::new())

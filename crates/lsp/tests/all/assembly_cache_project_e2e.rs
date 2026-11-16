@@ -19,16 +19,15 @@ use std::time::Instant;
 use borzoi::assembly_cache::AssemblyCache;
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::SemanticState;
-use borzoi::workspace::Workspace;
 
 fn build_env_len(project: &std::path::Path, cache_dir: &std::path::Path) -> (usize, f64) {
-    let mut workspace = Workspace::with_env(SdkDiscoveryEnv::from_process_env());
+    let mut workspace = crate::common::workspace(SdkDiscoveryEnv::from_process_env());
     let dotnet_root = workspace.dotnet_root_for_project(project);
     let mut sema = SemanticState::new();
     sema.set_assembly_cache(AssemblyCache::at(cache_dir.to_path_buf()));
     // Prime the parses cache so the timing isolates the assembly-env build.
     let docs = borzoi::vfs::Vfs::new();
-    let mut workspace2 = Workspace::with_env(SdkDiscoveryEnv::from_process_env());
+    let mut workspace2 = crate::common::workspace(SdkDiscoveryEnv::from_process_env());
     let _ = sema.parses_for_project(project, &mut workspace2, &docs);
 
     let target_framework = workspace2.served_tfm_for_project(project);

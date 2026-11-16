@@ -95,6 +95,9 @@ pub mod diagnostics_reference;
 pub mod host_fs;
 pub mod inheritdoc_diff;
 pub mod inheritdoc_oracle;
+pub mod workspace;
+
+pub use workspace::{workspace, workspace_with_build_properties};
 
 /// Budget for the `dotnet build` of `tools/fcs-dump`.
 ///
@@ -315,7 +318,6 @@ pub fn runtime_project_state_in(
 ) -> (borzoi::server::State, Vec<lsp_types::Uri>) {
     use borzoi::sdk_discovery::SdkDiscoveryEnv;
     use borzoi::server::State;
-    use borzoi::workspace::Workspace;
 
     fn write(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
@@ -355,7 +357,7 @@ pub fn runtime_project_state_in(
         ..SdkDiscoveryEnv::default()
     };
     let mut state = State::default();
-    state.workspace = Workspace::with_env(env);
+    state.workspace = crate::common::workspace(env);
     let uris = files
         .iter()
         .map(|(name, src)| {

@@ -36,7 +36,7 @@ use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::ProjectId;
 use borzoi::server::State;
 use borzoi::vfs::{Clock, RACY_WINDOW};
-use borzoi::workspace::{ServedTfm, Workspace};
+use borzoi::workspace::ServedTfm;
 use borzoi_cst::language_version::LanguageVersion;
 use borzoi_cst::syntax::{AstNode as _, SyntaxNode};
 use borzoi_msbuild::ItemKind;
@@ -326,7 +326,7 @@ fn write_world(fixture: &Fixture, world: &World) {
 /// timestamps so that no stamp of a project file is racy.
 fn state(fixture: &Fixture) -> State {
     let mut state = State::new();
-    state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+    state.workspace = crate::common::workspace(SdkDiscoveryEnv {
         dotnet_root: Some(fixture.root.join("dotnet")),
         nuget_packages_dir: Some(fixture.root.join("global-packages")),
         home_dir: Some(fixture.root.join("home")),
@@ -712,7 +712,7 @@ fn a_change_of_language_version_provenance_alone_reaches_the_fold() {
     };
     write(&root.join("P/A.fs"), b"match x with\n");
     let mut state = State::new();
-    state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+    state.workspace = crate::common::workspace(SdkDiscoveryEnv {
         dotnet_root: Some(root.join("no-dotnet")),
         ..SdkDiscoveryEnv::default()
     });

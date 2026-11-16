@@ -56,7 +56,6 @@ use borzoi::handlers::hover;
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::server::State;
 use borzoi::uri::UriExt as _;
-use borzoi::workspace::Workspace;
 use borzoi_spawn::BoundedCommand;
 use lsp_types::{
     HoverContents, HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, Uri,
@@ -596,7 +595,7 @@ fn project(src: &str) -> (State, Uri, TempDir) {
     fs::write(&src_path, src).unwrap();
 
     let mut state = State::default();
-    state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+    state.workspace = crate::common::workspace(SdkDiscoveryEnv {
         dotnet_root: Some(dotnet_root),
         ..SdkDiscoveryEnv::default()
     });

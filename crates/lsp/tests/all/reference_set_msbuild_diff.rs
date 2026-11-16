@@ -52,7 +52,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::semantic::SemanticState;
-use borzoi::workspace::Workspace;
 use borzoi_assembly::{Ecma335Assembly, EcmaView};
 use borzoi_spawn::BoundedCommand;
 use serde::Deserialize;
@@ -189,11 +188,11 @@ fn our_reference_names(fsproj: &Path) -> BTreeSet<String> {
     // without its `MSBuildUserExtensionsPath` the SDK's import chain is
     // opaque, and no reference list is certain.
     let mut workspace = match std::env::var_os("DOTNET_ROOT").map(PathBuf::from) {
-        Some(root) => Workspace::with_env(SdkDiscoveryEnv {
+        Some(root) => crate::common::workspace(SdkDiscoveryEnv {
             dotnet_root: Some(root),
             ..SdkDiscoveryEnv::from_process_env()
         }),
-        None => Workspace::with_env(SdkDiscoveryEnv::from_process_env()),
+        None => crate::common::workspace(SdkDiscoveryEnv::from_process_env()),
     };
     let dotnet_root = workspace.dotnet_root_for_project(fsproj);
     assert!(

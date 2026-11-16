@@ -19,7 +19,6 @@ use crate::common::ensure_system_runtime_dll;
 use borzoi::handlers::hover;
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
 use borzoi::server::State;
-use borzoi::workspace::Workspace;
 use lsp_types::{
     HoverContents, HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, Uri,
     WorkDoneProgressParams,
@@ -180,7 +179,7 @@ fn project_with(src: &str, runtime_xml: Xml, packages: Vec<Package>) -> Project 
     fs::write(&src_path, src).unwrap();
 
     let mut state = State::default();
-    state.workspace = Workspace::with_env(SdkDiscoveryEnv {
+    state.workspace = crate::common::workspace(SdkDiscoveryEnv {
         dotnet_root: Some(dotnet_root),
         ..SdkDiscoveryEnv::default()
     });

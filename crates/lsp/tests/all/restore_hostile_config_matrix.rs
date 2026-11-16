@@ -36,7 +36,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use borzoi::restore::{RestoreOutcome, restore_to_scratch_assemblies};
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
-use borzoi::workspace::Workspace;
 
 /// A version of `FSharp.Core` vendored in the devshell's `$NUGET_PACKAGES`.
 const FSHARP_CORE_VERSION: &str = "10.1.204";
@@ -123,7 +122,7 @@ fn restore_hazard(
         std::fs::write(root.join(name), content).unwrap();
     }
 
-    let mut workspace = Workspace::with_env(env);
+    let mut workspace = crate::common::workspace(env);
     let served = workspace.served_tfm_for_project(&fsproj);
     let dotnet = dotnet_root();
 

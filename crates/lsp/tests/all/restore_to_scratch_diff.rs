@@ -24,7 +24,6 @@ use borzoi::project_assets::resolve_assemblies_for_tfm;
 use borzoi::restore::shadow::ShadowVerdict;
 use borzoi::restore::{RestoreOutcome, restore_to_scratch};
 use borzoi::sdk_discovery::SdkDiscoveryEnv;
-use borzoi::workspace::Workspace;
 use borzoi_spawn::BoundedCommand;
 
 /// A version of `FSharp.Core` vendored in the devshell's `$NUGET_PACKAGES`.
@@ -114,7 +113,7 @@ fn write_project(tag: &str, item_group: &str) -> PathBuf {
 /// and never wrote the project's `obj/`.
 fn assert_scratch_matches_obj(project: &Path) {
     let root = dotnet_root();
-    let mut workspace = Workspace::with_env(SdkDiscoveryEnv::from_process_env());
+    let mut workspace = crate::common::workspace(SdkDiscoveryEnv::from_process_env());
     let served = workspace.served_tfm_for_project(project);
     let tfm = served
         .as_deref()
