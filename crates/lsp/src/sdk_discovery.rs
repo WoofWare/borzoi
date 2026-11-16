@@ -277,8 +277,10 @@ pub struct SdkDiscoveryEnv {
     /// True when any workload-resolution override variable is set
     /// (`DOTNETSDK_WORKLOAD_MANIFEST_ROOTS`,
     /// `DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS`,
-    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`). The in-house locator resolution
-    /// degrades rather than model those redirections.
+    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`), or `MSBuildEnableWorkloadResolver`
+    /// switches the workload resolver off. The in-house workload resolution
+    /// (the locators, and a workload pack named as an SDK) degrades rather
+    /// than model those redirections.
     pub workload_overrides_present: bool,
     /// The environment MSBuild would fold in as initial properties when
     /// evaluating a project under this configuration.
@@ -393,9 +395,14 @@ impl SdkDiscoveryEnv {
             // even `=false` drops the default roots; PACK_ROOTS goes
             // through `string.IsNullOrEmpty`, so an empty value is a
             // true no-op and must not degrade resolution.
+            // `CachingWorkloadResolver` is off where
+            // `MSBuildEnableWorkloadResolver` equals `false` as
+            // `OrdinalIgnoreCase` compares (untrimmed), and on otherwise.
             workload_overrides_present: get("DOTNETSDK_WORKLOAD_MANIFEST_ROOTS").is_some()
                 || get("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS").is_some()
-                || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some(),
+                || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some()
+                || get("MSBuildEnableWorkloadResolver")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("false")),
         }
     }
 }

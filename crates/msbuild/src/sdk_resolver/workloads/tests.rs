@@ -1537,3 +1537,29 @@ fn a_workload_state_we_cannot_resolve_declines_a_name_the_running_sdk_lacks() {
         Err(SdkResolveError::UnsupportedLayout { .. })
     ));
 }
+
+#[test]
+fn the_disable_sentinel_declines_every_workload_answer() {
+    // `CachingWorkloadResolver` answers nothing where
+    // `DisableWorkloadResolver.sentinel` sits in the SDK directory; neither a
+    // locator nor a pack lookup commits there, though both would without it.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    let version_dir = layout.root.join("sdk/10.0.300");
+    fs::create_dir_all(layout.root.join("packs/Contoso.Pack/1.0.0")).unwrap();
+    let answers = || {
+        [
+            layout.resolve("Contoso.Pack", &no_user_env()).is_ok(),
+            resolve_workload_locator(
+                AUTO,
+                &layout.root,
+                &version_dir,
+                &no_user_env(),
+                &Observer::new(),
+            )
+            .is_ok(),
+        ]
+    };
+    assert_eq!(answers(), [true, true]);
+    write(&version_dir.join("DisableWorkloadResolver.sentinel"), "");
+    assert_eq!(answers(), [false, false]);
+}

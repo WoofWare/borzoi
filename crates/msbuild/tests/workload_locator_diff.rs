@@ -3120,8 +3120,9 @@ fn gen_pack_lookup_layout(rng: &mut SplitMix64) -> PackLookupLayout {
         _ => name.to_owned(),
     };
     let mut queries: Vec<PackQuery> = Vec::new();
-    for (id, pack) in &defined {
-        // A pack both manifests define is one query.
+    // The last definition of an id is the one a manifest keeps (a JSON
+    // object's repeated key), and an id both manifests define is one query.
+    for (id, pack) in defined.iter().rev() {
         if queries.iter().any(|q| q.name.eq_ignore_ascii_case(id)) {
             continue;
         }

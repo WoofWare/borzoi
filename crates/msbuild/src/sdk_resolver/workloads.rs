@@ -64,7 +64,7 @@
 //!   (the user-local one, then the dotnet root) that has it, and each folder
 //!   once.
 //! * Any other SDK name the running SDK does not ship reaches the same
-//!   resolver (`TryGetPackInfo`, [`resolve_workload_pack`]): the pack whose id
+//!   resolver (`TryGetPackInfo`, [`crate::workloads::resolve_workload_pack`]): the pack whose id
 //!   it names, ignoring case, resolved as above, is looked up at its kind's
 //!   location (`packs/{id}/{version}` for an SDK or framework pack,
 //!   `tool-packs/{id}/{version}` for a tool pack, a lower-cased `.nupkg` under
@@ -173,8 +173,10 @@ pub struct WorkloadEnvironment<'a> {
     /// True when any workload-resolution environment override is set
     /// (`DOTNETSDK_WORKLOAD_MANIFEST_ROOTS`,
     /// `DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS`,
-    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`): those redirect resolution in ways
-    /// we do not model, so their presence degrades.
+    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`), or the resolver is switched off
+    /// (`MSBuildEnableWorkloadResolver=false`, which makes it answer nothing
+    /// and leaves every name to the next resolver): those redirect resolution
+    /// in ways we do not model, so their presence degrades.
     pub overrides_present: bool,
     /// What the workload reader reads of the `global.json` governing the
     /// evaluation (`GlobalJson::workloads`): MSBuild passes the discovered
@@ -336,6 +338,18 @@ impl WorkloadResolver {
         .all(Path::has_root)
         {
             return Err(unsupported("a workload root is a relative path"));
+        }
+        // `CachingWorkloadResolver` answers nothing (null, so MSBuild asks the
+        // next resolver) when this sentinel sits in the SDK directory, where
+        // CLR `File.Exists` finds it. No installed SDK ships one, and the
+        // resolver reads it from its own directory, which the differential
+        // cannot point at a generated layout, so it declines.
+        let sentinel = sdk_version_dir.join("DisableWorkloadResolver.sentinel");
+        if dotnet_io::file_exists(observer, &sentinel) {
+            return Err(unsupported(format!(
+                "the workload resolver is disabled by {}",
+                sentinel.display()
+            )));
         }
         let band = host_feature_band(sdk_version_dir)?;
         let runtime_identifiers = runtime_identifier_chain(sdk_version_dir, observer)?;

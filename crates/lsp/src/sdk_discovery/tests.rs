@@ -1858,6 +1858,11 @@ fn workload_override_detection_follows_upstream_value_semantics() {
             .workload_overrides_present
     );
     assert!(!with_var("UNRELATED", "x").workload_overrides_present);
+    // The resolver's own switch: off only at `false`, in any case.
+    assert!(with_var("MSBuildEnableWorkloadResolver", "FALSE").workload_overrides_present);
+    assert!(!with_var("MSBuildEnableWorkloadResolver", "true").workload_overrides_present);
+    assert!(!with_var("MSBuildEnableWorkloadResolver", " false").workload_overrides_present);
+    assert!(!with_var("MSBuildEnableWorkloadResolver", "").workload_overrides_present);
 }
 
 #[test]
