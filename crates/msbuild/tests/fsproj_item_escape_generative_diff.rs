@@ -166,9 +166,8 @@ const FRAGMENTS: &[&str] = &[
     // A glob rooted inside a directory a `**` exclude names (#615).
     "sub/Deep/*.fs",
     "**/Deep/**",
-    // Case variants. MSBuild ignores ASCII case against a literal include,
-    // directories included, on every host. Against a glob include the resolver
-    // declines where case would decide the answer (#607).
+    // Case variants, which meet the escapes here; the case rules themselves
+    // are swept by `fsproj_glob_case_generative_diff`.
     "PLAIN.FS",
     "up.fs",
     "SUB/c.fs",
@@ -569,68 +568,6 @@ fn hand_picked_corners() {
             outcome,
             Outcome::Declined,
             "the corner declined through the resolver seam:\n{}",
-            fixture.xml()
-        );
-    }
-}
-
-/// How MSBuild's matching treats case, from the oracle table on #607.
-///
-/// Against a literal include, every exclude ignores ASCII case, directories
-/// included, on every host (`FileSpecMatcherTester` compares names
-/// `OrdinalIgnoreCase` and its `GlobPattern` folds the whole path). Those
-/// corners must commit, and match MSBuild.
-///
-/// Against a glob include the file matcher's rule turns on which directories
-/// exist and on the include's walk root, which the resolver does not model, so
-/// those corners may decline by name; where one commits it must match.
-#[test]
-fn case_corners() {
-    let mut oracle = Oracle::spawn();
-    let corner = |include: &str, exclude: Option<&str>| Fixture {
-        esc: "plain.fs".to_string(),
-        pct: "pct%".to_string(),
-        includes: vec![include.to_string()],
-        exclude: exclude.map(str::to_string),
-        condition: None,
-    };
-    let literal = [
-        corner("plain.fs;z.fs", Some("PLAIN.FS")),
-        corner("sub/c.fs;z.fs", Some("SUB/c.fs")),
-        corner("sub/c.fs;z.fs", Some("SUB/*.fs")),
-        corner("sub/c.fs;z.fs", Some("S*/c.fs")),
-        corner("plain.fs;z.fs", Some("**/PLAIN.fs")),
-        corner("plain.fs;z.fs", Some("$(MSBuildProjectDirectory)/P*")),
-        corner("plain.fs;z.fs", Some("$(MSBuildProjectDirectory)/PLAIN.fs")),
-    ];
-    for fixture in &literal {
-        assert_eq!(
-            check_with(&mut oracle, fixture, true),
-            Outcome::Committed,
-            "a literal-include case corner did not commit:\n{}",
-            fixture.xml()
-        );
-    }
-    let glob = [
-        corner("sub/*.fs", Some("sub/C.fs")),
-        corner("sub/*.fs", Some("SUB/c.fs")),
-        corner("**/*.fs", Some("SUB/c.fs")),
-        corner("**/*.fs", Some("S*/c.fs")),
-        corner("**/*.fs", Some("SUB/*.fs")),
-        corner("**/*.fs", Some("**/C.fs")),
-        corner("*.fs", Some("$(MSBuildProjectDirectory)/PLAIN.fs")),
-        corner("*.fs", Some("u*")),
-        corner("SUB/*.fs", None),
-        corner("S*/*.fs", None),
-        corner("u*.fs", None),
-        corner("*.FS", None),
-        corner("sub/**/C.fs", None),
-    ];
-    for fixture in &glob {
-        assert_ne!(
-            check_with(&mut oracle, fixture, true),
-            Outcome::Declined,
-            "{}",
             fixture.xml()
         );
     }
