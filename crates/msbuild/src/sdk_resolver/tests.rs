@@ -489,26 +489,17 @@ fn per_import_version_pin_fails_when_only_other_versions_present() {
 }
 
 #[test]
-fn per_import_version_pin_overrides_caller_spec() {
-    // When both a caller `spec` (e.g. from `global.json`) and a
-    // per-import pin are in play, the per-import wins — the project
-    // file is explicitly requesting a specific package version, which
-    // is a different question from `global.json`'s host-SDK pin.
-    //
-    // Without the override, a caller spec pinning some other
-    // version with `Disable` would block the per-import from
-    // resolving in `$DOTNET_ROOT`; this test catches that
-    // regression.
+fn a_per_import_pin_does_not_select_the_host_sdk() {
+    // The version half names the package NuGet looks for, never the host
+    // SDK: a caller spec (the `global.json` `sdk` block) that admits no
+    // installed SDK leaves the .NET host with nothing to run, whatever the
+    // reference names.
     let dotnet = TempDir::new().unwrap();
     let nuget = TempDir::new().unwrap();
     install_sdk(dotnet.path(), "9.0.100", "Microsoft.NET.Sdk");
-
-    // Caller spec disallows 9.0.100 directly (host-SDK pin to a
-    // different version). Per-import asks for 9.0.100 exactly, and
-    // it wins.
     let caller_pin = SdkVersion::parse("8.0.401").unwrap();
     let caller_spec = VersionSpec::with_version(caller_pin, RollForward::Disable, false);
-    let paths = locate_dotnet_sdk(
+    let err = locate_dotnet_sdk(
         dotnet.path(),
         Some(nuget.path()),
         "Microsoft.NET.Sdk/9.0.100",
@@ -516,9 +507,11 @@ fn per_import_version_pin_overrides_caller_spec() {
         None,
         &Observer::new(),
     )
-    .expect("per-import pin should override caller spec");
-    assert_eq!(version_dir_name(&paths.props), "9.0.100");
-    assert!(picked_from_dotnet_root(&paths.props));
+    .expect_err("no host SDK runs");
+    assert!(
+        matches!(err, SdkResolveError::VersionNotSatisfied { ref spec, .. } if *spec == caller_spec),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -1253,11 +1246,11 @@ fn unpinned_reference_to_nuget_only_sdk_yields_not_found() {
 }
 
 #[test]
-fn per_import_pin_only_in_nuget_picks_nuget_copy() {
-    // Cross-root selection under per-import: when DOTNET has version A
-    // but the pin is to version B (only restored in NuGet), the
-    // resolver picks the NuGet copy. Demonstrates that the per-import
-    // pin reaches across both roots and isn't tied to either.
+fn the_running_sdk_s_copy_outranks_a_restored_pin() {
+    // MSBuild's default resolver serves the running SDK's copy at any
+    // version the reference names, before NuGet's resolver is asked
+    // (`sdk_directory_probe_diff`'s resolver-order sweep), so the restored
+    // 9.0.100 package is not read.
     let dotnet = TempDir::new().unwrap();
     let nuget = TempDir::new().unwrap();
     install_sdk(dotnet.path(), "8.0.100", "Microsoft.NET.Sdk");
@@ -1272,17 +1265,35 @@ fn per_import_pin_only_in_nuget_picks_nuget_copy() {
         &Observer::new(),
     )
     .unwrap();
-    assert!(!picked_from_dotnet_root(&paths.props));
-    assert_eq!(version_dir_name(&paths.props), "9.0.100");
+    assert!(picked_from_dotnet_root(&paths.props));
+    assert_eq!(version_dir_name(&paths.props), "8.0.100");
 }
 
 #[test]
-fn per_import_pin_present_in_both_dotnet_wins_tie() {
-    // When both roots host the pinned version, MSBuild's "shared over
-    // per-user" preference kicks in — `$DOTNET_ROOT` wins. The
-    // `Disable` filter from the per-import pin admits exactly the
-    // pinned version in both roots, so this is the standing case for
-    // the tie-breaker.
+fn a_pin_the_running_sdk_does_not_ship_is_served_from_nuget() {
+    let dotnet = TempDir::new().unwrap();
+    let nuget = TempDir::new().unwrap();
+    install_sdk(dotnet.path(), "8.0.100", "Microsoft.NET.Sdk");
+    install_sdk_nuget(nuget.path(), "1.2.3", "MySdk");
+
+    let paths = locate_dotnet_sdk(
+        dotnet.path(),
+        Some(nuget.path()),
+        "MySdk/1.2.3",
+        None,
+        None,
+        &Observer::new(),
+    )
+    .unwrap();
+    assert!(!picked_from_dotnet_root(&paths.props));
+    assert_eq!(version_dir_name(&paths.props), "1.2.3");
+}
+
+#[test]
+fn per_import_pin_present_in_both_is_served_from_the_running_sdk() {
+    // MSBuild's default resolver serves the running SDK's copy before
+    // NuGet's resolver is asked, so a restored copy of the same version
+    // is not read.
     let dotnet = TempDir::new().unwrap();
     let nuget = TempDir::new().unwrap();
     install_sdk(dotnet.path(), "8.0.401", "Microsoft.NET.Sdk");
@@ -1299,7 +1310,7 @@ fn per_import_pin_present_in_both_dotnet_wins_tie() {
     .unwrap();
     assert!(
         picked_from_dotnet_root(&paths.props),
-        "tie should go to $DOTNET_ROOT, got {}",
+        "the running SDK's copy is served first, got {}",
         paths.props.display()
     );
 }
@@ -1491,26 +1502,20 @@ fn msbuild_sdks_entry_alone_makes_nuget_eligible() {
 }
 
 #[test]
-fn msbuild_sdks_pin_overrides_caller_spec_in_dotnet_root() {
-    // Like the per-import pin, an `msbuild-sdks` entry acts on both
-    // roots with `Disable` semantics — including overriding the caller
-    // `spec` (which is the `global.json` `sdk` block). Caller spec
-    // pins to a *different* version with `Disable`; the project-wide
-    // map asks for the version that's actually installed, and it wins.
+fn an_msbuild_sdks_pin_does_not_select_the_host_sdk() {
+    // Like a per-import pin, an `msbuild-sdks` entry names the package NuGet
+    // looks for, never the host SDK.
     let dotnet = TempDir::new().unwrap();
     let nuget = TempDir::new().unwrap();
     install_sdk(dotnet.path(), "9.0.100", "Microsoft.NET.Sdk");
-
     let caller_pin = SdkVersion::parse("8.0.401").unwrap();
     let caller_spec = VersionSpec::with_version(caller_pin, RollForward::Disable, false);
-
     let mut pins = std::collections::BTreeMap::new();
     pins.insert(
         "Microsoft.NET.Sdk".to_owned(),
         SdkVersion::parse("9.0.100").unwrap(),
     );
-
-    let paths = locate_dotnet_sdk(
+    let err = locate_dotnet_sdk(
         dotnet.path(),
         Some(nuget.path()),
         "Microsoft.NET.Sdk",
@@ -1518,9 +1523,11 @@ fn msbuild_sdks_pin_overrides_caller_spec_in_dotnet_root() {
         Some(&pins),
         &Observer::new(),
     )
-    .expect("msbuild-sdks pin should override caller spec");
-    assert_eq!(version_dir_name(&paths.props), "9.0.100");
-    assert!(picked_from_dotnet_root(&paths.props));
+    .expect_err("no host SDK runs");
+    assert!(
+        matches!(err, SdkResolveError::VersionNotSatisfied { ref spec, .. } if *spec == caller_spec),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -1989,21 +1996,23 @@ fn proptest_highest_wins_against_reference_max() {
 #[test]
 fn proptest_resolver_matches_layered_oracle() {
     // Property under test: `locate_dotnet_sdk` agrees with a layered
-    // oracle that mirrors the resolver's semantics one-to-one —
+    // oracle that mirrors the resolver order `sdk_directory_probe_diff`
+    // grades against `dotnet msbuild` —
     //
-    //   per_import → Disable spec over the per-import version
-    //   dotnet_spec = per_import ?? caller_spec
-    //   dotnet_pick = select(dotnet_versions, dotnet_spec)
-    //   nuget_pick  = if per_import is set: select(nuget_versions, per_import)
-    //                 else:                  None  (NuGet not consulted)
-    //   combine via (DOTNET wins ties, NuGet on strict-higher),
-    //   with (None,None) splitting NotFound/VersionNotSatisfied by
-    //   whether the considered candidate set was empty.
+    //   host versions installed:
+    //     select(dotnet_versions, caller_spec) = None → VersionNotSatisfied
+    //     = Some(d), and d ships the name (every install here does)
+    //                                             → DotnetPick(d)
+    //   none installed, per-import pin set:
+    //     select(nuget_versions, pin) = Some(n)   → NugetPick(n)
+    //     = None, NuGet empty                     → NotFound
+    //     = None, otherwise                       → VersionNotSatisfied
+    //   otherwise                                 → NotFound
     //
-    // Exercises every interaction: admission filter, NuGet
-    // gating on per-import, cross-root comparison, source-root
-    // back-mapping, NotFound vs VersionNotSatisfied split, and the
-    // `available` list.
+    // Exercises every interaction: host selection by the caller spec
+    // alone, NuGet gating on per-import, the order between the roots,
+    // source-root back-mapping, the NotFound vs VersionNotSatisfied
+    // split, and the `available` list.
     //
     // Universe: four versions with distinct majors, ordering
     // unambiguous, no feature-band collisions.
@@ -2043,22 +2052,20 @@ fn proptest_resolver_matches_layered_oracle() {
     //     biased to DOTNET / Both. Drives DotnetPick.
     //   - UnpinnedDotnetMiss: per_import=None, caller=UnknownPin,
     //     slots biased to DOTNET / Both / NuGet. Drives
-    //     VersionNotSatisfied (because under the new semantic NuGet
-    //     is not consulted without a pin).
+    //     VersionNotSatisfied (NuGet is not consulted without a pin).
     //   - UnpinnedNugetOnly: per_import=None, caller=NoneSpec, slots
     //     in {NugetOnly, Neither}. Drives NotFound (NuGet ignored,
     //     DOTNET empty).
     //   - PinnedNugetWin: per_import=PinV0, slot[0]=NugetOnly
-    //     (deterministic), slots[1..] uniform. The pin lives in
-    //     NuGet only, so the cascade picks NuGet — drives NugetPick
-    //     with a wide margin.
+    //     (deterministic), slots[1..] in {NugetOnly, Neither}. No host
+    //     SDK, so the cascade reaches NuGet, which holds the pin —
+    //     drives NugetPick with a wide margin.
     //   - PinnedMixed: per_import set, slots uniform, caller any.
-    //     Exercises the tie path and per-import overrides; also
-    //     contributes incidentally to every bucket.
+    //     Exercises a pin the running SDK outranks, and a caller spec
+    //     no host SDK meets; contributes incidentally to every bucket.
     //
-    // Without the per-import variable, the NugetPick bucket can only
-    // be reached via a per-import pin under the new semantic, so it
-    // must appear in the strategy. Likewise NotFound for a populated
+    // The NugetPick bucket can only be reached via a per-import pin, so
+    // it must appear in the strategy. Likewise NotFound for a populated
     // NuGet cache requires the per-import to be None.
     #[derive(Clone, Copy, Debug)]
     enum Scenario {
@@ -2079,6 +2086,7 @@ fn proptest_resolver_matches_layered_oracle() {
         2 => Just(Where::NugetOnly),
         1 => Just(Where::Neither),
     ];
+    let nuget_or_neither_tail = nuget_or_neither.clone();
     let mixed_where = prop_oneof![
         1 => Just(Where::DotnetOnly),
         1 => Just(Where::NugetOnly),
@@ -2128,19 +2136,17 @@ fn proptest_resolver_matches_layered_oracle() {
         })
         .boxed();
     let pinned_mixed = (
-        proptest::array::uniform4(mixed_where.clone()),
+        proptest::array::uniform4(mixed_where),
         mixed_spec.clone(),
         mixed_pin,
     )
         .prop_map(|(w, s, p)| (Scenario::PinnedMixed, w, s, p))
         .boxed();
-    // PinnedNugetWin pins V0 and forces slot[0] = NugetOnly so the
-    // pin's only home is the NuGet cache. The remaining slots vary
-    // freely; caller_spec varies too but is overridden by per_import.
-    // Per the resolver's gating, dotnet_chosen = None and
-    // nuget_chosen = Some(V0), so every case in this scenario lands
-    // in the NugetPick bucket.
-    let pinned_nuget_win = (proptest::array::uniform3(mixed_where), mixed_spec)
+    // PinnedNugetWin pins V0, forces slot[0] = NugetOnly, and installs
+    // no host SDK, so NuGet is consulted and holds the pin: every case
+    // in this scenario lands in the NugetPick bucket. caller_spec varies
+    // but selects among no host versions.
+    let pinned_nuget_win = (proptest::array::uniform3(nuget_or_neither_tail), mixed_spec)
         .prop_map(|(tail, s)| {
             let installs = [Where::NugetOnly, tail[0], tail[1], tail[2]];
             (
@@ -2238,44 +2244,35 @@ fn proptest_resolver_matches_layered_oracle() {
                     }
                 }
 
-                // Oracle: mirror the resolver's two-stage selection
-                // one-to-one. Per-import overrides caller spec for
-                // DOTNET and gates NuGet entirely.
+                // Oracle: the resolver order, one-to-one.
                 let per_import_spec = per_import_version
                     .as_ref()
                     .map(|v| VersionSpec::with_version(v.clone(), RollForward::Disable, true));
-                let dotnet_spec_ref = per_import_spec.as_ref().or(caller_spec.as_ref());
-                let dotnet_chosen = select_sdk_version(&dotnet_versions, dotnet_spec_ref).cloned();
-                let nuget_chosen = if per_import_spec.is_some() {
-                    select_sdk_version(&nuget_versions, per_import_spec.as_ref()).cloned()
-                } else {
-                    None
-                };
-                // Effective NuGet visibility for the (None, None)
-                // branch: same gating — without per-import, NuGet
-                // versions don't count toward "anything was on disk".
-                let nuget_considered: &[SdkVersion] = if per_import_spec.is_some() {
-                    &nuget_versions
-                } else {
-                    &[]
-                };
-                let expected: OracleOutcome = match (dotnet_chosen, nuget_chosen) {
-                    (Some(d), Some(n)) => {
-                        if d >= n {
-                            OracleOutcome::DotnetPick(d)
-                        } else {
-                            OracleOutcome::NugetPick(n)
-                        }
-                    }
-                    (Some(d), None) => OracleOutcome::DotnetPick(d),
-                    (None, Some(n)) => OracleOutcome::NugetPick(n),
-                    (None, None) => {
-                        if dotnet_versions.is_empty() && nuget_considered.is_empty() {
-                            OracleOutcome::NotFound
-                        } else {
+                let mut sorted_dotnet = dotnet_versions.clone();
+                sorted_dotnet.sort();
+                let mut sorted_nuget = nuget_versions.clone();
+                sorted_nuget.sort();
+                // The spec and `available` a VersionNotSatisfied carries.
+                let mut expected_unsatisfied: Option<(Option<VersionSpec>, Vec<SdkVersion>)> = None;
+                let expected: OracleOutcome = if !dotnet_versions.is_empty() {
+                    match select_sdk_version(&dotnet_versions, caller_spec.as_ref()) {
+                        Some(d) => OracleOutcome::DotnetPick(d.clone()),
+                        None => {
+                            expected_unsatisfied = Some((caller_spec.clone(), sorted_dotnet));
                             OracleOutcome::VersionNotSatisfied
                         }
                     }
+                } else if let Some(pin) = per_import_spec.as_ref() {
+                    match select_sdk_version(&nuget_versions, Some(pin)) {
+                        Some(n) => OracleOutcome::NugetPick(n.clone()),
+                        None if nuget_versions.is_empty() => OracleOutcome::NotFound,
+                        None => {
+                            expected_unsatisfied = Some((Some(pin.clone()), sorted_nuget));
+                            OracleOutcome::VersionNotSatisfied
+                        }
+                    }
+                } else {
+                    OracleOutcome::NotFound
                 };
 
                 let sdk_name = match per_import_version.as_ref() {
@@ -2320,32 +2317,14 @@ fn proptest_resolver_matches_layered_oracle() {
                         OracleOutcome::VersionNotSatisfied,
                         Err(SdkResolveError::VersionNotSatisfied { spec: s, available }),
                     ) => {
-                        // Effective spec = per-import if set, else
-                        // caller; the resolver's diagnostic carries
-                        // whichever is governing.
-                        let expected_spec = per_import_spec.clone().or(caller_spec.clone());
+                        let (expected_spec, expected_avail) = expected_unsatisfied
+                            .clone()
+                            .expect("a VersionNotSatisfied outcome records its spec");
                         prop_assert_eq!(Some(s.clone()), expected_spec);
-                        // `available` is the union the spec was
-                        // consulted against, sorted ascending. With
-                        // per-import set, both roots; without, only
-                        // DOTNET (NuGet not consulted).
-                        let mut expected_avail = dotnet_versions.clone();
-                        if per_import_spec.is_some() {
-                            for v in &nuget_versions {
-                                if !expected_avail.contains(v) {
-                                    expected_avail.push(v.clone());
-                                }
-                            }
-                        }
-                        expected_avail.sort();
                         prop_assert_eq!(available.clone(), expected_avail);
                         version_not_satisfied_count.set(version_not_satisfied_count.get() + 1);
                     }
                     (OracleOutcome::NotFound, Err(SdkResolveError::NotFound)) => {
-                        prop_assert!(
-                            dotnet_versions.is_empty() && nuget_considered.is_empty(),
-                            "NotFound requires the considered candidate set to be empty"
-                        );
                         not_found_count.set(not_found_count.get() + 1);
                     }
                     (_, _) => {
