@@ -12,7 +12,6 @@
 //! Stage 7), so nothing here is told when an input changes.
 
 use crate::inbox::{Superseded, Watch, never_superseded};
-use crate::observed::Unobserved;
 use crate::parses::{ParseMemo, SourceParse};
 use crate::vfs::Vfs;
 use borzoi_cst::parser::FileKind;
@@ -3596,44 +3595,47 @@ fn csharp_project_ref_edges(
         CsharpReferences::Enabled(sidecar) => sidecar,
         CsharpReferences::Disabled => return unread(CSHARP_REFERENCES_DISABLED),
     };
-    let Some(workspace_root) = project.parent() else {
-        // Nowhere to publish the sidecar's output, so *no* C# reference can be
-        // read — every edge is unread, not silently absent.
-        return unread("the entry project path has no parent directory");
+    let plan = match plan_csharp_builds(
+        project,
+        dotnet_root,
+        recovered,
+        csproj_refs,
+        base_tfms,
+        observer,
+    ) {
+        Ok(plan) => plan,
+        Err(why) => return unread(why),
     };
-    let dotnet_exe = dotnet_exe_for(dotnet_root);
 
     let mut edges: Vec<ReferenceEdge> = Vec::with_capacity(csproj_refs.len());
     let mut retryable = false;
-    for csproj in csproj_refs {
-        let Some(tfm) = recovered.get(csproj).or_else(|| base_tfms.get(csproj)) else {
-            tracing::warn!(
-                csproj = %csproj.display(),
-                "no producer TFM known for C# project reference (not yet restored?); skipping"
-            );
-            edges.push(ReferenceEdge {
-                project: csproj.clone(),
-                outcome: ReferenceOutcome::Unread {
-                    why: "no producer TFM known",
-                    transient: false,
-                },
-            });
-            continue;
+    for (csproj, build) in &plan.references {
+        let build = match build {
+            Ok(build) => build,
+            Err(why) => {
+                tracing::warn!(
+                    csproj = %csproj.display(),
+                    why,
+                    "C# project reference not built by the sidecar; skipping"
+                );
+                edges.push(ReferenceEdge {
+                    project: csproj.clone(),
+                    outcome: ReferenceOutcome::Unread {
+                        why,
+                        transient: false,
+                    },
+                });
+                continue;
+            }
         };
-        let tfm = tfm.as_str();
-        // Closure-wide TFM map for per-node workspace construction. Best-effort:
-        // a partial restore (the ref's own `project.assets.json` missing) makes
-        // this error; the sidecar accepts an empty map and falls back to `tfm`.
-        let project_tfms =
-            resolve_transitive_project_tfms(csproj, tfm, observer).unwrap_or_default();
         let meta = sidecar.metadata_dlls_for_csproj(
-            &dotnet_exe,
+            &plan.dotnet_exe,
             dotnet_root,
-            workspace_root,
+            &plan.workspace_root,
             csproj,
             crate::BUILD_CONFIGURATION,
-            tfm,
-            &project_tfms,
+            &build.tfm,
+            &build.project_tfms,
         );
         retryable |= meta.retryable;
         // `CsharpMetadata::dlls` is empty on *any* failure and a successful
@@ -3724,17 +3726,79 @@ fn entry_ref_tfms(
     }
 }
 
+/// What the env build asks of the C# sidecar for an entry's C# references,
+/// decided before any is asked ([`plan_csharp_builds`]): the `dotnet` to
+/// launch it with, where it publishes, and, for each reference, the build to
+/// ask for or why none is asked.
+#[derive(Debug, PartialEq)]
+struct CsharpPlan {
+    dotnet_exe: PathBuf,
+    workspace_root: PathBuf,
+    references: Vec<(PathBuf, Result<CsharpBuild, &'static str>)>,
+}
+
+/// One `buildMetadata` request: the producer's TFM, and the closure-wide TFM
+/// map for per-node workspace construction.
+#[derive(Debug, PartialEq)]
+struct CsharpBuild {
+    tfm: String,
+    project_tfms: BTreeMap<PathBuf, String>,
+}
+
+/// [`CsharpPlan`] for `csproj_refs`, each producer's TFM taken from
+/// `recovered`, else from `base_tfms`. Every file-system query deciding it
+/// is asked through `observer`, so an env built from it confirms the
+/// decision; what the sidecar reads once asked is not (the `CSharpSources`
+/// input class, unwitnessed by design). `Err` when no reference can be
+/// asked for at all.
+fn plan_csharp_builds(
+    project: &Path,
+    dotnet_root: &Path,
+    recovered: &BTreeMap<PathBuf, String>,
+    csproj_refs: &[PathBuf],
+    base_tfms: &BTreeMap<PathBuf, String>,
+    observer: &Observer,
+) -> Result<CsharpPlan, &'static str> {
+    // Nowhere to publish the sidecar's output, so *no* C# reference can be
+    // read — every edge is unread, not silently absent.
+    let workspace_root = project
+        .parent()
+        .ok_or("the entry project path has no parent directory")?;
+    let references = csproj_refs
+        .iter()
+        .map(|csproj| {
+            let build = match recovered.get(csproj).or_else(|| base_tfms.get(csproj)) {
+                Some(tfm) => Ok(CsharpBuild {
+                    tfm: tfm.clone(),
+                    // Best-effort: a partial restore (the ref's own
+                    // `project.assets.json` missing) makes this error; the
+                    // sidecar accepts an empty map and falls back to `tfm`.
+                    project_tfms: resolve_transitive_project_tfms(csproj, tfm, observer)
+                        .unwrap_or_default(),
+                }),
+                None => Err("no producer TFM known"),
+            };
+            (csproj.clone(), build)
+        })
+        .collect();
+    Ok(CsharpPlan {
+        dotnet_exe: dotnet_exe_for(dotnet_root, observer),
+        workspace_root: workspace_root.to_path_buf(),
+        references,
+    })
+}
+
 /// The `dotnet` executable to launch the sidecar with: prefer the one inside
 /// the resolved SDK root, else fall back to `dotnet` on `PATH`. (`start_sidecar`
-/// spawns `dotnet <sidecar.dll>`.)
-fn dotnet_exe_for(dotnet_root: &Path) -> PathBuf {
+/// spawns `dotnet <sidecar.dll>`.) Asks through `observer`.
+fn dotnet_exe_for(dotnet_root: &Path, observer: &Observer) -> PathBuf {
     let exe = if cfg!(windows) {
         "dotnet.exe"
     } else {
         "dotnet"
     };
     let candidate = dotnet_root.join(exe);
-    if Unobserved::CSharpSidecar.is_file(&candidate) {
+    if msbuild_observed::is_file(observer, &candidate) {
         candidate
     } else {
         PathBuf::from(exe)
@@ -6146,6 +6210,11 @@ mod tests {
     /// with the given project-kind entries (`(name_version, framework,
     /// msbuild_project_rel)`).
     fn write_assets_with_project_refs(path: &Path, tfm: &str, refs: &[(&str, &str, &str)]) {
+        write(path, &assets_with_project_refs(tfm, refs));
+    }
+
+    /// The text [`write_assets_with_project_refs`] writes.
+    fn assets_with_project_refs(tfm: &str, refs: &[(&str, &str, &str)]) -> String {
         let mut target = serde_json::Map::new();
         let mut libraries = serde_json::Map::new();
         for (name_version, framework, rel) in refs {
@@ -6165,7 +6234,7 @@ mod tests {
             "packageFolders": {},
             "project": { "frameworks": { tfm: {} } },
         });
-        write(path, &serde_json::to_string_pretty(&doc).unwrap());
+        serde_json::to_string_pretty(&doc).unwrap()
     }
 
     /// The 3.3b residual, closed: a platform-qualified consumer's assets
@@ -6217,6 +6286,105 @@ mod tests {
             .is_err(),
             "base-TFM lookup in the producer's own assets was expected to miss"
         );
+    }
+
+    /// What decides whether and how the C# sidecar is asked for each C#
+    /// reference ([`plan_csharp_builds`]) is in the env's read set, and the
+    /// record is sound: over a tree holding the entry, two C# producers (one
+    /// restored, its assets naming a transitive C# project, one not) and a
+    /// .NET root with or without its `dotnet`, the read-set soundness sweep
+    /// perturbs every file one at a time and creates the `dotnet` and the
+    /// unrestored producer's assets file; whenever every recorded answer
+    /// stands, planning again gives the same plan. Deleting the `dotnet`, and
+    /// restoring the unrestored producer, each move it.
+    #[test]
+    fn the_csharp_plan_s_read_set_is_sound() {
+        use borzoi_msbuild::observed::soundness::{Edit, Perturbation, Why, sweep_with};
+        for with_dotnet in [true, false] {
+            let tmp = TempDir::new().unwrap();
+            let root = crate::observed::host_fs::canonicalize(tmp.path()).unwrap();
+            let entry = root.join("Fs/Fs.fsproj");
+            write(&entry, &fsproj(&[]));
+            let restored = root.join("Cs/Cs.csproj");
+            let unrestored = root.join("Raw/Raw.csproj");
+            write(&restored, "<Project></Project>");
+            write(&unrestored, "<Project></Project>");
+            write(&root.join("Deep/Deep.csproj"), "<Project></Project>");
+            write_assets_with_project_refs(
+                &root.join("Cs/obj/project.assets.json"),
+                "net8.0",
+                &[(
+                    "Deep/1.0.0",
+                    ".NETCoreApp,Version=v8.0",
+                    "../Deep/Deep.csproj",
+                )],
+            );
+            write_assets_with_project_refs(
+                &root.join("Deep/obj/project.assets.json"),
+                "net8.0",
+                &[],
+            );
+            let dotnet_root = root.join("dotnet");
+            std::fs::create_dir_all(&dotnet_root).unwrap();
+            // The name `dotnet_exe_for` probes for.
+            let exe = dotnet_root.join(if cfg!(windows) {
+                "dotnet.exe"
+            } else {
+                "dotnet"
+            });
+            if with_dotnet {
+                write(&exe, "#!/bin/sh\n");
+            }
+            let refs = [restored.clone(), unrestored.clone()];
+            let base: BTreeMap<PathBuf, String> = refs
+                .iter()
+                .map(|csproj| (csproj.clone(), "net8.0".to_string()))
+                .collect();
+            let compute = || {
+                let observer = Observer::new();
+                let plan = plan_csharp_builds(
+                    &entry,
+                    &dotnet_root,
+                    &BTreeMap::new(),
+                    &refs,
+                    &base,
+                    &observer,
+                );
+                (plan, observer.finish().0)
+            };
+            let extras = [
+                Perturbation {
+                    why: Why::Extra,
+                    edits: vec![Edit::Write(exe.clone(), b"#!/bin/sh\n".to_vec())],
+                },
+                Perturbation {
+                    why: Why::Extra,
+                    edits: vec![Edit::Delete(exe.clone())],
+                },
+                Perturbation {
+                    why: Why::Extra,
+                    edits: vec![Edit::Write(
+                        root.join("Raw/obj/project.assets.json"),
+                        assets_with_project_refs(
+                            "net8.0",
+                            &[(
+                                "Deep/1.0.0",
+                                ".NETCoreApp,Version=v8.0",
+                                "../Deep/Deep.csproj",
+                            )],
+                        )
+                        .into_bytes(),
+                    )],
+                },
+            ];
+            let tally = sweep_with(&root, &compute, &extras);
+            assert_eq!(
+                tally.moved(Why::Extra),
+                2,
+                "with_dotnet {with_dotnet}: the `dotnet` made or deleted, and the producer \
+                 restored, each move the plan: {tally:#?}"
+            );
+        }
     }
 
     #[test]

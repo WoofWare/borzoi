@@ -2987,6 +2987,10 @@ filled.
 The other variants are as Stage 6b left them (`FsprojDiagnostics` is
 computed per request, `AssemblyCache` answers for a stamp the env records,
 and `CSharpSidecar` feeds envs with an unrecorded reader), but for one.
+(Since #665, what decides whether and how the sidecar is asked, the
+`dotnet` it is launched with and each producer's TFM map, is planned through
+the env's observer, `semantic::plan_csharp_builds`, and `CSharpSidecar` is
+left with the sidecar's own binaries.)
 `EnvKey` is gone: Stage 6b kept it on the ground that the env key is
 computed afresh on every slow-path lookup, so no cached value rests on it.
 The resolved fold does, because its fast path never computes the key, and

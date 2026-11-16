@@ -322,10 +322,15 @@ pub enum Unobserved {
     /// (`semantic::enumerate_dll_type_defs_cached`), so it is never an input
     /// of its own.
     AssemblyCache,
-    /// The C# sidecar's own binaries, and the `dotnet` it is launched with.
-    /// No stage routes them: they lie outside the workspace, and what the
-    /// sidecar reads is the `CSharpSources` input class, unwitnessed by
-    /// design (D1).
+    /// The C# sidecar's own binaries: where borzoi's install keeps the
+    /// sidecar DLL, found once and latched for the session. No stage routes
+    /// them: they lie outside the workspace and are borzoi's, not the
+    /// project's. What the sidecar reads once asked is the `CSharpSources`
+    /// input class, unwitnessed by design (D1), so an env with a C# edge
+    /// names it as an unrecorded reader (`semantic::EnvReads::unrecorded`).
+    /// What decides whether and how it is asked, the `dotnet` it is launched
+    /// with among it, is not this variant's: it asks through the env's
+    /// observer (`semantic::plan_csharp_builds`).
     CSharpSidecar,
     /// The `workspace/diagnostic` sweep's walk of the workspace roots for
     /// `.fsproj` files. No stage routes it.
