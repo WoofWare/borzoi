@@ -188,10 +188,13 @@ enum Reach {
     /// an enclosing namespace (`open G` then `open C1.Exts`), which no drop
     /// sits in.
     SharedModuleRelative,
+    /// `open G.C<n>.Exts` of an assembly module whose path an earlier
+    /// project file declares as a *namespace*.
+    SharedNamespaceOverModule,
 }
 
 impl Reach {
-    const ALL: [Reach; 15] = [
+    const ALL: [Reach; 16] = [
         Reach::OpenNamespace,
         Reach::GlobalNamespace,
         Reach::RelativeNamespace,
@@ -207,6 +210,7 @@ impl Reach {
         Reach::SharedNamespace,
         Reach::SharedModule,
         Reach::SharedModuleRelative,
+        Reach::SharedNamespaceOverModule,
     ];
 
     /// Whether the reach goes through a module, which needs a module home
@@ -222,6 +226,7 @@ impl Reach {
                 | Reach::AliasEarlierFile
                 | Reach::SharedModule
                 | Reach::SharedModuleRelative
+                | Reach::SharedNamespaceOverModule
         )
     }
 }
@@ -636,7 +641,9 @@ fn use_source(n: usize, cell: Cell) -> (String, Probe) {
         Reach::OpenNamespace | Reach::SharedNamespace => top(format!("open {ns}")),
         Reach::GlobalNamespace => top(format!("open global.{ns}")),
         Reach::RelativeNamespace => nested("G", format!("open C{n}")),
-        Reach::OpenModule | Reach::SharedModule => top(format!("open {ns}.{}", module())),
+        Reach::OpenModule | Reach::SharedModule | Reach::SharedNamespaceOverModule => {
+            top(format!("open {ns}.{}", module()))
+        }
         Reach::GlobalModule => top(format!("open global.{ns}.{}", module())),
         Reach::RelativeModule => top(format!("open {ns}\nopen {}", module())),
         Reach::EnclosingRelativeModule => nested(&ns, format!("open {}", module())),
@@ -679,6 +686,10 @@ fn shared_source(n: usize, cell: Cell) -> Option<String> {
     match cell.reach {
         Reach::SharedNamespace => Some(format!(
             "namespace {ns}\nmodule Shared{n} =\n    let v{n} = 1\n"
+        )),
+        Reach::SharedNamespaceOverModule => Some(format!(
+            "namespace {ns}.{}\nmodule SharedNs{n} =\n    let v{n} = 1\n",
+            cell.module_path().expect("a module home")
         )),
         Reach::AliasEarlierFile => Some(format!(
             "namespace {ns}\nmodule A{n} = {ns}.{}\n",

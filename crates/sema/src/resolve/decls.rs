@@ -1358,7 +1358,8 @@ impl<'a> Resolver<'a> {
                     // and no abbreviation in between, and every interpretation is
                     //
                     // - a namespace reading, project or assembly, at that path, no
-                    //   split of which holds a dropped type: its assembly half is
+                    //   split of which holds an assembly entity of any
+                    //   accessibility or a dropped type: its assembly half is
                     //   the namespace query FCS's own `open` makes
                     //   (`open_extension_namespaces`), its project half is in the
                     //   project's extension names, which the gate asks of every
@@ -1382,7 +1383,17 @@ impl<'a> Resolver<'a> {
                     if !path.is_empty() {
                         let mut readings: Vec<Vec<String>> = Vec::new();
                         let mut opens_project = self.open_imports_project_values(&path);
+                        // On the assembly side the written path names namespaces
+                        // only: no top-level assembly entity, of any accessibility
+                        // (a friend assembly's internal module opens too), sits at
+                        // any split of it.
+                        let assembly_namespaces_only = (0..path.len()).all(|k| {
+                            self.assemblies
+                                .entities_named(&path[..k], &path[k])
+                                .is_empty()
+                        });
                         let mut certified = !interps.is_empty()
+                            && assembly_namespaces_only
                             && !vetoed_by_incomplete_prefix
                             && !names_uncovered_dropped_path
                             && !names_unlent_module
@@ -1402,13 +1413,6 @@ impl<'a> Resolver<'a> {
                                     certified &= *m == path
                                         && !self.index.module_aliases.contains_key(m)
                                         && !self.module_has_hidden_values(m)
-                                        // No assembly entity, of any
-                                        // accessibility (a friend assembly's
-                                        // internal module opens too), sits
-                                        // at any split of the path.
-                                        && (0..m.len()).all(|k| {
-                                            self.assemblies.entities_named(&m[..k], &m[k]).is_empty()
-                                        })
                                         && !self
                                             .assemblies
                                             .any_split_of_a_module_path_has_a_dropped_type(m);
