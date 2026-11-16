@@ -28,10 +28,10 @@
 //! - what `Directory.Build.props` writes: the targets gate, that value, a
 //!   redirect of `DirectoryBuildPropsPath`, and `Exists()` probes under a
 //!   `<When>`, a property element and a property group;
-//! - re-imports of either file by alias (a `..` respelling, a case respelling,
-//!   a directory symlink, a file symlink, a relative path to a symlink beside
-//!   the importing file, and one beside the importing file but not the
-//!   project), literal, through the path property, SDK-qualified
+//! - re-imports of either file by alias (a `..` respelling, a `..` after a
+//!   directory symlink, a case respelling, a directory symlink, a file
+//!   symlink, a relative path to a symlink beside the importing file, and one
+//!   beside the importing file but not the project), literal, through the path property, SDK-qualified
 //!   (`<Import Sdk=…>`), or by writing the path property alone for an import
 //!   point to read, from `Sdk.props` (before or after its props import point),
 //!   `Sdk.targets`, the body, or `Directory.Build.targets`;
@@ -164,6 +164,9 @@ enum Which {
 enum Spelling {
     /// Through `..`, which MSBuild's path normalisation collapses.
     DotDot,
+    /// Through `..` after a directory symlink, which MSBuild collapses as
+    /// text: the file beside the link, not the decoy beside its target.
+    LinkDotDot,
     /// In another case, which MSBuild's duplicate check folds.
     Case,
     /// Through a directory symlink: another file to MSBuild.
@@ -472,6 +475,7 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
             which: *rng.pick(&[Which::Props, Which::Targets]),
             spelling: *rng.pick(&[
                 Spelling::DotDot,
+                Spelling::LinkDotDot,
                 Spelling::Case,
                 Spelling::DirLink,
                 Spelling::FileLink,
@@ -846,7 +850,8 @@ const STANDARD_TARGETS_CONDITION: &str =
 /// the `Directory.Build.*` files are in `<case>`, `<case>/proj/up` is a
 /// symlink to `<case>`, `<case>/proj/alias.{props,targets}` are symlinks to
 /// the two files, and so is `rel.{props,targets}` in the SDK directory,
-/// `<case>` and `<case>/proj`.
+/// `<case>` and `<case>/proj`; `<case>/proj/far` is a symlink to
+/// `<case>/decoy/x/y`.
 fn reimport_path(which: Which, spelling: Spelling) -> String {
     let ext = match which {
         Which::Props => "props",
@@ -854,6 +859,9 @@ fn reimport_path(which: Which, spelling: Spelling) -> String {
     };
     match spelling {
         Spelling::DotDot => format!("$(MSBuildProjectDirectory)/../proj/../Directory.Build.{ext}"),
+        Spelling::LinkDotDot => {
+            format!("$(MSBuildProjectDirectory)/far/../../Directory.Build.{ext}")
+        }
         Spelling::Case => format!("$(MSBuildProjectDirectory)/../DIRECTORY.build.{ext}"),
         Spelling::DirLink => format!("$(MSBuildProjectDirectory)/up/Directory.Build.{ext}"),
         Spelling::FileLink => format!("$(MSBuildProjectDirectory)/alias.{ext}"),
@@ -1422,6 +1430,17 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         }
     }
     symlink(Path::new(".."), &case_dir.join("proj/up"));
+    // `proj/far/../..` is `<case>` to MSBuild and `<case>/decoy` to the file
+    // system, where each `Directory.Build.*` is an empty project.
+    std::fs::create_dir_all(case_dir.join("decoy/x/y")).expect("mkdir decoy");
+    for ext in ["props", "targets"] {
+        std::fs::write(
+            case_dir.join(format!("decoy/Directory.Build.{ext}")),
+            "<Project />",
+        )
+        .expect("write decoy");
+    }
+    symlink(Path::new("../decoy/x/y"), &case_dir.join("proj/far"));
     symlink(
         Path::new("../Directory.Build.props"),
         &case_dir.join("proj/alias.props"),

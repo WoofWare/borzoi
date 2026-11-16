@@ -139,3 +139,51 @@ fn this_file_directory_rebinds_to_pre_canonical_path_through_symlink() {
          not the canonicalised target's parent",
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn an_import_path_collapses_before_it_opens() {
+    // MSBuild collapses `..` in an import's path as text before it opens the
+    // file, so `link/../outer.props` is the project's own `outer.props`
+    // whatever `link` points at, a duplicate of `sub/../outer.props`, and the
+    // file's directory is the collapsed one (probed, `dotnet msbuild` 10.0:
+    // `P` is the project's directory, `Q` is `outer`).
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("proj/sub")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("real/inner")).unwrap();
+    std::os::unix::fs::symlink("../real/inner", tmp.path().join("proj/link")).unwrap();
+    write_at(
+        tmp.path(),
+        "proj/outer.props",
+        "<Project><PropertyGroup><P>$(MSBuildThisFileDirectory)</P><Q>outer</Q></PropertyGroup></Project>",
+    );
+    write_at(
+        tmp.path(),
+        "real/outer.props",
+        "<Project><PropertyGroup><Q>real</Q></PropertyGroup></Project>",
+    );
+    for imports in [
+        "<Import Project=\"sub/../outer.props\" /><Import Project=\"link/../outer.props\" />",
+        "<Import Project=\"link/../outer.props\" />",
+    ] {
+        let project_path = write_at(
+            tmp.path(),
+            "proj/p.proj",
+            &format!("<Project>{imports}</Project>"),
+        );
+        let parsed = parse_file(&project_path);
+        assert_eq!(
+            parsed.property("Q"),
+            PropertyRead::Value("outer".into()),
+            "{imports}"
+        );
+        let PropertyRead::Value(dir) = parsed.property("MSBuildProjectDirectory") else {
+            panic!("{:?}", parsed.property("MSBuildProjectDirectory"));
+        };
+        assert_eq!(
+            parsed.property("P"),
+            PropertyRead::Value(format!("{dir}/")),
+            "{imports}"
+        );
+    }
+}

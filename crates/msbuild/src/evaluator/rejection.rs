@@ -189,9 +189,10 @@ pub(super) fn import_path_is_certain(node: Node<'_, '_>, state: &State<'_>) -> b
 /// How sure the walk is that a failed load of `path`, the import it is taking,
 /// for `reason`, makes MSBuild reject the project. Asked as the failure is
 /// pushed, before it latches the walk opaque. MSBuild collapses `..` and `.` in
-/// an import's path as text before it opens the file, and the walk opens the
-/// path as joined, so a path that does not collapse to itself may name a file
-/// MSBuild loads.
+/// an import's path as text before it opens the file, as the walk's own
+/// imports do (`walk_external_file`): a failure recorded at a path that does
+/// not collapse to itself was not opened as MSBuild opens it, and claims
+/// nothing.
 pub(super) fn import_failure_certainty(
     state: &State<'_>,
     path: &Path,
@@ -309,7 +310,6 @@ fn judge_text(
 /// `dir` is the directory of the file holding it, and `reached` says whether
 /// MSBuild reaches `node` for certain.
 pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
-    let entry_dir = state.entry_project_dir.clone();
     match node.tag_name().name() {
         "PropertyGroup" => {
             if let Some(inner) = judge_gate(node, dir, reached, state).inner(reached) {

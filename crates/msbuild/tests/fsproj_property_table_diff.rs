@@ -1331,7 +1331,10 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     // directory, which holds `flag`, or exactly where it resolves against the
     // imported file's, which does not: each position's `Exists` directory,
     // graded in the imported context.
-    let by_directory = ["Exists('flag') And 1 &lt; abc", "!Exists('flag') And 1 &lt; abc"];
+    let by_directory = [
+        "Exists('flag') And 1 &lt; abc",
+        "!Exists('flag') And 1 &lt; abc",
+    ];
     let legal = [
         "'a' == 'a'",
         "'a' == 'b'",

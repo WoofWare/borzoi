@@ -92,6 +92,26 @@ fn import_sdk_with_zero_roots_is_an_exact_noop() {
     assert_eq!(result.package_references.len(), 1);
 }
 
+/// With zero roots there is no directory for an empty `Project` to name, and
+/// MSBuild accepts such an import, so the walk claims no rejection of it.
+#[test]
+fn import_sdk_with_zero_roots_and_an_empty_project_claims_no_rejection() {
+    let tmp = TempDir::new().unwrap();
+    let project_path = write_at(
+        tmp.path(),
+        "Demo.fsproj",
+        r#"<Project>
+  <Import Project="$(Empty)" Sdk="My.Locator" />
+</Project>"#,
+    );
+    let result =
+        parse_file_with_sdk_resolution(&project_path, roots_resolver("My.Locator", Vec::new()));
+    assert_ne!(
+        result.rejection.map(|r| r.certainty),
+        Some(crate::RejectionCertainty::Certain)
+    );
+}
+
 /// Dependency items inside locator-resolved files are captured through
 /// the ordinary machinery, and the roots count as SDK machinery for the
 /// Compile-tolerance set.

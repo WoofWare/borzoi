@@ -5338,10 +5338,24 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // An empty `Project` names no file: MSBuild fails the evaluation
         // (MSB4035 for a missing attribute; `Path.Combine` of the SDK
         // directory with "" names the directory itself, which no import
-        // can load). Decline as the plain `<Import>` path does.
+        // can load). Decline as the plain `<Import>` path does. A resolver
+        // that returns no directory gives MSBuild none to name, and a
+        // `Project` expanding to empty then imports nothing (the workload
+        // locators), so only a resolved directory makes the failure certain.
         if project_attr.trim().is_empty() {
             // Judged before the skip below latches the walk opaque.
-            state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
+            if matches!(&resolution, SdkResolution::Roots(roots) if roots.is_empty()) {
+                state.note_possible_rejection(
+                    crate::RejectionCause::Import {
+                        project: project_attr_raw.to_owned(),
+                        gate_undecided: false,
+                        why: crate::UnloadableImport::NoPath,
+                    },
+                    node.range(),
+                );
+            } else {
+                state.note_unloadable_import(node, crate::UnloadableImport::NoPath);
+            }
             state.push(
                 DiagnosticKind::UnsupportedConstruct {
                     element: format!(
@@ -5924,6 +5938,15 @@ fn latch_default_targets(root: Node<'_, '_>, state: &mut State<'_>) {
 }
 
 fn walk_external_file(path: &Path, span: Range<usize>, state: &mut State<'_>) {
+    // MSBuild opens an import at its path collapsed as text
+    // (`FileUtilities.NormalizePath`, which is `GetFullPath`): `..` pops the
+    // segment before it whatever that segment links to, so `link/../a.props`
+    // is the `a.props` beside `link`, never the one beside `link`'s target.
+    // The file's identity (`MSBuildThisFile*`, nested imports' directory) is
+    // that collapsed path too.
+    let collapsed =
+        std::path::absolute(path).map_or_else(|_| path.to_path_buf(), |p| normalise(&p));
+    let path = collapsed.as_path();
     // MSBuild's duplicate-import skip: an import that resolves to an
     // already-imported path (same lexically-normalised, case-insensitive
     // spelling — see [`import_dedup_key`]) is ignored with a warning
