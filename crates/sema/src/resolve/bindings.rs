@@ -270,6 +270,7 @@ impl<'a> Resolver<'a> {
                         repr_access_root: None,
                         attributed,
                         case_attributes: CaseAttributes::default(),
+                        under_attributed_module: self.scope.attributed_module.is_some(),
                     });
                     // The export-decl-list twin of the `ExportedItem` push: an
                     // ordinary `let` value (no case, no type-qualified path). Its

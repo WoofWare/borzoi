@@ -30,6 +30,7 @@ decline_census.assembly.by_cause.earlier_type_name_reused
 decline_census.assembly.by_cause.earlier_type_namespace_shared
 decline_census.assembly.by_cause.earlier_type_opened_over
 decline_census.assembly.by_cause.earlier_type_outside_namespace
+decline_census.assembly.by_cause.entity_attributed
 decline_census.assembly.by_cause.global_marker_head
 decline_census.assembly.by_cause.head_slot_unordered
 decline_census.assembly.by_cause.implicit_surface_unfolded
@@ -230,6 +231,12 @@ decline_census.assembly.by_pair.earlier_type_outside_namespace.implicit_open
 decline_census.assembly.by_pair.earlier_type_outside_namespace.pre_walk
 decline_census.assembly.by_pair.earlier_type_outside_namespace.root
 decline_census.assembly.by_pair.earlier_type_outside_namespace.whole_walk
+decline_census.assembly.by_pair.entity_attributed.enclosing_namespace
+decline_census.assembly.by_pair.entity_attributed.explicit_open
+decline_census.assembly.by_pair.entity_attributed.implicit_open
+decline_census.assembly.by_pair.entity_attributed.pre_walk
+decline_census.assembly.by_pair.entity_attributed.root
+decline_census.assembly.by_pair.entity_attributed.whole_walk
 decline_census.assembly.by_pair.global_marker_head.enclosing_namespace
 decline_census.assembly.by_pair.global_marker_head.explicit_open
 decline_census.assembly.by_pair.global_marker_head.implicit_open
@@ -510,6 +517,7 @@ decline_census.project.by_cause.earlier_type_name_reused
 decline_census.project.by_cause.earlier_type_namespace_shared
 decline_census.project.by_cause.earlier_type_opened_over
 decline_census.project.by_cause.earlier_type_outside_namespace
+decline_census.project.by_cause.entity_attributed
 decline_census.project.by_cause.global_marker_head
 decline_census.project.by_cause.head_slot_unordered
 decline_census.project.by_cause.implicit_surface_unfolded
@@ -710,6 +718,12 @@ decline_census.project.by_pair.earlier_type_outside_namespace.implicit_open
 decline_census.project.by_pair.earlier_type_outside_namespace.pre_walk
 decline_census.project.by_pair.earlier_type_outside_namespace.root
 decline_census.project.by_pair.earlier_type_outside_namespace.whole_walk
+decline_census.project.by_pair.entity_attributed.enclosing_namespace
+decline_census.project.by_pair.entity_attributed.explicit_open
+decline_census.project.by_pair.entity_attributed.implicit_open
+decline_census.project.by_pair.entity_attributed.pre_walk
+decline_census.project.by_pair.entity_attributed.root
+decline_census.project.by_pair.entity_attributed.whole_walk
 decline_census.project.by_pair.global_marker_head.enclosing_namespace
 decline_census.project.by_pair.global_marker_head.explicit_open
 decline_census.project.by_pair.global_marker_head.implicit_open

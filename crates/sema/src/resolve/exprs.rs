@@ -838,9 +838,7 @@ impl<'a> Resolver<'a> {
                 if def.provisional {
                     self.out.opaque_binders.insert(def.range);
                     let name = def.name();
-                    let a_case = self
-                        .case_reference(self.assemblies.names().text(name))
-                        .is_some_and(|r| !matches!(r, Resolution::Deferred(_)));
+                    let a_case = self.certain_case_reference(self.assemblies.names().text(name));
                     if !a_case {
                         entries.push(ScopeEntry::binding_named(
                             name,
@@ -1038,9 +1036,7 @@ impl<'a> Resolver<'a> {
                 // reference to the case when it resolves, nothing when it does
                 // not. So it is left unrecorded, and hides nothing.
                 if def.provisional
-                    && self
-                        .case_reference(self.assemblies.names().text(def.name()))
-                        .is_some_and(|r| !matches!(r, Resolution::Deferred(_)))
+                    && self.certain_case_reference(self.assemblies.names().text(def.name()))
                 {
                     return Some(None);
                 }

@@ -12,13 +12,16 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::{LineIndex, invoke_fcs_dump_project, parse_fcs_uses_project, temp_fs_tree};
+use super::{
+    LineIndex, NormalisedProjectUse, invoke_fcs_dump_project_with_refs, parse_fcs_uses_project,
+    temp_fs_tree,
+};
 use borzoi_cst::parser::{parse, parse_sig};
 use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{AstNode, ImplFile, SigFile};
 use borzoi_sema::{
-    AssemblyEnv, ProjectFile, Resolution, SourceFile, SyntaxRecovery, qualified_names,
-    resolve_project_files,
+    AssemblyEnv, ProjectFile, Resolution, ResolvedProject, SourceFile, SyntaxRecovery,
+    qualified_names, resolve_project_files,
 };
 
 /// A probed reference: which generated file, the byte range FCS reports the
@@ -155,6 +158,12 @@ pub struct Graded {
     pub record: Option<(usize, TextRange)>,
     /// The number of every error diagnostic overlapping the site.
     pub errors: Vec<i64>,
+    /// What the walk recorded at the site, committed or not.
+    pub resolution: Option<Resolution>,
+    /// FCS's use (or else definition) at the site whatever its diagnostics:
+    /// [`Self::record`] in full, for a grid that grades an answer into a
+    /// referenced assembly, whose declaration has no range.
+    pub record_use: Option<NormalisedProjectUse>,
 }
 
 /// What FCS and the walk do at a probed pattern binder.
@@ -176,6 +185,11 @@ pub struct GradedProject {
     /// ([`super::unmodelled_project_binder_failures`]): each binder FCS
     /// declares is one the walk interns or declines.
     pub completeness_failures: Vec<String>,
+    /// The project as the walk folded it.
+    pub proj: ResolvedProject,
+    /// Where each file was written for FCS, in Compile order: FCS names a
+    /// declaration's file by this path.
+    pub paths: Vec<PathBuf>,
 }
 
 /// Fold `files` (Compile order, `(relative name, source)`; a `.fsi` is a
@@ -204,10 +218,23 @@ pub fn grade_project(
     binders: &[Site],
     env: &AssemblyEnv,
 ) -> GradedProject {
+    grade_project_with_refs(tag, files, sites, binders, env, &[])
+}
+
+/// [`grade_project`], with FCS also referencing `refs` (extra `.dll`s),
+/// which `env` must read too.
+pub fn grade_project_with_refs(
+    tag: &str,
+    files: &[(&str, String)],
+    sites: &[Site],
+    binders: &[Site],
+    env: &AssemblyEnv,
+    refs: &[&Path],
+) -> GradedProject {
     let tree: Vec<(&str, &str)> = files.iter().map(|(n, s)| (*n, s.as_str())).collect();
     let (root, written) = temp_fs_tree(tag, &tree);
     let paths: Vec<&Path> = written.iter().map(|(p, _)| p.as_path()).collect();
-    let json = invoke_fcs_dump_project(&paths);
+    let json = invoke_fcs_dump_project_with_refs(&paths, refs);
     let fcs = parse_fcs_uses_project(&json, &written);
     let errors = error_diagnostics(&json, &written);
     let parsed: Vec<(SourceFile, SyntaxRecovery)> = files
@@ -288,18 +315,18 @@ pub fn grade_project(
             // A use at the site, or else a definition there: a name FCS reads
             // as a fresh binder (an unbound uppercase pattern) is declared at
             // the site itself.
-            let record = fcs
+            let found = fcs
                 .iter()
                 .find(|f| f.path.file_name() == path.file_name())
                 .and_then(|f| {
-                    let at = |u: &&super::NormalisedProjectUse| u.start == start && u.end == end;
+                    let at = |u: &&NormalisedProjectUse| u.start == start && u.end == end;
                     f.uses
                         .iter()
                         .filter(at)
                         .find(|u| !u.is_from_definition)
                         .or_else(|| f.uses.iter().filter(at).find(|u| u.is_from_definition))
-                })
-                .and_then(|u| u.decl.as_ref().map(|d| (d, u.is_from_definition)));
+                });
+            let record = found.and_then(|u| u.decl.as_ref().map(|d| (d, u.is_from_definition)));
             let record_at = record.map(|(d, _)| {
                 (
                     index_of(&d.file),
@@ -353,6 +380,8 @@ pub fn grade_project(
                 ours,
                 record: record_at,
                 errors: here,
+                resolution: res,
+                record_use: found.cloned(),
             }
         })
         .collect();
@@ -360,6 +389,8 @@ pub fn grade_project(
         sites: graded_sites,
         binders: graded_binders,
         completeness_failures,
+        proj,
+        paths: written.into_iter().map(|(p, _)| p).collect(),
     }
 }
 

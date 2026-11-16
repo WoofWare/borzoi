@@ -847,16 +847,30 @@ pub struct UnionCase {
     pub declaration_index: u32,
     /// What the pickle says of the case's fields. See [`CaseFields`].
     pub fields: CaseFields,
+    /// `Some` when the pickle lists `[System.ObsoleteAttribute]` on the case,
+    /// as [`Entity::obsolete`] reads it. F# checks a case's attributes, with
+    /// its union's, wherever the case is used (`CheckUnionCaseAttributes`),
+    /// and they live in the pickle alone: fsc writes them on no IL member.
+    /// An argument the decoder cannot read is an error.
+    pub obsolete: Option<Obsolete>,
+    /// `Some` when the pickle lists
+    /// `[Microsoft.FSharp.Core.CompilerMessageAttribute]` on the case, as
+    /// [`Entity::compiler_message`] reads it.
+    pub compiler_message: Option<CompilerMessage>,
 }
 
 impl UnionCase {
     /// A case known by name and position alone, its fields unread: what a
-    /// hand-built fixture needs, and what nothing may read a type from.
+    /// hand-built fixture needs, and what nothing may read a type from. It
+    /// reports no attribute, so a consumer deciding whether F# rejects a use
+    /// of a case must decline one whose fields are unknowable.
     pub fn unread(name: impl Into<String>, declaration_index: u32) -> Self {
         Self {
             name: name.into(),
             declaration_index,
             fields: CaseFields::Unknowable,
+            obsolete: None,
+            compiler_message: None,
         }
     }
 }

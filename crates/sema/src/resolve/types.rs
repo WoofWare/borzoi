@@ -891,6 +891,7 @@ impl<'a> Resolver<'a> {
                         repr_access_root: None,
                         attributed: false,
                         case_attributes: CaseAttributes::default(),
+                        under_attributed_module: self.scope.attributed_module.is_some(),
                     });
                     Some((item_idx, item_id))
                 };
@@ -2509,6 +2510,15 @@ impl<'a> Resolver<'a> {
                 AttrCandidate::NoMatch => None,
             },
         };
+        // An attribute type behind an entity that may carry an error-level
+        // attribute may be out of FCS's reach.
+        let verdict = match verdict {
+            Some(res) if self.behind_attributed_entity(res) => {
+                declined_at = Some(DeclineSite::pre_walk(DeclineCause::EntityAttributed));
+                Some(Resolution::Deferred(DeferredReason::ShadowableType))
+            }
+            verdict => verdict,
+        };
         if let Some(res) = verdict {
             self.out.attribute_resolutions.insert(range, res);
         }
@@ -3456,6 +3466,7 @@ impl<'a> Resolver<'a> {
         found: FoundUnion<'_>,
     ) -> bool {
         if !self.resolves_to_plain_union_case(case_res)
+            || self.behind_attributed_entity(case_res)
             || self.lexical_alias_target(type_name).is_some()
         {
             return false;
@@ -3575,9 +3586,14 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// Where the project union case or exception `res` names may carry an
-    /// error-level attribute ([`CaseAttributes`]): this file's, by its def,
-    /// or an earlier file's export. Nowhere for anything else.
+    /// Where the union case or exception `res` names may carry an
+    /// error-level attribute ([`CaseAttributes`]): a project one's, this
+    /// file's by its def or an earlier file's export; or a referenced
+    /// assembly's, read from its metadata and signature data — the union's
+    /// or the exception's own attributes and every enclosing entity's
+    /// ([`AssemblyEnv::use_rejected_on_path`](crate::AssemblyEnv::use_rejected_on_path)),
+    /// and the case's ([`AssemblyEnv::union_case_use_may_be_rejected`](crate::AssemblyEnv::union_case_use_may_be_rejected)).
+    /// Nowhere for anything else.
     pub(super) fn case_attributes_of(&self, res: Resolution) -> CaseAttributes {
         let def = match res {
             Resolution::Local(def) => def,
@@ -3588,6 +3604,21 @@ impl<'a> Resolver<'a> {
                 },
                 None => return self.preceding.earlier_case_attributes(id),
             },
+            Resolution::UnionCase { union, case } => {
+                return CaseAttributes {
+                    on_type: self.assemblies.use_rejected_on_path(union),
+                    on_cases: self.assemblies.union_case_use_may_be_rejected(union, case),
+                };
+            }
+            Resolution::Entity(handle)
+                if self.assemblies.entity(handle).kind
+                    == borzoi_assembly::EntityKind::Exception =>
+            {
+                return CaseAttributes {
+                    on_type: self.assemblies.use_rejected_on_path(handle),
+                    on_cases: false,
+                };
+            }
             _ => return CaseAttributes::default(),
         };
         self.index
@@ -3595,6 +3626,30 @@ impl<'a> Resolver<'a> {
             .get(&def)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Whether some union case or exception named `name` whose use FCS may
+    /// reject on account of an error-level attribute is in the project or a
+    /// referenced assembly: one that may carry such an attribute itself or
+    /// on its union ([`Self::case_attributes_of`]), or sits under a module
+    /// that may ([`Self::behind_attributed_entity`]). A bare pattern head the
+    /// walk could not resolve may be any of them to FCS.
+    fn case_named_may_reject_use(&self, name: &str) -> bool {
+        let names = self.assemblies.names();
+        let named = |def: DefId| names.text(self.out.defs[def].name()) == name;
+        self.assemblies.rejecting_case_names().may_name(name)
+            || self.preceding.may_name_rejecting_case(name)
+            || self
+                .index
+                .case_attributes
+                .iter()
+                .any(|(&def, attributes)| attributes.may_abandon_pattern() && named(def))
+            || self.index.under_attributed_module.keys().any(|&def| {
+                matches!(
+                    self.out.defs[def].kind,
+                    DefKind::UnionCase | DefKind::ExceptionCase
+                ) && named(def)
+            })
     }
 
     /// Whether a type named `name` with fewer than `arity` generic parameters
@@ -3852,8 +3907,12 @@ impl<'a> Resolver<'a> {
                         // binders loop, so it is skipped here.
                         self.record(single.fcs_range(), res);
                         // A case whose attributes FCS may reject abandons the
-                        // pattern under it.
-                        undecided = self.case_attributes_of(res).may_abandon_pattern();
+                        // pattern under it. A head behind an entity that may
+                        // carry an error-level attribute may be no case at all
+                        // to FCS, which reads the arguments by whatever the name
+                        // means there instead, so they are undecided too.
+                        let behind = self.behind_attributed_entity(res);
+                        undecided = behind || self.case_attributes_of(res).may_abandon_pattern();
                         // When the head is an active pattern with a stored shape —
                         // same-file (`Local`) or cross-file opened (`Item`, Stage
                         // 3a) via `resolution_active_pattern_shape`, or an **opened
@@ -3891,6 +3950,7 @@ impl<'a> Resolver<'a> {
                         if let Some(shape) =
                             opened_shape.or_else(|| self.resolution_active_pattern_shape(res))
                             && !shadowed
+                            && !behind
                             && p.name_pat_pairs().is_none()
                         {
                             let args: Vec<Pat> = p.args().collect();
@@ -3913,6 +3973,23 @@ impl<'a> Resolver<'a> {
                         && let Some(cause) = self.bare_case_decline(&id_text(single), false)
                     {
                         self.record_decline(single.fcs_range(), DeclineSite::pre_walk(cause));
+                    }
+                    // A bare applied head the walk committed to nothing may
+                    // still be, to FCS, a case or exception whose attributes it
+                    // rejects, abandoning the pattern under the head.
+                    if applied
+                        && !undecided
+                        && let [single] = segs.as_slice()
+                        && self
+                            .out
+                            .resolutions
+                            .get(&single.fcs_range())
+                            .is_none_or(|r| {
+                                matches!(r, Resolution::Deferred(_) | Resolution::Unresolved)
+                            })
+                        && self.case_named_may_reject_use(&id_text(single))
+                    {
+                        undecided = true;
                     }
                 }
                 // An enclosing undecided head has marked this whole subtree
@@ -4379,6 +4456,12 @@ impl<'a> Resolver<'a> {
             members.extend(om.members());
         }
         self.add_type_members(&type_key, &members, visible_from);
+        // `T.Member` names the type on its path, and FCS checks it there
+        // (`SendEntityPathToSink`): an error-level attribute on it leaves the
+        // path unresolved, so a type that may carry one emits no member.
+        if super::decls::attributes_may_be_error_level(defn.attributes()) {
+            self.suppress_member_emit(&type_key);
+        }
     }
 
     /// Index a same-file augmentation's (`type T with …`) members. Only a

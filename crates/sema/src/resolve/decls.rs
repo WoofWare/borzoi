@@ -310,6 +310,7 @@ impl<'a> Resolver<'a> {
             repr_access_root,
             attributed: false,
             case_attributes,
+            under_attributed_module: self.scope.attributed_module.is_some(),
         });
         self.push_export_decl(
             decl_path,
@@ -410,6 +411,7 @@ impl<'a> Resolver<'a> {
             repr_access_root,
             attributed: false,
             case_attributes,
+            under_attributed_module: self.scope.attributed_module.is_some(),
         });
         // The export-decl-list twin: a case `Item` decl (no value path). Its
         // type-qualified path is threaded by `export_type_qualified_case` below,
@@ -1884,6 +1886,9 @@ impl<'a> Resolver<'a> {
         }
         let inner_container = self.lexical.container_path.id();
         self.scope.in_exporting_module = !self.lexical.anonymous_root;
+        if attributes_may_be_error_level(nm.attributes()) {
+            self.scope.attributed_module = Some(inner_container);
+        }
         // A `module private Sub` scopes its contents to its parent (this module's
         // container); stacked private modules take the deepest floor (see
         // [`OpenScope::access_floor`]). A non-private module inherits the

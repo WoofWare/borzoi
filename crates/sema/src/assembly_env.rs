@@ -101,6 +101,23 @@ pub(crate) enum BuilderValue {
     Unknown,
 }
 
+/// See [`AssemblyEnv::rejecting_case_names`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RejectingCaseNames {
+    /// The names of the cases and exceptions F# may reject a use of.
+    names: HashSet<String>,
+    /// Some union's cases could not be read, so any name may be one.
+    unknown: bool,
+}
+
+impl RejectingCaseNames {
+    /// Whether a union case or exception named `name` may be one F# rejects a
+    /// use of.
+    pub(crate) fn may_name(&self, name: &str) -> bool {
+        self.unknown || self.names.contains(name)
+    }
+}
+
 /// See [`AssemblyEnv::core_attribute_aliases`].
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CoreAttributeAliases {
@@ -943,6 +960,8 @@ pub struct AssemblyEnv {
     /// Memo for [`Self::core_attribute_aliases`]: a scan of every entity,
     /// asked once per project fold.
     core_attribute_alias: std::sync::OnceLock<CoreAttributeAliases>,
+    /// Memo for [`Self::rejecting_case_names`]: a scan of every entity.
+    rejecting_case_name: std::sync::OnceLock<RejectingCaseNames>,
     /// Memo for [`Self::extension_custom_operations`]: the part read off the
     /// entities, a scan of every one.
     extension_custom_operation: std::sync::OnceLock<CustomOperationNames>,
@@ -4091,6 +4110,116 @@ impl AssemblyEnv {
         Some(chain)
     }
 
+    /// Whether F# rejects a use reached through `handle` on account of the
+    /// attributes of `handle` or of an entity enclosing it
+    /// ([`Self::entity_use_rejected`]). FCS checks every entity a qualified
+    /// path names (`SendEntityPathToSink`), and the module an `open` names,
+    /// so a member, case or nested entity of a rejected one is out of reach
+    /// whichever way a use comes to it.
+    pub(crate) fn use_rejected_on_path(&self, handle: EntityHandle) -> bool {
+        let mut next = Some(handle);
+        while let Some(h) = next {
+            if self.entity_use_rejected(h) {
+                return true;
+            }
+            next = self.nodes.get(h.index()).and_then(|node| node.parent);
+        }
+        false
+    }
+
+    /// Whether F# rejects a use of `handle` on account of its own attributes
+    /// (`CheckEntityAttributes`): [`rejected_by_attributes`](crate::infer::rejected_by_attributes),
+    /// but for a byref-like type FCS reads through IL. There
+    /// `CheckILAttributes` ignores `[<Obsolete>]`, which C# writes on every
+    /// `ref struct` (`Span<_>`) for compilers that predate them, and reads
+    /// no `[<CompilerMessage>]` at all; one is still asked of an assembly
+    /// whose F# signature is unreadable, which FCS reads through the pickle.
+    fn entity_use_rejected(&self, handle: EntityHandle) -> bool {
+        let entity = self.entity(handle);
+        // fsc writes an exception's attributes in the pickle alone, so where
+        // the projection could not read it they are unknown.
+        if entity.kind == EntityKind::Exception && !self.has_authoritative_fsharp_signature(handle)
+        {
+            return true;
+        }
+        if entity.is_byref_like && !self.has_authoritative_fsharp_signature(handle) {
+            crate::infer::error_compiler_message(entity.compiler_message.as_ref())
+        } else {
+            crate::infer::rejected_by_attributes(entity)
+        }
+    }
+
+    /// Whether F# may reject a use of case `case` of union `union` on account
+    /// of the case's own attributes, which it checks with the union's
+    /// wherever the case heads a pattern or an expression
+    /// (`CheckUnionCaseAttributes`), before the pattern's arguments: an
+    /// error-level one ([`case_rejected_by_attributes`](crate::infer::case_rejected_by_attributes)),
+    /// or a case whose signature data was not read.
+    pub(crate) fn union_case_use_may_be_rejected(
+        &self,
+        union: EntityHandle,
+        case: UnionCaseIndex,
+    ) -> bool {
+        let UnionCases::Known(cases) = &self.entity(union).union_cases else {
+            return true;
+        };
+        cases.get(case.index()).is_none_or(|c| {
+            matches!(c.fields, borzoi_assembly::CaseFields::Unknowable)
+                || crate::infer::case_rejected_by_attributes(c)
+        })
+    }
+
+    /// The names of the referenced assemblies' union cases and exceptions F#
+    /// may reject a use of on account of an error-level attribute
+    /// ([`Self::use_rejected_on_path`], [`Self::union_case_use_may_be_rejected`]):
+    /// what a pattern head the walk did not resolve may be to FCS, which then
+    /// abandons the pattern under it.
+    pub(crate) fn rejecting_case_names(&self) -> &RejectingCaseNames {
+        self.rejecting_case_name.get_or_init(|| {
+            let mut out = RejectingCaseNames::default();
+            for handle in self.all_handles() {
+                // A type another assembly cannot reach offers no case to its
+                // name environment.
+                let mut chain = Some(handle);
+                let reachable = std::iter::from_fn(|| {
+                    let h = chain?;
+                    chain = self.nodes.get(h.index()).and_then(|node| node.parent);
+                    Some(h)
+                })
+                .all(|h| self.is_public(h));
+                if !reachable {
+                    continue;
+                }
+                let entity = self.entity(handle);
+                match (entity.kind, &entity.union_cases) {
+                    (EntityKind::Union, UnionCases::Known(cases)) => {
+                        let union_rejected = self.use_rejected_on_path(handle);
+                        for (i, case) in cases.iter().enumerate() {
+                            if union_rejected
+                                || self
+                                    .union_case_use_may_be_rejected(handle, UnionCaseIndex::new(i))
+                            {
+                                out.names.insert(case.name.clone());
+                            }
+                        }
+                    }
+                    (EntityKind::Union, UnionCases::Unknowable) => out.unknown = true,
+                    (EntityKind::Exception, _) if self.use_rejected_on_path(handle) => {
+                        // Whichever of its names the head spells: its IL
+                        // name, its F# name, or the IL name without the
+                        // `Exception` suffix a compiled exception may carry.
+                        out.names.insert(entity.name.clone());
+                        out.names.extend(entity.source_name.iter().cloned());
+                        out.names
+                            .extend(entity.name.strip_suffix("Exception").map(str::to_string));
+                    }
+                    _ => {}
+                }
+            }
+            out
+        })
+    }
+
     /// What the referenced assemblies say about renaming `[<AutoOpen>]` and
     /// `[<RequireQualifiedAccess>]` ([`CORE_ATTRIBUTE_NAMES`]). Both are sealed
     /// classes, so only an abbreviation can rename them, and only a type
@@ -5156,6 +5285,7 @@ impl AssemblyEnv {
     /// [`Self::abbreviations_may_be_unread`]: a mark that arrives after the
     /// first query must still withdraw trust.
     fn invalidate_attribute_aliases(&mut self) {
+        self.rejecting_case_name = std::sync::OnceLock::new();
         self.core_attribute_alias = std::sync::OnceLock::new();
         self.custom_operation_alias = std::sync::OnceLock::new();
         self.slot_attribute_alias = std::sync::OnceLock::new();
