@@ -19,6 +19,7 @@
 //! arguments, wrong arity, a `void` return (identity recorded, type deferred),
 //! and a project-defined receiver.
 
+use borzoi_sema::FcsRange as _;
 use std::collections::HashMap;
 
 use crate::common::{ensure_system_runtime_dll, invoke_fcs_dump, parse_fcs_types, temp_fs_file};
@@ -131,7 +132,7 @@ fn ident_range(src: &str, name: &str) -> TextRange {
         .filter_map(|el| el.into_token())
         .find(|t| t.kind() == SyntaxKind::IDENT_TOK && t.text() == name)
         .unwrap_or_else(|| panic!("no IDENT_TOK {name:?} in {src:?}"))
-        .text_range()
+        .fcs_range()
 }
 
 // ===== Differentials: commits =====

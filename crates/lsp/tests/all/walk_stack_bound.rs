@@ -24,6 +24,7 @@
 //! ([`stack_probe`](borzoi_oracle_harness::stack_probe)), so an overflow names
 //! its case instead of aborting the suite.
 
+use borzoi_sema::FcsRange as _;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -162,7 +163,7 @@ fn deepest_token(root: &SyntaxNode) -> (usize, usize) {
             WalkEvent::Enter(NodeOrToken::Token(t))
                 if depth > best.1 && !t.kind().is_trivia() && !t.text().is_empty() =>
             {
-                best = (usize::from(t.text_range().start()), depth);
+                best = (usize::from(t.fcs_range().start()), depth);
             }
             WalkEvent::Enter(NodeOrToken::Token(_)) | WalkEvent::Leave(NodeOrToken::Token(_)) => {}
         }

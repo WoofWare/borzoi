@@ -15,6 +15,7 @@
 //! through, which token that edge of the node ends at, so each node is walked
 //! into at most once per edge however many spans are asked of it.
 
+use crate::FcsRange as _;
 use crate::hash::HashMap;
 
 use borzoi_cst::syntax::{NodeOrToken, SyntaxElement, SyntaxNode, SyntaxToken, TextRange};
@@ -101,7 +102,7 @@ impl NodeSpans {
                     }
                     at = next;
                 }
-                Some(NodeOrToken::Token(t)) if !is_trivia(&t) => break t.text_range(),
+                Some(NodeOrToken::Token(t)) if !is_trivia(&t) => break t.fcs_range(),
                 Some(el @ NodeOrToken::Token(_)) => at = edge.sibling(&el),
                 Some(NodeOrToken::Node(n)) => match memo.get(&n) {
                     Some(&Some(known)) => break known,
@@ -137,9 +138,9 @@ fn node_span_by_scan(node: &SyntaxNode) -> TextRange {
             let end = toks
                 .last()
                 .unwrap_or_else(|| first.clone())
-                .text_range()
+                .fcs_range()
                 .end();
-            TextRange::new(first.text_range().start(), end)
+            TextRange::new(first.fcs_range().start(), end)
         }
         None => node.text_range(),
     }

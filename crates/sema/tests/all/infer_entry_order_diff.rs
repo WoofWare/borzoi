@@ -119,6 +119,7 @@
 //! construct — is drawn per file, and the sweep asserts it reached every
 //! construct and both verdicts in quantity.
 
+use borzoi_sema::FcsRange as _;
 use std::collections::BTreeMap;
 
 use borzoi_cst::parser::parse;
@@ -2533,7 +2534,7 @@ impl ReceiverClaim {
             .descendants_with_tokens()
             .filter_map(|el| el.into_token())
             .filter(|t| t.kind() == SyntaxKind::DOT_TOK)
-            .map(|t| t.text_range())
+            .map(|t| t.fcs_range())
             .collect();
         let reply: serde_json::Value =
             serde_json::from_str(diagnostics_json).expect("check-diagnostics JSON");
@@ -2756,7 +2757,7 @@ fn written_member_dots(tree: &ImplFile) -> Vec<(TextRange, usize)> {
                     dot.next_token()
                         .is_some_and(|t| t.kind() == SyntaxKind::IDENT_TOK)
                 })
-                .map(move |dot| (dot.text_range(), end))
+                .map(move |dot| (dot.fcs_range(), end))
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -2812,7 +2813,7 @@ fn deleting_a_member_keeps_the_receiver_and_isolates_the_declaration() {
             let damaged_src = format!("{}{}", &src[..at], &src[path_end..]);
             let (damaged, damaged_tree, recovery) = publish(&damaged_src);
             let first = recovery.first_is_trailing_dot(damaged_tree.syntax());
-            if first.as_ref().map(|t| t.text_range()) != Some(dot) {
+            if first.as_ref().map(|t| t.fcs_range()) != Some(dot) {
                 tally.not_first_recovery += 1;
                 continue;
             }

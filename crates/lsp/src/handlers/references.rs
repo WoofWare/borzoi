@@ -24,6 +24,7 @@
 
 use crate::uri::UriExt as _;
 use borzoi_cst::parser::FileKind;
+use borzoi_sema::FcsRange as _;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -629,7 +630,7 @@ fn ambiguous_argument_label(element: &Expr) -> Option<TextRange> {
             let path = optional.long_ident()?;
             let mut idents = path.idents();
             let ident = idents.next()?;
-            idents.next().is_none().then(|| ident.text_range())
+            idents.next().is_none().then(|| ident.fcs_range())
         }
         _ => None,
     }

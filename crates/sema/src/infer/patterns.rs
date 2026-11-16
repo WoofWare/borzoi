@@ -1,6 +1,7 @@
 //! Patterns: their shapes, their types, and the binders they bind.
 
 use super::*;
+use crate::FcsRange as _;
 
 /// Where a pattern's named binders are bound, which decides the variable each
 /// one's type is read from ([`Gen::register_binder`]).
@@ -148,7 +149,7 @@ impl<'a> Gen<'a> {
         let named_def = |named: &NamedPat| {
             named
                 .ident()
-                .and_then(|tok| self.facts.def_at(tok.text_range()))
+                .and_then(|tok| self.facts.def_at(tok.fcs_range()))
                 .ok_or(Incomplete::Recovery)
         };
         match pat {
@@ -157,12 +158,12 @@ impl<'a> Gen<'a> {
             Pat::Named(named)
                 if site == PatSite::Match
                     && named.ident().is_some_and(|tok| {
-                        self.facts.def_at(tok.text_range()).is_none()
-                            || self.facts.own_union_case_at(tok.text_range())
+                        self.facts.def_at(tok.fcs_range()).is_none()
+                            || self.facts.own_union_case_at(tok.fcs_range())
                     }) =>
             {
                 let tok = named.ident().ok_or(Incomplete::Recovery)?;
-                self.case_pattern(tok.text_range(), None, cx)
+                self.case_pattern(tok.fcs_range(), None, cx)
             }
             Pat::Named(named) => Ok(PatShape::Name(named_def(named)?)),
             Pat::LongIdent(li) if site == PatSite::Match => {
@@ -186,7 +187,7 @@ impl<'a> Gen<'a> {
                 let (Some(first), Some(last)) = (idents.first(), idents.last()) else {
                     return Err(Incomplete::Recovery);
                 };
-                let at = TextRange::new(first.text_range().start(), last.text_range().end());
+                let at = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
                 self.case_pattern(at, arg.as_ref(), cx)
             }
             Pat::Const(c) if site == PatSite::Match && !c.syntax().text().is_empty() => {

@@ -737,6 +737,14 @@ fn parse_inner_stopping_at(
         .map(|i| raw_tokens.span(i))
         .collect();
 
+    // Every glued `(*)` the lexer read, for the check below that the tree's
+    // glued spelling is exactly these.
+    #[cfg(feature = "walk-reference")]
+    let glued_stars: Vec<Range<usize>> = (0..raw_tokens.len())
+        .filter(|&i| raw_tokens.kind(i) == RawKind::Lexed(TokenKind::LParenStarRParen))
+        .map(|i| raw_tokens.span(i))
+        .collect();
+
     let mut parser = Parser::new(source, raw_tokens, filtered_tokens);
     parser.tree_height_stop = initial_stop;
     // The parse stops once the tree would reach `tree_height_stop`, but that
@@ -796,6 +804,8 @@ fn parse_inner_stopping_at(
     // Build the root now: the feature gates below walk it for constructs a
     // language feature introduced after `lang`.
     let root = parser.builder.finish();
+    #[cfg(feature = "walk-reference")]
+    assert_glued_stars_are_the_lexer_s(&root, &glued_stars);
     let gates = feature_gates::feature_gate_diagnostics(&root, lang);
     // Merge the directive errors (collected in source order above), the FS1161
     // tab errors (scanned off the whitespace trivia), the `#elif` trivia gate,
@@ -884,6 +894,51 @@ fn langversion_diagnostics(
             ParseDiagnostic::gate(feature, feature.not_available_message(lang), span.clone())
         })
         .collect()
+}
+
+/// [`fcs_ident_range`](crate::syntax::fcs_ident_range) widens exactly the `*`
+/// of a glued `(*)` the lexer read, as it claims: adjacency in the tree is the
+/// only record of the glued spelling. Both directions: every `*` it widens sits
+/// where the lexer read the glued token, and every glued token the parser
+/// spelled as a parenthesised name (an `LPAREN_TOK` at its start) is widened.
+/// A glued token recovery emitted some other way names nothing, so it must not
+/// leave an `IDENT_TOK` inside its span.
+#[cfg(feature = "walk-reference")]
+fn assert_glued_stars_are_the_lexer_s(root: &SyntaxNode, glued_stars: &[Range<usize>]) {
+    use crate::syntax::{SyntaxElement, TextRange, fcs_ident_range};
+    let widened: Vec<Range<usize>> = root
+        .descendants_with_tokens()
+        .filter_map(SyntaxElement::into_token)
+        .filter_map(|t| {
+            let fcs = fcs_ident_range(&t);
+            (fcs != t.text_range()).then(|| usize::from(fcs.start())..usize::from(fcs.end()))
+        })
+        .collect();
+    for span in &widened {
+        assert!(
+            glued_stars.contains(span),
+            "the `*` at {span:?} is widened over parentheses the lexer did not glue"
+        );
+    }
+    for span in glued_stars {
+        if widened.contains(span) {
+            continue;
+        }
+        let range = TextRange::new(
+            u32::try_from(span.start).expect("offset").into(),
+            u32::try_from(span.end).expect("offset").into(),
+        );
+        let inside: Vec<_> = root
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|t| range.contains_range(t.text_range()))
+            .map(|t| t.kind())
+            .collect();
+        assert!(
+            !inside.contains(&SyntaxKind::LPAREN_TOK) && !inside.contains(&SyntaxKind::IDENT_TOK),
+            "the glued `(*)` at {span:?} is spelled {inside:?}, which is not widened"
+        );
+    }
 }
 
 /// The span of every `$$"""` opener among `raw_tokens` (two `$` or more), in

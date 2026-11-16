@@ -546,3 +546,11 @@ fn a_colon_directive_line_does_not_break_the_block() {
     let src = "module M\n/// first\n#:property X=Y\n/// second\nlet x = 1\n";
     assert_attached(src, "x", &[" first", " second"]);
 }
+
+/// A glued `(*)` binder is named over its parentheses, by FCS and by us, and
+/// its doc pairs there; a spaced `( * )` is named over the `*`.
+#[test]
+fn a_glued_star_binder_takes_its_doc() {
+    assert_attached("module M\n/// times\nlet (*) a b = a\n", "*", &[" times"]);
+    assert_attached("module M\n/// times\nlet ( * ) a b = a\n", "*", &[" times"]);
+}

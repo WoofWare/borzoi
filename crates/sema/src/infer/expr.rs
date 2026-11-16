@@ -2,6 +2,7 @@
 //! expression-level `let`s, sequential expressions and conditions.
 
 use super::*;
+use crate::FcsRange as _;
 
 impl<'a> Gen<'a> {
     /// Synthesize the type variable of expression `e`, generating its
@@ -100,7 +101,7 @@ impl<'a> Gen<'a> {
                 if is_unit_literal(e) {
                     self.emit(self.facts.node_span(c.syntax()), v, expected);
                 } else if let Some(lit) = c.literal() {
-                    self.emit(lit.text_range(), v, expected);
+                    self.emit(lit.fcs_range(), v, expected);
                 }
                 let (_, d) = self.relate(scope, v, expected);
                 Inferred::typed(v, d)
@@ -118,19 +119,19 @@ impl<'a> Gen<'a> {
                 };
                 let def = self
                     .facts
-                    .def_at(tok.text_range())
-                    .filter(|_| !self.facts.own_union_case_at(tok.text_range()));
+                    .def_at(tok.fcs_range())
+                    .filter(|_| !self.facts.own_union_case_at(tok.fcs_range()));
                 let Some(def) = def else {
                     // A referenced assembly's value, read off its signature, or
                     // a union case; anything else that is not an in-file binder
                     // (a preceding file's, a deferred name) is unmodelled.
                     let Some(uv) =
-                        self.nonlocal_value_or_incomplete(scope, tok.text_range(), Use::Value)
+                        self.nonlocal_value_or_incomplete(scope, tok.fcs_range(), Use::Value)
                     else {
                         return Inferred::untyped(self.decline_expected_propagated(scope));
                     };
-                    if !self.facts.case_of_fields_at(tok.text_range()) {
-                        self.emit(tok.text_range(), uv, expected);
+                    if !self.facts.case_of_fields_at(tok.fcs_range()) {
+                        self.emit(tok.fcs_range(), uv, expected);
                     }
                     let (_, d) = self.relate(scope, uv, expected);
                     return Inferred::typed(uv, d);
@@ -139,7 +140,7 @@ impl<'a> Gen<'a> {
                     return Inferred::untyped(self.decline_expected_propagated(scope));
                 }
                 let uv = self.value_use(scope, def);
-                self.emit(tok.text_range(), uv, expected);
+                self.emit(tok.fcs_range(), uv, expected);
                 let (_, d) = self.relate(scope, uv, expected);
                 Inferred::typed(uv, d)
             }
@@ -913,7 +914,7 @@ impl<'a> Gen<'a> {
             Expr::Ident(ident) => {
                 let slot = ident
                     .ident()
-                    .and_then(|tok| self.facts.def_at(tok.text_range()))
+                    .and_then(|tok| self.facts.def_at(tok.fcs_range()))
                     .and_then(|def| self.binders.param_slot(def));
                 // A parameter whose annotation mentions an implicitly scoped
                 // type variable is reachable through every other mention of
@@ -923,11 +924,11 @@ impl<'a> Gen<'a> {
                 // mention.
                 let shares_typar = ident
                     .ident()
-                    .and_then(|tok| self.facts.def_at(tok.text_range()))
+                    .and_then(|tok| self.facts.def_at(tok.fcs_range()))
                     .is_some_and(|def| scope.typar_params.contains(&def));
                 let def = ident
                     .ident()
-                    .and_then(|tok| self.facts.def_at(tok.text_range()));
+                    .and_then(|tok| self.facts.def_at(tok.fcs_range()));
                 match slot {
                     Some(_) if shares_typar => {
                         scope.mark_incomplete(Incomplete::ConditionUndecided);

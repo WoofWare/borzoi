@@ -105,6 +105,21 @@ pub trait AstNode: Sized {
     fn syntax(&self) -> &SyntaxNode;
 }
 
+// FCS's range for a name token. It belongs with the union rather than the
+// substrate: it answers for the glued `(*)` only, not for every spelling FCS
+// ranges apart from its token (active-pattern and operator-named case names
+// have accessors of their own), so it makes no promise a facade could keep.
+#[cfg_attr(
+    not(any(feature = "unstable-union", feature = "walk-reference")),
+    allow(dead_code)
+)]
+mod fcs_ident;
+#[cfg(feature = "unstable-union")]
+pub use fcs_ident::fcs_ident_range;
+#[cfg(not(feature = "unstable-union"))]
+#[allow(unused_imports)]
+pub(crate) use fcs_ident::fcs_ident_range;
+
 // The union typed facade (`union.rs`). Its items are `crate::syntax::Expr` and
 // so on either way; the feature decides only whether that path is public.
 // Without it, the crate's unit tests and `projection` are its only readers.

@@ -2,6 +2,7 @@
 //! binding's head: its parameters and its function type.
 
 use super::*;
+use crate::FcsRange as _;
 
 impl<'a> Gen<'a> {
     /// Fold `file` into per-binding constraint batches, solving each before the
@@ -44,7 +45,7 @@ impl<'a> Gen<'a> {
         }
         Some(Damaged {
             decl,
-            dot: dot.text_range(),
+            dot: dot.fcs_range(),
         })
     }
 
@@ -122,11 +123,11 @@ impl<'a> Gen<'a> {
         let mut defs: Vec<DefId> = names
             .iter()
             .filter_map(|n| n.ident())
-            .filter_map(|tok| self.facts.def_at(tok.text_range()))
+            .filter_map(|tok| self.facts.def_at(tok.fcs_range()))
             .collect();
         if let Pat::LongIdent(head) = &pat
             && let Some(name) = head.head().and_then(|li| li.idents().last())
-            && let Some(def) = self.facts.def_at(name.text_range())
+            && let Some(def) = self.facts.def_at(name.fcs_range())
         {
             defs.push(def);
         }
@@ -217,7 +218,7 @@ impl<'a> Gen<'a> {
                 self.fold_binding_lambdas(rhs);
                 let rhs_var = self.infer_expr(scope, rhs, Expected::Synth).var();
                 if let Some(tok) = named.ident()
-                    && let Some(def) = self.facts.def_at(tok.text_range())
+                    && let Some(def) = self.facts.def_at(tok.fcs_range())
                 {
                     // Create the binder's variable in *its own* binding — even
                     // when the RHS did not type — so it carries an index below
@@ -463,7 +464,7 @@ impl<'a> Gen<'a> {
             return Census::Record;
         };
         let census = if let Some(tok) = named.ident()
-            && let Some(def) = self.facts.def_at(tok.text_range())
+            && let Some(def) = self.facts.def_at(tok.fcs_range())
         {
             let dv = self.def_var(def);
             self.eq(scope, self.solver.tys.var(dv), t, Own::var(dv));
@@ -544,7 +545,7 @@ impl<'a> Gen<'a> {
             return None;
         }
         let name = head.head().and_then(|li| li.idents().last())?;
-        let f_def = self.facts.def_at(name.text_range())?;
+        let f_def = self.facts.def_at(name.fcs_range())?;
         // A function of n parameters is a chain n + 1 deep, which the tree
         // does not bound: its parameters are siblings. Past the type budget's
         // depth the chain is not built.

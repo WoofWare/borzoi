@@ -2,6 +2,7 @@
 //! the schemes of their cases and record fields.
 
 use super::*;
+use crate::FcsRange as _;
 
 /// Which case of which union a [`PatShape::Case`] names: its position in the
 /// union's case list, of `siblings` cases.
@@ -207,11 +208,11 @@ impl<'a> FileFacts<'a> {
             };
             // The defining occurrence of an in-file type, not an augmentation
             // naming one.
-            let Some(def) = self.def_at(name.text_range()) else {
+            let Some(def) = self.def_at(name.fcs_range()) else {
                 continue;
             };
             let d = self.resolved.def(def);
-            if d.kind != DefKind::Type || d.range != name.text_range() {
+            if d.kind != DefKind::Type || d.range != name.fcs_range() {
                 continue;
             }
             let nominal = match defn.repr() {
@@ -460,7 +461,7 @@ impl<'a> FileFacts<'a> {
                 continue;
             };
             let Some((path, arity)) = self
-                .def_at(name.text_range())
+                .def_at(name.fcs_range())
                 .and_then(|def| self.project_types.get(&def))
                 .cloned()
             else {
@@ -537,11 +538,10 @@ impl<'a> FileFacts<'a> {
                 .iter()
                 .map(|c| {
                     let tok = c.ident()?;
-                    self.own_case_at(tok.text_range())
-                        .filter(|case| match case {
-                            OwnCase::Item(_) => true,
-                            OwnCase::Def(def) => self.resolved.def(*def).range == tok.text_range(),
-                        })
+                    self.own_case_at(tok.fcs_range()).filter(|case| match case {
+                        OwnCase::Item(_) => true,
+                        OwnCase::Def(def) => self.resolved.def(*def).range == tok.fcs_range(),
+                    })
                 })
                 .collect();
             // The union's identity is its first case: without one, two of its

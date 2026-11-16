@@ -1,5 +1,6 @@
 //! Type definitions (`define_*`) and type-position name resolution.
 
+use crate::FcsRange as _;
 use borzoi_cst::syntax::{
     ActivePatName, AstNode, Binding, GetSetMember, LongIdentPat, MemberDefn, MemberLeading,
     MemberLetBindings, ObjExpr, Pat, RecordReprItem, SyntaxKind, SyntaxNode, SyntaxToken,
@@ -182,7 +183,7 @@ pub(super) fn typar_occurrence(node: &SyntaxNode) -> Option<(TextRange, String)>
         }
     }
     let (sigil, name) = (sigil?, name?);
-    let range = TextRange::new(sigil.text_range().start(), name.text_range().end());
+    let range = TextRange::new(sigil.fcs_range().start(), name.fcs_range().end());
     Some((range, format!("{}{}", sigil.text(), name.text())))
 }
 
@@ -917,8 +918,8 @@ impl<'a> Resolver<'a> {
                 if let Some(first) = tokens.next() {
                     let end = tokens.last().unwrap_or_else(|| first.clone());
                     self.out.opaque_binders.insert(TextRange::new(
-                        first.text_range().start(),
-                        end.text_range().end(),
+                        first.fcs_range().start(),
+                        end.fcs_range().end(),
                     ));
                 }
             }
@@ -1280,8 +1281,8 @@ impl<'a> Resolver<'a> {
                 if let Some(first) = tokens.next() {
                     let end = tokens.last().unwrap_or_else(|| first.clone());
                     self.out.opaque_binders.insert(TextRange::new(
-                        first.text_range().start(),
-                        end.text_range().end(),
+                        first.fcs_range().start(),
+                        end.fcs_range().end(),
                     ));
                 }
             }
@@ -1947,11 +1948,11 @@ impl<'a> Resolver<'a> {
             // name — record the local, exactly as
             // [`Self::resolve_in_file_type_path`] does for an augmentation head.
             TypePathResolution::InFileType(id) => {
-                self.record(segs[0].text_range(), Resolution::Local(id));
+                self.record(segs[0].fcs_range(), Resolution::Local(id));
             }
             TypePathResolution::EarlierFileType { file, index } => {
                 self.record(
-                    segs[0].text_range(),
+                    segs[0].fcs_range(),
                     Resolution::EarlierFileType { file, index },
                 );
             }
@@ -1960,7 +1961,7 @@ impl<'a> Resolver<'a> {
             // resolution's currency, not the shell's).
             TypePathResolution::Assembly { idx_recs, .. } => {
                 for (idx, res) in idx_recs {
-                    self.record(segs[idx].text_range(), res);
+                    self.record(segs[idx].fcs_range(), res);
                 }
             }
             // A shadow is possible but unpinnable. A single-segment name records
@@ -2443,7 +2444,7 @@ impl<'a> Resolver<'a> {
         // FCS records the attribute-type use at the written path's range
         // (`rangeOfLid`; the suffixed candidate reuses the written ident's
         // range), so key the verdict the same way.
-        let range = TextRange::new(first.text_range().start(), last.text_range().end());
+        let range = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
 
         // A **multi-segment** candidate defers wholesale, as does a
         // `global.`-rooted one (checked on the RAW token text — a quoted
@@ -2759,7 +2760,7 @@ impl<'a> Resolver<'a> {
     fn defer_shadowable_type(&mut self, segs: &[SyntaxToken], site: DeclineSite) {
         if let [only] = segs {
             self.record(
-                only.text_range(),
+                only.fcs_range(),
                 Resolution::Deferred(DeferredReason::ShadowableType),
             );
         }
@@ -3076,7 +3077,7 @@ impl<'a> Resolver<'a> {
         if let [only] = segs
             && let Some(Ok(id)) = self.in_file_type_at(&id_text(only), arity)
         {
-            self.record(only.text_range(), Resolution::Local(id));
+            self.record(only.fcs_range(), Resolution::Local(id));
             return true;
         }
         false
@@ -3737,7 +3738,7 @@ impl<'a> Resolver<'a> {
                         // resolve it to an in-scope case. A *nullary* single-segment
                         // head (`Red`) is a provisional binder, resolved in the
                         // binders loop, so it is skipped here.
-                        self.record(single.text_range(), res);
+                        self.record(single.fcs_range(), res);
                         // When the head is an active pattern with a stored shape —
                         // same-file (`Local`) or cross-file opened (`Item`, Stage
                         // 3a) via `resolution_active_pattern_shape`, or an **opened
@@ -3786,7 +3787,7 @@ impl<'a> Resolver<'a> {
                     if applied
                         && let [single] = segs.as_slice()
                         && !matches!(
-                            self.out.resolutions.get(&single.text_range()),
+                            self.out.resolutions.get(&single.fcs_range()),
                             Some(
                                 Resolution::Local(_)
                                     | Resolution::Item(_)
@@ -3796,7 +3797,7 @@ impl<'a> Resolver<'a> {
                         )
                         && let Some(cause) = self.bare_case_decline(&id_text(single), false)
                     {
-                        self.record_decline(single.text_range(), DeclineSite::pre_walk(cause));
+                        self.record_decline(single.fcs_range(), DeclineSite::pre_walk(cause));
                     }
                 }
                 if !split_applied {
@@ -3844,11 +3845,11 @@ impl<'a> Resolver<'a> {
         let (Some(first), Some(last)) = (segs.first(), segs.last()) else {
             return false;
         };
-        let whole = TextRange::new(first.text_range().start(), last.text_range().end());
+        let whole = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
         self.out
             .resolutions
             .get(&whole)
-            .or_else(|| self.out.resolutions.get(&last.text_range()))
+            .or_else(|| self.out.resolutions.get(&last.fcs_range()))
             .is_some_and(|res| !matches!(res, Resolution::Deferred(_) | Resolution::Unresolved))
     }
 

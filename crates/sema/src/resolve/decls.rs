@@ -1,5 +1,6 @@
 //! Module/namespace declaration walking and export construction.
 
+use crate::FcsRange as _;
 use borzoi_cst::syntax::{
     AstNode, Attribute, ModuleDecl, NestedModuleDecl, SyntaxToken, Type, TypeAbbrev, TypeDefn,
     TypeDefnRepr,
@@ -507,7 +508,7 @@ impl<'a> Resolver<'a> {
                         let pos = ident
                             .idents()
                             .next()
-                            .map(|t| t.text_range().start())
+                            .map(|t| t.fcs_range().start())
                             .unwrap_or_else(|| a.syntax().text_range().start());
                         self.push_export_decl(path, pos, ExportDeclKind::ModuleAbbrev);
                     }
@@ -572,7 +573,7 @@ impl<'a> Resolver<'a> {
                             let pos = li
                                 .idents()
                                 .next()
-                                .map(|t| t.text_range().start())
+                                .map(|t| t.fcs_range().start())
                                 .unwrap_or_else(|| defn.syntax().text_range().start());
                             let kind = if augmentation {
                                 ExportDeclKind::TypeAugmentation
@@ -695,7 +696,7 @@ impl<'a> Resolver<'a> {
                             let path = self.decl_path(&[id_text(&name)]);
                             self.push_export_decl(
                                 path,
-                                name.text_range().start(),
+                                name.fcs_range().start(),
                                 ExportDeclKind::Type {
                                     info: Some((cases_enumerable, export_slot)),
                                     auto_open: type_auto_open,
@@ -848,7 +849,7 @@ impl<'a> Resolver<'a> {
                         let path = self.decl_path(&[id_text(&name)]);
                         self.push_export_decl(
                             path,
-                            name.text_range().start(),
+                            name.fcs_range().start(),
                             ExportDeclKind::ExceptionTycon,
                         );
                     }
@@ -909,7 +910,7 @@ impl<'a> Resolver<'a> {
                         .and_then(|name| name.idents().last())
                         .into_iter()
                         .chain(ext.args().filter_map(|arg| arg.name()))
-                        .map(|tok| tok.text_range()),
+                        .map(|tok| tok.fcs_range()),
                 );
                 if let Some(name) = ext_name.last() {
                     // A value of the container's, for the declared-name view.
@@ -2053,7 +2054,7 @@ impl Resolver<'_> {
         else {
             return;
         };
-        let names_a_type = match self.out.resolutions.get(&case.text_range()) {
+        let names_a_type = match self.out.resolutions.get(&case.fcs_range()) {
             Some(Resolution::Local(id)) => self.out.defs[*id].kind == DefKind::Type,
             Some(Resolution::Entity(_)) => true,
             _ => false,
@@ -2061,7 +2062,7 @@ impl Resolver<'_> {
         if names_a_type {
             return;
         }
-        self.out.opaque_binders.insert(case.text_range());
+        self.out.opaque_binders.insert(case.fcs_range());
         // A case of the container's, for the declared-name view.
         let rqa = self.require_qualified_access(defn.attributes());
         let decl = self.mark_decl(&id_text(&case));

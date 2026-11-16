@@ -115,6 +115,10 @@ fn compiled_names() -> HashMap<&'static str, String> {
 /// Whether `text` is a use site this harness grades: an operator spelling, an
 /// `op_*` name, or a quoted operator spelling (`` ``+`` ``).
 fn is_operator_site(text: &str) -> bool {
+    // FCS ranges a glued `(*)` over its parentheses.
+    if text == "(*)" {
+        return true;
+    }
     let text = text
         .strip_prefix("``")
         .and_then(|t| t.strip_suffix("``"))
@@ -518,4 +522,96 @@ fn a_quoted_operator_name_is_never_its_compiled_name() {
         graded >= 4 * all_ops().count(),
         "graded {graded}: {tally:?}"
     );
+}
+
+/// The ways to write the name `*` (`op_Multiply`) as a definition.
+const STAR_DEFINITIONS: &[&str] = &[
+    "let (*) a b = a",
+    "let ( * ) a b = a",
+    "let op_Multiply a b = a",
+    "let rec f x = x\n    and (*) a b = a",
+    "let (*)(* c *) a b = a",
+];
+
+/// The ways to use the name `*`, in the defining module (`a` and `b` are in
+/// scope) or from beside it through the defining module `M`.
+const STAR_USES: &[&str] = &[
+    "a * b",
+    "(*) a b",
+    "(*)(* c *) a b",
+    "(*) (* c *) a b",
+    "op_Multiply a b",
+    "( * ) a b",
+    "List.fold (*) a [b]",
+    "id (*) a b",
+    "M.(*) a b",
+    "M.( * ) a b",
+];
+
+/// The glued `(*)` is the one operator spelling FCS ranges over its
+/// parentheses, at a definition and at a use alike; every other spelling, the
+/// spaced `( * )` included, is ranged over the operator. Each definition
+/// spelling meets each use spelling, in the defining module and through a
+/// qualified path from another, and both properties hold of every cell: we
+/// bind each glued use at FCS's range to the binder at FCS's range, and every
+/// spelling links to every other.
+#[test]
+fn a_glued_star_is_named_over_its_parentheses() {
+    let mut src = String::from("module Star\n");
+    for (i, def) in STAR_DEFINITIONS.iter().enumerate() {
+        src.push_str(&format!("module M{i} =\n    {def}\n"));
+        for (k, u) in STAR_USES
+            .iter()
+            .filter(|u| !u.starts_with("M."))
+            .enumerate()
+        {
+            src.push_str(&format!("    let u{k} a b = {u}\n"));
+        }
+        src.push_str(&format!("module N{i} =\n    module M = M{i}\n"));
+        for (k, u) in STAR_USES.iter().enumerate() {
+            src.push_str(&format!("    let v{k} a b = {u}\n"));
+        }
+    }
+    let c = check("op_glued_star", src);
+    let mut tally = Tally::default();
+    assert_agrees(&c, full_bcl_env(), &mut tally);
+    // FCS's own ranges: a glued `(*)` is three characters at a definition and
+    // at a use; no other spelling of `*` is.
+    let glued = |u: &NormalisedUse| &c.src[u.start..u.end] == "(*)";
+    let glued_defs = c
+        .uses
+        .iter()
+        .filter(|u| u.is_from_definition && glued(u))
+        .count();
+    let glued_uses = c
+        .uses
+        .iter()
+        .filter(|u| !u.is_from_definition && glued(u))
+        .count();
+    assert_eq!(glued_defs, 3, "FCS's glued definitions");
+    assert!(glued_uses > 0, "FCS reports no glued use");
+    // Every glued site FCS reports is one we answer at exactly that range: the
+    // in-file ones bound to the binder FCS names, FSharp.Core's to a member.
+    for u in c.uses.iter().filter(|u| glued(u)) {
+        let range = span(u.start, u.end);
+        let res = c.resolved.resolution_at(range);
+        match u.decl {
+            Some((a, b)) => assert_eq!(
+                res.and_then(|r| c.resolved.resolved_def(r))
+                    .map(|d| d.range),
+                Some(span(a, b)),
+                "the glued `(*)` at {range:?}: we bind {res:?}\n{}",
+                c.src
+            ),
+            None => assert!(
+                matches!(res, Some(Resolution::Member { .. })),
+                "the glued `(*)` at {range:?} is FSharp.Core's: we give {res:?}\n{}",
+                c.src
+            ),
+        }
+    }
+    // Measured, and exact: every in-file use of each definition spelling,
+    // and FSharp.Core's `*` wherever no definition is in scope.
+    assert_eq!(tally.in_file_agreed, 35, "{tally:?}");
+    assert_eq!(tally.assembly_agreed, 35, "{tally:?}");
 }

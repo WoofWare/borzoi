@@ -2,6 +2,7 @@
 //! checks of an assembly entity that reading one makes.
 
 use super::*;
+use crate::FcsRange as _;
 
 /// What a type variable in an annotation means where
 /// [`FileFacts::annotation_ty`] reads it.
@@ -127,7 +128,7 @@ impl<'a> FileFacts<'a> {
                 // segment — where the resolver roots both a bare and a
                 // qualified type — bridges (R2-d); anything else defers.
                 match idents.as_slice() {
-                    [.., last] => match self.resolved.resolution_at(last.text_range()) {
+                    [.., last] => match self.resolved.resolution_at(last.fcs_range()) {
                         Some(Resolution::Entity(handle)) => self.entity_annotation_ty(tys, handle),
                         Some(Resolution::Local(def)) => {
                             self.project_annotation_ty(tys, def, Vec::new())
@@ -192,7 +193,7 @@ impl<'a> FileFacts<'a> {
                     return None;
                 }
                 let last = li.idents().last()?;
-                let head = self.resolved.resolution_at(last.text_range());
+                let head = self.resolved.resolution_at(last.fcs_range());
                 if !matches!(
                     head,
                     Some(

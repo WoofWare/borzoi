@@ -54,6 +54,7 @@
 //! checks an invariant of the occurrence itself — the type arguments it
 //! supplies — rather than enumerate the declarations that could collide.
 
+use borzoi_sema::FcsRange as _;
 use std::collections::HashMap;
 
 use borzoi_cst::syntax::NodeOrToken;
@@ -347,13 +348,13 @@ impl SourceDocIndex {
     /// `token`'s position in this file's token list, or `None` for a token of
     /// another tree.
     fn index_of(&self, token: &SyntaxToken) -> Option<usize> {
-        let start = token.text_range().start();
+        let start = token.fcs_range().start();
         let from = self
             .tokens
-            .partition_point(|t| t.text_range().start() < start);
+            .partition_point(|t| t.fcs_range().start() < start);
         self.tokens[from..]
             .iter()
-            .take_while(|t| t.text_range().start() == start)
+            .take_while(|t| t.fcs_range().start() == start)
             .position(|t| t == token)
             .map(|i| from + i)
     }
@@ -504,7 +505,7 @@ pub(super) fn is_self_identifier(
     in_member_head
         && tokens
             .next()
-            .is_some_and(|t| t.kind() == SyntaxKind::IDENT_TOK && t.text_range() == range)
+            .is_some_and(|t| t.kind() == SyntaxKind::IDENT_TOK && t.fcs_range() == range)
         && tokens
             .next()
             .is_some_and(|t| t.kind() == SyntaxKind::DOT_TOK)
@@ -519,7 +520,7 @@ fn val_rule(decl: &SyntaxNode, range: TextRange) -> Result<GrabRule, SourceDocDe
             sig.children_with_tokens()
                 .filter_map(NodeOrToken::into_token)
         })
-        .any(|t| t.kind() == SyntaxKind::IDENT_TOK && t.text_range() == range);
+        .any(|t| t.kind() == SyntaxKind::IDENT_TOK && t.fcs_range() == range);
     if !names_it {
         return Err(SourceDocDecline::NoDeclaration);
     }
@@ -614,7 +615,7 @@ fn case_rule(
 fn is_case_name(case: &SyntaxNode, range: TextRange) -> bool {
     case.children_with_tokens()
         .filter_map(NodeOrToken::into_token)
-        .any(|t| t.kind() == SyntaxKind::IDENT_TOK && t.text_range() == range)
+        .any(|t| t.kind() == SyntaxKind::IDENT_TOK && t.fcs_range() == range)
 }
 
 /// The identifier `node` declares (its direct `IDENT_TOK` children, joined
@@ -805,7 +806,7 @@ fn classify_type_occurrence(root: &SyntaxNode, at: TextRange) -> Option<TypeOccu
         .collect();
     let position = idents
         .iter()
-        .position(|t| t.text_range().end() == at.end())?;
+        .position(|t| t.fcs_range().end() == at.end())?;
     let last = position + 1 == idents.len();
     match host.kind() {
         SyntaxKind::TYPE_DEFN => {
@@ -1341,7 +1342,7 @@ mod tests {
                 .root
                 .tokens_where(|k| k == SyntaxKind::LINE_COMMENT)
                 .filter_map(|t| {
-                    doc_line_text(t.text()).map(|l| (usize::from(t.text_range().start()), l.to_string()))
+                    doc_line_text(t.text()).map(|l| (usize::from(t.fcs_range().start()), l.to_string()))
                 })
                 .collect();
             for (name, doc) in docs_of(&src) {

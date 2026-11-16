@@ -4227,6 +4227,58 @@ fn end_index_classifier(
 }
 
 impl ResolvedFile {
+    /// No range this file records splits a glued `(*)`: each holds the whole
+    /// three-character name FCS ranges it over, or none of it. A range that
+    /// splits one was read off the bare `*` token where every other reading of
+    /// it is FCS's ([`FcsRange`](crate::FcsRange)), so its binder and its uses
+    /// would be keyed apart. `clippy.toml` bans the raw token range; this
+    /// checks what the ban cannot see, a range built from offsets.
+    ///
+    /// Debug-only: every test in the workspace and every corpus sweep runs it.
+    pub(super) fn debug_assert_no_range_splits_a_glued_star(
+        &self,
+        root: &borzoi_cst::syntax::SyntaxNode,
+    ) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        use crate::FcsRange as _;
+        use borzoi_cst::syntax::SyntaxKind;
+        let glued: Vec<TextRange> = root
+            .tokens_where(|k| k == SyntaxKind::IDENT_TOK)
+            .filter(|t| t.text() == "*")
+            .map(|t| t.fcs_range())
+            .filter(|r| r.len() == TextSize::from(3))
+            .collect();
+        if glued.is_empty() {
+            return;
+        }
+        let ranges = self
+            .resolutions
+            .keys()
+            .chain(self.attribute_resolutions.keys())
+            .chain(self.decline_sites.keys())
+            .chain(self.field_labels.keys())
+            .chain(&self.opaque_binders)
+            .chain(&self.or_pattern_aliases)
+            .copied()
+            .chain(
+                self.surface
+                    .defs
+                    .iter()
+                    .chain(self.local_defs.iter())
+                    .map(|d| d.range),
+            );
+        for range in ranges {
+            for g in &glued {
+                debug_assert!(
+                    range.intersect(*g).is_none_or(|i| i.is_empty()) || range.contains_range(*g),
+                    "{range:?} splits the glued `(*)` at {g:?}"
+                );
+            }
+        }
+    }
+
     /// The [`ResolvedFile`] a `.fsi` **signature file** occupies a Compile
     /// slot with (`docs/fsi-signature-restriction-plan.md`): no resolutions
     /// and no exports of its own — it owns no `ItemId` range (`item_base` is

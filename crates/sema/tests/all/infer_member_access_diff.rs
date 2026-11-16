@@ -20,6 +20,7 @@
 //! poison payoffs (an unwoken member access, or a method-argument parameter use,
 //! must block generalisation).
 
+use borzoi_sema::FcsRange as _;
 use std::collections::HashMap;
 
 use crate::common::{
@@ -664,7 +665,7 @@ fn ident_range(src: &str, name: &str) -> TextRange {
         .filter_map(|el| el.into_token())
         .find(|t| t.kind() == SyntaxKind::IDENT_TOK && t.text() == name)
         .unwrap_or_else(|| panic!("no IDENT_TOK {name:?} in {src:?}"))
-        .text_range()
+        .fcs_range()
 }
 
 #[test]
@@ -2246,7 +2247,7 @@ fn receiver_range(src: &str) -> TextRange {
             && t.text() == "s"
             && toks.get(i + 1).map(|n| n.kind()) == Some(SyntaxKind::DOT_TOK)
         {
-            return t.text_range();
+            return t.fcs_range();
         }
     }
     panic!("no receiver `s` (an `s` followed by `.`) in {src:?}");
@@ -2268,7 +2269,7 @@ fn arg_receiver_range(src: &str, name: &str) -> TextRange {
             (t.kind() == SyntaxKind::IDENT_TOK
                 && t.text() == name
                 && toks.get(i + 1).map(|n| n.kind()) == Some(SyntaxKind::DOT_TOK))
-            .then(|| t.text_range())
+            .then(|| t.fcs_range())
         })
         .unwrap_or_else(|| panic!("no `{name}.` in {src:?}"))
 }

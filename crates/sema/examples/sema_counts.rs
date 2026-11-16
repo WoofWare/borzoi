@@ -30,6 +30,7 @@
 //!   `tools/fcs-dump` puts one beside it). `System.Runtime.dll` and
 //!   `netstandard.dll` come from the reference pack under `DOTNET_ROOT`.
 
+use borzoi_sema::FcsRange as _;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -227,7 +228,7 @@ fn main() {
             .tokens_where(|kind| kind == SyntaxKind::IDENT_TOK)
         {
             ident_tokens += 1;
-            let range = token.text_range();
+            let range = token.fcs_range();
             spellings.insert(&text[usize::from(range.start())..usize::from(range.end())]);
         }
     }

@@ -2,6 +2,7 @@
 //! before its walk.
 
 use super::*;
+use crate::FcsRange as _;
 
 /// The immutable facts of one file's inference: its resolution, the env, what
 /// the earlier files published, and what the file declares. [`FileFacts::build`]
@@ -200,7 +201,7 @@ impl<'a> FileFacts<'a> {
                 let (Some(first), Some(last)) = (toks.first(), toks.last()) else {
                     return true;
                 };
-                let range = TextRange::new(first.text_range().start(), last.text_range().end());
+                let range = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
                 self.resolved.attribute_may_be(range, self.env, &is_target)
             })
     }
@@ -253,7 +254,7 @@ impl<'a> FileFacts<'a> {
                     out.extend(
                         pat.syntax()
                             .tokens_where(|k| k == SyntaxKind::IDENT_TOK)
-                            .map(|t| t.text_range()),
+                            .map(|t| t.fcs_range()),
                     );
                 }
             }

@@ -38,6 +38,7 @@
 //! perturbations ([`SAMPLE`]); [`full_sweep`] (ignored, a pre-push gate) runs
 //! them all.
 
+use borzoi_sema::FcsRange as _;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -172,8 +173,8 @@ fn significant_tokens(source: &str) -> Vec<(TextRange, String)> {
         .root
         .descendants_with_tokens()
         .filter_map(|el| el.into_token())
-        .filter(|t| !t.kind().is_trivia() && !t.text_range().is_empty())
-        .map(|t| (t.text_range(), t.text().to_string()))
+        .filter(|t| !t.kind().is_trivia() && !t.fcs_range().is_empty())
+        .map(|t| (t.fcs_range(), t.text().to_string()))
         .collect()
 }
 

@@ -4,7 +4,7 @@ use borzoi_cst::parser::{Parse, parse, parse_sig};
 use borzoi_cst::syntax::{
     AstNode, Binding, ExceptionDefnDecl, Expr, HashDirectiveDecl, ImplFile, LetDecl, MemberDefn,
     ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, NestedModuleDecl, Pat, SigDecl, SigFile,
-    SyntaxKind, SyntaxNode, SyntaxToken, TypeDefn, TypeDefnRepr, TypeDefnsDecl,
+    SyntaxKind, SyntaxNode, SyntaxToken, TypeDefn, TypeDefnRepr, TypeDefnsDecl, fcs_ident_range,
 };
 use serde_json::Value;
 use tempfile::NamedTempFile;
@@ -1063,10 +1063,11 @@ pub(super) fn is_light_hash_directive(node: &SyntaxNode) -> bool {
 // Below the declaration layer, the facts are the ranges consumers read: the
 // *names* that are definition sites. Each type definition's name in a
 // `type … and …` group, each union case's, record field's and `member`'s name,
-// and each `let` (or `extern`) binding's binder. Ours is the range of the token
-// the facade returns (`UnionCase::ident`, `RecordFieldDecl::ident`, the last
-// segment of a binding's head pattern, `ActivePatName::name_range` for an
-// active-pattern binder); FCS's is the `Ident`'s `idRange`. A wrong token with
+// and each `let` (or `extern`) binding's binder. Ours is the range sema and the
+// LSP report: `fcs_ident_range` of the token the facade returns
+// (`UnionCase::ident`, `RecordFieldDecl::ident`, the last segment of a
+// binding's head pattern), or `ActivePatName::name_range` for an
+// active-pattern binder; FCS's is the `Ident`'s `idRange`. A wrong token with
 // the right text (the right-hand `x` of `let x = x` as the binder, say)
 // normalises identically and differs only here.
 //
@@ -1075,7 +1076,7 @@ pub(super) fn is_light_hash_directive(node: &SyntaxNode) -> bool {
 // has no fields and not when it has some).
 
 fn token_range(token: &SyntaxToken) -> Range<usize> {
-    let r = token.text_range();
+    let r = fcs_ident_range(token);
     usize::from(r.start())..usize::from(r.end())
 }
 
@@ -1178,11 +1179,11 @@ fn cst_binder_range(binding: &Binding) -> Option<Range<usize>> {
     let range = match binding.pat()? {
         Pat::Named(named) => match named.active_pat_name() {
             Some(active) => active.name_range()?,
-            None => named.ident()?.text_range(),
+            None => fcs_ident_range(&named.ident()?),
         },
         Pat::LongIdent(head) => match head.active_pat_name() {
             Some(active) => active.name_range()?,
-            None => head.head()?.idents().last()?.text_range(),
+            None => fcs_ident_range(&head.head()?.idents().last()?),
         },
         _ => return None,
     };

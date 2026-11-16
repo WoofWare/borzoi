@@ -40,6 +40,7 @@ use borzoi_cst::syntax::{
     AstNode, DotGetExpr, Expr, ImplFile, LongIdentExpr, ModuleOrNamespace, NestedModuleDecl,
     SyntaxKind, SyntaxNode, SyntaxToken,
 };
+use borzoi_sema::FcsRange as _;
 use borzoi_sema::{
     AssemblyEnv, InferredFile, InferredProject, Resolution, ResolvedFile, Ty, TyKind,
 };
@@ -298,11 +299,11 @@ fn receiver_type(
     inferred: &InferredFile,
     project: &InferredProject,
 ) -> Option<Ty> {
-    if let Some(ty) = inferred.receiver_type_at(access.dot.text_range()) {
+    if let Some(ty) = inferred.receiver_type_at(access.dot.fcs_range()) {
         return Some(*ty);
     }
     let head = access.binder.as_ref()?;
-    let res = file.resolution_at(head.text_range())?;
+    let res = file.resolution_at(head.fcs_range())?;
     match (file.resolved_def_id(res), res) {
         (Some(def), _) if file.def(def).range.end() <= group_start(head) => {
             inferred.def_type(def).copied()
