@@ -6272,24 +6272,9 @@ let private scriptOptionsBatch () =
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
-/// Project-aware sibling of `dumpUses`: type-check an ordered set of source
-/// files as a *single project* (not isolated scripts), so name resolution sees
-/// cross-file declarations. Reads absolute source paths from stdin, one per
-/// line, in Compile order (F# cross-file order is load-bearing). Emits, per
-/// file, the same per-use shape as `uses` — but a use's `DeclRange.File` now
-/// faithfully names the *declaring* file, which may differ from the use's file.
-///
-/// The reference set (FSharp.Core + the runtime) is harvested the way the
-/// single-file `uses` path does — via script resolution on the first file —
-/// then those `-r:` switches are reused for a real multi-file project so the
-/// source-file set is exactly the Compile-ordered list given on stdin.
-/// Shared core of the `uses-project` oracle: type-check `paths` (Compile order)
-/// as ONE project against the given `checker`, folding `refArgs` / `defineArgs`
-/// / `langVersionArgs` into the compiler switches, and return the per-file
-/// `{ Path, Diagnostics, Uses }` records. Fails hard on a reference-resolution
-/// error or a per-file abort — the one-shot [`dumpUsesProject`] lets that exit
-/// the process nonzero; the resident [`usesProjectBatchCore`] catches it into a
-/// `BatchError` line so one bad project cannot wedge the resident child.
+/// The options the `uses-project` oracle checks `paths` (Compile order) under
+/// as ONE project, folding `refArgs` / `defineArgs` / `langVersionArgs` into
+/// the compiler switches. Fails hard on a reference-resolution error.
 ///
 /// The switch handling (verbatim from the pre-refactor one-shot): keep only
 /// compiler switches from the script options (the `-r:` references and flags such
@@ -6311,14 +6296,18 @@ let private scriptOptionsBatch () =
 /// `System.IO.FileSystem`, and the differential recorded a divergence for a
 /// resolution both sides had right. A caller whose refs merely *supplement* the
 /// SDK's (the fixture harnesses) must leave it off.
-let private usesProjectFiles
+///
+/// Kept apart from [`checkProjectFiles`] so the project-graph oracle
+/// ([`usesProjectGraphBatchCore`]) can add an output name and project
+/// references to the options before checking.
+let private projectOptionsOf
     (checker: FSharpChecker)
     (paths: string[])
     (refArgs: string[])
     (exclusiveRefs: bool)
     (defineArgs: string[])
     (langVersionArgs: string[])
-    =
+    : FSharpProjectOptions =
     let scriptOpts, scriptDiags =
         projectScriptOptions
             checker
@@ -6358,15 +6347,17 @@ let private usesProjectFiles
                     [||]
             Array.concat [ switches; framework; refArgs; defineArgs; langVersionArgs ]
 
-    let projOpts =
-        { scriptOpts with
-            ProjectFileName =
-                let dir = Option.ofObj (Path.GetDirectoryName(paths.[0])) |> Option.defaultValue "."
-                Path.Combine(dir, "fcs-dump-uses-project.fsproj")
-            SourceFiles = paths
-            OtherOptions = otherOptions
-            UseScriptResolutionRules = false }
+    { scriptOpts with
+        ProjectFileName =
+            let dir = Option.ofObj (Path.GetDirectoryName(paths.[0])) |> Option.defaultValue "."
+            Path.Combine(dir, "fcs-dump-uses-project.fsproj")
+        SourceFiles = paths
+        OtherOptions = otherOptions
+        UseScriptResolutionRules = false }
 
+/// Check each of `paths` in `projOpts` and project its `{ Path, Diagnostics,
+/// Uses }` record: [`usesProjectFiles`]'s second half.
+let private checkProjectFiles (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (paths: string[]) =
     paths
     |> Array.map (fun absolute ->
         let sourceText = SourceText.ofString (File.ReadAllText(absolute))
@@ -6397,6 +6388,34 @@ let private usesProjectFiles
            Diagnostics = diagnostics
            Uses = uses |})
 
+/// Shared core of the `uses-project` oracle: type-check `paths` (Compile order)
+/// as ONE project under [`projectOptionsOf`] and return the per-file
+/// `{ Path, Diagnostics, Uses }` records. Fails hard on a reference-resolution
+/// error or a per-file abort — the one-shot [`dumpUsesProject`] lets that exit
+/// the process nonzero; the resident [`usesProjectBatchCore`] catches it into a
+/// `BatchError` line so one bad project cannot wedge the resident child.
+let private usesProjectFiles
+    (checker: FSharpChecker)
+    (paths: string[])
+    (refArgs: string[])
+    (exclusiveRefs: bool)
+    (defineArgs: string[])
+    (langVersionArgs: string[])
+    =
+    let projOpts = projectOptionsOf checker paths refArgs exclusiveRefs defineArgs langVersionArgs
+    checkProjectFiles checker projOpts paths
+
+/// Project-aware sibling of `dumpUses`: type-check an ordered set of source
+/// files as a *single project* (not isolated scripts), so name resolution sees
+/// cross-file declarations. Reads absolute source paths from stdin, one per
+/// line, in Compile order (F# cross-file order is load-bearing). Emits, per
+/// file, the same per-use shape as `uses` — but a use's `DeclRange.File` now
+/// faithfully names the *declaring* file, which may differ from the use's file.
+///
+/// The reference set (FSharp.Core + the runtime) is harvested the way the
+/// single-file `uses` path does — via script resolution on the first file —
+/// then those `-r:` switches are reused for a real multi-file project so the
+/// source-file set is exactly the Compile-ordered list given on stdin.
 let private dumpUsesProject () =
     let paths =
         let acc = ResizeArray<string>()
@@ -6501,6 +6520,225 @@ let private usesProjectBatch () =
         System.Threading.Thread(
             (fun () ->
                 try usesProjectBatchCore ()
+                with ex -> captured <- Some ex),
+            512 * 1024 * 1024)
+    worker.Start()
+    worker.Join()
+    match captured with
+    | Some ex -> raise ex
+    | None -> ()
+
+/// One project of a `uses-project-graph-batch` request.
+type private GraphProject =
+    { Id: string
+      AssemblyName: string
+      Paths: string[]
+      RefArgs: string[]
+      ExclusiveRefs: bool
+      DefineArgs: string[]
+      LangVersionArgs: string[]
+      ProjectRefs: string[] }
+
+/// Whether `s` is a non-empty run of ASCII letters, digits, `.`, `_` and `-`:
+/// what a graph request's project ids and assembly names must be, so that
+/// either can name a file without escaping and an assembly name is a simple
+/// name rather than a path or a display name.
+let private isPlainName (s: string) =
+    s <> ""
+    && s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '.' || c = '_' || c = '-')
+
+/// Read one project object of a graph request.
+let private readGraphProject (e: JsonElement) : GraphProject =
+    let str (name: string) =
+        match e.TryGetProperty(name) with
+        | true, v when v.ValueKind = JsonValueKind.String -> Option.ofObj (v.GetString())
+        | _ -> None
+    let strArray (name: string) : string[] =
+        match e.TryGetProperty(name) with
+        | true, arr when arr.ValueKind = JsonValueKind.Array ->
+            arr.EnumerateArray()
+            |> Seq.map (fun x ->
+                match Option.ofObj (x.GetString()) with
+                | Some s -> s
+                | None -> failwithf "%s: expected an array of strings" name)
+            |> Seq.toArray
+        | true, v when v.ValueKind = JsonValueKind.Null -> [||]
+        | true, _ -> failwithf "%s: expected an array" name
+        | _ -> [||]
+    let id =
+        match str "id" with
+        | Some id when isPlainName id -> id
+        | other -> failwithf "project id must be a plain name, got %A" other
+    // Required, never derived: FCS names an assembly after its `-o:`, and
+    // without one after the project's last source file, so a defaulted name
+    // would silently break every `InternalsVisibleTo` match the graph grades.
+    let assemblyName =
+        match str "assemblyName" with
+        | Some n when isPlainName n -> n
+        | other -> failwithf "project %s: assemblyName must be a plain simple name, got %A" id other
+    // FCS's background compiler drops a project reference whose output is
+    // named like FSharp.Core and needs the DLL on disk instead
+    // (`BackgroundCompiler.getProjectReferences`), so such a graph would not
+    // check what it says.
+    if String.Equals(assemblyName, "FSharp.Core", StringComparison.OrdinalIgnoreCase) then
+        failwithf "project %s: FCS does not reference a project named FSharp.Core from source" id
+    let paths = strArray "paths" |> Array.map Path.GetFullPath
+    if Array.isEmpty paths then
+        failwithf "project %s has no paths" id
+    { Id = id
+      AssemblyName = assemblyName
+      Paths = paths
+      RefArgs = strArray "refs" |> Array.toList |> extraRefArgsOf
+      ExclusiveRefs =
+        (match e.TryGetProperty("exclusiveRefs") with
+         | true, v -> v.ValueKind = JsonValueKind.True
+         | _ -> false)
+      DefineArgs = strArray "defines" |> Array.map (fun d -> "--define:" + d.Trim())
+      LangVersionArgs = pinnedLangVersionArgs (str "langversion")
+      ProjectRefs = strArray "projectRefs" }
+
+/// The output path a graph project is named by: its `-o:`, and the string its
+/// dependants' `-r:` and `FSharpReference` carry. It is never written, and
+/// nothing reads it: FCS resolves a `-r:` that names a project reference
+/// without touching the disk (`TcConfig.TryResolveLibWithDirectories`), so
+/// the directory need not exist. It is per project id, beside the project's
+/// first source file, so two projects of one request never share it.
+let private graphOutputPath (p: GraphProject) : string =
+    let dir = Option.ofObj (Path.GetDirectoryName p.Paths.[0]) |> Option.defaultValue "."
+    Path.Combine(dir, "fcs-dump-graph-out", p.Id, p.AssemblyName + ".dll")
+
+/// `uses-project-graph-batch`: check one project of a project *graph*, each of
+/// its F# project references passed as `FSharpReferencedProject.FSharpReference`,
+/// which is how an IDE references an F# project: FCS type-checks the
+/// referenced project's sources and reads its signature from memory, so no
+/// referenced project is ever built.
+///
+/// One JSON request per stdin line:
+///
+/// ```text
+/// { "projects": [ { "id", "assemblyName", "paths": [<abs .fs/.fsi>…],
+///                   "refs": [<abs .dll>…], "defines": [<sym>…],
+///                   "langversion": <token|null>, "exclusiveRefs": <bool>,
+///                   "projectRefs": [<id>…] } … ],
+///   "check": <id> }
+/// ```
+///
+/// Each project is checked as [`usesProjectFiles`] checks one, with two
+/// additions: `-o:<graphOutputPath>`, which names its assembly
+/// `assemblyName` (FCS otherwise names it after its last source file, and no
+/// `InternalsVisibleTo` would ever match), and, per entry of `projectRefs`, a
+/// `-r:` and an `FSharpReference` carrying that project's output path. A
+/// project's options are built once per request, so a project several others
+/// reference is one referenced project.
+///
+/// The response is the `uses-project` payload for `check`'s files, plus
+/// `Referenced`: every project `check` reaches through `projectRefs`, in
+/// dependency order, with its output path and its whole-project diagnostics
+/// (FCS exports a recovered signature for a project with errors, so a caller
+/// grading against it needs to know). A malformed request, an unknown or
+/// cyclic reference, or a duplicate id or assembly name is a `BatchError`.
+let private usesProjectGraphBatchCore () =
+    let checker = FSharpChecker.Create()
+    let compact = buildOptionsCompact ()
+
+    let respond (line: string) : string =
+        try
+            use doc = JsonDocument.Parse(line: string)
+            let root = doc.RootElement
+            let projects =
+                match root.TryGetProperty("projects") with
+                | true, arr when arr.ValueKind = JsonValueKind.Array ->
+                    arr.EnumerateArray() |> Seq.map readGraphProject |> Seq.toArray
+                | _ -> failwith "no projects in request"
+            let byId = System.Collections.Generic.Dictionary<string, GraphProject>()
+            for p in projects do
+                if not (byId.TryAdd(p.Id, p)) then
+                    failwithf "duplicate project id %s" p.Id
+            projects
+            |> Array.countBy (fun p -> p.AssemblyName.ToLowerInvariant())
+            |> Array.tryFind (fun (_, n) -> n > 1)
+            |> Option.iter (fun (name, _) -> failwithf "two projects are named %s" name)
+            let check =
+                match root.TryGetProperty("check") with
+                | true, v when v.ValueKind = JsonValueKind.String ->
+                    match Option.ofObj (v.GetString()) with
+                    | Some id when byId.ContainsKey id -> byId.[id]
+                    | other -> failwithf "check names no project of the request: %A" other
+                | _ -> failwith "no check in request"
+
+            // Options per project, built depth first; `order` is the closure
+            // in dependency order, `inProgress` catches a cycle.
+            let built = System.Collections.Generic.Dictionary<string, FSharpProjectOptions>()
+            let order = ResizeArray<GraphProject>()
+            let inProgress = System.Collections.Generic.HashSet<string>()
+            let rec optionsOf (p: GraphProject) : FSharpProjectOptions =
+                match built.TryGetValue p.Id with
+                | true, opts -> opts
+                | _ ->
+                    if not (inProgress.Add p.Id) then
+                        failwithf "project reference cycle through %s" p.Id
+                    let referenced =
+                        p.ProjectRefs
+                        |> Array.distinct
+                        |> Array.map (fun id ->
+                            match byId.TryGetValue id with
+                            | true, r -> graphOutputPath r, optionsOf r
+                            | _ -> failwithf "project %s references unknown project %s" p.Id id)
+                    let baseOpts =
+                        projectOptionsOf checker p.Paths p.RefArgs p.ExclusiveRefs p.DefineArgs p.LangVersionArgs
+                    let dir = Option.ofObj (Path.GetDirectoryName p.Paths.[0]) |> Option.defaultValue "."
+                    let isOutput (o: string) =
+                        o.StartsWith "-o:" || o.StartsWith "--out:" || o.StartsWith "/out:"
+                    let opts =
+                        { baseOpts with
+                            ProjectFileName = Path.Combine(dir, "fcs-dump-" + p.Id + ".fsproj")
+                            OtherOptions =
+                                Array.concat
+                                    [ baseOpts.OtherOptions |> Array.filter (isOutput >> not)
+                                      [| "-o:" + graphOutputPath p |]
+                                      referenced |> Array.map (fun (out, _) -> "-r:" + out) ]
+                            ReferencedProjects =
+                                referenced
+                                |> Array.map (fun (out, opts) -> FSharpReferencedProject.FSharpReference(out, opts)) }
+                    inProgress.Remove p.Id |> ignore
+                    built.[p.Id] <- opts
+                    order.Add p
+                    opts
+
+            let checkOpts = optionsOf check
+            let files = checkProjectFiles checker checkOpts check.Paths
+            let referenced =
+                order
+                |> Seq.filter (fun p -> p.Id <> check.Id)
+                |> Seq.map (fun p ->
+                    let results =
+                        checker.ParseAndCheckProject(built.[p.Id], userOpName = "fcs-dump-uses-project-graph")
+                        |> Async.RunSynchronously
+                    {| Id = p.Id
+                       AssemblyName = p.AssemblyName
+                       OutputPath = graphOutputPath p
+                       Diagnostics = results.Diagnostics |> Array.map projectDiagnostic |})
+                |> Seq.toArray
+            JsonSerializer.Serialize({| Files = files; Referenced = referenced |}, compact)
+        with ex ->
+            JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
+
+    let mutable line = Console.In.ReadLine()
+    while not (isNull line) do
+        let trimmed = (Option.ofObj line |> Option.defaultValue "").Trim()
+        if trimmed <> "" then
+            Console.Out.WriteLine(respond trimmed)
+            Console.Out.Flush()
+        line <- Console.In.ReadLine()
+
+/// [`usesProjectGraphBatchCore`] on a large-stack thread, as
+/// [`usesProjectBatch`] runs its core.
+let private usesProjectGraphBatch () =
+    let mutable captured: exn option = None
+    let worker =
+        System.Threading.Thread(
+            (fun () ->
+                try usesProjectGraphBatchCore ()
                 with ex -> captured <- Some ex),
             512 * 1024 * 1024)
     worker.Start()
@@ -8575,6 +8813,7 @@ let private usage () =
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
     eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files} response/line"
+    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,assemblyName,paths,refs,defines,langversion,exclusiveRefs,projectRefs}],check}, F# project refs as FSharpReference; one compact {Files,Referenced} response/line"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
     eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files} response/line"
     2
@@ -8676,6 +8915,9 @@ let main argv =
         0
     | [| "uses-project-batch" |] ->
         usesProjectBatch ()
+        0
+    | [| "uses-project-graph-batch" |] ->
+        usesProjectGraphBatch ()
         0
     | [| "script-options-batch" |] ->
         scriptOptionsBatch ()

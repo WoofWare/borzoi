@@ -71,16 +71,20 @@ run_step() { # name
       # No other job tests this crate. Its FCS-driven tests are the runner's
       # own fixtures: small generated projects shaped to break its grading
       # rather than the server (sibling projects sharing a file, a byte-order
-      # mark on line 1, the attribute and qualifier matrices). They are
-      # `#[ignore]`d only because they drive FCS, so every ignored test runs
-      # except the two that take a project from the environment:
+      # mark on line 1, the attribute and qualifier matrices), and the
+      # project-graph oracle held to itself (a reference from source against
+      # the same reference built fresh, on generated two-project graphs). They
+      # are `#[ignore]`d only because they drive FCS, so every ignored test
+      # runs except the three that take projects from the environment:
       # `project_corpus_resolution_diff` is the `resolution` step in a debug
-      # build (and would read BORZOI_PROJECT_LIST), and
-      # `explain_token_at_position` is a hand-run trace.
+      # build (and would read BORZOI_PROJECT_LIST), `explain_token_at_position`
+      # is a hand-run trace, and `not_built_census` is a hand-run measurement
+      # (`tools/not-built-census.sh`).
       nix develop --command cargo test -p borzoi-corpus-diff --features surface-reference -- \
         --include-ignored \
         --skip project_corpus_resolution_diff \
-        --skip explain_token_at_position
+        --skip explain_token_at_position \
+        --skip not_built_census
       ;;
     assembly-projection)
       # This sweep wants a populated package cache rather than a fixture, and

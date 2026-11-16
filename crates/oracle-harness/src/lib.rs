@@ -19,6 +19,8 @@
 //!
 //! [`nuget_oracle`] is the one oracle driver kept here rather than beside its
 //! crate's tests, because more than one crate grades against it.
+//! [`project_graph`] is the protocol of `fcs-dump`'s project-graph oracle and
+//! the multi-project fixture layout its differentials share.
 //!
 //! [`xml_pump`] is not about oracles either: it builds the deeply nested
 //! documents that hold every reader of untrusted XML to bounded recursion, for
@@ -43,6 +45,7 @@ pub mod msbuild_oracle;
 pub mod nuget_oracle;
 pub mod panic_silence;
 pub mod par_map;
+pub mod project_graph;
 pub mod repetition_shapes;
 pub mod restore_globals;
 pub mod stack_probe;
