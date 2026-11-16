@@ -817,193 +817,217 @@ fn whitespace_variant_sweep_fixed_seed() {
 /// pinned through the `project` op. A condition behind a false
 /// `<PropertyGroup>`, `<ItemDefinitionGroup>` or `<ImportGroup>`, an unchosen
 /// `<When>`, or a `<Target>` is never evaluated, syntax errors included, nor is
-/// one on a write of a global property. An item's condition is evaluated under
-/// a false `<ItemGroup>`, and an `Include` item's metadata's under a false item
-/// or group, type errors included; an `Update` item's metadata's only where the
-/// update applies. `evaluator/rejection.rs` judges conditions by these facts.
+/// one on a write of a global property. In design-time evaluation (the
+/// editable `Project`), an item's condition is evaluated under a false
+/// `<ItemGroup>`, and an `Include` item's metadata's under a false item or
+/// group, type errors included; a build (`ProjectInstance`) evaluates neither,
+/// so it accepts every such project. An `Update` item's metadata's condition is
+/// evaluated only where the update applies. `evaluator/rejection.rs` judges
+/// conditions by design-time evaluation's facts, which reject every project a
+/// build rejects.
 #[test]
 fn where_msbuild_evaluates_a_condition() {
+    /// Whether MSBuild rejects a document, in each of its two evaluations.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Rejects {
+        /// Neither evaluation reads an illegal condition.
+        Neither,
+        /// Both do.
+        Both,
+        /// Only design-time evaluation does: it evaluates an `<ItemGroup>`'s
+        /// items whatever their conditions hold, and a build does not.
+        DesignTimeOnly,
+    }
+    fn rejects(oracle: &mut Oracle, xml: &str, globals: &[(String, String)]) -> Rejects {
+        let both = oracle.project_both(xml, &["R".to_string()], None, globals);
+        match (both.design_time.is_none(), both.build.is_none()) {
+            (false, _) => Rejects::Neither,
+            (true, true) => Rejects::Both,
+            (true, false) => Rejects::DesignTimeOnly,
+        }
+    }
     let mut oracle = Oracle::spawn();
-    let names = ["R".to_string()];
     for (body, rejected) in [
         (
             r#"<PropertyGroup><R Condition="tr ue">x</R></PropertyGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<PropertyGroup><R Condition="1 &lt; abc">x</R></PropertyGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<PropertyGroup><R Condition="false and 1 &lt; abc">x</R></PropertyGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<PropertyGroup><R Condition="false and (tr ue)">x</R></PropertyGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<PropertyGroup><R Condition="false">x</R><R Condition="tr ue">y</R></PropertyGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<PropertyGroup Condition="tr ue"><R>x</R></PropertyGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<PropertyGroup Condition="false"><R Condition="tr ue">x</R></PropertyGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<PropertyGroup Condition="false"><R Condition="'abc">x</R></PropertyGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<PropertyGroup Condition="false"><R Condition="1 &lt; abc">x</R></PropertyGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<ItemGroup><I Include="x" Condition="tr ue"/></ItemGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<ItemGroup Condition="false"><I Include="x" Condition="tr ue"/></ItemGroup>"#,
-            true,
+            Rejects::DesignTimeOnly,
         ),
         (
             r#"<ItemGroup Condition="false"><I Include="x" Condition="1 &lt; abc"/></ItemGroup>"#,
-            true,
+            Rejects::DesignTimeOnly,
         ),
         (
             r#"<ItemGroup Condition="false"><I Include="x" Condition="foo"/></ItemGroup>"#,
-            true,
+            Rejects::DesignTimeOnly,
         ),
         (
             r#"<ItemGroup Condition="false and 1 &lt; abc"><I Include="x"/></ItemGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<ItemGroup><I Include="x" Condition="false"><M Condition="1 &lt; abc">m</M></I></ItemGroup>"#,
-            true,
+            Rejects::DesignTimeOnly,
         ),
         // Metadata that reads item metadata is evaluated item by item: not at
         // all for an `Include` that names no item.
         (
             r#"<ItemGroup><I Include="$(Missing)"><O>%(Filename)</O><M Condition="tr ue">m</M></I></ItemGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<ItemGroup><I Include="x"><O>%(Filename)</O><M Condition="tr ue">m</M></I></ItemGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<ItemGroup><I Include="x"/><I Remove="x" Condition="tr ue"/></ItemGroup>"#,
-            true,
+            Rejects::Both,
         ),
-        (r#"<ItemDefinitionGroup Condition="tr ue"/>"#, true),
+        (r#"<ItemDefinitionGroup Condition="tr ue"/>"#, Rejects::Both),
         (
             r#"<ItemDefinitionGroup Condition="false"><I><M Condition="tr ue">m</M></I></ItemDefinitionGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<ItemDefinitionGroup><I Condition="false"><M Condition="tr ue">m</M></I></ItemDefinitionGroup>"#,
-            false,
+            Rejects::Neither,
         ),
-        (r#"<Import Project="nope.props" Condition="tr ue"/>"#, true),
+        (
+            r#"<Import Project="nope.props" Condition="tr ue"/>"#,
+            Rejects::Both,
+        ),
         (
             r#"<ImportGroup Condition="false"><Import Project="nope.props" Condition="tr ue"/></ImportGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<Choose><When Condition="tr ue"><PropertyGroup><R>x</R></PropertyGroup></When></Choose>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<Choose><When Condition="true"/><When Condition="tr ue"/></Choose>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<Choose><When Condition="false"><ItemGroup><I Include="x" Condition="tr ue"/></ItemGroup></When></Choose>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<Choose><When Condition="true"/><Otherwise><ItemGroup><I Include="x" Condition="tr ue"/></ItemGroup></Otherwise></Choose>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<UsingTask TaskName="X" AssemblyFile="y.dll" Condition="tr ue"/>"#,
-            true,
+            Rejects::Both,
         ),
-        (r#"<Target Name="T" Condition="tr ue"/>"#, false),
+        (r#"<Target Name="T" Condition="tr ue"/>"#, Rejects::Neither),
         (
             r#"<Target Name="T"><PropertyGroup><R Condition="tr ue">x</R></PropertyGroup></Target>"#,
-            false,
+            Rejects::Neither,
         ),
         // An `Include` item's metadata, whatever its group or item holds, and
         // whether or not the include names anything; an `Update`'s only
         // where the update applies.
         (
             r#"<ItemGroup Condition="false"><I Include="x"><M Condition="tr ue">m</M></I></ItemGroup>"#,
-            true,
+            Rejects::DesignTimeOnly,
         ),
         (
             r#"<ItemGroup><I Include="nomatch/*.cs"><M Condition="1 &lt; abc">m</M></I></ItemGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<ItemGroup><I Include="$(Nothing)"><M Condition="tr ue">m</M></I></ItemGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<ItemGroup><I Include="x" Exclude="x"><M Condition="tr ue">m</M></I></ItemGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<ItemGroup><I Update="nothere"><M Condition="tr ue">m</M></I></ItemGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<ItemGroup><I Include="x"/><I Update="x"><M Condition="tr ue">m</M></I></ItemGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<ItemGroup><I Include="x"/><I Update="x" Condition="false"><M Condition="tr ue">m</M></I></ItemGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<ItemGroup Condition="false"><I Update="x" Condition="1 &lt; abc"/></ItemGroup>"#,
-            true,
+            Rejects::DesignTimeOnly,
         ),
         (
             r#"<ItemDefinitionGroup><I><M Condition="1 &lt; abc">m</M></I></ItemDefinitionGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<ItemDefinitionGroup><I Condition="tr ue"/></ItemDefinitionGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<UsingTask TaskName="X" AssemblyFile="y.dll" Condition="1 &lt; abc"/>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<Choose><When Condition="false"/><Otherwise><ItemGroup><I Include="x" Condition="tr ue"/></ItemGroup></Otherwise></Choose>"#,
-            true,
+            Rejects::Both,
         ),
         // An item list is illegal in a property's condition, even behind a
         // false `and`, and legal in an item's.
         (
             r#"<PropertyGroup><R Condition="false and '@(I)' == ''">x</R></PropertyGroup>"#,
-            true,
+            Rejects::Both,
         ),
         (
             r#"<ItemGroup><I Include="x" Condition="false and '@(I)' == ''"/></ItemGroup>"#,
-            false,
+            Rejects::Neither,
         ),
     ] {
         let xml = format!("<Project>{body}</Project>");
-        let theirs = oracle.project(&xml, &names, None, &[]);
-        assert_eq!(theirs.is_none(), rejected, "{xml}");
+        assert_eq!(rejects(&mut oracle, &xml, &[]), rejected, "{xml}");
     }
     // A write of a global property is discarded with its condition
     // unevaluated; its group's condition is still evaluated.
@@ -1011,16 +1035,15 @@ fn where_msbuild_evaluates_a_condition() {
     for (body, rejected) in [
         (
             r#"<PropertyGroup><G Condition="tr ue">x</G></PropertyGroup>"#,
-            false,
+            Rejects::Neither,
         ),
         (
             r#"<PropertyGroup Condition="tr ue"><G>x</G></PropertyGroup>"#,
-            true,
+            Rejects::Both,
         ),
     ] {
         let xml = format!("<Project>{body}</Project>");
-        let theirs = oracle.project(&xml, &names, None, &globals);
-        assert_eq!(theirs.is_none(), rejected, "{xml}");
+        assert_eq!(rejects(&mut oracle, &xml, &globals), rejected, "{xml}");
     }
 }
 /// Fresh-seed twin of [`whitespace_variant_sweep_fixed_seed`].

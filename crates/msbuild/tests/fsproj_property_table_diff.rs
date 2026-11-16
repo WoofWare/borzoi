@@ -1687,6 +1687,14 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
 /// ([`RejectionCertainty::Certain`]) must be MSBuild's. Where nothing the walk
 /// cannot decide stands between the condition and a position MSBuild never
 /// evaluates, the walk must not withdraw either.
+///
+/// "MSBuild" is design-time evaluation (`Oracle::project_both`), as the walk's
+/// rejection model is: it evaluates an item's condition under a false
+/// `<ItemGroup>`, and an `Include` item's metadata's under a false item, which
+/// a build never reads. Every project a build rejects, design-time evaluation
+/// rejects too, so withdrawing what it rejects commits nothing a build
+/// rejects; the count of projects only design-time evaluation rejects is
+/// printed.
 #[test]
 fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
@@ -1857,6 +1865,7 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         .map(String::from)
         .to_vec();
     let (mut rejected, mut committed, mut certain, mut possible) = (0usize, 0, 0, 0);
+    let mut design_time_only = 0usize;
     let conditions = by_syntax
         .iter()
         .chain(&by_value)
@@ -1923,7 +1932,9 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
                 Some(RejectionCertainty::Possible) => possible += 1,
                 None => {}
             }
-            let Some(theirs) = oracle.project(&xml, &names, Some(&project_path), &[]) else {
+            let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
+            design_time_only += usize::from(both.design_time_only_rejects());
+            let Some(theirs) = both.design_time else {
                 rejected += 1;
                 assert!(
                     ours.is_empty(),
@@ -1965,8 +1976,9 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         }
     }
     eprintln!(
-        "illegal conditions: {rejected} rejected by MSBuild; we claim {certain} rejections \
-         and allow {possible} more; {committed} values committed"
+        "illegal conditions: {rejected} rejected by MSBuild ({design_time_only} by \
+         design-time evaluation alone); we claim {certain} rejections and allow {possible} \
+         more; {committed} values committed"
     );
     // Anti-vacuity: each side of the contract is exercised, the claim too.
     assert!(certain >= 150, "only {certain} rejections claimed");
@@ -2235,6 +2247,13 @@ fn load_time_errors_reject_exactly_where_msbuild_loads_them() {
 /// processing instruction). MSBuild refuses a file that breaks its loader, so
 /// the property table is held to certain-implies-exact, a claimed rejection to
 /// MSBuild's, and a project MSBuild evaluates must not be withdrawn.
+///
+/// "MSBuild" is design-time evaluation (`Oracle::project_both`), as the walk's
+/// rejection model is: it also evaluates the items of a false `<ItemGroup>`,
+/// so an item it cannot evaluate there (a `Remove` with `MatchOnMetadata` and
+/// no item type) rejects the project, which a build accepts. Every project a
+/// build rejects, design-time evaluation rejects too, so withdrawing what it
+/// rejects commits nothing a build rejects.
 #[test]
 fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
     // `{a}` is where an attribute goes, `{c}` where a child goes.
@@ -2484,6 +2503,7 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
     let project_path = dir.join("Demo.fsproj");
     let names: Vec<String> = ["Beta", "Gamma", "Delta"].map(String::from).to_vec();
     let (mut rejected, mut certain, mut possible, mut evaluated) = (0usize, 0, 0, 0);
+    let mut design_time_only = 0usize;
     let mut failures: Vec<String> = Vec::new();
     // Each case in the project, and in a file it imports.
     for (site, imported) in cases.iter().flat_map(|site| [(site, false), (site, true)]) {
@@ -2530,7 +2550,9 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
             "{:?}",
             parsed.rejection.as_ref().map(|r| (&r.certainty, &r.cause))
         );
-        let Some(theirs) = oracle.project(&xml, &names, Some(&project_path), &[]) else {
+        let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
+        design_time_only += usize::from(both.design_time_only_rejects());
+        let Some(theirs) = both.design_time else {
             rejected += 1;
             if !ours.is_empty() {
                 failures.push(format!("MSBuild rejects, we committed {ours:?}: {site}"));
@@ -2560,8 +2582,9 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
         failures.join("\n")
     );
     eprintln!(
-        "loader schema: {} cases; {rejected} rejected by MSBuild, {certain} claimed, \
-         {possible} more withdrawn; {evaluated} evaluated",
+        "loader schema: {} cases; {rejected} rejected by MSBuild ({design_time_only} \
+         by design-time evaluation alone), {certain} claimed, {possible} more withdrawn; \
+         {evaluated} evaluated",
         2 * cases.len()
     );
     // Anti-vacuity: both verdicts occur in numbers, and the claim covers most

@@ -67,6 +67,16 @@
 //! property; always for an `<ItemGroup>`'s items and an `Include` item's
 //! metadata; an `Update` item's metadata only when the update applies.
 //!
+//! "Always" is design-time evaluation's rule (the editable `Project`, which
+//! `dotnet msbuild -getProperty:` with no target also builds), and the one
+//! these judgements follow. A build (`ProjectInstance`: `dotnet build`, `dotnet
+//! restore`) evaluates an item under a false gate not at all, so it accepts
+//! every project whose only illegal condition sits there. Design-time
+//! evaluation rejects every project a build rejects, so a withdrawal by this
+//! rule commits nothing a build rejects; a Certain claim on such an item is a
+//! claim about design-time evaluation. The same test pins which projects only
+//! design-time evaluation rejects.
+//!
 //! **What is not judged.** Content the walk did not see may hold an import
 //! that fails, or rewrite a value so that one the walk reached fails; the walk
 //! cannot know of either. So for a Possible import site, a doubt that is only

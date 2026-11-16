@@ -798,8 +798,8 @@ impl Oracle {
     }
 
     /// Whether MSBuild takes `name` as a global property name (the
-    /// `globalName` op): `Ok(())`, or `Err` with the message the `Project`
-    /// constructor refuses it with.
+    /// `globalName` op): `Ok(())`, or `Err` with the message the build
+    /// evaluation (a `ProjectInstance`) refuses it with.
     pub fn global_name(&mut self, name: &str) -> Result<(), String> {
         let resp = self.request(&serde_json::json!({ "op": "globalName", "name": name }));
         if resp["accepted"]
@@ -816,12 +816,16 @@ impl Oracle {
         }
     }
 
+    /// Evaluate `xml` as a build does (the `project` op: a `ProjectInstance`,
+    /// as `dotnet build` and `dotnet restore` evaluate) and read back `names`.
+    /// `None` when MSBuild rejects the project.
+    ///
     /// `globals` is MSBuild's **global property** set for the evaluation: the
     /// `-p:` command line, and what an IDE-style consumer injects (the LSP sends
-    /// `Configuration` and `Platform`). It is handed to the `Project`
-    /// constructor, not written into the document, because the two are not the
-    /// same thing — a global is read-only to the body it evaluates, outranking
-    /// every write of that name unless `TreatAsLocalProperty` opts out.
+    /// `Configuration` and `Platform`). It is handed to the evaluation, not
+    /// written into the document, because the two are not the same thing — a
+    /// global is read-only to the body it evaluates, outranking every write of
+    /// that name unless `TreatAsLocalProperty` opts out.
     ///
     /// Sweeping it is the only way a differential can tell a value that is a
     /// fixed fact from one that is an artefact of the globals the caller
@@ -835,12 +839,66 @@ impl Oracle {
         path: Option<&Path>,
         globals: &[(String, String)],
     ) -> Option<HashMap<String, String>> {
+        self.project_as(xml, names, path, globals, false)
+    }
+
+    /// [`Self::project`] in the evaluation a design-time host loads (the
+    /// editable `Project`, which `dotnet msbuild -getProperty:` also builds
+    /// when it runs no target). It evaluates an `<ItemGroup>`'s items whatever
+    /// their conditions hold, so it rejects every project a build rejects and
+    /// more: one whose only illegal condition sits on an item under a false
+    /// gate (the `Evaluation` type in `tools/msbuild-condition-oracle`).
+    pub fn project_design_time(
+        &mut self,
+        xml: &str,
+        names: &[String],
+        path: Option<&Path>,
+        globals: &[(String, String)],
+    ) -> Option<HashMap<String, String>> {
+        self.project_as(xml, names, path, globals, true)
+    }
+
+    /// MSBuild's answer for one document in both evaluations, holding the two
+    /// to what makes design-time evaluation a sound stand-in for a build's
+    /// rejections: a build rejects only what design-time evaluation rejects,
+    /// and where both evaluate the document they read the same values.
+    pub fn project_both(
+        &mut self,
+        xml: &str,
+        names: &[String],
+        path: Option<&Path>,
+        globals: &[(String, String)],
+    ) -> BothEvaluations {
+        let build = self.project(xml, names, path, globals);
+        let design_time = self.project_design_time(xml, names, path, globals);
+        match (&build, &design_time) {
+            (None, Some(_)) => {
+                panic!("a build rejects a project design-time evaluation evaluates:\n{xml}")
+            }
+            (Some(build), Some(design_time)) => assert_eq!(
+                build, design_time,
+                "a build (left) and design-time evaluation (right) read different values:\n{xml}"
+            ),
+            _ => {}
+        }
+        BothEvaluations { build, design_time }
+    }
+
+    fn project_as(
+        &mut self,
+        xml: &str,
+        names: &[String],
+        path: Option<&Path>,
+        globals: &[(String, String)],
+        design_time: bool,
+    ) -> Option<HashMap<String, String>> {
         let resp = self.request(&serde_json::json!({
             "op": "project",
             "xml": xml,
             "names": names,
             "path": path.map(|p| p.to_string_lossy().into_owned()),
             "globals": globals_object(globals),
+            "designTime": design_time,
         }));
         if resp["ok"].as_bool() != Some(true) {
             return None;
@@ -861,6 +919,21 @@ impl Oracle {
                 })
                 .collect(),
         )
+    }
+}
+
+/// [`Oracle::project_both`]'s answer: the values each evaluation read, `None`
+/// where it rejects the project.
+pub struct BothEvaluations {
+    pub build: Option<HashMap<String, String>>,
+    pub design_time: Option<HashMap<String, String>>,
+}
+
+impl BothEvaluations {
+    /// Whether only design-time evaluation rejects the project: it read an
+    /// illegal condition on an item under a false gate, which a build skips.
+    pub fn design_time_only_rejects(&self) -> bool {
+        self.build.is_some() && self.design_time.is_none()
     }
 }
 
