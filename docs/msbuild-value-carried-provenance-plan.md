@@ -1203,8 +1203,12 @@ hidden content in a case that names a file twice), deleted in its turn when
 #891 was fixed, and `HiddenPointRejectsTheProject` (#820's remainder), the
 one family left. The sweep holds every other case.
 
-What stays open is the LSP's own reading of a name unset after hidden content:
-`tfm_policy` reads it as unset (#886).
+The LSP's own reading of a name unset after hidden content followed (#886):
+`tfm_policy` classes a `TargetFramework` or `TargetFrameworks` unset only
+after hidden content with the refused and environment-held ones, so such a
+project is served with its TFM-derived conclusions withheld and never as one
+that declares no TFM. Measured, no LSP test and no line of the project corpus
+moves.
 
 #### #677: the import points, as landed
 
@@ -1510,8 +1514,8 @@ reference, package or metadata gate that rests on a refused name is untrusted
 (`condition_reads_untrusted_value`). Every consumer in `crates/lsp` reads
 `property`; the motivating one, `tfm_untrusted`, now leaves a node whose body
 `TargetFramework` was refused with an unresolved TFM rather than an
-undeclared one. An unset name after unseen content (`Opaque`) stays trusted by
-the TFM policy (#886).
+undeclared one. An unset name after unseen content (`Opaque`) is untrusted to
+the TFM policy as well (#886).
 
 `properties` remains, documented as trust-blind: a display map of what the
 project wrote, which no consumer outside the crate's tests reads.

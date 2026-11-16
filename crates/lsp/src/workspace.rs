@@ -5783,6 +5783,43 @@ mod tests {
         assert_eq!(b_node.output_name, None);
     }
 
+    /// A project whose only `TargetFramework` write is in a file the walk
+    /// could not enter is a single-target build under a TFM we cannot see,
+    /// not a project that declares none (#886): the node's TFM is unknown.
+    #[test]
+    fn a_target_framework_hidden_content_may_write_is_not_read_as_unset() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("A/A.fsproj");
+        let b = tmp.path().join("B/B.fsproj");
+        write_file(&a, &fsproj_with_refs(&["../B/B.fsproj"]));
+        // True to MSBuild; the walk cannot evaluate it, and skips the import.
+        write_file(
+            &b,
+            r#"<Project>
+              <Import Project="tfm.props" Condition="$([System.String]::IsNullOrWhiteSpace(''))" />
+            </Project>"#,
+        );
+        write_file(
+            &tmp.path().join("B/tfm.props"),
+            "<Project><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>",
+        );
+
+        let ws = Workspace::default();
+        let observer = borzoi_msbuild::observed::Observer::new();
+        let graph = ws.project_graph_with_producer_tfms(&a, &BTreeMap::new(), &observer);
+        let b_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.path == lexically_normalize(&b))
+            .expect("B is in the graph");
+        assert_eq!(
+            b_node.tfm,
+            NodeTfm::Unresolved,
+            "the hidden import may set `TargetFramework`; its absence is not a declaration of none"
+        );
+        assert_eq!(b_node.output_name, None);
+    }
+
     /// MSBuild global-property names compare OrdinalIgnoreCase, and the
     /// evaluator's input validation rejects case-insensitive duplicate keys.
     /// A caller-supplied **differently-cased** empty `targetframework`

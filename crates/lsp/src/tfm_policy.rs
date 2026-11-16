@@ -79,8 +79,8 @@ impl TfmChoice {
     /// `TargetFramework` global included, which asks for the outer build), a
     /// TFM the body pins, a project that declares none, or an untrusted
     /// singular with no plural beside it — where "no plural" is read as
-    /// [`tfm_untrusted`] reads the singular, so a plural unset only because
-    /// content went unseen counts as unset. Not where the project may
+    /// [`tfm_untrusted`] reads the singular, so a plural unset only after
+    /// content the walk could not see is no plain absence. Not where the project may
     /// cross-target and pass 1 may be the outer dispatch build, exact for
     /// itself and for no inner build; nor for a reseed, which serves pass 2.
     pub(crate) fn pass1_is_the_build(&self) -> bool {
@@ -253,10 +253,12 @@ pub(crate) fn body_target_framework(parsed: &ParsedProject) -> Option<String> {
 /// second evaluation with, or to publish as a node's known TFM: its write sits
 /// behind a gate the evaluator could not pin, the real build holds a value the
 /// evaluator does not (a write it could not compute, or the environment's), or
-/// its value still holds a `$(...)` we did not expand. An unset singular is
-/// the multi-TFM shape (the outer build reads it unset), and one unset only
-/// because content went unseen is read as unset too, a trade-off this policy
-/// makes (#886): neither is untrusted here.
+/// its value still holds a `$(...)` we did not expand, or it is unset only
+/// after content the walk could not see, which may write it: a project whose
+/// one `TargetFramework` write is in a file the walk could not enter is a
+/// single-target build under a TFM we cannot read, not one that declares
+/// none. An unset singular with nothing hidden is the multi-TFM shape (the
+/// outer build reads it unset) and is not untrusted.
 ///
 /// Deliberately the singular only: the plural (the arcade idiom writes it
 /// under `'$(TargetFramework)' == ''`) is consumed by the TFM-invariant
@@ -267,20 +269,22 @@ pub(crate) fn tfm_untrusted(parsed: &ParsedProject) -> bool {
     read_untrusted(parsed.property("TargetFramework"))
 }
 
-/// [`tfm_untrusted`]'s classification of one read: untrusted on direct
-/// evidence that the real build holds another value, never merely because
-/// content went unseen.
+/// [`tfm_untrusted`]'s classification of one read: untrusted where the real
+/// build holds, or may hold, a value the walk does not.
 fn read_untrusted(read: PropertyRead) -> bool {
     match read {
         PropertyRead::Untrusted(_)
         | PropertyRead::UnsetInexact(
-            InexactUnset::Refused | InexactUnset::Environment | InexactUnset::Rejected(_),
+            InexactUnset::Refused
+            | InexactUnset::Environment
+            | InexactUnset::Rejected(_)
+            | InexactUnset::Opaque(_),
         ) => true,
         PropertyRead::Value(value) => value.contains("$("),
         PropertyRead::Unset
-        | PropertyRead::UnsetInexact(
-            InexactUnset::Toolset | InexactUnset::Opaque(_) | InexactUnset::ConsumerCarveOut,
-        ) => false,
+        | PropertyRead::UnsetInexact(InexactUnset::Toolset | InexactUnset::ConsumerCarveOut) => {
+            false
+        }
     }
 }
 
