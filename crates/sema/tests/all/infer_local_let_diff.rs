@@ -34,6 +34,7 @@
 //! green run evidence. They are one-sided: they fail if the sweep stops
 //! measuring, not if inference gets better.
 
+use borzoi_sema::FcsRange as _;
 use std::collections::HashSet;
 
 use crate::common::{
@@ -88,12 +89,12 @@ fn trimmed_range(node: &SyntaxNode) -> Option<(usize, usize)> {
     let mut toks = node
         .descendants_with_tokens()
         .filter_map(|el| el.into_token())
-        .filter(|t| !t.kind().is_trivia() && !t.text_range().is_empty());
+        .filter(|t| !t.kind().is_trivia() && !t.fcs_range().is_empty());
     let first = toks.next()?;
     let last = toks.last().unwrap_or_else(|| first.clone());
     Some((
-        u32::from(first.text_range().start()) as usize,
-        u32::from(last.text_range().end()) as usize,
+        u32::from(first.fcs_range().start()) as usize,
+        u32::from(last.fcs_range().end()) as usize,
     ))
 }
 
@@ -186,8 +187,8 @@ fn check_parsed(
                 .filter_map(|n| n.ident())
                 .map(move |t| {
                     let range = (
-                        u32::from(t.text_range().start()) as usize,
-                        u32::from(t.text_range().end()) as usize,
+                        u32::from(t.fcs_range().start()) as usize,
+                        u32::from(t.fcs_range().end()) as usize,
                     );
                     (range, in_pattern)
                 })

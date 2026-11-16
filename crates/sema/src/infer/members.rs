@@ -3,6 +3,7 @@
 //! arguments are checked under.
 
 use super::*;
+use crate::FcsRange as _;
 
 /// What a data member's lookup ([`Gen::wake_member`]) made of the access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +151,7 @@ impl<'a> Gen<'a> {
         let mut decided = 0;
         for seg in segments {
             if let Some(field) = self.facts.resolved.field_label_under(
-                seg.text_range(),
+                seg.fcs_range(),
                 self.facts.env,
                 &self.facts.ext_scope,
             ) {
@@ -216,7 +217,7 @@ impl<'a> Gen<'a> {
         let tys = self.solver.tys;
         let head = self.solver.table.resolve(tys.var(recv));
         let name = ident_text(member);
-        let use_range = member.text_range();
+        let use_range = member.fcs_range();
         let declined = match tys.kind(head) {
             TyKind::Named { args, .. } if !args.is_empty() => Incomplete::GenericReceiver,
             TyKind::Named { path, .. } => {
@@ -380,7 +381,7 @@ impl<'a> Gen<'a> {
             } => self.unique_call(
                 scope,
                 (decl, idx, method, form),
-                method_tok.text_range(),
+                method_tok.fcs_range(),
                 &args,
                 result,
                 expected,
@@ -388,7 +389,7 @@ impl<'a> Gen<'a> {
             CallRegime::Several(group) => self.several_call(
                 scope,
                 &group,
-                method_tok.text_range(),
+                method_tok.fcs_range(),
                 &args,
                 result,
                 expected,
@@ -778,7 +779,7 @@ impl<'a> Gen<'a> {
         let idents: Vec<SyntaxToken> = long_ident.idents().collect();
         let (method, prefix) = idents.split_last()?;
         let root = prefix.last()?;
-        let Resolution::Entity(handle) = self.facts.resolved.resolution_at(root.text_range())?
+        let Resolution::Entity(handle) = self.facts.resolved.resolution_at(root.fcs_range())?
         else {
             return None;
         };
@@ -846,7 +847,7 @@ impl<'a> Gen<'a> {
                 let (method, prefix) = rest.split_last()?;
                 let head_var = self.receiver_var(scope, head)?;
                 // Emit the receiver's own value node (coercion-free — synth).
-                self.emit(head.text_range(), head_var, Expected::Synth);
+                self.emit(head.fcs_range(), head_var, Expected::Synth);
                 let mut receivers = vec![head_var];
                 receivers.extend(self.gen_member_access(scope, head_var, prefix).0);
                 Some((receivers, method.clone(), long_ident))
@@ -960,7 +961,7 @@ impl<'a> Gen<'a> {
         // stands only where the access resolves: FCS keeps no receiver node for
         // a rejected one.
         let mark = self.out.mark();
-        self.emit(head.text_range(), recv, Expected::Synth);
+        self.emit(head.fcs_range(), recv, Expected::Synth);
         let (results, stands) = self.gen_member_access(scope, recv, segments);
         if !stands {
             self.out.discard_since(mark);
@@ -1055,8 +1056,8 @@ impl<'a> Gen<'a> {
     /// an assembly name, or unresolved) — the caller then defers, leaving any
     /// static-member resolution untouched.
     fn receiver_var(&mut self, scope: &mut Scope, head: &SyntaxToken) -> Option<TyVid> {
-        let Some(def) = self.facts.def_at(head.text_range()) else {
-            let Some(Resolution::Item(id)) = self.facts.resolved.resolution_at(head.text_range())
+        let Some(def) = self.facts.def_at(head.fcs_range()) else {
+            let Some(Resolution::Item(id)) = self.facts.resolved.resolution_at(head.fcs_range())
             else {
                 return None;
             };

@@ -21,6 +21,7 @@
 //! named-argument label rather than a use. (An equality operand `f (x = y)` has
 //! the same shape, so this sweep cannot see one left silent.)
 
+use borzoi_sema::FcsRange as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -177,12 +178,12 @@ fn silent_heads(src: &str, parsed: &Parse) -> Vec<SilentHead> {
         if !is_name || text == "base" {
             continue;
         }
-        if covered(&recorded, &max_end, head.text_range()) {
+        if covered(&recorded, &max_end, head.fcs_range()) {
             continue;
         }
         out.push(SilentHead {
             at: positions
-                .at(usize::from(head.text_range().start()))
+                .at(usize::from(head.fcs_range().start()))
                 .to_string(),
             name: text.to_string(),
             bucket: bucket(&node),

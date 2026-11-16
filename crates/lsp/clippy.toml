@@ -45,6 +45,12 @@ disallowed-methods = [
     { path = "std::path::Path::canonicalize", reason = "observe the file system through borzoi::observed — see crates/lsp/clippy.toml" },
     { path = "std::path::Path::read_dir", reason = "observe the file system through borzoi::observed — see crates/lsp/clippy.toml" },
     { path = "std::path::Path::read_link", reason = "observe the file system through borzoi::observed — see crates/lsp/clippy.toml" },
+    # A token's range in what the LSP serves is FCS's, as in sema: the glued
+    # `(*)` is three tokens FCS names as one, so a raw `text_range` keys its
+    # `*` apart from sema's definition and use ranges (see
+    # `borzoi_sema::FcsRange`). A site that needs the raw range carries
+    # `#[allow(clippy::disallowed_methods)]` saying why.
+    { path = "borzoi_cst::syntax::SyntaxToken::text_range", reason = "read a token's range as FCS reports it, through borzoi_sema::FcsRange::fcs_range — see crates/sema/src/fcs_range.rs" },
 ]
 
 # `lsp_types::Uri` wraps a `fluent_uri::Uri`, which caches its parsed

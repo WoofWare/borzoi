@@ -28,6 +28,7 @@
 //! a member whose argument count and type both differ from its signature's
 //! pairs with nothing, where names alone pair it.
 
+use borzoi_sema::FcsRange as _;
 use std::collections::HashMap;
 
 use borzoi_cst::syntax::NodeOrToken;
@@ -600,7 +601,7 @@ fn member_name_token(member: &SyntaxNode) -> Option<SyntaxToken> {
 fn def_at(token: &SyntaxToken, kind: DefKind) -> Binder {
     Binder {
         spelling: token.text().to_string(),
-        range: token.text_range(),
+        range: token.fcs_range(),
         kind,
     }
 }

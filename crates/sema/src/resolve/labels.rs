@@ -55,6 +55,7 @@
 //! member, never a field, and declines; an extension member of the label's
 //! name, which the lookup finds too, is the published accessor's own gate.
 
+use crate::FcsRange as _;
 use crate::hash::{HashMap, HashSet};
 
 use borzoi_cst::syntax::{
@@ -151,7 +152,7 @@ impl Resolver<'_> {
         let fields: Vec<(String, TextRange)> = repr
             .fields()
             .filter_map(|f| f.ident())
-            .map(|tok| (id_text(&tok).to_string(), tok.text_range()))
+            .map(|tok| (id_text(&tok).to_string(), tok.fcs_range()))
             .collect();
         let container = self.lexical.container_path.id();
         for (name, field) in &fields {
@@ -235,7 +236,7 @@ impl Resolver<'_> {
             }
             if let Some(label) = self.field_label(&name) {
                 self.out.field_labels.insert(
-                    seg.text_range(),
+                    seg.fcs_range(),
                     FieldLabelEntry {
                         name: name.to_string(),
                         label,

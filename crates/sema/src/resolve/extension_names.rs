@@ -32,6 +32,7 @@
 //! a region holds an attribute list, a directive or an active-pattern member,
 //! whose effect no single token's name bounds.
 
+use crate::FcsRange as _;
 use borzoi_assembly::op_name::compile_op_name;
 use borzoi_cst::syntax::{
     AstNode, AttributeList, MemberDefn, Pat, SyntaxKind, SyntaxNode, TextRange, TypeDefn,
@@ -240,7 +241,7 @@ pub(crate) fn file_extension_names(
                 .unwrap_or_default();
             match (toks.first(), toks.last()) {
                 (Some(first), Some(last)) => {
-                    let range = TextRange::new(first.text_range().start(), last.text_range().end());
+                    let range = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
                     marked |= may_be(range, MarkerQuestion::Extension);
                 }
                 _ => names.fail(NamesUnknowable::AttributeShape),
@@ -323,7 +324,7 @@ pub(crate) fn damage(root: &SyntaxNode, recovery: &SyntaxRecovery) -> Option<Dam
         .filter_map(|el| el.into_token())
         .filter(|t| !t.kind().is_trivia())
         .filter(move |t| {
-            let r = t.text_range();
+            let r = t.fcs_range();
             while next_region < regions.len() && regions[next_region].end() <= r.start() {
                 next_region += 1;
             }

@@ -2,6 +2,7 @@
 //! and cases, each instantiated and loosened as FCS types a use.
 
 use super::*;
+use crate::FcsRange as _;
 
 impl<'a> Gen<'a> {
     /// [`is_sealed`], knowing which of the file's own types are unions or
@@ -238,7 +239,7 @@ impl<'a> Gen<'a> {
         let idents: Vec<SyntaxToken> = long_ident.idents().collect();
         let (head, rest) = idents.split_first()?;
         let last = rest.last()?;
-        let whole = TextRange::new(head.text_range().start(), last.text_range().end());
+        let whole = TextRange::new(head.fcs_range().start(), last.fcs_range().end());
         // A qualified case of a project union (`U.A`, `Lib.A`, `Lib.U.B`),
         // whose head may be the union's own type.
         if self.facts.own_union_case_at(whole)
@@ -249,7 +250,7 @@ impl<'a> Gen<'a> {
         {
             return Some(whole);
         }
-        if self.facts.def_at(head.text_range()).is_some() {
+        if self.facts.def_at(head.fcs_range()).is_some() {
             return None;
         }
         match self.facts.resolved.resolution_at(whole)? {

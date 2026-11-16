@@ -2,6 +2,7 @@
 //! functions, typed by the rule F# builds in.
 
 use super::*;
+use crate::FcsRange as _;
 
 impl<'a> Gen<'a> {
     /// The application of `func` to `arg` when it is a use of one of
@@ -149,7 +150,7 @@ impl<'a> Gen<'a> {
     /// resolver names instead, and is not one.
     fn builtin_callee(&self, e: &Expr) -> Option<Builtin> {
         let at = match e {
-            Expr::Ident(ident) => ident.ident()?.text_range(),
+            Expr::Ident(ident) => ident.ident()?.fcs_range(),
             Expr::LongIdent(li) => {
                 let long_ident = li.long_ident()?;
                 if long_ident.active_pat_names().next().is_some() {
@@ -157,7 +158,7 @@ impl<'a> Gen<'a> {
                 }
                 let mut idents = long_ident.idents();
                 match (idents.next(), idents.next()) {
-                    (Some(tok), None) => tok.text_range(),
+                    (Some(tok), None) => tok.fcs_range(),
                     _ => self.module_value_path(li)?,
                 }
             }

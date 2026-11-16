@@ -86,15 +86,6 @@ exists.
   the differential oracle (FCS 43.13.101), so it is not a divergence today. No
   differential coverage — FCS errors on `(or)`. (`is_paren_operator_name`,
   `crates/cst/src/parser/classify.rs`)
-- **The glued `(*)` operator name is ranged as its `*`** — `let (*) x y = …`,
-  `static member (*) (a, b) = …`. The lexer reads `(*)` as one token (FCS's
-  `LPAREN_STAR_RPAREN`), and FCS names the operator over all three characters.
-  We emit it as `LPAREN_TOK IDENT_TOK("*") RPAREN_TOK` so the name reads as `*`,
-  which makes the binder's name range the middle character, where FCS's is the
-  whole token. The spaced `( * )` agrees. Found by the sub-declaration name
-  ranges in `range_audit`; five corpus files are `range-divergent` for it in
-  `parser_corpus_diff.txt`. (`consume_star_op_value`,
-  `crates/cst/src/parser/expr_atom.rs`)
 - **Dotted longident head in lambda-arg position not parsed** — `fun X.Y -> …`.
   Verified live 2026-05-31. (`a5b00d8`)
 - **Sign-folding: overflow recovery values on genuine errors** — adjacent-sign
@@ -578,6 +569,22 @@ our reimplementation.
 ## Resolved since introduction
 
 Documented early, since closed — listed so readers don't chase ghosts.
+
+- **The glued `(*)` operator name was ranged as its `*`:** `let (*) x y = …`,
+  `static member (*) (a, b) = …`, `List.fold (*) 1 xs`. Both lexers read `(*)`
+  as one token (FCS's `LPAREN_STAR_RPAREN`), and FCS ranges the name over all
+  three characters, where every other parenthesised operator, the spaced
+  `( * )` included, is ranged over the operator alone. The tree still spells
+  the glued token `LPAREN_TOK IDENT_TOK("*") RPAREN_TOK`, as the published
+  facades read it; `syntax::fcs_ident_range` gives FCS's range, which sema
+  reports for binders and uses and `range_audit` grades. FCS's glued/spaced
+  asymmetry is mirrored at the range layer only, on purpose: spelling the
+  glued name as one token would change what every frozen facade's name
+  accessors return. `parser_diff_ast_ranges::diff_ast_ranges_for_name_spellings`
+  and sema's `operator_name_diff` grade the spellings against FCS, and the
+  `walk-reference` feature checks on every parse that the adjacency
+  `fcs_ident_range` reads is exactly the lexer's glued token.
+  (#907)
 
 - **F# pickle `TType_anon` (tag 9):** an anonymous record anywhere in a
   signature raised `UnsupportedPickleTag`, costing the assembly every F#

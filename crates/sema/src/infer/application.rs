@@ -1,6 +1,7 @@
 //! Applications: a callee, its arguments, and infix operators.
 
 use super::*;
+use crate::FcsRange as _;
 
 /// What an application spine applies: an expression in function position, or
 /// the operator of an infix application.
@@ -115,7 +116,7 @@ impl<'a> Gen<'a> {
     /// path.
     fn names_case(&self, e: &Expr) -> bool {
         let at = match e {
-            Expr::Ident(ident) => ident.ident().map(|t| t.text_range()),
+            Expr::Ident(ident) => ident.ident().map(|t| t.fcs_range()),
             Expr::LongIdent(li) => self.module_value_path(li),
             _ => None,
         };
@@ -243,13 +244,13 @@ impl<'a> Gen<'a> {
             scope.mark_incomplete(Incomplete::CalleeShape(op.syntax().kind()));
             return None;
         };
-        if let Some(def) = self.facts.def_at(tok.text_range()) {
+        if let Some(def) = self.facts.def_at(tok.fcs_range()) {
             if self.declines_use(scope, def) {
                 return None;
             }
             return Some(self.value_use(scope, def));
         }
-        match self.nonlocal_value_use(scope, tok.text_range(), Use::Applied) {
+        match self.nonlocal_value_use(scope, tok.fcs_range(), Use::Applied) {
             Ok(v) => Some(v),
             Err(why) => {
                 let why = match why {
@@ -325,14 +326,10 @@ impl<'a> Gen<'a> {
                 };
                 let def = self
                     .facts
-                    .def_at(tok.text_range())
-                    .filter(|_| !self.facts.own_union_case_at(tok.text_range()));
+                    .def_at(tok.fcs_range())
+                    .filter(|_| !self.facts.own_union_case_at(tok.fcs_range()));
                 let Some(def) = def else {
-                    return self.nonlocal_value_or_incomplete(
-                        scope,
-                        tok.text_range(),
-                        Use::Applied,
-                    );
+                    return self.nonlocal_value_or_incomplete(scope, tok.fcs_range(), Use::Applied);
                 };
                 if self.declines_use(scope, def) {
                     return None;

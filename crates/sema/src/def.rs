@@ -1,6 +1,7 @@
 //! The definition model: a name introduced by F# source, and what sort of
 //! binder it is.
 
+use crate::FcsRange as _;
 use std::borrow::Cow;
 
 use borzoi_assembly::op_name::{compile_op_name, is_operator_spelling, prefix_op_name};
@@ -430,7 +431,7 @@ impl Def {
     /// Build a definite (non-provisional) `Def` from an identifier token and
     /// its kind.
     pub(crate) fn from_token(names: &NameTable, token: &SyntaxToken, kind: DefKind) -> Self {
-        Self::new(names, token.text(), token.text_range(), kind, false)
+        Self::new(names, token.text(), token.fcs_range(), kind, false)
     }
 
     /// Build a definite (non-provisional) `Def` from a spelling and an
@@ -467,7 +468,7 @@ impl Def {
         token: &SyntaxToken,
         kind: DefKind,
     ) -> Self {
-        Self::new(names, token.text(), token.text_range(), kind, true)
+        Self::new(names, token.text(), token.fcs_range(), kind, true)
     }
 
     /// The name this binder is keyed by in the name environment: [`id_text`]

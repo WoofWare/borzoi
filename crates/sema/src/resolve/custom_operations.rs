@@ -28,6 +28,8 @@
 //! `[<Extension>]` method), and every one a referenced assembly declares on
 //! an extension member, is an operation of every builder.
 
+use crate::FcsRange as _;
+use crate::fcs_range::ident_at;
 use std::collections::BTreeSet;
 
 use borzoi_cst::syntax::{
@@ -575,12 +577,6 @@ fn type_head(ty: &Type) -> Option<SyntaxToken> {
     }
 }
 
-/// The identifier token at exactly `range` under `root`.
-fn ident_at(root: &SyntaxNode, range: borzoi_cst::syntax::TextRange) -> Option<SyntaxToken> {
-    root.token_at_offset(range.start())
-        .find(|t| t.kind() == SyntaxKind::IDENT_TOK && t.text_range() == range)
-}
-
 impl Resolver<'_> {
     /// Enter a computation expression whose body the walk is about to
     /// resolve (module docs): mark every name its builder's custom
@@ -609,7 +605,7 @@ impl Resolver<'_> {
                     if names.contains(&*id_text(&tok)) {
                         self.index
                             .custom_operation_clauses
-                            .insert(tok.text_range(), cause);
+                            .insert(tok.fcs_range(), cause);
                     }
                 }
             }
@@ -658,8 +654,8 @@ impl Resolver<'_> {
             .tokens_where(|k| k == SyntaxKind::IDENT_TOK)
             .collect();
         for (binder, resets) in binders {
-            let at = binder.text_range().start();
-            self.out.opaque_binders.insert(binder.text_range());
+            let at = binder.fcs_range().start();
+            self.out.opaque_binders.insert(binder.fcs_range());
             let mut declined: HashSet<String> = HashSet::from_iter([id_text(&binder).to_string()]);
             if resets {
                 // Over-approximate: every identifier in a pattern before the
@@ -667,16 +663,16 @@ impl Resolver<'_> {
                 declined.extend(
                     idents
                         .iter()
-                        .filter(|t| t.text_range().start() < at)
+                        .filter(|t| t.fcs_range().start() < at)
                         .filter(|t| t.parent_ancestors().any(|n| Pat::can_cast(n.kind())))
                         .map(|t| id_text(t).to_string()),
                 );
             }
             for tok in &idents {
-                if tok.text_range().start() >= at && declined.contains(&*id_text(tok)) {
+                if tok.fcs_range().start() >= at && declined.contains(&*id_text(tok)) {
                     self.index
                         .custom_operation_clauses
-                        .entry(tok.text_range())
+                        .entry(tok.fcs_range())
                         .or_insert(DeclineCause::OpaqueBinder);
                 }
             }
@@ -699,7 +695,7 @@ impl Resolver<'_> {
     ) -> Option<DeclineCause> {
         self.index
             .custom_operation_clauses
-            .get(&tok.text_range())
+            .get(&tok.fcs_range())
             .copied()
     }
 
@@ -723,12 +719,12 @@ impl Resolver<'_> {
         let resolution = match &func {
             Expr::Ident(i) => i
                 .ident()
-                .and_then(|t| self.out.resolutions.get(&t.text_range()).copied()),
+                .and_then(|t| self.out.resolutions.get(&t.fcs_range()).copied()),
             Expr::LongIdent(li) => li.long_ident().and_then(|li| {
                 let last = li.idents().last()?;
                 self.out
                     .resolutions
-                    .get(&last.text_range())
+                    .get(&last.fcs_range())
                     .or_else(|| self.out.resolutions.get(&li.syntax().text_range()))
                     .copied()
             }),
@@ -792,7 +788,7 @@ impl Resolver<'_> {
         let name = id_text(&tok).to_string();
         if !self.prescan.own_type_simple_names.contains(&name)
             || !matches!(
-                self.out.resolutions.get(&tok.text_range()),
+                self.out.resolutions.get(&tok.fcs_range()),
                 Some(Resolution::Deferred(_))
             )
             || self.latest_entry_exists(&name)
@@ -803,9 +799,7 @@ impl Resolver<'_> {
         if let super::types::TypePathResolution::InFileType(id) =
             self.decide_type_path(std::slice::from_ref(&name), arity)
         {
-            self.index
-                .in_file_constructions
-                .insert(tok.text_range(), id);
+            self.index.in_file_constructions.insert(tok.fcs_range(), id);
         }
     }
 
@@ -850,7 +844,7 @@ impl Resolver<'_> {
             return CeOps::Unknown;
         };
         let names_binder = matches!(binding.pat(), Some(Pat::Named(n))
-            if n.ident().is_some_and(|t| t.text_range() == d.range));
+            if n.ident().is_some_and(|t| t.fcs_range() == d.range));
         if !names_binder {
             return CeOps::Unknown;
         }
@@ -860,13 +854,13 @@ impl Resolver<'_> {
         let constructed = self
             .index
             .in_file_constructions
-            .get(&ty.text_range())
+            .get(&ty.fcs_range())
             .copied()
             .or_else(|| {
                 // `new T(…)` names `T` in type position, which the walk resolves.
                 self.out
                     .resolutions
-                    .get(&ty.text_range())
+                    .get(&ty.fcs_range())
                     .and_then(|r| self.same_file_def(*r))
             });
         match constructed {
@@ -912,7 +906,7 @@ impl Resolver<'_> {
             let Some(base) = inherit.base_type().as_ref().and_then(type_head) else {
                 return CeOps::Unknown;
             };
-            let resolved = self.out.resolutions.get(&base.text_range()).copied();
+            let resolved = self.out.resolutions.get(&base.fcs_range()).copied();
             let ops = match (resolved, resolved.and_then(|r| self.same_file_def(r))) {
                 (_, Some(t)) if self.out.defs[t].kind == DefKind::Type => {
                     self.project_type_operations(t, root, depth + 1)
@@ -996,6 +990,43 @@ mod tests {
                 !committed,
                 declines,
                 "{alias}: {:?}",
+                rf.resolution_at(range)
+            );
+        }
+    }
+
+    /// A builder bound to a glued `(*)` is found by its binder as any other
+    /// builder is, though its binder's range spans the parentheses: a name its
+    /// operations cannot take resolves inside its expression, by any spelling
+    /// of the builder.
+    #[test]
+    fn a_builder_named_by_a_glued_star_is_found_by_its_binder() {
+        use crate::{AssemblyEnv, ProjectItems, Resolution, SyntaxRecovery, resolve_file};
+        use borzoi_cst::syntax::{AstNode, ImplFile};
+
+        for binder in ["b", "(*)", "( * )"] {
+            let src = format!(
+                "module M\ntype B() =\n    member _.Return(x: 'a) = x\nlet {binder} = B()\nlet outer = 1\nlet probe = {} {{ return outer }}\n",
+                if binder == "b" { "b" } else { "op_Multiply" }
+            );
+            let parsed = parse(&src);
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            let recovery = SyntaxRecovery::of(&parsed);
+            let file = ImplFile::cast(parsed.root).expect("impl file");
+            let rf = resolve_file(
+                &file,
+                &ProjectItems::default(),
+                &AssemblyEnv::default(),
+                &recovery,
+            );
+            let at = src.rfind("outer }").expect("the use");
+            let range = borzoi_cst::syntax::TextRange::new(
+                u32::try_from(at).unwrap().into(),
+                u32::try_from(at + 5).unwrap().into(),
+            );
+            assert!(
+                matches!(rf.resolution_at(range), Some(Resolution::Item(_))),
+                "{binder}: {:?}",
                 rf.resolution_at(range)
             );
         }

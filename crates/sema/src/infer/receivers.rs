@@ -15,6 +15,7 @@
 //! which is when completion asks.
 
 use super::*;
+use crate::FcsRange as _;
 
 /// A member access's path and the variables standing for its receivers:
 /// `receivers[i]` for what precedes the `i`-th dot of `path`, so there are
@@ -56,7 +57,7 @@ impl<'a> Gen<'a> {
         for (dot, var) in path_dots(path).zip(receivers) {
             let ty = self.solver.table.resolve(self.solver.tys.var(var));
             if self.solver.tys.is_ground(ty) {
-                self.out.receiver(dot.text_range(), var, ty);
+                self.out.receiver(dot.fcs_range(), var, ty);
             }
         }
     }

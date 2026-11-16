@@ -1,5 +1,6 @@
 //! Resolution of dotted paths into referenced assemblies.
 
+use crate::FcsRange as _;
 use borzoi_assembly::EntityKind;
 use borzoi_cst::syntax::SyntaxToken;
 use borzoi_cst::syntax::TextRange;
@@ -185,7 +186,7 @@ impl<'a> Resolver<'a> {
                     .iter()
                     .map(|seg| {
                         (
-                            seg.text_range(),
+                            seg.fcs_range(),
                             Resolution::Deferred(DeferredReason::QualifiedAccess),
                         )
                     })
@@ -370,7 +371,7 @@ impl<'a> Resolver<'a> {
         payload: &[(TextRange, Resolution)],
     ) -> bool {
         segments.last().is_some_and(|last| {
-            let terminal = last.text_range();
+            let terminal = last.fcs_range();
             payload.iter().any(|&(range, res)| {
                 range == terminal
                     && matches!(res, Resolution::Entity(h) if !self.assemblies.terminal_expression_value(h))
@@ -434,7 +435,7 @@ impl<'a> Resolver<'a> {
                         .iter()
                         .map(|seg| {
                             (
-                                seg.text_range(),
+                                seg.fcs_range(),
                                 Resolution::Deferred(DeferredReason::QualifiedAccess),
                             )
                         })
@@ -586,10 +587,10 @@ impl<'a> Resolver<'a> {
         // Namespace qualifier segments that are in the *source* (indices
         // `base..k`) are modeled uses we cannot resolve — defer, never drop.
         for seg in &segments[..(k - base)] {
-            recs.push((seg.text_range(), deferred));
+            recs.push((seg.fcs_range(), deferred));
         }
         recs.push((
-            segments[k - base].text_range(),
+            segments[k - base].fcs_range(),
             // Resolve-through chases the target to walk a member *tail*. When the
             // alias is a *qualifier* (a tail follows: `WidgetAlias.Make`), FCS points
             // the alias segment at the marker and the tail below walks on `walk_root`
@@ -628,8 +629,7 @@ impl<'a> Resolver<'a> {
             if i + 1 == n
                 && let Some(case) = self.union_case_tail(parent, &names[i])
             {
-                let whole =
-                    TextRange::new(segments[0].text_range().start(), src.text_range().end());
+                let whole = TextRange::new(segments[0].fcs_range().start(), src.fcs_range().end());
                 recs.push((whole, case));
                 i += 1;
                 break;
@@ -644,7 +644,7 @@ impl<'a> Resolver<'a> {
                     self.assemblies.static_lookup(parent, &names[i])
                 {
                     let whole =
-                        TextRange::new(segments[0].text_range().start(), src.text_range().end());
+                        TextRange::new(segments[0].fcs_range().start(), src.fcs_range().end());
                     recs.push((whole, Resolution::Member { parent, idx }));
                     i += 1;
                     break;
@@ -704,7 +704,7 @@ impl<'a> Resolver<'a> {
                             // value/constructor surface; codex review). Only a
                             // *qualifier* nested alias resolves through to a tail.
                             if i + 1 == n {
-                                recs.push((src.text_range(), deferred));
+                                recs.push((src.fcs_range(), deferred));
                                 i += 1;
                                 break;
                             }
@@ -724,16 +724,14 @@ impl<'a> Resolver<'a> {
                 {
                     return Self::owned_deferral(segments);
                 }
-                recs.push((src.text_range(), Resolution::Entity(child)));
+                recs.push((src.fcs_range(), Resolution::Entity(child)));
                 parent = child_walk;
                 i += 1;
             } else {
                 match self.assemblies.static_lookup(parent, &names[i]) {
                     StaticLookup::Resolved(idx) => {
-                        let whole = TextRange::new(
-                            segments[0].text_range().start(),
-                            src.text_range().end(),
-                        );
+                        let whole =
+                            TextRange::new(segments[0].fcs_range().start(), src.fcs_range().end());
                         recs.push((whole, Resolution::Member { parent, idx }));
                         i += 1;
                         break;
@@ -769,7 +767,7 @@ impl<'a> Resolver<'a> {
                         {
                             return AssemblyPath::AbbreviationOpaque;
                         }
-                        recs.push((src.text_range(), deferred));
+                        recs.push((src.fcs_range(), deferred));
                         i += 1;
                         break;
                     }
@@ -799,7 +797,7 @@ impl<'a> Resolver<'a> {
         // Anything left — an unresolvable tail, or member access on the static
         // member's result — is modeled-but-unresolved: deferred, not dropped.
         for seg in &segments[(i - base)..] {
-            recs.push((seg.text_range(), deferred));
+            recs.push((seg.fcs_range(), deferred));
         }
         // A `[<RequireQualifiedAccess>]` case of a name the walk read past is
         // FCS's reading whenever the type (or module) reading supplies
@@ -810,7 +808,7 @@ impl<'a> Resolver<'a> {
         // with an error, and names nothing we can commit to.
         if let Some(last) = segments.last()
             && recs.iter().any(|&(range, res)| {
-                range == last.text_range()
+                range == last.fcs_range()
                     && matches!(res, Resolution::Entity(h)
                         if self.assemblies.terminal_constructor_inaccessible(h))
             })
@@ -846,7 +844,7 @@ impl<'a> Resolver<'a> {
                     } else {
                         Resolution::Deferred(DeferredReason::QualifiedAccess)
                     };
-                    (seg.text_range(), res)
+                    (seg.fcs_range(), res)
                 })
                 .collect(),
             owns_path: true,
@@ -867,7 +865,7 @@ impl<'a> Resolver<'a> {
                 .iter()
                 .map(|seg| {
                     (
-                        seg.text_range(),
+                        seg.fcs_range(),
                         Resolution::Deferred(DeferredReason::QualifiedAccess),
                     )
                 })
@@ -976,9 +974,9 @@ impl<'a> Resolver<'a> {
         // The case itself, as FCS reports the use — `owning` is set only where
         // `authoritative_union_case` holds, which is exactly when the index
         // exists.
-        let whole = TextRange::new(type_seg.text_range().start(), case_seg.text_range().end());
+        let whole = TextRange::new(type_seg.fcs_range().start(), case_seg.fcs_range().end());
         let recs = vec![
-            (type_seg.text_range(), Resolution::Entity(union)),
+            (type_seg.fcs_range(), Resolution::Entity(union)),
             (
                 whole,
                 match self.assemblies.union_case_index(union, case_name) {

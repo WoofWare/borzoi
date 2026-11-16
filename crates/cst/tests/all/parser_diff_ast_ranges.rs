@@ -758,10 +758,11 @@ fn diff_sig_ast_ranges_exclude_exception_augmentation_end() {
 /// plain, backticked (including one that starts `op_`, an identifier rather
 /// than an operator), an operator in parentheses with and without spacing, and
 /// active patterns with spacing and a comment inside, each as a `let` binder,
-/// a function binder and a `member` name; and the case-name spellings of a
-/// union. Every cell must agree with FCS, except the glued `(*)` operator,
-/// which must still diverge (docs/fcs-divergences.md): when it is fixed, this
-/// says so.
+/// a function binder, a later binder of a `let rec` group, a `member` name and
+/// an `extern` name; and the case-name spellings of a union. The glued `(*)` is
+/// the one spelling FCS ranges over its parentheses (`fcs_ident_range`), so it
+/// sits beside its near misses: `( *)`, the comment opener `(* )`, a line break
+/// inside, and a comment glued after it. Every cell FCS accepts must agree.
 #[test]
 fn diff_ast_ranges_for_name_spellings() {
     use crate::common::{ast_ranges_match, fcs_ast_batch};
@@ -775,29 +776,33 @@ fn diff_ast_ranges_for_name_spellings() {
         "( + )",
         "( * )",
         "(*)",
+        "( *)",
+        "(* )",
+        "(\n *)",
+        "(*)(* c *)",
+        "(*) (* c *)",
+        "(%)",
         "(|A|)",
         "(| A |)",
         "(|A|_|)",
         "(| A (* c *) | B |)",
     ];
     const CASES: &[&str] = &["A", "``A b``", "``op_Case``", "([])", "( :: ) of int * int"];
-    let mut sources: Vec<(String, bool)> = Vec::new();
+    let mut sources: Vec<String> = Vec::new();
     for name in BINDERS {
-        let known = *name == "(*)";
-        sources.push((format!("let {name} = 1\n"), known));
-        sources.push((format!("let {name} a b = a\n"), known));
-        sources.push((format!("type T() =\n    member _.{name} a b = a\n"), known));
-        sources.push((
-            format!("type T() =\n    static member {name} (a, b) = a\n"),
-            known,
-        ));
+        sources.push(format!("let {name} = 1\n"));
+        sources.push(format!("let {name} a b = a\n"));
+        sources.push(format!("let rec f x = x\nand {name} a b = a\n"));
+        sources.push(format!("type T() =\n    member _.{name} a b = a\n"));
+        sources.push(format!("type T() =\n    static member {name} (a, b) = a\n"));
+        sources.push(format!("extern int {name}(int a)\n"));
     }
     for case in CASES {
-        sources.push((format!("type U =\n    | Z\n    | {case}\n"), false));
+        sources.push(format!("type U =\n    | Z\n    | {case}\n"));
     }
     let mut failures = Vec::new();
     let mut graded = 0;
-    for (src, known) in &sources {
+    for src in &sources {
         let mut tmp = tempfile::NamedTempFile::with_suffix(".fs").expect("tempfile");
         tmp.write_all(src.as_bytes()).expect("write");
         let json = fcs_ast_batch(tmp.path());
@@ -811,16 +816,8 @@ fn diff_ast_ranges_for_name_spellings() {
             continue;
         }
         graded += 1;
-        let agrees = ast_ranges_match(&parse, &json, src).is_ok();
-        if agrees == *known {
-            failures.push(format!(
-                "{src:?}: {}",
-                if *known {
-                    "now agrees (update docs/fcs-divergences.md)"
-                } else {
-                    "diverges"
-                }
-            ));
+        if let Err(diff) = ast_ranges_match(&parse, &json, src) {
+            failures.push(format!("{src:?}: {diff}"));
         }
     }
     assert!(

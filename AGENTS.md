@@ -311,6 +311,12 @@ This is a Cargo workspace with nine members:
   `resolve_corpus_diff` and the whole-project gate run the same check on
   every cell and file. A binding construct the walk does not know about
   starts as a row in that table, not a review finding.
+  Every range sema records or looks up is FCS's, so a token's range is read
+  through `borzoi_sema::FcsRange::fcs_range`, and `clippy.toml` bans
+  `SyntaxToken::text_range` in sema and the LSP. They differ only for the
+  glued `(*)`, which the tree spells as `(`, `*`, `)` (what every frozen
+  facade's name accessors return) and FCS names over all three characters
+  (`borzoi_cst::syntax::fcs_ident_range`).
   Inferred types are not bounded by the tree (each line of `let gK x =
   g(K-1) (g(K-1) x)` doubles one), so every walk of the unification table
   counts against a type budget (`MAX_TYPE_NODES`, `MAX_TYPE_DEPTH`), and a

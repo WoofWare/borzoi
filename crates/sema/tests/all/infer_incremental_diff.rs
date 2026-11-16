@@ -29,6 +29,7 @@
 //!
 //! No FCS: the cold fold is the oracle.
 
+use borzoi_sema::FcsRange as _;
 use std::path::{Path, PathBuf};
 
 use borzoi_cst::parser::{parse, parse_sig};
@@ -572,7 +573,7 @@ fn corpus_edits(src: &str) -> Vec<(&'static str, String)> {
         ));
     }
     if let Some(token) = literal {
-        let range = token.text_range();
+        let range = token.fcs_range();
         let (start, end) = (usize::from(range.start()), usize::from(range.end()));
         edits.push(("literal", format!("{}\"s\"{}", &src[..start], &src[end..])));
     }

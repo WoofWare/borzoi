@@ -1,5 +1,6 @@
 //! Expression and pattern name resolution.
 
+use crate::FcsRange as _;
 use borzoi_cst::syntax::TextRange;
 use borzoi_cst::syntax::{
     AppExpr, AstNode, Expr, InterpStringPart, MatchClause, Pat, RecordExprItem, SyntaxToken,
@@ -222,8 +223,8 @@ impl<'a> Resolver<'a> {
                         self.out
                             .opaque_binders
                             .insert(borzoi_cst::syntax::TextRange::new(
-                                first.text_range().start(),
-                                last.text_range().end(),
+                                first.fcs_range().start(),
+                                last.fcs_range().end(),
                             ));
                     }
                 }
@@ -885,8 +886,8 @@ impl<'a> Resolver<'a> {
                     self.simple_constructor_pattern(&inner, names);
                 }
             }
-            Pat::Named(p) => names.extend(p.ident().map(|t| t.text_range())),
-            Pat::OptionalVal(p) => names.extend(p.ident().map(|t| t.text_range())),
+            Pat::Named(p) => names.extend(p.ident().map(|t| t.fcs_range())),
+            Pat::OptionalVal(p) => names.extend(p.ident().map(|t| t.fcs_range())),
             // `Foo`: one segment, no arguments, no typars.
             Pat::LongIdent(p)
                 if p.args().next().is_none()
@@ -896,13 +897,13 @@ impl<'a> Resolver<'a> {
                 if let Some(head) = p.head() {
                     let segs: Vec<_> = head.idents().collect();
                     if let [only] = segs.as_slice() {
-                        names.push(only.text_range());
+                        names.push(only.fcs_range());
                     }
                 }
             }
             Pat::As(p) => {
                 if let Some(Pat::Named(rhs)) = p.rhs() {
-                    names.extend(rhs.ident().map(|t| t.text_range()));
+                    names.extend(rhs.ident().map(|t| t.fcs_range()));
                 }
             }
             _ => {}
@@ -1067,24 +1068,24 @@ impl<'a> Resolver<'a> {
     pub(super) fn resolve_name_use(&mut self, tok: &SyntaxToken, allow_opened_type: bool) {
         if let Some(cause) = self.custom_operation_clause_decline(tok) {
             self.record(
-                tok.text_range(),
+                tok.fcs_range(),
                 Resolution::Deferred(DeferredReason::UnboundName),
             );
-            self.record_decline(tok.text_range(), DeclineSite::pre_walk(cause));
+            self.record_decline(tok.fcs_range(), DeclineSite::pre_walk(cause));
             return;
         }
         if self.record_name_use(tok, allow_opened_type) {
             if let Some(cause) = self.bare_value_decline(&id_text(tok)) {
-                self.record_decline(tok.text_range(), DeclineSite::pre_walk(cause));
+                self.record_decline(tok.fcs_range(), DeclineSite::pre_walk(cause));
             }
         } else if let Some(cause) = self.bare_value_evicted(&id_text(tok)) {
             // A constructible type of the name took the unqualified slot after
             // the value the lookup found: a bare use constructs the type.
             self.record(
-                tok.text_range(),
+                tok.fcs_range(),
                 Resolution::Deferred(DeferredReason::UnboundName),
             );
-            self.record_decline(tok.text_range(), DeclineSite::pre_walk(cause));
+            self.record_decline(tok.fcs_range(), DeclineSite::pre_walk(cause));
         }
     }
 
@@ -1142,14 +1143,14 @@ impl<'a> Resolver<'a> {
         let res = match res {
             Resolution::UnionCase { .. } if self.assembly_case_slot_contested(name) => {
                 self.record_decline(
-                    tok.text_range(),
+                    tok.fcs_range(),
                     DeclineSite::pre_walk(DeclineCause::AssemblyCaseSlotContested),
                 );
                 Resolution::Deferred(DeferredReason::UnboundName)
             }
             other => other,
         };
-        self.record(tok.text_range(), res);
+        self.record(tok.fcs_range(), res);
         matches!(res, Resolution::Deferred(_))
     }
 
@@ -1385,12 +1386,12 @@ impl<'a> Resolver<'a> {
         // `x.M (a = b)` nothing is recorded there — `x` is a value and `M` a
         // member of it — so it stays unproved.
         let range = match head {
-            Expr::Ident(e) => e.ident().map(|t| t.text_range()),
+            Expr::Ident(e) => e.ident().map(|t| t.fcs_range()),
             Expr::LongIdent(e) => e.long_ident().and_then(|li| {
                 let mut idents = li.idents();
                 let first = idents.next()?;
                 let last = idents.last().unwrap_or_else(|| first.clone());
-                Some(first.text_range().cover(last.text_range()))
+                Some(first.fcs_range().cover(last.fcs_range()))
             }),
             _ => None,
         };

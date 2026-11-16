@@ -50,6 +50,7 @@
 //! rather than letting the body bind that. The dropped non-case heads are a coverage
 //! gap, never a wrong answer.
 
+use crate::FcsRange as _;
 use crate::hash::{HashMap, HashSet};
 use crate::recovery::SyntaxRecovery;
 use std::sync::Arc;
@@ -455,6 +456,7 @@ fn walk_file(
     let mut rf = r.finish().into_resolved_file(prescan, item_base, recovery);
     rf.surface.extension_names = rf.syntactic_extension_names(file.syntax(), assemblies);
     rf.surface.damage = extension_names::damage(file.syntax(), recovery);
+    rf.debug_assert_no_range_splits_a_glued_star(file.syntax());
     rf
 }
 
@@ -705,7 +707,7 @@ fn sig_val_access(vd_node: &SyntaxNode, ident: &SyntaxToken) -> SigValAccess {
     let Some(tok) = toks.next() else {
         return SigValAccess::Exported;
     };
-    if toks.next().is_some() || tok.text_range().start() >= ident.text_range().start() {
+    if toks.next().is_some() || tok.fcs_range().start() >= ident.fcs_range().start() {
         return SigValAccess::Unknown;
     }
     match tok.text() {
@@ -2071,7 +2073,7 @@ fn module_header_pos(module: &ModuleOrNamespace) -> borzoi_cst::syntax::TextSize
     module
         .long_id()
         .and_then(|li| li.idents().next())
-        .map(|t| t.text_range().start())
+        .map(|t| t.fcs_range().start())
         .unwrap_or_else(|| module.syntax().text_range().start())
 }
 
@@ -2421,7 +2423,7 @@ impl<'a> Resolver<'a> {
             return;
         };
         self.record_decline(
-            TextRange::new(first.text_range().start(), last.text_range().end()),
+            TextRange::new(first.fcs_range().start(), last.fcs_range().end()),
             site,
         );
     }

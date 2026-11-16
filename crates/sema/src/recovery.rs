@@ -17,6 +17,7 @@
 //! The parser's reported error spans are the only thing that knows, and this is
 //! what carries them.
 
+use crate::FcsRange as _;
 use std::sync::Arc;
 
 use std::collections::HashSet;
@@ -192,7 +193,7 @@ impl SyntaxRecovery {
         };
         let path = dot.parent()?;
         let is_trailing_dot = dot.kind() == SyntaxKind::DOT_TOK
-            && dot.text_range() == *first
+            && dot.fcs_range() == *first
             && path.kind() == SyntaxKind::LONG_IDENT
             && path.last_token().is_some_and(|last| last == dot)
             && path.parent().is_some_and(|access| {
@@ -220,7 +221,7 @@ impl SyntaxRecovery {
             return false;
         };
         self.first_is_trailing_dot(&root)
-            .is_some_and(|dot| node.text_range().end() <= dot.text_range().start())
+            .is_some_and(|dot| node.text_range().end() <= dot.fcs_range().start())
     }
 
     /// Whether the file parsed with no recovery anywhere before `offset`:
@@ -317,7 +318,7 @@ impl SyntaxRecovery {
             // The token at the span's start: the first that reaches past it,
             // or a zero-width one exactly there (the error marker itself).
             while let Some(t) = tokens.peek() {
-                let r = t.text_range();
+                let r = t.fcs_range();
                 if r.end() < span.start() || (r.end() == span.start() && !r.is_empty()) {
                     previous = tokens.next();
                 } else {
@@ -428,7 +429,7 @@ fn declaration_extent(node: &SyntaxNode) -> TextRange {
         match sibling {
             borzoi_cst::syntax::NodeOrToken::Node(_) => break,
             borzoi_cst::syntax::NodeOrToken::Token(t) => {
-                end = t.text_range().end();
+                end = t.fcs_range().end();
                 next = t.next_sibling_or_token();
             }
         }

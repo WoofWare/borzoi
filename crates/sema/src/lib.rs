@@ -38,6 +38,7 @@ mod assembly_env;
 mod binders;
 mod def;
 mod diagnostics;
+mod fcs_range;
 pub mod fold_counts;
 mod function_ty;
 pub mod hash;
@@ -64,6 +65,7 @@ pub use assembly_env::{
 pub use binders::{BinderRole, PatternName, pattern_names};
 pub use def::{Def, DefId, DefKind, DefSpace, SemanticClass};
 pub use diagnostics::{SemaDiagnostic, SemaDiagnosticKind};
+pub use fcs_range::FcsRange;
 pub use function_ty::FunctionTyGap;
 pub use infer::{
     BuiltinGap, ConstraintGap, GateInput, Incomplete, InferredFile, OperatorGap, infer_file,

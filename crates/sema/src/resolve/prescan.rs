@@ -4,6 +4,7 @@
 //! the file, whatever the walk has reached. Each is order-independent by
 //! design: a name declared after a use counts as much as one declared before.
 
+use crate::FcsRange as _;
 use std::collections::BTreeSet;
 
 use crate::hash::{HashMap, HashSet};
@@ -441,8 +442,8 @@ pub(super) fn abbreviation_attributes(root: &SyntaxNode) -> Vec<Option<TextRange
                         .unwrap_or_default();
                     match (toks.first(), toks.last()) {
                         (Some(first), Some(last)) => Some(TextRange::new(
-                            first.text_range().start(),
-                            last.text_range().end(),
+                            first.fcs_range().start(),
+                            last.fcs_range().end(),
                         )),
                         _ => None,
                     }

@@ -1,5 +1,6 @@
 //! `let`-binding processing: interning, scheduling, and RHS resolution.
 
+use crate::FcsRange as _;
 use borzoi_cst::syntax::{AstNode, Binding, Expr, LetDecl, LetOrUseExpr, SyntaxKind};
 
 use crate::binders::{BinderRole, PatternName, pattern_names};
@@ -346,7 +347,7 @@ impl<'a> Resolver<'a> {
             && let Some(kw) = e.keyword()
         {
             self.out.diagnostics.push(SemaDiagnostic {
-                range: kw.text_range(),
+                range: kw.fcs_range(),
                 kind: SemaDiagnosticKind::UseAndRec,
             });
         }

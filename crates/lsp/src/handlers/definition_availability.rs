@@ -20,6 +20,7 @@
 
 use borzoi_cst::syntax::{SyntaxKind, SyntaxNode};
 use borzoi_cst::syntax::{TextRange, TextSize};
+use borzoi_sema::FcsRange as _;
 use borzoi_sema::{DeferredReason, InferredFile, Resolution, ResolvedFile};
 
 use super::served_resolution_with_range;
@@ -271,7 +272,7 @@ fn identifier_token_range(root: &SyntaxNode, byte: usize) -> Option<TextRange> {
     }
     root.token_at_offset(offset)
         .find(|token| token.kind() == SyntaxKind::IDENT_TOK)
-        .map(|token| token.text_range())
+        .map(|token| token.fcs_range())
 }
 
 #[cfg(test)]

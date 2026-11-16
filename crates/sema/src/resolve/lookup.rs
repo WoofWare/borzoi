@@ -1,5 +1,6 @@
 //! The name-resolution engine: long-ident / value / case lookup and the project-open machinery.
 
+use crate::FcsRange as _;
 use borzoi_cst::syntax::SyntaxToken;
 use borzoi_cst::syntax::{TextRange, TextSize};
 
@@ -3701,10 +3702,10 @@ impl<'a> Resolver<'a> {
         // declines the whole path, as a bare use of it does.
         if let Some(cause) = self.custom_operation_clause_decline(first) {
             self.record(
-                first.text_range(),
+                first.fcs_range(),
                 Resolution::Deferred(DeferredReason::UnboundName),
             );
-            self.record_decline(first.text_range(), DeclineSite::pre_walk(cause));
+            self.record_decline(first.fcs_range(), DeclineSite::pre_walk(cause));
             return;
         }
 
@@ -3786,7 +3787,7 @@ impl<'a> Resolver<'a> {
                 );
                 if let Some(cause) = self.reached_type_contested(head, reach, type_pos) {
                     self.defer_with_cause(
-                        first.text_range(),
+                        first.fcs_range(),
                         segments,
                         DeclineSite::pre_walk(cause),
                     );
@@ -3794,7 +3795,7 @@ impl<'a> Resolver<'a> {
                 }
                 if self.lower_arity_namesake_possible(head, type_id, None) {
                     self.defer_with_cause(
-                        first.text_range(),
+                        first.fcs_range(),
                         segments,
                         DeclineSite::pre_walk(DeclineCause::QualifierArityNamesake),
                     );
@@ -3817,7 +3818,7 @@ impl<'a> Resolver<'a> {
             && !head_staled
             && !self.head_contested_by_project_module(first, member_seg)
             && let Some((type_id, member_def, reach)) =
-                self.type_member_path(first, member_seg, first.text_range().start())
+                self.type_member_path(first, member_seg, first.fcs_range().start())
         {
             let head = &*id_text(first);
             let head_is_value = self.head_case_classification(head) == Some(false);
@@ -3877,7 +3878,7 @@ impl<'a> Resolver<'a> {
                 }
                 Some(Err(cause)) => {
                     self.defer_with_cause(
-                        first.text_range(),
+                        first.fcs_range(),
                         segments,
                         DeclineSite::pre_walk(cause),
                     );
@@ -4032,7 +4033,7 @@ impl<'a> Resolver<'a> {
                         self.qualified_value_in(&module_path, &id_text(value_seg))
                 {
                     let whole =
-                        TextRange::new(first.text_range().start(), value_seg.text_range().end());
+                        TextRange::new(first.fcs_range().start(), value_seg.fcs_range().end());
                     match found {
                         QualifiedMember::Bound(id) => self.record(whole, Resolution::Item(id)),
                         _ => self.defer_with_cause(
@@ -4043,7 +4044,7 @@ impl<'a> Resolver<'a> {
                     }
                     for seg in prefix_segs {
                         self.record(
-                            seg.text_range(),
+                            seg.fcs_range(),
                             Resolution::Deferred(DeferredReason::QualifiedAccess),
                         );
                     }
@@ -4070,7 +4071,7 @@ impl<'a> Resolver<'a> {
                 && let found @ (QualifiedMember::Bound(_) | QualifiedMember::Declined) =
                     self.earlier_file_qualified_member(&written_path)
             {
-                let whole = TextRange::new(first.text_range().start(), last.text_range().end());
+                let whole = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
                 match found {
                     QualifiedMember::Bound(id) => self.record(whole, Resolution::Item(id)),
                     _ => self.defer_with_cause(
@@ -4081,7 +4082,7 @@ impl<'a> Resolver<'a> {
                 }
                 for seg in segments.iter().take(segments.len() - 1) {
                     self.record(
-                        seg.text_range(),
+                        seg.fcs_range(),
                         Resolution::Deferred(DeferredReason::QualifiedAccess),
                     );
                 }
@@ -4130,20 +4131,20 @@ impl<'a> Resolver<'a> {
             {
                 let CrossFileCase::Hit(_, id) = found else {
                     self.defer_with_cause(
-                        first.text_range(),
+                        first.fcs_range(),
                         segments,
                         DeclineSite::pre_walk(DeclineCause::QualifierArityNamesake),
                     );
                     return;
                 };
                 let whole = TextRange::new(
-                    first.text_range().start(),
-                    segments.last().expect("non-empty path").text_range().end(),
+                    first.fcs_range().start(),
+                    segments.last().expect("non-empty path").fcs_range().end(),
                 );
                 self.record(whole, Resolution::Item(id));
                 for seg in segments.iter().take(segments.len() - 1) {
                     self.record(
-                        seg.text_range(),
+                        seg.fcs_range(),
                         Resolution::Deferred(DeferredReason::QualifiedAccess),
                     );
                 }
@@ -4316,7 +4317,7 @@ impl<'a> Resolver<'a> {
             } else {
                 DeclineCause::HeadSlotUnordered
             };
-            self.defer_with_cause(first.text_range(), segments, DeclineSite::pre_walk(cause));
+            self.defer_with_cause(first.fcs_range(), segments, DeclineSite::pre_walk(cause));
         } else {
             // The head is member access on a *value*; a type-as-qualifier was
             // already handled by the assembly-path resolution above. Forbid the
@@ -4330,7 +4331,7 @@ impl<'a> Resolver<'a> {
             if !rest.is_empty()
                 && (self.scope.opacity.bare_or_dotted_heads_unknowable() || head_staled)
                 && matches!(
-                    self.out.resolutions.get(&first.text_range()),
+                    self.out.resolutions.get(&first.fcs_range()),
                     Some(Resolution::Deferred(_)) | None
                 )
             {
@@ -4342,7 +4343,7 @@ impl<'a> Resolver<'a> {
         }
         for seg in rest {
             self.record(
-                seg.text_range(),
+                seg.fcs_range(),
                 Resolution::Deferred(DeferredReason::QualifiedAccess),
             );
         }
@@ -4729,7 +4730,7 @@ impl<'a> Resolver<'a> {
             Self::reached_type_slot_pos(reach, u32::from(self.out.defs[type_id].range.start()));
         if let Some(cause) = self.reached_type_contested(&id_text(type_seg), reach, type_pos) {
             self.defer_with_cause(
-                type_seg.text_range(),
+                type_seg.fcs_range(),
                 &[type_seg.clone(), case_seg.clone()],
                 DeclineSite::pre_walk(cause),
             );
@@ -4737,7 +4738,7 @@ impl<'a> Resolver<'a> {
         }
         if self.lower_arity_namesake_possible(&id_text(type_seg), type_id, None) {
             self.defer_with_cause(
-                type_seg.text_range(),
+                type_seg.fcs_range(),
                 &[type_seg.clone(), case_seg.clone()],
                 DeclineSite::pre_walk(DeclineCause::QualifierArityNamesake),
             );
@@ -4831,7 +4832,7 @@ impl<'a> Resolver<'a> {
             &id_text(head_seg),
             res,
             in_pattern,
-            head_seg.text_range().start(),
+            head_seg.fcs_range().start(),
         );
         match outcome {
             SameFileQualified::Emit { .. } if self.scope.recursive_module_active => {
@@ -5783,12 +5784,12 @@ impl<'a> Resolver<'a> {
                     return false;
                 };
                 let whole =
-                    TextRange::new(head_seg.text_range().start(), case_seg.text_range().end());
+                    TextRange::new(head_seg.fcs_range().start(), case_seg.fcs_range().end());
                 self.record(whole, case_res);
-                self.record(type_seg.text_range(), Resolution::Local(type_id));
+                self.record(type_seg.fcs_range(), Resolution::Local(type_id));
                 for seg in qualifier {
                     self.record(
-                        seg.text_range(),
+                        seg.fcs_range(),
                         Resolution::Deferred(DeferredReason::QualifiedAccess),
                     );
                 }
@@ -5799,7 +5800,7 @@ impl<'a> Resolver<'a> {
                 // later branch runs to record it.
                 if let Some(head_seg) = segments.first() {
                     self.record(
-                        head_seg.text_range(),
+                        head_seg.fcs_range(),
                         Resolution::Deferred(DeferredReason::QualifiedAccess),
                     );
                 }
@@ -5808,7 +5809,7 @@ impl<'a> Resolver<'a> {
             SameFileQualified::Decline(cause) => {
                 if let Some(head_seg) = segments.first() {
                     self.defer_with_cause(
-                        head_seg.text_range(),
+                        head_seg.fcs_range(),
                         segments,
                         DeclineSite::pre_walk(cause),
                     );
@@ -6001,11 +6002,11 @@ impl<'a> Resolver<'a> {
                         segs.first().expect("non-empty"),
                         segs.last().expect("non-empty"),
                     );
-                    let whole = TextRange::new(first.text_range().start(), last.text_range().end());
+                    let whole = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
                     self.record(whole, Resolution::Item(id));
                     for seg in &segs[..segs.len() - 1] {
                         self.record(
-                            seg.text_range(),
+                            seg.fcs_range(),
                             Resolution::Deferred(DeferredReason::QualifiedAccess),
                         );
                     }
@@ -6297,11 +6298,11 @@ impl<'a> Resolver<'a> {
         let (Some(first), Some(last)) = (segments.first(), segments.last()) else {
             return;
         };
-        let whole = TextRange::new(first.text_range().start(), last.text_range().end());
+        let whole = TextRange::new(first.fcs_range().start(), last.fcs_range().end());
         self.record(whole, Resolution::Item(id));
         for seg in &segments[..segments.len() - 1] {
             self.record(
-                seg.text_range(),
+                seg.fcs_range(),
                 Resolution::Deferred(DeferredReason::QualifiedAccess),
             );
         }
@@ -6444,8 +6445,8 @@ impl<'a> Resolver<'a> {
         type_id: DefId,
         case_res: Resolution,
     ) {
-        self.record(type_seg.text_range(), Resolution::Local(type_id));
-        let whole = TextRange::new(type_seg.text_range().start(), case_seg.text_range().end());
+        self.record(type_seg.fcs_range(), Resolution::Local(type_id));
+        let whole = TextRange::new(type_seg.fcs_range().start(), case_seg.fcs_range().end());
         self.record(whole, case_res);
     }
 

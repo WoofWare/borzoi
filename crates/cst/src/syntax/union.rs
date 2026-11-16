@@ -1039,6 +1039,9 @@ impl ValSig {
     /// FCS's `OriginalNotationWithParen` spelling. `None` on a malformed slot
     /// **or** an active-pattern name (`val (|Foo|_|) : …`), whose idents live
     /// inside the [`ActivePatName`] node — read those via [`Self::active_pat_name`].
+    /// The glued `(*)` is spelled with the same three tokens, so this is its
+    /// `*`; FCS ranges that one spelling over the parentheses, which
+    /// [`fcs_ident_range`](crate::syntax::fcs_ident_range) reports.
     pub fn ident(&self) -> Option<SyntaxToken> {
         accessor!("ValSig::ident");
         self.0
@@ -1963,6 +1966,10 @@ impl NamedPat {
     /// `None` for the active-pattern form (`let (|Foo|Bar|) = …`), whose name
     /// is an [`ActivePatName`] child instead — read it via
     /// [`Self::active_pat_name`].
+    /// An operator name is the bare operator between its parentheses, the
+    /// glued `(*)` included; FCS ranges that one spelling over the
+    /// parentheses, which [`fcs_ident_range`](crate::syntax::fcs_ident_range)
+    /// reports.
     pub fn ident(&self) -> Option<SyntaxToken> {
         accessor!("NamedPat::ident");
         self.0
@@ -2975,6 +2982,10 @@ impl LongIdent {
     /// constructor head (phase 9.10b) carries the `new` keyword as its sole
     /// segment (a [`SyntaxKind::NEW_TOK`], text `"new"`), mirroring FCS's
     /// `SynLongIdent(["new"])`, so it is yielded here too.
+    /// An operator-value segment is the bare operator between its parentheses,
+    /// the glued `(*)` included; FCS ranges that one spelling over the
+    /// parentheses, which [`fcs_ident_range`](crate::syntax::fcs_ident_range)
+    /// reports.
     pub fn idents(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
         accessor!("LongIdent::idents");
         self.0
