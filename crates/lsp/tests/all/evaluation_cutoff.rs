@@ -336,13 +336,15 @@ fn state(fixture: &Fixture) -> State {
     state
 }
 
-/// What a fresh env is built from: the reference DLLs in fold order and the
-/// completeness verdict, under the served TFM.
+/// What a fresh env is built from: the reference DLLs in fold order, the
+/// completeness verdict and whether a project reference is unbuilt, under the
+/// served TFM.
 #[derive(Debug, PartialEq, Eq)]
 struct EnvValue {
     tfm: ServedTfm,
     dlls: Vec<PathBuf>,
     incomplete: bool,
+    not_built: bool,
 }
 
 /// What the parses read from the evaluation, through the workspace's
@@ -372,6 +374,7 @@ fn env_value(state: &mut State, project: &Path) -> EnvValue {
         tfm,
         dlls,
         incomplete: env.identities_incomplete(),
+        not_built: env.references_not_built(),
     }
 }
 
@@ -650,7 +653,10 @@ fn each_consumed_value_moves_only_what_reads_it() {
         (Edit::Indent(4), false, false),
         (Edit::Description(1), false, false),
         (Edit::LibComment(1), false, false),
-        (Edit::Reference(Ref::Unbuilt), false, false),
+        // The env reads an unbuilt project reference: the assembly it will
+        // build may declare an extension of any name, so the extension gate
+        // must see it (`AssemblyEnv::mark_references_not_built`).
+        (Edit::Reference(Ref::Unbuilt), true, true),
         (Edit::Reference(Ref::CSharp), true, true),
         (Edit::Define("FOO"), false, true),
         (Edit::Order, false, true),

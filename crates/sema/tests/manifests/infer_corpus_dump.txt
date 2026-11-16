@@ -5480,7 +5480,7 @@ vsintegration/src/FSharp.LanguageService/IProjectSite.fs	alone 92f38ec6e217e152/
 vsintegration/src/FSharp.LanguageService/Intellisense.fs	alone ef0306df8c9776ea/2 dir 8b1ef107ee53bcbd/2
 vsintegration/src/FSharp.LanguageService/LanguageServiceConstants.fs	alone 92f38ec6e217e152/0 dir 5d806b983bc8c6dd/0
 vsintegration/src/FSharp.LanguageService/ProjectSitesAndFiles.fs	alone 0e98c03e5fff4451/0 dir 695b31c55aa66934/0
-vsintegration/src/FSharp.LanguageService/SourceFile.fs	alone 5789097ba488769b/0 dir f8215ddf05259fbf/0
+vsintegration/src/FSharp.LanguageService/SourceFile.fs	alone a44622440ee997d4/0 dir 0eaaec4f5d91eb13/0
 vsintegration/src/FSharp.LanguageService/Vs.fs	alone 8c9e39e57f13fd71/12 dir 53be0f24654ca893/12
 vsintegration/src/FSharp.LanguageService/XmlDocumentation.fs	alone eadf312070653c8b/13 dir 0740bd5a0a6146af/13
 vsintegration/src/FSharp.ProjectSystem.FSharp/AppConfigHelper.fs	alone 92f38ec6e217e152/0 dir 0d1eb72880c96ebb/0

@@ -325,17 +325,19 @@ fn open_of_extension_bearing_namespace_defers_only_colliding_names() {
     }
 }
 
-/// EX-2 soundness (codex P1): a dropped TypeDef at a **prefix split** of an opened
-/// namespace path must make the open extension-unknowable, even though a namespace
-/// reading survives at the exact path. `open A.B.C` with a dropped type at `A.B`
-/// may be opening a same-FQN *module* `A.B.C` FCS merges into scope, whose
-/// extensions are invisible; and `extension_named_in_scope` queries only `A.B.C`,
-/// where the marker (recorded under its enclosing namespace `A.B`) does not sit.
+/// A TypeDef the projection drops at a **prefix split** of an opened
+/// namespace path is still a row of the existence index, so the open's
+/// certification reads the row itself rather than the drop: a dropped *module*
+/// at `A.B.C` (the hazard FCS's same-FQN merge poses) is an entity on the
+/// path, and declines (`ExistenceSet::names_namespaces_only`), while a drop
+/// marker with no such row behind it moves nothing. `assembly_entities_diff`
+/// holds the index to every TypeDef row whatever the projection drops, and
+/// `infer_assembly_extension_grid`'s dropped cells hold the gate to FCS.
 ///
 /// Driven at the resolver, no FCS: `mark_namespace_dropped_type` is what the LSP
 /// host calls after projection, so setting it directly reproduces the drop.
 #[test]
-fn open_of_namespace_with_a_dropped_prefix_split_is_unknowable() {
+fn a_dropped_prefix_split_moves_the_open_only_through_the_index() {
     let fixture = ensure_assembly_fixture_built();
     let fixture_bytes = std::fs::read(fixture).expect("read SemaAssemblyEnvFixture.dll");
     let build_env = || {
@@ -353,7 +355,7 @@ fn open_of_namespace_with_a_dropped_prefix_split_is_unknowable() {
     let file = ImplFile::cast(parsed.root).expect("impl file");
     let clean = resolve_file(&file, &ProjectItems::default(), &clean_env, &recovery);
     assert!(
-        !clean.open_extension_unknowable(),
+        !clean.opens_unenumerated(),
         "a clean `open <namespace>` is name-keyed, not unknowable"
     );
     assert_eq!(
@@ -362,15 +364,19 @@ fn open_of_namespace_with_a_dropped_prefix_split_is_unknowable() {
         "the opened assembly namespace is exported by name"
     );
 
-    // A dropped type at the prefix split `Demo.Sub` must flip the open to
-    // unknowable — the exact path `Demo.Sub.Extra` still resolves, so the value-side
-    // `names_uncovered_dropped_path` alone would not catch it.
+    // A drop marker at the prefix split `Demo.Sub`, with no row at the path
+    // behind it, moves nothing: the index holds every row the projection
+    // could have dropped, and none sits on `Demo.Sub.Extra`.
     let mut dropped_env = build_env();
     dropped_env.mark_namespace_dropped_type(vec!["Demo".to_owned(), "Sub".to_owned()]);
     let dropped = resolve_file(&file, &ProjectItems::default(), &dropped_env, &recovery);
     assert!(
-        dropped.open_extension_unknowable(),
-        "a dropped type at a prefix split of the opened namespace must defer the whole file"
+        !dropped.opens_unenumerated(),
+        "a drop marker alone moves the certification, which reads only the index"
+    );
+    assert_eq!(
+        dropped.open_extension_namespaces(),
+        std::slice::from_ref(&opened)
     );
 }
 

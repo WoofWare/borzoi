@@ -48,7 +48,7 @@ pub(super) struct Output {
     /// [`AssemblyEnv::extension_named_in_scope`](crate::AssemblyEnv) query about
     /// them. Only `open`s that resolve *entirely* to assembly-namespace readings
     /// with no residual uncertainty land here; anything else raises
-    /// [`Unknowable::OpenExtensionSurface`](super::unknowables::Unknowable::OpenExtensionSurface)
+    /// [`Unknowable::UnenumeratedSurface`](super::unknowables::Unknowable::UnenumeratedSurface)
     /// instead.
     ///
     /// **File-global, never block-scoped.** The gate is file-global (a single

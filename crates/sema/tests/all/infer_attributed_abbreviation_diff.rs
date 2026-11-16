@@ -33,8 +33,7 @@
 //!
 //! 1. Certain-implies-exact soundness in every file.
 //! 2. With no attribute, both calls commit: the abbreviation alone brings no
-//!    extension, so declining there is availability lost (except behind an
-//!    `open` of a project module, which declines every call today, #794).
+//!    extension, so declining there is availability lost.
 //!    With either attribute, neither call commits, and the literal one
 //!    carries `ExtensionInScope`: an attributed abbreviation's target is not
 //!    enumerated, so no name is known absent.
@@ -217,18 +216,7 @@ fn attributed_abbreviations_decline_every_call() {
         }
         for (k, (call, outcome)) in CALLS.iter().zip(&checked.calls).enumerate() {
             if attr == Attr::None {
-                // An `open` of a project module declines every call in the
-                // file today, whatever the name (#794).
-                let project_open = placement == Placement::EarlierOpened;
-                if project_open {
-                    if !outcome.gated() {
-                        failures.push(format!(
-                            "{label}: `{}` should carry ExtensionInScope behind a project \
-                             open; census {:?}",
-                            call.text, outcome.census
-                        ));
-                    }
-                } else if outcome.ours.is_none() || outcome.gated() {
+                if outcome.ours.is_none() || outcome.gated() {
                     failures.push(format!(
                         "{label}: `{}` should commit with no attribute; census {:?}",
                         call.text, outcome.census

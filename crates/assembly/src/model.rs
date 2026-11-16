@@ -738,6 +738,15 @@ pub struct TypeForwarder {
 pub struct AssemblyProjectionSkips {
     pub dropped_types: Vec<SkippedProjectionItem>,
     pub skipped_fsharp_overlays: Vec<SkippedFsharpOverlay>,
+    /// The namespaces of the top-level types some attribute of which — on the
+    /// type, a method of it, or a type nested in it — names an owner the
+    /// reader cannot read (a constructor whose parent is neither a `TypeDef`
+    /// nor a `TypeRef`). Every attribute detector reads such an attribute as
+    /// *not* the one it looks for, so [`Entity::is_extension_container`] and
+    /// [`MethodLike::is_extension_method`] are unread there, not false: a
+    /// consumer proving no C#-style extension exists must treat each of these
+    /// namespaces as possibly holding one, of any name.
+    pub unreadable_attribute_namespaces: Vec<Vec<String>>,
     /// `true` when this F#-authored assembly may export type abbreviations
     /// the projection cannot see: its host signature pickle failed to decode
     /// (so the abbreviation-marker overlay could not run — the skip is also

@@ -3047,6 +3047,7 @@ fn a_non_authoritative_module_still_contests_a_type_position() {
     module_color.kind = EntityKind::Module;
 
     let input = |path: &str, roots: Vec<Entity>, non_authoritative: bool| AssemblyProjectionInput {
+        existence: borzoi_sema::ExistenceInput::Synthetic,
         path: PathBuf::from(path),
         roots,
         abbreviation_visibility: AbbreviationVisibility::Modelled,
@@ -5991,6 +5992,7 @@ fn non_authoritative_assembly_declines_module_classification() {
     let build = |non_authoritative: bool| {
         AssemblyEnv::from_assemblies_with_projection_knowability(vec![
             borzoi_sema::AssemblyProjectionInput {
+                existence: borzoi_sema::ExistenceInput::Synthetic,
                 path: std::path::PathBuf::from("Test.dll"),
                 roots: vec![module.clone()],
                 abbreviation_visibility: AbbreviationVisibility::Modelled,
@@ -6050,6 +6052,7 @@ fn module_leaf_filter_honours_signature_authority() {
     let build = |non_authoritative: bool| {
         AssemblyEnv::from_assemblies_with_projection_knowability(vec![
             borzoi_sema::AssemblyProjectionInput {
+                existence: borzoi_sema::ExistenceInput::Synthetic,
                 path: std::path::PathBuf::from("Test.dll"),
                 roots: vec![module.clone()],
                 abbreviation_visibility: AbbreviationVisibility::Modelled,
@@ -6138,6 +6141,7 @@ fn non_authoritative_module_uses_the_type_rule_for_qualified_ownership() {
     let build = |non_authoritative: bool| {
         AssemblyEnv::from_assemblies_with_projection_knowability(vec![
             borzoi_sema::AssemblyProjectionInput {
+                existence: borzoi_sema::ExistenceInput::Synthetic,
                 path: std::path::PathBuf::from("Test.dll"),
                 roots: vec![module.clone()],
                 abbreviation_visibility: AbbreviationVisibility::Modelled,

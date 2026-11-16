@@ -1217,6 +1217,7 @@ pub fn doc_key_env_of(
         .into_iter()
         .map(
             |(path, roots, dialect)| borzoi_sema::AssemblyProjectionInput {
+                existence: borzoi_sema::ExistenceInput::Synthetic,
                 path,
                 roots,
                 abbreviation_visibility: borzoi_sema::AbbreviationVisibility::Modelled,

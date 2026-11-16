@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The referenced assembly of `infer_assembly_extension_grid` for the cells
+       an assembly-level auto-open reaches, kept apart because the attribute
+       opens its target for every cell of the assembly: one
+       namespace per cell of the grid, each declaring a receiver and an
+       extension member of one shape. `Generated*.fs` are emitted by the test
+       from the grid's dimensions and is not checked in. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>ExtAssemblyGridAutoFixture</AssemblyName>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- One file per batch of cells: a single file of every cell overflows
+         the compiler's stack. -->
+    <Compile Include="Generated*.fs" />
+  </ItemGroup>
+
+</Project>

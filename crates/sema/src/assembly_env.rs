@@ -30,8 +30,12 @@ use crate::names::{NameKey, NameTable, PathIdSet, PathKey, PathMap};
 use crate::resolve::{ActivePatternShape, DeclineCause};
 use crate::ty::TyTable;
 
+pub(crate) mod existence;
 mod il_types;
 mod type_index;
+
+pub use existence::ExistenceInput;
+use existence::ExistenceSet;
 
 pub use il_types::IlTypeDefinition;
 use type_index::TypeIndex;
@@ -162,6 +166,66 @@ pub(crate) const CORE_ATTRIBUTE_NAMES: &[&str] = &[
     "RequireQualifiedAccessAttribute",
     "RequireQualifiedAccessAttributeAttribute",
 ];
+
+/// The extension-scope gate's view of the referenced assemblies: what they
+/// hold, whatever its accessibility. Name resolution reads an assembly
+/// through its public surface, but a friend assembly's internal extension is
+/// in scope all the same (`InternalsVisibleTo`), so the gate's questions (and
+/// the resolver's certification of an `open` for it) are asked through this
+/// view, which exposes no lookup filtered by accessibility and no way back to
+/// the env. `extension_queries_read_no_public_only_lookup` holds the methods
+/// it calls to the same rule.
+#[derive(Clone, Copy)]
+pub(crate) struct ExtensionView<'a>(&'a AssemblyEnv);
+
+impl ExtensionView<'_> {
+    /// Whether an extension of `name` (`is_static`: for a type-qualified
+    /// call) may be in scope through the env's auto-opens or one of
+    /// `in_scope_namespaces` ([`AssemblyEnv::extension_named_in_scope`]), or
+    /// through an abbreviation marked `[<Extension>]` or `[<AutoOpen>]`, of
+    /// any accessibility, in one of those namespaces or in a container an
+    /// assembly-level auto-open names, module-shaped ones included
+    /// ([`ExistenceSet::lends_extensions_through_an_abbreviation`]).
+    pub(crate) fn extension_named_in_scope(
+        self,
+        in_scope_namespaces: &[Vec<String>],
+        name: &str,
+        is_static: bool,
+    ) -> bool {
+        let existence = &self.0.existence;
+        in_scope_namespaces
+            .iter()
+            .chain(&self.0.effective_implicit_open_namespace_paths())
+            .chain(existence.auto_open_bases())
+            .any(|ns| existence.lends_extensions_through_an_abbreviation(ns))
+            || self
+                .0
+                .extension_named_in_scope(in_scope_namespaces, name, is_static)
+    }
+
+    /// Whether some project reference has no built output yet.
+    pub(crate) fn references_not_built(self) -> bool {
+        self.0.references_not_built
+    }
+}
+
+/// The accessor spellings an F# property or event compiles to.
+const ACCESSOR_PREFIXES: [&str; 4] = ["get_", "set_", "add_", "remove_"];
+
+/// Whether `entity`, a C#-style extension container, declares a property or
+/// an event: F# lets `[<Extension>]` sit on its accessor (or on the property,
+/// which fsc carries to the accessor), and FCS then calls the accessor as an
+/// extension method. The reader projects the property, not its accessors,
+/// and a `[<CompiledName>]` moves the metadata name off the logical one FCS
+/// calls it by (which only the F# signature records), so no name of such a
+/// container is known absent.
+fn container_may_hold_accessor_extensions(entity: &Entity) -> bool {
+    entity.is_extension_container
+        && entity
+            .members
+            .iter()
+            .any(|m| matches!(m, Member::Property(_) | Member::Event(_)))
+}
 
 /// See [`AssemblyEnv::augmentation_member_names`].
 #[derive(Debug, Clone, Default)]
@@ -996,6 +1060,10 @@ pub struct AssemblyEnv {
     /// when at least one public top-level type exists, matching
     /// [`Self::has_namespace`]'s historical empty-path behaviour.
     public_namespace_paths: PathIdSet,
+    /// Everything the referenced assemblies declare, at every accessibility,
+    /// read from their raw metadata: what the extension gate's existence
+    /// questions read ([`existence`]).
+    existence: ExistenceSet,
     /// **Namespace** paths the referenced assemblies' assembly-level
     /// `[<assembly: AutoOpen("…")>]` attributes implicitly open — what drives
     /// the resolver's implicit opens (plan
@@ -1058,6 +1126,20 @@ pub struct AssemblyEnv {
     /// [`Self::mark_extension_surface_unknowable`] (the LSP host, which observes
     /// these failures); false by default (a clean projection is trusted).
     extension_surface_unknowable: bool,
+    /// The namespaces where a referenced assembly carries an attribute whose
+    /// owner its reader cannot name
+    /// ([`AssemblyProjectionSkips::unreadable_attribute_namespaces`](borzoi_assembly::AssemblyProjectionSkips::unreadable_attribute_namespaces)):
+    /// a C#-style extension there is unread, not absent, so each answers every
+    /// extension name. Set by [`Self::mark_namespace_unreadable_attribute`].
+    namespaces_with_unreadable_attributes: HashSet<Vec<String>>,
+    /// Whether some `<ProjectReference>` of the project has no built output
+    /// yet (the LSP's `ReferenceOutcome::NotBuilt`). The env counts as complete
+    /// without it, a decision taken for navigation; but the assembly it will
+    /// be may declare an extension of any name in any namespace it shares
+    /// with the project, so the extension gate declines every call in a file
+    /// that opens a project module or namespace. Set by
+    /// [`Self::mark_references_not_built`].
+    references_not_built: bool,
     /// Lazily-built index behind [`Self::assembly_bare_value_surface_could_supply`]
     /// for the arms that do **not** vary per call: the implicit-open namespaces,
     /// the contested ones, and the root. Rebuilding their fold surfaces per name
@@ -1208,6 +1290,9 @@ type MeasureHeadCache =
 /// One referenced assembly as
 /// [`AssemblyEnv::from_assemblies_with_projection_knowability`] takes it.
 pub struct AssemblyProjectionInput {
+    /// What the assembly declares at every accessibility, for the extension
+    /// gate's existence questions ([`ExistenceInput`]).
+    pub existence: ExistenceInput,
     /// The source DLL path (for go-to-definition's `AssemblyId → path` map).
     pub path: PathBuf,
     /// The projected top-level entities.
@@ -1521,6 +1606,7 @@ impl AssemblyEnv {
     /// reference-order rules; this slice does not model multi-assembly shadowing).
     pub fn from_entities(roots: Vec<Entity>) -> Self {
         let mut env = AssemblyEnv::default();
+        env.existence.add(&ExistenceInput::Synthetic, &roots);
         env.index_roots(
             roots
                 .into_iter()
@@ -1535,7 +1621,12 @@ impl AssemblyEnv {
     /// file it came from — go-to-definition reads that DLL's portable PDB for the
     /// source location. Same name-index rules as [`Self::from_entities`]; on a
     /// cross-assembly `(namespace, name, arity)` collision the assembly listed
-    /// first wins (deterministic, refine-later).
+    /// first wins (deterministic, refine-later). It is handed no existence
+    /// index, and a projection cannot establish absence (it leaves out what
+    /// another assembly cannot name), so the extension gate's existence
+    /// questions answer "unknown" ([`ExistenceInput::Unread`]):
+    /// [`Self::from_views`] and
+    /// [`Self::from_assemblies_with_projection_knowability`] take the index.
     pub fn from_assemblies(assemblies: Vec<(PathBuf, Vec<Entity>)>) -> Self {
         Self::from_assemblies_with_abbreviation_visibility(
             assemblies
@@ -1562,6 +1653,24 @@ impl AssemblyEnv {
     pub fn from_assemblies_with_abbreviation_visibility(
         assemblies: Vec<(PathBuf, Vec<Entity>, AbbreviationVisibility, Vec<String>)>,
     ) -> Self {
+        Self::from_assemblies_with_existence(assemblies, ExistenceInput::Unread)
+    }
+
+    /// [`Self::from_assemblies_with_abbreviation_visibility`] for **synthetic**
+    /// assemblies, a test's hand-built entities, which are taken as
+    /// everything the assemblies declare ([`ExistenceInput::Synthetic`]). A real
+    /// assembly's projection leaves out what another assembly cannot name, so
+    /// it never goes through here.
+    pub fn from_synthetic_assemblies(
+        assemblies: Vec<(PathBuf, Vec<Entity>, AbbreviationVisibility, Vec<String>)>,
+    ) -> Self {
+        Self::from_assemblies_with_existence(assemblies, ExistenceInput::Synthetic)
+    }
+
+    fn from_assemblies_with_existence(
+        assemblies: Vec<(PathBuf, Vec<Entity>, AbbreviationVisibility, Vec<String>)>,
+        existence: ExistenceInput,
+    ) -> Self {
         Self::from_assemblies_with_projection_knowability(
             assemblies
                 .into_iter()
@@ -1575,6 +1684,7 @@ impl AssemblyEnv {
                     AssemblyProjectionInput {
                         path,
                         roots,
+                        existence: existence.clone(),
                         abbreviation_visibility: visibility,
                         extension_index_unknowable: false,
                         signature_non_authoritative: false,
@@ -1613,6 +1723,7 @@ impl AssemblyEnv {
             let AssemblyProjectionInput {
                 path,
                 roots,
+                existence,
                 abbreviation_visibility: visibility,
                 extension_index_unknowable,
                 signature_non_authoritative,
@@ -1650,6 +1761,7 @@ impl AssemblyEnv {
             // *unnameable* such assembly (rootless, no supplied identity) makes the
             // identity set incomplete — it could be any name — so uniqueness must
             // decline (see [`Self::assembly_identities_incomplete`]).
+            env.existence.add(&existence, &roots);
             let identity = manifest_identity.or_else(|| roots.first().map(|r| r.assembly.clone()));
             if identity.is_none() {
                 env.assembly_identities_incomplete = true;
@@ -1921,8 +2033,13 @@ impl AssemblyEnv {
         let mut tagged = Vec::new();
         let mut auto_opens = Vec::new();
         let mut dropped_namespaces = Vec::new();
+        let mut unreadable_namespaces: Vec<Vec<String>> = Vec::new();
         for view in views {
             let (roots, skips) = view.enumerate_type_defs_with_skips()?;
+            match view.existence_index() {
+                Ok(index) => env.existence.add(&ExistenceInput::Read(index), &[]),
+                Err(_) => env.existence.mark_unknowable(),
+            }
             let visibility = if skips.fsharp_abbreviations_unknowable {
                 AbbreviationVisibility::Unknowable
             } else {
@@ -1937,6 +2054,7 @@ impl AssemblyEnv {
             // tree no longer shows, so its namespace is possibly extension-bearing
             // for the OV-6 gate (mirrors the LSP's separate construction path).
             dropped_namespaces.extend(skips.dropped_types.iter().map(|d| d.enclosing_namespace()));
+            unreadable_namespaces.extend(skips.unreadable_attribute_namespaces.iter().cloned());
             let id = AssemblyId(
                 u32::try_from(env.assemblies.len()).expect("more than u32::MAX assemblies"),
             );
@@ -1980,6 +2098,9 @@ impl AssemblyEnv {
         env.record_assembly_auto_opens(auto_opens);
         for namespace in dropped_namespaces {
             env.mark_namespace_dropped_type(namespace);
+        }
+        for namespace in unreadable_namespaces {
+            env.mark_namespace_unreadable_attribute(namespace);
         }
         Ok(env)
     }
@@ -2046,6 +2167,7 @@ impl AssemblyEnv {
                 if segments.iter().any(String::is_empty) {
                     continue;
                 }
+                self.existence.add_auto_open_base(segments.clone());
                 if let Some((handle, effectively_public)) =
                     self.assembly_entity_at_path(contributor, &segments)
                 {
@@ -5223,6 +5345,48 @@ impl AssemblyEnv {
         self.invalidate_fold_surfaces();
     }
 
+    /// Record that a referenced assembly carries, in `namespace`, an attribute
+    /// whose owner its reader cannot name, so no extension-name answer in
+    /// that namespace is an absence proof. Called by the host
+    /// (the LSP), which reads the projection, and by [`Self::from_views`].
+    pub fn mark_namespace_unreadable_attribute(&mut self, namespace: Vec<String>) {
+        self.namespaces_with_unreadable_attributes.insert(namespace);
+    }
+
+    /// Record that some project reference has no built output yet (see
+    /// [`Self::references_not_built`]). Called by the host (the LSP).
+    pub fn mark_references_not_built(&mut self) {
+        self.references_not_built = true;
+    }
+
+    /// Whether some project reference has no built output yet
+    /// ([`Self::mark_references_not_built`]).
+    pub fn references_not_built(&self) -> bool {
+        self.references_not_built
+    }
+
+    /// The extension-scope gate's view of the referenced assemblies
+    /// ([`ExtensionView`]).
+    pub(crate) fn extension_view(&self) -> ExtensionView<'_> {
+        ExtensionView(self)
+    }
+
+    /// What the referenced assemblies declare, at every accessibility
+    /// ([`existence`]): the only assembly-side input the resolver's
+    /// certification of an `open` is handed.
+    pub(crate) fn existence(&self) -> &ExistenceSet {
+        &self.existence
+    }
+
+    /// Whether a referenced assembly carries, in `namespace`, an attribute
+    /// whose owner its reader cannot name.
+    fn namespace_has_unreadable_attribute(&self, namespace: &[String]) -> bool {
+        !self.namespaces_with_unreadable_attributes.is_empty()
+            && self
+                .namespaces_with_unreadable_attributes
+                .contains(namespace)
+    }
+
     /// Whether the env's loaded-DLL **identity set is incomplete**: some DLL is
     /// present that the env cannot name, so nothing read out of the assemblies
     /// is provably unshadowed by it (see
@@ -5242,6 +5406,8 @@ impl AssemblyEnv {
     /// which DLLs were skipped is known there.
     pub fn mark_referenced_assemblies_incomplete(&mut self) {
         self.assembly_identities_incomplete = true;
+        // An assembly the env cannot name may declare anything.
+        self.existence.mark_unknowable();
         // Chase results depend on this flag (a `CcuRef` hop declines on an
         // incomplete identity set), so memoised entries computed before the
         // mark are stale for THIS env — replace the whole cache handle. A
@@ -5495,6 +5661,7 @@ impl AssemblyEnv {
             // over-deferring an inaccessible target's extensions is the
             // gate's safe direction.
             self.namespace_has_dropped_type(&self.nodes[h.index()].owning_namespace)
+                || self.namespace_has_unreadable_attribute(&self.nodes[h.index()].owning_namespace)
                 || self.entity_tree_has_extension_named(h, name, is_static)
         }) {
             return true;
@@ -5519,6 +5686,7 @@ impl AssemblyEnv {
         contributor: AssemblyId,
     ) -> bool {
         self.namespace_has_dropped_type(namespace)
+            || self.namespace_has_unreadable_attribute(namespace)
             || self.types_in_namespace(namespace).iter().any(|&h| {
                 self.assembly_provenance(h) == Some(contributor)
                     && self.entity_tree_has_extension_named(h, name, is_static)
@@ -5566,6 +5734,7 @@ impl AssemblyEnv {
         is_static: bool,
     ) -> bool {
         self.namespace_has_dropped_type(namespace)
+            || self.namespace_has_unreadable_attribute(namespace)
             || self
                 .types_in_namespace(namespace)
                 .iter()
@@ -5623,7 +5792,14 @@ impl AssemblyEnv {
         } else {
             &entity.extension_member_names
         };
-        if fsharp_names.iter().any(|n| n == name) {
+        // An F# extension property or event is named by its accessors
+        // (`get_P`) and by itself (`P`, which a record label's lookup asks).
+        if fsharp_names.iter().any(|n| {
+            n == name
+                || ACCESSOR_PREFIXES
+                    .iter()
+                    .any(|p| n.strip_prefix(p) == Some(name))
+        }) {
             return true;
         }
         if !entity.skipped_members.is_empty() {
@@ -5636,20 +5812,7 @@ impl AssemblyEnv {
         {
             return true;
         }
-        // A property or event of an extension container may have an accessor
-        // under `[<Extension>]` (F# allows it on a static property's getter),
-        // which FCS calls as an extension method by its accessor name. The
-        // reader projects the property, not the accessor, so each accessor
-        // spelling of it may be one.
-        if !is_static
-            && entity.is_extension_container
-            && entity.members.iter().any(|m| {
-                matches!(m, Member::Property(_) | Member::Event(_))
-                    && ["get_", "set_", "add_", "remove_"]
-                        .iter()
-                        .any(|prefix| name.strip_prefix(prefix) == Some(member_name(m)))
-            })
-        {
+        if !is_static && container_may_hold_accessor_extensions(entity) {
             return true;
         }
         self.children(handle)
@@ -8393,6 +8556,12 @@ pub(crate) mod from_views_tests {
     }
 
     impl EcmaView for FakeView {
+        fn existence_index(&self) -> Result<borzoi_assembly::ExistenceIndex, ImportError> {
+            Ok(borzoi_assembly::ExistenceIndex {
+                il: Vec::new(),
+                pickle: borzoi_assembly::PickleLayer::Unreadable("a synthetic view".to_string()),
+            })
+        }
         fn identity(&self) -> &AssemblyIdentity {
             &self.identity
         }
@@ -8413,6 +8582,7 @@ pub(crate) mod from_views_tests {
                     fsharp_abbreviations_unknowable: false,
                     fsharp_extension_index_unknowable: false,
                     fsharp_signature_non_authoritative: false,
+                    unreadable_attribute_namespaces: Vec::new(),
                 },
             ))
         }
@@ -8468,6 +8638,12 @@ pub(crate) mod from_views_tests {
     }
 
     impl EcmaView for ConfigView {
+        fn existence_index(&self) -> Result<borzoi_assembly::ExistenceIndex, ImportError> {
+            Ok(borzoi_assembly::ExistenceIndex {
+                il: Vec::new(),
+                pickle: borzoi_assembly::PickleLayer::Unreadable("a synthetic view".to_string()),
+            })
+        }
         fn identity(&self) -> &AssemblyIdentity {
             &self.identity
         }
@@ -8492,6 +8668,7 @@ pub(crate) mod from_views_tests {
                     fsharp_abbreviations_unknowable: false,
                     fsharp_extension_index_unknowable: self.extension_index_unknowable,
                     fsharp_signature_non_authoritative: self.signature_non_authoritative,
+                    unreadable_attribute_namespaces: Vec::new(),
                 },
             ))
         }
@@ -9647,6 +9824,7 @@ pub(crate) mod from_views_tests {
             Some(named_target(Some("Lib"), &["N", "Widget"])),
         );
         let input = |path: &str, roots: Vec<Entity>| super::AssemblyProjectionInput {
+            existence: super::ExistenceInput::Synthetic,
             path: std::path::PathBuf::from(path),
             roots,
             abbreviation_visibility: super::AbbreviationVisibility::Modelled,
@@ -9800,6 +9978,7 @@ pub(crate) mod from_views_tests {
         forwarders: Vec<borzoi_assembly::TypeForwarder>,
     ) -> super::AssemblyProjectionInput {
         super::AssemblyProjectionInput {
+            existence: super::ExistenceInput::Synthetic,
             path: std::path::PathBuf::from(format!("{dll}.dll")),
             roots,
             abbreviation_visibility: super::AbbreviationVisibility::Modelled,
@@ -9831,6 +10010,7 @@ pub(crate) mod from_views_tests {
         qualified_names: Option<Vec<&str>>,
     ) -> super::AssemblyProjectionInput {
         super::AssemblyProjectionInput {
+            existence: super::ExistenceInput::Synthetic,
             has_assembly_references,
             qualified_names: qualified_names
                 .map(|names| names.into_iter().map(str::to_string).collect()),
@@ -11835,6 +12015,7 @@ pub(crate) mod from_views_tests {
                     .map(
                         |((dll, abbreviations_unknowable, extensions_unknowable), roots)| {
                             super::AssemblyProjectionInput {
+                                existence: super::ExistenceInput::Synthetic,
                                 abbreviation_visibility: if abbreviations_unknowable {
                                     super::AbbreviationVisibility::Unknowable
                                 } else {
@@ -11967,4 +12148,146 @@ pub(crate) fn is_array_tycon_path(path: &[String]) -> bool {
         && shape.starts_with('[')
         && shape.ends_with(']')
         && shape[1..shape.len() - 1].chars().all(|ch| ch == ',')
+}
+
+#[cfg(test)]
+mod extension_view_guard {
+    use std::collections::{BTreeSet, VecDeque};
+
+    /// The lookups that answer from name resolution's view of an assembly,
+    /// its public surface. A friend assembly's internal extension is in scope
+    /// (`InternalsVisibleTo`), so no question the extension gate asks may be
+    /// answered through one.
+    const PUBLIC_ONLY: [&str; 6] = [
+        "is_public",
+        "public_entities_named",
+        "has_namespace",
+        "effectively_public",
+        "is_accessible",
+        "public_types",
+    ];
+
+    /// Every body of a function named `name` in `source`.
+    fn bodies<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        let needle = format!("fn {name}");
+        let mut from = 0;
+        while let Some(at) = source[from..].find(&needle) {
+            let start = from + at;
+            from = start + needle.len();
+            let next = source[from..].chars().next().unwrap_or(' ');
+            if next.is_alphanumeric() || next == '_' {
+                continue;
+            }
+            let Some(open) = source[start..].find('{') else {
+                break;
+            };
+            let mut depth = 0usize;
+            let mut end = start + open;
+            for (i, c) in source[start + open..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = start + open + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.push(&source[start..end]);
+        }
+        out
+    }
+
+    /// The methods a body calls on `self` (or on the wrapped env), a call
+    /// split across lines included.
+    fn callees(body: &str) -> Vec<String> {
+        let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut out = Vec::new();
+        for prefix in ["self.", "self.0."] {
+            let mut rest = compact.as_str();
+            while let Some(at) = rest.find(prefix) {
+                rest = &rest[at + prefix.len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() && rest[name.len()..].starts_with('(') {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// Everything the extension gate asks of the assemblies goes through
+    /// [`super::ExtensionView`], and the resolver's certification of an
+    /// `open` holds only one. Every function the view's methods reach, by
+    /// name, must read no public-only lookup.
+    #[test]
+    fn extension_queries_read_no_public_only_lookup() {
+        let source = include_str!("assembly_env.rs");
+        let view_impl = {
+            let start = source
+                .find("impl ExtensionView<'_> {")
+                .expect("the view's methods");
+            let end = start + source[start..].find("\n}\n").expect("the impl's end");
+            &source[start..end]
+        };
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut queue: VecDeque<String> = callees(view_impl).into();
+        let mut offenders = Vec::new();
+        while let Some(name) = queue.pop_front() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            for body in bodies(source, &name) {
+                for bad in PUBLIC_ONLY {
+                    if body.contains(bad) {
+                        offenders.push(format!("`{name}` reads `{bad}`"));
+                    }
+                }
+                queue.extend(callees(body));
+            }
+        }
+        assert!(seen.len() > 8, "reached only {seen:?}");
+        assert!(offenders.is_empty(), "{offenders:#?}");
+        let certify = include_str!("resolve/open_certify.rs");
+        for bad in PUBLIC_ONLY {
+            assert!(
+                !certify.contains(&format!("{bad}(")),
+                "the open certification reads `{bad}`"
+            );
+        }
+    }
+
+    /// The open certification's only assembly-side input is the existence
+    /// set, and the set's module holds no way back to the env: neither file
+    /// names the env or its view, so nothing the certification is handed can
+    /// answer from name resolution's public view.
+    #[test]
+    fn the_open_certification_reads_only_the_existence_set() {
+        let certify = include_str!("resolve/open_certify.rs");
+        let existence = include_str!("assembly_env/existence.rs");
+        for (file, text) in [("open_certify.rs", certify), ("existence.rs", existence)] {
+            for forbidden in [
+                "AssemblyEnv",
+                "ExtensionView",
+                "extension_view",
+                "EntityHandle",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{file} names `{forbidden}`, a way to name resolution's view"
+                );
+            }
+        }
+        assert!(
+            certify.contains("use crate::assembly_env::existence::ExistenceSet;"),
+            "the certification reads the existence set"
+        );
+    }
 }

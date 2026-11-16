@@ -16,15 +16,18 @@
 /// [module docs](self).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Unknowable {
-    /// EX-2: some explicit `open` in the file brings an extension surface
-    /// whose names cannot be enumerated here: a project module or namespace
-    /// (EX-3), an assembly module or `open type`, or an opaque, vetoed or
-    /// dropped-path open. The overload engine's extension gate then defers
-    /// every method-call commit in the file, as it did for *any* `open`
-    /// before EX-2. File-global like
+    /// Some explicit `open` in the file lies outside the certified domain the
+    /// resolver enumerates (an assembly module, an `open type`, a relative
+    /// reading, a module abbreviation, an opaque, vetoed or dropped-path
+    /// open), so the extension gate declines every call. File-global like
     /// [`Output::open_extension_namespaces`](crate::resolve::output::Output::open_extension_namespaces):
     /// an `open` in a nested module counts for the whole file.
-    OpenExtensionSurface,
+    UnenumeratedSurface,
+    /// Some explicit `open` in the file names a project module or namespace.
+    /// The extensions it brings are the project's own, which the gate reads
+    /// anyway; but under an unbuilt project reference (whose namespaces it may
+    /// share) the gate keeps such an `open` as a wholesale decline.
+    ProjectSurface,
     /// An earlier `namespace global` block of this file held an `open`. FCS
     /// carries what such an open brings into the blocks after it (probed: a
     /// later block's `Alpha.Color.Red` binds the opened module's `Alpha`
@@ -36,8 +39,9 @@ pub(super) enum Unknowable {
 impl Unknowable {
     /// Every reason, each once.
     #[cfg(test)]
-    pub(super) const ALL: [Unknowable; 2] = [
-        Unknowable::OpenExtensionSurface,
+    pub(super) const ALL: [Unknowable; 3] = [
+        Unknowable::UnenumeratedSurface,
+        Unknowable::ProjectSurface,
         Unknowable::GlobalBlockOpen,
     ];
 
@@ -82,8 +86,12 @@ mod tests {
         let env = AssemblyEnv::default();
         let rf = resolve_file(&file, &ProjectItems::default(), &env, &recovery);
         assert_eq!(
-            rf.open_extension_unknowable(),
-            rf.unknowables.contains(Unknowable::OpenExtensionSurface)
+            rf.opens_unenumerated(),
+            rf.unknowables.contains(Unknowable::UnenumeratedSurface)
+        );
+        assert_eq!(
+            rf.opens_project(),
+            rf.unknowables.contains(Unknowable::ProjectSurface)
         );
         Unknowable::ALL
             .into_iter()
@@ -99,20 +107,26 @@ mod tests {
         let rows: &[(&str, &[Unknowable])] = &[
             ("module M\nlet x = 1\n", &[]),
             (
+                "module M\nmodule N =\n    let y = 1\nopen M.N\nlet x = 1\n",
+                &[Unknowable::ProjectSurface],
+            ),
+            // A relative `open` is outside the certified domain.
+            (
+                "module M\nmodule N =\n    let y = 1\nopen N\nlet x = 1\n",
+                &[Unknowable::UnenumeratedSurface, Unknowable::ProjectSurface],
+            ),
+            (
                 "module M\nopen Nowhere\nlet x = 1\n",
-                &[Unknowable::OpenExtensionSurface],
+                &[Unknowable::UnenumeratedSurface],
             ),
             (
                 "module M\nopen type Nowhere.T\nlet x = 1\n",
-                &[Unknowable::OpenExtensionSurface],
+                &[Unknowable::UnenumeratedSurface],
             ),
             (
                 "namespace global\nopen System\ntype U = int\nnamespace A\ntype V = int\n",
                 // In an empty env the `open` is unenumerable too.
-                &[
-                    Unknowable::OpenExtensionSurface,
-                    Unknowable::GlobalBlockOpen,
-                ],
+                &[Unknowable::UnenumeratedSurface, Unknowable::GlobalBlockOpen],
             ),
         ];
         for (src, expected) in rows {
