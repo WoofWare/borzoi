@@ -1141,8 +1141,8 @@ impl<'s, 'r> Engine<'s, 'r> {
     }
 
     /// `raw` with each plain `@(Type)` read as a property holding the list as
-    /// MSBuild expands it: each identity escaped, joined by `;`. An item
-    /// expression that is more (a transform, a separator) declines.
+    /// MSBuild expands it: each identity's escaped spelling, joined by `;`. An
+    /// item expression that is more (a transform, a separator) declines.
     fn with_items(&mut self, raw: &str, condition: bool) -> Result<String, Decline> {
         if references_private(raw) {
             return decline(format!("{raw} reads a property no project can write"));
@@ -1154,19 +1154,15 @@ impl<'s, 'r> Engine<'s, 'r> {
                 "{raw} passes an item reference to a property function"
             ));
         }
-        // The tables hold identities decoded, and MSBuild expands a list from
-        // their escaped spellings, which decoding loses. In a value that
-        // spelling is what the value holds, and a later read may run it into a
-        // `%` (with `J` spelt `%34%31`, `%@(J)` reads `%41`, not `A`); a
-        // condition compares decoded text, where only what the reference runs
-        // into can tell spellings apart. So a value declines any item list,
-        // and a condition one not bounded by quotes, parentheses, whitespace
-        // or its ends.
-        if !condition && raw.contains("@(") {
-            return decline(format!(
-                "{raw} reads an item list into a value, whose escaped spelling the tables do not keep"
-            ));
-        }
+        // MSBuild expands a list from its items' escaped spellings. In a value
+        // that spelling is what the value holds, run into whatever stands
+        // beside it, and a later read may run it into a `%` (with `J` spelt
+        // `%34%31`, `%@(J)` reads `%41`, not `A`): so a value takes each
+        // item's spelling as the table keeps it, and declines an item whose
+        // spelling it does not keep. A condition compares decoded text, where
+        // only what the reference runs into can tell spellings apart, so it
+        // takes a list bounded by quotes, parentheses, whitespace or its ends,
+        // of identities every spelling of which reads the same.
         let mut out = String::new();
         let mut rest = raw;
         while let Some(at) = rest.find("@(") {
@@ -1182,28 +1178,38 @@ impl<'s, 'r> Engine<'s, 'r> {
                     c.is_whitespace() || c == '\'' || c == if opening { '(' } else { ')' }
                 })
             };
-            if !bounded(before, true) || !bounded(after, false) {
+            if condition && (!bounded(before, true) || !bounded(after, false)) {
                 return decline(format!("{raw} runs an item list into other text"));
             }
             let item_type = interior[..close].trim();
             if !item_name(item_type) {
                 return decline(format!("{raw} has an item expression"));
             }
-            // The tables hold identities decoded, and MSBuild expands the list
-            // from the escaped spelling, which decoding loses. Only an identity
-            // every spelling of which reads the same wherever it lands passes.
             let table = self.table(item_type)?;
-            if let Some(item) = table.iter().find(|item| !respellable(&item.identity)) {
-                return decline(format!(
-                    "an item of {item_type}, {:?}, may be spelt otherwise",
-                    item.identity
-                ));
+            let mut spellings = Vec::with_capacity(table.len());
+            for item in table.iter() {
+                let spelled = if condition {
+                    // Only an identity every spelling of which reads the same
+                    // wherever it lands passes.
+                    if !respellable(&item.identity) {
+                        return decline(format!(
+                            "an item of {item_type}, {:?}, may be spelt otherwise",
+                            item.identity
+                        ));
+                    }
+                    escaping::escape(&item.identity)
+                } else {
+                    let Some(spelled) = &item.escaped_identity else {
+                        return decline(format!(
+                            "{raw} reads {:?} of {item_type}, whose escaped spelling the walk does not keep",
+                            item.identity
+                        ));
+                    };
+                    spelled.clone()
+                };
+                spellings.push(spelled);
             }
-            let list = table
-                .iter()
-                .map(|item| escaping::escape(&item.identity))
-                .collect::<Vec<_>>()
-                .join(";");
+            let list = spellings.join(";");
             let name = format!("{ITEM_LIST_PROPERTY}{item_type}");
             self.lookup
                 .insert_escaped(&name, escaping::Escaped::from_xml(list));

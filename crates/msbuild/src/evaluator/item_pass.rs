@@ -1554,9 +1554,13 @@ fn project_reference_view(state: &State<'_>) -> Option<Vec<EvaluatedItem>> {
             let identity = ordered.identity.as_ref().filter(|id| !id.contains('\\'))?;
             Some(EvaluatedItem {
                 identity: identity.clone(),
-                // The reference capture keeps the identity decoded only.
+                // The reference capture keeps its spelling in the row it reads
+                // as an item table, where it has one.
                 #[cfg(any(test, feature = "test-support"))]
-                escaped_identity: None,
+                escaped_identity: ordered
+                    .row
+                    .as_ref()
+                    .and_then(|row| row.escaped_identity.clone()),
                 // We capture a reference's metadata in its own model, not as
                 // the package metadata a helper item records: a consumer
                 // reading one through the copy must treat it as unknown.

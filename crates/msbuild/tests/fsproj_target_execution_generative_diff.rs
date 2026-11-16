@@ -610,8 +610,9 @@ fn item_references_keep_definitions_and_escapes() {
 
 /// Identities whose escaped spelling decoding loses, read through a
 /// property: MSBuild keeps padding escaped (`%20j%20`), and a lone `%` run into
-/// `41` forms the escape for `A`. The executor's tables hold identities
-/// decoded. Each run may decline; if it runs, it must be MSBuild's.
+/// `41` forms the escape for `A`. A value reads each item's spelling as the
+/// table keeps it, so every run but the condition's commits, and must be
+/// MSBuild's; the condition, which runs the list into a `%`, may decline.
 #[test]
 fn identities_decoding_loses_the_spelling_of() {
     const CASES: [&str; 6] = [
@@ -652,9 +653,11 @@ fn identities_decoding_loses_the_spelling_of() {
            </Project>"#,
     ];
     let mut oracle = Oracle::spawn();
+    let mut tally = Tally::default();
     for xml in CASES {
-        check(&mut oracle, xml, &mut Tally::default());
+        check(&mut oracle, xml, &mut tally);
     }
+    assert_eq!(tally.committed, CASES.len() - 1, "{tally:?}");
 }
 
 /// Expressions the XML reader and MSBuild read apart: a line break inside
@@ -750,6 +753,104 @@ fn element_content_is_read_with_its_line_ends() {
         check(&mut oracle, &xml, &mut tally);
     }
     assert_eq!(tally.committed, BODIES.len(), "{tally:?}");
+}
+
+/// Spellings an item of `J` may take in a generated list: plain, escapes of
+/// characters MSBuild needs no escape for (decoding loses them: `%34%31` is
+/// `41`), an escaped `%` and `;`, padding kept escaped, a lone `%` (which
+/// beside other text may form an escape), and an escaped `@`.
+const LIST_IDENTITIES: [&str; 10] = [
+    "j1", "j2", "%34%31", "%25", "%2541", "a%3Bb", "%20j%20", "%", "%40", "x%2Ey",
+];
+
+/// Values a target writes that read `J` beside text: escapes it may complete
+/// (`%@(J)` with `J` spelt `%34%31` reads `%41`), text on either side, two
+/// lists, a list beside another, and a property that holds a list (`%$(B)`).
+const LIST_VALUES: [&str; 14] = [
+    "@(J)",
+    "%@(J)",
+    "@(J)%",
+    "@(J)41",
+    "x@(J)y",
+    "@(J)@(J)",
+    "@(J);@(I)",
+    " @(J) ",
+    "%$(B)",
+    "$(B)41",
+    "[$(B)]",
+    "$(B);@(J)",
+    "@(J)$(B)",
+    "%25@(J)",
+];
+
+/// A project whose target writes properties from [`LIST_VALUES`] and includes
+/// what they hold, so a list's spelling reaches a property, a later read, and
+/// an item.
+fn list_project(rng: &mut SplitMix64) -> String {
+    let mut out = String::from("<Project>\n  <ItemGroup>\n");
+    for _ in 0..1 + rng.below(3) {
+        out.push_str(&format!(
+            "    <J Include=\"{}\" />\n",
+            rng.pick(&LIST_IDENTITIES)
+        ));
+    }
+    if rng.below(2) == 0 {
+        out.push_str("    <I Include=\"e\" />\n");
+    }
+    out.push_str("  </ItemGroup>\n  <Target Name=\"T0\">\n    <PropertyGroup>\n");
+    for property in PROPERTIES {
+        if rng.below(4) != 0 {
+            out.push_str(&format!(
+                "      <{property}>{}</{property}>\n",
+                rng.pick(&LIST_VALUES)
+            ));
+        }
+    }
+    out.push_str("    </PropertyGroup>\n");
+    if rng.below(2) == 0 {
+        let include = rng.pick(&["$(A)", "$(C)", "$(B);$(C)", "@(J)"]);
+        out.push_str(&format!(
+            "    <ItemGroup>\n      <I Include=\"{include}\" />\n    </ItemGroup>\n"
+        ));
+    }
+    out.push_str("  </Target>\n</Project>\n");
+    out
+}
+
+fn list_sweep(seed: u64, cases: usize) -> Tally {
+    let mut rng = SplitMix64(seed);
+    let mut oracle = Oracle::spawn();
+    let mut tally = Tally::default();
+    for _ in 0..cases {
+        let xml = list_project(&mut rng);
+        check(&mut oracle, &xml, &mut tally);
+    }
+    eprintln!(
+        "item lists in values: {} cases, {} committed, {} rejected, {} failed",
+        tally.cases, tally.committed, tally.rejected, tally.failed
+    );
+    tally
+}
+
+/// Item lists read into values from escape-bearing spellings, beside text,
+/// `%` and properties holding lists, and included again: every committed run
+/// must be MSBuild's, and most must commit.
+#[test]
+fn item_lists_in_values_match_msbuild() {
+    let tally = list_sweep(0x1157_5e11, 300);
+    assert!(
+        tally.committed * 2 > tally.cases,
+        "only {} of {} runs were committed",
+        tally.committed,
+        tally.cases
+    );
+}
+
+#[test]
+#[ignore = "a fresh-seed soak; BORZOI_MSBUILD_SOAK_SEED / BORZOI_MSBUILD_SOAK_CASES"]
+fn item_lists_in_values_soak() {
+    let (seed, cases) = common::soak_parameters("item_lists_in_values", 3000);
+    list_sweep(seed, cases);
 }
 
 /// Identities an item list `J` may hold for batching: extensions of either
