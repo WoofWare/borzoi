@@ -117,6 +117,11 @@ impl Oracle {
     /// `<dotnet-root>/sdk/<version>` directory), on the runtime of
     /// `<dotnet-root>`. A resolver built for a newer runtime than the tool's
     /// own (net10.0) is run on the newest runtime there.
+    ///
+    /// The child is `<dotnet-root>`'s own `dotnet` muxer running the tool
+    /// (`dotnet exec`), not the tool's apphost, so that it is the process a
+    /// build there runs in: `identity`'s `processArchitecture` is the
+    /// architecture the install state is read under.
     pub fn spawn_on(sdk: &Path) -> Oracle {
         let dotnet_root = sdk
             .parent()
@@ -144,10 +149,17 @@ impl Oracle {
         }
         process.extend(WORKLOAD_VARIABLES.iter().map(|v| ((*v).to_owned(), None)));
         let sdk = sdk.to_str().expect("SDK directory is UTF-8");
+        let muxer = dotnet_root.join(if cfg!(windows) {
+            "dotnet.exe"
+        } else {
+            "dotnet"
+        });
+        let tool = ensure_oracle_built().with_extension("dll");
+        let tool = tool.to_str().expect("the tool's path is UTF-8");
         Oracle {
             child: BatchChild::spawn_with_environment(
-                ensure_oracle_built(),
-                &["--sdk", sdk],
+                &muxer,
+                &["exec", tool, "--sdk", sdk],
                 &process,
             ),
         }

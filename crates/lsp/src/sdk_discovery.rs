@@ -418,6 +418,12 @@ impl SdkDiscoveryEnv {
 #[derive(Debug, Clone)]
 pub struct SdkDiscovery {
     roots: Vec<PathBuf>,
+    /// The host's .NET install root ([`resolve_dotnet_root`]), whose `dotnet`
+    /// muxer is the one a build is started with, when discovery named it: a
+    /// `global.json` `sdk.paths` that does not list `$host$` leaves it
+    /// unnamed. [`Self::resolve`] reads the build process's architecture off
+    /// that muxer.
+    host_root: Option<PathBuf>,
     /// The global packages folder NuGet's SDK resolver reads versioned SDK
     /// references from, or why it cannot be said (see the module docs).
     nuget_packages: Result<PathBuf, GlobalPackagesFolderDecline>,
@@ -513,7 +519,7 @@ impl SdkDiscovery {
         // optional when `sdk.paths` is set (it may name explicit
         // alternatives that don't need the host). The decision lives
         // in [`expand_sdk_paths`] so this site doesn't have to know.
-        let (roots, spec, msbuild_sdks, global_json_path, global_json_workloads) =
+        let (roots, host_root, spec, msbuild_sdks, global_json_path, global_json_workloads) =
             match find_global_json(&walk_start, observer)
                 .map_err(DiscoveryError::GlobalJsonUndecided)?
             {
@@ -540,9 +546,10 @@ impl SdkDiscovery {
                             VersionSpec::any_version(env.host_default_allow_prerelease),
                         ),
                     };
-                    let roots = expand_sdk_paths(env, &path, paths, observer)?;
+                    let (roots, host_root) = expand_sdk_paths(env, &path, paths, observer)?;
                     (
                         roots,
+                        host_root,
                         spec,
                         parsed.msbuild_sdks,
                         Some(path),
@@ -553,7 +560,8 @@ impl SdkDiscovery {
                     let host_root = resolve_dotnet_root(env, observer)
                         .ok_or(DiscoveryError::MissingDotnetRoot)?;
                     (
-                        vec![host_root],
+                        vec![host_root.clone()],
+                        Some(host_root),
                         VersionSpec::any_version(env.host_default_allow_prerelease),
                         BTreeMap::new(),
                         None,
@@ -563,6 +571,7 @@ impl SdkDiscovery {
             };
         Ok(Self {
             roots,
+            host_root,
             nuget_packages,
             spec,
             msbuild_sdks,
@@ -664,9 +673,11 @@ impl SdkDiscovery {
             user_dotnet_root: self.user_dotnet_root.as_deref(),
             overrides_present: self.workload_overrides_present,
             global_json: self.global_json_workloads.clone(),
-            // Not said yet (#953): the locators then decline on any
-            // install-state file, as they did before they read one.
-            process_architecture: None,
+            // Only a workload locator reads it, so no other name reads the
+            // muxer.
+            process_architecture: workloads::is_workload_locator(sdk_name)
+                .then(|| self.build_process_architecture(observer))
+                .flatten(),
         };
         let locate = |root: &Path, name: &str| {
             resolve_sdk(
@@ -698,6 +709,35 @@ impl SdkDiscovery {
             }),
             (resolved, _) => resolved,
         }
+    }
+
+    /// The architecture of the process a build runs in, which the workload
+    /// install state is keyed by: that of the host's `dotnet` muxer, read off
+    /// its header through `observer`
+    /// ([`workloads::ProcessArchitecture::of_executable`]). The read is of the
+    /// file's leading bytes and is recorded as their digest, so an evaluation
+    /// that read it holds exactly while the muxer's header does, and a muxer
+    /// replaced by one of another architecture is seen.
+    ///
+    /// `None` where the host root is unnamed ([`Self::host_root`]), the muxer
+    /// cannot be read, or its header does not settle the architecture (a
+    /// universal binary of two, say): the locators then decline wherever an
+    /// install-state file exists. The muxer is the host root's, as discovery
+    /// names it: a `$DOTNET_ROOT` naming another install than the `dotnet` the
+    /// user builds with is outside what discovery models, here as for the
+    /// SDKs.
+    fn build_process_architecture(
+        &self,
+        observer: &Observer,
+    ) -> Option<workloads::ProcessArchitecture> {
+        let muxer = self.host_root.as_ref()?.join(DOTNET_BIN);
+        let header = borzoi_msbuild::observed::read_prefix(
+            observer,
+            &muxer,
+            workloads::EXECUTABLE_HEADER_BYTES,
+        )
+        .ok()?;
+        workloads::ProcessArchitecture::of_executable(&header)
     }
 
     /// The ordered list of SDK install roots [`Self::resolve`] consults.
@@ -749,7 +789,8 @@ const DOTNET_BIN: &str = "dotnet.exe";
 const DOTNET_BIN: &str = "dotnet";
 
 /// Project a `global.json` `sdk.paths` field into the ordered list of
-/// SDK install roots [`SdkDiscovery::resolve`] consults.
+/// SDK install roots [`SdkDiscovery::resolve`] consults, beside the host root
+/// where it was resolved ([`SdkDiscovery::host_root`]).
 ///
 /// `paths == None` is the "no `paths` field present" case (the common
 /// one): the result is a single-element vec carrying the discovered
@@ -781,12 +822,12 @@ fn expand_sdk_paths(
     global_json_path: &Path,
     paths: Option<Vec<SdkPathEntry>>,
     observer: &Observer,
-) -> Result<Vec<PathBuf>, DiscoveryError> {
+) -> Result<(Vec<PathBuf>, Option<PathBuf>), DiscoveryError> {
     let Some(entries) = paths else {
         // No `paths` field in `global.json` ⇒ host-only, strict.
         let host_root =
             resolve_dotnet_root(env, observer).ok_or(DiscoveryError::MissingDotnetRoot)?;
-        return Ok(vec![host_root]);
+        return Ok((vec![host_root.clone()], Some(host_root)));
     };
     let global_json_dir = global_json_path
         .parent()
@@ -813,7 +854,7 @@ fn expand_sdk_paths(
             SdkPathEntry::Relative(s) => Some(global_json_dir.join(s)),
         })
         .collect();
-    Ok(roots)
+    Ok((roots, host_root))
 }
 
 /// The host's .NET install root, read off the filesystem: an explicit

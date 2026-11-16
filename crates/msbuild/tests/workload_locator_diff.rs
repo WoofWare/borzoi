@@ -51,11 +51,12 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use borzoi_msbuild::observed;
 use borzoi_msbuild::observed::host_fs::HostPath as _;
 use borzoi_msbuild::observed::{Observer, host_fs};
 use borzoi_msbuild::workloads::{
-    WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR, WORKLOAD_MANIFEST_TARGETS_LOCATOR, WorkloadEnvironment,
-    resolve_workload_locator,
+    EXECUTABLE_HEADER_BYTES, ProcessArchitecture, WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
+    WORKLOAD_MANIFEST_TARGETS_LOCATOR, WorkloadEnvironment, resolve_workload_locator,
 };
 use borzoi_msbuild::{SdkResolution, test_support};
 use borzoi_oracle_harness::workload_oracle::Oracle;
@@ -196,6 +197,38 @@ fn must_band(version: &str) -> bool {
                 && (ids.len() == 2 || ids.len() == 4)
                 && ids[1..].iter().all(|id| plain_number(id))
         }
+    }
+}
+
+/// The architecture read off a dotnet root's `dotnet` muxer, as a host reads
+/// it (its leading bytes, through the observer), is the one a process of that
+/// muxer reports: the one the install state is keyed by.
+#[test]
+fn the_muxer_s_header_names_its_process_architecture() {
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let theirs = oracle.request(&json!({"op": "identity"}))["processArchitecture"]
+            .as_str()
+            .expect("the oracle names its architecture")
+            .to_owned();
+        let muxer = sdk
+            .parent()
+            .and_then(Path::parent)
+            .expect("an SDK directory sits at <dotnet-root>/sdk/<version>")
+            .join(if cfg!(windows) {
+                "dotnet.exe"
+            } else {
+                "dotnet"
+            });
+        let header = observed::read_prefix(&Observer::new(), &muxer, EXECUTABLE_HEADER_BYTES)
+            .expect("the muxer reads");
+        assert_eq!(
+            ProcessArchitecture::of_executable(&header).map(ProcessArchitecture::name),
+            Some(theirs.as_str()),
+            "{}: the muxer's header against the process it runs ({})",
+            sdk.display(),
+            muxer.display()
+        );
     }
 }
 
@@ -1858,7 +1891,10 @@ fn sweep_sets(seed: u64, cases: usize) {
                     user_dotnet_root: None,
                     overrides_present: false,
                     global_json: global_json.clone().unwrap_or_default(),
-                    process_architecture: Some(&architecture),
+                    process_architecture: Some(
+                        ProcessArchitecture::from_name(&architecture)
+                            .expect("the oracle names an Architecture member"),
+                    ),
                 };
                 let sdk_dir = layout.dotnet_root.join("sdk").join(HOST);
                 let ours = match resolve_workload_locator(
@@ -2388,10 +2424,12 @@ fn the_installed_layouts_resolve_as_their_own_resolvers_do() {
     let user_root = host_fs::canonicalize(user.path()).unwrap();
     for sdk in graded_sdks() {
         let mut oracle = Oracle::spawn_on(&sdk);
-        let architecture = oracle.request(&json!({"op": "identity"}))["processArchitecture"]
-            .as_str()
-            .expect("the oracle names its architecture")
-            .to_owned();
+        let architecture = ProcessArchitecture::from_name(
+            oracle.request(&json!({"op": "identity"}))["processArchitecture"]
+                .as_str()
+                .expect("the oracle names its architecture"),
+        )
+        .expect("the oracle names an Architecture member");
         let dotnet_root = sdk.parent().unwrap().parent().unwrap();
         let version = sdk.file_name().unwrap().to_string_lossy().into_owned();
         for locator in [
@@ -2402,7 +2440,7 @@ fn the_installed_layouts_resolve_as_their_own_resolvers_do() {
                 user_dotnet_root: Some(&user_root),
                 overrides_present: false,
                 global_json: Default::default(),
-                process_architecture: Some(&architecture),
+                process_architecture: Some(architecture),
             };
             let ours = resolve_workload_locator(locator, dotnet_root, &sdk, &env, &Observer::new());
             let response = oracle.request(&json!({

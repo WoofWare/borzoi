@@ -33,8 +33,9 @@ use std::path::{Path, PathBuf};
 
 use super::super::global_json::{JsonValue, parse_json_string_map, parse_strict_json};
 use super::{
-    FeatureBand, GlobalJsonWorkloads, ManifestVersion, WorkloadRoots, is_plain_release_version,
-    is_plain_workload_set_version, is_safe_manifest_id, read_dir_or_degrade, unsupported,
+    FeatureBand, GlobalJsonWorkloads, ManifestVersion, ProcessArchitecture, WorkloadRoots,
+    is_plain_release_version, is_plain_workload_set_version, is_safe_manifest_id,
+    read_dir_or_degrade, unsupported,
 };
 use crate::SdkResolveError;
 use crate::dotnet_io;
@@ -90,7 +91,7 @@ pub(super) fn select(
     band: &FeatureBand,
     roots: &WorkloadRoots,
     global_json: &GlobalJsonWorkloads,
-    architecture: Option<&str>,
+    architecture: Option<ProcessArchitecture>,
     observer: &Observer,
 ) -> Result<Selection, SdkResolveError> {
     let host_sets = load_sets(band, roots, observer)?;
@@ -411,14 +412,14 @@ struct InstallState {
 fn read_install_state(
     band: &FeatureBand,
     roots: &WorkloadRoots,
-    architecture: &str,
+    architecture: ProcessArchitecture,
     observer: &Observer,
 ) -> Result<InstallState, SdkResolveError> {
     let root = roots.manifest_roots().next().expect("a manifest root");
     let path = root
         .join("metadata")
         .join("workloads")
-        .join(architecture)
+        .join(architecture.name())
         .join(band.to_string())
         .join("InstallState")
         .join("default.json");
