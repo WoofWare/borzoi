@@ -308,10 +308,10 @@ This is a Cargo workspace with ten members:
   No dependencies. Its correctness oracle is in `borzoi-cst`'s tests
   (`tests/all/print_roundtrip/`), beside the FCS harness it needs: for a tree
   `t`, FCS must parse `print(t)` with no diagnostic at all and its parse must
-  lower back to `t` exactly (and our parser must agree with FCS, the shape of
-  #947 aside). The trees come from a generator over the whole tree, from
-  exhaustive tables of keywords and short operator spellings, and from every
-  corpus file lowered with the unmodelled declarations dropped
+  lower back to `t` exactly (and our parser must agree with FCS). The trees
+  come from a generator over the whole tree, from exhaustive tables of
+  keywords and short operator spellings, and from every corpus file lowered
+  with the unmodelled declarations dropped
   (`print_roundtrip::corpus`, pinned per file). When the oracle finds a value
   F# cannot express, the fix is to the tree's types, so that value cannot be
   built; CI runs the printer's tests under the `cst` change filter.

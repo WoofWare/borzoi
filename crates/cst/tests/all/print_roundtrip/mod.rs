@@ -8,13 +8,10 @@
 //! cannot express, which is a hole in the types.
 //!
 //! Every printed text is also a parser differential for free: our parser must
-//! parse it cleanly to the same normalised tree. Two refusals of ours are
-//! exempt. One is by design: past `MAX_TREE_HEIGHT` our parser stops rather
-//! than risk its stack, and the printer's parentheses roughly double a tree's
-//! height, which the corpus's stress tests (`LargeSequential-500.fs`) cross.
-//! The other is the known divergence #947 (our offside rule counts byte
-//! columns where FCS counts UTF-16 ones), in exactly the shape the printer
-//! produces it ([`hits_issue_947`]).
+//! parse it cleanly to the same normalised tree. One refusal of ours is
+//! exempt, by design: past `MAX_TREE_HEIGHT` our parser stops rather than risk
+//! its stack, and the printer's parentheses roughly double a tree's height,
+//! which the corpus's stress tests (`LargeSequential-500.fs`) cross.
 //!
 //! The trees come from two places: a generator over the tree's whole surface
 //! ([`generate`]), and every corpus file, lowered with the declarations the
@@ -97,9 +94,6 @@ fn check_printed(printed: &str, tree: &ImplFile) -> Result<(), CheckFailure> {
         }
         Ok(_) => {}
     }
-    if hits_issue_947(printed) {
-        return Ok(());
-    }
     let parse = borzoi_cst::parser::parse(printed);
     if let [only] = parse.errors.as_slice()
         && only.message == "nesting is too deep; parsing stopped here"
@@ -116,31 +110,6 @@ fn check_printed(printed: &str, tree: &ImplFile) -> Result<(), CheckFailure> {
         ));
     }
     Ok(())
-}
-
-/// Whether `printed` has a `let rec … and …` group whose `let` follows a
-/// non-ASCII character on its line: the `and` aligns with the `let`'s UTF-16
-/// column, which our offside rule measures in bytes (#947), so our parser
-/// rejects text FCS accepts. Delete this once #947 is fixed.
-fn hits_issue_947(printed: &str) -> bool {
-    let lines: Vec<&str> = printed.lines().collect();
-    lines.iter().enumerate().any(|(i, line)| {
-        let rest = line.trim_start_matches(' ');
-        let column = line.len() - rest.len();
-        rest.starts_with("and ")
-            && lines[..i].iter().rev().any(|earlier| {
-                let mut units = 0;
-                for (byte, ch) in earlier.char_indices() {
-                    if units == column {
-                        return !earlier.is_char_boundary(byte)
-                            || (earlier[byte..].starts_with("let rec")
-                                && !earlier[..byte].is_ascii());
-                    }
-                    units += ch.len_utf16();
-                }
-                false
-            })
-    })
 }
 
 /// A caught panic's message.
