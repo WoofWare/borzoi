@@ -6183,6 +6183,29 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     {
         return;
     }
+    // Content the walk could not see may already have made this import, and
+    // MSBuild then skips it here as a duplicate (MSB4011): like an import
+    // followed on a gate the walk could not decide, it is one MSBuild may not
+    // make, so what it writes is not the build's for certain (#891).
+    if state.directory_build.fallback.is_none()
+        && let Some(hidden) = state.walk_opaque.clone()
+    {
+        let root = match hidden {
+            OpacityCause::Gate(root) => root,
+            OpacityCause::Unentered(what) => UnpinnedRoot::UnsupportedCondition(
+                format!(
+                    "the import of {}, which content the walk could not enter ({what}) may \
+                     already have made",
+                    path.display()
+                )
+                .into(),
+            ),
+        };
+        directory_build::within_followed_import(Some(root), state, |state| {
+            walk_import_file(path, span, collapse, state);
+        });
+        return;
+    }
     // A near-duplicate under the wider Unicode fold: the pair differs in
     // non-ASCII casing, where .NET's ordinal table (probed: `ı`≠`I` yet
     // `σ`==`Σ`) is not reproducible from Rust's folds. MSBuild might skip

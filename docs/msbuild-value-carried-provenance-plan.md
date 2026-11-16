@@ -1183,21 +1183,25 @@ each walk would grow it once per import where MSBuild walks it once. What the
 later import would do is content the walk does not see, and the whole
 evaluation is uncertain from there.
 
-Still open is the import that may duplicate one the walk never saw: after
-hidden content, a file the walk imports may already have been imported there,
-and MSBuild then skips it. The item sets are already withdrawn on that account
-(#819); the properties such a file writes are not yet doubted (#891).
+The same rule covers the import that may duplicate one the walk never saw
+(#891): after hidden content, a file the walk imports may already have been
+imported there, and MSBuild then skips it (MSB4011). So every import the walk
+makes once it is opaque, outside a doubted walk, is a doubted walk too, its
+root the hidden content's. The item sets were already withdrawn on that
+account (#819); now the properties such a file writes are unpinned as well.
+Measured, it costs nothing: the crate suite moves only the family's witness,
+the F# corpus manifest and the LSP project corpus move no line, and no LSP
+test changes.
 
 The gates moved as the fixes ask. The opacity tier's set-aside (26 stale
 reads) is deleted, and every fact it grades must hold;
 `fsproj_global_perturbation_diff`'s set-aside (56 imports followed after hidden
 content) is deleted; and `Family::UndecidedImportHidesWrites` of
 `fsproj_sdk_import_graph_generative_diff` is narrowed to the two things it
-still held, each a family with its own witness:
-`HiddenImportMakesALaterOneADuplicate` (#891: a hidden repeat, or hidden
-content in a case that names a file twice) and `HiddenPointRejectsTheProject`
-(#820's remainder). The sweep now holds
-every other case the old family set aside, which is #791 itself.
+still held: `HiddenImportMakesALaterOneADuplicate` (#891: a hidden repeat, or
+hidden content in a case that names a file twice), deleted in its turn when
+#891 was fixed, and `HiddenPointRejectsTheProject` (#820's remainder), the
+one family left. The sweep holds every other case.
 
 What stays open is the LSP's own reading of a name unset after hidden content:
 `tfm_policy` reads it as unset (#886).
