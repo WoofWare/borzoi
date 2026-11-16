@@ -623,7 +623,7 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
                 ]),
             })
             .collect(),
-        gated: (rng.below(3) == 0)
+        gated: (rng.below(2) == 0)
             .then(|| GatedImport {
                 site: *rng.pick(&[GatedSite::SdkProps, GatedSite::Body, GatedSite::SdkTargets]),
                 input: *rng.pick(&[
@@ -631,6 +631,7 @@ fn gen_case(rng: &mut SplitMix64) -> Case {
                     GateInput::UnseededToolset,
                     GateInput::SdkTaintedOnly,
                     GateInput::SdkTaintedOnly,
+                    GateInput::RefusedThenOverwritten,
                     GateInput::RefusedThenOverwritten,
                     GateInput::HiddenRewrite,
                 ]),
