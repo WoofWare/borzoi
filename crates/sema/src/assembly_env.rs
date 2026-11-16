@@ -163,6 +163,24 @@ pub(crate) const CORE_ATTRIBUTE_NAMES: &[&str] = &[
     "RequireQualifiedAccessAttributeAttribute",
 ];
 
+/// The accessor spellings an F# property or event compiles to.
+const ACCESSOR_PREFIXES: [&str; 4] = ["get_", "set_", "add_", "remove_"];
+
+/// Whether `entity`, a C#-style extension container, declares a property or
+/// an event: F# lets `[<Extension>]` sit on its accessor (or on the property,
+/// which fsc carries to the accessor), and FCS then calls the accessor as an
+/// extension method. The reader projects the property, not its accessors,
+/// and a `[<CompiledName>]` moves the metadata name off the logical one FCS
+/// calls it by (which only the F# signature records), so no name of such a
+/// container is known absent.
+fn container_may_hold_accessor_extensions(entity: &Entity) -> bool {
+    entity.is_extension_container
+        && entity
+            .members
+            .iter()
+            .any(|m| matches!(m, Member::Property(_) | Member::Event(_)))
+}
+
 /// See [`AssemblyEnv::augmentation_member_names`].
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AugmentationNames {
@@ -1058,6 +1076,20 @@ pub struct AssemblyEnv {
     /// [`Self::mark_extension_surface_unknowable`] (the LSP host, which observes
     /// these failures); false by default (a clean projection is trusted).
     extension_surface_unknowable: bool,
+    /// The namespaces where a referenced assembly carries an attribute whose
+    /// owner its reader cannot name
+    /// ([`AssemblyProjectionSkips::unreadable_attribute_namespaces`](borzoi_assembly::AssemblyProjectionSkips::unreadable_attribute_namespaces)):
+    /// a C#-style extension there is unread, not absent, so each answers every
+    /// extension name. Set by [`Self::mark_namespace_unreadable_attribute`].
+    namespaces_with_unreadable_attributes: HashSet<Vec<String>>,
+    /// Whether some `<ProjectReference>` of the project has no built output
+    /// yet (the LSP's `ReferenceOutcome::NotBuilt`). The env counts as complete
+    /// without it, a decision taken for navigation; but the assembly it will
+    /// be may declare an extension of any name in any namespace it shares
+    /// with the project, so the extension gate declines every call in a file
+    /// that opens a project module or namespace. Set by
+    /// [`Self::mark_references_not_built`].
+    references_not_built: bool,
     /// Lazily-built index behind [`Self::assembly_bare_value_surface_could_supply`]
     /// for the arms that do **not** vary per call: the implicit-open namespaces,
     /// the contested ones, and the root. Rebuilding their fold surfaces per name
@@ -1921,6 +1953,7 @@ impl AssemblyEnv {
         let mut tagged = Vec::new();
         let mut auto_opens = Vec::new();
         let mut dropped_namespaces = Vec::new();
+        let mut unreadable_namespaces: Vec<Vec<String>> = Vec::new();
         for view in views {
             let (roots, skips) = view.enumerate_type_defs_with_skips()?;
             let visibility = if skips.fsharp_abbreviations_unknowable {
@@ -1937,6 +1970,7 @@ impl AssemblyEnv {
             // tree no longer shows, so its namespace is possibly extension-bearing
             // for the OV-6 gate (mirrors the LSP's separate construction path).
             dropped_namespaces.extend(skips.dropped_types.iter().map(|d| d.enclosing_namespace()));
+            unreadable_namespaces.extend(skips.unreadable_attribute_namespaces.iter().cloned());
             let id = AssemblyId(
                 u32::try_from(env.assemblies.len()).expect("more than u32::MAX assemblies"),
             );
@@ -1980,6 +2014,9 @@ impl AssemblyEnv {
         env.record_assembly_auto_opens(auto_opens);
         for namespace in dropped_namespaces {
             env.mark_namespace_dropped_type(namespace);
+        }
+        for namespace in unreadable_namespaces {
+            env.mark_namespace_unreadable_attribute(namespace);
         }
         Ok(env)
     }
@@ -5223,6 +5260,35 @@ impl AssemblyEnv {
         self.invalidate_fold_surfaces();
     }
 
+    /// Record that a referenced assembly carries, in `namespace`, an attribute
+    /// whose owner its reader cannot name, so no extension-name answer in
+    /// that namespace is an absence proof. Called by the host
+    /// (the LSP), which reads the projection, and by [`Self::from_views`].
+    pub fn mark_namespace_unreadable_attribute(&mut self, namespace: Vec<String>) {
+        self.namespaces_with_unreadable_attributes.insert(namespace);
+    }
+
+    /// Record that some project reference has no built output yet (see
+    /// [`Self::references_not_built`]). Called by the host (the LSP).
+    pub fn mark_references_not_built(&mut self) {
+        self.references_not_built = true;
+    }
+
+    /// Whether some project reference has no built output yet
+    /// ([`Self::mark_references_not_built`]).
+    pub fn references_not_built(&self) -> bool {
+        self.references_not_built
+    }
+
+    /// Whether a referenced assembly carries, in `namespace`, an attribute
+    /// whose owner its reader cannot name.
+    fn namespace_has_unreadable_attribute(&self, namespace: &[String]) -> bool {
+        !self.namespaces_with_unreadable_attributes.is_empty()
+            && self
+                .namespaces_with_unreadable_attributes
+                .contains(namespace)
+    }
+
     /// Whether the env's loaded-DLL **identity set is incomplete**: some DLL is
     /// present that the env cannot name, so nothing read out of the assemblies
     /// is provably unshadowed by it (see
@@ -5495,6 +5561,7 @@ impl AssemblyEnv {
             // over-deferring an inaccessible target's extensions is the
             // gate's safe direction.
             self.namespace_has_dropped_type(&self.nodes[h.index()].owning_namespace)
+                || self.namespace_has_unreadable_attribute(&self.nodes[h.index()].owning_namespace)
                 || self.entity_tree_has_extension_named(h, name, is_static)
         }) {
             return true;
@@ -5519,6 +5586,7 @@ impl AssemblyEnv {
         contributor: AssemblyId,
     ) -> bool {
         self.namespace_has_dropped_type(namespace)
+            || self.namespace_has_unreadable_attribute(namespace)
             || self.types_in_namespace(namespace).iter().any(|&h| {
                 self.assembly_provenance(h) == Some(contributor)
                     && self.entity_tree_has_extension_named(h, name, is_static)
@@ -5566,6 +5634,7 @@ impl AssemblyEnv {
         is_static: bool,
     ) -> bool {
         self.namespace_has_dropped_type(namespace)
+            || self.namespace_has_unreadable_attribute(namespace)
             || self
                 .types_in_namespace(namespace)
                 .iter()
@@ -5623,7 +5692,14 @@ impl AssemblyEnv {
         } else {
             &entity.extension_member_names
         };
-        if fsharp_names.iter().any(|n| n == name) {
+        // An F# extension property or event is named by its accessors
+        // (`get_P`) and by itself (`P`, which a record label's lookup asks).
+        if fsharp_names.iter().any(|n| {
+            n == name
+                || ACCESSOR_PREFIXES
+                    .iter()
+                    .any(|p| n.strip_prefix(p) == Some(name))
+        }) {
             return true;
         }
         if !entity.skipped_members.is_empty() {
@@ -5636,20 +5712,7 @@ impl AssemblyEnv {
         {
             return true;
         }
-        // A property or event of an extension container may have an accessor
-        // under `[<Extension>]` (F# allows it on a static property's getter),
-        // which FCS calls as an extension method by its accessor name. The
-        // reader projects the property, not the accessor, so each accessor
-        // spelling of it may be one.
-        if !is_static
-            && entity.is_extension_container
-            && entity.members.iter().any(|m| {
-                matches!(m, Member::Property(_) | Member::Event(_))
-                    && ["get_", "set_", "add_", "remove_"]
-                        .iter()
-                        .any(|prefix| name.strip_prefix(prefix) == Some(member_name(m)))
-            })
-        {
+        if !is_static && container_may_hold_accessor_extensions(entity) {
             return true;
         }
         self.children(handle)
@@ -8413,6 +8476,7 @@ pub(crate) mod from_views_tests {
                     fsharp_abbreviations_unknowable: false,
                     fsharp_extension_index_unknowable: false,
                     fsharp_signature_non_authoritative: false,
+                    unreadable_attribute_namespaces: Vec::new(),
                 },
             ))
         }
@@ -8492,6 +8556,7 @@ pub(crate) mod from_views_tests {
                     fsharp_abbreviations_unknowable: false,
                     fsharp_extension_index_unknowable: self.extension_index_unknowable,
                     fsharp_signature_non_authoritative: self.signature_non_authoritative,
+                    unreadable_attribute_namespaces: Vec::new(),
                 },
             ))
         }

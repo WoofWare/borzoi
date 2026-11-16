@@ -1111,12 +1111,11 @@ impl<'a> Resolver<'a> {
                         }
                     }
                     self.scope.opacity.raise_unmodelled();
-                    // EX-2: `open type T` brings T's static content into unqualified
-                    // scope, not an instance/static extension into any *method group*
-                    // — but a name-keyed claim about that surface would have to
-                    // enumerate the opened type's members, which we do not do here.
-                    // Defer wholesale; the coverage cost is a rare `open type`.
-                    self.out.unknowables.raise(Unknowable::OpenExtensionSurface);
+                    // `open type T` brings T's C#-style extension members, and its
+                    // nested types', into scope; if `T` abbreviates a type, its
+                    // target's. Neither is enumerated here (#794 PR 2b), so the
+                    // open is unenumerated, whatever `T` is.
+                    self.out.unknowables.raise(Unknowable::UnenumeratedSurface);
                 } else if let Some(li) = open.long_ident() {
                     let idents: Vec<SyntaxToken> = li.idents().collect();
                     let mut path: Vec<String> =
@@ -1349,50 +1348,75 @@ impl<'a> Resolver<'a> {
                         self.scope.open_generation += 1;
                     }
 
-                    // EX-2 (`docs/extension-scope-enumeration-plan.md`): classify this
-                    // open's *extension* surface for the overload-absence gate, keyed
-                    // by name only when we can enumerate that surface. The gate treats
-                    // an opened assembly namespace exactly as it treats an enclosing
-                    // one — the same `namespace_extension_names` query — so an open
-                    // that resolves **entirely** to assembly-namespace readings, with
-                    // no residual uncertainty, contributes its readings by name. Every
-                    // other target defers wholesale: a project module/namespace (its
-                    // extension content is EX-3, and is anyway caught by the file's
-                    // preceding/own project-source triggers), an assembly module
-                    // (`OpenInterpretation::AssemblyModule` — a plain `open` of one, or
-                    // the plain-open-of-a-class `unmodelled` case), or an open whose
-                    // path is uncertain (an incomplete prefix or a dropped-type split
-                    // could hide an `[<Extension>]` of any name; an unresolved path
-                    // might be a namespace we simply failed to model). `open global`
-                    // (empty path) opens the always-in-scope root — a no-op here.
+                    // The extension-scope gate's reading of this `open` (#794): which
+                    // extensions it can bring into scope. Every one an `open` reaches
+                    // is declared in a project file or a referenced assembly.
                     //
-                    // A **dropped type at any split of an opened reading** is unknowable
-                    // even when a namespace reading survives at the exact path (codex
-                    // P1): `open A.B.C` with a dropped TypeDef at `A.B` may be opening a
-                    // same-FQN *module* `A.B.C` FCS merges into scope, whose extensions
-                    // are invisible — and `extension_named_in_scope` queries only the
-                    // exact opened namespace (`A.B.C`), where the marker (recorded under
-                    // its enclosing namespace `A.B`) does not sit. The value-side fold
-                    // guards the same hazard with the same `any_split_…` check.
-                    let clean_assembly_namespace_open = !path.is_empty()
-                        && !interps.is_empty()
-                        && !vetoed_by_incomplete_prefix
-                        && !names_uncovered_dropped_path
-                        && !unmodelled
-                        && !self.open_imports_project_values(&path)
-                        && interps.iter().all(|i| {
-                            matches!(i, OpenInterpretation::Reading(r)
-                                if !self.is_project_namespace_path(r)
-                                    && !self.assemblies.any_split_of_a_module_path_has_a_dropped_type(r))
-                        });
-                    if clean_assembly_namespace_open {
+                    // An `open` is **enumerated** only inside a closed domain: its
+                    // path, as written (`open A.B` or `open global.A.B`), names
+                    // exactly what it opens, with no relative or shortened reading
+                    // and no abbreviation in between, and every interpretation is
+                    //
+                    // - a namespace reading, project or assembly, at that path, no
+                    //   split of which holds a dropped type: its assembly half is
+                    //   the namespace query FCS's own `open` makes
+                    //   (`open_extension_namespaces`), its project half is in the
+                    //   project's extension names, which the gate asks of every
+                    //   call; or
+                    // - a project module at that path that no assembly entity
+                    //   shares (no assembly module, no dropped type at any split)
+                    //   and whose values the walk can list (an abbreviation, or a
+                    //   module a later reading cannot see through, is not): it
+                    //   brings nothing beyond the project's names.
+                    //
+                    // Every other `open` is **unenumerated**, and the gate declines
+                    // every call in the file: an assembly module (#794 PR 2b), a
+                    // relative or shortened reading, a module abbreviation, an
+                    // unresolved path, and every conservatism the walk above takes.
+                    // The domain is certified by `infer_assembly_extension_grid`,
+                    // which reaches its calls through every `open` form.
+                    //
+                    // `open global` (empty path) opens the always-in-scope root — a
+                    // no-op here.
+                    if !path.is_empty() {
+                        let mut readings: Vec<Vec<String>> = Vec::new();
+                        let mut opens_project = self.open_imports_project_values(&path);
+                        let mut certified = !interps.is_empty()
+                            && !vetoed_by_incomplete_prefix
+                            && !names_uncovered_dropped_path
+                            && !names_unlent_module
+                            && !unmodelled;
                         for interp in &interps {
-                            if let OpenInterpretation::Reading(r) = interp {
-                                self.out.open_extension_namespaces.push(r.clone());
+                            match interp {
+                                OpenInterpretation::Reading(r) => {
+                                    certified &= *r == path
+                                        && !self
+                                            .assemblies
+                                            .any_split_of_a_module_path_has_a_dropped_type(r);
+                                    opens_project |= self.is_project_namespace_path(r);
+                                    readings.push(r.clone());
+                                }
+                                OpenInterpretation::Module(m) => {
+                                    opens_project = true;
+                                    certified &= *m == path
+                                        && !self.index.module_aliases.contains_key(m)
+                                        && !self.module_has_hidden_values(m)
+                                        && self.opened_assembly_modules(m).is_empty()
+                                        && !self
+                                            .assemblies
+                                            .any_split_of_a_module_path_has_a_dropped_type(m);
+                                }
+                                OpenInterpretation::AssemblyModule(_) => certified = false,
                             }
                         }
-                    } else if !path.is_empty() {
-                        self.out.unknowables.raise(Unknowable::OpenExtensionSurface);
+                        if certified {
+                            self.out.open_extension_namespaces.extend(readings);
+                        } else {
+                            self.out.unknowables.raise(Unknowable::UnenumeratedSurface);
+                        }
+                        if opens_project {
+                            self.out.unknowables.raise(Unknowable::ProjectSurface);
+                        }
                     }
 
                     // Apply the interpretations **lowest priority first** (the list

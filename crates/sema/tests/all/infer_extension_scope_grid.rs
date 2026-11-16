@@ -12,11 +12,14 @@
 //!
 //! - `(asTable x).ContainsKey(1)` on a `System.Collections.Hashtable`, whose
 //!   intrinsic `ContainsKey(obj)` returns `bool`;
-//! - `(asTable x).ContainsValue(1)`, a name no extension anywhere declares;
+//! - `(asTable x).ContainsValue(1)`, a name no project declaration here
+//!   declares, but the fixture does, behind namespaces no cell opens;
 //! - `"abc".Normalize()`, a name a referenced assembly declares an extension
 //!   of (`System.StringNormalizationExtensions`) in a namespace no cell opens;
 //! - `"abc".Equals(1)`, whose literal receiver needs no resolution, so the
-//!   resolver can never decline the call before the gate is asked.
+//!   resolver can never decline the call before the gate is asked;
+//! - `(asTable x).Clone()`, a name no extension anywhere declares, so the one
+//!   call even an `open` the resolver does not enumerate lets pass.
 //!
 //! Every extension a cell declares takes an `int` and returns `int64`, so
 //! where FCS binds it over the intrinsic (the better fit for `1`), a gate that
@@ -446,17 +449,15 @@ impl Placement {
         }
     }
 
-    /// Whether the calling file holds an `open` of a project module or
-    /// namespace, or an `open type`: the resolver does not enumerate those
-    /// (#794 PR 2), so the gate declines every call.
-    fn opens_project(self) -> bool {
+    /// Whether the calling file holds an `open` the resolver does not
+    /// enumerate: an `open type` (#794 PR 2b), or a relative `open N` of the
+    /// file's own nested module, whose written path is not the module's (the
+    /// certified domain takes only an `open` whose written path names what it
+    /// opens; `infer_assembly_extension_grid` holds every form to it).
+    fn opens_unenumerated(self) -> bool {
         matches!(
             self,
-            Placement::OwnNestedOpened
-                | Placement::EarlierOpened
-                | Placement::EarlierAutoOpen
-                | Placement::EarlierOpenType
-                | Placement::EarlierDamaged
+            Placement::EarlierOpenType | Placement::OwnNestedOpened
         )
     }
 }
@@ -515,7 +516,8 @@ impl OpenShape {
     }
 
     /// Whether the resolver leaves this `open`'s extension surface
-    /// un-enumerated (#794 PR 2): everything but a namespace.
+    /// un-enumerated: everything but a namespace (assembly modules and
+    /// `open type`, #794 PR 2b; an unresolved path).
     fn not_enumerated(self) -> bool {
         !matches!(
             self,
@@ -537,7 +539,7 @@ struct Cell {
 /// receiver is typed through [`PREAMBLE`], declared before any `open`: an
 /// `open` of a project module, or an `open type`, leaves the resolver unable
 /// to pin a dotted type path written after it.
-const CALLS: [Call; 4] = [
+const CALLS: [Call; 5] = [
     Call {
         binder: "c1",
         text: "(asTable x).ContainsKey(1)",
@@ -554,10 +556,20 @@ const CALLS: [Call; 4] = [
         binder: "c4",
         text: "\"abc\".Equals(1)",
     },
+    Call {
+        binder: "c5",
+        text: "(asTable x).Clone()",
+    },
 ];
 
 /// The method each of [`CALLS`] names.
-const METHODS: [&str; 4] = ["ContainsKey", "ContainsValue", "Normalize", "Equals"];
+const METHODS: [&str; 5] = [
+    "ContainsKey",
+    "ContainsValue",
+    "Normalize",
+    "Equals",
+    "Clone",
+];
 
 const PREAMBLE: &str = "let asTable (h: System.Collections.Hashtable) = h";
 
@@ -571,24 +583,41 @@ const PREAMBLE: &str = "let asTable (h: System.Collections.Hashtable) = h";
 /// - otherwise a project declaration declines the calls of the names it
 ///   contributes, whatever its placement (the project's names are
 ///   scope-blind);
-/// - then an `open` the resolver does not enumerate declines every call;
+/// - then an `open` the resolver does not enumerate declines every name;
 /// - then an opened assembly namespace declines the names it declares.
-fn expected(cell: Cell) -> [Option<GateInput>; 4] {
-    let decl = cell.kind.decl(cell.relation).join("\n");
+///
+/// An `open` of a project module or namespace declines nothing.
+fn expected(cell: Cell) -> [Option<GateInput>; 5] {
+    // The damaged text: the declaration's last line, which the cut damages,
+    // with the attribute lines directly above it, which belong to the same
+    // declaration.
+    let decl = cell.kind.decl(cell.relation);
     let damaged = cell.placement == Placement::EarlierDamaged;
+    let damaged_text: Vec<&String> = {
+        let mut lines: Vec<&String> = decl.iter().rev().take(1).collect();
+        lines.extend(
+            decl.iter()
+                .rev()
+                .skip(1)
+                .take_while(|l| l.trim_start().starts_with("[<")),
+        );
+        lines
+    };
     let unknowable = cell.kind.unknowable().or_else(|| {
-        // A damaged declaration's tail holding an attribute list may declare
-        // what no token names.
-        (damaged && decl.contains("[<")).then_some(NamesUnknowable::Recovered)
+        // Damaged text holding an attribute list may declare what no token
+        // names.
+        (damaged && damaged_text.iter().any(|l| l.contains("[<")))
+            .then_some(NamesUnknowable::Recovered)
     });
-    // Otherwise a damaged declaration may declare any name it spells.
+    // Otherwise damaged text may declare any name it spells.
     let spelled = |method: &str| {
         damaged
-            && decl
-                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                .any(|word| word == method)
+            && damaged_text.iter().any(|l| {
+                l.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|word| word == method)
+            })
     };
-    let not_enumerated = cell.placement.opens_project() || cell.open.not_enumerated();
+    let not_enumerated = cell.placement.opens_unenumerated() || cell.open.not_enumerated();
     METHODS.map(|method| {
         if let Some(why) = unknowable {
             Some(GateInput::ProjectUnknowable(why))
@@ -610,18 +639,19 @@ fn expected(cell: Cell) -> [Option<GateInput>; 4] {
 /// `cell`, so that inference reaches the call. After `open type ExtLib.E` of
 /// a project type, or with an `[<AutoOpen>]` abbreviation in scope, a bare
 /// name may be one of a type's statics, which the resolver does not
-/// enumerate; in a `module rec`, it may be a declaration after the use. Either
-/// way `asTable` declines first. The literal receivers need no name.
-fn receiver_named(cell: Cell) -> [bool; 4] {
+/// enumerate; after an `open` of a namespace holding a project `[<AutoOpen>]`
+/// module, one of that module's; in a `module rec`, a declaration after the
+/// use. Each way `asTable` declines first. The literal receivers need no name.
+fn receiver_named(cell: Cell) -> [bool; 5] {
     let opaque = matches!(
         cell.placement,
-        Placement::EarlierOpenType | Placement::OwnRecAfter
+        Placement::EarlierOpenType | Placement::OwnRecAfter | Placement::EarlierAutoOpen
     ) || (cell.kind == Kind::AutoOpenOnAbbrev
         && !matches!(
             cell.placement,
             Placement::OwnNestedUnopened | Placement::EarlierUnopened
         ));
-    [!opaque, !opaque, true, true]
+    [!opaque, !opaque, true, true, !opaque]
 }
 
 /// The kinds whose declaration FCS binds a call to in some cell with no
@@ -830,14 +860,14 @@ fn cell_label(cell: Cell) -> String {
 struct Outcome {
     failures: Vec<String>,
     /// Per call: whether FCS bound it to an extension (typed it `int64`).
-    fcs_bound: [bool; 4],
+    fcs_bound: [bool; 5],
 }
 
 fn grade(cell: Cell, unsound: &[String], calls: &[CallOutcome]) -> Outcome {
     let mut failures: Vec<String> = unsound.iter().map(|u| format!("unsound: {u}")).collect();
     let want = expected(cell);
     let named = receiver_named(cell);
-    let mut fcs_bound = [false; 4];
+    let mut fcs_bound = [false; 5];
     for (k, (call, outcome)) in CALLS.iter().zip(calls).enumerate() {
         fcs_bound[k] = outcome.fcs.as_deref() == Some("System.Int64");
         // Which input declines a damaged file's calls depends on how much of
@@ -995,4 +1025,72 @@ fn an_event_member_declines_its_accessor_spellings() {
         );
         assert_eq!(call.ours, None, "[<{attribute}>]");
     }
+}
+
+/// While a project reference has no built output, the assembly it will build
+/// may declare an extension of any name, in a namespace this project shares:
+/// a file that opens a project module or namespace declines every call
+/// (`GateInput::ProjectOpenReferencesNotBuilt`). A file with no such `open`
+/// is graded as the env without the mark grades it.
+#[test]
+fn an_unbuilt_reference_keeps_every_open_but_an_assembly_namespace_wholesale() {
+    let mut cells = Vec::new();
+    for (kind, placement) in [
+        (Kind::None, Placement::OwnTop),
+        (Kind::FsMethod, Placement::OwnTop),
+        (Kind::FsMethod, Placement::OwnNestedOpened),
+        (Kind::FsMethod, Placement::EarlierOpened),
+        (Kind::FsMethod, Placement::EarlierSameNamespace),
+        (Kind::FsMethod, Placement::EarlierUnopened),
+    ] {
+        for open in [OpenShape::None, OpenShape::Namespace, OpenShape::Unresolved] {
+            cells.push(Cell {
+                kind,
+                relation: Relation::Exact,
+                placement,
+                open,
+            });
+        }
+    }
+    let env = crate::common::ext_universe_env_not_built();
+    let outcomes = par_map(cells.len(), |i| {
+        let checked = crate::common::ext_scope::check_in(env, &sources(cells[i]), &CALLS);
+        (checked.unsound, checked.calls)
+    });
+    let unbuilt = Some(GateInput::ProjectOpenReferencesNotBuilt);
+    let mut failures = Vec::new();
+    for (cell, (unsound, calls)) in cells.iter().zip(&outcomes) {
+        let label = cell_label(*cell);
+        failures.extend(unsound.iter().map(|u| format!("{label}: unsound: {u}")));
+        let project_open = matches!(
+            cell.placement,
+            Placement::OwnNestedOpened | Placement::EarlierOpened
+        );
+        for (k, (call, outcome)) in CALLS.iter().zip(calls).enumerate() {
+            let design = expected(*cell)[k];
+            let want = match design {
+                None | Some(GateInput::OpenNotEnumerated) if project_open => unbuilt,
+                other => other,
+            };
+            if outcome.gate != want {
+                failures.push(format!(
+                    "{label}: `{}`: the gate's input is {:?}, the design's {want:?}",
+                    call.text, outcome.gate
+                ));
+            }
+            if want.is_some() && outcome.ours.is_some() {
+                failures.push(format!(
+                    "{label}: `{}`: declined by {want:?}, yet committed {:?}",
+                    call.text, outcome.ours
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures over {} cells:\n{}",
+        failures.len(),
+        cells.len(),
+        failures.join("\n")
+    );
 }

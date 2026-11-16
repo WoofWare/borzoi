@@ -7770,6 +7770,65 @@ let private dropScriptRefsNamedLike (kind: string) (refs: string list) (switches
         requested |> List.exists (fun r -> String.Equals(r, name, StringComparison.OrdinalIgnoreCase))
     switches |> Array.filter (fun o -> not (referencedFile o |> Option.exists isRequested))
 
+/// Every member FCS reads as an extension in the referenced assembly at
+/// `target` (the `extension-members` request): an F# optional extension
+/// (`IsExtensionMember`), or a method or accessor under `[<Extension>]` in a
+/// non-generic type that carries it too (FCS's
+/// `IsTyconRefUsedForCSharpStyleExtensionMembers` and the method's own
+/// marker). Each by the name a call spells (its `LogicalName`, which a
+/// `[<CompiledName>]` does not move), with the namespace that holds its
+/// top-level type. Kept out of the batch loop, whose nesting the bridge test
+/// serialises (`fcs_dump_handles_a_non_trivial_source`).
+let private extensionMembersOf (checkResults: FSharpCheckFileResults) (target: string) =
+    let assembly =
+        checkResults.ProjectContext.GetReferencedAssemblies()
+        |> List.tryFind (fun a ->
+            match a.FileName with
+            | Some f -> String.Equals(Path.GetFullPath f, target, System.StringComparison.OrdinalIgnoreCase)
+            | None -> false)
+        |> Option.defaultWith (fun () -> failwithf "extension-members: %s not referenced" target)
+    let marked (attrs: System.Collections.Generic.IList<FSharpAttribute>) =
+        attrs
+        |> Seq.exists (fun a ->
+            a.AttributeType.TryFullName = Some "System.Runtime.CompilerServices.ExtensionAttribute")
+    let safe f = try f () with _ -> false
+    let rows = ResizeArray<_>()
+    let emit (ns: string) (e: FSharpEntity) (m: FSharpMemberOrFunctionOrValue) (style: string) (isInstance: bool) =
+        rows.Add(
+            {| Namespace = ns
+               Entity = (try e.FullName with _ -> e.LogicalName)
+               Name = m.LogicalName
+               CompiledName = (try m.CompiledName with _ -> "")
+               Style = style
+               IsInstance = isInstance |})
+    let accessorsOf (m: FSharpMemberOrFunctionOrValue) =
+        [ if safe (fun () -> m.HasGetterMethod) then yield m.GetterMethod
+          if safe (fun () -> m.HasSetterMethod) then yield m.SetterMethod
+          if safe (fun () -> m.IsEvent) then
+              yield m.EventAddMethod
+              yield m.EventRemoveMethod ]
+    let memberRows (ns: string) (e: FSharpEntity) container (m: FSharpMemberOrFunctionOrValue) =
+        if safe (fun () -> m.IsExtensionMember) then
+            emit ns e m "fsharp" (safe (fun () -> m.IsInstanceMember))
+        elif container then
+            for x in m :: accessorsOf m do
+                if safe (fun () -> not x.IsProperty && not x.IsEvent && marked x.Attributes) then
+                    emit ns e x "csharp" true
+    let rec walk (ns: string) (e: FSharpEntity) =
+        if e.IsNamespace then
+            let here = if ns = "" then e.LogicalName else ns + "." + e.LogicalName
+            for c in e.NestedEntities do walk here c
+        else
+            let container = safe (fun () -> marked e.Attributes && e.GenericParameters.Count = 0)
+            for m in (try e.MembersFunctionsAndValues :> seq<_> with _ -> Seq.empty) do
+                memberRows ns e container m
+            for c in (try e.NestedEntities :> seq<_> with _ -> Seq.empty) do
+                walk ns c
+    for e in assembly.Contents.Entities do
+        let ns = if e.IsNamespace then "" else (try Option.defaultValue "" e.Namespace with _ -> "")
+        walk ns e
+    rows.ToArray()
+
 /// Resident, multi-projection single-file oracle: the amortised-startup engine
 /// behind `sema`'s per-case differential loops (`resolve_diff`, `infer_*_diff`,
 /// `attr_resolution_diff`, `overloads_oracle`, …). Each of those otherwise spawns
@@ -7936,6 +7995,13 @@ let private fileBatchCore () =
                 // independent IL reader's TypeDefinition rows. Batch-only.
                 let assemblies = refs |> List.map (assemblyEntitiesOf checkResults) |> List.toArray
                 JsonSerializer.Serialize({| Assemblies = assemblies |}, compact)
+            | "extension-members" ->
+                // See `extensionMembersOf`. Batch-only.
+                let target =
+                    match refs with
+                    | first :: _ -> Path.GetFullPath first
+                    | [] -> failwith "extension-members: no reference to read"
+                JsonSerializer.Serialize({| Members = extensionMembersOf checkResults target |}, compact)
             | other ->
                 failwithf "unknown kind %s" other
         with ex ->

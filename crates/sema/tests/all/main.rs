@@ -53,6 +53,7 @@ mod infer_annotation_shape_gen_diff;
 mod infer_annotation_typar_diff;
 mod infer_assembly_accessor_extension_diff;
 mod infer_assembly_attributed_abbreviation_diff;
+mod infer_assembly_extension_grid;
 mod infer_assembly_values_diff;
 mod infer_attributed_abbreviation_diff;
 mod infer_binder_types_diff;

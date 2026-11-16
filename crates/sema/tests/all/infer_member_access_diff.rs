@@ -353,7 +353,7 @@ fn open_of_namespace_with_a_dropped_prefix_split_is_unknowable() {
     let file = ImplFile::cast(parsed.root).expect("impl file");
     let clean = resolve_file(&file, &ProjectItems::default(), &clean_env, &recovery);
     assert!(
-        !clean.open_extension_unknowable(),
+        !clean.opens_unenumerated(),
         "a clean `open <namespace>` is name-keyed, not unknowable"
     );
     assert_eq!(
@@ -369,7 +369,7 @@ fn open_of_namespace_with_a_dropped_prefix_split_is_unknowable() {
     dropped_env.mark_namespace_dropped_type(vec!["Demo".to_owned(), "Sub".to_owned()]);
     let dropped = resolve_file(&file, &ProjectItems::default(), &dropped_env, &recovery);
     assert!(
-        dropped.open_extension_unknowable(),
+        dropped.opens_unenumerated(),
         "a dropped type at a prefix split of the opened namespace must defer the whole file"
     );
 }

@@ -88,6 +88,12 @@ struct ReferencedAssemblyProjection {
     /// namespaces had no drop still commits. `#[serde(default)]` for old cache entries.
     #[serde(default)]
     dropped_type_namespaces: Vec<Vec<String>>,
+    /// [`AssemblyProjectionSkips::unreadable_attribute_namespaces`](borzoi_assembly::AssemblyProjectionSkips::unreadable_attribute_namespaces)
+    /// for this DLL: where a C#-style extension is unread, not absent. Fed to
+    /// `AssemblyEnv::mark_namespace_unreadable_attribute`. No `serde(default)`:
+    /// an entry from a binary that did not compute it is a different tag, and
+    /// a default would claim every attribute read.
+    unreadable_attribute_namespaces: Vec<Vec<String>>,
     /// The DLL's manifest identity (`EcmaView::identity`), carried so the env can
     /// register a **rootless** projection's DLL name for referenced-CCU
     /// uniqueness: with no surviving roots the identity cannot be derived from an
@@ -2941,6 +2947,13 @@ struct EnvInputs {
     /// Some declared reference could not be read
     /// ([`ReferenceOutcome::Unread`]), which marks the env incomplete.
     incomplete: bool,
+    /// Some declared project reference has no built output
+    /// ([`ReferenceOutcome::NotBuilt`]). The env stays complete for
+    /// navigation, but the extension gate cannot trust a project `open`: the
+    /// assembly the reference will build may declare an extension of any
+    /// name, in a namespace this project shares
+    /// (`AssemblyEnv::mark_references_not_built`).
+    not_built: bool,
 }
 
 impl EnvInputs {
@@ -2948,6 +2961,7 @@ impl EnvInputs {
         EnvInputs {
             dlls: refs.dlls.clone(),
             incomplete: refs.unread().next().is_some(),
+            not_built: refs.not_built().next().is_some(),
         }
     }
 }
@@ -3008,6 +3022,9 @@ fn build_env(
         // bare-value, attribute and overload gates committing past it.
         env.mark_referenced_assemblies_incomplete();
         env.mark_extension_surface_unknowable();
+    }
+    if inputs.not_built {
+        env.mark_references_not_built();
     }
     (env, kept)
 }
@@ -4373,6 +4390,10 @@ pub fn build_env_from_dll_paths<'a>(
         .iter()
         .flat_map(|(_, _, p)| p.dropped_type_namespaces.iter().cloned())
         .collect();
+    let unreadable_attribute_namespaces: Vec<Vec<String>> = indexed
+        .iter()
+        .flat_map(|(_, _, p)| p.unreadable_attribute_namespaces.iter().cloned())
+        .collect();
     // The set the env is actually built from — the caller's list minus the
     // unified-away duplicates. A caller that hands these references on (the
     // differential harnesses hand them to FCS) must pass *this* list: a
@@ -4411,6 +4432,9 @@ pub fn build_env_from_dll_paths<'a>(
     }
     for namespace in dropped_type_namespaces {
         env.mark_namespace_dropped_type(namespace);
+    }
+    for namespace in unreadable_attribute_namespaces {
+        env.mark_namespace_unreadable_attribute(namespace);
     }
     (env, kept)
 }
@@ -4621,6 +4645,7 @@ fn enumerate_view_catching<V: EcmaView>(
                 assembly_auto_opens,
                 auto_opens_unreadable,
                 dropped_type_namespaces,
+                unreadable_attribute_namespaces: skipped.unreadable_attribute_namespaces.clone(),
                 fsharp_extension_index_unknowable: skipped.fsharp_extension_index_unknowable,
                 fsharp_signature_non_authoritative: skipped.fsharp_signature_non_authoritative,
                 // Captured even when `types` is empty (rootless), so the env can
@@ -7519,11 +7544,20 @@ mod tests {
             "an unread reference must be reported even alongside an unbuilt one"
         );
 
+        // The env inputs carry both: an unbuilt reference leaves the env
+        // complete but marks it for the extension gate
+        // (`AssemblyEnv::mark_references_not_built`, in `build_env`).
+        let inputs = EnvInputs::of(&unbuilt);
+        assert!(inputs.not_built && !inputs.incomplete, "{inputs:?}");
+        let inputs = EnvInputs::of(&unread);
+        assert!(inputs.not_built && inputs.incomplete, "{inputs:?}");
+
         // A declined resolution claims neither: the env is empty, so it makes no
         // assembly reading for a missing reference to be wrong about.
         let declined = ReferenceSet::declined(false);
         assert_eq!(declined.unread().count(), 0);
         assert_eq!(declined.not_built().count(), 0);
+        assert!(!EnvInputs::of(&declined).not_built);
     }
 
     /// Write `<root>/obj/project.assets.json` for a single-target `net10.0`
@@ -8528,6 +8562,7 @@ mod tests {
             fsharp_abbreviations_unknowable: true,
             fsharp_extension_index_unknowable: true,
             fsharp_signature_non_authoritative: true,
+            unreadable_attribute_namespaces: Vec::new(),
         };
         let view = FakeView::new(Enumerate::OkWithSkips(
             vec![minimal_entity(&["Demo"], "Thing")],

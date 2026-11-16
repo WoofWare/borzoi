@@ -27,9 +27,17 @@ use crate::resolve::{ExtensionNames, NamesUnknowable};
 ///   the file's in-scope namespace chain, and its explicit `open <namespace>`
 ///   targets ([`Self::in_scope_namespaces`]), asked through
 ///   [`AssemblyEnv::extension_named_in_scope`] by call shape (`is_static`).
-/// - **`open`s the resolver could not name-key (EX-2 ⇒ [`Self::opens_unknowable`]).**
-///   Still presence-based: every call in the file defers (#794 PR 2). An
-///   `open` in text the parser recovered from is one.
+/// - **`open`s.** An `open` inside the certified domain (see the resolver's
+///   open classification) is enumerated: an opened namespace joins the
+///   assembly side above, and a project module or namespace brings nothing
+///   the project side does not already hold. Every other `open`
+///   ([`Self::unenumerated_open`]: an assembly module, an `open type`, a
+///   relative or shortened reading, a module abbreviation, an unresolved or
+///   uncertain path) declines every call. While a project reference is not
+///   built ([`AssemblyEnv::references_not_built`]), a project `open` declines
+///   every call too: the unbuilt assembly may share the project's namespaces.
+///   An `open` in text the parser recovered from counts as both kinds, since
+///   FCS may recover it to either.
 ///
 /// A source whose names cannot be computed is a wholesale defer, so no
 /// refinement can license a commit a full name enumeration would not. The
@@ -41,11 +49,11 @@ pub(crate) struct ExtensionScope {
     /// preceding file may declare, their damaged text included.
     project: ExtensionNames,
     /// Some explicit `open` in the file brings an extension surface the resolver
-    /// could not name-key (EX-2): a project module/namespace, an assembly module /
-    /// `open type`, or an opaque / vetoed / dropped-path open. Presence-based —
-    /// every commit defers when set — and set straight from
-    /// [`ResolvedFile::open_extension_unknowable`].
-    opens_unknowable: bool,
+    /// does not enumerate ([`ResolvedFile::opens_unenumerated`]).
+    unenumerated_open: bool,
+    /// Some explicit `open` in the file names a project module or namespace
+    /// ([`ResolvedFile::opens_project`]).
+    project_open: bool,
     /// The file's **in-scope namespace chain plus its explicit `open <namespace>`
     /// targets**: the always-in-scope root `[]`, each declared namespace and its
     /// ancestors, and every assembly namespace an `open` brought in (EX-2,
@@ -66,8 +74,11 @@ pub enum GateInput {
     /// A project file declares an extension member, or a member that may be
     /// one, of the call's name.
     ProjectName,
-    /// An `open` whose extension surface the resolver does not enumerate.
+    /// An `open` the resolver does not enumerate.
     OpenNotEnumerated,
+    /// A project `open` while a project reference is not built: the
+    /// assembly it will be may share the opened namespace.
+    ProjectOpenReferencesNotBuilt,
     /// A referenced assembly's extension of the call's name is in scope, or
     /// its in-scope surface cannot be enumerated.
     AssemblyInScope,
@@ -88,7 +99,8 @@ impl ExtensionScope {
         project.absorb(&resolved.extension_names());
         ExtensionScope {
             project,
-            opens_unknowable: resolved.open_extension_unknowable(),
+            unenumerated_open: resolved.opens_unenumerated(),
+            project_open: resolved.opens_project(),
             in_scope_namespaces,
         }
     }
@@ -111,7 +123,10 @@ impl ExtensionScope {
         if self.project.may_have(name, is_static) {
             return Some(GateInput::ProjectName);
         }
-        if self.opens_unknowable {
+        if self.project_open && env.references_not_built() {
+            return Some(GateInput::ProjectOpenReferencesNotBuilt);
+        }
+        if self.unenumerated_open {
             return Some(GateInput::OpenNotEnumerated);
         }
         if env.extension_named_in_scope(&self.in_scope_namespaces, name, is_static) {
@@ -173,15 +188,26 @@ mod tests {
             Some(GateInput::ProjectUnknowable(NamesUnknowable::HashReference))
         );
 
-        // An `open` the resolver could not name-key defers every name.
-        let unknowable_open = ExtensionScope {
-            opens_unknowable: true,
+        // An `open` the resolver does not enumerate declines every name.
+        let unenumerated = ExtensionScope {
+            unenumerated_open: true,
             ..ExtensionScope::default()
         };
         assert_eq!(
-            unknowable_open.decline(&env, "NoSourceDeclaresThis", false),
+            unenumerated.decline(&env, "NoSourceDeclaresThis", false),
             Some(GateInput::OpenNotEnumerated)
         );
-        assert!(!unknowable_open.absent(&env, "Substring", false));
+        // A project `open` declines only under an unbuilt project reference.
+        let mut unbuilt = AssemblyEnv::default();
+        unbuilt.mark_references_not_built();
+        let project_open = ExtensionScope {
+            project_open: true,
+            ..ExtensionScope::default()
+        };
+        assert_eq!(project_open.decline(&env, "Substring", false), None);
+        assert_eq!(
+            project_open.decline(&unbuilt, "Substring", false),
+            Some(GateInput::ProjectOpenReferencesNotBuilt)
+        );
     }
 }

@@ -614,11 +614,57 @@ impl Ecma335Assembly {
             AssemblyProjectionSkips {
                 dropped_types,
                 skipped_fsharp_overlays,
+                unreadable_attribute_namespaces: self.unreadable_attribute_namespaces(),
                 fsharp_abbreviations_unknowable,
                 fsharp_extension_index_unknowable,
                 fsharp_signature_non_authoritative: !authoritative,
             },
         ))
+    }
+
+    /// What [`AssemblyProjectionSkips::unreadable_attribute_namespaces`] holds: the
+    /// namespace of each top-level type whose tree carries an attribute whose
+    /// owner the reader cannot name, each once.
+    fn unreadable_attribute_namespaces(&self) -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = Vec::new();
+        for &TypeDefId(i) in &self.image.top_level {
+            if !self.tree_has_unreadable_attribute(i as usize, 0) {
+                continue;
+            }
+            let namespace = &self.image.type_defs[i as usize].name.namespace;
+            let segments: Vec<String> = if namespace.is_empty() {
+                Vec::new()
+            } else {
+                namespace.split('.').map(str::to_owned).collect()
+            };
+            if !out.contains(&segments) {
+                out.push(segments);
+            }
+        }
+        out
+    }
+
+    /// Whether the type at row `i`, a method of it, or a type nested in it
+    /// carries an attribute whose owner the reader cannot name. A nesting
+    /// deeper than [`MAX_NESTING_DEPTH`] (a cycle) counts as one: it is not read.
+    fn tree_has_unreadable_attribute(&self, i: usize, depth: usize) -> bool {
+        if depth > MAX_NESTING_DEPTH {
+            return true;
+        }
+        let Some(td) = self.image.type_defs.get(i) else {
+            return true;
+        };
+        let unreadable = |attributes: &[RawAttribute]| {
+            attributes
+                .iter()
+                .any(|raw| self.image.attribute_owning_type(raw).is_err())
+        };
+        unreadable(&td.attributes)
+            || td.methods.iter().any(|m| unreadable(&m.attributes))
+            || td
+                .nested
+                .iter()
+                .any(|&TypeDefId(n)| self.tree_has_unreadable_attribute(n as usize, depth + 1))
     }
 
     /// The [`RowPath`] of every `TypeDef` row of the image, dropped and skipped
@@ -867,6 +913,12 @@ const MAX_NESTING_DEPTH: usize = 128;
 struct ProjectedMembers {
     kept: Vec<Member>,
     skipped: Vec<SkippedMember>,
+    /// The indices into the type's `methods` of each method a projection path
+    /// hid on purpose (an accessor the path does not surface, a synthesised
+    /// member, a witness twin), which
+    /// [`Ecma335Assembly::record_hidden_extensions`] checks for the
+    /// `[Extension]` marker. Every path that hides a method records it here.
+    hidden_methods: Vec<usize>,
 }
 
 impl ProjectedMembers {
@@ -957,10 +1009,7 @@ impl Ecma335Assembly {
         // compiler-generated tail of structural members FCS does not surface,
         // so they take the dedicated F# member path; everything else takes the
         // straight IL projection.
-        let ProjectedMembers {
-            kept: members,
-            skipped: skipped_members,
-        } = if is_fsharp_kind(kind) {
+        let mut projected = if is_fsharp_kind(kind) {
             self.project_fsharp_members(
                 kind,
                 td,
@@ -970,6 +1019,12 @@ impl Ecma335Assembly {
         } else {
             self.project_il_members(td, type_context)?
         };
+        self.record_hidden_extensions(td, &mut projected);
+        let ProjectedMembers {
+            kept: members,
+            skipped: skipped_members,
+            hidden_methods: _,
+        } = projected;
 
         let mut nested_types = Vec::new();
         for &TypeDefId(child) in &td.nested {
@@ -2761,6 +2816,36 @@ impl Ecma335Assembly {
     /// their owning property/event is dropped and recorded — see
     /// [`reject_other_accessors`] — and the accessor methods stay hidden with
     /// it.)
+    /// Record, as a skipped member, each method of `td` a projection path hid
+    /// ([`ProjectedMembers::hidden_methods`]) that carries the CLR
+    /// `[Extension]` marker: FCS calls such a method as an extension by its
+    /// own name, so hiding it silently would let a consumer conclude no
+    /// extension of that name exists. Kept by method, not by name: a hidden
+    /// extension may share its compiled name with a member that survives. An
+    /// IL-path accessor is not hidden; it stays with its surfaced property or
+    /// event, which a consumer reads as possibly an extension in a marked
+    /// container. An attribute that cannot be read counts as the marker.
+    fn record_hidden_extensions(&self, td: &TypeDef, projected: &mut ProjectedMembers) {
+        for &i in &projected.hidden_methods {
+            let m = &td.methods[i];
+            let marked = self
+                .has_attribute(
+                    &m.attributes,
+                    "System.Runtime.CompilerServices",
+                    "ExtensionAttribute",
+                )
+                .unwrap_or(true);
+            if marked {
+                projected.skipped.push(SkippedMember {
+                    name: m.name.clone(),
+                    reason: "an `[Extension]` method the projection hides, which FCS calls as an \
+                             extension"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
     fn project_il_members(
         &self,
         td: &TypeDef,
@@ -2777,6 +2862,7 @@ impl Ecma335Assembly {
             // A witness twin is pure codegen the pickle never names; FCS's IL
             // import, which reads no pickle, lists it like any other method.
             if self.fsharp_marker && is_fsharp_witness_duplicate(&m.name, &real_method_names) {
+                out.hidden_methods.push(i);
                 continue;
             }
             out.push_or_skip(
@@ -3836,6 +3922,9 @@ impl Ecma335Assembly {
                 }
                 Ok(Some(Member::Method(Box::new(projected))))
             })();
+            if matches!(projected, Ok(None)) {
+                out.hidden_methods.push(i);
+            }
             out.push_or_skip_opt(&m.name, projected);
         }
 

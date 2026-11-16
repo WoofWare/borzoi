@@ -176,6 +176,50 @@ pub fn invoke_fcs_dump_types_project(paths: &[&Path]) -> Vec<(String, String)> {
     invoke_fcs_dump_types_project_with_refs(paths, &[])
 }
 
+/// One member FCS reads as an extension in a referenced assembly
+/// (`fcs-dump`'s `extension-members` kind).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct FcsExtensionMember {
+    /// The namespace holding the member's top-level type, dotted.
+    #[serde(rename = "Namespace")]
+    pub namespace: String,
+    #[serde(rename = "Entity")]
+    pub entity: String,
+    /// The name a call spells.
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "CompiledName")]
+    pub compiled_name: String,
+    /// `fsharp` (an optional extension) or `csharp`.
+    #[serde(rename = "Style")]
+    pub style: String,
+    /// Whether a value receiver calls it (else a type-qualified call).
+    #[serde(rename = "IsInstance")]
+    pub is_instance: bool,
+}
+
+/// Every member FCS reads as an extension in `dll`, checked with `dll`
+/// referenced beside the SDK's references (`anchor` is any source file to
+/// check for the reference's sake).
+pub fn invoke_fcs_dump_extension_members(anchor: &Path, dll: &Path) -> Vec<FcsExtensionMember> {
+    let request = serde_json::json!({
+        "kind": "extension-members",
+        "path": anchor.display().to_string(),
+        "refs": [dll.display().to_string()],
+    })
+    .to_string();
+    let line = fcs_file_batch_pool().request(&request);
+    reject_batch_error(&line, "extension-members");
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(rename = "Members")]
+        members: Vec<FcsExtensionMember>,
+    }
+    serde_json::from_str::<Reply>(&line)
+        .expect("fcs-dump extension-members JSON shape")
+        .members
+}
+
 /// [`invoke_fcs_dump_types_project`], with `refs` (extra `.dll`s) referenced
 /// by the project.
 pub fn invoke_fcs_dump_types_project_with_refs(
@@ -2430,6 +2474,29 @@ pub fn ensure_ext_universe_fixture_built() -> &'static Path {
         .as_path()
 }
 
+/// Build the extension-assembly grid's fixture
+/// (`tests/fixtures/ext_assembly_grid_env`) once per test binary, its
+/// `Generated.fs` being `source()` (emitted from the grid's dimensions by
+/// `infer_assembly_extension_grid`, never checked in), and return its `.dll`.
+pub fn ensure_ext_assembly_grid_built(source: impl FnOnce() -> String) -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/ext_assembly_grid_env");
+            let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
+            std::fs::write(project.join("Generated.fs"), source())
+                .expect("write the extension-assembly grid's Generated.fs");
+            dotnet_build(&project, "dotnet build extension-assembly grid fixture");
+            project
+                .join("bin")
+                .join("Release")
+                .join("net10.0")
+                .join("ExtAssemblyGridFixture.dll")
+        })
+        .as_path()
+}
+
 /// [`full_bcl_env`] plus the extension-universe fixture
 /// ([`ensure_ext_universe_fixture_built`]), which is exactly what
 /// [`ext_scope::check`] hands the oracle beside the SDK's references.
@@ -2454,6 +2521,17 @@ pub fn ext_universe_env() -> &'static borzoi_sema::AssemblyEnv {
             Ecma335Assembly::parse(&fixture).expect("parse SemaExtUniverseFixture.dll"),
         ];
         borzoi_sema::AssemblyEnv::from_views(&views).expect("build AssemblyEnv")
+    })
+}
+
+/// [`ext_universe_env`] as the LSP builds it while some project reference
+/// has no built output ([`borzoi_sema::AssemblyEnv::mark_references_not_built`]).
+pub fn ext_universe_env_not_built() -> &'static borzoi_sema::AssemblyEnv {
+    static ENV: OnceLock<borzoi_sema::AssemblyEnv> = OnceLock::new();
+    ENV.get_or_init(|| {
+        let mut env = ext_universe_env().clone();
+        env.mark_references_not_built();
+        env
     })
 }
 

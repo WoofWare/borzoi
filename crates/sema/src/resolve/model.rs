@@ -4103,8 +4103,8 @@ pub struct FileSurface {
     /// or open (`resolve::extension_names::damage`), or `None` for a clean
     /// file. Later files read the names it may declare
     /// ([`Self::extension_names()`]); whether it may open something is read
-    /// only by the file's own gate
-    /// ([`ResolvedFile::open_extension_unknowable`]). Like the reading it is
+    /// only by the file's own gate ([`ResolvedFile::opens_unenumerated`],
+    /// [`ResolvedFile::opens_project`]). Like the reading it is
     /// read under, resolution never consults it.
     pub(super) damage: Option<Damage>,
 }
@@ -4361,7 +4361,7 @@ pub struct ResolvedFile {
     /// as possibly any attribute.
     pub(super) own_abbrev_type_simple_names: HashSet<String>,
     /// The file-wide unknowables the walk raised ([`Unknowables`]), read
-    /// through [`Self::open_extension_unknowable`].
+    /// through [`Self::opens_unenumerated`] and [`Self::opens_project`].
     pub(super) unknowables: Unknowables,
     /// The union of [`FileSurface::extension_names()`] over every **preceding**
     /// Compile-order file, stamped by the fold; empty for a single-file
@@ -4900,13 +4900,24 @@ impl ResolvedFile {
         &self.open_extension_namespaces
     }
 
-    /// Whether some `open` in this file brings an extension surface whose names the
-    /// resolver cannot enumerate (EX-2), or may: an `open` in text the parser
-    /// recovered from.
-    /// The gate defers wholesale when true.
-    pub fn open_extension_unknowable(&self) -> bool {
-        self.unknowables.contains(Unknowable::OpenExtensionSurface)
-            || self.surface.damage.as_ref().is_some_and(|d| d.opens)
+    /// Whether some `open` in this file brings an extension surface the
+    /// resolver does not enumerate, or may (an `open` in text the parser
+    /// recovered from); the gate then declines every call.
+    pub fn opens_unenumerated(&self) -> bool {
+        self.unknowables.contains(Unknowable::UnenumeratedSurface) || self.damaged_open()
+    }
+
+    /// Whether some `open` in this file names a project module or namespace,
+    /// or may (an `open` in text the parser recovered from).
+    pub fn opens_project(&self) -> bool {
+        self.unknowables.contains(Unknowable::ProjectSurface) || self.damaged_open()
+    }
+
+    /// Whether the text the recovery reading reports damaged spells `open`:
+    /// FCS may recover an `open` the parser dropped, of a namespace or module
+    /// of either kind.
+    fn damaged_open(&self) -> bool {
+        self.surface.damage.as_ref().is_some_and(|d| d.opens)
     }
 
     /// The file's declared project **namespace** paths, each with its ancestor

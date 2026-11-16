@@ -39,3 +39,4 @@ crates/sema/tests/fixtures/module_value_env/Generated.fs
 crates/sema/tests/fixtures/container_precedence_env/Generated.fs
 crates/sema/tests/fixtures/container_precedence_il_only_env/Generated.fs
 crates/sema/tests/fixtures/case_attr_env/Generated.fs
+crates/sema/tests/fixtures/ext_assembly_grid_env/Generated.fs

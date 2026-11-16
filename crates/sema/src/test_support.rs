@@ -28,6 +28,18 @@ pub fn extension_gate_decline(
     crate::infer::ExtensionScope::of(resolved).decline(env, name, is_static)
 }
 
+/// Whether the gate's namespace query finds an extension named `name` in
+/// `namespace` of `env`'s assemblies, for a call of the given shape: what an
+/// enclosing or opened namespace answers.
+pub fn extension_named_in_namespace(
+    env: &AssemblyEnv,
+    namespace: &[String],
+    name: &str,
+    is_static: bool,
+) -> bool {
+    env.extension_named_in_scope(&[namespace.to_vec()], name, is_static)
+}
+
 pub mod binder_completeness;
 pub mod entity_placement;
 pub mod names;
