@@ -281,6 +281,9 @@ dependencies = [
 [[package]]
 name = "borzoi-print"
 version = "0.1.0"
+dependencies = [
+ "borzoi-cst",
+]
 
 [[package]]
 name = "borzoi-sema"

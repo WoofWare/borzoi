@@ -4,10 +4,20 @@
 
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
-    Attribute, Binding, BindingHead, Const, Expr, ForDirection, ImplFile, LetBindings, ModuleDecl,
-    NamedModule, NestedModule, Pat, RecordField, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
+    BindingHead, Const, ForDirection, Pat, RecordField, Type, TypeRepr, UnionCase, UnionField,
 };
 use borzoi_print::vec::Vec1;
+use borzoi_print::version::DefaultVersion;
+
+type Expr = borzoi_print::tree::Expr<DefaultVersion>;
+type ImplFile = borzoi_print::tree::ImplFile<DefaultVersion>;
+type ModuleDecl = borzoi_print::tree::ModuleDecl<DefaultVersion>;
+type Binding = borzoi_print::tree::Binding<DefaultVersion>;
+type LetBindings = borzoi_print::tree::LetBindings<DefaultVersion>;
+type NestedModule = borzoi_print::tree::NestedModule<DefaultVersion>;
+type NamedModule = borzoi_print::tree::NamedModule<DefaultVersion>;
+type Attribute = borzoi_print::tree::Attribute<DefaultVersion>;
+type TypeDefn = borzoi_print::tree::TypeDefn<DefaultVersion>;
 
 use super::round_trips;
 use crate::common::{corpus_root, par_map};

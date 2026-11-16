@@ -315,13 +315,20 @@ This is a Cargo workspace with ten members:
   writes it as source: every expression, pattern and type parenthesised, every
   expression on one line, verbose forms throughout. It is the output half of
   source generation; `borzoi-cst`'s lossless tree comes only from parsing.
-  No dependencies. Its correctness oracle is in `borzoi-cst`'s tests
+  The tree's types take the F# version they target (`version`: `Expr<V8_0>`
+  and so on), and a construct a version lacks carries that version's
+  uninhabited gate, so a tree cannot hold it. Each gate is named after FCS's
+  `LanguageFeature` and held to `borzoi-cst`'s feature table, its only
+  dependency. Its correctness oracle is in `borzoi-cst`'s tests
   (`tests/all/print_roundtrip/`), beside the FCS harness it needs: for a tree
-  `t`, FCS must parse `print(t)` with no diagnostic at all and its parse must
-  lower back to `t` exactly (and our parser must agree with FCS). The trees
-  come from a generator over the whole tree, from exhaustive tables of
-  keywords and short operator spellings, and from every corpus file lowered
-  with the unmodelled declarations dropped
+  `t` at version `V`, FCS at `V` must parse `print(t)` with no diagnostic at
+  all and its parse must lower back to `t` exactly (and our parser must agree
+  with FCS); generated trees are checked at `preview` too, and each gated
+  construct must draw FCS's FS3350 one version below its gate
+  (`print_roundtrip::gates`). The trees come from a generator over the whole
+  tree at every version, from exhaustive tables of keywords and short operator
+  spellings, and from every corpus file lowered with the unmodelled
+  declarations dropped
   (`print_roundtrip::corpus`, pinned per file). When the oracle finds a value
   F# cannot express, the fix is to the tree's types, so that value cannot be
   built; CI runs the printer's tests under the `cst` change filter.

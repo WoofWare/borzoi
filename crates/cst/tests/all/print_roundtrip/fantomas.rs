@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 
 use borzoi_cst::syntax::{NodeOrToken, SyntaxKind};
 use borzoi_print::print_impl_file;
+use borzoi_print::version::DefaultVersion;
 
 use super::check_printed;
 use super::lower::lower_file_lossy;
@@ -76,7 +77,7 @@ fn every_fantomas_test_source_round_trips() {
             return None;
         }
         let root = catch_unwind_silent(|| normalise_parse(&parse)).ok()?;
-        let (tree, tally) = lower_file_lossy(&root).ok()?;
+        let (tree, tally) = lower_file_lossy::<DefaultVersion>(&root).ok()?;
         let printed = print_impl_file(&tree);
         let verdict = match catch_unwind_silent(|| check_printed(&printed, &tree)) {
             Ok(Ok(())) => Ok(tally.kept),

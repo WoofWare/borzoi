@@ -6,37 +6,42 @@
 //! one parse share one value. Where F#'s grammar has a constraint the parser
 //! enforces, the types enforce it too, so every value prints as source F#
 //! parses back to that value.
+//!
+//! The types that can hold a version-gated construct take the F# version the
+//! tree targets as a parameter ([`crate::version`]), so a tree holds only what
+//! its version has.
 
 use crate::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use crate::vec::{Vec1, Vec2};
+use crate::version::Version;
 
 /// An implementation file (`.fs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImplFile {
+pub enum ImplFile<V: Version> {
     /// A file with no `module` or `namespace` header.
-    AnonModule(Vec<ModuleDecl>),
+    AnonModule(Vec<ModuleDecl<V>>),
     /// `module A.B` followed by its declarations.
-    NamedModule(NamedModule),
+    NamedModule(NamedModule<V>),
     /// One or more `namespace` sections.
-    Namespaces(Vec1<Namespace>),
+    Namespaces(Vec1<Namespace<V>>),
 }
 
 /// A file-level `module A.B`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamedModule {
-    pub attributes: Vec<Attribute>,
+pub struct NamedModule<V: Version> {
+    pub attributes: Vec<Attribute<V>>,
     pub access: Option<Access>,
     pub is_rec: bool,
     pub name: LongIdent,
-    pub decls: Vec<ModuleDecl>,
+    pub decls: Vec<ModuleDecl<V>>,
 }
 
 /// A `namespace` section.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Namespace {
+pub struct Namespace<V: Version> {
     pub is_rec: bool,
     pub name: NamespaceName,
-    pub decls: Vec<ModuleDecl>,
+    pub decls: Vec<ModuleDecl<V>>,
 }
 
 /// What a `namespace` section names.
@@ -58,59 +63,59 @@ pub enum Access {
 
 /// An attribute, `[<Name(arg)>]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Attribute {
+pub struct Attribute<V: Version> {
     pub name: LongIdent,
     /// The argument; [`Const::Unit`] is an attribute written without one,
     /// which is how F# reads `[<A>]` and `[<A()>]` alike.
-    pub arg: Expr,
+    pub arg: Expr<V>,
 }
 
 /// A declaration in a module or namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModuleDecl {
+pub enum ModuleDecl<V: Version> {
     /// `let …` or `let rec … and …`.
-    Let(LetBindings),
+    Let(LetBindings<V>),
     /// An expression evaluated for its effect.
-    Expr(Expr),
+    Expr(Expr<V>),
     /// `open A.B`
     Open(LongIdent),
     /// `module M = …`
-    NestedModule(NestedModule),
+    NestedModule(NestedModule<V>),
     /// `module M = A.B`
     ModuleAbbrev { name: Ident, target: LongIdent },
     /// `type A = … and B = …`
-    Types(Vec1<TypeDefn>),
+    Types(Vec1<TypeDefn<V>>),
     /// `exception E of …`
     Exception(UnionCase),
 }
 
 /// A nested `module M =` and its declarations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NestedModule {
-    pub attributes: Vec<Attribute>,
+pub struct NestedModule<V: Version> {
+    pub attributes: Vec<Attribute<V>>,
     pub access: Option<Access>,
     pub is_rec: bool,
     pub name: Ident,
-    pub decls: Vec<ModuleDecl>,
+    pub decls: Vec<ModuleDecl<V>>,
 }
 
 /// One `let` group. A non-recursive group has one binding: F# rejects
 /// `let a = 1 and b = 2` at module level.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LetBindings {
+pub enum LetBindings<V: Version> {
     /// `let …`
-    NonRec(Box<Binding>),
+    NonRec(Box<Binding<V>>),
     /// `let rec … and …`
-    Rec(Vec1<Binding>),
+    Rec(Vec1<Binding<V>>),
 }
 
 /// One binding of a `let` group.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Binding {
-    pub attributes: Vec<Attribute>,
+pub struct Binding<V: Version> {
+    pub attributes: Vec<Attribute<V>>,
     pub is_inline: bool,
     pub head: BindingHead,
-    pub body: Expr,
+    pub body: Expr<V>,
 }
 
 /// What a binding binds.
@@ -135,8 +140,8 @@ pub enum BindingHead {
 
 /// A type definition, one of a `type … and …` group.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeDefn {
-    pub attributes: Vec<Attribute>,
+pub struct TypeDefn<V: Version> {
+    pub attributes: Vec<Attribute<V>>,
     pub access: Option<Access>,
     pub name: Ident,
     pub typars: Vec<TyparName>,
@@ -243,7 +248,7 @@ impl Float64 {
 
 /// An expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
+pub enum Expr<V: Version> {
     Const(Const),
     /// `null`
     Null,
@@ -253,121 +258,126 @@ pub enum Expr {
     OpValue(Operator),
     /// `f x`
     App {
-        func: Box<Expr>,
-        arg: Box<Expr>,
+        func: Box<Expr<V>>,
+        arg: Box<Expr<V>>,
     },
     /// `a op b`
     Infix {
         op: InfixOperator,
-        lhs: Box<Expr>,
-        rhs: Box<Expr>,
+        lhs: Box<Expr<V>>,
+        rhs: Box<Expr<V>>,
     },
     /// `a, b`
-    Tuple(Vec2<Expr>),
+    Tuple(Vec2<Expr<V>>),
     /// `[a; b]`
-    List(Vec<Expr>),
+    List(Vec<Expr<V>>),
     /// `[|a; b|]`
-    Array(Vec<Expr>),
+    Array(Vec<Expr<V>>),
     /// `{ A = a }` or `{ r with A = a }`
     Record {
-        copy: Option<Box<Expr>>,
-        fields: Vec1<(LongIdent, Expr)>,
+        copy: Option<Box<Expr<V>>>,
+        fields: Vec1<(LongIdent, Expr<V>)>,
     },
     /// `(e).f`: a field of an expression's value. `A.B.c` is a [`Expr::Name`].
     FieldGet {
-        expr: Box<Expr>,
+        expr: Box<Expr<V>>,
         field: Ident,
     },
     /// `a.b <- v`
     Set {
         target: LongIdent,
-        value: Box<Expr>,
+        value: Box<Expr<V>>,
     },
     /// `fun p1 p2 -> e`
     Lambda {
         params: Vec1<Pat>,
-        body: Box<Expr>,
+        body: Box<Expr<V>>,
     },
     /// `function | p -> e …`
-    Function(Vec1<MatchClause>),
+    Function(Vec1<MatchClause<V>>),
     /// `match e with | p -> e …`
     Match {
-        scrutinee: Box<Expr>,
-        clauses: Vec1<MatchClause>,
+        scrutinee: Box<Expr<V>>,
+        clauses: Vec1<MatchClause<V>>,
     },
     /// `if c then a [else b]`
     IfThenElse {
-        cond: Box<Expr>,
-        then_branch: Box<Expr>,
-        else_branch: Option<Box<Expr>>,
+        cond: Box<Expr<V>>,
+        then_branch: Box<Expr<V>>,
+        else_branch: Option<Box<Expr<V>>>,
     },
     /// `let … in e`
     LetIn {
-        bindings: LetBindings,
-        body: Box<Expr>,
+        bindings: LetBindings<V>,
+        body: Box<Expr<V>>,
     },
     /// `a; b`
-    Sequential(Box<Expr>, Box<Expr>),
+    Sequential(Box<Expr<V>>, Box<Expr<V>>),
     /// `e : t`
     Typed {
-        expr: Box<Expr>,
+        expr: Box<Expr<V>>,
         ty: Type,
     },
     /// `e :? t`
     TypeTest {
-        expr: Box<Expr>,
+        expr: Box<Expr<V>>,
         ty: Type,
     },
     /// `e :> t`
     Upcast {
-        expr: Box<Expr>,
+        expr: Box<Expr<V>>,
         ty: Type,
     },
     /// `e :?> t`
     Downcast {
-        expr: Box<Expr>,
+        expr: Box<Expr<V>>,
         ty: Type,
     },
     /// `h :: t`
     Cons {
-        head: Box<Expr>,
-        tail: Box<Expr>,
+        head: Box<Expr<V>>,
+        tail: Box<Expr<V>>,
     },
     /// `try e with | p -> e …`
     TryWith {
-        body: Box<Expr>,
-        clauses: Vec1<MatchClause>,
+        body: Box<Expr<V>>,
+        clauses: Vec1<MatchClause<V>>,
     },
     /// `try e finally f`
     TryFinally {
-        body: Box<Expr>,
-        finally: Box<Expr>,
+        body: Box<Expr<V>>,
+        finally: Box<Expr<V>>,
     },
     /// `while c do e done`
     While {
-        cond: Box<Expr>,
-        body: Box<Expr>,
+        cond: Box<Expr<V>>,
+        body: Box<Expr<V>>,
     },
     /// `for i = a to b do e done`
     For {
         var: Ident,
-        from: Box<Expr>,
+        from: Box<Expr<V>>,
         direction: ForDirection,
-        to: Box<Expr>,
-        body: Box<Expr>,
+        to: Box<Expr<V>>,
+        body: Box<Expr<V>>,
     },
     /// `for p in e do e done`
     ForEach {
         pat: Pat,
-        source: Box<Expr>,
-        body: Box<Expr>,
+        source: Box<Expr<V>>,
+        body: Box<Expr<V>>,
     },
     /// `lazy e`
-    Lazy(Box<Expr>),
+    Lazy(Box<Expr<V>>),
     /// `assert e`
-    Assert(Box<Expr>),
+    Assert(Box<Expr<V>>),
     /// `do e`
-    Do(Box<Expr>),
+    Do(Box<Expr<V>>),
+    /// `_.A.B`: a function reading a member path of its argument.
+    DotLambda {
+        gate: V::AccessorFunctionShorthand,
+        path: LongIdent,
+    },
 }
 
 /// Which way a `for … to/downto` loop counts.
@@ -379,10 +389,10 @@ pub enum ForDirection {
 
 /// `| pat [when guard] -> result`
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MatchClause {
+pub struct MatchClause<V: Version> {
     pub pat: Pat,
-    pub guard: Option<Expr>,
-    pub result: Expr,
+    pub guard: Option<Expr<V>>,
+    pub result: Expr<V>,
 }
 
 /// A pattern.
