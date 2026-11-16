@@ -163,11 +163,19 @@ impl Harness {
         // MSBuild and `SdkDiscovery` would otherwise walk past a nested `TMPDIR`
         // into an ancestor `global.json`. This pins nothing but stops that walk.
         common::write_boundary_global_json(&cases_root);
+        // The dummy root holds a stub of the host SDK version, which every
+        // case's spec admits: hostfxr runs no build from a root without one
+        // (#912), and the stub ships no SDK, so each name falls to NuGet.
+        let host_sdk_version = query_host_sdk_version();
+        let dotnet_root = tmp.path().join("dotnet");
+        let stub = dotnet_root.join("sdk").join(&host_sdk_version);
+        std::fs::create_dir_all(&stub).unwrap();
+        std::fs::write(stub.join("dotnet.dll"), "").unwrap();
         Harness {
             gpf: gpf.clone(),
-            dotnet_root: tmp.path().join("dotnet"),
+            dotnet_root,
             cases_root,
-            host_sdk_version: query_host_sdk_version(),
+            host_sdk_version,
             oracle: RefCell::new(common::SdkOracle::spawn(&gpf)),
             next_id: Cell::new(0),
             _tmp: tmp,

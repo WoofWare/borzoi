@@ -62,7 +62,8 @@ pub use sdk_resolver::global_json::{
 };
 pub use sdk_resolver::version_spec::{RollForward, VersionSpec};
 pub use sdk_resolver::{
-    SdkResolveError, SdkVersion, locate_dotnet_sdk, nuget_package_version, resolve_sdk, workloads,
+    SdkResolveError, SdkVersion, locate_dotnet_sdk, nuget_package_version, resolve_sdk,
+    running_sdk_dir, workloads,
 };
 pub use target_frameworks::target_frameworks;
 

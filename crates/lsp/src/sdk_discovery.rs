@@ -72,7 +72,7 @@ use std::path::{Component, Path, PathBuf};
 use borzoi_msbuild::{
     GlobalJsonError, SdkPathEntry, SdkResolution, SdkResolveError, SdkVersion, UndecidedGlobalJson,
     VersionSpec, find_global_json, nuget_package_version, parse_global_json, resolve_sdk,
-    workloads,
+    running_sdk_dir, workloads,
 };
 use borzoi_nuget::settings::{
     GlobalPackagesFolderDecline, SettingsFs, global_packages_folder_with,
@@ -596,19 +596,15 @@ impl SdkDiscovery {
     /// let parsed = parse_fsproj_with_imports(src, &path, &extra, Some(r), None)?;
     /// ```
     ///
-    /// Iterates [`Self::roots`] in order, calling [`resolve_sdk`] for
-    /// each (which routes the workload locator SDK names through their
-    /// layout-envelope resolution and everything else through
-    /// `locate_dotnet_sdk`). First `Ok` wins (matching the .NET host's
-    /// first-match semantics). An `UnsupportedLayout` from any root
-    /// short-circuits: the root MSBuild *would* use has a workload
-    /// state we cannot resolve exactly, and trying a lower-priority
-    /// root instead could produce a different file set than a real
-    /// build. On all-error outcomes the result is `NotFound` unless at
-    /// least one root reported `VersionNotSatisfied`, in which case the
-    /// returned `available` list is the dedup-sorted union across the
-    /// consulted roots — the most informative error for a workspace
-    /// with a pinned `sdk.version` and multiple roots.
+    /// Walks [`Self::roots`] in order as hostfxr does, and calls
+    /// [`resolve_sdk`] (which routes the workload locator SDK names through
+    /// their layout-envelope resolution and everything else through
+    /// `locate_dotnet_sdk`) in the first root hostfxr runs an SDK from, and
+    /// no other: MSBuild serves the name from that SDK or fails (#912;
+    /// `resolve_across_roots`). With no such root, hostfxr runs no SDK, and
+    /// the result is `NotFound` unless a passed-over root held SDKs the spec
+    /// admits none of, in which case it is `VersionNotSatisfied` with the
+    /// dedup-sorted union of their versions.
     ///
     /// Every file-system query goes through `observer`, the evaluation's
     /// (see [`borzoi_msbuild::SdkResolver`]).
@@ -683,7 +679,8 @@ impl SdkDiscovery {
                 observer,
             )
         };
-        let resolved = resolve_across_roots(&self.roots, sdk_name, &locate);
+        let pick = |root: &Path| running_sdk_dir(root, Some(&self.spec), observer);
+        let resolved = resolve_across_roots(&self.roots, sdk_name, &pick, &locate);
         match (resolved, nuget_version) {
             // NuGet's resolver does not stop at a global packages folder that
             // lacks the version: it looks in its fallback folders, then
@@ -870,63 +867,50 @@ fn normalise_lexically(path: &Path) -> PathBuf {
     out
 }
 
-/// Iterate `roots` in order calling `locate` for each, with first-match
-/// semantics: the first `Ok` wins and short-circuits, matching the
-/// .NET host's behaviour.
+/// Iterate `roots` in order as hostfxr does, and resolve `sdk_name` in the
+/// first root hostfxr runs an SDK from, consulting no later one (#912).
 ///
-/// Error aggregation: collect [`SdkResolveError::VersionNotSatisfied`]
-/// `available` lists across consulted roots and, if no root yielded
-/// `Ok`, return their dedup-sorted union under a single
-/// `VersionNotSatisfied { spec, available }`. The returned `spec` is
-/// the one from the *first* `VersionNotSatisfied` reported by
-/// `locate` — this matters because `locate_dotnet_sdk` reports the
-/// *effective* spec, which can be a per-import `Sdk="Name/Version"`
-/// pin or a `msbuild-sdks` override rather than the discovery-wide
-/// `global.json` spec; preserving it keeps the resulting diagnostic
-/// accurate. In practice the spec is invariant across roots for a
-/// given `sdk_name` lookup (it's derived from name + global.json +
-/// per-import pin, not the root), so "first seen" is well-defined.
+/// hostfxr runs from the first root whose `sdk` directory holds a version
+/// the `global.json` spec admits, and looks at no later root
+/// (`sdk_resolver::resolve_sdk_path_and_version`); MSBuild's default resolver
+/// then serves the name from that SDK or fails. `pick` is hostfxr's choice in
+/// one root ([`borzoi_msbuild::running_sdk_dir`], which
+/// `sdk_paths_root_choice_diff` holds to hostfxr's trace across roots): `Ok`
+/// where it runs an SDK, and the root's answer is `locate`'s, whatever it is,
+/// a `NotFound` for a running SDK that lacks the name included. A root with
+/// no SDK (`NotFound`), or none the spec admits (`VersionNotSatisfied`), is
+/// passed over, as hostfxr passes over it. An `UnsupportedLayout` from `pick`
+/// declines.
 ///
-/// If the resulting union is empty (no root reported
-/// `VersionNotSatisfied`, or every one did so with an empty
-/// `available`), return [`SdkResolveError::NotFound`]. Empty `roots`
-/// short-circuits to `NotFound` without calling `locate`.
+/// With no root picked, hostfxr runs no SDK: the result is the dedup-sorted
+/// union of the passed-over roots' versions under the first spec reported,
+/// as `VersionNotSatisfied`, or `NotFound` when there were none.
 ///
-/// Pure over `(roots, sdk_name, locate)` and total: the function is
-/// extracted from [`SdkDiscovery::resolve`] specifically so the
-/// iteration logic can be property-tested without touching disk —
-/// tests substitute a deterministic `locate` that returns prepared
-/// outcomes per root.
+/// Pure over `(roots, sdk_name, pick, locate)` and total: the function is
+/// extracted from [`SdkDiscovery::resolve`] so the iteration can be
+/// property-tested without touching disk.
 fn resolve_across_roots(
     roots: &[PathBuf],
     sdk_name: &str,
+    pick: &dyn Fn(&Path) -> Result<PathBuf, SdkResolveError>,
     locate: &dyn Fn(&Path, &str) -> Result<SdkResolution, SdkResolveError>,
 ) -> Result<SdkResolution, SdkResolveError> {
     let mut effective_spec: Option<VersionSpec> = None;
     let mut union: Vec<SdkVersion> = Vec::new();
     for root in roots {
-        match locate(root, sdk_name) {
-            Ok(resolution) => return Ok(resolution),
-            Err(SdkResolveError::NotFound) => continue,
+        match pick(root) {
+            Ok(_) => return locate(root, sdk_name),
+            Err(SdkResolveError::NotFound) => {}
             Err(SdkResolveError::VersionNotSatisfied { spec, available }) => {
                 if effective_spec.is_none() {
                     effective_spec = Some(spec);
                 }
                 union.extend(available);
             }
-            // The root MSBuild would consult has workload state outside
-            // the exactness envelope; falling through to another root
-            // could resolve a *different* file set than a real build.
-            // Degrade immediately.
             Err(err @ SdkResolveError::UnsupportedLayout { .. }) => return Err(err),
         }
     }
     if union.is_empty() {
-        // Either no root reported `VersionNotSatisfied`, or every
-        // one did but with an empty `available`. `locate_dotnet_sdk`
-        // never emits the latter — it falls through to `NotFound`
-        // itself when both probe roots are empty — but the fold
-        // stays well-defined if some other locator ever does.
         Err(SdkResolveError::NotFound)
     } else {
         union.sort();

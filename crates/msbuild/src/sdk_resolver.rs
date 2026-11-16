@@ -716,7 +716,7 @@ pub fn resolve_sdk(
     observer: &Observer,
 ) -> Result<SdkResolution, SdkResolveError> {
     if workloads::is_workload_locator(sdk_name) {
-        let version_dir = select_host_sdk_version_dir(dotnet_root, spec, observer)?;
+        let version_dir = running_sdk_dir(dotnet_root, spec, observer)?;
         return workloads::resolve_workload_locator(
             sdk_name,
             dotnet_root,
@@ -759,15 +759,17 @@ pub fn nuget_package_version(
     }
 }
 
-/// The `{dotnet_root}/sdk/{version}` directory of the host SDK the spec
-/// admits (highest installed version when unconstrained) — the SDK
-/// whose `KnownWorkloadManifests.txt` drives workload locator
-/// resolution: [`host_sdk_versions`], selected by version alone, as
-/// [`locate_dotnet_sdk`] selects it. No installed version at all is `NotFound`;
-/// installed versions all rejected by the spec is `VersionNotSatisfied`
-/// with the sorted available list, matching ordinary SDK resolution's
-/// diagnostic split.
-fn select_host_sdk_version_dir(
+/// The `{dotnet_root}/sdk/{version}` directory of the SDK hostfxr runs from
+/// `dotnet_root` under `spec` (the highest installed version when
+/// unconstrained): `host_sdk_versions`, selected by version alone, as
+/// [`locate_dotnet_sdk`] selects it. It is the SDK whose
+/// `KnownWorkloadManifests.txt` drives workload locator resolution, and,
+/// across a `global.json`'s `sdk.paths`, hostfxr runs from the first root
+/// where this is `Ok` (`sdk_paths_root_choice_diff`). No installed version
+/// at all is `NotFound`; installed versions all rejected by the spec is
+/// `VersionNotSatisfied` with the sorted available list, matching ordinary
+/// SDK resolution's diagnostic split.
+pub fn running_sdk_dir(
     dotnet_root: &Path,
     spec: Option<&VersionSpec>,
     observer: &Observer,

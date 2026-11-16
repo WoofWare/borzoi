@@ -7547,11 +7547,12 @@ mod tests {
             // Bare Microsoft.NET.Sdk only under A; the project's Custom.Sdk
             // only under B. Disjoint names so each resolves to exactly one root.
             install_stub_sdk(&root_a, "9.0.100", "Microsoft.NET.Sdk", "<Project/>");
-            install_stub_sdk(&root_b, "9.0.100", "Custom.Sdk", "<Project/>");
-            // sdk.paths lists A before B, so a bare probe lands on A.
+            install_stub_sdk(&root_b, "9.0.200", "Custom.Sdk", "<Project/>");
+            // sdk.paths lists A before B, but the pin admits only B's SDK, so
+            // hostfxr passes A over and runs B's (#912).
             write_file(
                 &ws_dir.join("global.json"),
-                r#"{ "sdk": { "paths": [ "dotnet_a", "dotnet_b" ] } }"#,
+                r#"{ "sdk": { "paths": [ "dotnet_a", "dotnet_b" ], "version": "9.0.200", "rollForward": "latestPatch" } }"#,
             );
             let proj = ws_dir.join("proj").join("App.fsproj");
             write_file(&proj, r#"<Project Sdk="Custom.Sdk"></Project>"#);
