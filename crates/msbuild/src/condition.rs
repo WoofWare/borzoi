@@ -224,9 +224,10 @@ pub(crate) fn rejected_by_syntax(source: &str) -> bool {
     syntax::msbuild_parse(source) == syntax::Syntax::Rejects
 }
 
-/// Parse a condition into its tree: `Ok(None)` for a blank condition (which
+/// Parse a condition into its tree: `Ok(None)` for an empty condition (which
 /// MSBuild treats as true), `Err` for anything outside the grammar, which is
-/// [`Reject::Illegal`] when MSBuild's own parser rejects it too.
+/// [`Reject::Illegal`] when MSBuild's own parser rejects it too, as it does a
+/// condition of whitespace alone (MSB4092; probed, `dotnet msbuild` 10.0).
 fn parse_condition(source: &str) -> Result<Option<BoolExpr>, Reject> {
     parse_modelled(source).map_err(|()| match syntax::msbuild_parse(source) {
         syntax::Syntax::Rejects => Reject::Illegal,
@@ -236,8 +237,11 @@ fn parse_condition(source: &str) -> Result<Option<BoolExpr>, Reject> {
 
 /// [`parse_condition`] within the grammar we model.
 fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
-    if source.trim().is_empty() {
+    if source.is_empty() {
         return Ok(None);
+    }
+    if source.trim().is_empty() {
+        return Err(());
     }
     // MSBuild's condition scanner lexes item-list (`@(`) and metadata (`%(`)
     // references directly from the *raw* condition text, before any property
@@ -1837,7 +1841,16 @@ mod tests {
     #[test]
     fn empty_condition_is_true() {
         assert_eq!(evaluate("", &PropertyMap::new()), Outcome::True);
-        assert_eq!(evaluate("   ", &PropertyMap::new()), Outcome::True);
+    }
+
+    /// MSBuild's parser throws on whitespace alone (MSB4092; probed,
+    /// `dotnet msbuild` 10.0, in every position a condition takes).
+    #[test]
+    fn blank_condition_is_illegal() {
+        for blank in ["   ", "\t", "\r\n"] {
+            assert_eq!(evaluate(blank, &PropertyMap::new()), Outcome::Illegal);
+            assert!(super::rejected_by_syntax(blank));
+        }
     }
 
     #[test]

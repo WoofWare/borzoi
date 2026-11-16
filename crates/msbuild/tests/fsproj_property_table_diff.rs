@@ -1319,6 +1319,8 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     // MSBuild's parser rejects each, whatever the values.
     let by_syntax = [
         "tr ue",
+        // Whitespace alone is MSB4092, not the empty condition's `true`.
+        " ",
         "'a' = 'a'",
         "$( Word ) == ''",
         "(true",
@@ -1654,6 +1656,8 @@ fn load_time_errors_reject_exactly_where_msbuild_loads_them() {
         "<Choose><Otherwise /><When Condition=\"true\" /></Choose>",
         "<Choose><When /></Choose>",
         "<Choose><When Condition=\"true\"><Foo /></When></Choose>",
+        "<Choose><When Condition=\"true\" /><When Condition=\" \" /></Choose>",
+        "<Choose><When Condition=\" \" /></Choose>",
         "<Choose><When Condition=\"true\"><PropertyGroup><Zeta>z</Zeta></PropertyGroup></When></Choose>",
     ];
     let property_containers = [

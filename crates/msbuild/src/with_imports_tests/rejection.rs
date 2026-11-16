@@ -807,6 +807,7 @@ const LOAD_TIME_ACCEPTED: &[&str] = &[
     "<ItemGroup><I Include=\" \" /><J Include=\"$(Nothing)\" /></ItemGroup>",
     "<Target Name=\"T\"><ItemGroup><I /></ItemGroup></Target>",
     "<ImportGroup Condition=\"false\"><Import Project=\"$(Nothing)\" /><Import Project=\" \" /></ImportGroup>",
+    "<Choose><When Condition=\"true\" /><When Condition=\" \" /></Choose>",
     "<ProjectExtensions><PropertyGroup><MSBuildThisFile>x</MSBuildThisFile></PropertyGroup></ProjectExtensions>",
 ];
 
