@@ -49,7 +49,7 @@ fn restore_request(engine: &str) -> serde_json::Value {
 /// file, so the padding can be computed from the file offset. Panics unless the
 /// key occurs exactly once.
 fn product_version(dll: &Path) -> String {
-    let bytes = std::fs::read(dll).unwrap_or_else(|e| panic!("read {dll:?}: {e}"));
+    let bytes = crate::common::host_fs::read(dll).unwrap_or_else(|e| panic!("read {dll:?}: {e}"));
     let key: Vec<u8> = "ProductVersion\0"
         .encode_utf16()
         .flat_map(u16::to_le_bytes)

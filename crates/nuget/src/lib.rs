@@ -41,13 +41,16 @@
 //!
 //! Self-contained by design: no dependencies on the other workspace crates,
 //! reusable outside this repo. Its crates.io dependencies are `roxmltree`
-//! (nuspecs) and `serde`/`serde_json` (the dgspec).
+//! (nuspecs) and `serde`/`serde_json` (the dgspec). It reads a file whole only
+//! when the path names a regular file (`regular_file`): a FIFO's open waits
+//! for a writer that may never come.
 
 pub mod assets;
 pub mod dgspec;
 pub mod framework;
 pub mod package;
 pub mod range;
+mod regular_file;
 pub mod resolver;
 pub mod settings;
 pub mod version;

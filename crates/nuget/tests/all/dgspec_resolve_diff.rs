@@ -5177,7 +5177,7 @@ fn a_losers_children_at_the_evicters_depth_are_examined() {
 #[ignore = "env-driven probe; set BORZOI_DGSPEC_PATH"]
 fn resolve_the_spec_at_borzoi_dgspec_path() {
     let path = std::env::var_os("BORZOI_DGSPEC_PATH").expect("BORZOI_DGSPEC_PATH names a spec");
-    let text = fs::read_to_string(&path).expect("the spec is readable");
+    let text = crate::common::host_fs::read_to_string(&path).expect("the spec is readable");
     let spec =
         parse_dgspec(&text).unwrap_or_else(|decline| panic!("the reader declines: {decline}"));
     let resolved = resolve_dgspec(&verified(), &spec, &project_of(&spec), &DEFAULT_ENVIRONMENT);
@@ -6227,7 +6227,8 @@ fn every_variable_the_verified_nuget_names_has_a_verdict() {
         let file = path.file_name().and_then(OsStr::to_str).unwrap_or("");
         if file.starts_with("NuGet.") && file.ends_with(".dll") {
             named.extend(variable_like_strings(
-                &fs::read(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}")),
+                &crate::common::host_fs::read(&path)
+                    .unwrap_or_else(|e| panic!("read {path:?}: {e}")),
             ));
         }
     }

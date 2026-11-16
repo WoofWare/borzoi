@@ -6,6 +6,8 @@
 
 pub use borzoi_oracle_harness::nuget_oracle::{EnvironmentChange, Oracle, sdk_dir};
 
+pub mod host_fs;
+
 // ============================================================================
 // Deterministic input generation (shared by the differential tests)
 // ============================================================================
