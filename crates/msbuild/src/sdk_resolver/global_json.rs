@@ -295,17 +295,7 @@ pub fn parse_global_json(text: &str) -> Result<GlobalJson, GlobalJsonError> {
 /// the parser would otherwise skip as whitespace while `System.Text.Json`
 /// throws on it.
 pub(super) fn parse_json_string_map(text: &str) -> Option<Vec<(String, String)>> {
-    if text.contains('\u{c}') {
-        return None;
-    }
-    let mut parser = Parser::new(text);
-    parser.skip_ws().ok()?;
-    let value = parser.parse_value().ok()?;
-    parser.skip_ws().ok()?;
-    if parser.pos < parser.src.len() {
-        return None;
-    }
-    let JsonValue::Object(entries) = value else {
+    let JsonValue::Object(entries) = parse_strict_json(text, false)? else {
         return None;
     };
     entries
@@ -315,6 +305,30 @@ pub(super) fn parse_json_string_map(text: &str) -> Option<Vec<(String, String)>>
             _ => None,
         })
         .collect()
+}
+
+/// Parse a whole JSON document as `System.Text.Json` would read it, or `None`.
+///
+/// A `None` claims nothing, so this may be stricter than the reference (which
+/// skips comments) but never more lenient: it refuses comments, input after
+/// the value, and a form feed anywhere, which the parser would otherwise skip
+/// as whitespace while `System.Text.Json` throws on it. With
+/// `trailing_commas`, one comma may follow the last member of an object or an
+/// array, as `AllowTrailingCommas` lets it. A leading UTF-8 BOM is skipped, as
+/// the readers that call this skip it.
+pub(super) fn parse_strict_json(text: &str, trailing_commas: bool) -> Option<JsonValue> {
+    if text.contains('\u{c}') {
+        return None;
+    }
+    let mut parser = Parser::new(text);
+    parser.trailing_commas = trailing_commas;
+    parser.skip_ws().ok()?;
+    let value = parser.parse_value().ok()?;
+    parser.skip_ws().ok()?;
+    if parser.pos < parser.src.len() {
+        return None;
+    }
+    Some(value)
 }
 
 /// Transcription of the *effect* of
@@ -659,7 +673,7 @@ fn parse_roll_forward(value: &str) -> Option<RollForward> {
 /// out of `global.json` we'd thread the value through here, but today
 /// every typed field is a string, bool, or nested object.
 #[derive(Debug, Clone, PartialEq)]
-enum JsonValue {
+pub(super) enum JsonValue {
     String(String),
     Bool(bool),
     Object(Vec<(String, JsonValue)>),
@@ -691,6 +705,9 @@ struct Parser<'s> {
     pos: usize,
     /// Arrays and objects enclosing the value being parsed.
     depth: usize,
+    /// Whether one comma may follow the last member of an object or array,
+    /// as `System.Text.Json`'s `AllowTrailingCommas` lets it.
+    trailing_commas: bool,
 }
 
 impl<'s> Parser<'s> {
@@ -708,6 +725,7 @@ impl<'s> Parser<'s> {
             src: bytes,
             pos,
             depth: 0,
+            trailing_commas: false,
         }
     }
 
@@ -796,6 +814,10 @@ impl<'s> Parser<'s> {
         }
         loop {
             self.skip_ws()?;
+            if !out.is_empty() && self.trailing_commas && self.peek() == Some(b'}') {
+                self.pos += 1;
+                return Ok(out);
+            }
             let key = self.parse_string()?;
             self.skip_ws()?;
             self.expect(b':')?;
@@ -830,6 +852,13 @@ impl<'s> Parser<'s> {
             return Ok(out);
         }
         loop {
+            if !out.is_empty() && self.trailing_commas {
+                self.skip_ws()?;
+                if self.peek() == Some(b']') {
+                    self.pos += 1;
+                    return Ok(out);
+                }
+            }
             let value = self.parse_value()?;
             out.push(value);
             self.skip_ws()?;

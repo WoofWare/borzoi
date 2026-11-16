@@ -793,7 +793,6 @@ fn subdirectories(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Every file named `name` under `root`, sorted.
-#[cfg(unix)]
 fn files_named(root: &Path, name: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -968,4 +967,482 @@ fn the_workload_probes_answer_as_the_resolver_s() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+// ---------------------------------------------------------------------------
+// What the resolver reads in a manifest and in the known list.
+
+/// A manifest document, written over a resolved manifest of a plain layout,
+/// and whether the resolver loads it.
+#[derive(Clone, Copy, Debug)]
+enum Content {
+    /// The resolver loads it, and we must answer as it does.
+    Loads(&'static str, &'static str),
+    /// The resolver throws reading or composing it, and we must decline.
+    Throws(&'static str, &'static str),
+    /// The resolver loads it, and we decline on purpose: outside the strict
+    /// reader (a comment, a trailing comma, input after the object) or the
+    /// certified spellings (an integer version).
+    Declined(&'static str, &'static str),
+    /// Outside what we certify, and read differently by the installed
+    /// resolvers (a later one validates what an earlier one let through), so
+    /// we decline on purpose and hold no resolver to either outcome.
+    Unsettled(&'static str, &'static str),
+}
+
+/// `{own}` stands for the manifest's own id, `{w}` for a workload id and
+/// `{p}` for a pack id unique to the layout.
+const CONTENTS: &[Content] = &[
+    Content::Loads("plain", r#"{"version": "1.0.0"}"#),
+    Content::Loads(
+        "every top-level key",
+        r#"{"version": "1.0.0", "description": "d", "depends-on": {}, "workloads": {}, "packs": {}, "data": {"x": [1, {"y": null}]}}"#,
+    ),
+    Content::Loads(
+        "keys in another case",
+        r#"{"Version": "1.0.0", "WORKLOADS": {}, "Packs": {}}"#,
+    ),
+    Content::Loads(
+        "a pack",
+        r#"{"version": "1.0.0", "packs": {"{p}": {"version": "1.2.3", "kind": "Sdk"}}}"#,
+    ),
+    Content::Loads(
+        "an aliased pack",
+        r#"{"version": "1.0.0", "packs": {"{p}": {"version": "1.2.3", "kind": "framework", "alias-to": {"linux-x64": "{p}.Linux", "any": "{p}.Any"}}}}"#,
+    ),
+    Content::Loads(
+        "workloads",
+        r#"{"version": "1.0.0", "workloads": {"{w}": {"description": "W", "kind": "dev", "packs": ["{p}"], "extends": ["{w}-base"], "platforms": ["linux-x64"]}, "{w}-base": {"abstract": true}, "{w}-build": {"kind": "build"}}, "packs": {"{p}": {"version": "1.0.0", "kind": "library"}}}"#,
+    ),
+    Content::Loads(
+        "a met dependency",
+        r#"{"version": "1.0.0", "depends-on": {"{own}": "1.0.0"}}"#,
+    ),
+    Content::Throws("an unknown key", r#"{"version": "1.0.0", "frobnicate": 1}"#),
+    Content::Throws("no version", r#"{"description": "d"}"#),
+    Content::Throws("a malformed version", r#"{"version": "abc"}"#),
+    Content::Throws("a key twice", r#"{"version": "1.0.0", "Version": "1.0.1"}"#),
+    Content::Throws(
+        "a pack without a kind",
+        r#"{"version": "1.0.0", "packs": {"{p}": {"version": "1.0.0"}}}"#,
+    ),
+    Content::Throws(
+        "a pack of an unknown kind",
+        r#"{"version": "1.0.0", "packs": {"{p}": {"version": "1.0.0", "kind": "widget"}}}"#,
+    ),
+    Content::Throws(
+        "a concrete dev workload without a description",
+        r#"{"version": "1.0.0", "workloads": {"{w}": {"kind": "dev", "packs": []}}}"#,
+    ),
+    Content::Loads(
+        "a workload of no kind without a description",
+        r#"{"version": "1.0.0", "workloads": {"{w}": {"packs": []}}}"#,
+    ),
+    Content::Throws(
+        "a workload redirect",
+        r#"{"version": "1.0.0", "workloads": {"{w}": {"replace-with": "{w}-new"}}}"#,
+    ),
+    Content::Unsettled(
+        "a workload id that is no path component",
+        r#"{"version": "1.0.0", "workloads": {"a/b": {"abstract": true}}}"#,
+    ),
+    Content::Throws(
+        "a missing dependency",
+        r#"{"version": "1.0.0", "depends-on": {"contoso.nowhere": "1.0.0"}}"#,
+    ),
+    Content::Throws(
+        "an unmet dependency",
+        r#"{"version": "1.0.0", "depends-on": {"{own}": "9.0.0"}}"#,
+    ),
+    Content::Throws("not JSON", r#"{"version": "#),
+    Content::Throws("an array", "[]"),
+    Content::Declined("an integer version", r#"{"version": 1}"#),
+    Content::Declined("a comment", r#"{"version": "1.0.0" /* c */}"#),
+    Content::Loads("trailing commas", r#"{"version": "1.0.0",}"#),
+    Content::Declined("input after the object", r#"{"version": "1.0.0"} x"#),
+];
+
+impl Content {
+    fn text(self) -> (&'static str, &'static str) {
+        match self {
+            Content::Loads(n, t)
+            | Content::Throws(n, t)
+            | Content::Declined(n, t)
+            | Content::Unsettled(n, t) => (n, t),
+        }
+    }
+}
+
+/// A localization catalog written beside a manifest: its file name and text.
+type Catalog = (&'static str, &'static str);
+
+/// The manifest id a `WorkloadManifest.json` under a manifest tree is named
+/// by: the directory just below its band directory.
+fn manifest_id(tree: &Path, manifest: &Path) -> String {
+    let relative = manifest
+        .strip_prefix(tree)
+        .expect("the manifest is in the tree");
+    let mut components = relative.components();
+    components.next();
+    components
+        .next()
+        .expect("a manifest sits below an id directory")
+        .as_os_str()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Every resolved-manifest content the reader and the composition can meet,
+/// written over one manifest of a plain layout (and, for a catalog case, with
+/// localization catalogs beside it): where the resolver throws, the
+/// auto-import locator must decline, and where it loads, both locators must
+/// answer as it does.
+#[test]
+fn workload_manifests_load_as_the_resolver_reads_them() {
+    let mut cases: Vec<(String, Content, Option<Catalog>)> = CONTENTS
+        .iter()
+        .map(|&content| (content.text().0.to_owned(), content, None))
+        .collect();
+    let workloads = *CONTENTS
+        .iter()
+        .find(|content| content.text().0 == "workloads")
+        .expect("a workloads case");
+    cases.push((
+        "a localized description".to_owned(),
+        workloads,
+        Some((
+            "WorkloadManifest.ja.json",
+            r#"{"workloads/{w}/description": "ワ"}"#,
+        )),
+    ));
+    // The resolver opens only the catalog the build process's UI culture
+    // selects, and the oracle's selects none of these; we cannot see that
+    // culture, so a catalog that would throw under some culture declines.
+    cases.push((
+        "a malformed catalog".to_owned(),
+        Content::Declined("", workloads.text().1),
+        Some(("WorkloadManifest.ja.json", "{")),
+    ));
+    cases.push((
+        "a catalog that empties a description".to_owned(),
+        Content::Declined("", workloads.text().1),
+        Some((
+            "WorkloadManifest.de.json",
+            r#"{"workloads/{w}/description": ""}"#,
+        )),
+    ));
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let mut rng = SplitMix64(0x313_6d6e);
+        for (name, content, catalog) in &cases {
+            let (mut graded, mut auto_committed, mut auto_answered, mut auto_threw) = (0, 0, 0, 0);
+            let mut attempts = 0;
+            while graded < 6 {
+                attempts += 1;
+                assert!(attempts < 200, "{name}: no layout has a manifest");
+                let mut layout = gen_layout(&mut rng, true);
+                // A manifest of the host band, which the primary pass resolves.
+                let tree = layout.dotnet_root.join("sdk-manifests");
+                let manifests =
+                    files_named(&tree.join(layout.host.bands().0), "WorkloadManifest.json");
+                if manifests.is_empty() {
+                    continue;
+                }
+                let target = rng.pick(&manifests).clone();
+                let own = manifest_id(&tree, &target);
+                let fill = |text: &str| {
+                    text.replace("{own}", &own)
+                        .replace("{w}", "contoso-workload")
+                        .replace("{p}", "Contoso.Pack")
+                };
+                std::fs::write(&target, fill(content.text().1)).unwrap();
+                if let Some((file, text)) = catalog {
+                    write(&target.with_file_name("localize").join(file), &fill(text));
+                }
+                if matches!(content, Content::Declined(..) | Content::Unsettled(..)) {
+                    layout.in_domain = false;
+                }
+                layout.description.push_str(&format!(
+                    "{name} in {}\n",
+                    target.strip_prefix(&layout.dotnet_root).unwrap().display()
+                ));
+                graded += 1;
+                let (_, _, failure) = grade(&mut oracle, &layout);
+                if let Some(failure) = failure
+                    && failures.len() < 8
+                {
+                    failures.push(format!(
+                        "{}, {name}: {failure}\n{}",
+                        sdk.display(),
+                        layout.description
+                    ));
+                }
+                let ours = ours(&layout, WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR);
+                let theirs = theirs(&mut oracle, &layout, WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR);
+                auto_committed += usize::from(ours.is_some());
+                auto_answered += usize::from(theirs.is_ok());
+                auto_threw += usize::from(theirs.is_err());
+            }
+            println!(
+                "{}: {name}: auto-import committed {auto_committed}, the resolver answered \
+                 {auto_answered} and threw {auto_threw} of {graded}",
+                sdk.display()
+            );
+            // Each case must reach what it is about: a loading manifest a
+            // commit, a throwing one a throw.
+            match content {
+                Content::Loads(..) => assert!(
+                    auto_committed > 0,
+                    "{}: {name}: the auto-import locator never committed",
+                    sdk.display()
+                ),
+                Content::Throws(..) => assert!(
+                    auto_threw > 0,
+                    "{}: {name}: the resolver never threw",
+                    sdk.display()
+                ),
+                Content::Declined(..) => assert!(
+                    auto_answered > 0,
+                    "{}: {name}: the resolver never answered",
+                    sdk.display()
+                ),
+                Content::Unsettled(..) => {}
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A known list's spelling, which `File.ReadAllLines` reads line by line,
+/// keeping every non-empty line untrimmed.
+#[derive(Clone, Copy, Debug)]
+enum KnownSpelling {
+    /// One id per `\n` line.
+    Plain,
+    /// `\r\n` line ends.
+    Crlf,
+    /// Lone `\r` line ends.
+    LoneCr,
+    /// Blank lines between the ids.
+    Blank,
+    /// A leading UTF-8 BOM.
+    Bom,
+    /// The first id repeated at the end.
+    Repeated,
+    /// The ids in another case than their directories.
+    OtherCase,
+    /// A space before each id, which the resolver keeps.
+    Padded,
+    /// A line of spaces.
+    Spaces,
+    /// One id spelled in two cases.
+    TwoSpellings,
+}
+
+impl KnownSpelling {
+    const ALL: &[KnownSpelling] = &[
+        KnownSpelling::Plain,
+        KnownSpelling::Crlf,
+        KnownSpelling::LoneCr,
+        KnownSpelling::Blank,
+        KnownSpelling::Bom,
+        KnownSpelling::Repeated,
+        KnownSpelling::OtherCase,
+        KnownSpelling::Padded,
+        KnownSpelling::Spaces,
+        KnownSpelling::TwoSpellings,
+    ];
+
+    /// Whether we decline on purpose: an id the fallback would look up that
+    /// is no plain path component (a padded or blank one), and one id spelled
+    /// two ways, whose outcome hangs on dictionary order.
+    fn declines_on_purpose(self) -> bool {
+        matches!(
+            self,
+            KnownSpelling::Padded | KnownSpelling::Spaces | KnownSpelling::TwoSpellings
+        )
+    }
+
+    fn spell(self, ids: &[&str]) -> String {
+        let upper = |id: &str| -> String {
+            id.split('.')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    chars
+                        .next()
+                        .map(|c| c.to_ascii_uppercase().to_string() + chars.as_str())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        match self {
+            KnownSpelling::Plain => ids.join("\n"),
+            KnownSpelling::Crlf => ids.join("\r\n") + "\r\n",
+            KnownSpelling::LoneCr => ids.join("\r"),
+            KnownSpelling::Blank => ids.join("\n\n") + "\n",
+            KnownSpelling::Bom => format!("\u{feff}{}", ids.join("\n")),
+            KnownSpelling::Repeated => {
+                let mut lines: Vec<&str> = ids.to_vec();
+                lines.extend(ids.first());
+                lines.join("\n")
+            }
+            KnownSpelling::OtherCase => ids
+                .iter()
+                .map(|id| upper(id))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            KnownSpelling::Padded => ids
+                .iter()
+                .map(|id| format!(" {id}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            KnownSpelling::Spaces => format!("{}\n   \n", ids.join("\n")),
+            KnownSpelling::TwoSpellings => {
+                let mut lines: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+                lines.extend(ids.first().map(|id| upper(id)));
+                lines.join("\n")
+            }
+        }
+    }
+}
+
+/// Every spelling of a known list `File.ReadAllLines` reads differently from
+/// a line-trimming reader, over plain layouts: the targets locator's order
+/// and fallback must be the resolver's, or we decline.
+#[test]
+fn the_known_list_is_read_as_the_resolver_reads_it() {
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let mut rng = SplitMix64(0x6b6e_6f77);
+        for &spelling in KnownSpelling::ALL {
+            let mut committed = 0;
+            for _ in 0..8 {
+                let mut layout = gen_layout(&mut rng, true);
+                let mut ids: Vec<&str> =
+                    IDS.iter().copied().filter(|_| rng.below(3) != 0).collect();
+                ids.push(UNLISTED_ID);
+                for i in (1..ids.len()).rev() {
+                    ids.swap(i, rng.below(i + 1));
+                }
+                let path = layout
+                    .dotnet_root
+                    .join("sdk")
+                    .join(&layout.host.version)
+                    .join("KnownWorkloadManifests.txt");
+                std::fs::write(&path, spelling.spell(&ids)).unwrap();
+                if spelling.declines_on_purpose() {
+                    layout.in_domain = false;
+                }
+                layout
+                    .description
+                    .push_str(&format!("known list {spelling:?} of {ids:?}\n"));
+                let (here, _, failure) = grade(&mut oracle, &layout);
+                committed += here;
+                if let Some(failure) = failure
+                    && failures.len() < 8
+                {
+                    failures.push(format!(
+                        "{}, {spelling:?}: {failure}\n{}",
+                        sdk.display(),
+                        layout.description
+                    ));
+                }
+            }
+            println!(
+                "{}: {spelling:?}: committed {committed} of 16 answers",
+                sdk.display()
+            );
+            assert!(
+                committed > 0 || spelling.declines_on_purpose(),
+                "{}: {spelling:?}: the sweep committed nothing",
+                sdk.display()
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Prerelease spellings a `depends-on` compares: the orders `FXVersion.Compare`
+/// takes from the first differing character rather than whole identifiers.
+const FX_VERSIONS: &[&str] = &[
+    "1.0.0",
+    "1.0.1",
+    "1.0.0-rc",
+    "1.0.0-rc.1",
+    "1.0.0-rc.2",
+    "1.0.0-rc.10",
+    "1.0.0-rc.1.2",
+    "1.0.0-rc.a",
+    "1.0.0-rc-1",
+    "1.0.0-preview.9",
+    "1.0.0-a",
+    "1.0.0-a-b",
+    "1.0.0-a.b",
+    "1.0.0-1",
+    "1.0.0-10",
+    "1.0.0-x.-1",
+    "1.0.0-x.-10",
+];
+
+/// A manifest that depends on itself at another version: the auto-import
+/// locator loads it exactly where the resolver's `FXVersion.Compare` puts the
+/// needed version at or below its own, over every pair of [`FX_VERSIONS`].
+#[test]
+fn a_dependency_s_versions_compare_as_the_resolver_compares_them() {
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let (mut met, mut unmet) = (0, 0);
+        for own in FX_VERSIONS {
+            for needed in FX_VERSIONS {
+                let dir = tempfile::TempDir::new().unwrap();
+                let dotnet_root = host_fs::canonicalize(dir.path()).unwrap().join("dotnet");
+                std::fs::create_dir_all(dotnet_root.join("sdk/10.0.100")).unwrap();
+                write(
+                    &dotnet_root.join("sdk-manifests/10.0.100/contoso.one/WorkloadManifest.json"),
+                    &format!(
+                        r#"{{"version": "{own}", "depends-on": {{"contoso.one": "{needed}"}}}}"#
+                    ),
+                );
+                let layout = Layout {
+                    _dir: dir,
+                    dotnet_root,
+                    user_root: None,
+                    host: Host {
+                        version: "10.0.100".to_owned(),
+                        major: 10,
+                        minor: 0,
+                        hundreds: 1,
+                        pre: None,
+                    },
+                    in_domain: true,
+                    description: format!("contoso.one {own} depends on itself at {needed}\n"),
+                };
+                let ours = ours(&layout, WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR);
+                let theirs = theirs(&mut oracle, &layout, WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR);
+                if theirs.is_ok() {
+                    met += 1;
+                } else {
+                    unmet += 1;
+                }
+                if ours.is_some() != theirs.is_ok() && failures.len() < 8 {
+                    failures.push(format!(
+                        "{}: {}we answer {ours:?}, the resolver {theirs:?}",
+                        sdk.display(),
+                        layout.description
+                    ));
+                }
+            }
+        }
+        println!("{}: {met} met, {unmet} unmet", sdk.display());
+        assert!(
+            met > 0 && unmet > 0,
+            "{}: the sweep graded one side only",
+            sdk.display()
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
