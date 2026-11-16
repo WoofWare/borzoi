@@ -222,6 +222,9 @@ struct Fixture {
     links: Vec<(&'static str, LinkTarget)>,
     include: String,
     exclude: Option<String>,
+    /// Whether the project's path is spelt unnormalised (`//`, `/./`, and a
+    /// `sub/..`), to both sides: MSBuild takes the project's full path.
+    respelt: bool,
 }
 
 impl Fixture {
@@ -248,6 +251,7 @@ impl Fixture {
             links: linked,
             include,
             exclude,
+            respelt: false,
         }
     }
 
@@ -290,12 +294,14 @@ enum Outcome {
     Declined,
 }
 
-/// Lexical normalisation, as MSBuild's `FullPath` resolves `.` and `..`.
+/// Lexical normalisation, as MSBuild's `FullPath` resolves `.`, `..` and
+/// runs of separators.
 fn norm(path: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     for seg in path.split(['/', '\\']) {
         match seg {
             "." => {}
+            "" if !out.is_empty() => {}
             ".." if out.len() > 1 => {
                 out.pop();
             }
@@ -347,6 +353,13 @@ fn check(oracles: &mut [Oracle; 2], fixture: &Fixture) -> Outcome {
     let proj = root.join("Demo.fsproj");
     let xml = fixture.xml(&root.to_string_lossy().to_ascii_uppercase());
     std::fs::write(&proj, &xml).expect("write project");
+    // Every walk disk has `sub`, which the respelling passes through.
+    let proj = if fixture.respelt {
+        let parent = root.parent().expect("the project directory has a parent");
+        std::path::PathBuf::from(format!("{}//proj/./sub/../Demo.fsproj", parent.display()))
+    } else {
+        proj
+    };
 
     let resolver: &borzoi_msbuild::GlobResolver<'_> = &glob_resolver::resolve;
     let parsed = parse_fsproj_with_imports(
@@ -444,6 +457,7 @@ fn case_corners() {
         links: Vec::new(),
         include: include.to_string(),
         exclude: exclude.map(str::to_string),
+        respelt: false,
     };
     let committing = [
         // Literal includes: `FileSpecMatcherTester`, case folded throughout.
@@ -622,6 +636,7 @@ fn link_corners() {
         links: links.to_vec(),
         include: include.to_string(),
         exclude: None,
+        respelt: false,
     };
     let cases = [
         (
@@ -830,6 +845,7 @@ fn gen_walk_fixture(rng: &mut SplitMix64) -> (Fixture, Vec<ExcludeBase>) {
         links: Vec::new(),
         include,
         exclude: (!excludes.is_empty()).then(|| excludes.join(";")),
+        respelt: rng.below(5) == 0,
     };
     (fixture, relations)
 }

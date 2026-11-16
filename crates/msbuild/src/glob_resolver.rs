@@ -142,12 +142,24 @@ const MAX_GLOB_DEPTH: usize = 64;
 /// splice as items — exactly MSBuild's list, or a [`GlobDecline`] saying why
 /// it cannot be reproduced. Suitable as a [`crate::GlobResolver`].
 pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
-    // The project directory as the evaluation spells it: the base every
-    // relative spec is combined with, and the prefix the walk strips from
-    // what it lists. It is a *literal* path (it may legitimately contain
-    // `*`/`?` on a case-sensitive Unix file system) and is never parsed as a
-    // glob.
-    let base_norm = req.base_dir.to_string_lossy().replace('\\', "/");
+    // The project directory as MSBuild spells it, the directory of the
+    // project's full path (`.`, `..` and runs of `/` resolved lexically): the
+    // base every relative spec is combined with, and the prefix the walk
+    // strips from what it lists. It is a *literal* path (it may legitimately
+    // contain `*`/`?` on a case-sensitive Unix file system) and is never
+    // parsed as a glob.
+    let base_norm = {
+        let raw = req.base_dir.to_string_lossy().replace('\\', "/");
+        if raw.starts_with('/') {
+            let full = full_path(&raw);
+            match full.trim_end_matches('/') {
+                "" => full,
+                trimmed => trimmed.to_string(),
+            }
+        } else {
+            raw
+        }
+    };
     let base_segs = split_segments(&base_norm);
 
     // The allow-list: every spec the resolver matches anything against, and
@@ -291,12 +303,17 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
         });
         let (invariant, turkish) = (invariant?, turkish?);
         if invariant != turkish {
-            let path = invariant
-                .iter()
-                .chain(&turkish)
-                .find(|f| !(invariant.contains(f) && turkish.contains(f)))
-                .map(|f| f.path.clone())
-                .unwrap_or_default();
+            // Both are sorted, so the first place they part names a file one
+            // culture lists and the other does not.
+            let parted = invariant.iter().zip(&turkish).find(|(a, b)| a != b);
+            let path = match parted {
+                Some((a, b)) => a.path.clone().min(b.path.clone()),
+                None => invariant
+                    .get(turkish.len())
+                    .or_else(|| turkish.get(invariant.len()))
+                    .map(|f| f.path.clone())
+                    .unwrap_or_default(),
+            };
             return Err(GlobDecline::CultureDependentCase { path });
         }
         // MSBuild may skip a directory these were found through, and would
@@ -912,6 +929,9 @@ mod tests {
             run_rel(tmp.path(), "absent/../*.fs", &[]),
             ["a.fs", "b.fs", "m.fs", "z.fs"]
         );
+        // The project directory is spelt as MSBuild spells it, its full path.
+        let spelt = format!("{}//./sub/..", tmp.path().display());
+        assert_eq!(try_resolve(Path::new(&spelt), "s*/*.fs", &["s*/e*"]), Ok(1));
         assert_eq!(run_rel(tmp.path(), "*.*", &["*.fs"]), ["noext"]);
         assert_eq!(run_rel(tmp.path(), "*", &["%2a.%2a"]), Vec::<String>::new());
     }
