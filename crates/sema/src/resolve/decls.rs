@@ -14,6 +14,7 @@ use super::model::{
     CaseAttributes, CaseKind, DeclaredType, ExportDeclKind, ExportedItem, ItemId, OpenTrace,
     Resolution, SlotClass, TypeSlot,
 };
+use super::open_certify;
 use super::open_scope::{AutoOpenExit, InternedPrefix, ModuleExit, OpenedPrefix};
 use super::state::{Frame, OpenGroup, OpenInterpretation, Resolver, ShorteningPrefix};
 use super::unknowables::Unknowable;
@@ -1381,49 +1382,38 @@ impl<'a> Resolver<'a> {
                     // `open global` (empty path) opens the always-in-scope root — a
                     // no-op here.
                     if !path.is_empty() {
-                        let mut readings: Vec<Vec<String>> = Vec::new();
                         let mut opens_project = self.open_imports_project_values(&path);
-                        // On the assembly side the written path names namespaces
-                        // only: no top-level assembly entity, of any accessibility
-                        // (a friend assembly's internal module opens too), sits at
-                        // any split of it.
-                        let assembly_namespaces_only = (0..path.len()).all(|k| {
-                            self.assemblies
-                                .entities_named(&path[..k], &path[k])
-                                .is_empty()
-                        });
-                        let mut certified = !interps.is_empty()
-                            && assembly_namespaces_only
-                            && !vetoed_by_incomplete_prefix
-                            && !names_uncovered_dropped_path
-                            && !names_unlent_module
-                            && !unmodelled;
+                        let mut interpretations = Vec::with_capacity(interps.len());
                         for interp in &interps {
-                            match interp {
+                            interpretations.push(match interp {
                                 OpenInterpretation::Reading(r) => {
-                                    certified &= *r == path
-                                        && !self
-                                            .assemblies
-                                            .any_split_of_a_module_path_has_a_dropped_type(r);
                                     opens_project |= self.is_project_namespace_path(r);
-                                    readings.push(r.clone());
+                                    open_certify::Interpretation::Namespace { path: r }
                                 }
                                 OpenInterpretation::Module(m) => {
                                     opens_project = true;
-                                    certified &= *m == path
-                                        && !self.index.module_aliases.contains_key(m)
-                                        && !self.module_has_hidden_values(m)
-                                        && !self
-                                            .assemblies
-                                            .any_split_of_a_module_path_has_a_dropped_type(m);
+                                    open_certify::Interpretation::ProjectModule {
+                                        path: m,
+                                        listable: !self.index.module_aliases.contains_key(m)
+                                            && !self.module_has_hidden_values(m),
+                                    }
                                 }
-                                OpenInterpretation::AssemblyModule(_) => certified = false,
-                            }
+                                OpenInterpretation::AssemblyModule(_) => {
+                                    open_certify::Interpretation::AssemblyModule
+                                }
+                            });
                         }
-                        if certified {
-                            self.out.open_extension_namespaces.extend(readings);
-                        } else {
-                            self.out.unknowables.raise(Unknowable::UnenumeratedSurface);
+                        let facts = open_certify::OpenFacts {
+                            written: &path,
+                            interpretations,
+                            walk_uncertain: vetoed_by_incomplete_prefix
+                                || names_uncovered_dropped_path
+                                || names_unlent_module
+                                || unmodelled,
+                        };
+                        match open_certify::certify(&facts, self.assemblies.extension_view()) {
+                            Some(namespace) => self.out.open_extension_namespaces.push(namespace),
+                            None => self.out.unknowables.raise(Unknowable::UnenumeratedSurface),
                         }
                         if opens_project {
                             self.out.unknowables.raise(Unknowable::ProjectSurface);

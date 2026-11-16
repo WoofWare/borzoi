@@ -163,6 +163,48 @@ pub(crate) const CORE_ATTRIBUTE_NAMES: &[&str] = &[
     "RequireQualifiedAccessAttributeAttribute",
 ];
 
+/// The extension-scope gate's view of the referenced assemblies: what they
+/// hold, whatever its accessibility. Name resolution reads an assembly
+/// through its public surface, but a friend assembly's internal extension is
+/// in scope all the same (`InternalsVisibleTo`), so the gate's questions (and
+/// the resolver's certification of an `open` for it) are asked through this
+/// view, which exposes no lookup filtered by accessibility and no way back to
+/// the env. `extension_queries_read_no_public_only_lookup` holds the methods
+/// it calls to the same rule.
+#[derive(Clone, Copy)]
+pub(crate) struct ExtensionView<'a>(&'a AssemblyEnv);
+
+impl ExtensionView<'_> {
+    /// Whether an extension of `name` (`is_static`: for a type-qualified
+    /// call) may be in scope through the env's auto-opens or one of
+    /// `in_scope_namespaces` ([`AssemblyEnv::extension_named_in_scope`]).
+    pub(crate) fn extension_named_in_scope(
+        self,
+        in_scope_namespaces: &[Vec<String>],
+        name: &str,
+        is_static: bool,
+    ) -> bool {
+        self.0
+            .extension_named_in_scope(in_scope_namespaces, name, is_static)
+    }
+
+    /// Whether some project reference has no built output yet.
+    pub(crate) fn references_not_built(self) -> bool {
+        self.0.references_not_built
+    }
+
+    /// Whether `path` names namespaces only: no top-level entity, of any
+    /// accessibility, sits at any split of it.
+    pub(crate) fn names_namespaces_only(self, path: &[String]) -> bool {
+        (0..path.len()).all(|k| self.0.types_named(&path[..k], &path[k]).is_empty())
+    }
+
+    /// Whether a referenced assembly dropped a type at any split of `path`.
+    pub(crate) fn any_split_has_a_dropped_type(self, path: &[String]) -> bool {
+        self.0.any_split_of_a_module_path_has_a_dropped_type(path)
+    }
+}
+
 /// The accessor spellings an F# property or event compiles to.
 const ACCESSOR_PREFIXES: [&str; 4] = ["get_", "set_", "add_", "remove_"];
 
@@ -5278,6 +5320,12 @@ impl AssemblyEnv {
     /// ([`Self::mark_references_not_built`]).
     pub fn references_not_built(&self) -> bool {
         self.references_not_built
+    }
+
+    /// The extension-scope gate's view of the referenced assemblies
+    /// ([`ExtensionView`]).
+    pub(crate) fn extension_view(&self) -> ExtensionView<'_> {
+        ExtensionView(self)
     }
 
     /// Whether a referenced assembly carries, in `namespace`, an attribute
@@ -12032,4 +12080,119 @@ pub(crate) fn is_array_tycon_path(path: &[String]) -> bool {
         && shape.starts_with('[')
         && shape.ends_with(']')
         && shape[1..shape.len() - 1].chars().all(|ch| ch == ',')
+}
+
+#[cfg(test)]
+mod extension_view_guard {
+    use std::collections::{BTreeSet, VecDeque};
+
+    /// The lookups that answer from name resolution's view of an assembly,
+    /// its public surface. A friend assembly's internal extension is in scope
+    /// (`InternalsVisibleTo`), so no question the extension gate asks may be
+    /// answered through one.
+    const PUBLIC_ONLY: [&str; 6] = [
+        "is_public",
+        "public_entities_named",
+        "has_namespace",
+        "effectively_public",
+        "is_accessible",
+        "public_types",
+    ];
+
+    /// Every body of a function named `name` in `source`.
+    fn bodies<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        let needle = format!("fn {name}");
+        let mut from = 0;
+        while let Some(at) = source[from..].find(&needle) {
+            let start = from + at;
+            from = start + needle.len();
+            let next = source[from..].chars().next().unwrap_or(' ');
+            if next.is_alphanumeric() || next == '_' {
+                continue;
+            }
+            let Some(open) = source[start..].find('{') else {
+                break;
+            };
+            let mut depth = 0usize;
+            let mut end = start + open;
+            for (i, c) in source[start + open..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = start + open + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.push(&source[start..end]);
+        }
+        out
+    }
+
+    /// The methods a body calls on `self` (or on the wrapped env), a call
+    /// split across lines included.
+    fn callees(body: &str) -> Vec<String> {
+        let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut out = Vec::new();
+        for prefix in ["self.", "self.0."] {
+            let mut rest = compact.as_str();
+            while let Some(at) = rest.find(prefix) {
+                rest = &rest[at + prefix.len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() && rest[name.len()..].starts_with('(') {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// Everything the extension gate asks of the assemblies goes through
+    /// [`super::ExtensionView`], and the resolver's certification of an
+    /// `open` holds only one. Every function the view's methods reach, by
+    /// name, must read no public-only lookup.
+    #[test]
+    fn extension_queries_read_no_public_only_lookup() {
+        let source = include_str!("assembly_env.rs");
+        let view_impl = {
+            let start = source
+                .find("impl ExtensionView<'_> {")
+                .expect("the view's methods");
+            let end = start + source[start..].find("\n}\n").expect("the impl's end");
+            &source[start..end]
+        };
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut queue: VecDeque<String> = callees(view_impl).into();
+        let mut offenders = Vec::new();
+        while let Some(name) = queue.pop_front() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            for body in bodies(source, &name) {
+                for bad in PUBLIC_ONLY {
+                    if body.contains(bad) {
+                        offenders.push(format!("`{name}` reads `{bad}`"));
+                    }
+                }
+                queue.extend(callees(body));
+            }
+        }
+        assert!(seen.len() > 8, "reached only {seen:?}");
+        assert!(offenders.is_empty(), "{offenders:#?}");
+        let certify = include_str!("resolve/open_certify.rs");
+        for bad in PUBLIC_ONLY {
+            assert!(
+                !certify.contains(&format!("{bad}(")),
+                "the open certification reads `{bad}`"
+            );
+        }
+    }
 }

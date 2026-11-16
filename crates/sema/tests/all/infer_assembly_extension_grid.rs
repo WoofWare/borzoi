@@ -62,15 +62,20 @@ use std::path::Path;
 
 use crate::common::ext_scope::{Probe, check_files};
 use crate::common::{
-    ensure_ext_assembly_grid_built, ensure_fsharp_core_dll, ensure_system_runtime_dll,
-    invoke_fcs_dump_extension_members, temp_fs_tree,
+    ensure_ext_assembly_grid_built, ensure_ext_assembly_grid_internal_built,
+    ensure_fsharp_core_dll, ensure_system_runtime_dll, invoke_fcs_dump_extension_members,
+    temp_fs_tree,
 };
 use borzoi_assembly::{
     AssemblyIdentity, AssemblyProjectionSkips, Ecma335Assembly, EcmaView, Entity, FSharpResource,
     ImportError, SkippedProjectionItem, TypeForwarder,
 };
+use borzoi_cst::parser::parse;
+use borzoi_cst::syntax::{AstNode, ImplFile};
 use borzoi_oracle_harness::par_map::par_map;
-use borzoi_sema::AssemblyEnv;
+use borzoi_sema::{
+    AssemblyEnv, ProjectFile, SourceFile, SyntaxRecovery, qualified_names, resolve_project_files,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Style {
@@ -142,6 +147,14 @@ enum Home {
     /// `module internal Exts`, the fixture granting the calling project
     /// friendship (`InternalsVisibleTo`).
     InternalModule,
+    /// `namespace G.C<n>.Hidden`, holding internal extension holders only
+    /// (an internal C#-style container, or an internal `[<AutoOpen>]`
+    /// module), so name resolution sees no namespace there at all.
+    HiddenNamespace,
+    /// [`Home::HiddenNamespace`] with its holders public: a namespace that
+    /// holds nothing but them, which the visibility perturbation turns
+    /// internal-only.
+    SoleNamespace,
     Nested,
     AutoOpen,
     Rqa,
@@ -191,10 +204,14 @@ enum Reach {
     /// `open G.C<n>.Exts` of an assembly module whose path an earlier
     /// project file declares as a *namespace*.
     SharedNamespaceOverModule,
+    /// `open G.C<n>.Hidden` of an assembly namespace holding internal
+    /// extensions only, whose path an earlier project file declares as a
+    /// *module*.
+    SharedModuleOverNamespace,
 }
 
 impl Reach {
-    const ALL: [Reach; 16] = [
+    const ALL: [Reach; 17] = [
         Reach::OpenNamespace,
         Reach::GlobalNamespace,
         Reach::RelativeNamespace,
@@ -211,6 +228,7 @@ impl Reach {
         Reach::SharedModule,
         Reach::SharedModuleRelative,
         Reach::SharedNamespaceOverModule,
+        Reach::SharedModuleOverNamespace,
     ];
 
     /// Whether the reach goes through a module, which needs a module home
@@ -306,6 +324,18 @@ impl Cell {
                     && matches!(self.renamed, Renamed::No | Renamed::Shared)
                     && self.target == Target::Receiver
                     && self.container != Container::Generic));
+        // The hidden namespace is reached only through the project module
+        // that shares its path, and that reach needs it.
+        let sole = matches!(self.home, Home::HiddenNamespace | Home::SoleNamespace);
+        let hidden = sole == (self.reach == Reach::SharedModuleOverNamespace)
+            && (!sole
+                || (matches!(self.style, Style::CsMarked | Style::FsOptional)
+                    && self.kind == Kind::Method
+                    && self.renamed == Renamed::No
+                    && self.synth == Synth::No
+                    && self.container == Container::Plain
+                    && self.target == Target::Receiver
+                    && self.drop == Drop::No));
         // The internal module is a perturbation of the plain method's home.
         let internal = self.home != Home::InternalModule
             || (self.kind == Kind::Method
@@ -314,7 +344,7 @@ impl Cell {
                 && self.container == Container::Plain
                 && self.target == Target::Receiver
                 && self.drop == Drop::No);
-        shape && reach && bounded && internal
+        shape && reach && bounded && internal && hidden
     }
 
     /// The method name a call of cell `n` spells. Each cell's names are its
@@ -350,7 +380,7 @@ impl Cell {
     /// The module path holding the extension, if any.
     fn module_path(self) -> Option<&'static str> {
         match self.home {
-            Home::Namespace => None,
+            Home::Namespace | Home::HiddenNamespace | Home::SoleNamespace => None,
             Home::Module | Home::InternalModule | Home::AutoOpen | Home::Rqa => Some("Exts"),
             Home::Nested => Some("Outer.Exts"),
         }
@@ -360,6 +390,10 @@ impl Cell {
     fn top_level(self) -> &'static str {
         match self.home {
             Home::Namespace => "Holder",
+            Home::HiddenNamespace | Home::SoleNamespace => match self.style {
+                Style::FsOptional => "Exts",
+                _ => "Holder",
+            },
             Home::Module | Home::InternalModule | Home::AutoOpen | Home::Rqa => "Exts",
             Home::Nested => "Outer",
         }
@@ -394,6 +428,8 @@ impl Cell {
                                     Home::Namespace,
                                     Home::Module,
                                     Home::InternalModule,
+                                    Home::HiddenNamespace,
+                                    Home::SoleNamespace,
                                     Home::Nested,
                                     Home::AutoOpen,
                                     Home::Rqa,
@@ -569,6 +605,32 @@ fn cell_source(n: usize, cell: Cell) -> String {
             out.push("module internal Exts =".to_string());
             out.extend(indent(body, 4));
         }
+        Home::HiddenNamespace | Home::SoleNamespace => {
+            // Its own namespace, with the receiver's types written in full.
+            out.push(format!("namespace {}.Hidden", namespace(n)));
+            out.push(String::new());
+            let ns = namespace(n);
+            let internal = if cell.home == Home::HiddenNamespace {
+                "internal "
+            } else {
+                ""
+            };
+            let body: Vec<String> = body
+                .into_iter()
+                .map(|l| {
+                    l.replace("type Holder", &format!("type {internal}Holder"))
+                        .replace("r: Receiver", &format!("r: {ns}.Receiver"))
+                        .replace("type Receiver with", &format!("type {ns}.Receiver with"))
+                })
+                .collect();
+            if cell.style == Style::FsOptional {
+                out.push("[<AutoOpen>]".to_string());
+                out.push(format!("module {internal}Exts ="));
+                out.extend(indent(body, 4));
+            } else {
+                out.extend(body);
+            }
+        }
         Home::AutoOpen => {
             out.push("[<AutoOpen>]".to_string());
             out.push("module Exts =".to_string());
@@ -588,12 +650,64 @@ fn cell_source(n: usize, cell: Cell) -> String {
     out.join("\n") + "\n"
 }
 
-fn fixture_source(cells: &[Cell]) -> String {
+/// The projects the gate test has FCS check: each cell is its own namespace
+/// and calling file, so the cells (split by whether the reader is made to
+/// drop their type) are checked in independent projects of at most
+/// [`CHUNK`] calling files.
+fn fcs_projects(cells: &[Cell]) -> Vec<(Drop, Vec<(usize, Cell)>)> {
+    [Drop::No, Drop::Yes]
+        .into_iter()
+        .flat_map(|drop| {
+            let mine: Vec<(usize, Cell)> = cells
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, c)| c.drop == drop)
+                .collect();
+            mine.chunks(CHUNK)
+                .map(|chunk| (drop, chunk.to_vec()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Cell `n`'s block with every extension holder `internal`: the visibility
+/// perturbation (the receiver and its base and interface stay public).
+fn internalize(block: String) -> String {
+    block
+        .lines()
+        .map(|l| {
+            let trimmed = l.trim_start();
+            let indent = &l[..l.len() - trimmed.len()];
+            for holder in ["type Holder", "module Exts =", "module Outer ="] {
+                if let Some(rest) = trimmed.strip_prefix(holder) {
+                    let keyword = holder.split(' ').next().expect("a keyword");
+                    let name = &holder[keyword.len() + 1..];
+                    return format!("{indent}{keyword} internal {name}{rest}");
+                }
+            }
+            l.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// The cells one generated fixture file holds.
+const CELLS_PER_FILE: usize = 1000;
+
+/// The fixture's source files: the friendship header, then the cells'
+/// blocks in batches of [`CELLS_PER_FILE`].
+fn fixture_source(cells: &[Cell], internal: bool) -> Vec<String> {
     // Friendship for the calling projects of the internal-module cells. The
-    // oracle's project is named after one of its files, `Shared` or some
-    // `Use<n>`, so every one of them is a friend.
+    // oracle names each project after one of its files, so the first and
+    // last file of every project the gate test checks is a friend.
     let mut friends = vec!["Shared".to_string()];
-    friends.extend((0..cells.len()).map(|n| format!("Use{n}")));
+    for (_, chunk) in fcs_projects(cells) {
+        for &(n, _) in [chunk.first(), chunk.last()].into_iter().flatten() {
+            friends.push(format!("Use{n}"));
+        }
+    }
     let mut out = vec![
         "namespace G.Friends".to_string(),
         "module Attrs =".to_string(),
@@ -603,10 +717,17 @@ fn fixture_source(cells: &[Cell]) -> String {
     }));
     out.push("    do ()".to_string());
     let header = out.join("\n") + "\n";
+    let blocks: Vec<String> = cells
+        .iter()
+        .enumerate()
+        .map(|(n, &c)| {
+            let block = cell_source(n, c);
+            if internal { internalize(block) } else { block }
+        })
+        .collect();
     std::iter::once(header)
-        .chain(cells.iter().enumerate().map(|(n, &c)| cell_source(n, c)))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .chain(blocks.chunks(CELLS_PER_FILE).map(|batch| batch.join("\n")))
+        .collect()
 }
 
 /// The calling file of cell `n`, and its probed call.
@@ -644,6 +765,7 @@ fn use_source(n: usize, cell: Cell) -> (String, Probe) {
         Reach::OpenModule | Reach::SharedModule | Reach::SharedNamespaceOverModule => {
             top(format!("open {ns}.{}", module()))
         }
+        Reach::SharedModuleOverNamespace => top(format!("open {ns}.Hidden")),
         Reach::GlobalModule => top(format!("open global.{ns}.{}", module())),
         Reach::RelativeModule => top(format!("open {ns}\nopen {}", module())),
         Reach::EnclosingRelativeModule => nested(&ns, format!("open {}", module())),
@@ -674,7 +796,7 @@ fn certified(cell: Cell) -> bool {
         Reach::OpenNamespace | Reach::GlobalNamespace | Reach::SharedNamespace => {
             cell.drop == Drop::No
         }
-        Reach::Enclosing => true,
+        Reach::Enclosing | Reach::SharedModuleOverNamespace => true,
         _ => false,
     }
 }
@@ -686,6 +808,9 @@ fn shared_source(n: usize, cell: Cell) -> Option<String> {
     match cell.reach {
         Reach::SharedNamespace => Some(format!(
             "namespace {ns}\nmodule Shared{n} =\n    let v{n} = 1\n"
+        )),
+        Reach::SharedModuleOverNamespace => Some(format!(
+            "namespace {ns}\nmodule Hidden =\n    let v{n} = 1\n"
         )),
         Reach::SharedNamespaceOverModule => Some(format!(
             "namespace {ns}.{}\nmodule SharedNs{n} =\n    let v{n} = 1\n",
@@ -817,7 +942,7 @@ fn liveness(cell: Cell) -> bool {
 #[test]
 fn the_gate_declines_every_extension_fcs_binds_through_an_assembly() {
     let cells = Cell::all();
-    let dll = ensure_ext_assembly_grid_built(|| fixture_source(&cells));
+    let dll = ensure_ext_assembly_grid_built(|| fixture_source(&cells, false));
     let drops: Vec<(Vec<String>, &'static str)> = cells
         .iter()
         .enumerate()
@@ -835,23 +960,7 @@ fn the_gate_declines_every_extension_fcs_binds_through_an_assembly() {
     let mut failures = Vec::new();
     let mut bound = 0usize;
     let mut graded = 0usize;
-    // Each cell is its own namespace and calling file, so the cells are
-    // checked in independent projects of at most `CHUNK` calling files, one
-    // FCS project check each.
-    let chunks: Vec<(Drop, Vec<(usize, Cell)>)> = [Drop::No, Drop::Yes]
-        .into_iter()
-        .flat_map(|drop| {
-            let mine: Vec<(usize, Cell)> = cells
-                .iter()
-                .copied()
-                .enumerate()
-                .filter(|(_, c)| c.drop == drop)
-                .collect();
-            mine.chunks(CHUNK)
-                .map(|chunk| (drop, chunk.to_vec()))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let chunks = fcs_projects(&cells);
     let results = par_map(chunks.len(), |i| {
         let (drop, mine) = &chunks[i];
         let env = if *drop == Drop::No { &whole } else { &dropped };
@@ -937,7 +1046,7 @@ fn the_gate_declines_every_extension_fcs_binds_through_an_assembly() {
 #[test]
 fn every_extension_fcs_reads_in_the_assembly_is_projected() {
     let cells = Cell::all();
-    let dll = ensure_ext_assembly_grid_built(|| fixture_source(&cells));
+    let dll = ensure_ext_assembly_grid_built(|| fixture_source(&cells, false));
     let whole = env_of(dll, Vec::new());
     let (root, written) = temp_fs_tree("ext_assembly_grid", &[("Anchor.fs", "module Anchor\n")]);
     let members = invoke_fcs_dump_extension_members(&written[0].0, dll);
@@ -971,6 +1080,133 @@ fn every_extension_fcs_reads_in_the_assembly_is_projected() {
         members.len() * 2 >= candidates,
         "FCS reads {} extension members in a fixture of {candidates} candidate cells",
         members.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// The calling projects of `cells`, each a chunk of at most [`CHUNK`]
+/// calling files after the earlier file their reaches share: per chunk, the
+/// sources and, per calling file, its index and the call's method name.
+fn calling_projects(cells: &[(usize, Cell)]) -> Vec<(Vec<(String, String)>, Vec<(usize, String)>)> {
+    cells
+        .chunks(CHUNK)
+        .map(|chunk| {
+            let shared: String = chunk
+                .iter()
+                .filter_map(|&(n, c)| shared_source(n, c))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut sources: Vec<(String, String)> = Vec::new();
+            if !shared.is_empty() {
+                sources.push(("Shared.fs".to_string(), shared));
+            }
+            let mut calls = Vec::new();
+            for &(n, c) in chunk {
+                let (src, _) = use_source(n, c);
+                calls.push((sources.len(), c.call_name(n)));
+                sources.push((format!("Use{n}.fs"), src));
+            }
+            (sources, calls)
+        })
+        .collect()
+}
+
+/// Whether the gate declines each call of `project` with `env`'s assemblies
+/// in scope, resolving it without inference (the gate reads resolution
+/// alone).
+fn gate_declines(
+    env: &AssemblyEnv,
+    project: &(Vec<(String, String)>, Vec<(usize, String)>),
+) -> Vec<bool> {
+    let (sources, calls) = project;
+    let parsed: Vec<(ImplFile, SyntaxRecovery)> = sources
+        .iter()
+        .map(|(_, s)| {
+            let p = parse(s);
+            let recovery = SyntaxRecovery::of(&p);
+            (ImplFile::cast(p.root).expect("impl file"), recovery)
+        })
+        .collect();
+    let paths: Vec<std::path::PathBuf> = sources.iter().map(|(p, _)| p.into()).collect();
+    let files: Vec<SourceFile> = parsed
+        .iter()
+        .map(|(f, _)| SourceFile::Impl(f.clone()))
+        .collect();
+    let project: Vec<ProjectFile> = files
+        .iter()
+        .cloned()
+        .zip(parsed.iter().map(|(_, r)| r.clone()))
+        .zip(qualified_names(&files, &paths))
+        .map(|((file, recovery), qnof)| ProjectFile::new(file, qnof, recovery))
+        .collect();
+    let resolved = resolve_project_files(&project, env);
+    calls
+        .iter()
+        .map(|(file, name)| {
+            borzoi_sema::test_support::extension_gate_decline(
+                resolved.file(*file),
+                env,
+                name,
+                false,
+            )
+            .is_some()
+        })
+        .collect()
+}
+
+/// The visibility perturbation: every extension holder of the fixture
+/// (container type, module, enclosing module) turned `internal`, the
+/// receiver staying public. With friendship granted FCS sees an internal
+/// extension as it sees a public one, so the gate's assembly side must not
+/// read visibility at all: no call the public fixture's gate declines may
+/// read as absent against the internal twin. FCS-free: it compares the gate
+/// with itself.
+#[test]
+fn turning_an_extension_internal_never_makes_it_absent() {
+    let cells = Cell::all();
+    let public = ensure_ext_assembly_grid_built(|| fixture_source(&cells, false));
+    let internal = ensure_ext_assembly_grid_internal_built(|| fixture_source(&cells, true));
+    let public_env = env_of(public, Vec::new());
+    let internal_env = env_of(internal, Vec::new());
+    let indexed: Vec<(usize, Cell)> = cells.iter().copied().enumerate().collect();
+    let projects = calling_projects(&indexed);
+    let answers = par_map(projects.len(), |i| {
+        (
+            gate_declines(&public_env, &projects[i]),
+            gate_declines(&internal_env, &projects[i]),
+        )
+    });
+    let mut failures = Vec::new();
+    let mut declined = 0usize;
+    for ((_, calls), (public, internal)) in projects.iter().zip(&answers) {
+        for (k, (file, name)) in calls.iter().enumerate() {
+            declined += usize::from(public[k]);
+            if public[k] && !internal[k] {
+                let n: usize = name
+                    .trim_start_matches(|c: char| !c.is_ascii_digit())
+                    .parse()
+                    .unwrap_or(usize::MAX);
+                let cell = cells.get(n).map(|c| format!("{c:?}")).unwrap_or_default();
+                failures.push(format!(
+                    "file {file} `{name}`: declined against the public fixture, absent \
+                     against the internal one; {cell}"
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "{} cells: the public fixture's gate declines {declined}; {} turn absent when internal",
+        cells.len(),
+        failures.len()
+    );
+    assert!(
+        declined * 2 > cells.len(),
+        "only {declined} declines to perturb"
     );
     assert!(
         failures.is_empty(),

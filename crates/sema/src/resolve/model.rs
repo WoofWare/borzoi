@@ -4721,7 +4721,11 @@ impl ResolvedFile {
     ) -> Option<FieldLabel> {
         let entry = self.field_labels.get(&label)?;
         (self.recovery.clean_before(label.end())
-            && crate::infer::ExtensionScope::of(self).absent(env, &entry.name, false))
+            && crate::infer::ExtensionScope::of(self).absent(
+                env.extension_view(),
+                &entry.name,
+                false,
+            ))
         .then_some(entry.label)
     }
 
@@ -4734,8 +4738,9 @@ impl ResolvedFile {
         extensions: &crate::infer::ExtensionScope,
     ) -> Option<FieldLabel> {
         let entry = self.field_labels.get(&label)?;
-        (self.recovery.clean_before(label.end()) && extensions.absent(env, &entry.name, false))
-            .then_some(entry.label)
+        (self.recovery.clean_before(label.end())
+            && extensions.absent(env.extension_view(), &entry.name, false))
+        .then_some(entry.label)
     }
 
     /// The full written-attribute-range→[`Resolution`] map (EX-3 §2(d)).

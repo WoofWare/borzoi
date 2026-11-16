@@ -25,7 +25,7 @@ pub fn extension_gate_decline(
     name: &str,
     is_static: bool,
 ) -> Option<GateInput> {
-    crate::infer::ExtensionScope::of(resolved).decline(env, name, is_static)
+    crate::infer::ExtensionScope::of(resolved).decline(env.extension_view(), name, is_static)
 }
 
 /// Whether the gate's namespace query finds an extension named `name` in
@@ -37,7 +37,8 @@ pub fn extension_named_in_namespace(
     name: &str,
     is_static: bool,
 ) -> bool {
-    env.extension_named_in_scope(&[namespace.to_vec()], name, is_static)
+    env.extension_view()
+        .extension_named_in_scope(&[namespace.to_vec()], name, is_static)
 }
 
 pub mod binder_completeness;

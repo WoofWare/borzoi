@@ -2478,21 +2478,64 @@ pub fn ensure_ext_universe_fixture_built() -> &'static Path {
 /// (`tests/fixtures/ext_assembly_grid_env`) once per test binary, its
 /// `Generated.fs` being `source()` (emitted from the grid's dimensions by
 /// `infer_assembly_extension_grid`, never checked in), and return its `.dll`.
-pub fn ensure_ext_assembly_grid_built(source: impl FnOnce() -> String) -> &'static Path {
+pub fn ensure_ext_assembly_grid_built(source: impl FnOnce() -> Vec<String>) -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
         .get_or_init(|| {
             let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/ext_assembly_grid_env");
             let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
-            std::fs::write(project.join("Generated.fs"), source())
-                .expect("write the extension-assembly grid's Generated.fs");
+            write_generated_files(&project, source());
             dotnet_build(&project, "dotnet build extension-assembly grid fixture");
             project
                 .join("bin")
                 .join("Release")
                 .join("net10.0")
                 .join("ExtAssemblyGridFixture.dll")
+        })
+        .as_path()
+}
+
+/// Replace `project`'s `Generated*.fs` with `files`, in order
+/// (`Generated000.fs`, …), so its wildcard `<Compile>` takes them as given.
+fn write_generated_files(project: &Path, files: Vec<String>) {
+    for entry in std::fs::read_dir(project)
+        .expect("read the fixture directory")
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("Generated") && name.ends_with(".fs") {
+            std::fs::remove_file(entry.path()).expect("remove a stale generated file");
+        }
+    }
+    for (i, text) in files.iter().enumerate() {
+        std::fs::write(project.join(format!("Generated{i:03}.fs")), text)
+            .expect("write a generated fixture file");
+    }
+}
+
+/// [`ensure_ext_assembly_grid_built`]'s visibility-perturbed twin
+/// (`tests/fixtures/ext_assembly_grid_internal_env`): the same cells, every
+/// extension holder `internal`.
+pub fn ensure_ext_assembly_grid_internal_built(
+    source: impl FnOnce() -> Vec<String>,
+) -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/ext_assembly_grid_internal_env");
+            let _guard = BUILD_LOCK.lock().expect("BUILD_LOCK poisoned");
+            write_generated_files(&project, source());
+            dotnet_build(
+                &project,
+                "dotnet build internal extension-assembly grid fixture",
+            );
+            project
+                .join("bin")
+                .join("Release")
+                .join("net10.0")
+                .join("ExtAssemblyGridInternalFixture.dll")
         })
         .as_path()
 }

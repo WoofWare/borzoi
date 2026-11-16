@@ -2,7 +2,7 @@
 
   <!-- The referenced assembly of `infer_assembly_extension_grid`: one
        namespace per cell of the grid, each declaring a receiver and an
-       extension member of one shape. `Generated.fs` is emitted by the test
+       extension member of one shape. `Generated*.fs` are emitted by the test
        from the grid's dimensions and is not checked in. -->
 
   <PropertyGroup>
@@ -15,7 +15,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="Generated.fs" />
+    <!-- One file per batch of cells: a single file of every cell overflows
+         the compiler's stack. -->
+    <Compile Include="Generated*.fs" />
   </ItemGroup>
 
 </Project>

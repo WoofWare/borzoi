@@ -1,6 +1,7 @@
 //! The extension-absence gate an overloaded call consults ([`ExtensionScope`]).
 
 use super::*;
+use crate::assembly_env::ExtensionView;
 use crate::resolve::{ExtensionNames, NamesUnknowable};
 
 /// The OV-6 overload engine's **extension-absence gate** (see
@@ -113,7 +114,7 @@ impl ExtensionScope {
     /// *static* ones into a type-qualified call's.
     pub(crate) fn decline(
         &self,
-        env: &AssemblyEnv,
+        assemblies: ExtensionView<'_>,
         name: &str,
         is_static: bool,
     ) -> Option<GateInput> {
@@ -123,13 +124,13 @@ impl ExtensionScope {
         if self.project.may_have(name, is_static) {
             return Some(GateInput::ProjectName);
         }
-        if self.project_open && env.references_not_built() {
+        if self.project_open && assemblies.references_not_built() {
             return Some(GateInput::ProjectOpenReferencesNotBuilt);
         }
         if self.unenumerated_open {
             return Some(GateInput::OpenNotEnumerated);
         }
-        if env.extension_named_in_scope(&self.in_scope_namespaces, name, is_static) {
+        if assemblies.extension_named_in_scope(&self.in_scope_namespaces, name, is_static) {
             return Some(GateInput::AssemblyInScope);
         }
         None
@@ -137,8 +138,13 @@ impl ExtensionScope {
 
     /// Whether an extension member named `name` is provably absent from the
     /// file's in-scope extension surface ([`Self::decline`] finds no input).
-    pub(crate) fn absent(&self, env: &AssemblyEnv, name: &str, is_static: bool) -> bool {
-        self.decline(env, name, is_static).is_none()
+    pub(crate) fn absent(
+        &self,
+        assemblies: ExtensionView<'_>,
+        name: &str,
+        is_static: bool,
+    ) -> bool {
+        self.decline(assemblies, name, is_static).is_none()
     }
 }
 
@@ -154,8 +160,14 @@ mod tests {
         // and no project source, every name is absent.
         let env = AssemblyEnv::default();
         let extension_free = ExtensionScope::default();
-        assert_eq!(extension_free.decline(&env, "Substring", false), None);
-        assert_eq!(extension_free.decline(&env, "Compare", true), None);
+        assert_eq!(
+            extension_free.decline(env.extension_view(), "Substring", false),
+            None
+        );
+        assert_eq!(
+            extension_free.decline(env.extension_view(), "Compare", true),
+            None
+        );
 
         // Project names decline their own name, and only it.
         let mut instance = crate::hash::HashSet::default();
@@ -168,15 +180,15 @@ mod tests {
             ..ExtensionScope::default()
         };
         assert_eq!(
-            named.decline(&env, "Substring", false),
+            named.decline(env.extension_view(), "Substring", false),
             Some(GateInput::ProjectName)
         );
         assert_eq!(
-            named.decline(&env, "Substring", true),
+            named.decline(env.extension_view(), "Substring", true),
             None,
             "an instance name"
         );
-        assert_eq!(named.decline(&env, "Trim", false), None);
+        assert_eq!(named.decline(env.extension_view(), "Trim", false), None);
 
         // Unknowable project names decline every name, saying why.
         let unknowable = ExtensionScope {
@@ -184,7 +196,7 @@ mod tests {
             ..ExtensionScope::default()
         };
         assert_eq!(
-            unknowable.decline(&env, "NoSourceDeclaresThis", false),
+            unknowable.decline(env.extension_view(), "NoSourceDeclaresThis", false),
             Some(GateInput::ProjectUnknowable(NamesUnknowable::HashReference))
         );
 
@@ -194,7 +206,7 @@ mod tests {
             ..ExtensionScope::default()
         };
         assert_eq!(
-            unenumerated.decline(&env, "NoSourceDeclaresThis", false),
+            unenumerated.decline(env.extension_view(), "NoSourceDeclaresThis", false),
             Some(GateInput::OpenNotEnumerated)
         );
         // A project `open` declines only under an unbuilt project reference.
@@ -204,9 +216,12 @@ mod tests {
             project_open: true,
             ..ExtensionScope::default()
         };
-        assert_eq!(project_open.decline(&env, "Substring", false), None);
         assert_eq!(
-            project_open.decline(&unbuilt, "Substring", false),
+            project_open.decline(env.extension_view(), "Substring", false),
+            None
+        );
+        assert_eq!(
+            project_open.decline(unbuilt.extension_view(), "Substring", false),
             Some(GateInput::ProjectOpenReferencesNotBuilt)
         );
     }
