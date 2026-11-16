@@ -43,6 +43,36 @@ let ctorRef = mb.AddMemberReference(attrDef, str ".ctor", ctorSig)
 let attrBlob = mb.GetOrAddBlob([| 0x01uy; 0x00uy; 0x00uy; 0x00uy |])
 mb.AddCustomAttribute(marked, ctorRef, attrBlob) |> ignore
 
+// `Probe.Marked`'s methods (rows 2 and 3, after the attribute's constructor):
+// `get_P`, the getter of a static property `P` that carries
+// `ExtensionAttribute` on the property alone, and `Unread`, whose attribute's
+// constructor is a MemberRef on a ModuleRef, an owner no reader can name.
+let staticIntSig =
+    let b = BlobBuilder()
+    BlobEncoder(b).MethodSignature(isInstanceMethod = false).Parameters(0, (fun r -> r.Type().Int32()), (fun _ -> ())) |> ignore
+    mb.GetOrAddBlob b
+let getP =
+    mb.AddMethodDefinition(
+        MethodAttributes.Public ||| MethodAttributes.Static ||| MethodAttributes.SpecialName ||| MethodAttributes.HideBySig,
+        MethodImplAttributes.Runtime ||| MethodImplAttributes.Managed, str "get_P", staticIntSig, -1, MetadataTokens.ParameterHandle 1)
+let unread =
+    mb.AddMethodDefinition(
+        MethodAttributes.Public ||| MethodAttributes.Static ||| MethodAttributes.HideBySig,
+        MethodImplAttributes.Runtime ||| MethodImplAttributes.Managed, str "Unread", staticIntSig, -1, MetadataTokens.ParameterHandle 1)
+let elsewhere = mb.AddModuleReference(str "Elsewhere.dll")
+let unreadableCtor = mb.AddMemberReference(elsewhere, str ".ctor", ctorSig)
+mb.AddCustomAttribute(unread, unreadableCtor, attrBlob) |> ignore
+let extensionRef = mb.AddTypeReference(corlib, str "System.Runtime.CompilerServices", str "ExtensionAttribute")
+let extensionCtor = mb.AddMemberReference(extensionRef, str ".ctor", ctorSig)
+let propertySig =
+    let b = BlobBuilder()
+    BlobEncoder(b).PropertySignature(isInstanceProperty = false).Parameters(0, (fun r -> r.Type().Int32()), (fun _ -> ())) |> ignore
+    mb.GetOrAddBlob b
+let property = mb.AddProperty(PropertyAttributes.None, str "P", propertySig)
+mb.AddPropertyMap(marked, property) |> ignore
+mb.AddMethodSemantics(property, MethodSemanticsAttributes.Getter, getP)
+mb.AddCustomAttribute(property, extensionCtor, attrBlob) |> ignore
+
 let pe = ManagedPEBuilder(PEHeaderBuilder(imageCharacteristics = Characteristics.Dll), MetadataRootBuilder(mb), BlobBuilder())
 let blob = BlobBuilder()
 pe.Serialize blob |> ignore

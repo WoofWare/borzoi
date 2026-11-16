@@ -52,7 +52,8 @@ pub use display::{
 pub use ecma335_assembly::Ecma335Assembly;
 pub use error::ImportError;
 pub use existence::{
-    ExistenceIndex, IlTypeRow, IlVisibility, PickleLayer, PickledEntityKind, PickledEntityRow,
+    ExistenceIndex, ExtensionRow, IlTypeRow, IlVisibility, IndexLayer, PickleLayer,
+    PickledEntityKind, PickledEntityRow,
 };
 pub use fsharp_pickle::{CcuRef, PickledCcu, PickledHeader, PickledNleRef, unpickle_signature};
 pub use fsharp_pickle_merge::{ModuleMemberTarget, ModuleMemberVal, collect_module_member_targets};

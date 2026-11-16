@@ -16,13 +16,15 @@
 //! cannot read fails too, for the assemblies here, whose pickles are all
 //! sound.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use borzoi_assembly::{Ecma335Assembly, EcmaView, ExistenceIndex, PickleLayer, PickledEntityKind};
+use borzoi_assembly::{
+    Ecma335Assembly, EcmaView, ExistenceIndex, IndexLayer, PickleLayer, PickledEntityKind,
+};
 
 use crate::common::assembly_entities::{
-    AssemblyEntities, FcsAccess, invoke_fcs_dump_assembly_entities,
+    AssemblyEntities, ExtensionStyle, FcsAccess, invoke_fcs_dump_assembly_entities,
 };
 use crate::common::{
     ensure_abbrev_fixture_built, ensure_active_pattern_fixture_built,
@@ -121,6 +123,93 @@ fn pickle_theirs(entities: &AssemblyEntities) -> Vec<String> {
         .collect()
 }
 
+/// The `TypeDef` layer's extension methods of `index`, one line per
+/// (namespace, declaring type chain, method name).
+fn il_extensions_ours(index: &ExistenceIndex) -> BTreeSet<String> {
+    index
+        .extensions
+        .iter()
+        .filter(|r| r.layer == IndexLayer::TypeDef)
+        .flat_map(|r| {
+            r.names.iter().map(move |name| {
+                format!(
+                    "{} | {} | {name}",
+                    r.namespace.join("."),
+                    r.enclosing.join("+")
+                )
+            })
+        })
+        .collect()
+}
+
+fn il_extensions_theirs(entities: &AssemblyEntities) -> BTreeSet<String> {
+    entities
+        .il
+        .extension_methods
+        .iter()
+        .map(|m| format!("{} | {} | {}", m.namespace, m.enclosing.join("+"), m.name))
+        .collect()
+}
+
+/// One extension row's names and instance-ness.
+type RowNames<'a> = (&'a [String], Option<bool>);
+
+/// Every disagreement between the pickle layer's extension rows of `index`
+/// and FCS's extension members, both ways: each member FCS reads must be a
+/// row of the index at its place answering to its logical and compiled
+/// names (and, for an F# extension, of its instance-ness), and each row must
+/// answer to a member FCS reads there.
+fn pickle_extension_failures(index: &ExistenceIndex, entities: &AssemblyEntities) -> Vec<String> {
+    let place = |ns: &str, enclosing: &[String]| format!("{ns} | {}", enclosing.join("+"));
+    let mut ours: BTreeMap<String, Vec<RowNames<'_>>> = BTreeMap::new();
+    for row in index
+        .extensions
+        .iter()
+        .filter(|r| r.layer == IndexLayer::Pickle)
+    {
+        ours.entry(place(&row.namespace.join("."), &row.enclosing))
+            .or_default()
+            .push((&row.names, row.instance));
+    }
+    let mut failures = Vec::new();
+    for m in &entities.fcs.extension_members {
+        let at = place(&m.namespace, &m.enclosing);
+        let found = ours.get(&at).is_some_and(|rows| {
+            rows.iter().any(|(names, instance)| {
+                names.contains(&m.logical_name)
+                    && names.contains(&m.compiled_name)
+                    && (m.style != ExtensionStyle::Fsharp || *instance == Some(m.is_instance))
+            })
+        });
+        if !found {
+            failures.push(format!(
+                "  FCS reads {:?} extension {} ({}, instance {}) at {at}; the index has no such row",
+                m.style, m.logical_name, m.compiled_name, m.is_instance
+            ));
+        }
+    }
+    let mut theirs: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+    for m in &entities.fcs.extension_members {
+        let names = theirs.entry(place(&m.namespace, &m.enclosing)).or_default();
+        names.insert(&m.logical_name);
+        names.insert(&m.compiled_name);
+    }
+    for (at, rows) in &ours {
+        for (names, _) in rows {
+            let read = theirs
+                .get(at)
+                .is_some_and(|fcs| names.iter().any(|n| fcs.contains(n.as_str())));
+            if !read {
+                failures.push(format!(
+                    "  the index lists extension {names:?} at {at}; FCS reads none of them there"
+                ));
+            }
+        }
+    }
+    failures.truncate(20);
+    failures
+}
+
 /// The lines one side has more often than the other, each with how many
 /// more, at most `limit` of them.
 fn excess(ours: &[String], theirs: &[String], limit: usize) -> Vec<String> {
@@ -149,7 +238,7 @@ fn excess(ours: &[String], theirs: &[String], limit: usize) -> Vec<String> {
 /// and how many rows of each layer were compared. `support` is referenced
 /// too, ungraded: the assemblies whose types `graded` reads (an attribute's
 /// type from another package), without which FCS reads less of it.
-fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usize) {
+fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usize, usize) {
     let anchor = temp_fs_file(
         "assembly_entities_diff_anchor",
         "module Anchor\nlet x = 1\n",
@@ -160,7 +249,7 @@ fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usiz
     let report = invoke_fcs_dump_assembly_entities(&anchor, &refs);
     let _ = std::fs::remove_file(&anchor);
     let mut failures = Vec::new();
-    let (mut il_rows, mut pickle_rows) = (0, 0);
+    let (mut il_rows, mut pickle_rows, mut extension_rows) = (0, 0, 0);
     for entities in &report.assemblies {
         let file = &entities.file;
         if !graded_files.contains(&canonical(Path::new(file))) {
@@ -183,6 +272,26 @@ fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usiz
                 moved.join("\n")
             ));
         }
+        let (ours_ext, theirs_ext) = (il_extensions_ours(&index), il_extensions_theirs(entities));
+        extension_rows += theirs_ext.len();
+        let moved: Vec<String> = ours_ext
+            .symmetric_difference(&theirs_ext)
+            .take(20)
+            .map(|l| {
+                let side = if ours_ext.contains(l) {
+                    "ours"
+                } else {
+                    "the oracle's"
+                };
+                format!("  only {side}: {l}")
+            })
+            .collect();
+        if !moved.is_empty() {
+            failures.push(format!(
+                "{file}: the TypeDef layer's extension methods differ\n{}",
+                moved.join("\n")
+            ));
+        }
         match pickle_ours(&index) {
             Ok(None) => {}
             Err(reason) => failures.push(format!("{file}: the pickle is unreadable: {reason}")),
@@ -202,6 +311,14 @@ fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usiz
                 }
                 let theirs = pickle_theirs(entities);
                 pickle_rows += theirs.len();
+                extension_rows += entities.fcs.extension_members.len();
+                let moved = pickle_extension_failures(&index, entities);
+                if !moved.is_empty() {
+                    failures.push(format!(
+                        "{file}: the pickle layer's extension members differ\n{}",
+                        moved.join("\n")
+                    ));
+                }
                 let moved = excess(&ours, &theirs, 20);
                 if !moved.is_empty() {
                     failures.push(format!(
@@ -212,7 +329,7 @@ fn compare(graded: &[PathBuf], support: &[PathBuf]) -> (Vec<String>, usize, usiz
             }
         }
     }
-    (failures, il_rows, pickle_rows)
+    (failures, il_rows, pickle_rows, extension_rows)
 }
 
 /// The reference pack, FSharp.Core and the F# fixtures: the pickles hold
@@ -248,10 +365,15 @@ fn the_existence_index_is_what_both_readers_report() {
     ] {
         dlls.push(fixture.to_path_buf());
     }
-    let (failures, il_rows, pickle_rows) = compare(&dlls, &[]);
+    let (failures, il_rows, pickle_rows, extension_rows) = compare(&dlls, &[]);
     eprintln!(
-        "{} assemblies: {il_rows} TypeDef rows and {pickle_rows} pickled entities compared",
+        "{} assemblies: {il_rows} TypeDef rows, {pickle_rows} pickled entities and \
+         {extension_rows} extension members compared",
         dlls.len()
+    );
+    assert!(
+        extension_rows > 300,
+        "only {extension_rows} extension members compared"
     );
     assert!(il_rows > 5_000, "only {il_rows} TypeDef rows compared");
     assert!(
@@ -344,7 +466,7 @@ fn the_existence_index_is_what_both_readers_report_over_a_package_cache() {
         } else {
             Vec::new()
         };
-        let (f, i, p) = compare(std::slice::from_ref(dll), &support);
+        let (f, i, p, _) = compare(std::slice::from_ref(dll), &support);
         failures.extend(f);
         compared += 1;
         il_rows += i;

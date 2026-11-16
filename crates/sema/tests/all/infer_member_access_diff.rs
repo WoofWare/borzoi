@@ -1794,13 +1794,13 @@ fn skipped_member_in_scope_defers_the_overload_gate() {
 }
 
 #[test]
-fn dropped_type_uncertainty_is_namespace_scoped() {
-    // OV-6 review (GPT-5.6): a **dropped** type may be a C#-style `[<Extension>]`
-    // class the entity tree no longer shows, so its namespace is possibly
-    // extension-bearing — but *namespace-scoped*: a `namespace Demo` file defers
-    // while a root `module M` file (whose in-scope namespace saw no drop) commits.
-    // (This is what keeps method-call hovers alive despite the real BCL dropping
-    // ~38 namespaced generic types, none in root.)
+fn a_projection_drop_moves_the_overload_gate_only_through_the_index() {
+    // A type the projection drops is still a row of the existence index, whose
+    // extension column lists every marked method of every row; the gate's name
+    // query reads that column, so a drop marker with no extension behind it
+    // defers nothing, in the dropped namespace or out of it.
+    // `assembly_entities_diff` holds the column to every TypeDef row whatever
+    // the projection drops.
     let commit = |env: &AssemblyEnv, src: &str| -> Option<String> {
         let parsed = parse(src);
         let recovery = SyntaxRecovery::of(&parsed);
@@ -1822,14 +1822,14 @@ fn dropped_type_uncertainty_is_namespace_scoped() {
     let mut env = bcl_env();
     env.mark_namespace_dropped_type(vec!["Demo".to_string()]);
 
-    // A file in `namespace Demo` sees the dropped-type uncertainty and defers.
     assert_eq!(
         commit(
             &env,
             "namespace Demo\nmodule M =\n    let s = \"hi\"\n    let n = s.Substring(1)\n"
-        ),
-        None,
-        "a drop in the file's in-scope namespace defers the overload"
+        )
+        .as_deref(),
+        Some("System.String"),
+        "a drop marker alone, in the file's in-scope namespace, defers nothing"
     );
     // A root `module M` file — the drop was in `Demo`, not root — still commits.
     assert_eq!(

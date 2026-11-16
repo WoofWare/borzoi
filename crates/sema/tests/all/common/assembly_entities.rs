@@ -15,6 +15,10 @@
 //!   read with `System.Reflection.Metadata`, `<Module>` and nested types
 //!   included.
 //!
+//! Each view also lists the assembly's *extension universe*: every member
+//! that might be an extension, whatever its container
+//! ([`FcsExtensionMember`], [`IlExtensionMethod`]).
+//!
 //! Neither view filters by accessibility, which is the point: the oracle
 //! grades an index that answers "does anything of any accessibility exist at
 //! this path".
@@ -50,9 +54,48 @@ pub struct FcsEntities {
     /// An exception the walk raised as a whole; `entities` is then empty.
     pub error: Option<String>,
     pub entities: Vec<FcsEntity>,
-    /// A property read that threw for one entity: that entity has no row, and
-    /// this names it and the property.
+    /// Every member of every entity in `entities` (abbreviations aside) that
+    /// might be an extension. Identical rows are merged, so overloads of one
+    /// name are one row.
+    pub extension_members: Vec<FcsExtensionMember>,
+    /// A property read that threw for one entity or member: that entity or
+    /// member has no row, and this names it and the property.
     pub read_errors: Vec<String>,
+}
+
+/// One member FCS reports that might be an extension.
+///
+/// FCS does not list an IL type's private, internal or
+/// family-and-assembly members, nor any member of a non-public IL type: its
+/// `MembersFunctionsAndValues` asks for what some F# code could access. An F#
+/// type's members, and an F# module's extension members, it lists at every
+/// accessibility.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct FcsExtensionMember {
+    /// The outermost enclosing entity's namespace.
+    pub namespace: String,
+    /// The logical names of the enclosing entities, outermost first, the
+    /// declaring entity included.
+    pub enclosing: Vec<String>,
+    pub logical_name: String,
+    pub compiled_name: String,
+    pub is_instance: bool,
+    pub style: ExtensionStyle,
+}
+
+/// Why a member is in the extension universe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExtensionStyle {
+    /// FCS reads it as an F# extension member (`IsExtensionMember`). An
+    /// extension property is two rows, its value (`get_P`) and its property
+    /// (`P`).
+    Fsharp,
+    /// A method or accessor carrying
+    /// `System.Runtime.CompilerServices.ExtensionAttribute`, or an accessor
+    /// of a property or event that does, whatever its container.
+    Csharp,
 }
 
 /// One non-namespace entity, as FCS reports it.
@@ -107,6 +150,30 @@ pub struct IlEntities {
     /// An exception reading the file; `rows` is then empty.
     pub error: Option<String>,
     pub rows: Vec<IlTypeDef>,
+    /// Every method that might be an extension, in method order.
+    pub extension_methods: Vec<IlExtensionMethod>,
+}
+
+/// One `MethodDefinition` that carries
+/// `System.Runtime.CompilerServices.ExtensionAttribute`, or is an accessor
+/// (getter, setter, adder, remover, raiser or other) of a property or event
+/// that does; or that carries, or is such an accessor of one that carries, an
+/// attribute whose type cannot be named. An F# extension member carries no
+/// attribute, so it is not here.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+pub struct IlExtensionMethod {
+    /// The outermost enclosing type's namespace.
+    pub namespace: String,
+    /// The metadata names of the enclosing types, outermost first, the
+    /// declaring type included.
+    pub enclosing: Vec<String>,
+    /// The method's metadata name.
+    pub name: String,
+    pub is_static: bool,
+    /// An attribute that made the method count has a type that cannot be
+    /// named, so it might not be `ExtensionAttribute`.
+    pub unreadable_attribute: bool,
 }
 
 /// One `TypeDefinition` row.

@@ -23,11 +23,28 @@
 //!
 //! A pickle that exists but cannot be read gives [`PickleLayer::Unreadable`],
 //! never an empty layer.
+//!
+//! Beside the entities, [`ExistenceIndex::extensions`] lists every member
+//! that may be an extension, by every name a call may spell it: the
+//! *universe* the extension gate's name query reads. FCS takes a member as an
+//! extension by the member's own marker, not by its container's, so neither
+//! layer asks the container:
+//!
+//! - the `TypeDef` layer: every method carrying `ExtensionAttribute` (an
+//!   attribute whose owner the reader cannot name counts as one), and every
+//!   accessor of a property or event carrying it;
+//! - the pickle layer: every val flagged `IsExtensionMember` or carrying the
+//!   attribute (a polyfill the assembly declares itself included), by its
+//!   logical and compiled names, and for a property accessor its
+//!   `get_`/`set_` spelling too.
+
+use std::collections::HashMap;
 
 use crate::ImportError;
 use crate::ecma335_assembly::MAX_NESTING_DEPTH;
 use crate::fsharp_pickle::model::{
-    IsType, PickledAttribute, PickledCcu, PickledEntity, PickledExnRepr, PickledTcRef, TyparKind,
+    IsType, PickledAttribute, PickledCcu, PickledEntity, PickledExnRepr, PickledMemberKind,
+    PickledTcRef, TyparKind,
 };
 use crate::reader::{Accessibility, Image, TypeDefId};
 
@@ -39,6 +56,37 @@ pub struct ExistenceIndex {
     pub il: Vec<IlTypeRow>,
     /// Every entity of the host F# signature pickle.
     pub pickle: PickleLayer,
+    /// Every member either layer marks as a possible extension. A pickle
+    /// that is not [`PickleLayer::Read`] contributes none, and is itself the
+    /// unknown.
+    pub extensions: Vec<ExtensionRow>,
+}
+
+/// Which layer of the index a row comes from.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum IndexLayer {
+    TypeDef,
+    Pickle,
+}
+
+/// One member that may be an extension.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExtensionRow {
+    pub layer: IndexLayer,
+    /// The namespace of the declaring entity, or of its outermost encloser.
+    pub namespace: Vec<String>,
+    /// The declaring entity and its enclosers, outermost first: metadata
+    /// names in the `TypeDef` layer, logical names in the pickle's. Empty for
+    /// a val directly in a namespace fragment.
+    pub enclosing: Vec<String>,
+    /// Every name a call may spell the member by, sorted and deduplicated.
+    pub names: Vec<String>,
+    /// `Some(true)` for an instance F# extension, `Some(false)` for a static
+    /// one, `None` for a C#-style one (a static method a call reaches as an
+    /// instance one) and for every `TypeDef` row.
+    pub instance: Option<bool>,
 }
 
 /// The pickle layer of an [`ExistenceIndex`].
@@ -132,6 +180,69 @@ const EXTENSION: [&str; 4] = [
     "ExtensionAttribute",
 ];
 
+/// Whether `attributes` carries `ExtensionAttribute`, or an attribute whose
+/// owner the reader cannot name (which may be it).
+fn marked_extension(image: &Image, attributes: &[crate::reader::RawAttribute]) -> bool {
+    attributes
+        .iter()
+        .any(|raw| match image.attribute_owning_type(raw) {
+            Ok(owner) => owner.name == EXTENSION[3] && owner.namespace == EXTENSION[..3].join("."),
+            Err(_) => true,
+        })
+}
+
+/// The `TypeDef` layer's extension rows of `image`: every marked method, and
+/// every accessor of a marked property or event, of every row. `rows` is
+/// [`il_rows`]' output for the same image, whose namespaces and enclosers
+/// each row's members share.
+pub(crate) fn il_extension_rows(image: &Image, rows: &[IlTypeRow]) -> Vec<ExtensionRow> {
+    let mut out = Vec::new();
+    for (td, row) in image.type_defs.iter().zip(rows) {
+        let mut enclosing = row.enclosing.clone();
+        enclosing.push(row.name.clone());
+        let mut names: Vec<String> = Vec::new();
+        for method in &td.methods {
+            if marked_extension(image, &method.attributes) {
+                names.push(method.name.clone());
+            }
+        }
+        let accessor = |id: &Option<crate::reader::MethodId>| {
+            id.and_then(|crate::reader::MethodId(i)| td.methods.get(i as usize))
+                .map(|m| m.name.clone())
+        };
+        for property in &td.properties {
+            if marked_extension(image, &property.attributes) {
+                names.extend(
+                    [&property.getter, &property.setter]
+                        .into_iter()
+                        .chain(&property.other_accessors)
+                        .filter_map(accessor),
+                );
+            }
+        }
+        for event in &td.events {
+            if marked_extension(image, &event.attributes) {
+                names.extend(
+                    [&event.add, &event.remove, &event.raise]
+                        .into_iter()
+                        .chain(&event.other_accessors)
+                        .filter_map(accessor),
+                );
+            }
+        }
+        for name in names {
+            out.push(ExtensionRow {
+                layer: IndexLayer::TypeDef,
+                namespace: row.namespace.clone(),
+                enclosing: enclosing.clone(),
+                names: vec![name],
+                instance: None,
+            });
+        }
+    }
+    out
+}
+
 /// The `TypeDef` layer of `image`, or a refusal when a row's `NestedClass`
 /// chain is deeper than [`MAX_NESTING_DEPTH`]: a cycle, or corrupt metadata
 /// no compiler writes, whose paths would cost memory cubic in the table.
@@ -218,8 +329,14 @@ struct Frame {
     depth: usize,
 }
 
-/// The entity layer of the host pickle `pickled`, or why it cannot be read.
-pub(crate) fn pickled_rows(pickled: &PickledCcu) -> Result<Vec<PickledEntityRow>, String> {
+/// FCS's `ValFlags` bit for an extension member.
+const VAL_IS_EXTENSION_MEMBER: i64 = 0b1_0000_0000;
+
+/// The entity layer of the host pickle `pickled` and its extension rows, or
+/// why it cannot be read.
+pub(crate) fn pickled_rows(
+    pickled: &PickledCcu,
+) -> Result<(Vec<PickledEntityRow>, Vec<ExtensionRow>), String> {
     // Every entity's full logical path, so an attribute whose type the
     // assembly itself declares (a `Local` tcref, as FSharp.Core's own
     // `[<AutoOpen>]` is) is read as surely as a non-local one.
@@ -306,7 +423,105 @@ pub(crate) fn pickled_rows(pickled: &PickledCcu) -> Result<Vec<PickledEntityRow>
             path.is_some_and(|p| p == target)
         })
     };
-    Ok(order
+    // Each module's or type's place as a declaring entity, by its full
+    // logical path: its namespace, and its enclosers with itself.
+    let mut declaring: HashMap<Vec<String>, (Vec<String>, Vec<String>)> = HashMap::new();
+    for (stamp, namespace, enclosing) in &order {
+        let entity = &pickled.tables.tycons[*stamp as usize];
+        if kind_of(entity) != PickledEntityKind::Namespace {
+            let mut chain = enclosing.clone();
+            chain.push(entity.logical_name.clone());
+            let mut full = namespace.clone();
+            full.extend(chain.iter().cloned());
+            declaring.insert(full, (namespace.clone(), chain));
+        }
+    }
+    // A reference to one of this CCU's entities, local or by path.
+    let path_of = |tcref: &PickledTcRef| -> Option<Vec<String>> {
+        match tcref {
+            PickledTcRef::Local(stamp) => paths.get(*stamp as usize).cloned().flatten(),
+            PickledTcRef::NonLocal(index) => {
+                pickled.header.nlerefs.get(*index as usize).map(|nle| {
+                    nle.path
+                        .iter()
+                        .filter_map(|&i| pickled.header.strings.get(i as usize).cloned())
+                        .collect()
+                })
+            }
+        }
+    };
+    let mut extensions = Vec::new();
+    for (stamp, namespace, enclosing) in &order {
+        let entity = &pickled.tables.tycons[*stamp as usize];
+        // The vals of a namespace fragment sit in it; a module's or a type's
+        // inside the entity.
+        let (namespace, enclosing) = if kind_of(entity) == PickledEntityKind::Namespace {
+            let mut ns = namespace.clone();
+            ns.push(entity.logical_name.clone());
+            (ns, Vec::new())
+        } else {
+            let mut chain = enclosing.clone();
+            chain.push(entity.logical_name.clone());
+            (namespace.clone(), chain)
+        };
+        for &index in &entity.module_type.vals {
+            let v = pickled
+                .tables
+                .vals
+                .get(index as usize)
+                .ok_or_else(|| format!("val {index} out of range"))?;
+            let optional = v.flags & VAL_IS_EXTENSION_MEMBER != 0;
+            if !optional && !carries(&v.attribs, &EXTENSION) {
+                continue;
+            }
+            let mut names = vec![v.logical_name.clone()];
+            if let Some(compiled) = &v.compiled_name {
+                names.push(compiled.clone());
+            }
+            let kind = v.member_info.as_ref().map(|m| m.flags.kind);
+            let accessor = match kind {
+                Some(PickledMemberKind::PropertyGet) => Some("get_"),
+                Some(PickledMemberKind::PropertySet) => Some("set_"),
+                _ => None,
+            };
+            // A property accessor answers to its property's name and to its
+            // `get_`/`set_` spelling, whichever the val carries.
+            if let Some(prefix) = accessor {
+                match v.logical_name.strip_prefix(prefix) {
+                    Some(bare) => names.push(bare.to_string()),
+                    None => names.push(format!("{prefix}{}", v.logical_name)),
+                }
+            }
+            names.sort();
+            names.dedup();
+            // An optional extension is declared by the module holding it; any
+            // other member by the type it belongs to (its apparent parent),
+            // though its val sits in the enclosing module's list.
+            let parent = v
+                .member_info
+                .as_ref()
+                .filter(|_| !optional)
+                .and_then(|m| path_of(&m.apparent_parent))
+                .and_then(|path| declaring.get(&path).cloned());
+            let (namespace, enclosing) =
+                parent.unwrap_or_else(|| (namespace.clone(), enclosing.clone()));
+            extensions.push(ExtensionRow {
+                layer: IndexLayer::Pickle,
+                namespace,
+                enclosing,
+                names,
+                // An optional extension is called as its member is declared;
+                // a C#-style one is a static method called as an instance
+                // one, so either call may reach it.
+                instance: if optional {
+                    v.member_info.as_ref().map(|m| m.flags.is_instance)
+                } else {
+                    None
+                },
+            });
+        }
+    }
+    let entities = order
         .into_iter()
         .map(|(stamp, namespace, enclosing)| {
             let entity = &pickled.tables.tycons[stamp as usize];
@@ -324,7 +539,8 @@ pub(crate) fn pickled_rows(pickled: &PickledCcu) -> Result<Vec<PickledEntityRow>
                 extension: carries(&entity.attribs, &EXTENSION),
             }
         })
-        .collect())
+        .collect();
+    Ok((entities, extensions))
 }
 
 /// FCS's `EntityFlags.IsModuleOrNamespace` bit.
