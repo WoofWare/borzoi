@@ -1160,6 +1160,11 @@ pub mod host_fs {
         std::fs::read_to_string(path)
     }
 
+    /// [`std::fs::File::open`]: on a FIFO, it waits until a writer opens it.
+    pub fn open_for_reading(path: impl AsRef<Path>) -> std::io::Result<std::fs::File> {
+        std::fs::File::open(path)
+    }
+
     /// The path opened to read and write, creating nothing: on a FIFO, it
     /// waits for no peer (Linux and macOS; POSIX leaves it unspecified).
     pub fn open_to_read_and_write(path: impl AsRef<Path>) -> std::io::Result<std::fs::File> {

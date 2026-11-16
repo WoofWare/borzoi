@@ -59,7 +59,7 @@ This is a Cargo workspace with nine members:
   Self-contained: depends only on `roxmltree` and `self_cell` (which holds a
   parsed document beside its text, so the crate forbids `unsafe`), and, behind
   `test-support` only, `borzoi-spawn` (the soundness sweep's FIFO watch holds
-  a reader open while no child is launched). Intended to be reusable outside
+  the FIFO open while no child is launched). Intended to be reusable outside
   this repo. Every file-system query an evaluation makes
   goes through `observed`, which records it in the result's `read_set` (absences
   included); the crate's own `clippy.toml` bans the `std` calls elsewhere, and

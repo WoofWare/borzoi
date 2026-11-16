@@ -44,9 +44,10 @@
 //! FIFO: every regular file replaced by a link to a FIFO the caller made
 //! outside `root` ([`fifo_perturbations`]). Opening a FIFO to read it blocks
 //! until a writer arrives, so a query that opened one would hang the sweep.
-//! While a perturbation links to a FIFO, the sweep keeps a writer waiting on
-//! it, so such an open returns (reading nothing) and the sweep panics, naming
-//! the perturbation, rather than hanging.
+//! While a perturbation links to a FIFO, a watchdog opens it to write once
+//! the computation has run a while, so such an open returns (reading nothing)
+//! and the sweep panics, naming the perturbation, rather than hanging. The
+//! open cannot return before the watchdog writes, so none goes unseen.
 //!
 //! This is test support: it writes into `root` and restores what it changed.
 
@@ -203,27 +204,38 @@ pub fn sweep_with<T: PartialEq + std::fmt::Debug>(
                 continue;
             }
         };
-        // Armed before the read set is asked again: that asks every read's
-        // query, a whole-file read of the FIFO among them.
-        let watches: Vec<FifoWatch> = perturbation
+        let fifos: Vec<&Path> = perturbation
             .edits
             .iter()
             .filter_map(|edit| match edit {
-                Edit::Link(_, target) if is_fifo(target) => Some(FifoWatch::arm(target)),
+                Edit::Link(_, target) if is_fifo(target) => Some(target.as_path()),
                 _ => None,
             })
             .collect();
-        let stale = base.1.first_stale().cloned();
-        let after = compute();
-        for watch in watches {
-            let fifo = watch.fifo.clone();
-            let opened = watch.disarm();
+        // The read set asked again is watched too: that asks every read's
+        // query, a whole-file read of the FIFO among them.
+        let watched = |patience| {
+            let watches: Vec<FifoWatch> = fifos
+                .iter()
+                .map(|fifo| FifoWatch::arm(fifo, patience))
+                .collect();
+            let stale = base.1.first_stale().cloned();
+            let after = compute();
+            let rescued: Vec<bool> = watches.into_iter().map(FifoWatch::disarm).collect();
+            (stale, after, rescued.contains(&true))
+        };
+        let (mut stale, mut after, rescued) = watched(FIFO_PATIENCE);
+        if rescued {
+            // Either an open waited on the FIFO, or the computation outlasted
+            // the watch's patience: asked again with far more, an open still
+            // waits, and nothing else should.
+            let again;
+            (stale, after, again) = watched(FIFO_PATIENCE * 10);
             assert!(
-                opened == 0,
-                "{perturbation:?}: the evaluation, or the read set asked again, opened the \
-                 FIFO {} to read it {opened} time(s); that open waits for a writer, which \
-                 here might never come",
-                fifo.display()
+                !again,
+                "{perturbation:?}: the evaluation, or the read set asked again, opened \
+                 {fifos:?} to read it, which waits for a writer that here might never come \
+                 (the sweep's watch had to write to it, twice)"
             );
         }
         let touched = undo.changed().any(|path| names(root, &base.1, path));
@@ -541,74 +553,105 @@ fn is_fifo(_path: &Path) -> bool {
     false
 }
 
-/// A writer kept waiting on a FIFO while a perturbation links to it: every
-/// open of the FIFO for reading meets one, so it returns rather than blocks,
-/// and is counted. [`FifoWatch::disarm`] stops the writer and says how many
-/// opens it met.
+/// How long a computation under a [`FifoWatch`] may run before the watch
+/// opens the FIFO to write, which a query waiting in its open of the FIFO
+/// needs to go on.
+const FIFO_PATIENCE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A watchdog for a FIFO while a perturbation links to it. Opening a FIFO to
+/// read it waits until a writer opens it too, and nothing else ever will, so
+/// a query that opens it waits for good. Once the computation has run for the
+/// watch's patience, and again each patience after, the watchdog opens the
+/// FIFO to write, which lets such a query go on, reading nothing.
+///
+/// So any such open makes the watchdog write ([`FifoWatch::disarm`]), however
+/// the threads are scheduled: the open cannot return before it does. A
+/// computation that merely outlasts the patience makes it write too; the
+/// sweep tells the two apart by asking again with ten times the patience.
 struct FifoWatch {
     fifo: PathBuf,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    opened: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    writer: Option<std::thread::JoinHandle<()>>,
+    state: std::sync::Arc<(std::sync::Mutex<WatchState>, std::sync::Condvar)>,
+    watchdog: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct WatchState {
+    /// The computation has returned.
+    done: bool,
+    /// The watchdog has opened, or is opening, the FIFO to write.
+    writing: bool,
 }
 
 impl FifoWatch {
-    fn arm(fifo: &Path) -> Self {
-        use std::sync::atomic::Ordering::SeqCst;
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let writer = {
-            let (fifo, stop, opened) = (fifo.to_path_buf(), stop.clone(), opened.clone());
+    fn arm(fifo: &Path, patience: std::time::Duration) -> Self {
+        let state = std::sync::Arc::new((
+            std::sync::Mutex::new(WatchState::default()),
+            std::sync::Condvar::new(),
+        ));
+        let watchdog = {
+            let (fifo, state) = (fifo.to_path_buf(), state.clone());
             std::thread::spawn(move || {
+                let (lock, done) = &*state;
                 loop {
-                    // Blocks until a reader opens the FIFO: the evaluation's
-                    // read, or `release`'s own.
-                    match host_fs::open_for_writing(&fifo) {
-                        Ok(_) if stop.load(SeqCst) => return,
-                        // Counted before the writer closes, which is when
-                        // the reader's read returns.
-                        Ok(_) => {
-                            opened.fetch_add(1, SeqCst);
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                        Err(e) => panic!("open the FIFO {} to write: {e}", fifo.display()),
+                    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let (mut guard, _) = done
+                        .wait_timeout_while(guard, patience, |state| !state.done)
+                        .unwrap_or_else(|e| e.into_inner());
+                    if guard.done {
+                        return;
+                    }
+                    guard.writing = true;
+                    drop(guard);
+                    // Returns once a reader opens the FIFO: a query waiting
+                    // in its open, or `disarm`'s own.
+                    if host_fs::open_for_writing(&fifo).is_err() {
+                        return;
                     }
                 }
             })
         };
         FifoWatch {
             fifo: fifo.to_path_buf(),
-            stop,
-            opened,
-            writer: Some(writer),
+            state,
+            watchdog: Some(watchdog),
         }
     }
 
-    /// How many opens for reading met the writer, which is stopped.
-    fn disarm(mut self) -> usize {
-        let opened = self.opened.load(std::sync::atomic::Ordering::SeqCst);
-        self.release();
-        opened
+    /// Whether the watchdog opened the FIFO to write, once the computation
+    /// had returned; the watchdog is stopped.
+    fn disarm(mut self) -> bool {
+        self.stop()
     }
 
-    /// Stop the writer. The FIFO is opened to read and write, which does not
-    /// wait for a peer (on Linux and macOS), and held until the writer has
-    /// returned: it is the reader the writer's pending open meets, and any
-    /// open it makes after that, so whenever the writer next looks it sees
-    /// `stop`, and no open of ours waits on a writer that has already left.
+    /// Stop the watchdog, and say whether it opened the FIFO to write. The
+    /// state is read and `done` set under the lock the watchdog decides
+    /// under, so a watchdog that had not begun to write never will.
     ///
-    /// It is held with no child being launched: a child between its fork and
-    /// its `exec` holds a copy of it, and would be a reader the next watch of
-    /// this FIFO counts.
-    fn release(&mut self) {
-        let Some(writer) = self.writer.take() else {
-            return;
+    /// One that had may still be waiting in its open, with no reader left:
+    /// the FIFO is opened to read and write, which waits for no peer (on
+    /// Linux and macOS), and held until the watchdog has returned. It is held
+    /// with no child being launched, since a child between its fork and its
+    /// `exec` holds a copy of it: a writer that an open of this FIFO under the
+    /// next watch could meet without that watchdog ever writing.
+    fn stop(&mut self) -> bool {
+        let Some(watchdog) = self.watchdog.take() else {
+            return false;
         };
-        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (lock, done) = &*self.state;
+        let writing = {
+            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+            state.done = true;
+            state.writing
+        };
+        done.notify_all();
+        if !writing {
+            let _ = watchdog.join();
+            return false;
+        }
         // Nothing in here panics, which would poison the spawn lock.
         let woken = borzoi_spawn::without_spawns(|| {
             let wake = host_fs::open_to_read_and_write(&self.fifo)?;
-            let _ = writer.join();
+            let _ = watchdog.join();
             drop(wake);
             Ok::<(), std::io::Error>(())
         });
@@ -618,12 +661,13 @@ impl FifoWatch {
                 self.fifo.display()
             );
         }
+        true
     }
 }
 
 impl Drop for FifoWatch {
     fn drop(&mut self) {
-        self.release();
+        self.stop();
     }
 }
 
@@ -883,4 +927,49 @@ fn topmost_missing_ancestor(path: &Path) -> Option<PathBuf> {
         cursor = dir.parent();
     }
     missing
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::observed::{Observer, read_to_string};
+
+    /// The FIFO rule's controls, over a tree of one file: a computation
+    /// that reads it only through [`read_to_string`] passes the sweep, and
+    /// one that also opens it (and looks at the open file, as a reader that
+    /// checks what it opened before reading would) fails it, rather than
+    /// hanging in that open, which waits for a writer.
+    #[test]
+    fn a_computation_that_opens_the_fifo_fails_the_sweep() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = host_fs::canonicalize(tmp.path()).unwrap();
+        let file = root.join("a.props");
+        std::fs::write(&file, "<Project />").unwrap();
+        let fifo = crate::with_imports_tests::Fifo::new().unwrap();
+        let extra = fifo_perturbations(&root, &fifo.path);
+        assert_eq!(extra.len(), 1);
+        let sweep_opening = |opens: bool| {
+            let compute = || {
+                let observer = Observer::new();
+                let _ = read_to_string(&observer, &file);
+                if opens {
+                    let _ = host_fs::open_for_reading(&file).and_then(|open| open.metadata());
+                }
+                ((), observer.finish().0)
+            };
+            sweep_with(&root, &compute, &extra)
+        };
+        let tally = sweep_opening(false);
+        assert_eq!(tally.made.get(&Why::Fifo), Some(&1), "{tally:?}");
+        let failed =
+            borzoi_oracle_harness::panic_silence::catch_unwind_silent(|| sweep_opening(true));
+        assert!(failed.is_err(), "a computation that opened the FIFO passed");
+        let panic =
+            borzoi_oracle_harness::panic_silence::take_silenced_panic().expect("the sweep's panic");
+        assert!(
+            panic.message.contains("which waits for a writer"),
+            "{}",
+            panic.message
+        );
+    }
 }

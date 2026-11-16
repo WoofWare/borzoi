@@ -70,8 +70,9 @@ pub fn spawn_serialised(cmd: &mut Command) -> io::Result<Child> {
 /// once that has passed, so no child holds a descriptor `f` opens and closes.
 ///
 /// The soundness sweep's FIFO watch (`borzoi_msbuild::observed::soundness`)
-/// is the one user: a reader of a FIFO, inherited by a child that has yet to
-/// `exec`, would look to it like a read it must report. `f` must be short and
+/// is the one user: the FIFO it opens to read and write, inherited by a child
+/// that has yet to `exec`, is a writer that a later open of that FIFO could
+/// meet unseen. `f` must be short and
 /// take no lock: it holds the lock every spawn takes.
 pub fn without_spawns<T>(f: impl FnOnce() -> T) -> T {
     let _guard = SPAWN_LOCK.lock().expect("spawn lock poisoned");
