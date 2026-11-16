@@ -3838,7 +3838,9 @@ pub(super) fn expand_silent(raw: &str, state: &State<'_>) -> Expansion {
                     unpinned_root = Some(state.root_for_undefined_read(&name));
                 }
             }
-            Issue::Unsupported { .. } => had_unsupported = true,
+            Issue::Unsupported { .. } | Issue::PathAdjustmentUndecided { .. } => {
+                had_unsupported = true;
+            }
         }
     }
     // Silent expansion still reports (via flags, not diagnostics) a read of

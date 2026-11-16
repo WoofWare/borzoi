@@ -748,7 +748,7 @@ impl<'s, 'r> Engine<'s, 'r> {
             self.check_property_write(name)?;
             let raw = element_text(property)?;
             let value = self.expand(&raw)?;
-            self.lookup.insert_escaped(name, value);
+            self.lookup.insert_expanded(name, value);
             self.written.insert(name.to_ascii_lowercase());
         }
         Ok(())
@@ -1058,14 +1058,21 @@ impl<'s, 'r> Engine<'s, 'r> {
     fn decide_text(&mut self, raw: &str) -> Result<bool, Decline> {
         let raw = self.with_items(raw, true)?;
         self.check_references(&raw)?;
-        if holds_reference(
-            properties::substitute(&raw, &self.lookup)
-                .0
-                .ignoring_trust()
-                .as_escaped(),
-        ) {
+        let (expanded, issues) = properties::substitute_in_target(&raw, &self.lookup);
+        if holds_reference(expanded.ignoring_trust().as_escaped()) {
             return decline(format!(
                 "the condition {raw} expands to an item or metadata reference"
+            ));
+        }
+        // The condition evaluator takes a relative probe of project text to
+        // miss, as an evaluation does; a target runs in the project's
+        // directory, so a backslash that meets one declines here.
+        if issues
+            .iter()
+            .any(|issue| matches!(issue, Issue::PathAdjustmentUndecided { .. }))
+        {
+            return decline(format!(
+                "the condition {raw} meets a Unix path adjustment the run cannot decide"
             ));
         }
         match condition::evaluate(&raw, &self.lookup).outcome {
@@ -1105,7 +1112,7 @@ impl<'s, 'r> Engine<'s, 'r> {
                 return decline(format!("{name} may assemble an item reference"));
             }
         }
-        let (value, issues) = properties::substitute(raw, &self.lookup);
+        let (value, issues) = properties::substitute_in_target(raw, &self.lookup);
         if issues
             .iter()
             .any(|issue| !matches!(issue, Issue::Undefined { .. }))
@@ -1124,7 +1131,7 @@ impl<'s, 'r> Engine<'s, 'r> {
     /// wrote it itself.
     fn substitute(&self, raw: &str) -> Result<escaping::Escaped, Decline> {
         self.check_references(raw)?;
-        let (value, issues) = properties::substitute(raw, &self.lookup);
+        let (value, issues) = properties::substitute_in_target(raw, &self.lookup);
         let value = value.into_ignoring_trust();
         if issues
             .iter()
@@ -1152,6 +1159,22 @@ impl<'s, 'r> Engine<'s, 'r> {
         if item_reference_in_property(raw) {
             return decline(format!(
                 "{raw} passes an item reference to a property function"
+            ));
+        }
+        // MSBuild adjusts the pieces its property expansion splices with the
+        // `@(…)` text still in place, and the item list only with the whole
+        // value. Read as a property, the list would split those pieces, so a
+        // backslash anywhere in such an expression declines.
+        if raw.contains("@(")
+            && (raw.contains('\\')
+                || crate::properties::property_references(raw).any(|name| {
+                    self.lookup
+                        .get_ignoring_trust(name)
+                        .is_some_and(|value| value.as_escaped().contains('\\'))
+                }))
+        {
+            return decline(format!(
+                "{raw} reads an item list beside a backslash, which MSBuild's Unix path adjustment may respell"
             ));
         }
         // MSBuild expands a list from its items' escaped spellings. In a value
@@ -1207,6 +1230,14 @@ impl<'s, 'r> Engine<'s, 'r> {
                     };
                     spelled.clone()
                 };
+                // MSBuild splices an item list after adjusting the properties'
+                // pieces, and adjusts it only with the whole value, which the
+                // list read as a property would not reproduce.
+                if spelled.contains('\\') {
+                    return decline(format!(
+                        "{raw} reads {spelled:?} of {item_type}, whose backslash MSBuild's Unix path adjustment may respell"
+                    ));
+                }
                 spellings.push(spelled);
             }
             let list = spellings.join(";");

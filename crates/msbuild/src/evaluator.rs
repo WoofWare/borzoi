@@ -3114,6 +3114,10 @@ impl<'r> State<'r> {
                     had_unsupported = true;
                     DiagnosticKind::UnsupportedPropertyExpression { expression }
                 }
+                Issue::PathAdjustmentUndecided { value } => {
+                    had_unsupported = true;
+                    DiagnosticKind::PathAdjustmentUndecided { value }
+                }
             };
             self.push(kind, span.clone());
         }

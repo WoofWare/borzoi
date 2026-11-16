@@ -795,10 +795,12 @@ fn late_sdk_seeding_overrides_prior_project_write_to_reserved_toolset_property()
     let get = |name: &str| result.properties.get(name).map(String::as_str);
     assert_eq!(get("ProbeToolsVersion"), Some("Current"));
     assert_eq!(get("ProbeToolsPath"), Some(&*version_dir.to_string_lossy()));
-    // The chain past Microsoft.Common.props stays intact.
+    // The chain past Microsoft.Common.props stays intact. The fixture writes
+    // `$(MSBuildToolsPath)\NuGet.props`, whose `\` MSBuild's Unix path
+    // adjustment rewrites: the first segment is a directory under the root.
     assert_eq!(
         get("ProbeNuGetPropsFile"),
-        Some(&*format!("{}\\NuGet.props", version_dir.display()))
+        Some(&*format!("{}/NuGet.props", version_dir.display()))
     );
 }
 

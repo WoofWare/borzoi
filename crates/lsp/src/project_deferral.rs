@@ -908,6 +908,12 @@ fn render_diagnostic_kind(kind: &DiagnosticKind) -> String {
         DiagnosticKind::UnsupportedPropertyExpression { expression } => {
             format!("a property expression I can't evaluate: `{expression}`")
         }
+        DiagnosticKind::PathAdjustmentUndecided { value } => {
+            format!(
+                "a value, `{value}`, whose backslashes MSBuild may rewrite as slashes depending on \
+                 which directories exist where it runs"
+            )
+        }
         DiagnosticKind::UnresolvedItemReference { reference } => {
             format!("an item reference I can't expand: `{reference}`")
         }

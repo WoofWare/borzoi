@@ -105,6 +105,15 @@ pub enum DiagnosticKind {
     /// Phase 2 only models simple property references; the expression is
     /// left literal in the substituted output.
     UnsupportedPropertyExpression { expression: String },
+    /// MSBuild's Unix path adjustment of an expanded value turns on what the
+    /// evaluation does not know: whether a directory exists relative to the
+    /// directory MSBuild runs in, or (on the path that asks no file system)
+    /// under the root. `value` is the escaped text adjusted: one piece of the
+    /// expansion (a literal run or a reference's value), or the whole of it.
+    /// A backslash a reserved, toolset, environment or global property holds
+    /// meets the adjustment when it is read, so declining it is what keeps a
+    /// value MSBuild would respell from being committed as written.
+    PathAdjustmentUndecided { value: String },
     /// `@(Foo)` appeared in an attribute — a reference to another item
     /// list. We have no item evaluator, so we can't expand it.
     UnresolvedItemReference { reference: String },

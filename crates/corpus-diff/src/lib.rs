@@ -532,6 +532,7 @@ fn define_constants_uncertainty_diagnostic(kind: &DiagnosticKind) -> bool {
         kind,
         DiagnosticKind::UndefinedProperty { .. }
             | DiagnosticKind::UnsupportedPropertyExpression { .. }
+            | DiagnosticKind::PathAdjustmentUndecided { .. }
             | DiagnosticKind::UnresolvedItemReference { .. }
             | DiagnosticKind::UnresolvedMetadataReference { .. }
             | DiagnosticKind::UnsupportedCondition { .. }
@@ -644,6 +645,9 @@ fn msbuild_diagnostic_message(kind: &DiagnosticKind) -> String {
         }
         DiagnosticKind::UnsupportedPropertyExpression { expression } => {
             format!("$(...) expression not understood: {expression}")
+        }
+        DiagnosticKind::PathAdjustmentUndecided { value } => {
+            format!("Unix path adjustment of {value} depends on where MSBuild runs")
         }
         DiagnosticKind::UnresolvedItemReference { reference } => {
             format!("item reference not expanded: {reference}")
