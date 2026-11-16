@@ -6,12 +6,13 @@ use borzoi_cst::syntax::{TextRange, TextSize};
 use borzoi_assembly::{EntityKind, UnionCases};
 
 use super::path_set::PathPrefixes;
+use crate::AssemblyEnv;
 use crate::assembly_env::{EntityHandle, OpenFoldSpace, OpenFoldSurface, OpenFoldTarget};
 use crate::def::{DefId, DefKind};
 use crate::hash::{HashMap, HashSet};
 use crate::names::{NameKey, PathId, PathKey, Segments};
 
-use super::contributors::Contribution;
+use super::contributors::{Contribution, contribution_marks};
 use super::id_text;
 use super::model::{
     CaseKind, DeclOrder, DeclineCause, DeclineSite, DeclineTier, DeferredReason, ItemId,
@@ -370,61 +371,14 @@ impl<'a> Resolver<'a> {
     /// (review round 17). A merge names a definite target only when *every* half is fully
     /// enumerable.
     pub(super) fn open_type_statics(&mut self, handle: EntityHandle, open_pos: u32, certain: bool) {
-        // The entries borrow the env, not the scope stack they are pushed on.
-        let generation = self.scope.open_generation;
-        let assemblies = self.assemblies;
-        let entries =
-            assemblies
-                .open_static_entries(handle)
-                .into_iter()
-                .map(|(name, idx)| match idx {
-                    Some(idx) if certain => ScopeEntry::opened(
-                        assemblies.names(),
-                        name,
-                        Resolution::Member {
-                            parent: handle,
-                            idx,
-                        },
-                        generation,
-                        open_pos,
-                    ),
-                    Some(_) => ScopeEntry::opened_declined(
-                        assemblies.names(),
-                        name,
-                        DeclineCause::OpenFoldResidue,
-                        generation,
-                        open_pos,
-                    ),
-                    None => ScopeEntry::opened_declined(
-                        assemblies.names(),
-                        name,
-                        DeclineCause::OpenedOverloadSet,
-                        generation,
-                        open_pos,
-                    ),
-                });
+        let entries = type_static_entries(
+            self.assemblies,
+            handle,
+            open_pos,
+            certain,
+            self.scope.open_generation,
+        );
         self.lexical.module_frame().extend(entries);
-        // The members the projection dropped are statics FCS still opens, by
-        // names the entries above do not list. An accessor's IL name carries
-        // its property's.
-        let dropped = self
-            .assemblies
-            .entity(handle)
-            .skipped_members
-            .iter()
-            .map(|m| {
-                let name = m.name.as_str();
-                ["get_", "set_", "add_", "remove_"]
-                    .iter()
-                    .find_map(|p| name.strip_prefix(p))
-                    .unwrap_or(name)
-                    .to_string()
-            });
-        let dropped = Contribution {
-            values: dropped.collect(),
-            ..Contribution::default()
-        };
-        self.push_contribution(&dropped, open_pos);
     }
 
     /// What an `open type` of `handle` brings beside its own statics
@@ -504,57 +458,6 @@ impl<'a> Resolver<'a> {
             entry.opened_case = true;
             entry
         });
-        self.lexical.module_frame().extend(entries);
-    }
-
-    /// Push the implicitly opened union cases
-    /// ([`AssemblyEnv::implicit_union_cases`](crate::AssemblyEnv::implicit_union_cases))
-    /// into the current frame at position 0 — `Some`, `None`, `Ok` and the rest,
-    /// which every file sees with no `open`.
-    ///
-    /// Called twice at the start of each top-level block, around the implicit
-    /// auto-open modules' statics, with `definite` selecting which half:
-    ///
-    /// - `true`, **before** the statics: the cases with a definite target. FCS
-    ///   folds a namespace's tycon tier before its `[<AutoOpen>]` modules, so a
-    ///   same-surface val of the name wins by position on both sides; and a
-    ///   definite case has no same-named rival on any other implicit surface.
-    /// - `false`, **after** the statics: the opaque ones. A case is opaque when
-    ///   its order against a same-named implicit name is not known, so it must
-    ///   shadow that name rather than let whichever was pushed last win — an
-    ///   opaque entry defers both positions, which is sound in every order.
-    pub(super) fn fold_implicit_union_cases(&mut self, definite: bool) {
-        let generation = self.scope.open_generation;
-        let entries = self
-            .assemblies
-            .implicit_union_cases()
-            .iter()
-            .filter_map(|case| {
-                let mut entry = match case.target {
-                    OpenFoldTarget::UnionCase { union, case: idx } if definite => {
-                        ScopeEntry::opened(
-                            self.assemblies.names(),
-                            &case.name,
-                            Resolution::UnionCase { union, case: idx },
-                            generation,
-                            0,
-                        )
-                    }
-                    OpenFoldTarget::Opaque(cause) if !definite => ScopeEntry::opened_declined(
-                        self.assemblies.names(),
-                        &case.name,
-                        cause,
-                        generation,
-                        0,
-                    ),
-                    OpenFoldTarget::UnionCase { .. }
-                    | OpenFoldTarget::Opaque(_)
-                    | OpenFoldTarget::Member { .. }
-                    | OpenFoldTarget::Entity(_) => return None,
-                };
-                entry.opened_case = true;
-                Some(entry)
-            });
         self.lexical.module_frame().extend(entries);
     }
 
@@ -1358,8 +1261,8 @@ impl<'a> Resolver<'a> {
         // `[<AutoOpen>]` inside the declaring assembly only, while
         // `effective_implicit_open_namespace_paths` is a set of namespace paths
         // applied across every assembly, so a second assembly's auto-open module
-        // in `Microsoft.FSharp.Core` is folded here as it already is by
-        // `open_auto_open_modules_in`. Scoping that to the contributor is one
+        // in `Microsoft.FSharp.Core` is folded here as it already is by the
+        // implicit seed (`ImplicitSeed`). Scoping that to the contributor is one
         // change to both, not a special case of this walk.
         if prefix.namespace_reading {
             for path in self.assemblies.auto_open_module_paths_in_namespace(base) {
@@ -7744,3 +7647,118 @@ pub(super) fn is_synthesized_name(name: &str) -> bool {
 /// ([`FoldOrder`]): what [`Resolver::value_slot`] orders a value the same
 /// `open` entered against.
 type OrderedTypeOpen<'a> = (&'a [String], FoldOrder);
+
+/// The entries [`Resolver::open_type_statics`] pushes for `handle`, each
+/// stamped with `generation`: one opened entry per distinct bare static name,
+/// then a contributor mark for each static the projection dropped.
+pub(super) fn type_static_entries(
+    assemblies: &AssemblyEnv,
+    handle: EntityHandle,
+    open_pos: u32,
+    certain: bool,
+    generation: usize,
+) -> Vec<ScopeEntry> {
+    let mut entries: Vec<ScopeEntry> = assemblies
+        .open_static_entries(handle)
+        .into_iter()
+        .map(|(name, idx)| match idx {
+            Some(idx) if certain => ScopeEntry::opened(
+                assemblies.names(),
+                name,
+                Resolution::Member {
+                    parent: handle,
+                    idx,
+                },
+                generation,
+                open_pos,
+            ),
+            Some(_) => ScopeEntry::opened_declined(
+                assemblies.names(),
+                name,
+                DeclineCause::OpenFoldResidue,
+                generation,
+                open_pos,
+            ),
+            None => ScopeEntry::opened_declined(
+                assemblies.names(),
+                name,
+                DeclineCause::OpenedOverloadSet,
+                generation,
+                open_pos,
+            ),
+        })
+        .collect();
+    // The members the projection dropped are statics FCS still opens, by
+    // names the entries above do not list. An accessor's IL name carries
+    // its property's.
+    let dropped = assemblies.entity(handle).skipped_members.iter().map(|m| {
+        let name = m.name.as_str();
+        ["get_", "set_", "add_", "remove_"]
+            .iter()
+            .find_map(|p| name.strip_prefix(p))
+            .unwrap_or(name)
+            .to_string()
+    });
+    let dropped = Contribution {
+        values: dropped.collect(),
+        ..Contribution::default()
+    };
+    entries.extend(contribution_marks(
+        assemblies.names(),
+        &dropped,
+        generation,
+        open_pos,
+    ));
+    entries
+}
+
+/// The implicitly opened union cases
+/// ([`AssemblyEnv::implicit_union_cases`]) as frame entries at position 0,
+/// each stamped with `generation` — `Some`, `None`, `Ok` and the rest, which
+/// every file sees with no `open`.
+///
+/// The implicit seed ([`ImplicitSeed`](super::ImplicitSeed)) takes them in
+/// two halves, around the implicit auto-open modules' statics, with
+/// `definite` selecting which:
+///
+/// - `true`, **before** the statics: the cases with a definite target. FCS
+///   folds a namespace's tycon tier before its `[<AutoOpen>]` modules, so a
+///   same-surface val of the name wins by position on both sides; and a
+///   definite case has no same-named rival on any other implicit surface.
+/// - `false`, **after** the statics: the opaque ones. A case is opaque when
+///   its order against a same-named implicit name is not known, so it must
+///   shadow that name rather than let whichever was pushed last win — an
+///   opaque entry defers both positions, which is sound in every order.
+pub(super) fn implicit_union_case_entries(
+    assemblies: &AssemblyEnv,
+    definite: bool,
+    generation: usize,
+) -> impl Iterator<Item = ScopeEntry> + '_ {
+    assemblies
+        .implicit_union_cases()
+        .iter()
+        .filter_map(move |case| {
+            let mut entry = match case.target {
+                OpenFoldTarget::UnionCase { union, case: idx } if definite => ScopeEntry::opened(
+                    assemblies.names(),
+                    &case.name,
+                    Resolution::UnionCase { union, case: idx },
+                    generation,
+                    0,
+                ),
+                OpenFoldTarget::Opaque(cause) if !definite => ScopeEntry::opened_declined(
+                    assemblies.names(),
+                    &case.name,
+                    cause,
+                    generation,
+                    0,
+                ),
+                OpenFoldTarget::UnionCase { .. }
+                | OpenFoldTarget::Opaque(_)
+                | OpenFoldTarget::Member { .. }
+                | OpenFoldTarget::Entity(_) => return None,
+            };
+            entry.opened_case = true;
+            Some(entry)
+        })
+}

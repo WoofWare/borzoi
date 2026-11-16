@@ -636,8 +636,20 @@ fn push_contribution(
     if contribution.unlisted {
         scope.open_generation += 1;
     }
-    let generation = scope.open_generation;
-    let marks = contribution
+    let marks = contribution_marks(names, contribution, scope.open_generation, pos);
+    lexical.module_frame().extend(marks);
+}
+
+/// The contributor marks a [`Contribution`]'s listed names push, each
+/// stamped with `generation`: values shadow in expression position, names in
+/// both. Whether it is unlisted is the caller's to act on.
+pub(super) fn contribution_marks<'c>(
+    names: &'c NameTable,
+    contribution: &'c Contribution,
+    generation: usize,
+    pos: u32,
+) -> impl Iterator<Item = ScopeEntry> + 'c {
+    contribution
         .values
         .iter()
         .map(|name| (name, MarkReach::Expression))
@@ -647,8 +659,7 @@ fn push_contribution(
                 .iter()
                 .map(|name| (name, MarkReach::Both)),
         )
-        .map(|(name, reach)| ScopeEntry::contributor_mark(names, name, reach, generation, pos));
-    lexical.module_frame().extend(marks);
+        .map(move |(name, reach)| ScopeEntry::contributor_mark(names, name, reach, generation, pos))
 }
 
 /// The cases of the active patterns `decls` declare at their own level.

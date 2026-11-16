@@ -102,9 +102,8 @@ pub use model::{
     ResolutionTrace, ResolvedFile, ResolvedProject,
 };
 pub use state::ActivePatternShape;
-use state::{
-    Resolver, implicit_open_groups, implicit_open_namespaces, implicit_shortening_prefixes,
-};
+pub(crate) use state::ImplicitSeed;
+use state::{Resolver, implicit_open_groups, implicit_shortening_prefixes};
 
 /// `$body`, inside the `fold-counts` span `crate::fold_counts::$span` when that
 /// feature is on. The value is `$body`'s; the span closes once it is computed.
@@ -327,7 +326,7 @@ pub fn resolve_file(
         // `Ok`, …) fold around them: those with a definite target first, as
         // FCS folds a namespace's tycon tier before its auto-open modules, and
         // the opaque ones last, so a name whose order is unknown shadows rather
-        // than loses ([`Resolver::fold_implicit_union_cases`]).
+        // than loses ([`lookup::implicit_union_case_entries`]).
         //
         // All of it goes *below* what the frame already holds: a later
         // same-named `namespace N` block re-takes the bindings of the earlier
@@ -335,12 +334,15 @@ pub fn resolve_file(
         // winning over the seed.
         let seeded = fold_phase!(IMPLICIT_SEED_SPAN, {
             let retained = r.lexical.module_frame().len();
-            r.fold_implicit_union_cases(true);
-            for ns in implicit_open_namespaces(r.assemblies) {
-                // Implicit auto-opens precede every declaration: slot position 0.
-                r.open_auto_open_modules_in(&ns, 0, true);
-            }
-            r.fold_implicit_union_cases(false);
+            let generation = r.scope.open_generation;
+            let seed: Vec<state::ScopeEntry> =
+                r.assemblies.implicit_seed().at(generation).collect();
+            debug_assert_eq!(
+                seed,
+                state::implicit_seed_entries(r.assemblies, generation),
+                "the env's memoised implicit seed differs from the per-block computation"
+            );
+            r.lexical.module_frame().extend(seed);
             let seeded = r.lexical.module_frame().len() - retained;
             r.lexical.module_frame().rotate_tail_right(0, seeded);
             seeded
@@ -2118,26 +2120,6 @@ impl<'a> Resolver<'a> {
                 false,
                 "set_last_decl_type_qualified expects a trailing Item decl, found {other:?}"
             ),
-        }
-    }
-
-    /// Bring the `[<AutoOpen>]` modules of `namespace` into scope: opening a
-    /// namespace also opens any auto-open module it declares, so each such
-    /// module's public static names enter the current frame as source-ordered
-    /// `opened` entries — exactly as `open type Module` does
-    /// ([`Self::open_type_statics`]), reached through
-    /// [`AssemblyEnv::auto_open_modules_in_namespace`]. This is how FSharp.Core's
-    /// `printfn` / `id` / operators resolve unqualified.
-    ///
-    /// `certain` is withheld when this namespace is *also* an assembly **module** whose
-    /// surface we cannot fully enumerate — a hidden module name could contest any of
-    /// these, and FCS folds the two halves in reference order (review round 17).
-    fn open_auto_open_modules_in(&mut self, namespace: &[String], open_pos: u32, certain: bool) {
-        // The slice borrows the env, not `self`, which `open_type_statics`
-        // borrows mutably.
-        let assemblies = self.assemblies;
-        for &handle in assemblies.auto_open_modules_in_namespace(namespace) {
-            self.open_type_statics(handle, open_pos, certain);
         }
     }
 

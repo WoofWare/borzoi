@@ -1415,10 +1415,9 @@ impl<'a> Resolver<'a> {
                         // decided BEFORE any half is applied so the barrier
                         // outranks earlier groups and earlier opens only, never a
                         // half of its own group (round 15). The assembly namespace
-                        // half is gated exactly as the old `open_auto_open_modules_in`
-                        // was (`!(project_readings_only && !project_ns)`) — a pure
-                        // assembly-namespace reading suppressed by a project-module /
-                        // unmodelled-type open must not contribute.
+                        // half applies unless `project_readings_only && !project_ns`:
+                        // a pure assembly-namespace reading suppressed by a
+                        // project-module / unmodelled-type open must not contribute.
                         let assembly_ns_applies = has_reading
                             && self.assemblies.has_namespace(gp)
                             && !(project_readings_only && !project_ns);
