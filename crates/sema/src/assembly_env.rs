@@ -186,6 +186,17 @@ impl ExtensionView<'_> {
     /// any accessibility, in one of those namespaces or in a container an
     /// assembly-level auto-open names, module-shaped ones included
     /// ([`ExistenceSet::lends_extensions_through_an_abbreviation`]).
+    ///
+    /// **Knowingly unsound under an unbuilt project reference.** A project
+    /// reference with no built output is missing from the existence index, and
+    /// this query does not answer for it: an extension the unbuilt project
+    /// declares in a namespace the file opens reads as absent here. That is
+    /// the decision that a not-built reference keeps the env complete. Two
+    /// routes are still covered: a project `open` declines while a reference
+    /// is unbuilt (`GateInput::ProjectOpenReferencesNotBuilt`), and an open
+    /// the gate cannot enumerate reads the universe as unbounded
+    /// ([`Self::extension_named_anywhere`]). A namespace that a built
+    /// assembly and the unbuilt project both declare is not.
     pub(crate) fn extension_named_in_scope(
         self,
         in_scope_namespaces: &[Vec<String>],
