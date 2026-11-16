@@ -42,7 +42,7 @@ use crate::project_deferral::{FoldOutcome, FoldRefusal};
 use crate::project_graph::{NodeTfm, ProjectGraph, ProjectKind};
 use crate::restore::{RestoreOutcome, restore_to_scratch_assemblies};
 use crate::sdk_discovery::SdkDiscoveryEnv;
-use crate::sdk_language::LangVersionDoubt;
+use crate::sdk_language::{FeatureSwitchRoute, LangVersionDoubt};
 use crate::sidecar_manager::SidecarManager;
 use crate::workspace::{EnvChecks, EvaluationId, ProjectsGeneration, ServedTfm, Workspace};
 use crate::xml_doc::inherit::{Expansion, expand};
@@ -227,6 +227,10 @@ struct CachedParse {
     /// project's accepted parse of a straddling file could wrongly satisfy an
     /// untrusted project that a cold build refuses.
     guessed_from: Option<LanguageVersion>,
+    /// [`ParseInputs::off_ladder`] when this tree was accepted: part of the key
+    /// for the same reason as `guessed_from`, since under it the gate refuses a
+    /// flagged tree another project's gate verified.
+    off_ladder: bool,
     /// The allocation of `parse`'s text the `Vfs` last handed out, so that the
     /// next comparison with it is a pointer test.
     text: Arc<str>,
@@ -2419,6 +2423,14 @@ struct ParseInputs {
     /// ([`Workspace::compiler_floor_for_project`]): where `lang` is a guess,
     /// the versions the build may check at are this one up, and the guess.
     compiler_floor: LanguageVersion,
+    /// How the evaluation shows the build may switch a language feature
+    /// apart from the version
+    /// ([`feature_switch_evidence`](crate::sdk_language::feature_switch_evidence)),
+    /// so that where `lang` is a guess, the build may check by a set of rules
+    /// no version on the ladder has: the version-boundary gate then reads no
+    /// file whose tree the rules may shape, since the ladder's shape bands do
+    /// not bracket such a set.
+    off_ladder: Option<FeatureSwitchRoute>,
 }
 
 impl ParseInputs {
@@ -2490,6 +2502,7 @@ impl ParseInputs {
         // intersection: a doubted version × a file that genuinely straddles the
         // boundary.
         let lang_version_untrust = LangVersionDoubt::of(parsed, &selection);
+        let off_ladder = crate::sdk_language::feature_switch_evidence(parsed);
         // Accept every Compile flavour `ParsedProject.items` produces:
         // `[CompileBefore, Compile, CompileAfter]` — F#-specific item kinds the
         // msbuild parser already orders for us. Excluding any of them would
@@ -2514,6 +2527,7 @@ impl ParseInputs {
             lang,
             lang_version_untrust,
             compiler_floor,
+            off_ladder,
         })
     }
 }
@@ -2540,6 +2554,7 @@ fn build_parses(
         lang,
         lang_version_untrust,
         compiler_floor,
+        off_ladder,
     } = inputs;
     let lang = *lang;
     let guessed_from = inputs.guessed_from();
@@ -2581,10 +2596,10 @@ fn build_parses(
         };
         // Per-file fold cache: reuse a variant whose every deciding input — the
         // source text, the `#if` symbols, the language version, and the versions
-        // the build may check at (`guessed_from`) — matches. A hit is a handle
-        // clone that also *skips* the version-boundary gate and the recovery
-        // reading below, which is why `guessed_from` is part of the match (it is
-        // their one non-parse input). A miss falls through to the parse memo (and, for a
+        // the build may check at (`guessed_from`, and `off_ladder`) — matches. A hit is a
+        // handle clone that also *skips* the version-boundary gate and the recovery
+        // reading below, which is why those two are part of the match (they are
+        // their only non-parse inputs). A miss falls through to the parse memo (and, for a
         // straddle-flagged file, re-runs the gate) and records a variant. The
         // input comparison is what keeps a stale variant from being served, so no
         // invalidation hook is load-bearing.
@@ -2599,6 +2614,7 @@ fn build_parses(
                     c.parse.lang() == lang
                         && c.parse.file_kind() == file_kind
                         && c.guessed_from == guessed_from
+                        && c.off_ladder == off_ladder.is_some()
                         && c.parse.symbols() == symbols
                         && (Arc::ptr_eq(&c.text, &text) || *c.text == *text)
                 })
@@ -2647,6 +2663,26 @@ fn build_parses(
         if let (Some(untrust), Some(from)) = (&lang_version_untrust, guessed_from)
             && parse.shape_depends_on_language_version
         {
+            // A feature switch may have the build check by rules no version
+            // has (`--strict-indentation-` at F# 10 keeps F# 8's string
+            // lexing but not its indentation rule), which no band's
+            // representative parses at. Only the unset flag speaks for every
+            // set of rules, so a flagged file is refused unverified. An
+            // unflagged one has the same tree under every set, which is what
+            // lets its recovery be read off the ladder's two ends below: each
+            // gate's diagnostic then turns on its own feature alone.
+            if let Some(route) = off_ladder {
+                tracing::info!(
+                    project = %project.display(),
+                    file = %include.display(),
+                    "refusing project parses: the build may switch a language feature apart \
+                     from the version and this file's tree may depend on the rules"
+                );
+                return Ok(Err(FoldRefusal::LanguageVersionShape {
+                    file: include,
+                    cause: LangVersionDoubt::FeatureSwitch(route.clone()),
+                }));
+            }
             let own_band = lang.shape_representative();
             // Bands are contiguous and ascend with their representatives, and
             // the range runs up to the top one, so it meets exactly the bands
@@ -2730,6 +2766,7 @@ fn build_parses(
         let variant = CachedParse {
             parse: Arc::clone(&source),
             guessed_from,
+            off_ladder: off_ladder.is_some(),
             text: Arc::clone(&text),
             file: source_file.clone(),
             recovery: recovery.clone(),
@@ -2739,6 +2776,7 @@ fn build_parses(
             c.parse.lang() == lang
                 && c.parse.file_kind() == file_kind
                 && c.guessed_from == guessed_from
+                && c.off_ladder == off_ladder.is_some()
                 && c.parse.symbols() == symbols
         }) {
             *slot = variant;
@@ -6010,6 +6048,50 @@ mod tests {
             sema.parses_for_project(&pinned, &mut ws, &Vfs::new())
                 .is_some(),
             "a trustworthily pinned version resolves the shape dependence"
+        );
+    }
+
+    /// A file two projects share is verified once per set of rules a build may
+    /// check it by: a flagged tree one project's gate verified on the version
+    /// ladder answers nothing for a project whose build may switch a language
+    /// feature off it, though both guess from the same version.
+    #[test]
+    fn a_switched_project_reuses_no_tree_verified_on_the_ladder() {
+        let tmp = TempDir::new().unwrap();
+        let shared = tmp.path().join("Shared/D.fs");
+        write(&shared, "module M =\n");
+        // One path, spelt the same in both, so the second fold finds the first's
+        // variant.
+        let gated = |flags: &str| {
+            format!(
+                r#"<Project>
+              <PropertyGroup Condition="'$(DefineConstants)' == ''">
+                <LangVersion>7.0</LangVersion>
+              </PropertyGroup>
+              <PropertyGroup>{flags}</PropertyGroup>
+              <ItemGroup><Compile Include="{}" /></ItemGroup>
+            </Project>"#,
+                shared.display()
+            )
+        };
+        let ladder = tmp.path().join("Ladder/P.fsproj");
+        write(&ladder, &gated(""));
+        let switched = tmp.path().join("Switched/P.fsproj");
+        write(
+            &switched,
+            &gated("<OtherFlags>--strict-indentation-</OtherFlags>"),
+        );
+        let mut ws = Workspace::default();
+        let mut sema = SemanticState::new();
+        assert!(
+            sema.parses_for_project(&ladder, &mut ws, &Vfs::new())
+                .is_some(),
+            "the ladder's bands agree on the mid-edit tree"
+        );
+        assert!(
+            sema.parses_for_project(&switched, &mut ws, &Vfs::new())
+                .is_none(),
+            "no band speaks for a rule set off the ladder"
         );
     }
 

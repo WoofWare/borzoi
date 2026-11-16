@@ -50,6 +50,21 @@
 //! `PropertyName="%(…)"`), and doubting every such project's version would
 //! cost its fold for a write that never names it.
 //!
+//! The compiler can also switch a language feature apart from the version
+//! (`--strict-indentation±`, `--disableLanguageFeature`), and then checks by a
+//! set of rules no version has. Where the evaluation shows the build may pass
+//! such a switch ([`feature_switch_evidence`]: a `$(OtherFlags)` that is not
+//! version-neutral switches alone, or that the walk may have wrong, or a
+//! `DisabledLanguageFeatures` item or a target writing `OtherFlags` that a
+//! document outside the SDK names), the version is doubted however well
+//! established it is ([`LangVersionDoubt::FeatureSwitch`]), and the fold reads
+//! no file whose tree the language rules may shape: the version ladder's
+//! shape bands do not bracket a rule set off the ladder. The switches are not
+//! mirrored into the parse; no project of either corpus passes one. A computed
+//! name and content the walk did not enter stay on the boundary above for the
+//! switches as for the version, and hold only a guessed version to the whole
+//! ladder ([`feature_switch_doubt`]).
+//!
 //! What stays **unmodelled**, by the same assumption the rest of the LSP makes:
 //!
 //! - a replacement hidden in an import the SDK performs that a project property
@@ -420,38 +435,111 @@ pub const FEATURE_SWITCH_ITEMS: &[&str] = &["DisabledLanguageFeatures"];
 /// SDK (or in a workload manifest) may write one before `CoreCompile` reads
 /// it, no document outside the SDK defines an item of a type in
 /// [`FEATURE_SWITCH_ITEMS`], and the walk entered every document.
-pub fn feature_switch_doubt(parsed: &ParsedProject) -> Option<UntrustedCause> {
+///
+/// Everything [`feature_switch_evidence`] reads, and besides it what may pass a
+/// switch without naming one: a target or item whose name is computed (which
+/// matches every query), and content the walk did not enter. This is what holds
+/// a guessed version to the whole ladder ([`checked_floor`]); only the evidence
+/// doubts a version that is otherwise the build's.
+pub fn feature_switch_doubt(parsed: &ParsedProject) -> Option<FeatureSwitchRoute> {
+    feature_switch_route(parsed, SwitchReach::May)
+}
+
+/// Why the evaluated project shows its build may switch a language feature
+/// apart from its language version: a carrier ([`FEATURE_SWITCH_CARRIERS`])
+/// whose evaluated value holds anything but version-neutral switches
+/// ([`only_version_neutral_switches`]), or whose read the evaluation may have
+/// wrong (as [`lang_version_value_doubt`] reads `$(LangVersion)`'s); a target
+/// outside the SDK (or in a workload manifest) that writes a carrier under its
+/// own name; or a document outside the SDK that defines an item of a type in
+/// [`FEATURE_SWITCH_ITEMS`] under its own name.
+///
+/// This doubts the version the files parse at ([`LangVersionDoubt::FeatureSwitch`]),
+/// however well established `$(LangVersion)` is: under such a switch the
+/// compiler checks by a set of rules no language version has. What it leaves
+/// to [`feature_switch_doubt`] alone, a computed name and content the walk did
+/// not enter, is the boundary the module docs state for the version itself.
+pub fn feature_switch_evidence(parsed: &ParsedProject) -> Option<FeatureSwitchRoute> {
+    feature_switch_route(parsed, SwitchReach::Named)
+}
+
+/// Which routes to a feature switch [`feature_switch_route`] reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwitchReach {
+    /// What the evaluation shows ([`feature_switch_evidence`]).
+    Named,
+    /// Besides that, what may pass one unseen ([`feature_switch_doubt`]).
+    May,
+}
+
+/// A way the build may pass one of [`FEATURE_SWITCHES`] to the compiler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeatureSwitchRoute {
+    /// A carrier ([`FEATURE_SWITCH_CARRIERS`]) whose read the evaluation may
+    /// have wrong, for `cause`.
+    Untrusted {
+        carrier: &'static str,
+        cause: UntrustedCause,
+    },
+    /// A carrier whose evaluated value holds something other than
+    /// version-neutral switches ([`only_version_neutral_switches`]).
+    Flags {
+        carrier: &'static str,
+        value: String,
+    },
+    /// A target outside the SDK (or in a workload manifest) that may write a
+    /// carrier before `CoreCompile` reads it.
+    TargetWrite { carrier: &'static str },
+    /// A document outside the SDK (or a workload manifest) that may define an
+    /// item of a type in [`FEATURE_SWITCH_ITEMS`].
+    Item { item: &'static str },
+    /// Content the walk did not enter ([`ParsedProject::hidden_content`]).
+    Hidden(UntrustedCause),
+}
+
+fn feature_switch_route(parsed: &ParsedProject, reach: SwitchReach) -> Option<FeatureSwitchRoute> {
     let definitions = [&parsed.foreign_definitions, &parsed.workload_definitions];
-    for carrier in FEATURE_SWITCH_CARRIERS {
+    for &carrier in FEATURE_SWITCH_CARRIERS {
+        let untrusted = |cause| Some(FeatureSwitchRoute::Untrusted { carrier, cause });
         let value = match parsed.property(carrier) {
             PropertyRead::Unset => None,
             PropertyRead::Value(value) => Some(value),
-            PropertyRead::Untrusted(cause) => return Some(cause),
-            PropertyRead::UnsetInexact(why) => return Some(why.cause(carrier)),
+            PropertyRead::Untrusted(cause) => return untrusted(cause),
+            PropertyRead::UnsetInexact(why) => match (reach, why) {
+                (
+                    SwitchReach::Named,
+                    InexactUnset::Toolset
+                    | InexactUnset::Opaque(_)
+                    | InexactUnset::ConsumerCarveOut,
+                ) => None,
+                (_, why) => return untrusted(why.cause(carrier)),
+            },
         };
-        if value.is_some_and(|value| !only_version_neutral_switches(&value)) {
-            return Some(UntrustedCause::Unentered(format!(
-                "`$({carrier})`, which may switch a language feature apart from the version"
-            )));
+        if let Some(value) = value.filter(|value| !only_version_neutral_switches(value)) {
+            return Some(FeatureSwitchRoute::Flags { carrier, value });
         }
-        if definitions
-            .iter()
-            .any(|defined| defined.writes_property_at_build_time(carrier))
-        {
-            return Some(UntrustedCause::Unentered(format!(
-                "a target that may write `{carrier}` before `CoreCompile` reads it"
-            )));
+        if definitions.iter().any(|defined| match reach {
+            SwitchReach::Named => defined.names_property_at_build_time(carrier),
+            SwitchReach::May => defined.writes_property_at_build_time(carrier),
+        }) {
+            return Some(FeatureSwitchRoute::TargetWrite { carrier });
         }
     }
-    if let Some(item) = FEATURE_SWITCH_ITEMS
-        .iter()
-        .find(|item| definitions.iter().any(|defined| defined.defines_item(item)))
-    {
-        return Some(UntrustedCause::Unentered(format!(
-            "`@({item})`, which switches a language feature off apart from the version"
-        )));
+    if let Some(&item) = FEATURE_SWITCH_ITEMS.iter().find(|item| {
+        definitions.iter().any(|defined| match reach {
+            SwitchReach::Named => defined.names_item(item),
+            SwitchReach::May => defined.defines_item(item),
+        })
+    }) {
+        return Some(FeatureSwitchRoute::Item { item });
     }
-    parsed.hidden_content.clone()
+    match reach {
+        SwitchReach::Named => None,
+        SwitchReach::May => parsed
+            .hidden_content
+            .clone()
+            .map(FeatureSwitchRoute::Hidden),
+    }
 }
 
 /// Whether `environment` lifts the compiler's support floor. The compiler reads
@@ -748,17 +836,26 @@ pub enum LangVersionDoubt {
     /// The project's compiler refuses its `<LangVersion>`, so the build checks
     /// at no version.
     Refused(LangVersionRefusal),
+    /// The evaluated values show the build may switch a language feature apart
+    /// from the version ([`feature_switch_evidence`]), so the compiler may
+    /// check by rules no version has.
+    FeatureSwitch(FeatureSwitchRoute),
 }
 
 impl LangVersionDoubt {
     /// The doubt over `parsed`'s language version, if any. The value's own
     /// doubt comes first: a refusal read from a doubted value is itself a
-    /// guess.
+    /// guess. A feature switch comes last, as the build may pass one whatever
+    /// the version; the fold reads it from [`feature_switch_evidence`] itself
+    /// whichever doubt this names.
     pub fn of(parsed: &ParsedProject, selection: &LangVersionSelection) -> Option<Self> {
         if let Some(cause) = lang_version_value_doubt(parsed) {
             return Some(LangVersionDoubt::Provenance(cause));
         }
-        selection.refusal.clone().map(LangVersionDoubt::Refused)
+        if let Some(refusal) = selection.refusal.clone() {
+            return Some(LangVersionDoubt::Refused(refusal));
+        }
+        feature_switch_evidence(parsed).map(LangVersionDoubt::FeatureSwitch)
     }
 }
 
@@ -1337,6 +1434,181 @@ mod tests {
         assert_eq!(checked(&parsed), V8_0, "an item of another type");
     }
 
+    /// What the evaluation shows of a feature switch doubts a trusted version
+    /// ([`LangVersionDoubt::FeatureSwitch`]); a name the build computes and
+    /// content the walk did not enter hold only a guess to the whole ladder.
+    /// Whatever is evidence is also doubt, so a switch that doubts a trusted
+    /// version always widens a guessed one too.
+    #[test]
+    fn a_feature_switch_the_evaluation_shows_doubts_a_trusted_version() {
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::path::PathBuf;
+        let doubt = |parsed: &ParsedProject| {
+            let compiler = project_compiler(parsed, &HashMap::new(), &HashMap::new());
+            LangVersionDoubt::of(parsed, &LangVersionSelection::of(parsed, compiler.as_ref()))
+        };
+        let with_read = |read: PropertyRead| {
+            let mut parsed = on_sdk("10.0.401");
+            parsed
+                .property_reads
+                .named
+                .insert("otherflags".to_string(), read);
+            parsed
+        };
+        let defined =
+            |table: fn(&mut ParsedProject) -> &mut BTreeMap<String, BTreeSet<PathBuf>>,
+             name: &str| {
+                let mut parsed = on_sdk("10.0.401");
+                table(&mut parsed)
+                    .entry(name.to_string())
+                    .or_default()
+                    .insert("/w/Directory.Build.targets".into());
+                parsed
+            };
+        let mut hidden = on_sdk("10.0.401");
+        hidden.hidden_content = Some(UntrustedCause::Unentered("an import".to_string()));
+        let flags = |value: &str| {
+            let mut parsed = with_read(PropertyRead::Value(value.to_string()));
+            parsed.other_flags = Some(value.to_string());
+            parsed
+        };
+        // (case, the evidence's route, whether the broader doubt sees a route)
+        let cases: Vec<(&str, ParsedProject, Option<FeatureSwitchRoute>, bool)> = vec![
+            ("nothing", on_sdk("10.0.401"), None, false),
+            (
+                "neutral flags",
+                flags("--warnon:3390 --optimize-"),
+                None,
+                false,
+            ),
+            (
+                "strict indentation",
+                flags("--strict-indentation-"),
+                Some(FeatureSwitchRoute::Flags {
+                    carrier: "OtherFlags",
+                    value: "--strict-indentation-".to_string(),
+                }),
+                true,
+            ),
+            (
+                "a quoted splice",
+                flags("--strict-\"\"indentation-"),
+                Some(FeatureSwitchRoute::Flags {
+                    carrier: "OtherFlags",
+                    value: "--strict-\"\"indentation-".to_string(),
+                }),
+                true,
+            ),
+            (
+                "an untrusted read",
+                with_read(PropertyRead::Untrusted(UntrustedCause::Unentered(
+                    "a gate".to_string(),
+                ))),
+                Some(FeatureSwitchRoute::Untrusted {
+                    carrier: "OtherFlags",
+                    cause: UntrustedCause::Unentered("a gate".to_string()),
+                }),
+                true,
+            ),
+            (
+                "a refused write",
+                with_read(PropertyRead::UnsetInexact(InexactUnset::Refused)),
+                Some(FeatureSwitchRoute::Untrusted {
+                    carrier: "OtherFlags",
+                    cause: InexactUnset::Refused.cause("OtherFlags"),
+                }),
+                true,
+            ),
+            (
+                "unset behind hidden content",
+                with_read(PropertyRead::UnsetInexact(InexactUnset::Opaque(
+                    UntrustedCause::Unentered("an import".to_string()),
+                ))),
+                None,
+                true,
+            ),
+            (
+                "a target writing the carrier",
+                defined(
+                    |p| &mut p.foreign_definitions.build_time_properties,
+                    "otherflags",
+                ),
+                Some(FeatureSwitchRoute::TargetWrite {
+                    carrier: "OtherFlags",
+                }),
+                true,
+            ),
+            (
+                "a workload target writing the carrier",
+                defined(
+                    |p| &mut p.workload_definitions.build_time_properties,
+                    "otherflags",
+                ),
+                Some(FeatureSwitchRoute::TargetWrite {
+                    carrier: "OtherFlags",
+                }),
+                true,
+            ),
+            (
+                "a target writing a computed name",
+                defined(
+                    |p| &mut p.foreign_definitions.build_time_properties,
+                    "%(nbgv_propertyitems.identity)",
+                ),
+                None,
+                true,
+            ),
+            (
+                "an item of the type",
+                defined(
+                    |p| &mut p.foreign_definitions.items,
+                    "disabledlanguagefeatures",
+                ),
+                Some(FeatureSwitchRoute::Item {
+                    item: "DisabledLanguageFeatures",
+                }),
+                true,
+            ),
+            (
+                "an item of a computed type",
+                defined(|p| &mut p.foreign_definitions.items, "$(itemtype)"),
+                None,
+                true,
+            ),
+            (
+                "an item of another type",
+                defined(|p| &mut p.foreign_definitions.items, "compile"),
+                None,
+                false,
+            ),
+            ("hidden content", hidden, None, true),
+        ];
+        for (case, parsed, evidence, doubted) in cases {
+            assert_eq!(feature_switch_evidence(&parsed), evidence, "{case}");
+            assert_eq!(feature_switch_doubt(&parsed).is_some(), doubted, "{case}");
+            assert!(evidence.is_none() || doubted, "{case}: evidence is doubt");
+            // A quote also doubts the version `$(OtherFlags)` may name.
+            let expected = lang_version_value_doubt(&parsed)
+                .map(LangVersionDoubt::Provenance)
+                .or(evidence.map(LangVersionDoubt::FeatureSwitch));
+            assert_eq!(doubt(&parsed), expected, "{case}");
+        }
+        // A doubted value and a refusal each come first: either already
+        // makes the version a guess.
+        let mut parsed = flags("--strict-indentation- --langversion:9.0");
+        assert!(matches!(
+            doubt(&parsed),
+            Some(LangVersionDoubt::Provenance(_))
+        ));
+        parsed.lang_version = Some("4.6".to_string());
+        parsed.lang_version_untrimmed = Some("4.6".to_string());
+        parsed.property_reads.named.insert(
+            "otherflags".to_string(),
+            PropertyRead::Value("--strict-indentation-".into()),
+        );
+        parsed.other_flags = Some("--strict-indentation-".to_string());
+        assert!(matches!(doubt(&parsed), Some(LangVersionDoubt::Refused(_))));
+    }
     /// A compiler with no row reads the value as the pinned compiler does and
     /// claims no floor; a skipped support check lifts the floor.
     #[test]

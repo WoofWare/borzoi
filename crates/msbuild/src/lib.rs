@@ -936,6 +936,22 @@ impl ForeignDefinitions {
         Self::matches(&self.build_time_properties, name, |key, name| key == name)
     }
 
+    /// Whether a document outside the SDK writes property `name` from a target,
+    /// spelling it out (case aside). Unlike
+    /// [`Self::writes_property_at_build_time`], a computed or escaped name
+    /// does not count: this is what a document names, not all it may write.
+    pub fn names_property_at_build_time(&self, name: &str) -> bool {
+        self.build_time_properties
+            .contains_key(&name.to_ascii_lowercase())
+    }
+
+    /// Whether a document outside the SDK defines an item of type `name`,
+    /// spelling it out (case aside). Unlike [`Self::defines_item`], a computed
+    /// or escaped name does not count.
+    pub fn names_item(&self, name: &str) -> bool {
+        self.items.contains_key(&name.to_ascii_lowercase())
+    }
+
     /// Whether a document outside the SDK may define an item of type `name`.
     pub fn defines_item(&self, name: &str) -> bool {
         Self::matches(&self.items, name, |key, name| key == name)
