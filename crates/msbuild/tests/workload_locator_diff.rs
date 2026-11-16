@@ -10,7 +10,7 @@
 //! (`BORZOI_DOTNET_ROOT_SDK11`), so a prerelease SDK's resolver is graded as
 //! well as the release ones.
 //!
-//! Four sweeps, each *certain-implies-exact* (an answer we commit must be the
+//! Five sweeps, each *certain-implies-exact* (an answer we commit must be the
 //! resolver's) with a positive domain where we must commit:
 //!
 //! - the feature band of a host SDK version (`SdkFeatureBand`), over a
@@ -24,6 +24,9 @@
 //!   release candidates, earlier and later releases, non-canonical spellings),
 //!   known-list order, flat and versioned manifests, unresolvable id
 //!   directories, and a missing `WorkloadManifest.targets`;
+//! - which of a manifest's version directories wins (the provider's
+//!   `VersionCompare`), over every name alone, every pair and a sample of
+//!   triples of a vocabulary of release, prerelease and malformed names;
 //! - every existence probe the resolver makes (`File.Exists` of a manifest,
 //!   its targets, a marker, the install state, the known list, the runtime
 //!   identifier chain, and `Directory.GetDirectories` of a band or id
@@ -268,14 +271,21 @@ const IDS: &[&str] = &[
 const UNLISTED_ID: &str = "contoso.unlisted";
 
 /// A manifest version directory name, and whether it is in the domain we must
-/// resolve (plain release versions).
+/// resolve beside any other of these: a name `VersionCompare` certainly
+/// compares, which none of the others ties with.
 const MANIFEST_VERSIONS: &[(&str, bool)] = &[
     ("1.0.0", true),
     ("1.0.2", true),
     ("1.0.10", true),
     ("2.0.0", true),
-    ("2.0.0-rc.1", false),
-    ("2.0.0-preview.3.1", false),
+    ("2.0.0-rc.1", true),
+    ("2.0.0-preview.3.1", true),
+    ("2.0.0-rc.1.26425.128", true),
+    ("1.0.0.1", true),
+    ("2.0", true),
+    ("26.5.11720-net11-p6", true),
+    ("2.0.0+abc", false),
+    ("not-a-version", false),
 ];
 
 /// The manifest versions in the domain we must resolve.
@@ -284,6 +294,8 @@ const PLAIN_MANIFEST_VERSIONS: &[(&str, bool)] = &[
     ("1.0.2", true),
     ("1.0.10", true),
     ("2.0.0", true),
+    ("2.0.0-rc.1", true),
+    ("2.0.0-preview.3.1", true),
 ];
 
 struct Host {
@@ -1445,4 +1457,163 @@ fn a_dependency_s_versions_compare_as_the_resolver_compares_them() {
         );
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// Which manifest version directory wins.
+
+/// Manifest version directory names: release cores of two, three and four
+/// components, spellings `System.Version` reads as one value (leading zeros),
+/// prereleases whose identifiers `ReleaseVersion` compares numerically, by
+/// length, ordinally and by count (and whose first carries the `-`), and names
+/// either parser refuses.
+const VERSION_DIRECTORY_NAMES: &[&str] = &[
+    "1.0.0",
+    "1.0.1",
+    "1.0.10",
+    "1.0.9",
+    "2.0.0",
+    "1.0",
+    "1.0.0.0",
+    "1.0.0.1",
+    "01.0.0",
+    "1.00.0",
+    "1",
+    "1.0.0-rc.1",
+    "1.0.0-rc.2",
+    "1.0.0-rc.10",
+    "1.0.0-rc.01",
+    "1.0.0-preview.1",
+    "1.0.0-1",
+    "1.0.0-10",
+    "1.0.0-9",
+    "1.0.0-a",
+    "1.0.0-A",
+    "1.0.0-rc.1.2",
+    "1.0.0-rc",
+    "1.0.0-rc.a",
+    "1.0.0--1",
+    "1.0.0-",
+    "1.0.0-net11-p6",
+    "01.0.0-rc.1",
+    "1.0.0.0-rc.1",
+    "1.0-rc.1",
+    "11.0.100-rc.1.26425.128",
+    "1.0.0-rc+x",
+    "1.0.0+x",
+    "1.0.0-rc..1",
+    "1.0.0-rc_1",
+    "foo",
+    "-1",
+    "1.0.0.0.0",
+    "2147483648.0.0",
+    " 1.0.0",
+];
+
+/// Every name alone, every pair and a fixed sample of triples of
+/// [`VERSION_DIRECTORY_NAMES`] as the version directories of one manifest,
+/// each with its targets: the targets locator's answer, ours against the
+/// resolver's, certain-implies-exact. We must commit for a lone name (the
+/// resolver compares nothing), and for names [`test_support`] certifies of
+/// which no two tie at the top.
+#[test]
+fn the_highest_manifest_version_directory_is_the_resolver_s() {
+    let mut sets: Vec<Vec<&str>> = VERSION_DIRECTORY_NAMES.iter().map(|n| vec![*n]).collect();
+    for (i, a) in VERSION_DIRECTORY_NAMES.iter().enumerate() {
+        for b in &VERSION_DIRECTORY_NAMES[i + 1..] {
+            sets.push(vec![a, b]);
+        }
+    }
+    let mut rng = SplitMix64(0x0918_7e75);
+    for _ in 0..300 {
+        let mut set: Vec<&str> = (0..3).map(|_| *rng.pick(VERSION_DIRECTORY_NAMES)).collect();
+        set.sort_unstable();
+        set.dedup();
+        sets.push(set);
+    }
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = host_fs::canonicalize(tmp.path()).unwrap();
+        let host = "10.0.100";
+        let mut committed = 0;
+        for (case, set) in sets.iter().enumerate() {
+            let dotnet = root.join(format!("c{case}"));
+            let sdk_dir = dotnet.join("sdk").join(host);
+            std::fs::create_dir_all(&sdk_dir).unwrap();
+            let id_dir = dotnet.join("sdk-manifests").join(host).join("contoso.one");
+            for name in set {
+                write(
+                    &id_dir.join(name).join("WorkloadManifest.json"),
+                    MANIFEST_JSON,
+                );
+                write(
+                    &id_dir.join(name).join("WorkloadManifest.targets"),
+                    "<Project />",
+                );
+            }
+            let env = WorkloadEnvironment {
+                user_dotnet_root: None,
+                overrides_present: false,
+                global_json_pins_workload_set: false,
+            };
+            let ours = match resolve_workload_locator(
+                WORKLOAD_MANIFEST_TARGETS_LOCATOR,
+                &dotnet,
+                &sdk_dir,
+                &env,
+                &Observer::new(),
+            ) {
+                Ok(SdkResolution::Roots(roots)) => Some(
+                    roots
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>(),
+                ),
+                Ok(other) => panic!("a locator resolves to roots, not {other:?}"),
+                Err(_) => None,
+            };
+            let response = oracle.request(&json!({
+                "op": "resolve",
+                "sdk": WORKLOAD_MANIFEST_TARGETS_LOCATOR,
+                "dotnetRoot": dotnet.to_string_lossy(),
+                "sdkVersion": host,
+                "userProfileDir": null,
+            }));
+            let theirs = (response["ok"] == json!(true)).then(|| {
+                response["paths"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            });
+            let must =
+                set.len() == 1 || test_support::workload_manifest_versions_are_told_apart(set);
+            match (&ours, &theirs) {
+                (Some(ours), Some(theirs)) if ours == theirs => committed += 1,
+                (Some(ours), _) => failures.push(format!(
+                    "{}: {set:?}: we pick {ours:?}, the resolver answers {response}",
+                    sdk.display()
+                )),
+                (None, Some(theirs)) if must => failures.push(format!(
+                    "{}: {set:?}: we decline, the resolver picks {theirs:?}",
+                    sdk.display()
+                )),
+                (None, _) => {}
+            }
+        }
+        println!("{}: committed {committed} of {}", sdk.display(), sets.len());
+        assert!(
+            committed >= sets.len() / 3,
+            "{}: {committed}",
+            sdk.display()
+        );
+    }
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures[..failures.len().min(20)].join("\n")
+    );
 }

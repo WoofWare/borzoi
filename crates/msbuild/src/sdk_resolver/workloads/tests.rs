@@ -163,13 +163,40 @@ fn prerelease_manifest_versions_order_by_semver_not_lexically() {
 }
 
 #[test]
-fn unparseable_manifest_version_directory_degrades() {
-    // We cannot reproduce MSBuild's version comparison for a name our
-    // SdkVersion refuses; degrade rather than guess an ordering.
+fn an_uncertified_manifest_version_directory_beside_another_degrades() {
+    // The resolver compares the candidates, and a name `System.Version`
+    // cannot parse throws there; one `ManifestVersion` does not certify
+    // declines.
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
     manifest(root, "10.0.100", "w.workload", "not a version!");
+    manifest(root, "10.0.100", "w.workload", "1.0.0");
+
+    let err = resolve_targets(root, &version_dir, &no_user_env()).unwrap_err();
+    assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));
+}
+
+#[test]
+fn a_lone_manifest_version_directory_wins_whatever_its_name() {
+    // The resolver folds the candidates, so with one it compares nothing.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
+    let only = manifest(root, "10.0.100", "w.workload", "not a version!");
+
+    let result = resolve_targets(root, &version_dir, &no_user_env()).unwrap();
+    assert_eq!(result, SdkResolution::Roots(vec![only]));
+}
+
+#[test]
+fn manifest_version_directories_the_resolver_cannot_tell_apart_degrade() {
+    // `1.0.0` and `01.0.0` compare equal, and the later one listed wins.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
+    manifest(root, "10.0.100", "w.workload", "1.0.0");
+    manifest(root, "10.0.100", "w.workload", "01.0.0");
 
     let err = resolve_targets(root, &version_dir, &no_user_env()).unwrap_err();
     assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));
@@ -1087,7 +1114,7 @@ fn locator_under_rejecting_spec_reports_version_not_satisfied() {
     host_sdk(root, "10.0.300", &["w.workload"]);
     manifest(root, "10.0.100", "w.workload", "1.0.0");
 
-    let pin = SdkVersion::parse("9.0.100").unwrap();
+    let pin = crate::SdkVersion::parse("9.0.100").unwrap();
     let spec = VersionSpec::with_version(pin, RollForward::Disable, false);
     let err = crate::resolve_sdk(
         root,
@@ -1239,6 +1266,7 @@ fn what_resolution_observes_does_not_depend_on_hash_order() {
     let version_dir = host_sdk(root, "10.0.300", &["a.workload", "b.workload"]);
     manifest(root, "10.0.300", "a.workload", "1.0.0");
     manifest(root, "10.0.300", "b.workload", "not a version!");
+    manifest(root, "10.0.300", "b.workload", "1.0.0");
     let observe = || {
         let observer = Observer::new();
         let result =
