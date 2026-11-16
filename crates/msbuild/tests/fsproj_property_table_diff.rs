@@ -1658,6 +1658,19 @@ fn load_time_errors_reject_exactly_where_msbuild_loads_them() {
         "<Choose><When Condition=\"true\"><Foo /></When></Choose>",
         "<Choose><When Condition=\"true\" /><When Condition=\" \" /></Choose>",
         "<Choose><When Condition=\" \" /></Choose>",
+        // The loader's attribute and child rules, each side of each.
+        "<Choose><When Condition=\"true\"><ItemDefinitionGroup /></When></Choose>",
+        "<Choose><When Condition=\"true\" Foo=\"bar\" Label=\"l\" /></Choose>",
+        "<Choose><When Condition=\"true\" /><Otherwise Label=\"l\" /></Choose>",
+        "<Choose Label=\"l\"><When Condition=\"true\" /></Choose>",
+        "<Choose><When Condition=\"true\"><Import Project=\"x\" /></When></Choose>",
+        "<Choose><When Condition=\"true\"><When Condition=\"true\" /></When></Choose>",
+        "<Choose><When Condition=\"true\" /><Foo /></Choose>",
+        "<Choose><When Condition=\"true\" />text</Choose>",
+        "<Choose><When Condition=\"true\">text</When></Choose>",
+        "<Choose><When Condition=\"true\"><!-- c --></When></Choose>",
+        "<Choose><When Condition=\"false\"><Choose><Otherwise /></Choose></When></Choose>",
+        "<Choose><When Condition=\"false\"><Choose><When Condition=\"true\" Foo=\"bar\" /></Choose></When></Choose>",
         "<Choose><When Condition=\"true\"><PropertyGroup><Zeta>z</Zeta></PropertyGroup></When></Choose>",
     ];
     let property_containers = [

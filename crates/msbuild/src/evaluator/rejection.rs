@@ -91,7 +91,7 @@ use crate::{LoadTimeError, Rejection, RejectionCause, RejectionCertainty, Unload
 use super::item_pass::expand_silent;
 use super::observed::{self, EntryKind};
 use super::{
-    SdkResolution, State, choose_shape_is_valid, condition, condition_exists, directory_build,
+    MAXIMUM_CHOOSE_NESTING, SdkResolution, State, condition, condition_exists, directory_build,
     import_dedup_key, is_msbuild_reserved_name, properties, sdk_import_path,
     sdk_project_in_alphabet, sdk_project_under_root, sdk_root_is_reparsed,
 };
@@ -276,10 +276,10 @@ fn first_load_time_error(root: Node<'_, '_>) -> Option<(LoadTimeError, Range<usi
                 .filter(|c| c.is_element() && c.has_tag_name("Import"))
                 .find_map(import_without_project),
             "Choose" => {
-                if choose_shape_is_valid(child) {
-                    choose_load_time_error(child)
-                } else {
+                if choose_refused(child, 1) {
                     Some((LoadTimeError::MalformedChoose, child.range()))
+                } else {
+                    choose_load_time_error(child)
                 }
             }
             "Target" => {
@@ -296,8 +296,68 @@ fn first_load_time_error(root: Node<'_, '_>) -> Option<(LoadTimeError, Range<usi
         })
 }
 
+/// Whether MSBuild's loader refuses the `<Choose>` at `choose`, which has
+/// `nesting` `<Choose>` elements on its path, itself included. Each rule is
+/// probed (`dotnet msbuild` 10.0) and pinned in the property-table
+/// differential: a `<Choose>` takes no attribute (MSB4066) and holds at least
+/// one `<When>` (MSB4085), then at most one `<Otherwise>` (MSB4082, MSB4084),
+/// which takes no attribute either; a `<When>` needs a non-empty `Condition`
+/// (MSB4035) and takes any other attribute; a branch holds only
+/// `<PropertyGroup>`, `<ItemGroup>`, `<ItemDefinitionGroup>` and `<Choose>`
+/// elements (MSB4067), nested no deeper than [`MAXIMUM_CHOOSE_NESTING`]; and
+/// no text but whitespace stands among them (MSB4067). What the branch's own
+/// groups hold is the rest of the loader's schema (#917), which this does not
+/// judge. Narrower than [`super::choose_shape_is_valid`], which the walk
+/// declines on.
+fn choose_refused(choose: Node<'_, '_>, nesting: usize) -> bool {
+    let has_attributes = |node: Node<'_, '_>| node.attributes().any(|a| a.namespace().is_none());
+    // Text the reader declines (a CDATA section) makes no claim.
+    let stray_text = |node: Node<'_, '_>| {
+        node.children().filter(|n| n.is_text()).any(|n| {
+            crate::document::text(n)
+                .is_some_and(|t| t.chars().any(|c| !matches!(c, ' ' | '\t' | '\r' | '\n')))
+        })
+    };
+    if nesting > MAXIMUM_CHOOSE_NESTING || has_attributes(choose) || stray_text(choose) {
+        return true;
+    }
+    let (mut saw_when, mut saw_otherwise) = (false, false);
+    for branch in choose.children().filter(Node::is_element) {
+        match branch.tag_name().name() {
+            "When" => {
+                if saw_otherwise || attribute(branch, "Condition").is_none_or(|c| c.is_empty()) {
+                    return true;
+                }
+                saw_when = true;
+            }
+            "Otherwise" => {
+                if saw_otherwise || !saw_when || has_attributes(branch) {
+                    return true;
+                }
+                saw_otherwise = true;
+            }
+            _ => return true,
+        }
+        if stray_text(branch) {
+            return true;
+        }
+        for group in branch.children().filter(Node::is_element) {
+            match group.tag_name().name() {
+                "PropertyGroup" | "ItemGroup" | "ItemDefinitionGroup" => {}
+                "Choose" => {
+                    if choose_refused(group, nesting + 1) {
+                        return true;
+                    }
+                }
+                _ => return true,
+            }
+        }
+    }
+    !saw_when
+}
+
 /// [`first_load_time_error`] within the branches of `choose`, a `<Choose>`
-/// whose shape MSBuild accepts (so nested no deeper than it loads).
+/// MSBuild's loader accepts (so nested no deeper than it loads).
 fn choose_load_time_error(choose: Node<'_, '_>) -> Option<(LoadTimeError, Range<usize>)> {
     choose
         .children()
