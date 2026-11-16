@@ -68,6 +68,7 @@ mod parser_diff_global_pat;
 mod parser_diff_hash_directive;
 mod parser_diff_ifdef;
 mod parser_diff_inherit_record;
+mod parser_diff_inline_il;
 mod parser_diff_lazy;
 mod parser_diff_let_bindings;
 mod parser_diff_lists;

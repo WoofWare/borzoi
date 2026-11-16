@@ -2392,6 +2392,32 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
                 arg: Box::new(fcs_expr(&f[2])),
             }
         }
+        "LibraryOnlyILAssembly" => {
+            // `SynExpr.LibraryOnlyILAssembly(ilCode: obj, typeArgs: SynType
+            // list, args: SynExpr list, retTy: SynType list, range)` — inline IL.
+            // Field 0 is the parsed instruction list, elided (see
+            // `NormalisedExpr::InlineIl`); the grammar's `List.rev` leaves the
+            // arguments in source order. The range is elided.
+            let f = fields(v);
+            let types = |field: &Value| -> Vec<NormalisedType> {
+                field
+                    .as_array()
+                    .expect("SynExpr.LibraryOnlyILAssembly type field must be an array")
+                    .iter()
+                    .map(fcs_type)
+                    .collect()
+            };
+            NormalisedExpr::InlineIl {
+                type_args: types(&f[1]),
+                args: f[2]
+                    .as_array()
+                    .expect("SynExpr.LibraryOnlyILAssembly field 2 must be an expression array")
+                    .iter()
+                    .map(fcs_expr)
+                    .collect(),
+                ret_ty: types(&f[3]),
+            }
+        }
         "Tuple" => {
             // `SynExpr.Tuple of isStruct: bool * exprs: SynExpr list *
             //                  commaRanges: range list * range: range`.
@@ -3312,8 +3338,7 @@ fn fcs_expr(v: &Value) -> NormalisedExpr {
             // `SyntaxTreeOps.mkSynBindingRhs` builds. Field 0 is the outermost
             // clause's condition list, field 1 its branch, field 2 the rest (the
             // next nested optimization, bottoming out at the fallthrough main
-            // expression). Unlike inline IL, every field is serialisable, so this
-            // is fully modelled; the CST projector reproduces the same nesting.
+            // expression). The CST projector reproduces the same nesting.
             let f = fields(v);
             // FCS's `staticOptimizationConditions` grammar is left-recursive and
             // *prepends* (`$3 :: $1`) without a final `List.rev`, so the `and`-

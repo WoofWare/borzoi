@@ -7,17 +7,16 @@ src/Compiler/Service/ServiceErrorResolutionHints.fs	both-reject exact 2/2/3
 src/FSharp.Core/Nullable.fsi	both-reject outside-damage 24/24/59
 src/FSharp.Core/Query.fs	both-reject divergent 206/206/207 at:module[0]/Let@6428,module[0]/Let@6500,module[0]/Let@6539
 src/FSharp.Core/Query.fsi	both-reject outside-damage 15/15/16
-src/FSharp.Core/array2.fs	we-accept-fcs-rejects divergent 11/13/16 beyond-fcs:14 at:module[0]/Types@1824,module[0]/nested@472/Let@1703
-src/FSharp.Core/array3.fs	we-accept-fcs-rejects outside-damage 7/10/12 beyond-fcs:15
-src/FSharp.Core/fslib-extra-pervasives.fs	fcs-normaliser-unmodelled
+src/FSharp.Core/array2.fs	we-accept-fcs-rejects divergent 13/13/16 beyond-fcs:14 at:module[0]/Types@1824,module[0]/nested@472/Let@1703
+src/FSharp.Core/array3.fs	we-accept-fcs-rejects outside-damage 10/10/12 beyond-fcs:15
 src/FSharp.Core/fslib-extra-pervasives.fsi	both-reject outside-damage 47/47/53
-src/FSharp.Core/local.fs	both-reject outside-damage 132/133/136
-src/FSharp.Core/nativeptr.fs	we-accept-fcs-rejects divergent 3/10/14 beyond-fcs:8 at:module[0]/Types@1958,module[0]/nested@195/Let@1640,module[0]/nested@195/Let@1814
+src/FSharp.Core/local.fs	both-reject outside-damage 133/133/136
+src/FSharp.Core/nativeptr.fs	we-accept-fcs-rejects divergent 10/10/14 beyond-fcs:8 at:module[0]/Types@1958,module[0]/nested@195/Let@1640,module[0]/nested@195/Let@1814
 src/FSharp.Core/prim-types-prelude.fs	we-accept-fcs-rejects outside-damage 27/27/62
 src/FSharp.Core/prim-types-prelude.fsi	we-accept-fcs-rejects outside-damage 28/28/63
 src/FSharp.Core/prim-types.fs	both-reject divergent 103/103/110 beyond-fcs:364 at:Module@5,Module@6,Module@7,Module@8,Module@9,Module@10,module[4]/Types@21417,module[4]/nested@21244/Let@21377,+455#742063cd
 src/FSharp.Core/prim-types.fsi	both-reject outside-damage 497/497/569
-src/FSharp.Core/seqcore.fs	both-reject outside-damage 47/48/51
+src/FSharp.Core/seqcore.fs	both-reject exact 48/48/51
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/codepage/libCodepage.fs	non-utf8
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/times/times01.fs	both-reject exact 8/8/10
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/AccessibilityAnnotations/OnTypeMembers/E_OnProperty02.fs	both-reject outside-damage 1/1/1
@@ -91,7 +90,6 @@ tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/SimpleConstant/
 tests/FSharp.Compiler.ComponentTests/Conformance/PatternMatching/TypeConstraint/E_typeconstraint01.fs	both-reject outside-damage 4/4/5
 tests/FSharp.Compiler.ComponentTests/Conformance/PseudoCustomAttributes/AssemblyCopyright_001.fs	non-utf8
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/BasicExtensionOperators.fs	range-divergent
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/MiniFSharpPlusExtensionSRTP.fs	fcs-normaliser-unmodelled
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/TypeConstraints/ExtensionConstraints/testFiles/ScopeCapture.fs	range-divergent
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase02.fsx	both-reject outside-damage 1/1/1
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/E_BeginWithUppercase03.fsx	both-reject outside-damage 1/1/1

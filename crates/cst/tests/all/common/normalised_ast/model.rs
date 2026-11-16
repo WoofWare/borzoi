@@ -1716,6 +1716,19 @@ pub enum NormalisedExpr {
         member: Box<NormalisedMember>,
         arg: Box<NormalisedExpr>,
     },
+    /// `SynExpr.LibraryOnlyILAssembly(ilCode, typeArgs, args, retTy, range)` —
+    /// FSharp.Core's inline IL `(# "instr" type (T) arg₀ … : retTy #)`.
+    /// `type_args` is the `type (T)` operand, `args` the curried value
+    /// arguments, and `ret_ty` the `: retTy` return type (empty for none and for
+    /// `: ()`). `ilCode` is elided: FCS parses the instruction string into IL
+    /// instructions while our tree keeps it as a string literal, so there is
+    /// nothing in common to compare. The range is elided; FCS wraps the node in
+    /// `SynExpr.Paren`, projected as [`NormalisedExpr::Paren`].
+    InlineIl {
+        type_args: Vec<NormalisedType>,
+        args: Vec<NormalisedExpr>,
+        ret_ty: Vec<NormalisedType>,
+    },
     /// `SynExpr.LibraryOnlyStaticOptimization(constraints, expr, optimizedExpr,
     /// range)` — FSharp.Core's static-optimization binding RHS
     /// (`mainExpr when 'T : ty = branch …`). FCS folds the surface clauses *right*

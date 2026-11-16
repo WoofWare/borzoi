@@ -58,18 +58,7 @@ use syn::visit::Visit;
 
 /// Accessors the consumers read that the projection does not, with the reason
 /// FCS's tree has nothing to compare them with.
-pub const NOT_PROJECTED: &[(&str, &str)] = &[
-    (
-        "InlineIlExpr::args",
-        "FSharp.Core's inline IL `(# … #)`: the normaliser does not model \
-         SynExpr.LibraryOnlyILAssembly, whose IL FCS boxes as an opaque object, so \
-         no file holding one reaches the comparison",
-    ),
-    (
-        "InlineIlExpr::types",
-        "FSharp.Core's inline IL `(# … #)`; see InlineIlExpr::args",
-    ),
-];
+pub const NOT_PROJECTED: &[(&str, &str)] = &[];
 
 /// Constructs the consumers read that no matching corpus file holds: each is
 /// graded against FCS like a corpus file ([`fixture_reads`]), and must read
