@@ -60,7 +60,8 @@ pub struct Observer {
     counts: Cell<ReadCounts>,
     /// Every answer recorded so far, by query, which a query asked again
     /// takes instead of asking the file system. `None` in an observer that
-    /// asks every time ([`Observer::asking_every_time`]).
+    /// asks every time (`Observer::asking_every_time`, which only a
+    /// `test-support` build has).
     memo: Option<RefCell<Memo>>,
     /// The imported files' documents the evaluation may reuse, and those it
     /// parsed ([`read_document`]).
