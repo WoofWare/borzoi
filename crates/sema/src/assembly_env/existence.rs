@@ -91,7 +91,8 @@ impl ExistenceSet {
             ExistenceInput::Unread => self.unknowable = true,
             ExistenceInput::Synthetic => {
                 for root in roots {
-                    self.add_entity(&canonical_path(&root.namespace), root);
+                    let namespace = canonical_path(&root.namespace);
+                    self.add_entity(&namespace, &namespace, root);
                 }
             }
         }
@@ -152,8 +153,12 @@ impl ExistenceSet {
                             self.abbreviation_lenders.insert(parent[..k].to_vec());
                         }
                     }
-                    for spelling in [&row.logical_name, &row.compiled_name] {
-                        let name = canonical(spelling);
+                    let mut spellings = vec![canonical(&row.logical_name)];
+                    let compiled = canonical(&row.compiled_name);
+                    if !spellings.contains(&compiled) {
+                        spellings.push(compiled);
+                    }
+                    for name in spellings {
                         let mut path = parent.clone();
                         path.push(name.clone());
                         let child = Child {
@@ -168,18 +173,23 @@ impl ExistenceSet {
         }
     }
 
-    fn add_entity(&mut self, parent: &[String], entity: &Entity) {
+    /// Add `entity`, directly inside `parent`, whose top-level ancestor's
+    /// namespace is `namespace` (a nested entity's own is empty).
+    fn add_entity(&mut self, namespace: &[String], parent: &[String], entity: &Entity) {
         let abbreviation = entity.kind == EntityKind::Abbreviation;
         if abbreviation && (entity.is_extension_container || entity.is_auto_open) {
-            let namespace = canonical_path(&entity.namespace);
-            for k in namespace.len().min(parent.len())..=parent.len() {
+            for k in namespace.len()..=parent.len() {
                 self.abbreviation_lenders.insert(parent[..k].to_vec());
             }
-            self.abbreviation_lenders.insert(namespace);
         }
+        // One walk per distinct spelling: a module's metadata and source
+        // names (`MModule`, `M`) are one canonical name.
         let mut spellings = vec![canonical(&entity.name)];
         if let Some(source) = &entity.source_name {
-            spellings.push(canonical(source));
+            let source = canonical(source);
+            if !spellings.contains(&source) {
+                spellings.push(source);
+            }
         }
         for name in spellings {
             let mut path = parent.to_vec();
@@ -191,7 +201,7 @@ impl ExistenceSet {
             };
             self.add_path(path.clone(), Some(child));
             for nested in &entity.nested_types {
-                self.add_entity(&path, nested);
+                self.add_entity(namespace, &path, nested);
             }
         }
     }
@@ -348,6 +358,39 @@ mod tests {
         assert!(whole.lends_extensions_through_an_abbreviation(&segs("D.M")));
         assert!(whole.lends_extensions_through_an_abbreviation(&segs("D")));
         assert!(!whole.lends_extensions_through_an_abbreviation(&segs("A")));
+    }
+
+    /// A synthetic module `N.MModule` (source name `M`) holding a marked
+    /// abbreviation: the abbreviation lends at `N` and `N.M`, not at the
+    /// root, and the module's two spellings are walked once.
+    #[test]
+    fn a_synthetic_nested_abbreviation_lends_at_its_own_containers() {
+        use crate::assembly_env::from_views_tests::module_entity;
+        use borzoi_assembly::EntityKind;
+
+        let mut alias = module_entity("Lib", &[], "Alias");
+        alias.kind = EntityKind::Abbreviation;
+        alias.is_extension_container = true;
+        // A chain of modules each spelled twice alike, ending at the alias.
+        let mut inner = alias;
+        for depth in (0..24).rev() {
+            let mut m = module_entity("Lib", &[], &format!("L{depth}Module"));
+            m.source_name = Some(format!("L{depth}"));
+            m.nested_types = vec![inner];
+            inner = m;
+        }
+        let mut top = module_entity("Lib", &["N"], "MModule");
+        top.source_name = Some("M".to_string());
+        top.nested_types = vec![inner];
+        let mut set = ExistenceSet::default();
+        set.add(&ExistenceInput::Synthetic, &[top]);
+        assert!(set.lends_extensions_through_an_abbreviation(&segs("N")));
+        assert!(set.lends_extensions_through_an_abbreviation(&segs("N.M")));
+        assert!(!set.lends_extensions_through_an_abbreviation(&[]));
+        assert!(!set.lends_extensions_through_an_abbreviation(&segs("Other")));
+        // One child per entity: each spelled-alike module walked once.
+        let children: usize = set.children.values().map(Vec::len).sum();
+        assert_eq!(children, 26, "the two spellings were walked separately");
     }
 
     #[test]
