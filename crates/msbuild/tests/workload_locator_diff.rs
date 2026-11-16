@@ -1073,6 +1073,9 @@ impl Content {
     }
 }
 
+/// A localization catalog written beside a manifest: its file name and text.
+type Catalog = (&'static str, &'static str);
+
 /// The manifest id a `WorkloadManifest.json` under a manifest tree is named
 /// by: the directory just below its band directory.
 fn manifest_id(tree: &Path, manifest: &Path) -> String {
@@ -1096,7 +1099,7 @@ fn manifest_id(tree: &Path, manifest: &Path) -> String {
 /// answer as it does.
 #[test]
 fn workload_manifests_load_as_the_resolver_reads_them() {
-    let mut cases: Vec<(String, Content, Option<(&str, &str)>)> = CONTENTS
+    let mut cases: Vec<(String, Content, Option<Catalog>)> = CONTENTS
         .iter()
         .map(|&content| (content.text().0.to_owned(), content, None))
         .collect();

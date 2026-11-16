@@ -362,11 +362,11 @@ fn id_array(value: &JsonValue) -> Result<(), &'static str> {
 
 /// An object of distinct keys whose values are strings `check` accepts:
 /// `ReadDependsOn`, `ReadStringDictionary`.
-fn string_map<'v>(
-    value: &'v JsonValue,
+fn string_map(
+    value: &JsonValue,
     case_insensitive_keys: bool,
     check: impl Fn(&str) -> bool,
-) -> Result<Vec<(&'v str, &'v str)>, &'static str> {
+) -> Result<Vec<(&str, &str)>, &'static str> {
     let JsonValue::Object(entries) = value else {
         return Err("expected an object");
     };
