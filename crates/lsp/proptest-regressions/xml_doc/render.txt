@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 9243e3e99a1f3ef7c2319b6b812aaba3346d132d753a3b67150aea9a5464d627 # shrinks to mut children = [Element(DocElement { name: "paramref", attributes: [], children: [Text(""), Element(DocElement { name: "seealso", attributes: [("href", "")], children: [Text(" ")], namespaced: None })], namespaced: None }), Text("a")]
+cc b97309071063615ba55cfdb232985a877f5946e848cff2a924e7b53140237889 # shrinks to children = [Element(DocElement { name: "seealso", attributes: [("cref", "T:System.String")], children: [Element(DocElement { name: "summary", attributes: [], children: [Text("R"), Element(DocElement { name: "seealso", attributes: [("name", "0")], children: [], namespaced: None })], namespaced: None })], namespaced: None })]
