@@ -26,6 +26,12 @@ pub trait EcmaView {
     /// resolver to follow `TypeRef`s out across the assembly graph.
     fn assembly_refs(&self) -> Vec<AssemblyIdentity>;
 
+    /// Everything the assembly declares, at every accessibility, read from
+    /// its raw metadata with no projection in between
+    /// ([`crate::existence`]). A view that cannot read it says so (an
+    /// unreadable pickle layer, or an error), never an empty index.
+    fn existence_index(&self) -> Result<crate::ExistenceIndex, ImportError>;
+
     /// All non-synthetic top-level types in this assembly, together with the
     /// assembly-level projection degradations. Per "bound uncertainty", a type
     /// whose shape cannot be decoded is skipped — its `(name, reason)` lands in

@@ -135,6 +135,10 @@ enum Container {
     /// `open` does not reach, so only the alias brings its extensions into
     /// scope.
     Alias,
+    /// `[<AutoOpen>] type Holder = G.C<n>.AliasImpl<n>.AliasTarget`, the
+    /// target a marked C#-style holder: an auto-open abbreviation brings its
+    /// target's extensions into scope.
+    AutoOpenAlias,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,6 +298,11 @@ struct Cell {
 }
 
 impl Cell {
+    /// Whether the container is an abbreviation of a holder elsewhere.
+    fn aliased(self) -> bool {
+        matches!(self.container, Container::Alias | Container::AutoOpenAlias)
+    }
+
     fn csharp(self) -> bool {
         matches!(self.style, Style::CsMarked | Style::CsUnmarked)
     }
@@ -369,11 +378,13 @@ impl Cell {
                     && self.kind == Kind::Method
                     && self.renamed == Renamed::No
                     && self.synth == Synth::No
-                    && self.container == Container::Plain
+                    && (self.container == Container::Plain
+                        || (self.style == Style::CsMarked && self.aliased()))
                     && self.target == Target::Receiver
                     && self.drop == Drop::No));
-        // The alias is a perturbation of the plain method's container.
-        let alias = self.container != Container::Alias
+        // The alias is a perturbation of the plain method's container, in a
+        // namespace that may hold nothing else (the hidden homes).
+        let alias = !self.aliased()
             || (self.style == Style::CsMarked
                 && self.kind == Kind::Method
                 && self.attr_on == AttrOn::Member
@@ -381,13 +392,19 @@ impl Cell {
                 && self.synth == Synth::No
                 && self.target == Target::Receiver
                 && self.drop == Drop::No
-                && matches!(self.home, Home::Namespace | Home::Module)
+                && matches!(
+                    self.home,
+                    Home::Namespace | Home::Module | Home::HiddenNamespace | Home::SoleNamespace
+                )
                 && matches!(
                     self.reach,
                     Reach::OpenNamespace
                         | Reach::SharedNamespace
                         | Reach::Enclosing
                         | Reach::OpenModule
+                        | Reach::SharedModuleOverNamespace
+                        | Reach::RelativeEnclosingOverRoot
+                        | Reach::RelativeOpenedOverRoot
                 ));
         // The internal module is a perturbation of the plain method's home.
         let internal = self.home != Home::InternalModule
@@ -482,6 +499,7 @@ impl Cell {
                                 (Container::Record, Synth::No),
                                 (Container::Record, Synth::Yes),
                                 (Container::Alias, Synth::No),
+                                (Container::AutoOpenAlias, Synth::No),
                             ] {
                                 for home in [
                                     Home::Namespace,
@@ -607,10 +625,15 @@ fn member_lines(n: usize, cell: Cell) -> Vec<String> {
                 Kind::EventAdd => unreachable!("no C#-style event cell"),
             };
             lines.push(decl);
-            if cell.container == Container::Alias {
+            if cell.aliased() {
                 // The target's members are declared by `alias_target`.
+                let marker = if cell.container == Container::AutoOpenAlias {
+                    "[<AutoOpen>]".to_string()
+                } else {
+                    format!("[<{EXTENSION}>]")
+                };
                 return vec![
-                    format!("[<{EXTENSION}>]"),
+                    marker,
                     format!("type Holder = {}.AliasImpl{n}.AliasTarget", namespace(n)),
                 ];
             }
@@ -643,8 +666,9 @@ fn member_lines(n: usize, cell: Cell) -> Vec<String> {
     }
 }
 
-/// The namespace fragment declaring the unmarked type an alias cell's
-/// `Holder` abbreviates, then the cell's namespace again.
+/// The namespace fragment declaring the type an alias cell's `Holder`
+/// abbreviates (unmarked under `[<Extension>]`, marked under
+/// `[<AutoOpen>]`), then the cell's namespace again.
 fn alias_target(n: usize, cell: Cell) -> Vec<String> {
     let ns = namespace(n);
     let plain = member_lines(
@@ -655,8 +679,10 @@ fn alias_target(n: usize, cell: Cell) -> Vec<String> {
         },
     );
     let mut out = vec![format!("namespace {ns}.AliasImpl{n}"), String::new()];
-    // Every line of the plain holder but its own marker.
-    out.extend(plain.into_iter().skip(1).map(|l| {
+    // Every line of the plain holder, its own marker only where the alias
+    // does not carry one.
+    let skip = usize::from(cell.container == Container::Alias);
+    out.extend(plain.into_iter().skip(skip).map(|l| {
         l.replace("type Holder =", "type AliasTarget =")
             .replace("r: Receiver", &format!("r: {ns}.Receiver"))
     }));
@@ -679,7 +705,7 @@ fn cell_source(n: usize, cell: Cell) -> String {
         format!("    {}", cell.intrinsic(n)),
         String::new(),
     ];
-    if cell.container == Container::Alias {
+    if cell.aliased() {
         out.extend(alias_target(n, cell));
     }
     let body = member_lines(n, cell);
@@ -900,18 +926,20 @@ fn use_source(n: usize, cell: Cell) -> (String, Probe) {
 
 /// Whether the extension gate must read the calling file's `open` as
 /// enumerated: only inside the certified domain (an `open` whose written
-/// path is a namespace, read at that path, no split of which holds a
-/// dropped type, and whose every other candidate reading holds nothing in
-/// the assemblies). Every other form is unenumerated, and a file with no
-/// `open` has none to read.
+/// path is a namespace, read at that path, and whose every other candidate
+/// reading holds nothing in the assemblies). A type the reader's projection
+/// drops is still a row of the existence index, so a drop moves nothing
+/// here. Every other form is unenumerated, and a file with no `open` has
+/// none to read.
 fn certified(cell: Cell) -> bool {
-    match cell.reach {
-        Reach::OpenNamespace | Reach::GlobalNamespace | Reach::SharedNamespace => {
-            cell.drop == Drop::No
-        }
-        Reach::Enclosing | Reach::SharedModuleOverNamespace => true,
-        _ => false,
-    }
+    matches!(
+        cell.reach,
+        Reach::OpenNamespace
+            | Reach::GlobalNamespace
+            | Reach::SharedNamespace
+            | Reach::Enclosing
+            | Reach::SharedModuleOverNamespace
+    )
 }
 
 /// The earlier project file's declaration that shares cell `n`'s namespace
@@ -965,6 +993,12 @@ fn names_one_of(e: &Entity, types: &[(Vec<String>, &'static str)]) -> bool {
 }
 
 impl EcmaView for DroppingView<'_> {
+    /// The full index: the reader's raw metadata holds every row whatever the
+    /// projection drops.
+    fn existence_index(&self) -> Result<borzoi_assembly::ExistenceIndex, ImportError> {
+        self.inner.existence_index()
+    }
+
     fn identity(&self) -> &AssemblyIdentity {
         self.inner.identity()
     }

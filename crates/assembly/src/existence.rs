@@ -31,6 +31,7 @@ use crate::reader::{Accessibility, Image, TypeDefId};
 
 /// What one assembly declares, at every accessibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExistenceIndex {
     /// Every `TypeDef` row.
     pub il: Vec<IlTypeRow>,
@@ -40,6 +41,7 @@ pub struct ExistenceIndex {
 
 /// The pickle layer of an [`ExistenceIndex`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PickleLayer {
     /// The assembly is not F# (it carries no
     /// `FSharpInterfaceDataVersionAttribute`): it declares nothing beyond its
@@ -56,6 +58,7 @@ pub enum PickleLayer {
 /// The visibility of a `TypeDef` row, by its `TypeAttributes.VisibilityMask`
 /// name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum IlVisibility {
     NotPublic,
     Public,
@@ -69,6 +72,7 @@ pub enum IlVisibility {
 
 /// One `TypeDef` row.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IlTypeRow {
     /// The namespace of the row, or of its outermost enclosing row.
     pub namespace: Vec<String>,
@@ -90,6 +94,7 @@ pub struct IlTypeRow {
 /// `FSharpEntity` tests them (`IsFSharpModule`, `IsFSharpAbbreviation`,
 /// `IsFSharpExceptionDeclaration`, `IsMeasure`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PickledEntityKind {
     Namespace,
     Module,
@@ -101,6 +106,7 @@ pub enum PickledEntityKind {
 
 /// One entity of the host pickle.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PickledEntityRow {
     /// The enclosing namespace fragments' names.
     pub namespace: Vec<String>,

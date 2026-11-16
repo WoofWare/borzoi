@@ -2986,9 +2986,6 @@ fn decode_nonlocal_named(
 /// Exclusions, each load-bearing:
 /// - **Non-public** abbreviations (a non-empty `TAccess` path list) are not
 ///   nameable from a referencing assembly, so they cannot shadow anything.
-///   A friend assembly (`InternalsVisibleTo`) still calls the extensions of
-///   an `[<Extension>]` one, which the projection then does not show, so the
-///   namespace of each is returned: its extension surface is unlisted.
 /// - **Measure-kind** entities (`typar_kind = Measure`, e.g.
 ///   `[<Measure>] type T = m * kg`): a measure name is not a *type*-position
 ///   name, and the measure overlay owns that channel.
@@ -3003,8 +3000,7 @@ pub(crate) fn apply_abbreviation_markers(
     pickled: &PickledCcu,
     join: &PickleJoin,
     assembly: &AssemblyIdentity,
-) -> Result<Vec<Vec<String>>, ImportError> {
-    let mut unlisted_extension_namespaces: Vec<Vec<String>> = Vec::new();
+) -> Result<(), ImportError> {
     // Built before the site walk: a `Local` abbreviation target may reference a
     // tycon walked *after* the abbreviation's own site, so the whole stamp→FQN
     // map must exist before any target is decoded.
@@ -3018,19 +3014,8 @@ pub(crate) fn apply_abbreviation_markers(
         &[],
         &[],
         &mut path,
-        &mut |stamp, entity, is_root, namespace, _type_chain| {
-            if is_root {
-                return Ok(());
-            }
-            if !entity.access.is_empty() {
-                if entity.type_abbrev.is_some()
-                    && has_extension_attribute(pickled, &entity.attribs)
-                    && !unlisted_extension_namespaces
-                        .iter()
-                        .any(|ns| ns == namespace)
-                {
-                    unlisted_extension_namespaces.push(namespace.to_vec());
-                }
+        &mut |stamp, entity, is_root, _namespace, _type_chain| {
+            if is_root || !entity.access.is_empty() {
                 return Ok(());
             }
             // An EXCEPTION abbreviation (`exception Alias = Original` /
@@ -3152,7 +3137,7 @@ pub(crate) fn apply_abbreviation_markers(
                 .push(abbreviation_marker(assembly, namespace, target));
         }
     }
-    Ok(unlisted_extension_namespaces)
+    Ok(())
 }
 
 /// The name-only marker entity for one abbreviation — every capability field
@@ -5034,7 +5019,7 @@ mod tests {
         assembly: &AssemblyIdentity,
     ) -> Result<(), ImportError> {
         let join = join_for(entities, ccu)?;
-        super::apply_abbreviation_markers(entities, ccu, &join, assembly).map(|_| ())
+        super::apply_abbreviation_markers(entities, ccu, &join, assembly)
     }
 
     fn dummy_assembly() -> AssemblyIdentity {

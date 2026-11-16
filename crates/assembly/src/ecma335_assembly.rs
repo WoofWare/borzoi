@@ -133,6 +133,10 @@ impl EcmaView for Ecma335Assembly {
         self.image.references.iter().map(project_identity).collect()
     }
 
+    fn existence_index(&self) -> Result<crate::ExistenceIndex, ImportError> {
+        Ecma335Assembly::existence_index(self)
+    }
+
     fn qualified_names(&self) -> Option<Vec<String>> {
         Some(
             self.image
@@ -489,9 +493,6 @@ impl Ecma335Assembly {
         // `!authoritative` is exactly the completeness predicate the source-name and
         // declaration-order overlays gate on.
         let fsharp_extension_index_unknowable = is_fsharp_assembly && !authoritative;
-        // The namespaces of the non-public `[<Extension>]` abbreviations the
-        // markers leave out.
-        let mut unlisted_extension_namespaces: Vec<Vec<String>> = Vec::new();
 
         let mut records_settled = false;
         if let Some((resource_name, decoded)) = decoded {
@@ -536,13 +537,12 @@ impl Ecma335Assembly {
                     // resolution can see the shadow. Host-CCU facts, so this
                     // runs even when the source-name overlay is
                     // non-authoritative (foreign pickles present).
-                    unlisted_extension_namespaces =
-                        crate::fsharp_pickle_merge::apply_abbreviation_markers(
-                            &mut out,
-                            &ccu,
-                            &join,
-                            &self.identity,
-                        )?;
+                    crate::fsharp_pickle_merge::apply_abbreviation_markers(
+                        &mut out,
+                        &ccu,
+                        &join,
+                        &self.identity,
+                    )?;
                     // F#-native instance extension-member name index (OV-0.5):
                     // record each module's extension-member source names from the
                     // pickle — the no-false-negative signal the overload
@@ -618,15 +618,7 @@ impl Ecma335Assembly {
             AssemblyProjectionSkips {
                 dropped_types,
                 skipped_fsharp_overlays,
-                unreadable_attribute_namespaces: {
-                    let mut namespaces = self.unreadable_attribute_namespaces();
-                    for ns in unlisted_extension_namespaces {
-                        if !namespaces.contains(&ns) {
-                            namespaces.push(ns);
-                        }
-                    }
-                    namespaces
-                },
+                unreadable_attribute_namespaces: self.unreadable_attribute_namespaces(),
                 fsharp_abbreviations_unknowable,
                 fsharp_extension_index_unknowable,
                 fsharp_signature_non_authoritative: !authoritative,

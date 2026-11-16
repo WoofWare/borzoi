@@ -1426,7 +1426,7 @@ impl<'a> Resolver<'a> {
                                 .collect(),
                             container_path: &self.lexical.container_path,
                         };
-                        match open_certify::certify(&facts, self.assemblies.extension_view()) {
+                        match open_certify::certify(&facts, self.assemblies.existence()) {
                             Some(namespace) => self.out.open_extension_namespaces.push(namespace),
                             None => self.out.unknowables.raise(Unknowable::UnenumeratedSurface),
                         }

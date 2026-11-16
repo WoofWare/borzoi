@@ -94,6 +94,12 @@ struct ReferencedAssemblyProjection {
     /// an entry from a binary that did not compute it is a different tag, and
     /// a default would claim every attribute read.
     unreadable_attribute_namespaces: Vec<Vec<String>>,
+    /// Everything the DLL declares at every accessibility, read from its raw
+    /// metadata (`EcmaView::existence_index`), or `None` when that read
+    /// failed: what the extension gate's existence questions read. No
+    /// `serde(default)`, for the reason above: a default would claim the DLL
+    /// declares nothing.
+    existence: Option<borzoi_assembly::ExistenceIndex>,
     /// The DLL's manifest identity (`EcmaView::identity`), carried so the env can
     /// register a **rootless** projection's DLL name for referenced-CCU
     /// uniqueness: with no surviving roots the identity cannot be derived from an
@@ -4410,6 +4416,10 @@ pub fn build_env_from_dll_paths<'a>(
             let visibility = projection.abbreviation_visibility();
             borzoi_sema::AssemblyProjectionInput {
                 path,
+                existence: match projection.existence {
+                    Some(index) => borzoi_sema::ExistenceInput::Read(index),
+                    None => borzoi_sema::ExistenceInput::Unread,
+                },
                 roots: projection.entities,
                 abbreviation_visibility: visibility,
                 extension_index_unknowable: projection.fsharp_extension_index_unknowable,
@@ -4639,6 +4649,20 @@ fn enumerate_view_catching<V: EcmaView>(
                 catch_reader_panic(path, "assembly_refs", || !view.assembly_refs().is_empty());
             let qualified_names =
                 catch_reader_panic(path, "qualified_names", || view.qualified_names()).flatten();
+            // Unreadable degrades to unknown: the gate then declines every
+            // existence question this DLL could answer.
+            let existence = catch_reader_panic(path, "existence_index", || view.existence_index())
+                .and_then(|r| match r {
+                    Ok(index) => Some(index),
+                    Err(err) => {
+                        tracing::warn!(
+                            dll = %path.display(),
+                            error = %err,
+                            "failed to read the existence index; the extension gate declines what it would answer"
+                        );
+                        None
+                    }
+                });
             Some(ReferencedAssemblyProjection {
                 entities: types,
                 fsharp_abbreviations_unknowable: skipped.fsharp_abbreviations_unknowable,
@@ -4646,6 +4670,7 @@ fn enumerate_view_catching<V: EcmaView>(
                 auto_opens_unreadable,
                 dropped_type_namespaces,
                 unreadable_attribute_namespaces: skipped.unreadable_attribute_namespaces.clone(),
+                existence,
                 fsharp_extension_index_unknowable: skipped.fsharp_extension_index_unknowable,
                 fsharp_signature_non_authoritative: skipped.fsharp_signature_non_authoritative,
                 // Captured even when `types` is empty (rootless), so the env can
@@ -8433,6 +8458,12 @@ mod tests {
     impl EcmaView for FakeView {
         fn identity(&self) -> &AssemblyIdentity {
             &self.identity
+        }
+        fn existence_index(&self) -> Result<borzoi_assembly::ExistenceIndex, ImportError> {
+            Ok(borzoi_assembly::ExistenceIndex {
+                il: Vec::new(),
+                pickle: borzoi_assembly::PickleLayer::Unreadable("a synthetic view".to_string()),
+            })
         }
         fn assembly_refs(&self) -> Vec<AssemblyIdentity> {
             vec![]
