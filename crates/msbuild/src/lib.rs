@@ -1151,14 +1151,19 @@ pub enum ParseError {
     /// `PathBuf::join`, so don't double-join — are accepted.
     RelativeProjectPath(PathBuf),
     /// `extra_properties` contained a key that names an MSBuild
-    /// reserved property — path-derived (`MSBuildProjectName`,
-    /// `MSBuildProjectDirectory`, …) or toolset (`MSBuildToolsPath`,
-    /// `MSBuildToolsVersion`, …). MSBuild rejects this at the CLI
-    /// (`MSB4177: …property name is reserved`); we do the same rather
-    /// than let the caller's value silently displace the seed and break
-    /// every `$(MSBuildProjectName)` reference. The stored name is the
-    /// caller's original casing.
+    /// reserved property (any spelling, under MSBuild's case-insensitive
+    /// comparison, of a name in `ReservedPropertyNames`:
+    /// `MSBuildProjectName`, `MSBuildToolsPath`, `MSBuildVersion`, …).
+    /// MSBuild refuses such a global property and evaluates nothing
+    /// (`MSB4177: …property name is reserved` from the command line), so
+    /// we refuse it too. The stored name is the caller's original casing.
     ReservedPropertyInExtras(String),
+    /// `extra_properties` contained a key that is not a valid MSBuild
+    /// property name: empty, or not an ASCII letter or `_` followed by
+    /// ASCII letters, digits, `_` and `-` (`XmlUtilities`' element-name
+    /// rule). MSBuild refuses such a global property and evaluates
+    /// nothing, so we refuse it too.
+    InvalidPropertyNameInExtras(String),
     /// `extra_properties` contained two keys that compare equal under
     /// MSBuild's `OrdinalIgnoreCase` property-name comparison
     /// (e.g., `Configuration` and `configuration`). The substitution
@@ -1187,6 +1192,12 @@ impl fmt::Display for ParseError {
                     "extra_properties contains the reserved MSBuild property name {name:?}"
                 )
             }
+            ParseError::InvalidPropertyNameInExtras(name) => {
+                write!(
+                    f,
+                    "extra_properties contains {name:?}, which is not a valid MSBuild property name"
+                )
+            }
             ParseError::DuplicateExtraProperty { first, second } => {
                 write!(
                     f,
@@ -1203,6 +1214,7 @@ impl Error for ParseError {
             ParseError::Xml(e) => Some(e),
             ParseError::RelativeProjectPath(_) => None,
             ParseError::ReservedPropertyInExtras(_) => None,
+            ParseError::InvalidPropertyNameInExtras(_) => None,
             ParseError::DuplicateExtraProperty { .. } => None,
         }
     }
@@ -1572,40 +1584,20 @@ fn validate_inputs(
         }
         seen.insert(lower, key);
     }
-    // MSBuild treats the path-derived properties as reserved; even
-    // command-line `-p:MSBuildProjectName=...` errors out with MSB4177.
-    // Mirror that strictness, since silently honouring the override
-    // would make every `$(MSBuildProjectName)` reference (and friends)
-    // resolve against the caller's value instead of the actual path.
-    let reserved = properties::well_known(project_path);
-    let mut reserved_lower: std::collections::HashSet<String> = reserved
-        .canonical_keys()
-        .map(|k| k.to_ascii_lowercase())
-        .collect();
-    // The toolset names the evaluator seeds at SDK resolution are just as
-    // reserved as the path-derived ones (`dotnet msbuild
-    // -p:MSBuildToolsVersion=Foo` errors); accepting them would let a
-    // caller global redirect the SDK's own
-    // `$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\…` imports.
-    for name in [
-        "msbuildtoolspath",
-        "msbuildbinpath",
-        "msbuildtoolsversion",
-        "msbuildruntimetype",
-        // The ChangeWaves threshold property: MSBuild derives it from
-        // the MSBUILDDISABLEFEATURESFROMVERSION environment variable
-        // and rejects both project writes and property injection
-        // ("property is reserved, and cannot be modified").
-        "msbuilddisablefeaturesfromversion",
-        // The working directory of the build process (`-p:` of it is
-        // MSB4177). An evaluation of a process the caller launches supplies
-        // it as such, through `parse_fsproj_probed`'s `startup_directory`.
-        "msbuildstartupdirectory",
-    ] {
-        reserved_lower.insert(name.to_string());
-    }
-    for key in extra_properties.keys() {
-        if reserved_lower.contains(&key.to_ascii_lowercase()) {
+    // MSBuild refuses a global property whose name is not a valid property
+    // name, or is reserved (`MSB4177` from the command line), and evaluates
+    // nothing. Honouring such a key would commit a value the real build never
+    // has: the caller's in place of the path-derived `MSBuildProjectName`, or
+    // of the seeded `MSBuildAssemblyVersion`. `tests/reserved_global_diff.rs`
+    // holds this verdict to MSBuild's, name for name. Sorted, so that which
+    // key the error names does not depend on the map's iteration order.
+    let mut keys: Vec<&String> = extra_properties.keys().collect();
+    keys.sort();
+    for key in keys {
+        if !evaluator::is_valid_name(key) {
+            return Err(ParseError::InvalidPropertyNameInExtras(key.clone()));
+        }
+        if evaluator::is_msbuild_reserved_name(key) {
             return Err(ParseError::ReservedPropertyInExtras(key.clone()));
         }
     }

@@ -92,6 +92,7 @@ pub(crate) use directory_build::DirectoryBuildFile;
 mod item_pass;
 mod item_spec;
 mod loader;
+pub(crate) use loader::is_valid_name;
 pub(crate) mod property_reads;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod reads;
@@ -4938,10 +4939,16 @@ fn startup_directory_seed(observer: &Observer, dir: &Path) -> Option<Escaped> {
     Some(Escaped::from_xml(physical.to_str()?))
 }
 
-/// The names MSBuild treats as *reserved*, transcribed from
-/// `ReservedPropertyNames.ReservedProperties` (dotnet/msbuild
-/// `src/Build/Resources/Constants.cs`; the set is built with
-/// `MSBuildNameIgnoreCaseComparer`, hence the lowercase match).
+/// The names MSBuild treats as *reserved*, as MSBuild spells them: the one
+/// statement of the set in this crate, transcribed from
+/// `ReservedPropertyNames` (dotnet/msbuild `src/Build/ReservedPropertyNames.cs`,
+/// matched with `MSBuildNameIgnoreCaseComparer`). `tests/reserved_global_diff.rs`
+/// holds it to the installed MSBuild's own table, read by reflection, in both
+/// directions.
+///
+/// MSBuild refuses a reserved name as a global property
+/// (`ArgumentException`; MSB4177 from the command line), so
+/// `validate_inputs` rejects a caller's extra property of one.
 ///
 /// `Utilities.GetEnvironmentProperties` filters the environment against this
 /// whole set — `!ReservedPropertyNames.IsReservedProperty(name)` — so a
@@ -4955,35 +4962,42 @@ fn startup_directory_seed(observer: &Observer, dir: &Path) -> Option<Escaped> {
 /// `MSBuildSDKsPath`, `MSBuildFrameworkToolsRoot`, `LocalAppData`,
 /// `VisualStudioVersion` — MSBuild deliberately keeps these overridable from
 /// the environment.
-pub(crate) fn is_msbuild_reserved_name(lower: &str) -> bool {
-    matches!(
-        lower,
-        "msbuildprojectdirectory"
-            | "msbuildprojectdirectorynoroot"
-            | "msbuildprojectfile"
-            | "msbuildprojectextension"
-            | "msbuildprojectfullpath"
-            | "msbuildprojectname"
-            | "msbuildthisfiledirectory"
-            | "msbuildthisfiledirectorynoroot"
-            | "msbuildthisfile"
-            | "msbuildthisfileextension"
-            | "msbuildthisfilefullpath"
-            | "msbuildthisfilename"
-            | "msbuildbinpath"
-            | "msbuildprojectdefaulttargets"
-            | "msbuildtoolspath"
-            | "msbuildtoolsversion"
-            | "msbuildruntimetype"
-            | "msbuildstartupdirectory"
-            | "msbuildnodecount"
-            | "msbuildlasttaskresult"
-            | "msbuildprogramfiles32"
-            | "msbuildassemblyversion"
-            | "msbuildversion"
-            | "msbuildinteractive"
-            | "msbuilddisablefeaturesfromversion"
-    )
+pub(crate) const MSBUILD_RESERVED_NAMES: [&str; 25] = [
+    "MSBuildProjectDirectory",
+    "MSBuildProjectDirectoryNoRoot",
+    "MSBuildProjectFile",
+    "MSBuildProjectExtension",
+    "MSBuildProjectFullPath",
+    "MSBuildProjectName",
+    "MSBuildThisFileDirectory",
+    "MSBuildThisFileDirectoryNoRoot",
+    "MSBuildThisFile",
+    "MSBuildThisFileExtension",
+    "MSBuildThisFileFullPath",
+    "MSBuildThisFileName",
+    "MSBuildBinPath",
+    "MSBuildProjectDefaultTargets",
+    "MSBuildToolsPath",
+    "MSBuildToolsVersion",
+    "MSBuildRuntimeType",
+    "MSBuildStartupDirectory",
+    "MSBuildNodeCount",
+    "MSBuildLastTaskResult",
+    "MSBuildProgramFiles32",
+    "MSBuildAssemblyVersion",
+    "MSBuildVersion",
+    "MSBuildInteractive",
+    "MSBuildDisableFeaturesFromVersion",
+];
+
+/// Whether `name` is one of [`MSBUILD_RESERVED_NAMES`], compared as MSBuild
+/// compares property names (`OrdinalIgnoreCase`, which for these ASCII names
+/// folds ASCII letters only: `ı` and `ſ` are not `i` and `s` to it, and are
+/// not valid in a property name anyway).
+pub(crate) fn is_msbuild_reserved_name(name: &str) -> bool {
+    MSBUILD_RESERVED_NAMES
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 
 /// The `MSBUILDDISABLEFEATURESFROMVERSION` variable's value, looked up the way

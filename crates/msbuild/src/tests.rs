@@ -2276,6 +2276,61 @@ fn startup_directory_in_extras_is_rejected() {
 }
 
 #[test]
+fn every_reserved_name_in_extras_is_rejected_in_any_case() {
+    // MSBuild refuses each of its reserved names as a global, in any ASCII
+    // casing (`tests/reserved_global_diff.rs` holds the whole verdict to
+    // MSBuild's). `MSBuildAssemblyVersion` among them, which the walk seeds.
+    for reserved in crate::evaluator::MSBUILD_RESERVED_NAMES {
+        for name in [
+            reserved.to_string(),
+            reserved.to_ascii_lowercase(),
+            reserved.to_ascii_uppercase(),
+        ] {
+            let extras = HashMap::from([(name.clone(), "x".to_string())]);
+            let err = parse_fsproj(
+                "<Project/>",
+                Path::new("/repo/Demo.fsproj"),
+                &extras,
+                &HashMap::new(),
+            )
+            .expect_err("a reserved name is not a global property");
+            assert!(
+                matches!(&err, crate::ParseError::ReservedPropertyInExtras(n) if *n == name),
+                "{name}: got {err:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_invalid_property_name_in_extras_is_rejected() {
+    // MSBuild refuses a global whose name is not a valid element name.
+    for name in [
+        "",
+        "1abc",
+        "-x",
+        "a b",
+        "a.b",
+        "a;b",
+        "$(x)",
+        "MSBu\u{131}ldVersion",
+    ] {
+        let extras = HashMap::from([(name.to_string(), "x".to_string())]);
+        let err = parse_fsproj(
+            "<Project/>",
+            Path::new("/repo/Demo.fsproj"),
+            &extras,
+            &HashMap::new(),
+        )
+        .expect_err("an invalid name is not a global property");
+        assert!(
+            matches!(&err, crate::ParseError::InvalidPropertyNameInExtras(n) if n == name),
+            "{name:?}: got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn get_directory_name_of_file_above_is_unsupported_in_pure_parse() {
     // The pure `parse_fsproj` contract promises no filesystem access, and
     // `GetDirectoryNameOfFileAbove` is a filesystem probe — in this mode
