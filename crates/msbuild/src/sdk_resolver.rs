@@ -394,19 +394,9 @@ pub fn locate_dotnet_sdk(
                 .iter()
                 .position(|v| v == version)
                 .expect("selection returns a candidate from the slice");
-            // NuGet's resolver serves this directory whether or not it
-            // exists, so its absence fails the import rather than letting
-            // another root answer.
-            let sdk_root = nuget_candidates[idx].1.clone();
-            let Some(root) = sdk_directory(sdk_root.clone(), observer)? else {
-                return Err(SdkResolveError::UnsupportedLayout {
-                    reason: format!(
-                        "NuGet serves the SDK directory {}, which does not exist",
-                        sdk_root.display()
-                    ),
-                });
-            };
-            Some((version, root))
+            // Judged only if it wins below: an installed SDK that serves the
+            // name is used ahead of NuGet's copy, whatever state that is in.
+            Some((version, nuget_candidates[idx].1.clone()))
         }
         None => None,
     };
@@ -422,10 +412,11 @@ pub fn locate_dotnet_sdk(
             if d >= n {
                 dotnet_root
             } else {
-                nuget_root
+                nuget_served(nuget_root, observer)?
             }
         }
-        (Some((_, root)), None) | (None, Some((_, root))) => root,
+        (Some((_, root)), None) => root,
+        (None, Some((_, root))) => nuget_served(root, observer)?,
         (None, None) => {
             // Both roots produced no candidate. We get here in four
             // sub-cases:
@@ -525,6 +516,21 @@ fn sdk_directory(
         }
     }
     Ok(Some(sdk_root))
+}
+
+/// The directory NuGet's resolver serves, `sdk_root`, judged as
+/// [`sdk_directory`] judges it. NuGet serves it whether or not it exists, so
+/// its absence fails the import rather than letting another root answer.
+fn nuget_served(sdk_root: PathBuf, observer: &Observer) -> Result<PathBuf, SdkResolveError> {
+    match sdk_directory(sdk_root.clone(), observer)? {
+        Some(root) => Ok(root),
+        None => Err(SdkResolveError::UnsupportedLayout {
+            reason: format!(
+                "NuGet serves the SDK directory {}, which does not exist",
+                sdk_root.display()
+            ),
+        }),
+    }
 }
 
 /// The restored versions of the package `sdk_name` in

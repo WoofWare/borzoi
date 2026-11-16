@@ -263,6 +263,28 @@ fn a_linked_sdk_directory_is_served() {
 }
 
 #[test]
+fn a_broken_nuget_copy_the_installed_sdk_outranks_is_not_judged() {
+    // MSBuild serves the installed SDK's copy ahead of NuGet's (measured,
+    // #914), so the state of the NuGet copy cannot change the answer.
+    let dotnet = TempDir::new().unwrap();
+    let nuget = TempDir::new().unwrap();
+    let installed = install_sdk(dotnet.path(), "10.0.401", "Microsoft.NET.Sdk");
+    let version = nuget.path().join("microsoft.net.sdk").join("10.0.401");
+    fs::create_dir_all(&version).unwrap();
+    fs::write(version.join(".nupkg.metadata"), "{}").unwrap();
+    let paths = locate_dotnet_sdk(
+        dotnet.path(),
+        Some(nuget.path()),
+        "Microsoft.NET.Sdk/10.0.401",
+        None,
+        None,
+        &Observer::new(),
+    )
+    .unwrap();
+    assert_eq!(paths.root, installed);
+}
+
+#[test]
 fn a_relative_nuget_folder_declines_a_pinned_name() {
     // NuGet's `File.Exists` of a restore marker takes a relative folder
     // against a working directory we cannot see.
