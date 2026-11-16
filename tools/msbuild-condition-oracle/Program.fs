@@ -48,7 +48,8 @@
 ///     `<PackageReference>` `Include`+`Update` collapse — identity matching and
 ///     per-key metadata merge — against the real evaluator, resident.
 ///
-///   {"op":"project","xml":s,"names":[..],"globals":{name:value, ..}?}
+///   {"op":"project","xml":s,"names":[..],"globals":{name:value, ..}?,
+///    "designTime":true?}
 ///     -> {"ok":true,"values":{name:value, ..}}  // MSBuild evaluated the project
 ///      | {"ok":false}                           // MSBuild rejects the project
 ///     The caller's project XML is evaluated *verbatim*, so both sides read the
@@ -56,7 +57,8 @@
 ///     between sentinels, and is therefore blind to the XML layer that runs
 ///     before expansion (insignificant whitespace, entity decoding, CDATA,
 ///     comment-split text) — this op is what lets a differential see that
-///     layer at all.
+///     layer at all. It evaluates as a build does; `"designTime":true` asks
+///     for the evaluation a design-time host loads instead (`Evaluation`).
 ///
 ///   {"op":"restoreCone","project":s,"globals":{name:value, ..}}
 ///     -> {"ok":true,"succeeded":b,"errors":[..],"msbuildDirectory":s,
@@ -124,6 +126,10 @@
 /// `dotnet` resolves from the working directory (`registerMSBuild`).
 /// A second optional pair, `--sdks-path <dir>`, last on the line, points MSBuild's
 /// default SDK resolver at `<dir>` (`splitSdksPath`).
+///
+/// `project`, `items` and `itemsMeta` evaluate as a build does, through a
+/// `ProjectInstance`; `Evaluation` has how that differs from the editable
+/// `Project` a design-time host loads.
 ///
 /// `globals` — on `project` and `items` — is MSBuild's **global property** set:
 /// the `-p:` command line, and what an IDE-style consumer injects. It is not a
@@ -328,6 +334,50 @@ let private respondExpand (root: JsonElement) : string =
     | Some value -> JsonSerializer.Serialize {| ok = true; value = value |}
     | None -> JsonSerializer.Serialize {| ok = false |}
 
+/// The evaluation `project`, `items` and `itemsMeta` answer from.
+///
+/// `Build` is a `ProjectInstance`, the evaluation a build runs on: `dotnet
+/// build`, `dotnet restore` and `dotnet msbuild -t:…` evaluate through
+/// `BuildManager`, which builds one. Every differential grades against it
+/// unless it asks for the other.
+///
+/// `DesignTime` is the editable `Project`, the evaluation a design-time host
+/// (Visual Studio's project system) loads, and the one `dotnet msbuild
+/// -getProperty:` builds when it runs no target. It differs from a build in
+/// two ways:
+///
+/// - it evaluates an `<ItemGroup>`'s items and their metadata whatever the
+///   item's or the group's condition holds, to keep `ItemsIgnoringCondition`,
+///   so an illegal condition on an item under a false `<ItemGroup>` rejects
+///   the project, which a build evaluates without reading it (probed: `dotnet
+///   msbuild -getProperty:` rejects such a project, `dotnet msbuild -t:` on
+///   it builds);
+/// - in this process it refuses a global named `MSBuildSDKsPath` ("is a
+///   global property, and cannot be modified": `ProjectProperty` refuses a
+///   non-global property of a global's name), which a build, and `dotnet
+///   msbuild -p:`, accept.
+///
+/// Where both evaluate a document, they agree on every property and item the
+/// differentials read (every `project`, `items` and `itemsMeta` request of
+/// the crate's suite was run through both).
+type private Evaluation =
+    | Build
+    | DesignTime
+
+/// `globals` as MSBuild's global property set: `null` reads as none.
+let private globalTable
+    (globals: Collections.Generic.IDictionary<string, string>)
+    : Collections.Generic.IDictionary<string, string> =
+    match globals with
+    | null -> Collections.Generic.Dictionary<string, string>() :> Collections.Generic.IDictionary<_, _>
+    | globals -> globals
+
+/// Write `xml` to `path`, creating its directory, so the evaluation loads it
+/// as that file.
+let private writeProject (path: string) (xml: string) =
+    Directory.CreateDirectory(Path.GetDirectoryName path: string) |> ignore
+    File.WriteAllText(path, xml)
+
 /// Evaluate a *whole project* — the caller's XML verbatim, byte for byte, so
 /// both sides see the same document — and read back the named properties.
 /// `Some map` is what MSBuild computed; `None` when it rejects the project.
@@ -350,36 +400,48 @@ let private respondExpand (root: JsonElement) : string =
 /// because it came from the project's own directory name.
 ///
 /// `globals` is MSBuild's global property set (`null` for none), handed to the
-/// `Project` constructor rather than written into the document: a global is
-/// read-only to the body it evaluates, which is precisely the behaviour a
-/// property-group write could not reproduce.
+/// evaluation rather than written into the document: a global is read-only to
+/// the body it evaluates, which is precisely the behaviour a property-group
+/// write could not reproduce.
 let private evalProject
+    (evaluation: Evaluation)
     (path: string option)
     (xml: string)
     (names: string seq)
     (globals: Collections.Generic.IDictionary<string, string>)
     : Map<string, string> option =
     use collection = new ProjectCollection()
+    let globals = globalTable globals
 
-    let project =
+    let read =
         try
-            match path with
-            | Some path ->
-                Directory.CreateDirectory(Path.GetDirectoryName path: string) |> ignore
-                File.WriteAllText(path, xml)
-                Some(Project(path, globals, null, collection))
-            | None ->
+            match evaluation, path with
+            | Build, Some path ->
+                writeProject path xml
+                let instance = ProjectInstance(path, globals, null, collection)
+                Some(fun (name: string) -> instance.GetPropertyValue name)
+            | DesignTime, Some path ->
+                writeProject path xml
+                let project = Project(path, globals, null, collection)
+                Some(fun (name: string) -> project.GetPropertyValue name)
+            | evaluation, None ->
+                // Create the root *in the throwaway collection*, so disposing
+                // it releases both the root and the evaluation.
                 use reader = projectReader xml
                 let root = Microsoft.Build.Construction.ProjectRootElement.Create(reader, collection)
-                Some(Project(root, globals, null, collection))
+
+                match evaluation with
+                | Build ->
+                    let instance = ProjectInstance(root, globals, null, collection)
+                    Some(fun (name: string) -> instance.GetPropertyValue name)
+                | DesignTime ->
+                    let project = Project(root, globals, null, collection)
+                    Some(fun (name: string) -> project.GetPropertyValue name)
         with :? InvalidProjectFileException ->
             None
 
-    project
-    |> Option.map (fun project ->
-        names
-        |> Seq.map (fun name -> (name, project.GetPropertyValue name))
-        |> Map.ofSeq)
+    read
+    |> Option.map (fun read -> names |> Seq.map (fun name -> (name, read name)) |> Map.ofSeq)
 
 /// The `project` op's item-side twin: evaluate the document *as a file at
 /// `path`* and read back the `FullPath` of every `itemType` item, in evaluation
@@ -393,11 +455,10 @@ let private evalItems
     use collection = new ProjectCollection()
 
     try
-        Directory.CreateDirectory(Path.GetDirectoryName path: string) |> ignore
-        File.WriteAllText(path, xml)
-        let project = Project(path, globals, null, collection)
+        writeProject path xml
+        let instance = ProjectInstance(path, globalTable globals, null, collection)
 
-        project.GetItems itemType
+        instance.GetItems itemType
         |> Seq.map (fun item -> item.GetMetadataValue "FullPath")
         |> List.ofSeq
         |> Some
@@ -428,30 +489,12 @@ let private respondItems (root: JsonElement) : string =
     | Some items -> JsonSerializer.Serialize {| ok = true; items = items |}
     | None -> JsonSerializer.Serialize {| ok = false |}
 
-/// An item's include as MSBuild holds it, still escaped (`a%2Ex` where
-/// `EvaluatedInclude` reads `a.x`): the spelling every expansion of the item
-/// list and every metadata derivation starts from. MSBuild keeps it internal
-/// (`EvaluatedIncludeEscaped`, implementing `IItem`'s), so it is read by
-/// reflection. Lazily: `Microsoft.Build` must not load before
-/// `MSBuildLocator` has registered the SDK's copy.
-let private evaluatedIncludeEscapedProperty =
-    lazy
-        (let flags =
-            Reflection.BindingFlags.Instance
-            ||| Reflection.BindingFlags.Public
-            ||| Reflection.BindingFlags.NonPublic
-
-         typeof<ProjectItem>.GetProperties flags
-         |> Array.tryFind (fun p -> p.Name.EndsWith "EvaluatedIncludeEscaped")
-         |> Option.defaultWith (fun () -> failwith "ProjectItem has no EvaluatedIncludeEscaped"))
-
-let private evaluatedIncludeEscaped (item: ProjectItem) : string =
-    evaluatedIncludeEscapedProperty.Value.GetValue item :?> string
-
 /// The `items` op enriched for dependency items: each item's `EvaluatedInclude`
-/// (the identity `Update`/`Remove` match against), its escaped spelling, and
-/// the requested metadata's evaluated values, in evaluation order. `None` when
-/// MSBuild rejects the project.
+/// (the identity `Update`/`Remove` match against), its escaped spelling (`a%2Ex`
+/// where `EvaluatedInclude` reads `a.x`: the spelling every expansion of the
+/// item list and every metadata derivation starts from), and the requested
+/// metadata's evaluated values, in evaluation order. `None` when MSBuild
+/// rejects the project.
 let private evalItemsMeta
     (path: string)
     (xml: string)
@@ -461,18 +504,19 @@ let private evalItemsMeta
     use collection = new ProjectCollection()
 
     try
-        Directory.CreateDirectory(Path.GetDirectoryName path: string) |> ignore
-        File.WriteAllText(path, xml)
-        let project = Project(path, null, null, collection)
+        writeProject path xml
 
-        project.GetItems itemType
+        let instance =
+            ProjectInstance(path, Collections.Generic.Dictionary<string, string>(), null, collection)
+
+        instance.GetItems itemType
         |> Seq.map (fun item ->
             let values =
                 metadata
                 |> List.map (fun name -> (name, item.GetMetadataValue name))
                 |> Map.ofList
 
-            (item.EvaluatedInclude, evaluatedIncludeEscaped item, values))
+            (item.EvaluatedInclude, (item :> Microsoft.Build.Framework.ITaskItem2).EvaluatedIncludeEscaped, values))
         |> List.ofSeq
         |> Some
     with :? InvalidProjectFileException ->
@@ -513,7 +557,12 @@ let private respondProject (root: JsonElement) : string =
         |> Seq.map (fun n -> n.GetString())
         |> Seq.toArray
 
-    match evalProject path xml names (readGlobals root) with
+    let evaluation =
+        match root.TryGetProperty "designTime" with
+        | true, d when d.ValueKind = JsonValueKind.True -> DesignTime
+        | _ -> Build
+
+    match evalProject evaluation path xml names (readGlobals root) with
     | Some values ->
         JsonSerializer.Serialize
             {| ok = true
@@ -526,11 +575,9 @@ let private respondProject (root: JsonElement) : string =
 /// element name, each before evaluating anything, so the document is empty.
 ///
 /// The evaluation is a `ProjectInstance`, as a build's is (`dotnet msbuild`
-/// evaluates through `BuildManager`), not the editable `Project` the `project`
-/// op builds. The two differ here: `Project` also refuses a global named after
-/// a property its toolset defines (`MSBuildSDKsPath`, which `-p:` sets
-/// freely), because its evaluation will not write a toolset property over a
-/// global.
+/// evaluates through `BuildManager`), and as the `project` op's is
+/// (`Evaluation`): the editable `Project` also refuses a global named
+/// `MSBuildSDKsPath` in this process, which `-p:` sets freely.
 let private respondGlobalName (root: JsonElement) : string =
     let name = root.GetProperty("name").GetString()
     use collection = new ProjectCollection()

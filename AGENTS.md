@@ -100,8 +100,14 @@ This is a Cargo workspace with ten members:
   generative sweep cannot afford). `project` and `items` also carry the
   evaluation's **global properties** — the `-p:` set, which is *not* a
   property-group write: it is read-only to the document, outranking every write
-  of that name unless `TreatAsLocalProperty` opts out. The five differentials
-  that ride on these ops:
+  of that name unless `TreatAsLocalProperty` opts out. Both evaluate as a build
+  does (a `ProjectInstance`, as `dotnet build` and `dotnet restore` do), so a
+  toolset name such as `MSBuildSDKsPath` is a global like any other. The
+  editable `Project` a design-time host loads (`"designTime": true` on
+  `project`) also evaluates the items under a false gate, so it rejects every
+  project a build rejects and more; the walk's rejection model is its rule, and
+  `where_msbuild_evaluates_a_condition` pins where the two differ. The five
+  differentials that ride on these ops:
   `condition_diff.rs`, `property_expr_diff.rs`,
   `fsproj_property_table_diff.rs`,
   `fsproj_item_escape_generative_diff.rs` (item specs over an escape-bearing
@@ -120,10 +126,14 @@ This is a Cargo workspace with ten members:
   turns it back into an ordinary certain-implies-exact violation; no new
   contract was needed, only a harness that varies what the others hold fixed.
   It runs the corner list of routes (gates, `<Choose>` arms, property-selected
-  imports, `TreatAsLocalProperty`), a generated sweep, the Compile item set, and
-  the **real SDK chain**, and prints a movement census — how many values MSBuild
-  moves across the sweep, and for each whether we tracked it, declined it as
-  untrusted, or never reached it. Read that census before investing in a
+  imports, `TreatAsLocalProperty`, toolset names as globals), a generated
+  sweep, the Compile item set, and the **real SDK chain**, and prints a movement
+  census — how many values MSBuild moves across the sweep, and for each whether
+  we tracked it, declined it as untrusted, or never reached it. Every point is
+  also evaluated by MSBuild started from three directories (one oracle child
+  each) and by the walk with no startup directory, where nothing the directory
+  moves may be committed, and with each, where every commit must be MSBuild's
+  from there; the census counts those points too. Read that census before investing in a
   "depends on a caller-supplied global" provenance dimension: today the
   evaluator is sound on this axis and pays for it in declines
   (`OutDir`/`OutputPath`/`DefineConstants` are untrusted under every global set

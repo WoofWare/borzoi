@@ -69,6 +69,35 @@
 //! wrongness, which is the input to deciding whether the provenance model needs
 //! a "depends on a caller-supplied global" dimension at all.
 //!
+//! ## The startup directory
+//!
+//! MSBuild also reads the directory its process started in, as
+//! `MSBuildStartupDirectory`, and our walk takes it as an input only where it
+//! models a process the caller launches (`test_support::parse_fsproj_reads`'s
+//! `startup_directory`, the restore cone's A₁ path). So every point of the
+//! sweep is evaluated by MSBuild started from each of [`startups`]'s
+//! directories, one oracle child each, and by our walk in both of its modes:
+//!
+//! - **Served** (no startup directory, as every evaluation the LSP serves
+//!   runs): what we commit must equal MSBuild's value from *every* directory,
+//!   so nothing the startup directory moves may be committed.
+//! - **Supplied** (`Some(d)`): what we commit must equal MSBuild's value when
+//!   started from `d`.
+//!
+//! The census counts the `(case, name, globals)` points where the startup
+//! directory moves MSBuild's value, how many of them the supplied mode tracks
+//! (commits two or more distinct values for), and how the served mode declines
+//! each (untrusted, or never reached).
+//!
+//! ## The evaluation graded
+//!
+//! MSBuild is the oracle's `project` and `items` ops, which evaluate as a build
+//! does (a `ProjectInstance`). That is what lets the sweep vary toolset names
+//! as globals (`MSBuildSDKsPath`, `MSBuildExtensionsPath`,
+//! `MSBuildUserExtensionsPath`): the editable `Project` a design-time host
+//! loads refuses a global `MSBuildSDKsPath` in the oracle's process, where
+//! `-p:` on a build sets it.
+//!
 //! ## What it does not reach
 //!
 //! Unlike a self-perturbation oracle, this one has a reference that reads
@@ -87,14 +116,20 @@
 //! - **Whatever the global sweep in [`global_sets`] does not vary.** A value
 //!   that depends on, say, `RuntimeIdentifier` is a fixed fact as far as this
 //!   file is concerned.
+//! - **The three startup directories.** Their spellings are plain; the value
+//!   domain (a space, `;`, `%20`, `$`) is `startup_directory_diff`'s.
+
+#![cfg(unix)]
 
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::common::parse_fsproj_with_imports;
-use borzoi_msbuild::{resolve_sdk, workloads};
+use borzoi_msbuild::observed::host_fs;
+use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
+use borzoi_msbuild::{ParsedProject, resolve_sdk, workloads};
 use common::{Oracle, SplitMix64};
 use tempfile::TempDir;
 
@@ -122,9 +157,15 @@ struct Case {
     /// an expectation I reasoned out is exactly as untrustworthy as the code I
     /// reasoned out.
     pins: &'static [(&'static str, &'static str)],
+    /// Names **MSBuild** must move between [`startups`]'s directories under
+    /// [`PIN_GLOBALS`]: the case's claim to take a route from the startup
+    /// directory, checked like [`Case::pins`].
+    startup_moves: &'static [&'static str],
 }
 
 /// The global set the [`Case::pins`] are stated under: what the LSP injects.
+/// The pins are read from MSBuild started in the first of [`startups`]'s
+/// directories.
 const PIN_GLOBALS: &[(&str, &str)] = &[("Configuration", "Debug"), ("Platform", "AnyCPU")];
 
 const IMPORT_SETS_OUT: &str =
@@ -140,6 +181,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <PropertyGroup>\n    <Out>$(Configuration)</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", "Debug")],
+        startup_moves: &[],
     },
     // The SDK's own idiom, written against a name the sweep actually supplies
     // (`<Configuration Condition="'$(Configuration)' == ''">…`). This is the
@@ -155,6 +197,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <PropertyGroup>\n    <Configuration Condition=\"'$(Configuration)' == ''\">DefaultedInDocument</Configuration>\n    <Out>[$(Configuration)]-[$(Platform)]</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", "[Debug]-[AnyCPU]"), ("Configuration", "Debug")],
+        startup_moves: &[],
     },
     // A gate on the *group*, so the walk must decide whether to visit the writes
     // at all — the shape a property-walk that only inspects visited groups gets
@@ -164,6 +207,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <PropertyGroup Condition=\"'$(Configuration)' == 'Release'\">\n    <Out>optimised</Out>\n  </PropertyGroup>\n  <PropertyGroup Condition=\"'$(Configuration)' != 'Release'\">\n    <Out>plain</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", "plain")],
+        startup_moves: &[],
     },
     // A gate on the individual write.
     Case {
@@ -171,6 +215,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <PropertyGroup>\n    <Out Condition=\"'$(Platform)' == 'x64'\">wide</Out>\n    <Out Condition=\"'$(Platform)' != 'x64'\">narrow</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", "narrow")],
+        startup_moves: &[],
     },
     // `<Choose>`: the unselected arm is never walked, so a value can depend on a
     // global through a branch the property walk does not visit.
@@ -179,6 +224,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <Choose>\n    <When Condition=\"'$(Platform)' == 'x64'\">\n      <PropertyGroup><Out>wide</Out></PropertyGroup>\n    </When>\n    <Otherwise>\n      <PropertyGroup><Out>narrow</Out></PropertyGroup>\n    </Otherwise>\n  </Choose>\n</Project>\n",
         files: &[],
         pins: &[("Out", "narrow")],
+        startup_moves: &[],
     },
     // Nested arms, and a `When` whose selection depends on a *different* global
     // from the outer one.
@@ -187,6 +233,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <Choose>\n    <When Condition=\"'$(Configuration)' == 'Release'\">\n      <Choose>\n        <When Condition=\"'$(Platform)' == 'x64'\">\n          <PropertyGroup><Out>rel-x64</Out></PropertyGroup>\n        </When>\n        <Otherwise>\n          <PropertyGroup><Out>rel-other</Out></PropertyGroup>\n        </Otherwise>\n      </Choose>\n    </When>\n    <Otherwise>\n      <PropertyGroup><Out>dbg</Out></PropertyGroup>\n    </Otherwise>\n  </Choose>\n</Project>\n",
         files: &[],
         pins: &[("Out", "dbg")],
+        startup_moves: &[],
     },
     // A `When` with no `Otherwise`, so with the arm unselected the later
     // default-write decides.
@@ -195,6 +242,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <Choose>\n    <When Condition=\"'$(Platform)' == 'x64'\">\n      <PropertyGroup><Out>wide</Out></PropertyGroup>\n    </When>\n  </Choose>\n  <PropertyGroup>\n    <Out Condition=\"'$(Out)' == ''\">narrow</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", "narrow")],
+        startup_moves: &[],
     },
     // A global outranks a document write of the same name. Committing
     // `FromDocument` here would be a wrong commit under every non-empty
@@ -204,6 +252,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <PropertyGroup>\n    <Configuration>FromDocument</Configuration>\n    <Out>$(Configuration)</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", "Debug"), ("Configuration", "Debug")],
+        startup_moves: &[],
     },
     // …unless the entry project opts out, which flips the answer.
     Case {
@@ -211,6 +260,7 @@ const CASES: &[Case] = &[
         xml: "<Project TreatAsLocalProperty=\"Configuration\">\n  <PropertyGroup>\n    <Configuration>FromDocument</Configuration>\n    <Out>$(Configuration)</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", "FromDocument"), ("Configuration", "FromDocument")],
+        startup_moves: &[],
     },
     // `TreatAsLocalProperty` on an *imported* root also opts the name out — the
     // unprotection is not confined to the entry project, so a write in the
@@ -225,6 +275,7 @@ const CASES: &[Case] = &[
             "<Project TreatAsLocalProperty=\"Configuration\">\n  <PropertyGroup><Configuration>FromImport</Configuration></PropertyGroup>\n</Project>\n",
         )],
         pins: &[("Out", "FromImport"), ("Configuration", "FromImport")],
+        startup_moves: &[],
     },
     // A gated import: which *document* arrives depends on a global.
     Case {
@@ -232,6 +283,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <Import Project=\"rel.props\" Condition=\"'$(Configuration)' == 'Release'\" />\n  <PropertyGroup>\n    <Out Condition=\"'$(Out)' == ''\">default</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[("rel.props", IMPORT_SETS_OUT)],
         pins: &[("Out", "default")],
+        startup_moves: &[],
     },
     // A *property-selected* import: the same, but through the `Project`
     // attribute's expansion rather than a `Condition`.
@@ -249,6 +301,7 @@ const CASES: &[Case] = &[
             ),
         ],
         pins: &[("Out", "debug-import")],
+        startup_moves: &[],
     },
     // Laundered through a helper property, so the dependence is one hop away
     // from the read.
@@ -257,6 +310,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <PropertyGroup>\n    <Helper>$(Configuration)-x</Helper>\n    <Out>[$(Helper)]</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", "[Debug-x]"), ("Helper", "Debug-x")],
+        startup_moves: &[],
     },
     // The dependence runs through a property *function* on the global, not a
     // comparison. The `!= ''` guard is load-bearing: a method call on an unset
@@ -268,6 +322,7 @@ const CASES: &[Case] = &[
         xml: "<Project>\n  <PropertyGroup>\n    <Out Condition=\"'$(Configuration)' != '' AND $(Configuration.StartsWith('Rel'))\">release-ish</Out>\n    <Out Condition=\"'$(Out)' == ''\">other</Out>\n  </PropertyGroup>\n</Project>\n",
         files: &[],
         pins: &[("Out", "other")],
+        startup_moves: &[],
     },
     // A global the entry document never names — only a file it imports does. So
     // "which globals can move this project's answers" is not readable off the
@@ -284,8 +339,144 @@ const CASES: &[Case] = &[
             "<Project><PropertyGroup><Out>[$(BorzoiProbe)]</Out></PropertyGroup></Project>\n",
         )],
         pins: &[("Out", "[]")],
+        startup_moves: &[],
+    },
+    // The startup directory gating a write, alone and beside a global. Only
+    // `start-b` and `start-c` (through `start-link`) hold a `startup.props`.
+    Case {
+        name: "startup-gate",
+        xml: "<Project>\n  <PropertyGroup>\n    <Out Condition=\"Exists('$(MSBuildStartupDirectory)/startup.props') and '$(Configuration)' == 'Release'\">beside-props-release</Out>\n    <Out Condition=\"'$(Out)' == '' and Exists('$(MSBuildStartupDirectory)/startup.props')\">beside-props</Out>\n    <Out Condition=\"'$(Out)' == ''\">elsewhere</Out>\n  </PropertyGroup>\n</Project>\n",
+        files: &[],
+        pins: &[("Out", "elsewhere")],
+        startup_moves: &["Out"],
+    },
+    // A `<Choose>` arm selected by the startup directory, through a property
+    // function on it and through `Exists`, one arm reading a global.
+    Case {
+        name: "startup-choose",
+        xml: "<Project>\n  <Choose>\n    <When Condition=\"$(MSBuildStartupDirectory.EndsWith('start-b'))\">\n      <PropertyGroup><Out>chose-b</Out></PropertyGroup>\n    </When>\n    <When Condition=\"Exists('$(MSBuildStartupDirectory)/startup.props')\">\n      <PropertyGroup><Out>chose-props-$(Platform)</Out></PropertyGroup>\n    </When>\n    <Otherwise>\n      <PropertyGroup><Out>chose-none</Out></PropertyGroup>\n    </Otherwise>\n  </Choose>\n</Project>\n",
+        files: &[],
+        pins: &[("Out", "chose-none")],
+        startup_moves: &["Out"],
+    },
+    // An import whose path is built from the startup directory: which
+    // document arrives depends on where MSBuild started. What it writes is
+    // read directly, not through the self-default idiom (`<Out
+    // Condition="'$(Out)' == ''">`), which the walk commits after an import
+    // it could not decide by design (`State::self_default_absence_is_a_fact`).
+    Case {
+        name: "startup-selected-import",
+        xml: "<Project>\n  <Import Project=\"$(MSBuildStartupDirectory)/startup.props\" Condition=\"Exists('$(MSBuildStartupDirectory)/startup.props')\" />\n  <PropertyGroup>\n    <Helper>[$(Out)]|$(Configuration)</Helper>\n  </PropertyGroup>\n</Project>\n",
+        files: &[],
+        pins: &[("Out", ""), ("Helper", "[]|Debug")],
+        startup_moves: &["Out", "Helper"],
+    },
+    // The startup directory read directly, laundered through a helper beside a
+    // global.
+    Case {
+        name: "startup-read",
+        xml: "<Project>\n  <PropertyGroup>\n    <Helper>$(MSBuildStartupDirectory)</Helper>\n    <Out>[$(Helper)]-$(Configuration)</Out>\n  </PropertyGroup>\n</Project>\n",
+        files: &[],
+        pins: &[],
+        startup_moves: &["Out", "Helper"],
+    },
+    // Toolset names a caller may set as globals: read directly, and steering
+    // an import through `MSBuildUserExtensionsPath`, whose swept value holds a
+    // `borzoi.props` ([`global_sets`]). `MSBuildUserExtensionsPath` is not read
+    // into a body: unset, it is the host's computed value, stored with a `\`
+    // that MSBuild's Unix path fixup rewrites on expansion, and the walk does
+    // not model the fixup of a stored value (the deferred provenance dimension
+    // of `docs/msbuild-unix-path-fixup-plan.md`).
+    Case {
+        name: "toolset-global-read",
+        xml: "<Project>\n  <PropertyGroup>\n    <Out>[$(MSBuildSDKsPath)]</Out>\n    <Helper>[$(MSBuildExtensionsPath)]</Helper>\n  </PropertyGroup>\n</Project>\n",
+        files: &[],
+        pins: &[],
+        startup_moves: &[],
+    },
+    Case {
+        name: "toolset-global-import",
+        xml: "<Project>\n  <Import Project=\"$(MSBuildUserExtensionsPath)/borzoi.props\" Condition=\"Exists('$(MSBuildUserExtensionsPath)/borzoi.props')\" />\n  <PropertyGroup>\n    <Out Condition=\"'$(Out)' == ''\">no-user-extension</Out>\n  </PropertyGroup>\n</Project>\n",
+        files: &[],
+        pins: &[("Out", "no-user-extension")],
+        startup_moves: &[],
     },
 ];
+
+/// What `start-b`'s and `start-c`'s `startup.props` write.
+const STARTUP_PROPS: &[(&str, &str)] = &[
+    (
+        "start-b",
+        "<Project><PropertyGroup><Out>from-start-b</Out></PropertyGroup></Project>\n",
+    ),
+    (
+        "start-c",
+        "<Project><PropertyGroup><Out>from-start-c</Out></PropertyGroup></Project>\n",
+    ),
+];
+
+/// One directory MSBuild is started from, and the oracle child running there.
+struct Startup {
+    /// Names the directory in failure messages.
+    label: &'static str,
+    /// The child's working directory, and our side's `startup_directory`.
+    /// `start-link` is a symlink, which both sides resolve.
+    dir: PathBuf,
+    oracle: Oracle,
+}
+
+/// The startup directories, under `root` (the canonical parent of every
+/// case's directory), each with an oracle child started in it: `root` itself,
+/// `start-b`, and `start-link`, a symlink to `start-c`. MSBuild fixes the
+/// value once per process, so one child per directory serves the whole test.
+fn startups(root: &Path) -> Vec<Startup> {
+    for (name, contents) in STARTUP_PROPS {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("startup.props"), contents).unwrap();
+    }
+    let link = root.join("start-link");
+    std::os::unix::fs::symlink(root.join("start-c"), &link).unwrap();
+    [
+        ("root", root.to_path_buf()),
+        ("start-b", root.join("start-b")),
+        ("start-link", link),
+    ]
+    .into_iter()
+    .map(|(label, dir)| Startup {
+        label,
+        oracle: Oracle::spawn_in_dir(&dir),
+        dir,
+    })
+    .collect()
+}
+
+/// A fresh, canonical root for one test's cases and startup directories:
+/// MSBuild reports the physical directory it started in, so every path both
+/// sides compare must be the physical one.
+fn canonical_root(tmp: &TempDir) -> PathBuf {
+    host_fs::canonicalize(tmp.path()).unwrap()
+}
+
+/// The `MSBuildUserExtensionsPath` [`global_sets`] supplies, holding a
+/// `borzoi.props` that writes `Out`, and the `ImportBefore` file an SDK
+/// project's `Microsoft.Common.props` imports from it.
+fn write_user_extensions(root: &Path) {
+    let dir = root.join("user-extensions");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("borzoi.props"),
+        "<Project><PropertyGroup><Out>from-user-extensions</Out></PropertyGroup></Project>\n",
+    )
+    .unwrap();
+    let before = dir.join("Current/Imports/Microsoft.Common.props/ImportBefore");
+    std::fs::create_dir_all(&before).unwrap();
+    std::fs::write(
+        before.join("borzoi.props"),
+        "<Project><PropertyGroup><SeenUserExtension>yes</SeenUserExtension></PropertyGroup></Project>\n",
+    )
+    .unwrap();
+}
 
 /// The global sets swept. Every set is a plausible caller: `dotnet build -c
 /// Release`, an IDE's guess, a `-p:` override.
@@ -293,13 +484,17 @@ const CASES: &[Case] = &[
 /// The empty set and the LSP's own injection are both present because the
 /// difference between them is exactly the risk being measured — everything else
 /// in this crate only ever evaluates the first.
-fn global_sets() -> Vec<Vec<(String, String)>> {
+///
+/// `root` is the test's canonical root: the toolset sets name directories
+/// under it.
+fn global_sets(root: &Path) -> Vec<Vec<(String, String)>> {
     let g = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
         pairs
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
     };
+    let under = |name: &str| root.join(name).to_str().unwrap().to_owned();
     vec![
         // No globals: the baseline every other harness in this crate uses.
         g(&[]),
@@ -327,22 +522,74 @@ fn global_sets() -> Vec<Vec<(String, String)>> {
             ("Platform", "AnyCPU"),
             ("TargetFramework", "net10.0"),
         ]),
+        // Toolset names as globals, which `-p:` on a build sets over the
+        // toolset's own values. `MSBuildSDKsPath` and `MSBuildExtensionsPath`
+        // name directories that do not exist, so an SDK project's own imports
+        // through them fail; `MSBuildUserExtensionsPath` names one holding an
+        // `ImportBefore` file ([`write_user_extensions`]).
+        vec![("MSBuildSDKsPath".to_owned(), under("no-sdks"))],
+        vec![("MSBuildExtensionsPath".to_owned(), under("no-extensions"))],
+        vec![(
+            "MSBuildUserExtensionsPath".to_owned(),
+            under("user-extensions"),
+        )],
     ]
 }
 
-/// Evaluate `dir/Demo.fsproj` under `globals`, both sides.
-///
-/// Returns our [`OurSide`] outcome for every read-back name, and MSBuild's value
-/// for each — `None` when MSBuild rejects the document, which the contract turns
-/// into "we must have committed nothing".
+/// One point of the sweep: a document under one global set, evaluated by our
+/// walk served (no startup directory) and supplied with each of the
+/// [`startups`], and by MSBuild started from each — `None` where MSBuild
+/// rejects the document, which the contract turns into "we must have committed
+/// nothing".
+struct Point {
+    served: OurSide,
+    /// Per startup directory, in [`startups`]'s order.
+    supplied: Vec<OurSide>,
+    /// Per startup directory, in [`startups`]'s order.
+    theirs: Vec<Option<HashMap<String, String>>>,
+}
+
+/// Assert certain-implies-exact for one of our evaluations against one of
+/// MSBuild's.
+fn assert_exact(
+    ours: &OurSide,
+    theirs: Option<&HashMap<String, String>>,
+    what: &str,
+    globals: &[(String, String)],
+    xml: &str,
+) {
+    let Some(theirs) = theirs else {
+        assert!(
+            ours.committed.is_empty(),
+            "certain-implies-exact violated: MSBuild {what} rejects this project under \
+             globals {globals:?}, but we committed {:?}\n--- xml ---\n{xml}",
+            ours.committed
+        );
+        return;
+    };
+    for (name, our_value) in &ours.committed {
+        let their_value = theirs
+            .get(name)
+            .expect("oracle answers for every requested name");
+        assert_eq!(
+            our_value, their_value,
+            "certain-implies-exact violated for ${{{name}}} under globals {globals:?}, \
+             MSBuild {what}: we evaluate it to {our_value:?}, MSBuild to \
+             {their_value:?}\n--- xml ---\n{xml}"
+        );
+    }
+}
+
+/// Evaluate `dir/Demo.fsproj` under `globals`, both sides, in every mode, and
+/// assert the contract at each pairing.
 fn evaluate_both(
-    oracle: &mut Oracle,
+    startups: &mut [Startup],
     dir: &Path,
     xml: &str,
     globals: &[(String, String)],
     read_names: &[&str],
     with_sdk: bool,
-) -> (OurSide, Option<HashMap<String, String>>) {
+) -> Point {
     let project_path = dir.join("Demo.fsproj");
     let extra: HashMap<String, String> = globals.iter().cloned().collect();
 
@@ -367,22 +614,71 @@ fn evaluate_both(
             observer,
         )
     };
+    let sdk_resolver = with_sdk.then_some(&resolver as &borzoi_msbuild::SdkResolver<'_>);
 
     // `parse_fsproj_with_imports` rather than `parse_fsproj`: it is the entry
     // point the LSP itself calls, and half the routes above run through an
     // `<Import>`.
-    let parsed = parse_fsproj_with_imports(
+    let served = parse_fsproj_with_imports(
         xml,
         &project_path,
         &extra,
         &common::oracle_environment(),
-        with_sdk.then_some(&resolver as &borzoi_msbuild::SdkResolver<'_>),
+        sdk_resolver,
         None,
     )
     .expect("well-formed XML parses");
+    let served = our_side(&served, read_names);
 
-    // Per name, as in `fsproj_property_table_diff`: an untrusted provenance
-    // withdraws that name's claim without withdrawing its neighbours'.
+    let names: Vec<String> = read_names.iter().map(|n| (*n).to_string()).collect();
+    let mut supplied = Vec::new();
+    let mut theirs = Vec::new();
+    for startup in startups.iter_mut() {
+        let (parsed, _) = parse_fsproj_reads(
+            xml,
+            &project_path,
+            &extra,
+            &common::oracle_environment(),
+            sdk_resolver,
+            None,
+            Some(&startup.dir),
+            &ReadProbe::default(),
+        )
+        .expect("well-formed XML parses");
+        let ours = our_side(&parsed, read_names);
+        let answer = startup
+            .oracle
+            .project(xml, &names, Some(&project_path), globals);
+        let what = format!("started in {}", startup.label);
+        assert_exact(
+            &served,
+            answer.as_ref(),
+            &format!("{what} (ours served, with no startup directory)"),
+            globals,
+            xml,
+        );
+        assert_exact(
+            &ours,
+            answer.as_ref(),
+            &format!("{what} (ours supplied with it)"),
+            globals,
+            xml,
+        );
+        supplied.push(ours);
+        theirs.push(answer);
+    }
+    Point {
+        served,
+        supplied,
+        theirs,
+    }
+}
+
+/// Our side of one evaluation, per read-back name.
+///
+/// Per name, as in `fsproj_property_table_diff`: an untrusted provenance
+/// withdraws that name's claim without withdrawing its neighbours'.
+fn our_side(parsed: &ParsedProject, read_names: &[&str]) -> OurSide {
     let mut ours = OurSide::default();
     for name in read_names {
         match parsed.properties.get(*name) {
@@ -397,19 +693,7 @@ fn evaluate_both(
             }
         }
     }
-
-    let names: Vec<String> = read_names.iter().map(|n| (*n).to_string()).collect();
-    let theirs = oracle.project(xml, &names, Some(&project_path), globals);
-
-    if theirs.is_none() {
-        assert!(
-            ours.committed.is_empty(),
-            "certain-implies-exact violated: MSBuild rejects this project under \
-             globals {globals:?}, but we committed {:?}\n--- xml ---\n{xml}",
-            ours.committed
-        );
-    }
-    (ours, theirs)
+    ours
 }
 
 /// One evaluation's outcome on our side, split three ways.
@@ -432,17 +716,26 @@ struct OurSide {
 /// There is deliberately no "frozen" row — a name we committed the *same* value
 /// for under two global sets that MSBuild disagreed about. That is the defect
 /// this file exists to catch, and it cannot reach the census: the per-set
-/// exactness assertion in [`sweep_case`] fires on the second set first.
+/// exactness assertion in [`evaluate_both`] fires on the second set first.
 #[derive(Default)]
 struct CaseCensus {
-    /// `(name, globals index)` pairs we committed a value for.
+    /// `(name, globals index)` pairs we committed a value for, served.
     committed: usize,
+    /// Global sets under which MSBuild, started in the first startup
+    /// directory, evaluates the document rather than rejecting it.
+    evaluated_sets: usize,
+    /// The global names of each set it rejects the document under.
+    rejected_under: Vec<String>,
     /// Per name: how many global sets we committed under, and how many distinct
     /// values each side produced across the sweep.
     by_name: BTreeMap<String, NameCensus>,
 }
 
 /// One name's behaviour across the sweep.
+///
+/// The global-axis fields compare our served evaluation with MSBuild started
+/// in the first startup directory; the `startup_` fields hold the global set
+/// fixed and vary the startup directory.
 struct NameCensus {
     /// Global sets we committed a value under, of [`global_sets`]'s length.
     committed_sets: usize,
@@ -459,6 +752,21 @@ struct NameCensus {
     /// Distinct values MSBuild produced. `>= 2` is what "this name depends on a
     /// caller-supplied global" means, stated by the reference rather than by us.
     their_values: usize,
+    /// Global sets under which MSBuild's value moves between the startup
+    /// directories: the `(name, globals)` points that depend on the startup
+    /// directory.
+    startup_moving_sets: usize,
+    /// Of those, the sets where our supplied evaluations committed two or more
+    /// distinct values: tracked, so the exactness check was exercised on the
+    /// startup axis.
+    startup_tracked_sets: usize,
+    /// Of those, the sets where our served evaluation held the name untrusted.
+    startup_served_untrusted_sets: usize,
+    /// Of those, the sets where our served evaluation never reached the name.
+    /// With `startup_served_untrusted_sets` it covers every moving set: a
+    /// served commit there fails [`evaluate_both`]'s exactness check against
+    /// one of the directories.
+    startup_served_absent_sets: usize,
 }
 
 /// The property names some global set in [`global_sets`] assigns.
@@ -469,15 +777,67 @@ struct NameCensus {
 /// complement. (Left in the census's *report*, though: whether a document write
 /// of one of these names wins is precisely the `TreatAsLocalProperty` question.)
 fn swept_global_names() -> BTreeSet<String> {
-    global_sets()
+    global_sets(Path::new("/"))
         .into_iter()
         .flatten()
         .map(|(name, _)| name)
         .collect()
 }
 
+/// The startup axis's census, summed over cases.
+#[derive(Default, Debug)]
+struct StartupCensus {
+    /// `(case, name, globals)` points where the startup directory moves
+    /// MSBuild's value.
+    moving: usize,
+    /// Of those, the points our supplied evaluations track.
+    tracked: usize,
+    /// Of those, the points our served evaluation declines as untrusted.
+    served_untrusted: usize,
+    /// Of those, the points our served evaluation never reaches.
+    served_absent: usize,
+}
+
+impl StartupCensus {
+    fn add(&mut self, case: &CaseCensus) {
+        for c in case.by_name.values() {
+            self.moving += c.startup_moving_sets;
+            self.tracked += c.startup_tracked_sets;
+            self.served_untrusted += c.startup_served_untrusted_sets;
+            self.served_absent += c.startup_served_absent_sets;
+        }
+    }
+
+    fn report(&self, what: &str) {
+        eprintln!(
+            "{what}, startup axis: {} (case, name, globals) points move between the {} \
+             startup directories; supplied, we track {} and decline {}; served, we \
+             decline all of them ({} untrusted, {} never reached)",
+            self.moving,
+            STARTUP_DIRECTORIES,
+            self.tracked,
+            self.moving - self.tracked,
+            self.served_untrusted,
+            self.served_absent,
+        );
+        assert_eq!(
+            self.served_untrusted + self.served_absent,
+            self.moving,
+            "a served commit of a startup-dependent value passed the exactness check"
+        );
+    }
+}
+
+/// How many directories [`startups`] lays out.
+const STARTUP_DIRECTORIES: usize = 3;
+
+/// The startup-axis floors: points the supplied mode must track in the corner
+/// list and in the generated sweep.
+const STARTUP_TRACKED_FLOOR_ROUTES: usize = 60;
+const STARTUP_TRACKED_FLOOR_SWEEP: usize = 250;
+
 impl CaseCensus {
-    /// Names MSBuild moves across the sweep — the global-dependent ones.
+    /// Names MSBuild moves across the global sweep — the global-dependent ones.
     fn moving_in_msbuild(&self) -> impl Iterator<Item = (&String, &NameCensus)> {
         self.by_name.iter().filter(|(_, c)| c.their_values >= 2)
     }
@@ -522,116 +882,171 @@ impl CaseCensus {
         self.derived_moving() - self.derived_tracked()
     }
 
-    /// One entry per global-dependent name, for the report: how many distinct
-    /// values MSBuild produced, and what we did — committed (with how many
+    /// One entry per name that depends on a global or on the startup
+    /// directory, for the report: how many distinct values MSBuild produced
+    /// across the global sweep, and what we did — committed (with how many
     /// distinct values, over how many global sets), declined as untrusted, or
-    /// never reached at all.
+    /// never reached at all — and, where the startup directory moves it, in how
+    /// many global sets it does, how many of those our supplied evaluations
+    /// track, and how our served one declines it.
     fn render(&self) -> String {
-        self.moving_in_msbuild()
+        self.by_name
+            .iter()
+            .filter(|(_, c)| c.their_values >= 2 || c.startup_moving_sets > 0)
             .map(|(name, c)| {
-                format!(
-                    "{name}(theirs {}; ours {} val in {} set, {} untrusted, {} absent)",
+                let mut entry = format!(
+                    "{name}(theirs {}; ours {} val in {} set, {} untrusted, {} absent",
                     c.their_values, c.our_values, c.committed_sets, c.untrusted_sets, c.absent_sets
-                )
+                );
+                if c.startup_moving_sets > 0 {
+                    entry.push_str(&format!(
+                        "; startup moves it in {} set, supplied tracks {}, served {} \
+                         untrusted {} absent",
+                        c.startup_moving_sets,
+                        c.startup_tracked_sets,
+                        c.startup_served_untrusted_sets,
+                        c.startup_served_absent_sets
+                    ));
+                }
+                entry.push(')');
+                entry
             })
             .collect::<Vec<_>>()
             .join(" ")
     }
 }
 
-/// Run one case over the whole global sweep, asserting the contract at every
-/// point and returning its census row.
+/// Run one case over the whole global sweep and every startup directory,
+/// asserting the contract at every point and returning its census row.
+#[allow(clippy::too_many_arguments)]
 fn sweep_case(
-    oracle: &mut Oracle,
+    startups: &mut [Startup],
+    root: &Path,
     dir: &Path,
     xml: &str,
     read_names: &[&str],
     pins: &[(&str, &str)],
+    startup_moves: &[&str],
     with_sdk: bool,
 ) -> CaseCensus {
     let project_path = dir.join("Demo.fsproj");
     std::fs::write(&project_path, xml).expect("write project");
 
-    let sets = global_sets();
-    let mut ours_by_set: Vec<OurSide> = Vec::new();
-    let mut theirs_by_set: Vec<Option<HashMap<String, String>>> = Vec::new();
+    let sets = global_sets(root);
+    let points: Vec<Point> = sets
+        .iter()
+        .map(|globals| evaluate_both(startups, dir, xml, globals, read_names, with_sdk))
+        .collect();
 
-    for globals in &sets {
-        let (ours, theirs) = evaluate_both(oracle, dir, xml, globals, read_names, with_sdk);
-        if let Some(theirs) = &theirs {
-            for (name, our_value) in &ours.committed {
-                let their_value = theirs
-                    .get(name)
-                    .expect("oracle answers for every requested name");
-                assert_eq!(
-                    our_value, their_value,
-                    "certain-implies-exact violated for ${{{name}}} under globals \
-                     {globals:?}: we evaluate it to {our_value:?}, MSBuild to \
-                     {their_value:?}\n--- xml ---\n{xml}"
-                );
-            }
-        }
-        ours_by_set.push(ours);
-        theirs_by_set.push(theirs);
-    }
-
-    // The case's own claim about what it demonstrates, checked against MSBuild
+    // The case's own claims about what it demonstrates, checked against MSBuild
     // under the globals the LSP injects. `PIN_GLOBALS` is one of the swept sets,
-    // so this costs no extra evaluation — it reads the answer already collected.
+    // so this costs no extra evaluation — it reads the answers already collected.
+    let pin_index = sets
+        .iter()
+        .position(|set| {
+            set.iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .eq(PIN_GLOBALS.iter().copied())
+        })
+        .expect("PIN_GLOBALS is one of the swept global sets");
+    let pinned = &points[pin_index];
     if !pins.is_empty() {
-        let pin_index = sets
-            .iter()
-            .position(|set| {
-                set.iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .eq(PIN_GLOBALS.iter().copied())
-            })
-            .expect("PIN_GLOBALS is one of the swept global sets");
-        let theirs = theirs_by_set[pin_index]
+        let theirs = pinned.theirs[0]
             .as_ref()
             .expect("MSBuild evaluates a pinned case under the LSP's own globals");
         for (name, want) in pins {
             assert_eq!(
                 theirs.get(*name).map(String::as_str),
                 Some(*want),
-                "the pinned MSBuild value for ${{{name}}} under {PIN_GLOBALS:?} is \
-                 wrong — this case does not demonstrate the route its comment \
-                 claims\n--- xml ---\n{xml}"
+                "the pinned MSBuild value for ${{{name}}} under {PIN_GLOBALS:?}, started in \
+                 {}, is wrong — this case does not demonstrate the route its comment \
+                 claims\n--- xml ---\n{xml}",
+                startups[0].label
             );
         }
     }
+    for name in startup_moves {
+        let seen: BTreeSet<Option<&String>> = pinned
+            .theirs
+            .iter()
+            .map(|t| {
+                t.as_ref()
+                    .expect("MSBuild evaluates a startup-routed case from every directory")
+                    .get(*name)
+            })
+            .collect();
+        assert!(
+            seen.len() >= 2,
+            "MSBuild reads ${{{name}}} the same from every startup directory under \
+             {PIN_GLOBALS:?} — this case does not take the route from the startup \
+             directory its comment claims\n--- xml ---\n{xml}"
+        );
+    }
 
     let mut census = CaseCensus::default();
-    for ours in &ours_by_set {
-        census.committed += ours.committed.len();
+    for (globals, point) in sets.iter().zip(&points) {
+        census.committed += point.served.committed.len();
+        if point.theirs[0].is_some() {
+            census.evaluated_sets += 1;
+        } else {
+            let names: Vec<&str> = globals.iter().map(|(name, _)| name.as_str()).collect();
+            census
+                .rejected_under
+                .push(format!("{{{}}}", names.join(",")));
+        }
     }
     for name in read_names {
-        let their_values: BTreeSet<&String> = theirs_by_set
+        let their_values: BTreeSet<&String> = points
             .iter()
-            .flatten()
+            .filter_map(|p| p.theirs[0].as_ref())
             .filter_map(|t| t.get(*name))
             .collect();
-        let our_values: BTreeSet<&String> = ours_by_set
+        let our_values: BTreeSet<&String> = points
             .iter()
-            .filter_map(|o| o.committed.get(*name))
+            .filter_map(|p| p.served.committed.get(*name))
             .collect();
+        let mut startup = (0, 0, 0, 0);
+        for point in &points {
+            let across: BTreeSet<&String> = point
+                .theirs
+                .iter()
+                .flatten()
+                .filter_map(|t| t.get(*name))
+                .collect();
+            if across.len() < 2 {
+                continue;
+            }
+            startup.0 += 1;
+            let ours: BTreeSet<&String> = point
+                .supplied
+                .iter()
+                .filter_map(|o| o.committed.get(*name))
+                .collect();
+            startup.1 += usize::from(ours.len() >= 2);
+            startup.2 += usize::from(point.served.untrusted.contains(*name));
+            startup.3 += usize::from(point.served.absent.contains(*name));
+        }
         census.by_name.insert(
             (*name).to_string(),
             NameCensus {
-                committed_sets: ours_by_set
+                committed_sets: points
                     .iter()
-                    .filter(|o| o.committed.contains_key(*name))
+                    .filter(|p| p.served.committed.contains_key(*name))
                     .count(),
-                untrusted_sets: ours_by_set
+                untrusted_sets: points
                     .iter()
-                    .filter(|o| o.untrusted.contains(*name))
+                    .filter(|p| p.served.untrusted.contains(*name))
                     .count(),
-                absent_sets: ours_by_set
+                absent_sets: points
                     .iter()
-                    .filter(|o| o.absent.contains(*name))
+                    .filter(|p| p.served.absent.contains(*name))
                     .count(),
                 our_values: our_values.len(),
                 their_values: their_values.len(),
+                startup_moving_sets: startup.0,
+                startup_tracked_sets: startup.1,
+                startup_served_untrusted_sets: startup.2,
+                startup_served_absent_sets: startup.3,
             },
         );
     }
@@ -639,33 +1054,48 @@ fn sweep_case(
 }
 
 /// The hand-written route list: every way a global was found to reach a
-/// committed value while the output-directory work was being attempted.
+/// committed value while the output-directory work was being attempted, and
+/// the routes from the startup directory.
 #[test]
 fn every_route_from_a_global_is_exact_or_declined() {
-    let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
+    let root = canonical_root(&tmp);
+    write_user_extensions(&root);
+    let mut startups = startups(&root);
 
     let mut committed = 0usize;
     let mut moving = 0usize;
     let mut tracked = 0usize;
     let mut declined = 0usize;
+    let mut startup = StartupCensus::default();
     for case in CASES {
-        let dir = tmp.path().join(case.name);
+        let dir = root.join(case.name);
         std::fs::create_dir_all(&dir).unwrap();
         for (name, contents) in case.files {
             std::fs::write(dir.join(name), contents).unwrap();
         }
-        let census = sweep_case(&mut oracle, &dir, case.xml, READ_NAMES, case.pins, false);
+        let census = sweep_case(
+            &mut startups,
+            &root,
+            &dir,
+            case.xml,
+            READ_NAMES,
+            case.pins,
+            case.startup_moves,
+            false,
+        );
         eprintln!(
-            "  {:<28} committed {:>3}  {}",
+            "  {:<28} committed {:>3}, MSBuild rejects under [{}]  {}",
             case.name,
             census.committed,
+            census.rejected_under.join(" "),
             census.render()
         );
         committed += census.committed;
         moving += census.derived_moving();
         tracked += census.derived_tracked();
         declined += census.declined();
+        startup.add(&census);
     }
 
     eprintln!(
@@ -673,8 +1103,9 @@ fn every_route_from_a_global_is_exact_or_declined() {
          (name, globals) pairs; {moving} (case, name) pairs move in MSBuild, of which \
          we track {tracked} and decline {declined}",
         CASES.len(),
-        global_sets().len(),
+        global_sets(&root).len(),
     );
+    startup.report("global-perturbation routes");
 
     // Anti-vacuity. A harness that declined everything would satisfy the
     // one-sided contract while measuring nothing, and so would one whose globals
@@ -695,15 +1126,27 @@ fn every_route_from_a_global_is_exact_or_declined() {
          — the exactness check is no longer being exercised on the global axis, so \
          this harness is passing vacuously"
     );
+    // The same floor on the startup axis: points where the supplied directory
+    // was committed under two or more distinct values.
+    assert!(
+        startup.tracked >= STARTUP_TRACKED_FLOOR_ROUTES,
+        "only {} (case, name, globals) points were both committed and \
+         startup-dependent — the exactness check is no longer being exercised on \
+         the startup axis",
+        startup.tracked
+    );
 }
 
 /// The item side. The Compile order is what the semantic layer folds over, so a
 /// global-gated `<Compile>` is a route from an editor-guessed global straight
-/// into which files exist as far as the LSP is concerned.
+/// into which files exist as far as the LSP is concerned, and a gate on the
+/// startup directory is one from where the process started.
 #[test]
 fn compile_items_are_exact_or_declined_under_every_global_set() {
-    let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
+    let root = canonical_root(&tmp);
+    write_user_extensions(&root);
+    let mut startups = startups(&root);
 
     // Literal includes only — globbing is a separate seam with its own
     // differential, and a resolver is not wired here.
@@ -724,81 +1167,137 @@ fn compile_items_are_exact_or_declined_under_every_global_set() {
             "remove-gated-on-global",
             "<Project>\n  <ItemGroup>\n    <Compile Include=\"Always.fs\" />\n    <Compile Include=\"DebugOnly.fs\" />\n    <Compile Remove=\"DebugOnly.fs\" Condition=\"'$(Configuration)' == 'Release'\" />\n  </ItemGroup>\n</Project>\n",
         ),
+        (
+            "startup-gated",
+            "<Project>\n  <ItemGroup>\n    <Compile Include=\"Started.fs\" Condition=\"Exists('$(MSBuildStartupDirectory)/startup.props')\" />\n    <Compile Include=\"Always.fs\" />\n    <Compile Include=\"ReleaseOnly.fs\" Condition=\"'$(Configuration)' == 'Release'\" />\n  </ItemGroup>\n</Project>\n",
+        ),
     ];
+    /// The documents whose Compile order must move between the startup
+    /// directories.
+    const STARTUP_ROUTED: &[&str] = &["startup-gated"];
 
-    let sets = global_sets();
+    // The walker yields each include joined onto the project's directory and
+    // MSBuild its `FullPath`, so compare the file names they resolve to.
+    let file_names = |paths: &mut dyn Iterator<Item = &Path>| -> Vec<String> {
+        paths
+            .map(|p| {
+                p.file_name()
+                    .expect("an item resolves to a file name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    };
+    // `None` when a diagnostic or an uncertain item set withdraws the claim.
+    let ours = |parsed: &ParsedProject| -> Option<Vec<String>> {
+        (parsed.diagnostics.is_empty() && !parsed.items_uncertain)
+            .then(|| file_names(&mut parsed.items.iter().map(|i| i.include.as_path())))
+    };
+
+    let sets = global_sets(&root);
     let mut committed = 0usize;
     let mut moving = 0usize;
+    let mut startup_moving = 0usize;
+    let mut startup_tracked = 0usize;
     for (name, xml) in documents {
-        let dir = tmp.path().join(name);
+        let dir = root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         let project_path = dir.join("Demo.fsproj");
         std::fs::write(&project_path, xml).unwrap();
 
         let mut theirs_by_set: BTreeSet<Vec<String>> = BTreeSet::new();
+        let mut moves_with_startup = false;
         for globals in &sets {
+            let extra: HashMap<String, String> = globals.iter().cloned().collect();
             let parsed = parse_fsproj_with_imports(
                 xml,
                 &project_path,
-                &globals.iter().cloned().collect(),
+                &extra,
                 &common::oracle_environment(),
                 None,
                 None,
             )
             .expect("well-formed XML parses");
+            let served = ours(&parsed);
+            committed += usize::from(served.is_some());
 
-            let theirs: Vec<String> = oracle
-                .items(xml, &project_path, "Compile", globals)
-                .expect("MSBuild evaluates these documents")
-                .iter()
-                // `FullPath` on both sides, spelled the same way: the walker
-                // yields the include relative to the project, so compare the
-                // file names it resolves to.
-                .map(|p| {
-                    Path::new(p)
-                        .file_name()
-                        .expect("an item resolves to a file name")
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect();
-            theirs_by_set.insert(theirs.clone());
-
-            // A diagnostic or an uncertain item set withdraws the claim.
-            if !parsed.diagnostics.is_empty() || parsed.items_uncertain {
-                continue;
+            let mut theirs_by_startup: BTreeSet<Vec<String>> = BTreeSet::new();
+            let mut supplied_by_startup: BTreeSet<Vec<String>> = BTreeSet::new();
+            for (index, startup) in startups.iter_mut().enumerate() {
+                let theirs = file_names(
+                    &mut startup
+                        .oracle
+                        .items(xml, &project_path, "Compile", globals)
+                        .expect("MSBuild evaluates these documents")
+                        .iter()
+                        .map(Path::new),
+                );
+                if index == 0 {
+                    theirs_by_set.insert(theirs.clone());
+                }
+                theirs_by_startup.insert(theirs.clone());
+                if let Some(served) = &served {
+                    assert_eq!(
+                        served, &theirs,
+                        "certain-implies-exact violated for the Compile order under globals \
+                         {globals:?}, served with no startup directory, against MSBuild \
+                         started in {}\n--- xml ---\n{xml}",
+                        startup.label
+                    );
+                }
+                let (parsed, _) = parse_fsproj_reads(
+                    xml,
+                    &project_path,
+                    &extra,
+                    &common::oracle_environment(),
+                    None,
+                    None,
+                    Some(&startup.dir),
+                    &ReadProbe::default(),
+                )
+                .expect("well-formed XML parses");
+                if let Some(supplied) = ours(&parsed) {
+                    assert_eq!(
+                        supplied, theirs,
+                        "certain-implies-exact violated for the Compile order under globals \
+                         {globals:?}, started in {}\n--- xml ---\n{xml}",
+                        startup.label
+                    );
+                    supplied_by_startup.insert(supplied);
+                }
             }
-            let ours: Vec<String> = parsed
-                .items
-                .iter()
-                .map(|i| {
-                    i.include
-                        .file_name()
-                        .expect("an item resolves to a file name")
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect();
-            assert_eq!(
-                ours, theirs,
-                "certain-implies-exact violated for the Compile order under globals \
-                 {globals:?}\n--- xml ---\n{xml}"
-            );
-            committed += 1;
+            if theirs_by_startup.len() >= 2 {
+                moves_with_startup = true;
+                startup_moving += 1;
+                startup_tracked += usize::from(supplied_by_startup.len() >= 2);
+            }
         }
         eprintln!(
-            "  {name:<28} MSBuild produces {} distinct Compile orders across {} global sets",
+            "  {name:<28} MSBuild produces {} distinct Compile orders across {} global sets{}",
             theirs_by_set.len(),
-            sets.len()
+            sets.len(),
+            if moves_with_startup {
+                ", and moves it between the startup directories"
+            } else {
+                ""
+            }
         );
         if theirs_by_set.len() >= 2 {
             moving += 1;
         }
+        assert_eq!(
+            moves_with_startup,
+            STARTUP_ROUTED.contains(name),
+            "{name}: whether MSBuild's Compile order moves between the startup \
+             directories is not what the document is written for"
+        );
     }
 
     eprintln!(
         "global-perturbation items: {committed} committed (document, globals) pairs; \
-         {moving} of {} documents change Compile order across the sweep",
+         {moving} of {} documents change Compile order across the sweep; the startup \
+         directory moves it at {startup_moving} (document, globals) points, of which \
+         we track {startup_tracked} with a directory supplied",
         documents.len()
     );
     assert!(
@@ -812,6 +1311,11 @@ fn compile_items_are_exact_or_declined_under_every_global_set() {
          must move across the sweep — if one stopped, it is no longer testing the \
          axis"
     );
+    assert_eq!(
+        startup_tracked, startup_moving,
+        "a Compile order the startup directory moves was declined with the directory \
+         supplied"
+    );
 }
 
 /// Fixed-seed sweep over generated documents that compose the routes above:
@@ -823,9 +1327,15 @@ fn compile_items_are_exact_or_declined_under_every_global_set() {
 /// for a machine here rather than another review round.
 #[test]
 fn fixed_seed_composed_documents_are_exact_or_declined() {
-    let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
+    let root = canonical_root(&tmp);
+    write_user_extensions(&root);
+    let mut startups = startups(&root);
     let mut rng = SplitMix64(0x91ba_10c0_ffee);
+    // The startup and toolset draws come from their own stream, and only for
+    // the documents after the first `CASES_N`, so the global population is
+    // the same with them as without.
+    let mut startup_rng = SplitMix64(0x57a7_0d1c);
 
     // Gates: some depend on a global, some do not, so a generated document may
     // be genuinely invariant — a sweep of only-dependent documents would never
@@ -852,19 +1362,49 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
         "$(BorzoiProbe)",
         "$(Configuration.Length)",
     ];
+    // Gates and bodies on the startup directory and the toolset names a global
+    // set supplies, which a document of the second population draws in place
+    // of a write's own gate half the time and its body a third of it. No
+    // body reads `MSBuildUserExtensionsPath`, and no import is selected by the
+    // startup directory: see the `toolset-global-read` and
+    // `startup-selected-import` cases for the two classes those would reach,
+    // which the walk does not model by design.
+    const STARTUP_GATES: &[&str] = &[
+        "Exists('$(MSBuildStartupDirectory)/startup.props')",
+        "!Exists('$(MSBuildStartupDirectory)/startup.props')",
+        "$(MSBuildStartupDirectory.EndsWith('start-b'))",
+        "Exists('$(MSBuildStartupDirectory)/startup.props') and '$(Configuration)' == 'Release'",
+        "Exists('$(MSBuildUserExtensionsPath)/borzoi.props')",
+    ];
+    const STARTUP_BODIES: &[&str] = &[
+        "$(MSBuildStartupDirectory)",
+        "$(MSBuildStartupDirectory)|$(Platform)",
+        "[$(MSBuildExtensionsPath)]",
+    ];
     const WRITTEN: &[&str] = &["Out", "Helper", "Configuration", "Platform"];
 
+    /// Documents of the global grammar alone.
     const CASES_N: usize = 250;
+    /// Documents after them that mix in the startup and toolset draws.
+    const STARTUP_CASES_N: usize = 150;
     let mut committed = 0usize;
     let mut moving = 0usize;
     let mut tracked = 0usize;
-    for case in 0..CASES_N {
+    let mut startup = StartupCensus::default();
+    for case in 0..CASES_N + STARTUP_CASES_N {
+        let mixed = case >= CASES_N;
         let writes = 1 + rng.below(4);
         let mut xml = String::from("<Project>\n  <PropertyGroup>\n");
         for _ in 0..writes {
             let name = rng.pick(WRITTEN);
-            let gate = rng.pick(GATES);
-            let body = rng.pick(BODIES);
+            let mut gate = *rng.pick(GATES);
+            let mut body = *rng.pick(BODIES);
+            if mixed && startup_rng.below(2) == 0 {
+                gate = *startup_rng.pick(STARTUP_GATES);
+            }
+            if mixed && startup_rng.below(3) == 0 {
+                body = *startup_rng.pick(STARTUP_BODIES);
+            }
             if gate.is_empty() {
                 xml.push_str(&format!("    <{name}>{body}</{name}>\n"));
             } else {
@@ -878,7 +1418,7 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
         }
         xml.push_str("  </PropertyGroup>\n</Project>\n");
 
-        let dir = tmp.path().join(format!("case{case}"));
+        let dir = root.join(format!("case{case}"));
         std::fs::create_dir_all(&dir).unwrap();
         // Some gates probe for it; half the cases have it, so `Exists(...)`
         // splits the population rather than being constant.
@@ -886,27 +1426,46 @@ fn fixed_seed_composed_documents_are_exact_or_declined() {
             std::fs::write(dir.join("rel.props"), IMPORT_SETS_OUT).unwrap();
         }
 
-        let census = sweep_case(&mut oracle, &dir, &xml, READ_NAMES, &[], false);
+        let census = sweep_case(
+            &mut startups,
+            &root,
+            &dir,
+            &xml,
+            READ_NAMES,
+            &[],
+            &[],
+            false,
+        );
         committed += census.committed;
         moving += census.derived_moving();
         tracked += census.derived_tracked();
+        startup.add(&census);
     }
 
     eprintln!(
-        "global-perturbation sweep: {CASES_N} generated documents × {} global sets — \
+        "global-perturbation sweep: {} generated documents × {} global sets — \
          {committed} committed (name, globals) pairs, {moving} (case, name) pairs \
          move in MSBuild, of which we track {tracked}",
-        global_sets().len()
+        CASES_N + STARTUP_CASES_N,
+        global_sets(&root).len()
     );
+    startup.report("global-perturbation sweep");
     assert!(
         committed >= 1000,
-        "too few committed (name, globals) pairs ({committed}) over {CASES_N} documents"
+        "too few committed (name, globals) pairs ({committed}) over {} documents",
+        CASES_N + STARTUP_CASES_N
     );
     assert!(
         tracked >= 100,
         "only {tracked} generated (case, name) pairs were both committed and \
          global-dependent — the generator has drifted away from the axis this sweep \
          exists to test"
+    );
+    assert!(
+        startup.tracked >= STARTUP_TRACKED_FLOOR_SWEEP,
+        "only {} generated (case, name, globals) points were both committed and \
+         startup-dependent — the generator has drifted away from the startup axis",
+        startup.tracked
     );
 }
 
@@ -941,7 +1500,7 @@ fn unset_reads_in_import_gates_are_exact_or_declined() {
 
     let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
-    let sets = global_sets();
+    let sets = global_sets(tmp.path());
     let mut must_commit_misses = Vec::new();
     let mut census: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut case = 0usize;
@@ -1107,10 +1666,15 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
         // case's copy.
         "SeenVisualStudioVersion",
         "PublishProfileName",
+        // What the swept `MSBuildUserExtensionsPath`'s `ImportBefore` file
+        // writes, through `Microsoft.Common.props`'s wildcard import.
+        "SeenUserExtension",
     ];
 
-    let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
+    let root = canonical_root(&tmp);
+    write_user_extensions(&root);
+    let mut startups = startups(&root);
 
     let cases: &[Case] = &[
         // The plain project: everything below comes from the SDK, not the
@@ -1120,6 +1684,7 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
             xml: "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
             files: &[],
             pins: &[],
+            startup_moves: &[],
         },
         // The user redirects output through `OutputPath`, interpolating the
         // configuration — the shape the blocked feature had to answer for.
@@ -1128,6 +1693,7 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
             xml: "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n    <OutputPath>artifacts/$(Configuration)/</OutputPath>\n  </PropertyGroup>\n</Project>\n",
             files: &[],
             pins: &[],
+            startup_moves: &[],
         },
         // …and through `BaseOutputPath`, which the SDK then composes with the
         // configuration itself.
@@ -1136,6 +1702,7 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
             xml: "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n    <BaseOutputPath>build/</BaseOutputPath>\n  </PropertyGroup>\n</Project>\n",
             files: &[],
             pins: &[],
+            startup_moves: &[],
         },
         // A `Directory.Build.props` above the project, itself gated on a global:
         // the file the walker must find *and* condition correctly.
@@ -1151,6 +1718,7 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
             // genuinely reached is asserted instead by the `BaseOutputPath`
             // movement floor below, which only this case can satisfy.
             pins: &[],
+            startup_moves: &[],
         },
         // The ASP.NET SDKs layer the Web, Razor and Publish SDKs over the
         // plain one. Their props read `TargetFramework` before the body defines
@@ -1162,12 +1730,14 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
             xml: "<Project Sdk=\"Microsoft.NET.Sdk.Web\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
             files: &[],
             pins: &[("PublishProfileName", "Default")],
+            startup_moves: &[],
         },
         Case {
             name: "sdk-worker",
             xml: "<Project Sdk=\"Microsoft.NET.Sdk.Worker\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
             files: &[],
             pins: &[("PublishProfileName", "Default")],
+            startup_moves: &[],
         },
         // The toolset's `VisualStudioVersion`, copied into a written property
         // so the table reports it.
@@ -1176,6 +1746,7 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
             xml: "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n    <SeenVisualStudioVersion>$(VisualStudioVersion)</SeenVisualStudioVersion>\n  </PropertyGroup>\n</Project>\n",
             files: &[],
             pins: &[],
+            startup_moves: &[],
         },
         // `DefineConstants` is a value the LSP feeds straight into the lexer's
         // `#if` handling, and the SDK derives it from the configuration.
@@ -1184,6 +1755,7 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
             xml: "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n    <DefineConstants>$(DefineConstants);MINE</DefineConstants>\n  </PropertyGroup>\n</Project>\n",
             files: &[],
             pins: &[],
+            startup_moves: &[],
         },
     ];
 
@@ -1191,30 +1763,43 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
     let mut moving = 0usize;
     let mut tracked = 0usize;
     let mut sidecar_route_live = false;
+    let mut startup = StartupCensus::default();
     for case in cases {
-        let dir = tmp.path().join(case.name);
+        let dir = root.join(case.name);
         std::fs::create_dir_all(&dir).unwrap();
         for (name, contents) in case.files {
             std::fs::write(dir.join(name), contents).unwrap();
         }
-        let census = sweep_case(&mut oracle, &dir, case.xml, SDK_NAMES, case.pins, true);
+        let census = sweep_case(
+            &mut startups,
+            &root,
+            &dir,
+            case.xml,
+            SDK_NAMES,
+            case.pins,
+            case.startup_moves,
+            true,
+        );
         eprintln!(
-            "  {:<28} committed {:>3}  {}",
+            "  {:<28} committed {:>3}, MSBuild rejects under [{}]  {}",
             case.name,
             census.committed,
+            census.rejected_under.join(" "),
             census.render()
         );
         committed += census.committed;
         moving += census.derived_moving();
         tracked += census.derived_tracked();
+        startup.add(&census);
         // `BaseOutputPath` moves only where a `Directory.Build.props` gated on
         // the configuration wrote it, so this is the named proof that the sidecar
         // was found and conditioned — the one SDK route whose liveness a
         // literal pin cannot state.
         // The ASP.NET import gates read these, so a decline anywhere in the
         // sweep leaves the project's import set undecided: each must commit
-        // under every global set (certain-implies-exact already holds the
-        // values to MSBuild).
+        // under every global set MSBuild evaluates the project under
+        // (certain-implies-exact already holds the values to MSBuild, and
+        // forbids a commit where it rejects the project).
         let must_commit: &[&str] = match case.name {
             "sdk-web" | "sdk-worker" => &["PublishProfileName"],
             "sdk-visual-studio-version" => &["SeenVisualStudioVersion"],
@@ -1224,11 +1809,10 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
             for &name in must_commit {
                 let committed_sets = census.by_name.get(name).map_or(0, |n| n.committed_sets);
                 assert_eq!(
-                    committed_sets,
-                    global_sets().len(),
-                    "{}: `{name}` committed under only {committed_sets} of {} global sets",
-                    case.name,
-                    global_sets().len()
+                    committed_sets, census.evaluated_sets,
+                    "{}: `{name}` committed under only {committed_sets} of the {} global \
+                     sets MSBuild evaluates the project under",
+                    case.name, census.evaluated_sets
                 );
             }
         }
@@ -1244,8 +1828,9 @@ fn sdk_chain_properties_are_exact_or_declined_under_every_global_set() {
          committed (name, globals) pairs; {moving} (case, name) pairs move in \
          MSBuild, of which we track {tracked}",
         cases.len(),
-        global_sets().len(),
+        global_sets(&root).len(),
     );
+    startup.report("global-perturbation SDK chain");
 
     // The floor here is on *MSBuild's* movement, deliberately — unlike the
     // synthetic tests, whose inputs we author. What our side commits over the
