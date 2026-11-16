@@ -11,7 +11,10 @@
 
 use borzoi_cst::syntax::{SyntaxToken, TextRange, fcs_ident_range};
 
-/// A token's range as FCS reports it. See the [module docs](self).
+/// A token's range as FCS reports it: the range every definition, use and
+/// decline sema records is keyed by. It is the token's own range except for
+/// the `*` of a glued `(*)` ([`fcs_ident_range`]); `clippy.toml` bans
+/// `text_range` in sema and the LSP so that no site keys that `*` apart.
 pub trait FcsRange {
     /// The range FCS gives this token: its own, except the `*` of a glued
     /// `(*)`, which spans the parentheses.
