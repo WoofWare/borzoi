@@ -65,6 +65,51 @@
 //!   follows them (probed), and listed under the link's name. A link back to
 //!   a directory already on the walk's path is a cycle, which declines
 //!   ([`GlobDecline::SymlinkCycle`]) rather than guess what MSBuild does.
+//! - A glob that selects a file found through a symbolic link to a
+//!   directory (a directory the walk entered through a link, or the walk's
+//!   root being one) declines ([`GlobDecline::SymlinkedDirectory`]). MSBuild's
+//!   `FileMatcher.GetFilesRecursive` lists nothing in a directory that is a
+//!   link whose final target contains it:
+//!   `IsSubdirectoryOf(dir, Directory.ResolveLinkTarget(dir, returnFinalTarget: true).FullName, FileUtilities.PathComparison)`
+//!   (probed on MSBuild 18.9: `src/*/*.fs` skips `src/link` linking to the
+//!   project directory, and `link/*.fs` with `link` linking to it is empty).
+//!   Three inputs decide that, and the walk observes none of them:
+//!   - the link's final target, which .NET resolves *lexically*: each hop's
+//!     text joined to the directory of the path so far, and `..` taking the
+//!     name written before it, link or not. The canonical target the walk
+//!     sees can name a different directory, so no comparison of canonical
+//!     paths decides the rule;
+//!   - the directory's path as the build spells it, every ancestor up to `/`
+//!     included, above the walk's root and above the project directory too,
+//!     where the build's own spelling of the project directory decides;
+//!   - the comparison, `Ordinal` or `OrdinalIgnoreCase` by whether MSBuild's
+//!     probe of `Path.GetTempPath()` finds the build's temp directory
+//!     case-sensitive, so a link to a case variant of an ancestor
+//!     (`/p/src/link -> /P`, or `é` for `É`) is walked by one build and
+//!     skipped by another on the same tree.
+//!
+//!   A glob that only walks through such a directory, selecting nothing
+//!   found there, commits: the rule moves nothing it lists. Whether the
+//!   walk's root is a link is asked of it as [`crate::GlobRequest::base_dir`]
+//!   spells it; a build that spells the project directory through a link
+//!   where `base_dir` has none is outside what the walk sees. Reading each
+//!   link's target (a query `observed` does not make) would let the resolver
+//!   follow the rule wherever the build's spelling of the project directory
+//!   is [`crate::GlobRequest::base_dir`]'s, declining only where the temp
+//!   directory decides.
+//! - **Known boundary: `MSBuildCacheFileEnumerations`.** With that environment
+//!   variable set (non-empty) in the build's process, the file matcher keeps
+//!   every expansion process-wide (`FileMatcher.s_cachedGlobExpansions`)
+//!   until the build manager clears its caches, keyed `OrdinalIgnoreCase` on
+//!   the project directory, the spec and its excludes, and asks the file
+//!   system nothing for a key it holds. Two specs that differ only in case
+//!   (`sub/*.fs`, then `SUB/*.fs`) then share whichever expansion the process
+//!   made first, its spelling included, on a case-sensitive file system as on
+//!   any other; and a file created after an expansion can be missing from
+//!   later ones. What a build process expanded before is state of the build
+//!   that no evaluation here can see, so this is not modelled: the resolver
+//!   answers as a build without the variable does, whose evaluation context
+//!   caches expansions keyed ordinally.
 //! - A literal include meets its excludes ignoring ASCII case on every host,
 //!   as MSBuild's `FileSpecMatcherTester` does.
 //! - A glob include meets them as MSBuild's file matcher does on Linux
@@ -74,6 +119,7 @@
 //!   case. It declines where the build's culture would decide, and on any
 //!   other host wherever ASCII case would (#607).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::observed::{self, EntryKind, Observer};
@@ -315,9 +361,12 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
                 .iter()
                 .filter(|e| e.excludes_from_globs())
                 .any(|e| e.unescape().contains('?'));
+        // The keys found through a link to a directory, by their spelling in
+        // `select`'s output, with the link.
+        let mut through_links: HashMap<String, String> = HashMap::new();
         let keys: Vec<String> = enumerate_files(&walk_root, depth, recursive, req.observer)?
             .into_iter()
-            .map(|rel| {
+            .map(|Walked { rel, through_link }| {
                 let shape = match unmodelled_shape(&rel) {
                     Some(Unmodelled::NonAscii) if !question && !rel.contains(FOLDED_ONTO_ASCII) => {
                         unmodelled_shape(&rel.replace(|c: char| !c.is_ascii(), "x"))
@@ -327,11 +376,15 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
                 if let Some(shape) = shape {
                     return Err(GlobDecline::OutsideModelledShape { spec: rel, shape });
                 }
-                Ok(if prefix.is_empty() {
+                let key = if prefix.is_empty() {
                     rel
                 } else {
                     format!("{prefix}/{rel}")
-                })
+                };
+                if let Some(link) = through_link {
+                    through_links.insert(split_segments(&key).join("/"), link);
+                }
+                Ok(key)
             })
             .collect::<Result<_, _>>()?;
         let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -371,6 +424,11 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
                 .collect();
             select(&key_refs, std::slice::from_ref(pat), &excludes)?
         };
+        // MSBuild may skip a directory these were found through, and would
+        // then list none of them.
+        if let Some(link) = selected.iter().find_map(|key| through_links.get(key)) {
+            return Err(GlobDecline::SymlinkedDirectory { path: link.clone() });
+        }
         for key in selected {
             out.push(Path::new("/").join(&key));
         }
@@ -675,22 +733,35 @@ fn abs_from_segments(prefix: &[String]) -> PathBuf {
     p
 }
 
-/// Recursively list files under `base`, returning their `/`-joined paths
-/// relative to `base`. A file at depth `d` (i.e. with `d` path segments)
-/// is included only when `d <= max_depth`. Symlinked files and directories
-/// are followed, as MSBuild follows them, and listed under the link's own
-/// name; unreadable directories are skipped. Declines where the walk would
-/// miss files MSBuild might see: a directory left unvisited at the depth
-/// bound of a `recursive` walk, or a symlink cycle (see the module's
-/// correctness envelope).
+/// A file [`enumerate_files`] found: its `/`-joined path relative to the walk
+/// root, and the symbolic link to a directory it was found through, if any
+/// (the walk root itself, or the outermost directory the walk entered through
+/// a link), which MSBuild may skip (see the module's correctness envelope).
+struct Walked {
+    rel: String,
+    through_link: Option<String>,
+}
+
+/// Recursively list files under `base`. A file at depth `d` (i.e. with `d`
+/// path segments) is included only when `d <= max_depth`. Symlinked files
+/// and directories are followed, as MSBuild follows them, and listed under
+/// the link's own name, each file with the link it was found through;
+/// unreadable directories are skipped. Declines where the walk would miss
+/// files MSBuild might see: a directory left unvisited at the depth bound of
+/// a `recursive` walk, or a symlink cycle (see the module's correctness
+/// envelope).
 fn enumerate_files(
     base: &Path,
     max_depth: usize,
     recursive: bool,
     observer: &Observer,
-) -> Result<Vec<String>, GlobDecline> {
+) -> Result<Vec<Walked>, GlobDecline> {
     let mut out = Vec::new();
     let mut ancestors: Vec<PathBuf> = observed::canonicalize(observer, base).into_iter().collect();
+    // MSBuild asks of the walk root too whether it is a link to a directory
+    // that contains it, so the root is a link the files may be found through.
+    let root_link = (observed::link_kind(observer, base) == Ok(EntryKind::Symlink))
+        .then(|| base.to_string_lossy().into_owned());
     let mut walk = Walk {
         max_depth,
         recursive,
@@ -698,7 +769,7 @@ fn enumerate_files(
         ancestors: &mut ancestors,
         out: &mut out,
     };
-    walk.dir(base, "", 0)?;
+    walk.dir(base, "", 0, root_link.as_deref())?;
     Ok(out)
 }
 
@@ -710,12 +781,19 @@ struct Walk<'a> {
     recursive: bool,
     observer: &'a Observer,
     ancestors: &'a mut Vec<PathBuf>,
-    out: &'a mut Vec<String>,
+    out: &'a mut Vec<Walked>,
 }
 
 impl Walk<'_> {
-    /// One directory of the walk.
-    fn dir(&mut self, dir: &Path, prefix: &str, depth: usize) -> Result<(), GlobDecline> {
+    /// One directory of the walk, reached through the link `through_link`
+    /// if any.
+    fn dir(
+        &mut self,
+        dir: &Path,
+        prefix: &str,
+        depth: usize,
+        through_link: Option<&str>,
+    ) -> Result<(), GlobDecline> {
         let (max_depth, recursive) = (self.max_depth, self.recursive);
         if depth >= max_depth {
             if recursive {
@@ -731,12 +809,12 @@ impl Walk<'_> {
         };
         for entry in entries.into_iter().flatten() {
             // The directory entry's own type does not follow symlinks; `kind` does.
-            let is_dir = match entry.kind {
-                Ok(EntryKind::File) => false,
-                Ok(EntryKind::Dir) => true,
+            let (is_dir, is_link) = match entry.kind {
+                Ok(EntryKind::File) => (false, false),
+                Ok(EntryKind::Dir) => (true, false),
                 Ok(EntryKind::Symlink) => match observed::kind(self.observer, &entry.path) {
-                    Ok(EntryKind::File) => false,
-                    Ok(EntryKind::Dir) => true,
+                    Ok(EntryKind::File) => (false, true),
+                    Ok(EntryKind::Dir) => (true, true),
                     _ => continue,
                 },
                 _ => continue,
@@ -748,7 +826,10 @@ impl Walk<'_> {
                 format!("{prefix}/{name}")
             };
             if !is_dir {
-                self.out.push(rel);
+                self.out.push(Walked {
+                    rel,
+                    through_link: through_link.map(str::to_string),
+                });
                 continue;
             }
             // Only a directory the walk will actually enter can close a cycle.
@@ -764,14 +845,19 @@ impl Walk<'_> {
                     path: path.to_string_lossy().into_owned(),
                 });
             }
+            let link = path.to_string_lossy();
+            let through_link = through_link.or(is_link.then_some(link.as_ref()));
             self.ancestors.push(canonical);
-            let walked = self.dir(&path, &rel, depth + 1);
+            let walked = self.dir(&path, &rel, depth + 1, through_link);
             self.ancestors.pop();
             walked?;
         }
         Ok(())
     }
 }
+
+#[cfg(all(test, unix))]
+mod symlink_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1510,23 +1596,6 @@ mod tests {
             ghost_passed >= 5,
             "ghost literals rarely passed through: {ghost_passed}/{n}"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_symlinked_directory_is_followed_under_the_links_name() {
-        // Probed (dotnet 10.0.301): MSBuild's `**` descends into a symlinked
-        // directory and reports its files under the link's path.
-        let ext = TempDir::new().unwrap();
-        fs::write(ext.path().join("hidden.fs"), b"// f\n").unwrap();
-        let tmp = TempDir::new().unwrap();
-        let base = tmp.path();
-        std::os::unix::fs::symlink(ext.path(), base.join("linkdir")).unwrap();
-        fs::write(base.join("a.fs"), b"// f\n").unwrap();
-        assert_eq!(run_rel(base, "**/*.fs", &[]), ["a.fs", "linkdir/hidden.fs"]);
-        assert_eq!(run_rel(base, "*/*.fs", &[]), ["linkdir/hidden.fs"]);
-        // An excluded link costs nothing.
-        assert_eq!(run_rel(base, "**/*.fs", &["linkdir/**"]), ["a.fs"]);
     }
 
     #[cfg(unix)]

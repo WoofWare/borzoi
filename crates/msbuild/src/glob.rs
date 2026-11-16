@@ -83,6 +83,14 @@ pub enum GlobDecline {
     /// The walk met a symbolic link back to a directory already on its path.
     /// What MSBuild does with a cycle is not modelled.
     SymlinkCycle { path: String },
+    /// The glob selects a file under `path`, a symbolic link to a directory:
+    /// the walk's root, or a directory the walk entered. MSBuild's file matcher
+    /// skips such a directory when the link's final target, resolved
+    /// lexically, contains the link's path as the build spells it, comparing
+    /// ordinally or ignoring case by whether the build's temp directory is
+    /// case-sensitive. None of the three is observed here (see
+    /// [`crate::glob_resolver`]'s correctness envelope).
+    SymlinkedDirectory { path: String },
     /// MSBuild's file matcher refuses the decoded filespec (see
     /// `FileMatcher.IsLegalFileSpec`): `a**b.fs`, a `..` after a wildcard, a `...`.
     /// It then falls back to a different reading per caller, which is not
@@ -130,6 +138,10 @@ impl std::fmt::Display for GlobDecline {
             GlobDecline::SymlinkCycle { path } => {
                 write!(f, "the symbolic link `{path}` closes a directory cycle")
             }
+            GlobDecline::SymlinkedDirectory { path } => write!(
+                f,
+                "a match lies under the symbolic link `{path}`, which MSBuild skips when its target contains it, by a rule that depends on the build's temp directory"
+            ),
             GlobDecline::IllegalFilespec { pattern } => write!(
                 f,
                 "MSBuild's file matcher refuses the pattern `{pattern}`, and its fallback is not modelled"
