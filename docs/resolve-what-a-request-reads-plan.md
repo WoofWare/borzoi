@@ -423,6 +423,21 @@ Every gate is unchanged.
 
 **Expected**: about −0.17 G on the cold fold.
 
+**As built.** `ImplicitSeed` holds the seed's entries, built once from the
+env with generation 0 and memoised on `AssemblyEnv`. Each block copies it in,
+stamped with its open generation, the one input it reads besides the env.
+The entry builders (`type_static_entries`, `implicit_union_case_entries`)
+are what `open type` and the seed share. The memo resets with the env's fold
+memos, which every `mark_*` mutator resets; the seed reads a mark through
+`implicit_union_cases`. The reference is the per-block computation
+(`implicit_seed_entries`): a debug build holds every block's copy to it, so
+every file sema's tests resolve checks it, against the real FSharp.Core env
+and every fixture env. That is in place of a generated env, whose generator
+would have to build auto-open modules in implicitly opened namespaces.
+`a_dropped_type_marked_after_a_fold_still_withholds_every_implicit_case`
+marks a dropped type after a fold has read the seed. Without the memo's reset
+it fails there, on the debug check.
+
 ### Stage 6b: the own-namespace fold, carried forward
 
 **Dependencies**: Stage 4, so that the carried state is the surface fold's.

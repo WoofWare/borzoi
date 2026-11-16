@@ -2262,3 +2262,31 @@ fn a_dropped_type_in_an_empty_implicit_namespace_withholds_every_implicit_case()
         );
     }
 }
+
+/// The implicit seed is built once per env and memoised on it, so a dropped
+/// type marked after a fold has read the seed must still withhold every
+/// implicitly opened case from the next fold.
+#[test]
+fn a_dropped_type_marked_after_a_fold_still_withholds_every_implicit_case() {
+    let fsharp_core = ensure_fsharp_core_dll();
+    let mut env = env_of(&[fsharp_core.as_path()]);
+    let src = "module UcDroppedLate\nlet a = Some 1\nlet f x = match x with Some y -> y | _ -> 0\n";
+    let before = resolve_project(&[impl_file(src, false)], &env);
+    assert!(
+        matches!(
+            before.file(0).resolution_at(probe_span(src, "Some", 0)),
+            Some(Resolution::UnionCase { .. })
+        ),
+        "`Some` commits before the mark, so the fold has read the seed"
+    );
+    env.mark_namespace_dropped_type(Vec::new());
+    let after = resolve_project(&[impl_file(src, false)], &env);
+    for nth in 0..2 {
+        let span = probe_span(src, "Some", nth);
+        let ours = after.file(0).resolution_at(span);
+        assert!(
+            ours.is_none_or(|r| matches!(r, Resolution::Deferred(_))),
+            "`Some` #{nth} committed {ours:?} past a dropped type marked after the first fold"
+        );
+    }
+}

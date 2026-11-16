@@ -75,7 +75,7 @@ impl DottedOpacity {
 /// A binding visible in a scope frame. `name` is `idText`-normalised,
 /// interned in the env's name table; later entries in a frame shadow earlier
 /// ones (position-ordered shadowing, D4).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScopeEntry {
     pub(super) name: Name,
     pub(super) resolution: Resolution,
@@ -1146,6 +1146,60 @@ impl AliasTargets {
             .find(|(range, _)| *range == binder)
             .map(|(_, res)| *res)
     }
+}
+
+/// The entries every top-level block seeds its frame with before anything
+/// else: the implicitly opened union cases with a definite target, the
+/// statics of each implicitly opened namespace's `[<AutoOpen>]` modules, then
+/// the opaque cases ([`implicit_union_case_entries`](super::lookup::implicit_union_case_entries)
+/// says why that order). They read only the env, so the env builds them once
+/// ([`AssemblyEnv::implicit_seed`]) and each block copies them in, stamped
+/// with its own open generation ([`Self::at`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImplicitSeed {
+    /// In push order, each stamped with generation 0.
+    entries: Vec<ScopeEntry>,
+}
+
+impl ImplicitSeed {
+    /// The seed of `assemblies`, built entry by entry as a block would push
+    /// it at `generation`.
+    pub(crate) fn build(assemblies: &AssemblyEnv) -> Self {
+        ImplicitSeed {
+            entries: implicit_seed_entries(assemblies, 0),
+        }
+    }
+
+    /// The seed's entries, stamped with `generation`.
+    pub(super) fn at(&self, generation: usize) -> impl Iterator<Item = ScopeEntry> + '_ {
+        self.entries.iter().cloned().map(move |mut entry| {
+            entry.generation = generation;
+            entry
+        })
+    }
+}
+
+/// The implicit seed's entries ([`ImplicitSeed`]), computed from the env and
+/// stamped with `generation`: what each block pushed before the env memoised
+/// it, and what a debug build holds each block's copy to.
+pub(super) fn implicit_seed_entries(
+    assemblies: &AssemblyEnv,
+    generation: usize,
+) -> Vec<ScopeEntry> {
+    let mut entries: Vec<ScopeEntry> =
+        super::lookup::implicit_union_case_entries(assemblies, true, generation).collect();
+    for namespace in implicit_open_namespaces(assemblies) {
+        // Implicit auto-opens precede every declaration: slot position 0.
+        for &handle in assemblies.auto_open_modules_in_namespace(&namespace) {
+            entries.extend(super::lookup::type_static_entries(
+                assemblies, handle, 0, true, generation,
+            ));
+        }
+    }
+    entries.extend(super::lookup::implicit_union_case_entries(
+        assemblies, false, generation,
+    ));
+    entries
 }
 
 /// F#'s implicit auto-opened *namespaces* — opened in every file so their

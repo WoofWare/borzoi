@@ -833,7 +833,7 @@ pub struct AssemblyEnv {
     /// (FSharp.Core's `Operators` / `ExtraTopLevelOperators`, which carry
     /// `printfn` / `id` / operators). The resolver folds them into its
     /// open-type set so a bare `printfn` resolves to the module's static
-    /// member — see `Resolver::open_auto_open_modules_in`.
+    /// member — see [`ImplicitSeed`](crate::resolve::ImplicitSeed).
     auto_open_modules: PathMap<Vec<EntityHandle>>,
     /// The same closure as [`Self::auto_open_modules`], as **paths** — what an
     /// `open` of the namespace makes answerable by a short name, which is a
@@ -1051,6 +1051,10 @@ pub struct AssemblyEnv {
     /// Lazily-built [`Self::implicit_union_cases`]. A property of the closure,
     /// like [`Self::bare_value_index`], and invalidated with it.
     implicit_union_cases: std::sync::OnceLock<Vec<OpenFoldName>>,
+    /// Lazily-built [`Self::implicit_seed`]. It reads the env's marks
+    /// through [`Self::open_static_entries`], so every `mark_*` mutator
+    /// resets it ([`Self::invalidate_fold_surfaces`]).
+    implicit_seed: std::sync::OnceLock<crate::resolve::ImplicitSeed>,
     /// Lazily-built [`Self::augmentation_member_names`]. The entities are
     /// fixed once the env is built, so it is never invalidated.
     augmentation_members: std::sync::OnceLock<AugmentationNames>,
@@ -1472,6 +1476,8 @@ impl AssemblyEnv {
             types,
             session_seed,
             session_vars: session_vars.into(),
+            // Its entries hold the old table's ids; built again on first use.
+            implicit_seed: std::sync::OnceLock::new(),
             ..self.clone()
         }
     }
@@ -3505,6 +3511,13 @@ impl AssemblyEnv {
     /// (`Resolver::assembly_case_slot_contested`).
     ///
     /// Memoised: the answer is a property of the closure, not of a file.
+    /// The entries every top-level block seeds its frame with
+    /// ([`ImplicitSeed`](crate::resolve::ImplicitSeed)), built once.
+    pub(crate) fn implicit_seed(&self) -> &crate::resolve::ImplicitSeed {
+        self.implicit_seed
+            .get_or_init(|| crate::resolve::ImplicitSeed::build(self))
+    }
+
     pub fn implicit_union_cases(&self) -> &[OpenFoldName] {
         self.implicit_union_cases
             .get_or_init(|| self.build_implicit_union_cases())
@@ -5156,6 +5169,7 @@ impl AssemblyEnv {
     /// namespace queried again.
     fn invalidate_fold_surfaces(&mut self) {
         self.types_by_namespace.reset_fold_memos();
+        self.implicit_seed = std::sync::OnceLock::new();
     }
 
     /// Drop the memoised [`Self::bare_value_index`],
