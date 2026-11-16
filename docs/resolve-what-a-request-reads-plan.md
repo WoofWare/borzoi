@@ -542,6 +542,29 @@ above, the cold fold falls by 0.47 G (6.28 G → 5.81 G) and block start from
 1.07 G to 0.62 G. What remains for the rest of 6b is the project half and the
 entries' writes.
 
+**6b-ii, as built.** The project half was not carried forward. Its entries
+depend on the reading block's container, since `private` accessibility is
+decided against it, and on the straddle and same-file ordering rules. So the
+fold is not append-only, and carrying it would need one variant per reading
+container. Its cost was mostly constant factors on prefix-sized reads: about
+196 M reading the earlier files' direct children of the namespace four times
+per block, and about 90 M looking each cross-file case's path up again for
+the constant-pattern check. `ProjectItems::direct_children` reads each
+child's export history once, from the parent index, and answers the values,
+the constructors and the constant-pattern names from it. The straddle map and
+the push share that one read. The per-name forms stay as the reference, and a
+debug build checks every read against them. The project half fell from about
+415 M to about 190 M.
+
+With 6b-i and 6b-ii both in, on the same row, against the base before them
+(two alternating rounds): the cold fold fell from 6.32 G to 5.63 G (−11%),
+block start from 1.07 G to 0.39 G, and the keystroke minimum from 119.7 M to
+116.0 M. A hover after the tokens is unchanged at about 0.84 G, so a
+tokens-then-hover session is about 0.7 G cheaper. The fold is still quadratic
+in the project, through the project half's prefix-sized reads. At about
+190 M on a 240-file project it is no longer the phase to work on:
+declarations hold 4.49 G of the 5.63 G.
+
 ### Stage 7 (gated): the inference demand census, then the closure
 
 **Dependencies**: Stage 4. **Implements**: D6.
