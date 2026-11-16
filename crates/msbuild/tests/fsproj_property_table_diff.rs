@@ -1888,6 +1888,26 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
             "updating item",
             "<ItemGroup><I Update=\"x\"{a}>{c}</I></ItemGroup>",
         ),
+        // An item operation MSBuild builds in a group it evaluates, under a
+        // false condition too, but not in a `<When>` it does not choose.
+        (
+            "removing item under a false group",
+            "<ItemGroup Condition=\"false\"><I Remove=\"x\"{a}>{c}</I></ItemGroup>",
+        ),
+        (
+            "removing item in a chosen When",
+            "<Choose><When Condition=\"true\"><ItemGroup><I Remove=\"x\"{a}>{c}</I>\
+             </ItemGroup></When></Choose>",
+        ),
+        (
+            "removing item in an unchosen When",
+            "<Choose><When Condition=\"false\"><ItemGroup><I Remove=\"x\"{a}>{c}</I>\
+             </ItemGroup></When></Choose>",
+        ),
+        (
+            "removing references",
+            "<ItemGroup><I Remove=\"@(J); @(K)\"{a}>{c}</I></ItemGroup>",
+        ),
         ("ImportGroup", "<ImportGroup{a}>{c}</ImportGroup>"),
         ("Import", "<Import Project=\"there.props\"{a}>{c}</Import>"),
         (
@@ -1963,6 +1983,7 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
         ("RemoveMetadata", "k"),
         ("KeepDuplicates", "true"),
         ("MatchOnMetadata", "k"),
+        ("MatchOnMetadata", "; "),
         ("MatchOnMetadataOptions", "CaseSensitive"),
         ("Project", "there.props"),
         ("Version", "1.0"),
@@ -2038,6 +2059,9 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
         "<![CDATA[x]]>",
         "<!-- c -->",
         "<?pi x?>",
+        "@(I)",
+        "@<x />(I)",
+        "@(I);<!-- c -->",
     ];
     let mut cases: Vec<String> = Vec::new();
     for (subject, template) in subjects {

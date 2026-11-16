@@ -472,6 +472,15 @@ fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     judge_condition(node, &entry_dir, reached, state);
     for item in node.children().filter(Node::is_element) {
         judge_condition(item, &entry_dir, reached, state);
+        if let Some(sure) = loader::remove_matching_more_than_items(item) {
+            state.note_rejection(
+                certain_if(reached && sure),
+                RejectionCause::IllegalItemOperation {
+                    item: item.tag_name().name().to_owned(),
+                },
+                item.range(),
+            );
+        }
         let reads_items = |text: &str| text.contains("%(") || text.contains("@(");
         let per_item = item.attributes().any(|a| reads_items(a.value()))
             || item.children().filter(Node::is_element).any(|metadata| {

@@ -998,6 +998,10 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
              project",
             crate::fsproj_diagnostics::load_time_error_text(error)
         ),
+        RejectionCause::IllegalItemOperation { item } => format!(
+            "a `<{item}>` item removing with `MatchOnMetadata` by more than item types, so \
+             MSBuild {rejects} the whole project"
+        ),
     }
 }
 

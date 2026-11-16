@@ -481,33 +481,6 @@ impl Loader {
                 self.unrecognized_attribute(item, name)?;
             }
         }
-        // Not the loader's, but as blind to conditions: MSBuild builds every
-        // item operation outside a target, under a false condition too, and a
-        // `Remove` with `MatchOnMetadata` may reference only item types
-        // ("Only item types may be referenced when removing with
-        // MatchOnMetadata"; probed, `dotnet msbuild` 10.0). Read for certain
-        // only on literal text and on references alone.
-        if !below_target && !value_of(item, "MatchOnMetadata").is_empty() && has(item, "Remove") {
-            let remove = value_of(item, "Remove");
-            let references_only = remove.split(';').all(|fragment| {
-                let fragment = fragment.trim();
-                fragment
-                    .strip_prefix("@(")
-                    .and_then(|rest| rest.strip_suffix(')'))
-                    .is_some_and(is_valid_name)
-            });
-            if !references_only {
-                let literal = !remove.contains(['$', '@', '%'])
-                    && !value_of(item, "MatchOnMetadata").contains(['$', '@', '%']);
-                return Err(Violation {
-                    sure: literal,
-                    ..malformed(
-                        item,
-                        "a `Remove` of more than item types with `MatchOnMetadata`",
-                    )
-                });
-            }
-        }
         let removes = !value_of(item, "Remove").is_empty();
         for metadatum in self.children(item)? {
             if removes {
@@ -556,21 +529,27 @@ impl Loader {
             ));
         }
         if in_definition {
-            // `ExpressionContainsItemVector` on the value: an item list
-            // reference is refused. Only `@(` followed by a name and `)` is
-            // read for certain.
-            let value: String = metadatum
-                .descendants()
-                .filter(|n| n.is_text())
-                .filter_map(|n| crate::document::text(n))
-                .collect();
-            if let Some(at) = value.find("@(") {
-                let rest = &value[at + 2..];
-                let simple = rest
-                    .find(')')
-                    .is_some_and(|close| is_valid_name(rest[..close].trim()));
+            // `ExpressionContainsItemVector` on the value, which is the
+            // element's inner XML: an item list reference is refused. Read for
+            // certain only on a value of one text node holding one `@(`, a name
+            // and `)`; perhaps wherever else the source holds `@(`.
+            let source = metadatum.document().input_text();
+            let mut nodes = metadatum.children();
+            let lone_text = match (nodes.next(), nodes.next()) {
+                (Some(only), None) if only.is_text() => crate::document::text(only),
+                _ => None,
+            };
+            let sure = lone_text.as_deref().is_some_and(|value| {
+                value.matches("@(").count() == 1
+                    && value.find("@(").is_some_and(|at| {
+                        let rest = &value[at + 2..];
+                        rest.find(')')
+                            .is_some_and(|close| is_valid_name(rest[..close].trim()))
+                    })
+            });
+            if sure || source[metadatum.range()].contains("@(") {
                 return Err(Violation {
-                    sure: simple && value.matches("@(").count() == 1,
+                    sure,
                     ..malformed(metadatum, "an item list in an item definition's metadatum")
                 });
             }
@@ -884,4 +863,40 @@ fn holds_cdata(text: Node<'_, '_>) -> bool {
         end += 1;
     }
     source[start..end].contains("<![CDATA[")
+}
+
+/// Whether MSBuild refuses the item at `item`, a `Remove` with
+/// `MatchOnMetadata` that names more than item types ("Only item types may be
+/// referenced when removing with MatchOnMetadata"; probed, `dotnet msbuild`
+/// 10.0): `Some(true)` for certain, `Some(false)` perhaps. Not the loader's
+/// rule but the item operation's, which MSBuild builds for every item of an
+/// item group it evaluates, under a false condition too, but not in a
+/// `<When>` it does not choose. Both lists are split at `;` and trimmed, and
+/// an empty one makes no claim; text a property, item or escape may change is
+/// only perhaps refused.
+pub(super) fn remove_matching_more_than_items(item: Node<'_, '_>) -> Option<bool> {
+    let fragments = |text: &str| -> Vec<String> {
+        text.split(';')
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let remove = attribute(item, "Remove")?;
+    let matching = attribute(item, "MatchOnMetadata")?;
+    let dynamic = |text: &str| text.contains(['$', '@', '%']);
+    if fragments(&matching).is_empty() && !dynamic(&matching) {
+        return None;
+    }
+    let removed = fragments(&remove);
+    let references_only = removed.iter().all(|fragment| {
+        fragment
+            .strip_prefix("@(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .is_some_and(is_valid_name)
+    });
+    if references_only && !remove.contains(['$', '%']) {
+        return None;
+    }
+    Some(!dynamic(&remove) && !dynamic(&matching) && !removed.is_empty())
 }

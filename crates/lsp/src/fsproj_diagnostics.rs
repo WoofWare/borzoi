@@ -1000,6 +1000,13 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
                 load_time_error_text(error)
             )
         }
+        RejectionCause::IllegalItemOperation { item } => {
+            let rejects = if certain { "rejects" } else { "may reject" };
+            format!(
+                "MSBuild {rejects} this project: a `<{item}>` item removes with \
+                 `MatchOnMetadata` by more than item types — no evaluated value is trusted"
+            )
+        }
     }
 }
 
