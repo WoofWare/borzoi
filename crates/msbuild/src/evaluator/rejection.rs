@@ -623,7 +623,8 @@ fn may_load_nothing(
     if let Some(sdk) = attribute(node, "Sdk") {
         return sdk_import_may_load_nothing(&sdk, project, seen, state);
     }
-    let expansion = expand_silent(project, state);
+    // MSBuild turns the attribute's own `\` into `/` before it expands it.
+    let expansion = expand_silent(&project.replace('\\', "/"), state);
     if path_undecided(project, state, expansion.had_unsupported) {
         return (!requires_own_file).then_some(UnloadableImport::PathUndecided);
     }
