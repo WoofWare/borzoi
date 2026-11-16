@@ -897,6 +897,9 @@ pub struct ForeignDefinitions {
     /// `<Project DefaultTargets="…">` and `<Project InitialTargets="…">`, by
     /// attribute (lowercased): which targets a build runs.
     pub target_selections: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// Item types: every element directly inside an `<ItemGroup>`, wherever
+    /// the group sits, and every task `<Output ItemName="…">`.
+    pub items: BTreeMap<String, BTreeSet<PathBuf>>,
 }
 
 /// Whether a recorded name may stand for a name other than its spelling: one
@@ -931,6 +934,11 @@ impl ForeignDefinitions {
     /// time, from a target.
     pub fn writes_property_at_build_time(&self, name: &str) -> bool {
         Self::matches(&self.build_time_properties, name, |key, name| key == name)
+    }
+
+    /// Whether a document outside the SDK may define an item of type `name`.
+    pub fn defines_item(&self, name: &str) -> bool {
+        Self::matches(&self.items, name, |key, name| key == name)
     }
 
     /// Whether a document outside the SDK may define target `name`.
@@ -1005,13 +1013,25 @@ impl ForeignDefinitions {
             }
             return;
         }
-        let in_property_group = node
-            .parent_element()
-            .is_some_and(|p| p.tag_name().name().eq_ignore_ascii_case("PropertyGroup"));
+        let in_group = |group: &str| {
+            node.parent_element()
+                .is_some_and(|p| p.tag_name().name().eq_ignore_ascii_case(group))
+        };
+        let in_property_group = in_group("PropertyGroup");
+        let output = tag.eq_ignore_ascii_case("Output");
+        let output_property = if output {
+            attribute("PropertyName")
+        } else {
+            None
+        };
         let (table, name) = if in_property_group {
             (&mut self.properties, Some(tag))
-        } else if tag.eq_ignore_ascii_case("Output") {
-            (&mut self.properties, attribute("PropertyName"))
+        } else if output_property.is_some() {
+            (&mut self.properties, output_property)
+        } else if output {
+            (&mut self.items, attribute("ItemName"))
+        } else if in_group("ItemGroup") {
+            (&mut self.items, Some(tag))
         } else if tag.eq_ignore_ascii_case("Target") {
             (&mut self.targets, attribute("Name"))
         } else if tag.eq_ignore_ascii_case("UsingTask") {
@@ -1023,7 +1043,7 @@ impl ForeignDefinitions {
             return;
         };
         let name = name.to_ascii_lowercase();
-        let property = in_property_group || tag.eq_ignore_ascii_case("Output");
+        let property = in_property_group || output_property.is_some();
         table
             .entry(name.clone())
             .or_default()

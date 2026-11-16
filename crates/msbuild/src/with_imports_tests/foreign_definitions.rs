@@ -130,6 +130,13 @@ fn every_definition_outside_the_sdk_is_recorded_whatever_its_condition() {
     assert!(!foreign.writes_property_at_build_time("Skipped"));
     assert_eq!(names(&foreign.targets), ["corecompile"]);
     assert_eq!(names(&foreign.tasks), ["fsc"]);
+    assert_eq!(
+        names(&foreign.items),
+        ["compile", "notaproperty"],
+        "an item group's elements and a task's item outputs define item types"
+    );
+    assert!(foreign.defines_item("Compile"));
+    assert!(!foreign.defines_item("DisabledLanguageFeatures"));
 }
 
 #[test]

@@ -58,13 +58,13 @@ impl LanguageVersion {
 
     /// The top of the ladder: every implemented feature on.
     ///
-    /// [`MIN`](Self::MIN) and `MAX` bracket every version-gated decision the
-    /// parser makes. Each such gate is a *monotone threshold* — a feature
+    /// Any two versions bracket every version-gated decision the parser makes
+    /// between them. Each such gate is a *monotone threshold* — a feature
     /// becomes available at some version and stays available — so a producer
-    /// that agrees at both ends agrees at every version between them. That is
-    /// what lets
-    /// [`diagnostics_are_version_invariant`](crate::parser::diagnostics_are_version_invariant)
-    /// be decided by two evaluations instead of nine.
+    /// that agrees at two versions agrees at every version between them. That
+    /// is what lets
+    /// [`diagnostics_are_invariant_over`](crate::parser::diagnostics_are_invariant_over)
+    /// decide a range by evaluating its two ends.
     pub const MAX: LanguageVersion = LanguageVersion::Preview;
 
     /// Whether `feature` is available at this version (FCS's

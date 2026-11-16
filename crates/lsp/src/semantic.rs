@@ -203,28 +203,30 @@ impl ProjectParses {
 /// One Compile item's parse as the fold reads it (see
 /// [`SemanticState::file_parses`], which holds a list of these per path): the
 /// memo's parse ([`ParseMemo`]), and what the fold derived from it, stored
-/// with the one further input that decided it, the owning project's
-/// `LangVersion` *provenance* trust. A [`build_parses`] cache hit requires
-/// the parse's inputs (source text, `#if` symbols, language version) and the
-/// trust to match, so a variant is a pure function of its inputs: it can
-/// never be served stale, nor bypass the version-boundary gate.
-/// The trust matters because a hit *skips* that gate, whose accept/refuse
-/// verdict depends on `lang_version_untrusted` — and one source file shared by
-/// two projects can carry different provenance at the same effective version, so
-/// a trusted project's accepted parse must not satisfy an untrusted one. See
-/// [`SemanticState::file_parses`].
+/// with the one further input that decided it, the versions the owning
+/// project's build may check at ([`guessed_from`](Self::guessed_from)). A
+/// [`build_parses`] cache hit requires the parse's inputs (source text, `#if`
+/// symbols, language version) and those versions to match, so a variant is a
+/// pure function of its inputs: it can never be served stale, nor bypass the
+/// version-boundary gate.
+/// The versions matter because a hit *skips* that gate, and the recovery
+/// reading, whose verdicts depend on them — and one source file shared by two
+/// projects can carry different provenance, or a different compiler, at the
+/// same effective version, so a trusted project's accepted parse must not
+/// satisfy an untrusted one. See [`SemanticState::file_parses`].
 #[derive(Debug)]
 struct CachedParse {
     /// The parse: its text, `#if` symbols and language version are the rest
     /// of the key.
     parse: Arc<SourceParse>,
-    /// Whether the owning project's `LangVersion` provenance was untrusted when
-    /// this tree was accepted. Part of the key because a hit skips the
-    /// version-boundary gate, whose verdict is a function of this flag (not of
-    /// the file's text): without it, a trusted project's accepted parse of a
-    /// straddling file could wrongly satisfy an untrusted project that a cold
-    /// build refuses.
-    lang_version_untrusted: bool,
+    /// `None` when the owning project's language version was the build's when
+    /// this tree was accepted; otherwise the oldest version the build may check
+    /// at ([`ParseInputs::guessed_from`]). Part of the key because a hit skips the
+    /// version-boundary gate, whose verdict, like the recovery reading's, is a
+    /// function of this range (not of the file's text): without it, a trusted
+    /// project's accepted parse of a straddling file could wrongly satisfy an
+    /// untrusted project that a cold build refuses.
+    guessed_from: Option<LanguageVersion>,
     /// The allocation of `parse`'s text the `Vfs` last handed out, so that the
     /// next comparison with it is a pointer test.
     text: Arc<str>,
@@ -322,7 +324,7 @@ pub struct SemanticState {
     /// keyed per file.
     ///
     /// A path maps to a small list of [`CachedParse`] **variants** — one per
-    /// distinct parse-input set (`symbols` / `lang` / `lang_version_untrusted`).
+    /// distinct parse-input set (`symbols` / `lang` / `guessed_from`).
     /// Normally one; a source file linked into two projects with different
     /// settings keeps a variant each, so alternating between the projects never
     /// re-parses the shared file (the single-entry-per-path design would thrash,
@@ -2413,9 +2415,23 @@ struct ParseInputs {
     /// the version-boundary gate runs exactly when it is set, and a refusal it
     /// makes names it.
     lang_version_untrust: Option<LangVersionDoubt>,
+    /// The oldest version the project's compiler checks a file at
+    /// ([`Workspace::compiler_floor_for_project`]): where `lang` is a guess,
+    /// the versions the build may check at are this one up, and the guess.
+    compiler_floor: LanguageVersion,
 }
 
 impl ParseInputs {
+    /// `None` when `lang` is the version the build checks at; otherwise the
+    /// oldest version it may check at, from which every version up to
+    /// [`LanguageVersion::MAX`] is one the build may use. That is the
+    /// compiler's floor, or the guess itself if it lies below: the reading
+    /// taken at the guess is the one that must hold.
+    fn guessed_from(&self) -> Option<LanguageVersion> {
+        self.lang_version_untrust
+            .as_ref()
+            .map(|_| self.lang.min(self.compiler_floor))
+    }
     /// What the evaluation of `project` the workspace serves now gives the
     /// parses, or the refusal of a project whose evaluation declines the
     /// fold.
@@ -2423,6 +2439,7 @@ impl ParseInputs {
         let symbols = workspace.symbols_for_project(project);
         let selection = workspace.lang_version_selection(project);
         let lang = selection.version;
+        let compiler_floor = workspace.compiler_floor_for_project(project);
         // Every exit below is a *value*, not a bare `None`: a refusal the user is
         // never told about is the defect `crate::project_deferral` exists to close,
         // and only a typed refusal makes "we went quiet" and "we said why" the same
@@ -2496,6 +2513,7 @@ impl ParseInputs {
             symbols,
             lang,
             lang_version_untrust,
+            compiler_floor,
         })
     }
 }
@@ -2521,9 +2539,10 @@ fn build_parses(
         symbols,
         lang,
         lang_version_untrust,
+        compiler_floor,
     } = inputs;
     let lang = *lang;
-    let lang_version_untrusted = lang_version_untrust.is_some();
+    let guessed_from = inputs.guessed_from();
 
     let mut files = Vec::with_capacity(includes.len());
     let mut paths = Vec::with_capacity(includes.len());
@@ -2561,11 +2580,11 @@ fn build_parses(
             FileKind::Impl
         };
         // Per-file fold cache: reuse a variant whose every deciding input — the
-        // source text, the `#if` symbols, the language version, and the project's
-        // `LangVersion`-provenance trust — matches. A hit is a handle clone
-        // that also *skips* the version-boundary gate below, which is why
-        // `lang_version_untrusted` is part of the match (it is that gate's one
-        // non-parse input). A miss falls through to the parse memo (and, for a
+        // source text, the `#if` symbols, the language version, and the versions
+        // the build may check at (`guessed_from`) — matches. A hit is a handle
+        // clone that also *skips* the version-boundary gate and the recovery
+        // reading below, which is why `guessed_from` is part of the match (it is
+        // their one non-parse input). A miss falls through to the parse memo (and, for a
         // straddle-flagged file, re-runs the gate) and records a variant. The
         // input comparison is what keeps a stale variant from being served, so no
         // invalidation hook is load-bearing.
@@ -2579,7 +2598,7 @@ fn build_parses(
                 .find(|c| {
                     c.parse.lang() == lang
                         && c.parse.file_kind() == file_kind
-                        && c.lang_version_untrusted == lang_version_untrusted
+                        && c.guessed_from == guessed_from
                         && c.parse.symbols() == symbols
                         && (Arc::ptr_eq(&c.text, &text) || *c.text == *text)
                 })
@@ -2616,19 +2635,25 @@ fn build_parses(
         // — `module M =` at end of file, a common mid-edit state — differs as
         // a stack operation but reconverges via the EOF cascade), so acting on
         // the flag alone would flicker an untrusted project's fold off while
-        // the user types. Verify: re-parse
-        // at the representative of every *other* shape band (those gates are
-        // the only shape inputs, so one version per band decides) and refuse
-        // only genuine divergence — folding then could export bindings from a
-        // tree the compiler never sees; handlers fall back to single-file
-        // resolution (best-guess version, accepted best-effort). The extra
-        // parses run only for flagged files in untrusted-provenance projects.
-        if let Some(untrust) = &lang_version_untrust
+        // the user types. Verify: re-parse at the representative of every
+        // *other* shape band the build may check at (those gates are the only
+        // shape inputs, so one version per band decides; a band wholly below
+        // the compiler's floor is no build's, `ParseInputs::guessed_from`) and
+        // refuse only genuine divergence — folding then could export bindings
+        // from a tree the compiler never sees; handlers fall back to
+        // single-file resolution (best-guess version, accepted best-effort).
+        // The extra parses run only for flagged files in untrusted-provenance
+        // projects.
+        if let (Some(untrust), Some(from)) = (&lang_version_untrust, guessed_from)
             && parse.shape_depends_on_language_version
         {
             let own_band = lang.shape_representative();
+            // Bands are contiguous and ascend with their representatives, and
+            // the range runs up to the top one, so it meets exactly the bands
+            // from its lowest version's up.
+            let lowest_band = from.shape_representative();
             for other_side in LanguageVersion::SHAPE_REPRESENTATIVES {
-                if other_side == own_band {
+                if other_side == own_band || other_side < lowest_band {
                     continue;
                 }
                 let other = if signature {
@@ -2667,9 +2692,10 @@ fn build_parses(
         // Under untrusted `LangVersion` provenance the version is a guess, and
         // a guess cannot prove a clean read of a file whose diagnostics are
         // version-gated — the tree is identical either side of the threshold,
-        // so the shape gate above never fires on it.
-        let recovery = if lang_version_untrusted {
-            SyntaxRecovery::of_guessed_version(parse, &text, symbols, file_kind)
+        // so the shape gate above never fires on it — at a version the build
+        // may check at: from the compiler.s floor up, and the guess.
+        let recovery = if guessed_from.is_some() {
+            SyntaxRecovery::of_guessed_version(parse, &text, symbols, file_kind, *compiler_floor)
         } else {
             SyntaxRecovery::of(parse)
         };
@@ -2703,7 +2729,7 @@ fn build_parses(
         // alongside so neither project's build thrashes the other's).
         let variant = CachedParse {
             parse: Arc::clone(&source),
-            lang_version_untrusted,
+            guessed_from,
             text: Arc::clone(&text),
             file: source_file.clone(),
             recovery: recovery.clone(),
@@ -2712,7 +2738,7 @@ fn build_parses(
         if let Some(slot) = variants.iter_mut().find(|c| {
             c.parse.lang() == lang
                 && c.parse.file_kind() == file_kind
-                && c.lang_version_untrusted == lang_version_untrusted
+                && c.guessed_from == guessed_from
                 && c.parse.symbols() == symbols
         }) {
             *slot = variant;
@@ -5191,7 +5217,8 @@ mod tests {
     }
 
     /// A guessed language version cannot prove a clean read of a file whose
-    /// recovery diagnostics are version-gated.
+    /// recovery diagnostics are version-gated at a version the build may check
+    /// at.
     ///
     /// A nullness annotation is a recovery below F# 9 (FCS parses it
     /// differently there) and silent at or above it, from a byte-identical tree
@@ -5201,7 +5228,9 @@ mod tests {
     /// otherwise. The file must read `Unretained` instead. A legality error is
     /// different: `#elif` is an error below F# 11 over the tree FCS builds at
     /// every version, so a guess on either side reads that tree, and the file
-    /// keeps its reading.
+    /// keeps its reading. So does a recovery below the compiler's floor (a
+    /// compiler that refuses every version below F# 8 checks at none of them),
+    /// unless the guess itself lies below it.
     #[test]
     fn a_version_gated_recovery_is_unretained_under_a_guessed_version() {
         use borzoi_cst::language_version::LanguageVersion;
@@ -5217,25 +5246,36 @@ mod tests {
                 },
             )
         };
-        let guess = |source| {
+        let guess_at = |source, lang, floor| {
             SyntaxRecovery::of_guessed_version(
-                &parse(source, LanguageVersion::Preview),
+                &parse(source, lang),
                 source,
                 &HashSet::new(),
                 FileKind::Impl,
+                floor,
             )
         };
+        let guess = |source, floor| guess_at(source, LanguageVersion::Preview, floor);
         // The premises, restated locally so this test fails loudly if a gate
         // ever changes class rather than passing vacuously.
-        for (source, below, recovery) in [
+        // The last moves the tree too (`SingleUnderscorePattern` reshapes).
+        for (source, below, recovery, same_tree) in [
             (
                 "module M\nlet f (x : System.String | null) = 1\n",
                 LanguageVersion::V8_0,
+                true,
                 true,
             ),
             (
                 "module M\n#if FOO\nlet a = 1\n#elif BAR\nlet a = 2\n#endif\n",
                 LanguageVersion::V10_0,
+                false,
+                true,
+            ),
+            (
+                "module M\ntype T() =\n    member _.M = 1\n",
+                LanguageVersion::V4_6,
+                true,
                 false,
             ),
         ] {
@@ -5250,39 +5290,77 @@ mod tests {
                 "and rejected one threshold down: {:?}",
                 rejected.errors
             );
-            assert_eq!(
-                guessed.root.structure(),
-                rejected.root.structure(),
-                "with the same tree, which is why the shape gate cannot see it"
-            );
+            if same_tree {
+                assert_eq!(
+                    guessed.root.structure(),
+                    rejected.root.structure(),
+                    "with the same tree, which is why the shape gate cannot see it"
+                );
+            }
         }
 
+        for floor in [LanguageVersion::MIN, LanguageVersion::V8_0] {
+            assert_eq!(
+                guess("module M\nlet f (x : System.String | null) = 1\n", floor),
+                SyntaxRecovery::Unretained,
+                "a guessed version proves nothing about a version-gated recovery above the \
+                 floor ({floor})"
+            );
+            assert_eq!(
+                guess(
+                    "module M\n#if FOO\nlet a = 1\n#elif BAR\nlet a = 2\n#endif\n",
+                    floor
+                ),
+                SyntaxRecovery::Reported([].into()),
+                "a legality error leaves the reading as it is ({floor})"
+            );
+        }
+        // `member _.M` is a recovery below F# 4.7: a reading under a compiler
+        // that may check there proves nothing, and one under a compiler that
+        // refuses every version below F# 8 keeps it.
+        let self_id = "module M\ntype T() =\n    member _.M = 1\n";
         assert_eq!(
-            guess("module M\nlet f (x : System.String | null) = 1\n"),
-            SyntaxRecovery::Unretained,
-            "a guessed version proves nothing about a version-gated recovery"
+            guess(self_id, LanguageVersion::MIN),
+            SyntaxRecovery::Unretained
         );
         assert_eq!(
-            guess("module M\n#if FOO\nlet a = 1\n#elif BAR\nlet a = 2\n#endif\n"),
-            SyntaxRecovery::Reported([].into()),
-            "a legality error leaves the reading as it is"
+            guess(self_id, LanguageVersion::V8_0),
+            SyntaxRecovery::Reported([].into())
+        );
+        // But a guess below the floor is itself compared: an undented body is
+        // a warning below F# 8 and an error from it, so the reading taken at a
+        // guess of 7.0 is no reading the build makes, though the versions from
+        // the floor up agree among themselves.
+        let undented = "module M\nlet f (x: 'a -> 'a) =\nx\n";
+        assert_ne!(
+            parse(undented, LanguageVersion::V7_0)
+                .recovery_errors()
+                .count(),
+            parse(undented, LanguageVersion::V8_0)
+                .recovery_errors()
+                .count(),
+            "the gate must move a recovery error across the floor"
+        );
+        assert_eq!(
+            guess_at(undented, LanguageVersion::V8_0, LanguageVersion::V8_0),
+            guess_at(undented, LanguageVersion::Preview, LanguageVersion::V8_0),
+        );
+        assert_ne!(
+            guess_at(undented, LanguageVersion::V8_0, LanguageVersion::V8_0),
+            SyntaxRecovery::Unretained,
+            "invariant from the floor up"
+        );
+        assert_eq!(
+            guess_at(undented, LanguageVersion::V7_0, LanguageVersion::V8_0),
+            SyntaxRecovery::Unretained,
+            "a guess below the floor proves nothing about the versions above it"
         );
         // The contrast: ordinary source is version-invariant, so a guess is
         // still proof and the feature stays on for it.
-        let ordinary = parse_with_options(
-            "module M\nlet v : System.String = failwith \"\"\n",
-            ParseOptions {
-                file_kind: FileKind::Impl,
-                symbols: &HashSet::new(),
-                lang: LanguageVersion::Preview,
-            },
-        );
         assert_eq!(
-            SyntaxRecovery::of_guessed_version(
-                &ordinary,
+            guess(
                 "module M\nlet v : System.String = failwith \"\"\n",
-                &HashSet::new(),
-                FileKind::Impl,
+                LanguageVersion::MIN
             ),
             SyntaxRecovery::Reported([].into()),
         );

@@ -25,9 +25,10 @@
 //! with no floor: claiming an unknown compiler refuses a version would report a
 //! build failure that may not happen.
 //!
-//! The floor is also what #732 needs: a guessed version's invariance check
-//! may narrow its ladder to [`SdkLanguageFacts::floor`] only for an SDK that
-//! has a row, since a row's floor is graded and no row means the full ladder.
+//! The floor also bounds what a guessed version must get right: a reading
+//! taken at a guess need only be invariant from the floor of the compiler that
+//! checks the file up ([`checked_floor`]), and only a graded row has a floor
+//! above [`LanguageVersion::MIN`]; no row means the full ladder.
 //!
 //! # The boundary
 //!
@@ -247,6 +248,210 @@ pub struct ProjectCompiler {
     /// under which the compiler checks below its floor rather than refusing
     /// (FS3880).
     pub support_check_skipped: bool,
+}
+
+impl ProjectCompiler {
+    /// The oldest language version this compiler checks a file at: its
+    /// graded row's [`SdkLanguageFacts::floor`], below which it refuses the
+    /// version (FS3880) rather than check at it. [`LanguageVersion::MIN`] when
+    /// the build's environment lifts the floor (`SKIP_VERSION_SUPPORTED_CHECK=1`)
+    /// or the SDK has no row.
+    ///
+    /// A guessed language version need only be right from here up, unless the
+    /// build switches a feature apart from the version ([`checked_floor`]). The
+    /// floor rests on the compiler and its environment alone, never on the
+    /// version the build hands it: a doubted `$(LangVersion)` may name any
+    /// version, and `$(OtherFlags)` or a response file may pass another, but
+    /// the compiler refuses each below its floor all the same. It reads nothing
+    /// but the variable to lift the floor (`LanguageVersion.IsVersionSupported`),
+    /// and the SDK's `Fsc` task hands the compiler no environment of its own.
+    pub fn floor(&self) -> LanguageVersion {
+        if self.support_check_skipped {
+            return LanguageVersion::MIN;
+        }
+        SdkLanguageFacts::for_sdk(&self.sdk).map_or(LanguageVersion::MIN, |facts| facts.floor)
+    }
+}
+
+/// The oldest language version whose rules the build of `parsed` may parse a
+/// file by, where `compiler` is [`project_compiler`]'s answer: that compiler's
+/// [`ProjectCompiler::floor`], or [`LanguageVersion::MIN`] when it cannot be
+/// said. This is what a reading taken at a guessed version must be invariant
+/// from (`SyntaxRecovery::of_guessed_version`), so an unknown compiler, one
+/// with no graded row, and one with its floor lifted each leave the whole
+/// ladder to check.
+///
+/// So does a build that may switch a language feature apart from the version
+/// ([`feature_switch_doubt`]): `--strict-indentation-` restores the
+/// indentation rules of the versions below 8.0 at any version, and
+/// `--disableLanguageFeature` takes a feature away, so a rule from below the
+/// floor may still shape the parse.
+pub fn checked_floor(
+    parsed: &ParsedProject,
+    compiler: Option<&ProjectCompiler>,
+) -> LanguageVersion {
+    if feature_switch_doubt(parsed).is_some() {
+        return LanguageVersion::MIN;
+    }
+    compiler.map_or(LanguageVersion::MIN, ProjectCompiler::floor)
+}
+
+/// The compiler switches that turn a language feature on or off apart from the
+/// language version, as `fsc --help` spells them (`sdk_language_diff` reads
+/// every graded SDK's list and fails on a switch in neither this list nor
+/// [`VERSION_NEUTRAL_SWITCHES`]).
+pub const FEATURE_SWITCHES: &[&str] = &["strict-indentation", "disableLanguageFeature"];
+
+/// The compiler switches, as `fsc --help` spells them, known not to turn a
+/// language feature on or off apart from the language version: the only ones
+/// a `$(OtherFlags)` may hold for a guess to be held to the compiler's floor
+/// ([`only_version_neutral_switches`]). `--langversion` names the version
+/// itself, which the compiler refuses below its floor whatever spells it, and
+/// `--define` sets `#if` symbols, at every version alike.
+pub const VERSION_NEUTRAL_SWITCHES: &[&str] = &[
+    "allsigs",
+    "always-inline",
+    "baseaddress",
+    "checked",
+    "checknulls",
+    "checksumalgorithm",
+    "codepage",
+    "compilertool",
+    "compressmetadata",
+    "consolecolors",
+    "crossoptimize",
+    "debug",
+    "define",
+    "delaysign",
+    "deterministic",
+    "doc",
+    "embed",
+    "fullpaths",
+    "help",
+    "highentropyva",
+    "keyfile",
+    "langversion",
+    "lib",
+    "linkresource",
+    "mlcompatibility",
+    "nocopyfsharpcore",
+    "noframework",
+    "nointerfacedata",
+    "nologo",
+    "nooptimizationdata",
+    "nowarn",
+    "nowin32manifest",
+    "optimize",
+    "out",
+    "pathmap",
+    "pdb",
+    "platform",
+    "preferreduilang",
+    "publicsign",
+    "quotations-debug",
+    "realsig",
+    "reference",
+    "reflectionfree",
+    "refonly",
+    "refout",
+    "resource",
+    "sig",
+    "simpleresolution",
+    "sourcelink",
+    "standalone",
+    "staticlink",
+    "subsystemversion",
+    "tailcalls",
+    "target",
+    "targetprofile",
+    "utf8output",
+    "version",
+    "warn",
+    "warnaserror",
+    "warnon",
+    "win32icon",
+    "win32manifest",
+    "win32res",
+];
+
+/// Whether `flags`, a `$(OtherFlags)` value, is a sequence of switches each of
+/// which is in [`VERSION_NEUTRAL_SWITCHES`], spelt `-name` or `--name`,
+/// optionally followed by `+`, `-` or `:argument`. Decided on the finest split
+/// (every run of whitespace), and only for a value with no quote in it, since
+/// the `Fsc` task joins and strips quoted text: each piece the compiler can
+/// read as an argument of its own is then one of these, or a part of one's
+/// argument, which names no switch. So anything else, a response file
+/// (`@file`), a source path, a short alias (`-d:`), a quoted splice
+/// (`--strict-""indentation-`), declines. Allowing only what is known, rather
+/// than denying [`FEATURE_SWITCHES`], is what makes a spelling nobody listed
+/// decline.
+pub fn only_version_neutral_switches(flags: &str) -> bool {
+    !flags.contains(['"', '\'', '@'])
+        && flags.split_whitespace().all(|piece| {
+            let Some(switch) = piece.strip_prefix("--").or_else(|| piece.strip_prefix('-')) else {
+                return false;
+            };
+            let name = switch.split(':').next().unwrap_or_default();
+            let name = name.strip_suffix(['+', '-']).unwrap_or(name);
+            VERSION_NEUTRAL_SWITCHES.contains(&name)
+        })
+}
+
+/// The `Fsc` task parameters, named for the properties `CoreCompile` reads
+/// them from, through which a build can pass one of [`FEATURE_SWITCHES`]:
+/// `$(OtherFlags)`, appended to the arguments as it stands (a switch, or an
+/// `@` response file that may hold one). `sdk_language_diff` reads every
+/// parameter `CoreCompile` hands the task in each graded SDK and fails on one
+/// neither here, in [`FEATURE_SWITCH_ITEMS`], nor known not to carry one.
+pub const FEATURE_SWITCH_CARRIERS: &[&str] = &["OtherFlags"];
+
+/// The `Fsc` task parameters, named for the item types `CoreCompile` reads
+/// them from, through which a build can pass one of [`FEATURE_SWITCHES`]:
+/// `@(DisabledLanguageFeatures)`, each item passed as
+/// `--disableLanguageFeature`. No SDK file defines such an item
+/// (`sdk_language_diff` checks), so only a document outside the SDK can.
+pub const FEATURE_SWITCH_ITEMS: &[&str] = &["DisabledLanguageFeatures"];
+
+/// Why the build of `parsed` may switch a language feature apart from its
+/// language version, or `None` when it passes none of [`FEATURE_SWITCHES`]:
+/// every property carrier ([`FEATURE_SWITCH_CARRIERS`]) is unset or a trusted
+/// value of version-neutral switches alone ([`only_version_neutral_switches`]),
+/// no target outside the
+/// SDK (or in a workload manifest) may write one before `CoreCompile` reads
+/// it, no document outside the SDK defines an item of a type in
+/// [`FEATURE_SWITCH_ITEMS`], and the walk entered every document.
+pub fn feature_switch_doubt(parsed: &ParsedProject) -> Option<UntrustedCause> {
+    let definitions = [&parsed.foreign_definitions, &parsed.workload_definitions];
+    for carrier in FEATURE_SWITCH_CARRIERS {
+        let value = match parsed.property(carrier) {
+            PropertyRead::Unset => None,
+            PropertyRead::Value(value) => Some(value),
+            PropertyRead::Untrusted(cause) => return Some(cause),
+            PropertyRead::UnsetInexact(why) => return Some(why.cause(carrier)),
+        };
+        if value.is_some_and(|value| !only_version_neutral_switches(&value)) {
+            return Some(UntrustedCause::Unentered(format!(
+                "`$({carrier})`, which may switch a language feature apart from the version"
+            )));
+        }
+        if definitions
+            .iter()
+            .any(|defined| defined.writes_property_at_build_time(carrier))
+        {
+            return Some(UntrustedCause::Unentered(format!(
+                "a target that may write `{carrier}` before `CoreCompile` reads it"
+            )));
+        }
+    }
+    if let Some(item) = FEATURE_SWITCH_ITEMS
+        .iter()
+        .find(|item| definitions.iter().any(|defined| defined.defines_item(item)))
+    {
+        return Some(UntrustedCause::Unentered(format!(
+            "`@({item})`, which switches a language feature off apart from the version"
+        )));
+    }
+    parsed.hidden_content.clone()
 }
 
 /// Whether `environment` lifts the compiler's support floor. The compiler reads
@@ -600,7 +805,9 @@ pub fn lang_version_value_doubt(parsed: &ParsedProject) -> Option<UntrustedCause
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if other_flags.contains("langversion") || other_flags.contains('@') {
+    // A quote may splice a switch together (`--lang""version:7.0`): the `Fsc`
+    // task strips it before the compiler reads the switch.
+    if other_flags.contains("langversion") || other_flags.contains(['@', '"']) {
         return Some(UntrustedCause::Unentered(
             "`$(OtherFlags)`, which may name a language version after `$(LangVersion)`".to_string(),
         ));
@@ -992,6 +1199,144 @@ mod tests {
         );
     }
 
+    /// A guessed version need only be right from the compiler's floor up, and
+    /// the floor is above the bottom of the ladder only for a compiler with a
+    /// graded row that keeps it: 10.0.1xx's compiler checks at F# 4.6, and
+    /// `SKIP_VERSION_SUPPORTED_CHECK=1` lifts 10.0.4xx's.
+    #[test]
+    fn a_guess_is_held_to_the_floor_only_of_a_compiler_that_enforces_it() {
+        let floor = |version: &str, support_check_skipped| {
+            ProjectCompiler {
+                sdk: sdk(version),
+                support_check_skipped,
+            }
+            .floor()
+        };
+        assert_eq!(floor("10.0.401", false), V8_0);
+        assert_eq!(floor("10.0.499", false), V8_0);
+        assert_eq!(floor("10.0.401", true), LanguageVersion::MIN);
+        assert_eq!(floor("10.0.112", false), LanguageVersion::MIN);
+        for ungraded in ["10.0.300", "11.0.100", "9.0.100", "10.0.400-rc.1.1"] {
+            assert_eq!(floor(ungraded, false), LanguageVersion::MIN, "{ungraded}");
+        }
+        // Through the evaluation: the environment it saw decides.
+        let checked = |parsed: &ParsedProject, environment: &HashMap<String, String>| {
+            checked_floor(
+                parsed,
+                project_compiler(parsed, environment, &HashMap::new()).as_ref(),
+            )
+        };
+        let parsed = on_sdk("10.0.401");
+        assert_eq!(checked_floor(&parsed, None), LanguageVersion::MIN);
+        let skipping =
+            HashMap::from([("SKIP_VERSION_SUPPORTED_CHECK".to_string(), "1".to_string())]);
+        assert_eq!(checked(&parsed, &HashMap::new()), V8_0);
+        assert_eq!(checked(&parsed, &skipping), LanguageVersion::MIN);
+        assert_eq!(
+            checked(&on_sdk("10.0.112"), &HashMap::new()),
+            LanguageVersion::MIN
+        );
+    }
+
+    /// A build that may switch a language feature apart from the version may
+    /// parse by a rule from below the compiler's floor, so a guess is held to
+    /// the whole ladder: a carrier that names a feature switch or a response
+    /// file, one the walk does not hold exactly, and one a target may write.
+    #[test]
+    fn a_feature_switch_keeps_the_whole_ladder() {
+        let with_read = |name: &str, read: PropertyRead| {
+            let mut parsed = on_sdk("10.0.401");
+            parsed
+                .property_reads
+                .named
+                .insert(name.to_ascii_lowercase(), read);
+            parsed
+        };
+        let with =
+            |name: &str, value: &str| with_read(name, PropertyRead::Value(value.to_string()));
+        let checked = |parsed: &ParsedProject| {
+            checked_floor(
+                parsed,
+                project_compiler(parsed, &HashMap::new(), &HashMap::new()).as_ref(),
+            )
+        };
+        for (name, value, expected) in [
+            ("OtherFlags", "--warnon:3390 --nowarn:FS0044", V8_0),
+            ("OtherFlags", "--langversion:9.0", V8_0),
+            ("OtherFlags", "--strict-indentation-", LanguageVersion::MIN),
+            ("OtherFlags", "-STRICT-INDENTATION+", LanguageVersion::MIN),
+            (
+                "OtherFlags",
+                "--disableLanguageFeature:NullnessChecking",
+                LanguageVersion::MIN,
+            ),
+            ("OtherFlags", "@/w/more.rsp", LanguageVersion::MIN),
+            (
+                "OtherFlags",
+                "--strict-\"\"indentation-",
+                LanguageVersion::MIN,
+            ),
+            ("OtherFlags", "-d:FOO", LanguageVersion::MIN),
+            ("OtherFlags", "Extra.fs", LanguageVersion::MIN),
+            (
+                "OtherFlags",
+                "--warnon:3390\t--debug+\n--optimize- --keyfile:/k.snk",
+                V8_0,
+            ),
+            ("OtherFlags", "  ", V8_0),
+            // A property of the item's name passes nothing.
+            ("DisabledLanguageFeatures", "NullnessChecking", V8_0),
+        ] {
+            assert_eq!(checked(&with(name, value)), expected, "{name}={value:?}");
+        }
+        for carrier in FEATURE_SWITCH_CARRIERS {
+            let untrusted =
+                PropertyRead::Untrusted(UntrustedCause::Unentered("a gate".to_string()));
+            assert_eq!(
+                checked(&with_read(carrier, untrusted)),
+                LanguageVersion::MIN
+            );
+            let refused = PropertyRead::UnsetInexact(InexactUnset::Refused);
+            assert_eq!(checked(&with_read(carrier, refused)), LanguageVersion::MIN);
+            let mut parsed = on_sdk("10.0.401");
+            parsed
+                .workload_definitions
+                .build_time_properties
+                .entry(carrier.to_ascii_lowercase())
+                .or_default()
+                .insert("/d/sdk-manifests/x/WorkloadManifest.targets".into());
+            assert_eq!(checked(&parsed), LanguageVersion::MIN, "{carrier} written");
+        }
+        for item in FEATURE_SWITCH_ITEMS {
+            for definitions in ["foreign", "workload"] {
+                let mut parsed = on_sdk("10.0.401");
+                let defined = if definitions == "foreign" {
+                    &mut parsed.foreign_definitions
+                } else {
+                    &mut parsed.workload_definitions
+                };
+                defined
+                    .items
+                    .entry(item.to_ascii_lowercase())
+                    .or_default()
+                    .insert("/w/Directory.Build.props".into());
+                assert_eq!(
+                    checked(&parsed),
+                    LanguageVersion::MIN,
+                    "{item} ({definitions})"
+                );
+            }
+        }
+        let mut parsed = on_sdk("10.0.401");
+        parsed
+            .foreign_definitions
+            .items
+            .entry("compile".to_string())
+            .or_default()
+            .insert("/w/App.fsproj".into());
+        assert_eq!(checked(&parsed), V8_0, "an item of another type");
+    }
+
     /// A compiler with no row reads the value as the pinned compiler does and
     /// claims no floor; a skipped support check lifts the floor.
     #[test]
@@ -1070,7 +1415,12 @@ mod tests {
     fn the_language_version_is_established_only_while_nothing_carries_another() {
         let doubted = |parsed: &ParsedProject| lang_version_untrusted_cause(parsed).is_some();
         assert!(!doubted(&on_sdk("10.0.401")));
-        for flags in ["--warnon:3390", "--LangVersion:8.0", "@/w/more.rsp"] {
+        for flags in [
+            "--warnon:3390",
+            "--LangVersion:8.0",
+            "@/w/more.rsp",
+            r#"--lang""version:8.0"#,
+        ] {
             let mut parsed = on_sdk("10.0.401");
             parsed.other_flags = Some(flags.to_string());
             assert_eq!(doubted(&parsed), flags != "--warnon:3390", "{flags}");

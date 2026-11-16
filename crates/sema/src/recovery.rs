@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use std::collections::HashSet;
 
+use borzoi_cst::language_version::LanguageVersion;
 use borzoi_cst::parser::{FileKind, Parse};
 use borzoi_cst::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use borzoi_cst::syntax::{TextRange, TextSize};
@@ -99,10 +100,21 @@ impl SyntaxRecovery {
     /// would license exactly the commitment this type exists to withhold.
     ///
     /// So the source is asked whether its tree and its recovery diagnostics
-    /// depend on the version at all
-    /// ([`diagnostics_are_version_invariant`](borzoi_cst::parser::diagnostics_are_version_invariant),
-    /// which re-parses across the version ladder and is why this is not the
-    /// default constructor). The legality errors are no part of that question,
+    /// depend on the version across every version the real build may check at
+    /// ([`diagnostics_are_invariant_over`](borzoi_cst::parser::diagnostics_are_invariant_over),
+    /// which re-parses across that range and is why this is not the default
+    /// constructor). That range runs from `compiler_floor`, the oldest version
+    /// the compiler that checks the file accepts, to
+    /// [`LanguageVersion::MAX`]. A caller that does not know that compiler, or
+    /// whose compiler has its floor lifted (`SKIP_VERSION_SUPPORTED_CHECK=1`),
+    /// passes [`LanguageVersion::MIN`], which makes the range the whole ladder.
+    /// A compiler known to refuse every version below 8.0 (FS3880) checks at
+    /// none of them, so a threshold below its floor (`member _.M`'s, F# 4.7)
+    /// moves no reading it can make. The range always holds the guess itself
+    /// (`parse.lang`), since the reading is the one taken there: a guess below
+    /// the floor stretches it down.
+    ///
+    /// The legality errors are no part of that question,
     /// as [`of`](Self::of) reads none: `#elif` is an error at F# 10 and silent
     /// at preview, over the same tree either way. Few files depend on the
     /// version otherwise, which is what makes this a per-file question rather
@@ -114,8 +126,11 @@ impl SyntaxRecovery {
         source: &str,
         symbols: &HashSet<String>,
         file_kind: FileKind,
+        compiler_floor: LanguageVersion,
     ) -> Self {
-        if borzoi_cst::parser::diagnostics_are_version_invariant(source, symbols, file_kind) {
+        let versions = parse.lang.min(compiler_floor)..=LanguageVersion::MAX;
+        if borzoi_cst::parser::diagnostics_are_invariant_over(source, symbols, file_kind, versions)
+        {
             SyntaxRecovery::of(parse)
         } else {
             SyntaxRecovery::Unretained
