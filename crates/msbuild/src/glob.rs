@@ -1,56 +1,28 @@
-//! Pure MSBuild-style glob matching for `.fsproj` item includes.
+//! Pure MSBuild-style glob semantics for `.fsproj` item includes.
 //!
 //! This is the policy half of the glob *seam* (`GlobResolver`): the
 //! evaluator never globs, it hands each globbing item element to a
 //! caller-supplied resolver. This module is the *pure* core of the
-//! resolver this crate ships ([`crate::glob_resolver`]) — pattern parsing
-//! and matching against relative paths, plus a deterministic selection
-//! over a candidate set. The filesystem enumeration that produces those
-//! candidates lives in `glob_resolver`.
+//! resolver this crate ships ([`crate::glob_resolver`]): the port of
+//! MSBuild's file matcher ([`file_matcher`]), the split and escaped item
+//! fragments the seam carries ([`SpecFragment`]), the allow-list of shapes the
+//! resolver commits inside ([`unmodelled_shape`]), the file matcher's
+//! legality rules, and MSBuild's order within one fragment's expansion. The
+//! file-system listing the walk runs over is taken in `glob_resolver`.
 //!
-//! ## Semantics modelled
+//! ## Order
 //!
-//! - `*` matches zero or more characters *within a single path segment*
-//!   (never crosses `/`).
-//! - `?` matches exactly one character within a segment.
-//! - `**`, as a *whole* segment, matches zero or more whole path
-//!   segments (recursive). `**` embedded in a larger segment (e.g.
-//!   `a**b`) parses as two `*` wildcards, but MSBuild's file matcher
-//!   refuses such a filespec ([`is_legal_filespec`]), so the resolver
-//!   declines before matching one.
-//! - A filename part of `*.*` matches every file where MSBuild's matcher
-//!   reads it so ([`Pattern::with_all_files_rule`]).
-//! - Paths are compared with `/` separators (backslashes normalise to `/`,
-//!   runs of `/` collapse, and lone `.` current-directory segments are
-//!   dropped). `..` is left for the filesystem layer to resolve against the
-//!   base directory.
-//! - Case: [`select_ignoring_case`] is MSBuild's file matcher as measured on
-//!   Linux, where every comparison it makes past the file system's own
-//!   lookups ignores ASCII case, and it declines where the build's culture
-//!   would decide ([`GlobDecline::CultureDependentCase`]). [`select`] is for
-//!   a host whose rule is not modelled: it **declines**
-//!   ([`GlobDecline::CaseAmbiguous`]) whenever folding ASCII case would
-//!   change what a fragment selects, so the answer is the same under either
-//!   rule, or there is no answer.
-//!
-//! [`select`] is an information-preserving primitive: it orders but does
-//! not deduplicate. Across Include fragments it keeps document order; and
-//! *within* one fragment's expansion it sorts exactly as MSBuild does —
+//! A fragment's expansion is ordered exactly as MSBuild orders it:
 //! `EngineFileUtilities.GetFileList` sorts each wildcard fragment's matches
 //! with `StringComparer.OrdinalIgnoreCase` before returning them, so the
-//! order is a function of the names, not of the filesystem. Where that sort
-//! cannot be reproduced exactly it declines: two matches equal under it
-//! (only possible on a case-sensitive filesystem) leave the order to .NET's
-//! unstable `Array.Sort`, and a non-ASCII name would need .NET's per-UTF-16
-//! simple case mapping, which this module does not model.
-//!
-//! ## Testing
-//!
-//! The matcher is property-tested against an independent naive reference
-//! oracle (`matches_naive`). That proves the two agree, catching
-//! implementation bugs — but *not* MSBuild-faithfulness (both could share
-//! a wrong assumption). MSBuild-faithfulness is a separate concern pinned
-//! by the 9b-2 `dotnet msbuild` oracle.
+//! order is a function of the names, not of the file system. Where that sort
+//! cannot be reproduced exactly the resolver declines: two matches equal
+//! under it (only possible on a case-sensitive file system) leave the order
+//! to .NET's unstable `Array.Sort`, and a non-ASCII name would need .NET's
+//! per-UTF-16 simple case mapping, which this module does not model.
+//! Fragments keep document order, and nothing is deduplicated.
+
+pub(crate) mod file_matcher;
 
 use crate::properties::escaping::{self, Escaped};
 
@@ -66,10 +38,6 @@ pub enum GlobDecline {
     /// position under `OrdinalIgnoreCase` depends on .NET's per-UTF-16 simple
     /// case mapping, which is not modelled.
     NonAsciiOrder { path: String },
-    /// Folding ASCII case changes whether `path` is selected — by the include
-    /// or by an exclude — on a host whose file-matcher case rule is not
-    /// modelled (`glob::select_ignoring_case` is the one that is).
-    CaseAmbiguous { path: String },
     /// Whether `path` is selected turns on whether `i` and `I` are one letter.
     /// MSBuild matches some globs by a regular expression that ignores case by
     /// the build's culture (the file matcher, one with a wildcard directory
@@ -96,13 +64,13 @@ pub enum GlobDecline {
     /// It then falls back to a different reading per caller, which is not
     /// modelled.
     IllegalFilespec { pattern: String },
-    /// A glob include meets excludes, and the include or an exclude has a
-    /// `.` segment. MSBuild's file matcher relates them by spelling, so
-    /// `Include="*.fs" Exclude="./a.fs"` excludes nothing, nor does
-    /// `Include="./*.fs" Exclude="a.fs"`; the matcher here drops a `.`
-    /// segment, so it declines instead. (A `..` segment it keeps, and compares
-    /// by spelling as MSBuild does.)
-    CurDirSegmentExclude { pattern: String },
+    /// A glob include, or an exclude the file matcher is handed, enumerates a
+    /// drive from its root (`/**`: `FileMatcher.IsDriveEnumeratingWildcardPattern`).
+    /// `EngineFileUtilities.GetFileList` then lists nothing for the include,
+    /// or, for such an exclude, for every include of the element, and logs a
+    /// warning (or fails, under `MSBUILDFAILONDRIVEENUMERATINGWILDCARD`), which
+    /// is not modelled.
+    DriveEnumeratingWildcard { spec: String },
     /// A spec, or a name a glob would match, is outside the shapes the
     /// resolver models ([`Unmodelled`] says which). The resolver commits only
     /// inside an allow-list the MSBuild differentials verify, so a shape
@@ -120,10 +88,6 @@ impl std::fmt::Display for GlobDecline {
             GlobDecline::NonAsciiOrder { path } => write!(
                 f,
                 "`{path}` has a non-ASCII name, whose position in MSBuild's case-insensitive order is not modelled"
-            ),
-            GlobDecline::CaseAmbiguous { path } => write!(
-                f,
-                "whether `{path}` is selected depends on whether matching ignores case"
             ),
             GlobDecline::CultureDependentCase { path } => write!(
                 f,
@@ -146,9 +110,9 @@ impl std::fmt::Display for GlobDecline {
                 f,
                 "MSBuild's file matcher refuses the pattern `{pattern}`, and its fallback is not modelled"
             ),
-            GlobDecline::CurDirSegmentExclude { pattern } => write!(
+            GlobDecline::DriveEnumeratingWildcard { spec } => write!(
                 f,
-                "`{pattern}` has a `.` segment, which MSBuild's file matcher compares by spelling against excludes"
+                "`{spec}` enumerates a drive from its root, which MSBuild warns about and lists nothing for"
             ),
             GlobDecline::OutsideModelledShape { spec, shape } => write!(
                 f,
@@ -156,32 +120,6 @@ impl std::fmt::Display for GlobDecline {
             ),
         }
     }
-}
-
-/// One token inside a single-segment pattern piece.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Tok {
-    /// A literal character.
-    Lit(char),
-    /// `*` — zero or more non-`/` characters.
-    Star,
-    /// `?` — exactly one character.
-    Question,
-}
-
-/// One segment of a compiled pattern.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Seg {
-    /// Matches exactly one path segment via this token sequence.
-    Match(Vec<Tok>),
-    /// `**` — matches zero or more whole path segments.
-    DoubleStar,
-}
-
-/// A compiled MSBuild include/exclude pattern, relative to a base dir.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pattern {
-    segs: Vec<Seg>,
 }
 
 /// One `;`-separated fragment of an item `Include` or `Exclude`, still in
@@ -252,8 +190,7 @@ impl SpecFragment {
 
 /// Which allow-list rule a spec or name breaks
 /// ([`GlobDecline::OutsideModelledShape`]). Each names MSBuild behaviour the
-/// resolver's plain matching would get wrong, found by review or by the
-/// generative differential: none of it is modelled, so all of it declines.
+/// file matcher's port does not model, so all of it declines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unmodelled {
     /// A character outside printable ASCII. MSBuild's `?` matches one UTF-16
@@ -269,35 +206,14 @@ pub enum Unmodelled {
     /// One of `"<>|:`, which Windows forbids in a filename and MSBuild's
     /// matchers treat specially (as wildcards, or as a drive separator).
     WindowsReservedCharacter,
-    /// A glob include with a `..` segment meets an exclude with a wildcard
-    /// directory part. MSBuild applies that part only to the directories it
-    /// walks, not to the include's own `..` prefix, so the SDK's `**/.*/**`
-    /// leaves `../shared/*.fs` alone; matching the plain way, `.*` would take
-    /// the `..`.
-    ParentSegmentUnderWildcardExclude,
-    /// A glob exclude with a wildcard directory part, anchored differently
-    /// from the glob include it filters (one absolute, the other relative).
-    MixedAnchoring,
-    /// A glob exclude names a directory after a `**` in its wildcard part, and
-    /// the glob include it filters starts its walk below the exclude's base,
-    /// inside a directory that name could match. MSBuild applies that part
-    /// only to directories its walk enters, so `**/Deep/**` leaves
-    /// `sub/Deep/*.fs` alone; matched by full path, it takes the file (#615).
-    GlobstarExcludeAboveIncludeRoot,
     /// A glob's fixed directory has a `~` in a segment after its first, which
     /// MSBuild's file matcher resolves as a Windows short name relative to the
     /// build's working directory (`glob::has_tilde_after_first_fixed_segment`).
     TildeInFixedDirectory,
-    /// A glob MSBuild compares by regular expression has more `?`s that
-    /// expression could read as a path separator than
-    /// `glob::regex_question_readings` reads both ways.
-    RegexQuestionAcrossSeparator,
-    /// A glob include has a `.` segment in its wildcard directory part. The
-    /// file matcher's walk looks for a directory named `.` there, so
-    /// `*/./**/*.fs` takes nothing, unless a `**` came first, past which its
-    /// regular expression drops the segment (`**/./*.fs` takes `sub/a.fs`;
-    /// oracle-pinned). `Pattern` drops it everywhere.
-    CurDirInWildcardDirectory,
+    /// A name a glob would match holds a `\`, legal in a Unix file name. The
+    /// file matcher's regular expressions read it as a separator, and the
+    /// item's full path turns it into one, which names another file.
+    BackslashInName,
 }
 
 impl std::fmt::Display for Unmodelled {
@@ -307,23 +223,9 @@ impl std::fmt::Display for Unmodelled {
             Unmodelled::TrailingSeparator => "ends in a path separator",
             Unmodelled::TrailingDotOrSpace => "has a segment ending in `.` or a space",
             Unmodelled::WindowsReservedCharacter => "has one of `\"<>|:`",
-            Unmodelled::ParentSegmentUnderWildcardExclude => {
-                "has a `..` segment and meets an exclude with a wildcard directory part"
-            }
-            Unmodelled::MixedAnchoring => {
-                "has a wildcard directory part and is anchored unlike the include it filters"
-            }
-            Unmodelled::GlobstarExcludeAboveIncludeRoot => {
-                "names a directory after `**` that the include's walk root lies inside"
-            }
+            Unmodelled::BackslashInName => "has a `\\` in a file or directory name",
             Unmodelled::TildeInFixedDirectory => {
                 "has a `~` in a fixed directory segment after the first"
-            }
-            Unmodelled::RegexQuestionAcrossSeparator => {
-                "has too many `?`s MSBuild's regular expression could read as a path separator"
-            }
-            Unmodelled::CurDirInWildcardDirectory => {
-                "has a `.` segment in its wildcard directory part"
             }
         })
     }
@@ -353,12 +255,6 @@ pub fn unmodelled_shape(spec: &str) -> Option<Unmodelled> {
         }
     }
     None
-}
-
-/// Whether a decoded glob has a wildcard directory part (`**/a.fs`,
-/// `bin/**`): what [`Unmodelled::MixedAnchoring`] asks of an exclude.
-pub fn has_wildcard_directory_part(spec: &str) -> bool {
-    !split_filespec(spec).1.is_empty()
 }
 
 /// Characters that make MSBuild reject a filespec outright
@@ -414,16 +310,36 @@ fn has_misplaced_recursive_operator(part: &str) -> bool {
 /// illegal exclude falls back to a literal comparison — so the resolver
 /// declines rather than reproduce each fallback.
 pub fn is_legal_filespec(spec: &str) -> bool {
-    if spec.chars().any(is_invalid_path_char) || spec.contains("...") {
-        return false;
-    }
-    if spec.rfind(':').is_some_and(|colon| colon != 1) {
+    if !raw_filespec_is_valid(spec) {
         return false;
     }
     let (_, wildcard_dir, filename) = split_filespec(spec);
     !wildcard_dir.contains("..")
         && !has_misplaced_recursive_operator(&wildcard_dir)
         && !has_misplaced_recursive_operator(&filename)
+}
+
+/// `FileMatcher.RawFileSpecIsValid`: no invalid path character, no `...`, and
+/// no `:` but the second character.
+fn raw_filespec_is_valid(spec: &str) -> bool {
+    !spec.chars().any(is_invalid_path_char)
+        && !spec.contains("...")
+        && spec.rfind(':').is_none_or(|colon| colon == 1)
+}
+
+/// Whether `EngineFileUtilities.GetFileList` finds a decoded spec to enumerate
+/// a drive from its root (`FileMatcher.IsDriveEnumeratingWildcardPattern` of
+/// its `GetFileSpecInfo` parts, on a Unix host): a fixed directory of nothing
+/// but slashes before a wildcard directory part that starts with `**`, as
+/// `/**/*.fs` has.
+pub fn is_drive_enumerating_filespec(spec: &str) -> bool {
+    if !raw_filespec_is_valid(spec) {
+        return false;
+    }
+    let (fixed, wildcard_dir, _) = split_filespec(spec);
+    !fixed.is_empty()
+        && fixed.bytes().all(|b| b == b'/' || b == b'\\')
+        && wildcard_dir.starts_with("**")
 }
 
 /// Whether a **literal** spelling is one MSBuild compares without normalising
@@ -441,144 +357,6 @@ pub fn compares_unnormalised(spelling: &str) -> bool {
     filename
         .chars()
         .any(|c| matches!(c, '"' | '<' | '>' | '|' | ':' | '*' | '?') || c < ' ')
-}
-
-/// Whether a decoded glob filespec has the shape MSBuild's
-/// `FileSpecMatcherTester` matches by **filename alone**: an empty fixed
-/// directory and a wildcard directory part of exactly `**`
-/// (`**/*.fs`). That branch uses the plain filename glob, without the
-/// all-files reading of `*.*` ([`Pattern::with_all_files_rule`]).
-pub fn is_recursive_filename_pattern(spec: &str) -> bool {
-    let (fixed, wildcard_dir, _) = split_filespec(spec);
-    fixed.is_empty() && wildcard_dir.trim_end_matches(['/', '\\']) == "**"
-}
-
-/// Whether MSBuild's file matcher compares files with a decoded glob by
-/// regular expression (`FileMatcher.GetFileSearchData`'s `matchWithRegex`):
-/// its wildcard directory part is neither empty, nor exactly `**`, nor of the
-/// `**/{name}/**` shape it matches by directory name. That expression ignores
-/// case by the build's culture. The other forms compare each name with
-/// `FileMatcher.IsMatch`, which folds ASCII case on any culture.
-pub fn matches_by_regex(spec: &str) -> bool {
-    let (_, wildcard_dir, _) = split_filespec(spec);
-    let wildcard = wildcard_dir.trim_end_matches(['/', '\\']);
-    !wildcard.is_empty() && wildcard != "**" && !is_directory_name_pattern(wildcard)
-}
-
-/// A decoded glob as MSBuild's file matcher reads it, spelt for
-/// [`Pattern`]. Where its wildcard directory part has the `**/{name}/**`
-/// shape the matcher takes by directory name, `{name}` matches exactly one
-/// directory name by `FileMatcher.IsMatch`, in which a run of `*` is one `*`.
-/// The only legal `{name}` that reads otherwise as a path pattern is `**`,
-/// which would match no directory at all there: `sub/**/**/**` takes only
-/// files below a directory of `sub`, never `sub/a.fs` (oracle-pinned), so it
-/// is spelt `sub/**/*/**/*.*`.
-///
-/// A glob it compares by regular expression ([`matches_by_regex`]) has its
-/// file name read as that expression reads it ([`regex_filename`]).
-pub fn as_file_matcher_reads(spec: &str) -> String {
-    let (fixed, wildcard_dir, filename) = split_filespec(spec);
-    let wildcard = wildcard_dir.trim_end_matches(['/', '\\']);
-    if is_directory_name_pattern(wildcard) && &wildcard[3..wildcard.len() - 3] == "**" {
-        format!("{fixed}**/*/**/{filename}")
-    } else if matches_by_regex(spec) {
-        format!("{fixed}{wildcard_dir}{}", regex_filename(&filename))
-    } else {
-        spec.to_string()
-    }
-}
-
-/// A glob's file name as MSBuild's regular expression for it reads it
-/// (`FileMatcher.AppendRegularExpressionFromFilename`): the `.*` of each
-/// `*.*` is dropped, so `a*.*` takes `ab`, which has no dot (oracle-pinned).
-/// A trailing `.`, which that function also reads specially, is outside the
-/// allow-list.
-pub fn regex_filename(filename: &str) -> String {
-    let chars: Vec<char> = filename.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        out.push(chars[i]);
-        if chars[i] == '*' && chars.get(i + 1) == Some(&'.') && chars.get(i + 2) == Some(&'*') {
-            i += 2;
-        }
-        i += 1;
-    }
-    out
-}
-
-/// The most `?`s [`regex_question_readings`] reads both ways; past it the
-/// readings double too fast to enumerate, and the caller declines.
-const MAX_CROSSING_QUESTIONS: usize = 4;
-
-/// The spellings a glob's regular expression can read `text` as, for
-/// [`Pattern`]. MSBuild's expression reads `?` as any character, a separator
-/// included, so a `?` with a character of the same name on each side may
-/// also read as a separator: `sub/a?b.fs` takes `sub/a/b.fs` (oracle-pinned,
-/// against a literal include and past a `**` in the file matcher). Next to a
-/// separator, or where it would leave a name empty, `.` or `..`, it cannot,
-/// as a path has none of those. Only the `?`s from byte `from` on are read
-/// both ways. `None` past [`MAX_CROSSING_QUESTIONS`] such `?`s.
-pub fn regex_question_readings(text: &str, from: usize) -> Option<Vec<String>> {
-    let bytes = text.as_bytes();
-    let is_sep = |b: u8| b == b'/' || b == b'\\';
-    let crossing: Vec<usize> = (from.max(1)..text.len().saturating_sub(1))
-        .filter(|&i| bytes[i] == b'?' && !is_sep(bytes[i - 1]) && !is_sep(bytes[i + 1]))
-        .collect();
-    if crossing.len() > MAX_CROSSING_QUESTIONS {
-        return None;
-    }
-    let mut readings = Vec::new();
-    for mask in 0u32..1 << crossing.len() {
-        let mut reading = bytes.to_vec();
-        let replaced: Vec<usize> = crossing
-            .iter()
-            .enumerate()
-            .filter(|(bit, _)| mask & (1 << bit) != 0)
-            .map(|(_, &i)| i)
-            .collect();
-        for &i in &replaced {
-            reading[i] = b'/';
-        }
-        // The names on each side of every `?` read as a separator.
-        let name_ending_at = |end: usize| {
-            let start = reading[..end]
-                .iter()
-                .rposition(|&b| is_sep(b))
-                .map_or(0, |s| s + 1);
-            &reading[start..end]
-        };
-        let name_starting_at = |start: usize| {
-            let end = reading[start..]
-                .iter()
-                .position(|&b| is_sep(b))
-                .map_or(reading.len(), |e| start + e);
-            &reading[start..end]
-        };
-        let is_name = |name: &[u8]| !matches!(name, b"" | b"." | b"..");
-        if replaced
-            .iter()
-            .all(|&i| is_name(name_ending_at(i)) && is_name(name_starting_at(i + 1)))
-        {
-            readings.push(String::from_utf8(reading).expect("only ASCII bytes were replaced"));
-        }
-    }
-    Some(readings)
-}
-
-/// The `**/{name}/**` shape of a wildcard directory part (trailing separators
-/// trimmed) that `GetFileSearchData` matches by directory name: longer than
-/// six characters, with no separator inside `{name}`.
-fn is_directory_name_pattern(wildcard: &str) -> bool {
-    let b = wildcard.as_bytes();
-    let n = b.len();
-    let is_slash = |c: u8| c == b'/' || c == b'\\';
-    n > 6
-        && b.starts_with(b"**")
-        && is_slash(b[2])
-        && is_slash(b[n - 3])
-        && b.ends_with(b"**")
-        && !b[3..n - 3].iter().copied().any(is_slash)
 }
 
 /// Whether a decoded glob's fixed directory part has a `~` in a segment
@@ -607,169 +385,6 @@ pub fn split_segments(raw: &str) -> Vec<&str> {
     raw.split(['/', '\\'])
         .filter(|s| !s.is_empty() && *s != ".")
         .collect()
-}
-
-impl Pattern {
-    /// Parse one already-expanded include/exclude fragment. A segment
-    /// equal exactly to `**` becomes [`Seg::DoubleStar`]; otherwise each
-    /// character becomes a [`Tok`] (`*`/`?`/literal).
-    pub fn parse(fragment: &str) -> Pattern {
-        let mut segs = split_segments(fragment)
-            .into_iter()
-            .map(|s| {
-                if s == "**" {
-                    Seg::DoubleStar
-                } else {
-                    Seg::Match(
-                        s.chars()
-                            .map(|c| match c {
-                                '*' => Tok::Star,
-                                '?' => Tok::Question,
-                                other => Tok::Lit(other),
-                            })
-                            .collect(),
-                    )
-                }
-            })
-            .collect::<Vec<_>>();
-        // MSBuild rewrites a final `**` to `**/*.*` (`FileMatcher.SplitFileSpec`):
-        // the pattern names the files *below* a directory, so `bin/**` does
-        // not match a file called `bin`, and `a*/**` needs `a*` to be one.
-        if segs.last() == Some(&Seg::DoubleStar) {
-            segs.push(Seg::Match(vec![Tok::Star]));
-        }
-        Pattern { segs }
-    }
-
-    /// This pattern with MSBuild's all-files reading of its filename part
-    /// (`FileMatcher.IsAllFilesWildcard`): a final segment of `*.*` matches
-    /// every file, extensionless ones included, exactly as `*` does. The
-    /// file matcher applies it to every glob include and to the excludes it
-    /// is handed; `FileSpecMatcherTester` applies it except in its
-    /// filename-only branch ([`is_recursive_filename_pattern`]). `a*.*` is
-    /// not read this way.
-    pub fn with_all_files_rule(mut self) -> Pattern {
-        if let Some(Seg::Match(toks)) = self.segs.last_mut()
-            && toks.as_slice() == [Tok::Star, Tok::Lit('.'), Tok::Star]
-        {
-            *toks = vec![Tok::Star];
-        }
-        self
-    }
-
-    /// Build a pattern whose leading `literal` segments match **verbatim**
-    /// — any `*`/`?`/`**` in them are ordinary characters, not wildcards —
-    /// followed by the glob segments parsed from `fragment`.
-    ///
-    /// This anchors a glob at a *known-literal* base directory. The resolver
-    /// passes the project directory (which may legitimately contain `*`/`?`
-    /// on a case-sensitive Unix filesystem) as `literal`, so those bytes stay
-    /// literal instead of silently turning the base path into a wildcard that
-    /// would match sibling directories. `literal` segments are taken as
-    /// already-split path components; each is normalised again so a caller
-    /// may pass either pre-split segments or `/`-joined ones.
-    pub fn with_literal_prefix(literal: &[&str], fragment: &str) -> Pattern {
-        let mut segs: Vec<Seg> = literal
-            .iter()
-            .flat_map(|s| split_segments(s))
-            .map(|s| Seg::Match(s.chars().map(Tok::Lit).collect()))
-            .collect();
-        segs.extend(Pattern::parse(fragment).segs);
-        Pattern { segs }
-    }
-
-    /// Whether this pattern contains any wildcard (`*`, `?`, or `**`). The
-    /// resolver does not ask: whether a fragment globs is MSBuild's
-    /// classification of its escaped text ([`SpecFragment::is_wildcard`]),
-    /// which the parsed pattern no longer carries.
-    #[cfg(test)]
-    fn is_glob(&self) -> bool {
-        self.segs.iter().any(|seg| match seg {
-            Seg::DoubleStar => true,
-            Seg::Match(toks) => toks.iter().any(|t| matches!(t, Tok::Star | Tok::Question)),
-        })
-    }
-
-    /// Match against a relative candidate path (normalised internally).
-    pub fn matches(&self, candidate: &str) -> bool {
-        let path = split_segments(candidate);
-        path_match(&self.segs, &path)
-    }
-
-    /// [`Self::matches`] with ASCII case folded on both sides.
-    pub fn matches_ignoring_ascii_case(&self, candidate: &str) -> bool {
-        self.matches_folded(candidate, |c| c.to_ascii_lowercase())
-    }
-
-    /// [`Self::matches`] with ASCII case folded on both sides except between
-    /// `i` and `I`, as a .NET regular expression that ignores case compares
-    /// ASCII letters under a Turkish or Azerbaijani culture.
-    pub fn matches_ignoring_ascii_case_but_i(&self, candidate: &str) -> bool {
-        self.matches_folded(candidate, |c| match c {
-            'i' | 'I' => c,
-            _ => c.to_ascii_lowercase(),
-        })
-    }
-
-    /// [`Self::matches`] with `fold` applied to every literal character of the
-    /// pattern and every character of `candidate`.
-    fn matches_folded(&self, candidate: &str, fold: impl Fn(char) -> char) -> bool {
-        let folded = Pattern {
-            segs: self
-                .segs
-                .iter()
-                .map(|seg| match seg {
-                    Seg::DoubleStar => Seg::DoubleStar,
-                    Seg::Match(toks) => Seg::Match(
-                        toks.iter()
-                            .map(|tok| match tok {
-                                Tok::Lit(c) => Tok::Lit(fold(*c)),
-                                other => other.clone(),
-                            })
-                            .collect(),
-                    ),
-                })
-                .collect(),
-        };
-        folded.matches(&candidate.chars().map(fold).collect::<String>())
-    }
-}
-
-/// A glob as MSBuild's file matcher applies it: the [`Pattern`]s of its
-/// readings (one, unless a regular expression can read a `?` as a separator:
-/// [`regex_question_readings`]), any of which takes a file, and whether the
-/// matcher compares files with it by regular expression ([`matches_by_regex`])
-/// rather than name by name.
-#[derive(Debug, Clone)]
-pub struct MatcherPattern {
-    pub patterns: Vec<Pattern>,
-    pub by_regex: bool,
-}
-
-impl MatcherPattern {
-    /// Whether the file matcher takes `candidate`, ignoring ASCII case, with
-    /// `i` and `I` kept apart in a regular expression when `but_i`.
-    fn matches(&self, candidate: &str, but_i: bool) -> bool {
-        self.patterns.iter().any(|pattern| {
-            if but_i && self.by_regex {
-                pattern.matches_ignoring_ascii_case_but_i(candidate)
-            } else {
-                pattern.matches_ignoring_ascii_case(candidate)
-            }
-        })
-    }
-}
-
-/// Whether `candidate` survives `include` and `excludes` — and the same
-/// verdict with ASCII case folded. A caller that cannot rule out
-/// case-insensitive matching must decline when the two differ.
-fn selected_both_ways(include: &Pattern, excludes: &[Pattern], candidate: &str) -> (bool, bool) {
-    let exact = include.matches(candidate) && !excludes.iter().any(|e| e.matches(candidate));
-    let folded = include.matches_ignoring_ascii_case(candidate)
-        && !excludes
-            .iter()
-            .any(|e| e.matches_ignoring_ascii_case(candidate));
-    (exact, folded)
 }
 
 /// The length in bytes of the longest prefix all of `strings` share.
@@ -802,7 +417,7 @@ fn ordinal_ignore_case(a: &str, b: &str) -> std::cmp::Ordering {
 /// The text every match shares — the glob root and the project directory
 /// above it — cannot decide their order, so only what follows it must be
 /// ASCII: a checkout under `/home/José/` still commits.
-fn sort_like_msbuild(matched: &mut [String]) -> Result<(), GlobDecline> {
+pub(crate) fn sort_like_msbuild(matched: &mut [String]) -> Result<(), GlobDecline> {
     if matched.len() < 2 {
         return Ok(());
     }
@@ -827,678 +442,21 @@ fn sort_like_msbuild(matched: &mut [String]) -> Result<(), GlobDecline> {
     Ok(())
 }
 
-/// The fixed (wildcard-free) leading directory of a glob fragment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GlobRoot {
-    /// The leading wildcard-free segments, normalised (separators unified,
-    /// empty/`.` dropped, `..` preserved). Empty when the first segment is
-    /// already a wildcard (e.g. `*.fs`, `**/x.fs`). The resolver roots its
-    /// filesystem walk here; absoluteness (a leading `/`) is recovered from
-    /// the raw fragment, not from these segments.
-    pub prefix: Vec<String>,
-    /// The segment-depth of the wildcard tail that follows the prefix, or
-    /// `None` when that tail contains `**` (unbounded). The resolver walks
-    /// from [`GlobRoot::prefix`] to this depth.
-    pub tail_depth: Option<usize>,
-}
-
-/// Split a fragment into its fixed leading directory and the wildcard tail
-/// that follows. `../shared/*.fs` splits into prefix `["..", "shared"]` and
-/// a depth-1 tail, so the resolver can enumerate the sibling directory
-/// rather than the project directory.
-pub fn split_glob_root(fragment: &str) -> GlobRoot {
-    let segs = split_segments(fragment);
-    let is_wild = |s: &str| s.contains('*') || s.contains('?');
-    let prefix_len = segs.iter().take_while(|s| !is_wild(s)).count();
-    let prefix = segs[..prefix_len].iter().map(|s| s.to_string()).collect();
-    let tail = &segs[prefix_len..];
-    let tail_depth = if tail.contains(&"**") {
-        None
-    } else {
-        Some(tail.len())
-    };
-    GlobRoot { prefix, tail_depth }
-}
-
-/// Iterative two-pointer wildcard match of one segment's tokens against a
-/// string's characters: `*` spans 0+ chars, `?` exactly one. Distinct in
-/// structure from the recursive test oracle so their agreement is
-/// meaningful.
-fn seg_match(toks: &[Tok], s: &[char]) -> bool {
-    let (mut i, mut j) = (0usize, 0usize);
-    // (token index just after the last `*`, candidate index it was at)
-    let mut star: Option<(usize, usize)> = None;
-    while j < s.len() {
-        match toks.get(i) {
-            Some(Tok::Question) => {
-                i += 1;
-                j += 1;
-            }
-            Some(Tok::Lit(c)) if *c == s[j] => {
-                i += 1;
-                j += 1;
-            }
-            Some(Tok::Star) => {
-                star = Some((i, j));
-                i += 1;
-            }
-            _ => match star {
-                Some((si, sj)) => {
-                    i = si + 1;
-                    j = sj + 1;
-                    star = Some((si, sj + 1));
-                }
-                None => return false,
-            },
-        }
-    }
-    while matches!(toks.get(i), Some(Tok::Star)) {
-        i += 1;
-    }
-    i == toks.len()
-}
-
-/// Iterative two-pointer match at segment granularity, with
-/// [`Seg::DoubleStar`] spanning 0+ whole path segments.
-fn path_match(segs: &[Seg], path: &[&str]) -> bool {
-    let (mut i, mut j) = (0usize, 0usize);
-    let mut star: Option<(usize, usize)> = None;
-    while j < path.len() {
-        let advanced = match segs.get(i) {
-            Some(Seg::DoubleStar) => {
-                star = Some((i, j));
-                i += 1;
-                true
-            }
-            Some(Seg::Match(toks)) => {
-                let sc: Vec<char> = path[j].chars().collect();
-                if seg_match(toks, &sc) {
-                    i += 1;
-                    j += 1;
-                    true
-                } else {
-                    false
-                }
-            }
-            None => false,
-        };
-        if !advanced {
-            match star {
-                Some((si, sj)) => {
-                    i = si + 1;
-                    j = sj + 1;
-                    star = Some((si, sj + 1));
-                }
-                None => return false,
-            }
-        }
-    }
-    while matches!(segs.get(i), Some(Seg::DoubleStar)) {
-        i += 1;
-    }
-    i == segs.len()
-}
-
-/// Select the candidates matched by `includes` and not by any `exclude`.
-///
-/// This is an *information-preserving* primitive: it matches and orders,
-/// but does **not** deduplicate. The `includes` are processed in document
-/// (fragment) order — each fragment's matches appear before the next
-/// fragment's, whatever their names. *Within* one fragment's expansion the
-/// matches are in MSBuild's `OrdinalIgnoreCase` order (see the module docs).
-/// Overlapping fragments therefore yield duplicates (a literal also caught
-/// by a later glob appears twice), as MSBuild keeps them.
-///
-/// Declines — rather than guess — when folding ASCII case would change a
-/// fragment's selection, or when its MSBuild order is not reproducible.
-///
-/// Output paths are `/`-normalised (backslashes → `/`, runs of `/`
-/// collapsed, lone `.` dropped).
-pub fn select(
-    candidates: &[&str],
-    includes: &[Pattern],
-    excludes: &[Pattern],
-) -> Result<Vec<String>, GlobDecline> {
-    let mut out: Vec<String> = Vec::new();
-    for inc in includes {
-        let mut matched: Vec<String> = Vec::new();
-        for candidate in candidates {
-            let (exact, folded) = selected_both_ways(inc, excludes, candidate);
-            if exact != folded {
-                return Err(GlobDecline::CaseAmbiguous {
-                    path: candidate.to_string(),
-                });
-            }
-            if exact {
-                matched.push(split_segments(candidate).join("/"));
-            }
-        }
-        sort_like_msbuild(&mut matched)?;
-        out.append(&mut matched);
-    }
-    Ok(out)
-}
-
-/// One glob include's expansion as MSBuild's file matcher selects it on
-/// Linux: the candidates `include` takes and no exclude takes, in MSBuild's
-/// order (see [`select`], whose ordering and output this shares).
-///
-/// The file system decides what exists: the include's walk starts at its
-/// fixed directory as written, and an exclude whose fixed directory does not
-/// exist as written is dropped (`GetFileSearchData` returns
-/// `ReturnEmptyList` for it). So `excludes` must hold only the excludes whose
-/// fixed directory exists; the caller asks the file system.
-///
-/// Every comparison past those lookups ignores ASCII case, which is why the
-/// patterns are matched folded, their fixed directories included:
-/// - the include's walk enters a directory, and keeps a file, by
-///   `FileMatcher.IsMatch` or by a regular expression that ignores case;
-/// - an exclude's fixed directory meets the include's (`OrdinalIgnoreCase`
-///   in `GetFilesImplementation`, and in the dictionary keying the excludes
-///   that start below it);
-/// - an exclude's own directory and file names meet the walk's as the
-///   include's do.
-///
-/// The regular expressions ignore case by the build's culture, which keeps
-/// `i` and `I` apart in Turkish and Azerbaijani; where that decides whether a
-/// candidate is selected, this declines
-/// ([`GlobDecline::CultureDependentCase`]). Names holding a non-ASCII letter
-/// a regular expression folds onto an ASCII one (`K`, `İ`, `ı`) are the
-/// caller's to refuse.
-pub fn select_ignoring_case(
-    candidates: &[&str],
-    include: &MatcherPattern,
-    excludes: &[MatcherPattern],
-) -> Result<Vec<String>, GlobDecline> {
-    let selected = |candidate: &str, but_i: bool| {
-        include.matches(candidate, but_i) && !excludes.iter().any(|e| e.matches(candidate, but_i))
-    };
-    let mut matched: Vec<String> = Vec::new();
-    for candidate in candidates {
-        let invariant = selected(candidate, false);
-        if invariant != selected(candidate, true) {
-            return Err(GlobDecline::CultureDependentCase {
-                path: candidate.to_string(),
-            });
-        }
-        if invariant {
-            matched.push(split_segments(candidate).join("/"));
-        }
-    }
-    sort_like_msbuild(&mut matched)?;
-    Ok(matched)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
-    use proptest::strategy::{Strategy, ValueTree};
-    use proptest::test_runner::TestRunner;
-
-    // ----- Reference oracle (deliberately naive) -----
-
-    /// Naive within-segment match: `*` = 0+ chars, `?` = exactly 1,
-    /// else literal. Operates on char slices; backtracks on `*`.
-    fn seg_match_naive(pat: &[char], s: &[char]) -> bool {
-        match pat.split_first() {
-            None => s.is_empty(),
-            Some((&'*', rest)) => (0..=s.len()).any(|i| seg_match_naive(rest, &s[i..])),
-            Some((&'?', rest)) => !s.is_empty() && seg_match_naive(rest, &s[1..]),
-            Some((&c, rest)) => s.first() == Some(&c) && seg_match_naive(rest, &s[1..]),
-        }
-    }
-
-    /// Naive whole-path match. A pattern segment equal exactly to `"**"`
-    /// matches 0+ path segments; any other segment matches exactly one.
-    fn path_match_naive(pat: &[&str], path: &[&str]) -> bool {
-        match pat.split_first() {
-            None => path.is_empty(),
-            Some((&"**", rest)) => (0..=path.len()).any(|i| path_match_naive(rest, &path[i..])),
-            Some((&p, rest)) => {
-                if path.is_empty() {
-                    return false;
-                }
-                let pc: Vec<char> = p.chars().collect();
-                let sc: Vec<char> = path[0].chars().collect();
-                seg_match_naive(&pc, &sc) && path_match_naive(rest, &path[1..])
-            }
-        }
-    }
-
-    /// Independent ground-truth matcher over raw strings.
-    fn matches_naive(pattern: &str, path: &str) -> bool {
-        let mut p = split_segments(pattern);
-        // MSBuild's final-`**` rewrite (`**/*.*`), as `Pattern::parse` has it.
-        if p.last() == Some(&"**") {
-            p.push("*");
-        }
-        let s = split_segments(path);
-        path_match_naive(&p, &s)
-    }
-
-    /// Independent reference for [`select`]: walk includes in document
-    /// order, append each fragment's surviving matches sorted, no dedup.
-    /// Uses the naive recursive matcher, so agreement with `select` (which
-    /// drives the iterative compiled matcher) is meaningful.
-    fn select_naive(cands: &[String], incl: &[String], excl: &[String]) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for inc in incl {
-            let mut matched: Vec<String> = cands
-                .iter()
-                .filter(|c| matches_naive(inc, c) && !excl.iter().any(|p| matches_naive(p, c)))
-                .map(|c| split_segments(c).join("/"))
-                .collect();
-            // MSBuild's `OrdinalIgnoreCase`; the generated names are lower-case
-            // ASCII, so this is total and decidable.
-            matched.sort_by_key(|m| m.to_ascii_uppercase());
-            out.append(&mut matched);
-        }
-        out
-    }
-
-    // ----- Generators (generate-correct, fuzz the bias) -----
-
-    fn seg_chars() -> impl Strategy<Value = String> {
-        prop::collection::vec(prop::sample::select(vec!['a', 'b', 'c']), 1..=3)
-            .prop_map(|cs| cs.into_iter().collect())
-    }
-
-    /// A relative path: 1–4 segments over {a,b,c}.
-    fn path_segs() -> impl Strategy<Value = Vec<String>> {
-        prop::collection::vec(seg_chars(), 1..=4)
-    }
-
-    /// Transform a literal segment into a pattern segment that still
-    /// matches it: each char becomes `*` (25%), `?` (25%), or itself.
-    fn derive_seg(seg: String) -> impl Strategy<Value = String> {
-        let n = seg.chars().count();
-        prop::collection::vec(0u32..100, n).prop_map(move |codes| {
-            seg.chars()
-                .zip(codes)
-                .map(|(c, code)| match code {
-                    0..=24 => '*',
-                    25..=49 => '?',
-                    _ => c,
-                })
-                .collect::<String>()
-        })
-    }
-
-    /// A pattern derived from `path` so it matches by construction: each
-    /// segment is replaced by `**` (20%) or a char-transformed version.
-    fn derived_pattern(path: Vec<String>) -> impl Strategy<Value = String> {
-        let per_seg: Vec<_> = path
-            .into_iter()
-            .map(|s| {
-                (0u32..100, derive_seg(s)).prop_map(|(r, transformed)| {
-                    if r < 20 {
-                        "**".to_string()
-                    } else {
-                        transformed
-                    }
-                })
-            })
-            .collect();
-        per_seg.prop_map(|segs| segs.join("/"))
-    }
-
-    fn indep_tok() -> impl Strategy<Value = &'static str> {
-        prop_oneof![Just("a"), Just("b"), Just("c"), Just("*"), Just("?"),]
-    }
-
-    fn indep_seg() -> impl Strategy<Value = String> {
-        prop_oneof![
-            2 => Just("**".to_string()),
-            8 => prop::collection::vec(indep_tok(), 1..=3).prop_map(|t| t.concat()),
-        ]
-    }
-
-    /// An independent random pattern: 1–4 segments. Usually does not match
-    /// a given path, but sometimes coincidentally does.
-    fn independent_pattern() -> impl Strategy<Value = String> {
-        prop::collection::vec(indep_seg(), 1..=4).prop_map(|s| s.join("/"))
-    }
-
-    /// A (pattern, path) pair. Fuzzes a per-sample bias toward deriving
-    /// the pattern from the path (guaranteed match) vs. an independent
-    /// pattern (usually non-match), so both regimes are explored.
-    fn case() -> impl Strategy<Value = (String, String)> {
-        (path_segs(), 0u32..=100, 0u32..=100).prop_flat_map(|(segs, bias, roll)| {
-            let path_str = segs.join("/");
-            let derive = roll <= bias;
-            if derive {
-                derived_pattern(segs)
-                    .prop_map(move |pat| (pat, path_str.clone()))
-                    .boxed()
-            } else {
-                independent_pattern()
-                    .prop_map(move |pat| (pat, path_str.clone()))
-                    .boxed()
-            }
-        })
-    }
-
-    // ----- Distribution sanity (assert the generator explores) -----
 
     #[test]
-    fn case_distribution_is_non_trivial() {
-        // The matcher property below is only meaningful if the generator
-        // produces matches AND non-matches, and exercises `*`/`?`/`**`
-        // and multi-segment paths. We sample 512 cases and assert each
-        // bucket is hit with a wide margin.
-        //
-        // P(match) ≈ 0.5 (derive branch, ~always matches) + small
-        // (independent branch). Over 512 the per-bucket counts sit many
-        // (>10) standard deviations above the thresholds below, so the
-        // false-positive rate is far under 1e-11.
-        let mut runner = TestRunner::default();
-        let strat = case();
-        let n = 512;
-        let (mut matches, mut nonmatches) = (0, 0);
-        let (mut has_star, mut has_q, mut has_dstar, mut multiseg) = (0, 0, 0, 0);
-        for _ in 0..n {
-            let (pat, path) = strat.new_tree(&mut runner).unwrap().current();
-            if matches_naive(&pat, &path) {
-                matches += 1;
-            } else {
-                nonmatches += 1;
-            }
-            if pat.split('/').any(|s| s != "**" && s.contains('*')) {
-                has_star += 1;
-            }
-            if pat.contains('?') {
-                has_q += 1;
-            }
-            if pat.split('/').any(|s| s == "**") {
-                has_dstar += 1;
-            }
-            if path.contains('/') {
-                multiseg += 1;
-            }
-        }
-        assert!(matches >= 60, "too few matching cases: {matches}/{n}");
-        assert!(
-            nonmatches >= 60,
-            "too few non-matching cases: {nonmatches}/{n}"
-        );
-        assert!(has_star >= 30, "too few `*` patterns: {has_star}/{n}");
-        assert!(has_q >= 30, "too few `?` patterns: {has_q}/{n}");
-        assert!(has_dstar >= 30, "too few `**` patterns: {has_dstar}/{n}");
-        assert!(
-            multiseg >= 30,
-            "too few multi-segment paths: {multiseg}/{n}"
-        );
-    }
-
-    // ----- select() generator + distribution -----
-
-    fn select_case() -> impl Strategy<Value = (Vec<String>, Vec<String>, Vec<String>)> {
-        prop::collection::vec(path_segs(), 1..=6).prop_flat_map(|cands| {
-            let cand_strings: Vec<String> = cands.iter().map(|s| s.join("/")).collect();
-            let incl_pool = cand_strings.clone();
-            let excl_pool = cand_strings.clone();
-            let incl = prop::collection::vec(
-                prop_oneof![
-                    2 => Just("**".to_string()),
-                    2 => independent_pattern(),
-                    3 => prop::sample::select(incl_pool),
-                ],
-                1..=3,
-            );
-            let excl = prop::collection::vec(
-                prop_oneof![
-                    3 => prop::sample::select(excl_pool),
-                    1 => independent_pattern(),
-                ],
-                0..=3,
-            );
-            (Just(cand_strings), incl, excl)
-        })
-    }
-
-    #[test]
-    fn select_distribution_is_non_trivial() {
-        // Ensure select() cases produce non-empty output often and that
-        // excludes actually remove something often — otherwise the
-        // equality property below would be vacuous.
-        let mut runner = TestRunner::default();
-        let strat = select_case();
-        let n = 512;
-        let (mut nonempty, mut removed) = (0, 0);
-        for _ in 0..n {
-            let (cands, incl, excl) = strat.new_tree(&mut runner).unwrap().current();
-            let with = select_naive(&cands, &incl, &excl);
-            let without = select_naive(&cands, &incl, &[]);
-            if !with.is_empty() {
-                nonempty += 1;
-            }
-            if without.len() > with.len() {
-                removed += 1;
-            }
-        }
-        assert!(
-            nonempty >= 40,
-            "too few non-empty selections: {nonempty}/{n}"
-        );
-        assert!(removed >= 40, "too few exclude-removals: {removed}/{n}");
-    }
-
-    // ----- Properties -----
-
-    proptest! {
-        #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
-
-        /// The compiled matcher agrees with the naive reference oracle.
-        #[test]
-        fn compiled_matcher_agrees_with_naive((pat, path) in case()) {
-            let compiled = Pattern::parse(&pat);
-            prop_assert_eq!(
-                compiled.matches(&path),
-                matches_naive(&pat, &path),
-                "pattern {:?} vs path {:?}", pat, path
-            );
-        }
-
-        /// `select` equals the naive filter→sort→dedup reference.
-        #[test]
-        fn select_matches_reference((cands, incl, excl) in select_case()) {
-            let compiled_incl: Vec<Pattern> = incl.iter().map(|p| Pattern::parse(p)).collect();
-            let compiled_excl: Vec<Pattern> = excl.iter().map(|p| Pattern::parse(p)).collect();
-            let cand_refs: Vec<&str> = cands.iter().map(String::as_str).collect();
-            let got = select(&cand_refs, &compiled_incl, &compiled_excl).unwrap();
-            let want = select_naive(&cands, &incl, &excl);
-            prop_assert_eq!(got, want);
-        }
-    }
-
-    // ----- Example unit tests for easy-to-miss semantics -----
-
-    #[test]
-    fn star_is_single_segment() {
-        let p = Pattern::parse("*.fs");
-        assert!(p.matches("a.fs"));
-        assert!(!p.matches("dir/a.fs"), "`*` must not cross `/`");
-    }
-
-    #[test]
-    fn double_star_is_recursive_and_matches_zero_segments() {
-        let p = Pattern::parse("**/*.fs");
-        assert!(p.matches("a.fs"), "`**/` must allow zero leading dirs");
-        assert!(p.matches("x/a.fs"));
-        assert!(p.matches("x/y/a.fs"));
-        assert!(!p.matches("x/a.txt"));
-    }
-
-    #[test]
-    fn trailing_double_star_matches_everything_below() {
-        let p = Pattern::parse("src/**");
-        assert!(p.matches("src/a.fs"));
-        assert!(p.matches("src/x/y/a.fs"));
-        assert!(
-            !p.matches("src"),
-            "a final `**` is `**/*.*`: it names files below `src/`, not `src`"
-        );
-        assert!(!p.matches("other/a.fs"));
-    }
-
-    #[test]
-    fn question_matches_exactly_one_char() {
-        let p = Pattern::parse("a?.fs");
-        assert!(p.matches("ab.fs"));
-        assert!(!p.matches("a.fs"));
-        assert!(!p.matches("abc.fs"));
-    }
-
-    #[test]
-    fn literal_is_not_glob_and_matches_only_itself() {
-        let p = Pattern::parse("src/Main.fs");
-        assert!(!p.is_glob());
-        assert!(p.matches("src/Main.fs"));
-        assert!(!p.matches("src/Other.fs"));
-    }
-
-    #[test]
-    fn wildcards_report_as_glob() {
-        assert!(Pattern::parse("*.fs").is_glob());
-        assert!(Pattern::parse("a?.fs").is_glob());
-        assert!(Pattern::parse("**/x.fs").is_glob());
-    }
-
-    #[test]
-    fn literal_prefix_is_not_a_wildcard() {
-        // A literal prefix segment containing `*`/`?` matches only itself,
-        // while the trailing fragment still globs. This is what keeps a base
-        // directory whose name contains glob metacharacters from turning into
-        // a pattern that matches sibling directories.
-        let pat = Pattern::with_literal_prefix(&["a*b", "pr?j"], "*.fs");
-        assert!(pat.is_glob());
-        assert!(pat.matches("a*b/pr?j/x.fs"));
-        assert!(!pat.matches("axb/pr?j/x.fs"));
-        assert!(!pat.matches("a*b/proj/x.fs"));
-        assert!(!pat.matches("a*b/pr?j/x.fsi"));
-        // A wholly-literal fragment after a literal prefix is not a glob.
-        assert!(!Pattern::with_literal_prefix(&["a*b"], "main.fs").is_glob());
-    }
-
-    #[test]
-    fn backslashes_normalise_to_forward_slash() {
-        let p = Pattern::parse("src\\Main.fs");
-        assert!(p.matches("src/Main.fs"));
-        assert!(p.matches("src\\Main.fs"));
-    }
-
-    #[test]
-    fn current_dir_segments_are_collapsed() {
-        // MSBuild lets a glob spell the project dir as `./` or `.\`, and
-        // `.` may appear mid-path. A lone `.` segment is cosmetic and must
-        // not affect matching, on either the pattern or the candidate side.
-        assert!(Pattern::parse("./*.fs").matches("Main.fs"));
-        assert!(Pattern::parse(".\\src/*.fs").matches("src/a.fs"));
-        assert!(Pattern::parse("src/./a.fs").matches("src/a.fs"));
-        assert!(Pattern::parse("src/a.fs").matches("./src/a.fs"));
-        // A `.` inside a segment (a file extension) is preserved.
-        assert!(Pattern::parse("a.fs").matches("a.fs"));
-        assert!(!Pattern::parse("a.fs").matches("axfs"));
-    }
-
-    #[test]
-    fn select_preserves_include_fragment_order() {
-        // MSBuild adds items in Include-fragment document order; within a
-        // single fragment's expansion we sort deterministically. Earlier
-        // fragments precede later ones even when the later fragment sorts
-        // lower lexicographically.
-        let cands = ["a.fs", "b.fs", "z.fs"];
-        let incl = [Pattern::parse("z.fs"), Pattern::parse("a.fs")];
-        assert_eq!(
-            select(&cands, &incl, &[]).unwrap(),
-            vec!["z.fs".to_string(), "a.fs".to_string()],
-            "fragment order must beat lexicographic order"
-        );
-    }
-
-    #[test]
-    fn select_keeps_overlapping_duplicates() {
-        // `select` is an information-preserving primitive: it does NOT
-        // deduplicate across fragments. MSBuild item evaluation keeps
-        // duplicates from overlapping Include fragments by default, and
-        // whether/how to fold them is a faithfulness decision deferred to
-        // the 9b-2 resolver + `dotnet msbuild` oracle. So a literal that a
-        // later glob also matches appears twice, in document order.
-        let cands = ["a.fs", "b.fs"];
-        let incl = [Pattern::parse("a.fs"), Pattern::parse("*.fs")];
-        assert_eq!(
-            select(&cands, &incl, &[]).unwrap(),
-            vec!["a.fs".to_string(), "a.fs".to_string(), "b.fs".to_string()],
-        );
-    }
-
-    #[test]
-    fn split_glob_root_separates_fixed_prefix_from_wildcard_tail() {
-        let cases = [
-            ("*.fs", vec![], Some(1)),
-            ("**/*.fs", vec![], None),
-            ("sub/*.fs", vec!["sub"], Some(1)),
-            ("../shared/*.fs", vec!["..", "shared"], Some(1)),
-            ("a/b/**/*.fs", vec!["a", "b"], None),
-            ("./src/*.fs", vec!["src"], Some(1)),
-            ("a*/x.fs", vec![], Some(2)),
-            ("/opt/lib/*.fs", vec!["opt", "lib"], Some(1)),
-            ("dir/sub/?.fs", vec!["dir", "sub"], Some(1)),
-        ];
-        for (frag, prefix, depth) in cases {
-            let root = split_glob_root(frag);
-            assert_eq!(
-                root.prefix,
-                prefix.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                "prefix for {frag:?}"
-            );
-            assert_eq!(root.tail_depth, depth, "tail_depth for {frag:?}");
-        }
-    }
-
-    #[test]
-    fn split_glob_root_prefix_is_wildcard_free_and_total() {
-        // The prefix carries no wildcard, and prefix ++ tail reconstructs
-        // every surviving segment of the fragment.
-        for frag in ["*.fs", "a/b/*.fs", "../x/**/*.fs", "p/q/r*/s.fs"] {
-            let root = split_glob_root(frag);
-            for seg in &root.prefix {
-                assert!(!seg.contains('*') && !seg.contains('?'), "{frag:?}");
-            }
-            let total = split_segments(frag).len();
-            // tail_depth counts tail segments only when bounded; for the
-            // unbounded (`**`) case we just check the prefix is a strict
-            // prefix of all segments.
-            if let Some(d) = root.tail_depth {
-                assert_eq!(root.prefix.len() + d, total, "{frag:?}");
-            } else {
-                assert!(root.prefix.len() < total, "{frag:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn select_normalises_separators_in_output() {
-        // The FS enumerator (9b-2) may hand us OS-native separators on
-        // Windows. `select` must emit `/`-normalised paths so the
-        // lexicographic ordering is platform-independent: `a\b.fs` must
-        // normalise to `a/b.fs` and sort before `c0.fs` (`/` < `c`), not
-        // after it as the raw `\` (0x5C) byte would.
-        let incl = [Pattern::parse("**/*.fs")];
-        let got = select(&["c0.fs", "a\\b.fs"], &incl, &[]).unwrap();
-        assert_eq!(got, vec!["a/b.fs".to_string(), "c0.fs".to_string()]);
-    }
-
-    #[test]
-    fn select_orders_like_ordinal_ignore_case() {
+    fn sort_orders_like_ordinal_ignore_case() {
         // Probed against `dotnet msbuild` (10.0.301): upper-case folding puts
         // `_` after `Z`; `-` < `.` < `/` keeps `ab-c.fs`, `ab.fs`, `ab/x.fs`
         // in that order. The generated differential pins it in general.
-        let cands = [
+        let mut got: Vec<String> = [
             "_u.fs", "Zeta.fs", "alpha.fs", "ab/x.fs", "ab.fs", "ab-c.fs", "Beta.fs",
-        ];
-        let got = select(&cands, &[Pattern::parse("**/*.fs")], &[]).unwrap();
+        ]
+        .map(String::from)
+        .to_vec();
+        sort_like_msbuild(&mut got).unwrap();
         assert_eq!(
             got,
             [
@@ -1509,12 +467,15 @@ mod tests {
 
     #[test]
     fn a_non_ascii_prefix_shared_by_every_match_does_not_decline() {
-        let incl = [Pattern::parse("/home/José/app/*.fs")];
-        let got = select(&["/home/José/app/b.fs", "/home/José/app/a.fs"], &incl, &[]);
-        assert_eq!(got.unwrap(), ["home/José/app/a.fs", "home/José/app/b.fs"]);
+        let mut got = vec![
+            "/home/José/app/b.fs".to_string(),
+            "/home/José/app/a.fs".to_string(),
+        ];
+        sort_like_msbuild(&mut got).unwrap();
+        assert_eq!(got, ["/home/José/app/a.fs", "/home/José/app/b.fs"]);
         // Where the matches differ in a non-ASCII position, it still declines.
-        let incl = [Pattern::parse("/home/*/a.fs")];
-        let got = select(&["/home/José/a.fs", "/home/Josa/a.fs"], &incl, &[]);
+        let mut got = vec!["/home/José/a.fs".to_string(), "/home/Josa/a.fs".to_string()];
+        let got = sort_like_msbuild(&mut got);
         assert!(
             matches!(got, Err(GlobDecline::NonAsciiOrder { .. })),
             "{got:?}"
@@ -1522,156 +483,22 @@ mod tests {
     }
 
     #[test]
-    fn select_declines_a_case_only_tie() {
+    fn sort_declines_a_case_only_tie() {
         // Possible only on a case-sensitive filesystem: MSBuild's unstable sort
         // leaves the pair's order unspecified.
-        let got = select(&["a.fs", "A.fs"], &[Pattern::parse("*.fs")], &[]);
+        let got = sort_like_msbuild(&mut ["a.fs".to_string(), "A.fs".to_string()]);
         assert!(matches!(got, Err(GlobDecline::OrderTie { .. })), "{got:?}");
     }
 
     #[test]
-    fn select_declines_non_ascii_order_but_not_a_lone_match() {
-        let incl = [Pattern::parse("*.fs")];
-        let got = select(&["é.fs", "a.fs"], &incl, &[]);
+    fn sort_declines_non_ascii_order_but_not_a_lone_match() {
+        let got = sort_like_msbuild(&mut ["é.fs".to_string(), "a.fs".to_string()]);
         assert!(
             matches!(got, Err(GlobDecline::NonAsciiOrder { .. })),
             "{got:?}"
         );
         // One match has no order to get wrong.
-        assert_eq!(select(&["é.fs"], &incl, &[]).unwrap(), ["é.fs"]);
-    }
-
-    #[test]
-    fn select_declines_when_case_decides_selection() {
-        // Include side: `a*.fs` meets `Ab.fs`.
-        let got = select(&["Ab.fs"], &[Pattern::parse("a*.fs")], &[]);
-        assert!(
-            matches!(got, Err(GlobDecline::CaseAmbiguous { .. })),
-            "{got:?}"
-        );
-        // Exclude side: `bin/**` meets `Bin/x.fs`.
-        let got = select(
-            &["Bin/x.fs"],
-            &[Pattern::parse("**/*.fs")],
-            &[Pattern::parse("bin/**")],
-        );
-        assert!(
-            matches!(got, Err(GlobDecline::CaseAmbiguous { .. })),
-            "{got:?}"
-        );
-    }
-
-    fn matcher(spec: &str) -> MatcherPattern {
-        MatcherPattern {
-            patterns: vec![Pattern::parse(&as_file_matcher_reads(spec)).with_all_files_rule()],
-            by_regex: matches_by_regex(spec),
-        }
-    }
-
-    /// The file matcher's Linux rule: names and directories past the fixed
-    /// part fold, and a regular expression's `i`/`I` declines.
-    #[test]
-    fn select_ignoring_case_folds_and_declines_on_a_cultures_i() {
-        let got = select_ignoring_case(&["Ab.fs", "b.fs"], &matcher("a*.fs"), &[]);
-        assert_eq!(got, Ok(vec!["Ab.fs".to_string()]));
-        let got = select_ignoring_case(
-            &["Bin/x.fs", "src/y.fs"],
-            &matcher("**/*.fs"),
-            &[matcher("bin/**")],
-        );
-        assert_eq!(got, Ok(vec!["src/y.fs".to_string()]));
-        // Matched name by name, `i` and `I` fold on any culture.
-        let got = select_ignoring_case(&["x/bi.fs"], &matcher("**/*.fs"), &[matcher("**/BI.fs")]);
-        assert_eq!(got, Ok(vec![]));
-        // By regular expression, Turkish keeps them apart.
-        for (include, excludes) in [("s*/BI.fs", vec![]), ("s*/*.fs", vec![matcher("s*/BI.fs")])] {
-            let got = select_ignoring_case(&["sub/bi.fs"], &matcher(include), &excludes);
-            assert!(
-                matches!(got, Err(GlobDecline::CultureDependentCase { .. })),
-                "{include}: {got:?}"
-            );
-        }
-        // Where another exclude takes the file anyway, the culture decides
-        // nothing.
-        let got = select_ignoring_case(
-            &["sub/bi.fs"],
-            &matcher("s*/*.fs"),
-            &[matcher("s*/BI.fs"), matcher("**/b*")],
-        );
-        assert_eq!(got, Ok(vec![]));
-        // Two names one under case folding leave MSBuild's order open.
-        let got = select_ignoring_case(&["a.fs", "A.fs"], &matcher("*.fs"), &[]);
-        assert!(matches!(got, Err(GlobDecline::OrderTie { .. })), "{got:?}");
-    }
-
-    /// `GetFileSearchData`'s `matchWithRegex`, from MSBuild's source.
-    #[test]
-    fn regex_matching_follows_get_file_search_data() {
-        for by_name in [
-            "*.fs",
-            "sub/*.fs",
-            "**/*.fs",
-            "sub/**/*.fs",
-            "sub/**",
-            "**/Deep/**",
-            "**/Deep/**/*.fs",
-            "**/D/**",
-            "a.fs",
-        ] {
-            assert!(!matches_by_regex(by_name), "{by_name}");
-        }
-        for by_regex in [
-            "s*/a.fs",
-            "*/Deep/*.fs",
-            "**/Deep/*.fs",
-            "**/a/b/**/*.fs",
-            "**/**/*.fs",
-        ] {
-            assert!(matches_by_regex(by_regex), "{by_regex}");
-        }
-    }
-
-    /// How the file matcher's regular expression reads a file name and a `?`.
-    #[test]
-    fn the_regex_reading_follows_append_regular_expression_from_filename() {
-        for (name, read) in [
-            ("*.*", "*"),
-            ("a*.*", "a*"),
-            ("*.*.*", "*.*"),
-            ("*.*x", "*x"),
-            ("a.*", "a.*"),
-            ("*.fs", "*.fs"),
-        ] {
-            assert_eq!(regex_filename(name), read, "{name}");
-        }
-        assert_eq!(as_file_matcher_reads("s*/a*.*"), "s*/a*");
-        assert_eq!(as_file_matcher_reads("sub/a*.*"), "sub/a*.*");
-        // A `?` inside a name may read as a separator; next to one, or where
-        // it would leave a name empty or `.`, it may not.
-        let readings = |text: &str, from: usize| regex_question_readings(text, from).unwrap();
-        assert_eq!(readings("sub/a?b.fs", 0), ["sub/a?b.fs", "sub/a/b.fs"]);
-        assert_eq!(readings("?.fs", 0), ["?.fs"]);
-        assert_eq!(readings("s?/x?/a.fs", 0), ["s?/x?/a.fs"]);
-        assert_eq!(readings("a??b", 0), ["a??b", "a/?b", "a?/b"]);
-        assert_eq!(readings("x/.?y", 0), ["x/.?y"]);
-        assert_eq!(
-            readings("s?b/**/a?b.fs", 4),
-            ["s?b/**/a?b.fs", "s?b/**/a/b.fs"]
-        );
-        assert_eq!(regex_question_readings("a?a?a?a?a?a", 0), None);
-    }
-
-    /// The directory-name shape with a name of `**` needs one directory.
-    #[test]
-    fn the_file_matcher_reads_a_directory_named_globstar_as_one_directory() {
-        assert_eq!(as_file_matcher_reads("sub/**/**/**"), "sub/**/*/**/*.*");
-        assert_eq!(as_file_matcher_reads("**/**/**/*.fs"), "**/*/**/*.fs");
-        for unchanged in ["sub/**", "**/**/*.fs", "**/Deep/**", "**/**/**/**/*.fs"] {
-            assert_eq!(as_file_matcher_reads(unchanged), unchanged);
-        }
-        let read = Pattern::parse(&as_file_matcher_reads("sub/**/**/**")).with_all_files_rule();
-        assert!(!read.matches("sub/a.fs"));
-        assert!(read.matches("sub/x/a.fs"));
+        assert_eq!(sort_like_msbuild(&mut ["é.fs".to_string()]), Ok(()));
     }
 
     /// `FileMatcher.GetLongPathName` looks up a `~` segment after the first.
@@ -1732,24 +559,6 @@ mod tests {
         }
     }
 
-    /// `IsAllFilesWildcard`: a filename part of `*.*` is every file; `a*.*`
-    /// and a `*.*` directory segment are not.
-    #[test]
-    fn star_dot_star_filename_is_every_file() {
-        let all = Pattern::parse("*.*").with_all_files_rule();
-        assert!(all.matches("ab") && all.matches("ab.fs"));
-        assert!(!Pattern::parse("*.*").matches("ab"));
-        let recursive = Pattern::parse("**/*.*").with_all_files_rule();
-        assert!(recursive.matches("sub/noext"));
-        let prefixed = Pattern::parse("a*.*").with_all_files_rule();
-        assert!(!prefixed.matches("ab"));
-        let dir = Pattern::parse("*.*/x").with_all_files_rule();
-        assert!(!dir.matches("ab/x"));
-        assert!(is_recursive_filename_pattern("**/*.*"));
-        assert!(!is_recursive_filename_pattern("sub/**/*.*"));
-        assert!(!is_recursive_filename_pattern("*.*"));
-    }
-
     /// The allow-list admits the shapes the differentials verify and names
     /// the rule anything else breaks.
     #[test]
@@ -1782,20 +591,5 @@ mod tests {
         ] {
             assert_eq!(unmodelled_shape(spec), Some(shape), "{spec}");
         }
-    }
-
-    /// A final `**` names the files below a directory
-    /// (`FileMatcher.SplitFileSpec`).
-    #[test]
-    fn final_double_star_names_files_below() {
-        let bin = Pattern::parse("bin/**");
-        assert!(bin.matches("bin/x.fs") && bin.matches("bin/a/b.fs"));
-        assert!(
-            !bin.matches("bin"),
-            "a file called `bin` is not below `bin/`"
-        );
-        assert!(Pattern::parse("**").matches("a.fs"));
-        assert!(has_wildcard_directory_part("**/a.fs") && has_wildcard_directory_part("bin/**"));
-        assert!(!has_wildcard_directory_part("sub/*.fs"));
     }
 }

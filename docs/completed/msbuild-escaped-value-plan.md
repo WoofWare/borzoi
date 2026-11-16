@@ -192,6 +192,11 @@ name:
 All of it is pinned against `dotnet msbuild` 10.0.301 by the generative
 harness's hand-picked corners, and its generated sweep reaches every row.
 
+(Superseded since: the resolver ports the file matcher's walk and regular
+expressions (`glob::file_matcher`, issue 960), which read the anchoring, `..`
+and `.` shapes above exactly, so `MixedAnchoring`,
+`ParentSegmentUnderWildcardExclude` and `CurDirSegmentExclude` are gone.)
+
 ## Risks (durable invariants)
 
 - **Double-unescape** is foreclosed by the type: `unescape` consumes an `Escaped`

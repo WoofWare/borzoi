@@ -28,9 +28,9 @@
 //! culture and one under Turkish. Where the resolver commits, both must agree
 //! with it exactly; a decline makes no claim.
 //!
-//! The rule is modelled on Linux alone (`glob_resolver`); elsewhere a glob
-//! include declines wherever case would decide it, which this harness then
-//! checks the same way.
+//! The resolver ports the file matcher's walk, so the rule holds on every
+//! host: the file system answers what exists (case-insensitively on a
+//! case-insensitive one), and every comparison past that is the port's.
 //!
 //! Now and then a disk also holds symbolic links to directories: to the
 //! project directory, to its parent, to the project directory spelt in upper
@@ -49,9 +49,6 @@ use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::{DiagnosticKind, GlobDecline, glob_resolver};
 use common::{Oracle, SplitMix64};
 use std::collections::{BTreeMap, HashMap};
-
-/// Whether the resolver models the file matcher's case rule on this host.
-const MODELLED: bool = cfg!(target_os = "linux");
 
 /// The Turkish culture, under which a .NET regular expression that ignores
 /// case keeps `i` and `I` apart.
@@ -225,6 +222,9 @@ struct Fixture {
     links: Vec<(&'static str, LinkTarget)>,
     include: String,
     exclude: Option<String>,
+    /// Whether the project's path is spelt unnormalised (`//`, `/./`, and a
+    /// `sub/..`), to both sides: MSBuild takes the project's full path.
+    respelt: bool,
 }
 
 impl Fixture {
@@ -251,6 +251,7 @@ impl Fixture {
             links: linked,
             include,
             exclude,
+            respelt: false,
         }
     }
 
@@ -293,12 +294,14 @@ enum Outcome {
     Declined,
 }
 
-/// Lexical normalisation, as MSBuild's `FullPath` resolves `.` and `..`.
+/// Lexical normalisation, as MSBuild's `FullPath` resolves `.`, `..` and
+/// runs of separators.
 fn norm(path: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     for seg in path.split(['/', '\\']) {
         match seg {
             "." => {}
+            "" if !out.is_empty() => {}
             ".." if out.len() > 1 => {
                 out.pop();
             }
@@ -350,6 +353,13 @@ fn check(oracles: &mut [Oracle; 2], fixture: &Fixture) -> Outcome {
     let proj = root.join("Demo.fsproj");
     let xml = fixture.xml(&root.to_string_lossy().to_ascii_uppercase());
     std::fs::write(&proj, &xml).expect("write project");
+    // Every walk disk has `sub`, which the respelling passes through.
+    let proj = if fixture.respelt {
+        let parent = root.parent().expect("the project directory has a parent");
+        std::path::PathBuf::from(format!("{}//proj/./sub/../Demo.fsproj", parent.display()))
+    } else {
+        proj
+    };
 
     let resolver: &borzoi_msbuild::GlobResolver<'_> = &glob_resolver::resolve;
     let parsed = parse_fsproj_with_imports(
@@ -436,8 +446,8 @@ fn the_turkish_oracle_keeps_i_apart() {
 
 /// The oracle table on #607 (disk `a.fs`, `b.fs`, `sub/a.fs`), the directory
 /// existence corners found reviewing a first implementation, and the
-/// culture-dependent ones. On Linux every modelled corner must commit, and
-/// each culture or working-directory corner must decline by name.
+/// culture-dependent ones. Every modelled corner must commit, and each culture
+/// or working-directory corner must decline by name.
 #[test]
 fn case_corners() {
     let mut oracles = oracles();
@@ -447,6 +457,7 @@ fn case_corners() {
         links: Vec::new(),
         include: include.to_string(),
         exclude: exclude.map(str::to_string),
+        respelt: false,
     };
     let committing = [
         // Literal includes: `FileSpecMatcherTester`, case folded throughout.
@@ -527,27 +538,47 @@ fn case_corners() {
         // `i` and `I` where no regular expression compares them.
         corner(&["sub/x/bi.fs"], "**/*.fs", Some("**/BI.fs")),
         corner(&["sub/x/bi.fs"], "sub/x/*.fs", Some("sub/x/BI.fs")),
+        // The directory a `**/**/**` exclude needs is above the include's
+        // walk root, which MSBuild never matches against it (#615).
+        corner(&["sub/x/b.fs"], "sub/x/*.fs", Some("**/**/**")),
+        corner(&["sub/Deep/d.fs"], "sub/Deep/*.fs", Some("**/DEEP/**")),
+        // The walk looks for a directory named `.` before a `**`, and the
+        // regular expression drops one after it.
+        corner(&["sub/a.fs"], "*/./**/*.fs", Some("missing/*.fs")),
+        corner(&["sub/a.fs"], "**/./*.fs", None),
+        // A `.` in the fixed directory stays in what the walk lists, which the
+        // regular expression, having collapsed it, refuses.
+        corner(&["sub/a/b.fs"], "sub/./*/*", None),
+        // A `.` segment relates an include to an exclude by spelling.
+        corner(TABLE, "*.fs", Some("./a.fs")),
+        corner(TABLE, "./*.fs", Some("a.fs")),
+        // An exclude anchored unlike its include, and one under a `..`.
+        corner(TABLE, "**/*.fs", Some("$(MSBuildProjectDirectory)/s*/*.fs")),
+        corner(TABLE, "../proj/**/*.fs", Some("**/.*/**")),
+        corner(TABLE, "../proj/*/*.fs", Some("s*/*.fs")),
     ];
     for fixture in &committing {
         let outcome = check(&mut oracles, fixture);
-        if MODELLED {
-            assert_eq!(
-                outcome,
-                Outcome::Committed,
-                "a case corner did not commit:\ndisk: {:?}\n{}",
-                fixture.files,
-                fixture.xml(ROOT_UPPER)
-            );
-        } else {
-            assert_ne!(outcome, Outcome::Declined, "{}", fixture.xml(ROOT_UPPER));
-        }
+        assert_eq!(
+            outcome,
+            Outcome::Committed,
+            "a case corner did not commit:\ndisk: {:?}\n{}",
+            fixture.files,
+            fixture.xml(ROOT_UPPER)
+        );
     }
     let declining = [
-        // The directory a `**/**/**` exclude needs is above the include's
-        // walk root, which MSBuild never matches against it.
+        // An exclude read by regular expression under one culture takes what
+        // it leaves under the other, while the include is matched name by
+        // name (#976, whose `Sub/` spelling finds a directory only on a
+        // case-insensitive file system).
         (
-            corner(&["sub/x/b.fs"], "sub/x/*.fs", Some("**/**/**")),
-            "GlobstarExcludeAboveIncludeRoot",
+            corner(
+                &["sub/Deep/in.fs", "SUB/", "sub/deep/"],
+                "sub/**/IN.FS",
+                Some("sub/D*/I*.fs"),
+            ),
+            "CultureDependentCase",
         ),
         // A regular expression compares `i` with `I`, which Turkish keeps
         // apart.
@@ -562,16 +593,6 @@ fn case_corners() {
         (
             corner(&["sub/x/bi.fs"], "**/*.fs", Some("S*/x/BI.fs")),
             "CultureDependentCase",
-        ),
-        // The walk looks for a directory named `.` before a `**`, and the
-        // regular expression drops one after it.
-        (
-            corner(&["sub/a.fs"], "*/./**/*.fs", Some("missing/*.fs")),
-            "CurDirInWildcardDirectory",
-        ),
-        (
-            corner(&["sub/a.fs"], "**/./*.fs", None),
-            "CurDirInWildcardDirectory",
         ),
         // A regular expression folds the Kelvin sign onto `k`.
         (
@@ -590,16 +611,13 @@ fn case_corners() {
     ];
     for (fixture, reason) in &declining {
         let outcome = check(&mut oracles, fixture);
-        assert_ne!(outcome, Outcome::Declined, "{}", fixture.xml(ROOT_UPPER));
-        if MODELLED {
-            assert_eq!(
-                outcome,
-                Outcome::ResolverDeclined(reason.to_string()),
-                "disk: {:?}\n{}",
-                fixture.files,
-                fixture.xml(ROOT_UPPER)
-            );
-        }
+        assert_eq!(
+            outcome,
+            Outcome::ResolverDeclined(reason.to_string()),
+            "disk: {:?}\n{}",
+            fixture.files,
+            fixture.xml(ROOT_UPPER)
+        );
     }
 }
 
@@ -618,6 +636,7 @@ fn link_corners() {
         links: links.to_vec(),
         include: include.to_string(),
         exclude: None,
+        respelt: false,
     };
     let cases = [
         (
@@ -661,6 +680,258 @@ fn link_corners() {
             fixture.links,
             fixture.xml(ROOT_UPPER)
         );
+    }
+}
+
+/// Files on every disk of the walk sweep: names `*.*` reads differently from
+/// a regular expression (`ab`, `x`), a directory named like a file (`x.y`),
+/// directories a `?` can stand for, and a directory name met at two depths.
+const WALK_FILES: &[&str] = &[
+    "a.fs",
+    "ab",
+    "b.fs",
+    "sub/a.fs",
+    "sub/ab",
+    "sub/Deep/a.fs",
+    "sub/Deep/d.fs",
+    "sub/Deep/deep/x",
+    "sub/a/b.fs",
+    "sub/x.y/a.fs",
+    "sub/s/a.fs",
+    "q/x/a/b.fs",
+];
+
+/// Entries each walk disk holds a random selection of.
+const WALK_EXTRAS: &[&str] = &[
+    "sub/Deep/a/b.fs",
+    "sub/Deep/ab",
+    "sub/a/x",
+    "x",
+    "../out/a.fs",
+    "../out/sub/b.fs",
+];
+
+/// A walk spec's fixed directory: none, the base directories, `..` and `.`
+/// segments (which the file matcher keeps by spelling), and rooted ones.
+const WALK_FIXED: &[&str] = &[
+    "",
+    "",
+    "",
+    "sub",
+    "sub",
+    "sub/Deep",
+    "sub/a",
+    "q",
+    "..",
+    "../proj",
+    "../proj/sub",
+    "../out",
+    ".",
+    "./sub",
+    "sub/.",
+    "$(MSBuildProjectDirectory)",
+    "$(MSBuildProjectDirectory)/sub",
+];
+
+/// One segment of a walk spec's wildcard directory part.
+const WALK_WILD_SEGMENT: &[&str] = &[
+    "*", "*", "?", "**", "**", "**", ".", "sub", "Deep", "deep", "a", "s*", "?eep", "x.y", "*.*",
+    "x",
+];
+
+/// A walk spec's file name.
+const WALK_NAME: &[&str] = &[
+    "*.*", "*.*", "a*.*", "?", "*.fs", "*.fs", "a?b.fs", "?.fs", "a.fs", "b.fs", "*", "**", "ab",
+    "d.fs", "x", "*.*.*",
+];
+
+/// Where a walk exclude's fixed directory sits against its include's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ExcludeBase {
+    /// A strict ancestor of the include's fixed directory.
+    Above,
+    /// The include's fixed directory.
+    At,
+    /// A directory below the include's fixed directory.
+    Below,
+    /// Anywhere else.
+    Elsewhere,
+}
+
+/// Wildcard directory parts of the `**/{name}/**` shape the file matcher
+/// matches by directory name, drawn whole now and then.
+const WALK_DIRECTORY_NAME_WILD: &[&str] = &[
+    "**/Deep/**",
+    "**/deep/**",
+    "**/a/**",
+    "**/**/**",
+    "**/*.*/**",
+    "**/s*/**",
+    "**/?eep/**",
+];
+
+/// A wildcard directory part of up to three segments.
+fn gen_walk_wild(rng: &mut SplitMix64) -> String {
+    if rng.below(6) == 0 {
+        return rng.pick(WALK_DIRECTORY_NAME_WILD).to_string();
+    }
+    let n = *rng.pick(&[0, 0, 1, 1, 1, 2, 2, 3]);
+    (0..n)
+        .map(|_| *rng.pick(WALK_WILD_SEGMENT))
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// A spec from its parts, empty parts dropped.
+fn join_spec(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .copied()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// One walk fixture: an include from the walk grammar, and up to two excludes
+/// whose fixed directories sit above, at, below or beside the include's, each
+/// spelt as the include is anchored or the other way.
+fn gen_walk_fixture(rng: &mut SplitMix64) -> (Fixture, Vec<ExcludeBase>) {
+    let mut files = WALK_FILES.to_vec();
+    files.extend(WALK_EXTRAS.iter().filter(|_| rng.below(3) == 0));
+    let fixed = *rng.pick(WALK_FIXED);
+    let include = join_spec(&[fixed, &gen_walk_wild(rng), rng.pick(WALK_NAME)]);
+    // The include's fixed directory as segments below the project directory,
+    // where it has a spelling there.
+    let rooted = "$(MSBuildProjectDirectory)";
+    let below_root: Option<Vec<&str>> = match fixed.strip_prefix(rooted) {
+        Some(rest) => Some(rest.split('/').filter(|s| !s.is_empty()).collect()),
+        None if fixed.starts_with("..") => None,
+        None => Some(fixed.split('/').filter(|s| !s.is_empty()).collect()),
+    };
+    let mut relations = Vec::new();
+    let mut excludes = Vec::new();
+    for _ in 0..rng.below(3) {
+        let (relation, base): (ExcludeBase, String) = match (rng.below(4), &below_root) {
+            (0, Some(segs)) if !segs.is_empty() => {
+                let keep = rng.below(segs.len());
+                (ExcludeBase::Above, segs[..keep].join("/"))
+            }
+            (1, Some(segs)) => (ExcludeBase::At, segs.join("/")),
+            (2, Some(segs)) => {
+                let child = *rng.pick(&["Deep", "a", "x.y", "deep", "s"]);
+                let mut segs = segs.clone();
+                segs.push(child);
+                (ExcludeBase::Below, segs.join("/"))
+            }
+            _ => (
+                ExcludeBase::Elsewhere,
+                rng.pick(&["q", "sub/Deep/deep", "../out", ""]).to_string(),
+            ),
+        };
+        let anchored = if rng.below(4) == 0 && !base.starts_with("..") {
+            join_spec(&[rooted, &base])
+        } else {
+            base
+        };
+        excludes.push(join_spec(&[
+            &anchored,
+            &gen_walk_wild(rng),
+            rng.pick(WALK_NAME),
+        ]));
+        relations.push(relation);
+    }
+    let fixture = Fixture {
+        files,
+        links: Vec::new(),
+        include,
+        exclude: (!excludes.is_empty()).then(|| excludes.join(";")),
+        respelt: rng.below(5) == 0,
+    };
+    (fixture, relations)
+}
+
+/// The walk sweep: specs built from the file matcher's own grammar (fixed
+/// directories, wildcard directory segments, file names, and excludes based
+/// above, at and below the include's walk root), each held to both oracles
+/// where the resolver commits. The census counts commits by exclude placement
+/// and wildcard segment, so a decline that swallows one of them shows.
+#[test]
+fn generated_walk_shapes_are_certain_implies_exact() {
+    walk_sweep(0x0960_0a1c_5eed, 1500);
+}
+
+/// The walk sweep's fresh-seed soak twin (see `common::soak_parameters`).
+#[test]
+#[ignore = "soak: a fresh seed each run"]
+fn generated_walk_shapes_soak() {
+    let (seed, cases) = common::soak_parameters("glob walk shapes", 5000);
+    walk_sweep(seed, cases);
+}
+
+fn walk_sweep(seed: u64, cases: usize) {
+    let mut oracles = oracles();
+    let mut rng = SplitMix64(seed);
+    let mut committed = 0usize;
+    let mut committed_by_relation: BTreeMap<ExcludeBase, usize> = BTreeMap::new();
+    let mut committed_by_segment: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut census: BTreeMap<String, usize> = BTreeMap::new();
+    let mut declined_outside_resolver = Vec::new();
+    for _ in 0..cases {
+        let (fixture, relations) = gen_walk_fixture(&mut rng);
+        match check(&mut oracles, &fixture) {
+            Outcome::Committed => {
+                committed += 1;
+                for relation in relations {
+                    *committed_by_relation.entry(relation).or_default() += 1;
+                }
+                let specs = std::iter::once(fixture.include.as_str()).chain(
+                    fixture
+                        .exclude
+                        .as_deref()
+                        .into_iter()
+                        .flat_map(|e| e.split(';')),
+                );
+                for spec in specs {
+                    let mut segs: Vec<&str> = spec.split('/').collect();
+                    segs.pop();
+                    for seg in WALK_WILD_SEGMENT {
+                        if segs.contains(seg) {
+                            *committed_by_segment.entry(seg).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            Outcome::ResolverDeclined(reason) => *census.entry(reason).or_default() += 1,
+            Outcome::Declined => declined_outside_resolver.push(fixture.xml(ROOT_UPPER)),
+        }
+    }
+    eprintln!(
+        "glob walk shapes: {committed}/{cases} committed; by exclude base: \
+         {committed_by_relation:?}; by wildcard segment: {committed_by_segment:?}; \
+         declines by reason: {census:?}"
+    );
+    assert!(
+        declined_outside_resolver.is_empty(),
+        "{} generated cases declined outside the resolver; the first:\n{}",
+        declined_outside_resolver.len(),
+        declined_outside_resolver[0]
+    );
+    assert!(
+        committed * 100 >= cases * 90,
+        "only {committed}/{cases} committed"
+    );
+    for relation in [
+        ExcludeBase::Above,
+        ExcludeBase::At,
+        ExcludeBase::Below,
+        ExcludeBase::Elsewhere,
+    ] {
+        let n = committed_by_relation.get(&relation).copied().unwrap_or(0);
+        assert!(n >= 50, "{relation:?} committed {n} times");
+    }
+    for seg in WALK_WILD_SEGMENT {
+        let n = committed_by_segment.get(seg).copied().unwrap_or(0);
+        assert!(n >= 50, "`{seg}` committed {n} times");
     }
 }
 
@@ -725,14 +996,12 @@ fn sweep(seed: u64, cases: usize) {
         "the link dimension committed {committed_linked} and declined through a link \
          {declined_through_link} times"
     );
-    if MODELLED {
-        assert!(
-            committed * 100 >= unlinked * 50,
-            "only {committed}/{unlinked} committed"
-        );
-        assert!(
-            committed_upper * 100 >= unlinked * 25,
-            "only {committed_upper}/{unlinked} committed with an upper-case spelling"
-        );
-    }
+    assert!(
+        committed * 100 >= unlinked * 50,
+        "only {committed}/{unlinked} committed"
+    );
+    assert!(
+        committed_upper * 100 >= unlinked * 25,
+        "only {committed_upper}/{unlinked} committed with an upper-case spelling"
+    );
 }
