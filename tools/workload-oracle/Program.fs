@@ -20,15 +20,18 @@
 /// request line, in order. Ops:
 ///
 ///   {"op":"identity"}
-///     -> {"manifestReader":path,"resolver":path,"runtime":version}
+///     -> {"manifestReader":path,"resolver":path,"runtime":version,
+///         "processArchitecture":RuntimeInformation.ProcessArchitecture}
 ///   {"op":"band","version":s}   (new SdkFeatureBand(s))
 ///     -> {"ok":true,"band":ToString(),"withoutPrerelease":..,"isPrerelease":..}
 ///      | {"ok":false,"thrown":..}
 ///   {"op":"compareBands","a":s,"b":s}   (SdkFeatureBand(a).CompareTo(SdkFeatureBand(b)))
 ///     -> {"ok":true,"cmp":-1|0|1} | {"ok":false,"thrown":..}
-///   {"op":"resolve","sdk":name,"dotnetRoot":p,"sdkVersion":v,"userProfileDir":p|null}
+///   {"op":"resolve","sdk":name,"dotnetRoot":p,"sdkVersion":v,"userProfileDir":p|null,
+///    "globalJsonPath":p|null}
 ///     (a fresh CachingWorkloadResolver's Resolve, the call MSBuild's workload
-///      SDK resolver makes, with no global.json)
+///      SDK resolver makes, handed the global.json MSBuild found, if any;
+///      the install state is read under the process's own architecture)
 ///     -> {"ok":true,"kind":"multiple","paths":[..]}
 ///      | {"ok":true,"kind":"single"|"empty"|"null"}
 ///      | {"ok":false,"thrown":..}
@@ -115,7 +118,7 @@ let private respondResolve (root: JsonElement) : string =
                    box (root.GetProperty("dotnetRoot").GetString())
                    box (root.GetProperty("sdkVersion").GetString())
                    box (optionalString root "userProfileDir")
-                   null |]
+                   box (optionalString root "globalJsonPath") |]
             )
 
         match result.GetType().Name with
@@ -140,7 +143,8 @@ let private respondIdentity () : string =
     JsonSerializer.Serialize
         {| manifestReader = location manifestReaderName
            resolver = location resolverName
-           runtime = Environment.Version.ToString() |}
+           runtime = Environment.Version.ToString()
+           processArchitecture = string Runtime.InteropServices.RuntimeInformation.ProcessArchitecture |}
 
 /// `None` when both resolver assemblies and the feature-band type load, or why
 /// not.

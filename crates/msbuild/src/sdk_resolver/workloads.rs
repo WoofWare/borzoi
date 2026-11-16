@@ -56,19 +56,18 @@
 //!   `{pack}/Sdk` folders of installed SDK-kind packs whose
 //!   `Sdk/AutoImport.props` exists.
 //!
-//! * Workload sets change the manifest set only when one is *selected*
-//!   (`check_workload_sets` lists the four routes); a set in a band no
-//!   route reaches is inert — the 8.0.100 baseline set every current
-//!   SDK installer drops is the common case — provided it loads.
+//! * A workload set, selected by `global.json`, by the install state or by
+//!   default from the host band's, overrides the manifests it names, and
+//!   so do the install state's own manifests (`workload_sets.rs`). Every set
+//!   of the host band and of the 8.0.100 baseline band must load, whether
+//!   or not it is selected.
 //!
 //! What still degrades with [`SdkResolveError::UnsupportedLayout`]
-//! rather than resolving: a `workloadsets` directory in the host feature
-//! band, a baseline workload set not certified to load, or an
-//! install-state file (each can override manifest versions through
-//! machinery we don't model), a `global.json` that engages
-//! workload-set selection (`sdk.workloadVersion` — it selects a
-//! workload set or fails the real evaluation when the set is
-//! missing), a `userlocal` marker when the caller supplied no
+//! rather than resolving: a workload set, install state or `global.json`
+//! outside what `workload_sets.rs` certifies (or one that selects a set
+//! that is not installed, or names a manifest that is not), an install-state
+//! file when the caller cannot say the build process's architecture, a
+//! `userlocal` marker when the caller supplied no
 //! user-local root (we cannot see what a real build would), a host
 //! SDK version or band directory name outside the spellings
 //! `SdkFeatureBand` (`feature_band.rs`) certifies, a host SDK version with
@@ -107,6 +106,8 @@ use crate::observed::{self, EntryKind, Failure, Observer};
 mod feature_band;
 mod manifest;
 mod manifest_version;
+mod workload_sets;
+use super::global_json::GlobalJsonWorkloads;
 use feature_band::FeatureBand;
 use manifest_version::ManifestVersion;
 
@@ -149,14 +150,19 @@ pub struct WorkloadEnvironment<'a> {
     /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`): those redirect resolution in ways
     /// we do not model, so their presence degrades.
     pub overrides_present: bool,
-    /// True when the `global.json` governing the evaluation engages
-    /// workload-set selection (see `GlobalJson::pins_workload_set`):
-    /// MSBuild passes the discovered `global.json` path into its
-    /// workload manifest provider, and an `sdk.workloadVersion` pin
-    /// there selects a workload set — or fails the evaluation when
-    /// that set is not installed. Either way the manifest enumeration
-    /// modelled here is not what a real build would use, so degrade.
-    pub global_json_pins_workload_set: bool,
+    /// What the workload reader reads of the `global.json` governing the
+    /// evaluation (`GlobalJson::workloads`): MSBuild passes the discovered
+    /// `global.json` path into its workload manifest provider, where an
+    /// `sdk.workloadVersion` selects a workload set (or fails the evaluation
+    /// when that set is not installed) and `sdk.workloads-update-mode` opts
+    /// in or out of the default selection.
+    pub global_json: GlobalJsonWorkloads,
+    /// The architecture of the process a build resolves the locators in, as
+    /// `RuntimeInformation.ProcessArchitecture` spells it (`X64`, `Arm64`):
+    /// the install state lives under a directory of that name. `None` when
+    /// the caller cannot say, which declines wherever an install-state file
+    /// exists for any architecture.
+    pub process_architecture: Option<&'a str>,
 }
 
 fn unsupported(reason: impl Into<String>) -> SdkResolveError {
@@ -238,11 +244,6 @@ pub fn resolve_workload_locator(
             "a workload environment override variable is set",
         ));
     }
-    if env.global_json_pins_workload_set {
-        return Err(unsupported(
-            "global.json pins a workload set (sdk.workloadVersion)",
-        ));
-    }
     // The resolver's `File.Exists` takes a relative path against the process's
     // working directory, which we cannot see.
     if ![
@@ -259,7 +260,7 @@ pub fn resolve_workload_locator(
     let band = host_feature_band(sdk_version_dir)?;
     check_runtime_identifier_chain(sdk_version_dir, observer)?;
     let roots = workload_roots(dotnet_root, &band, env, observer)?;
-    let manifest_roots = enumerate_manifest_roots(sdk_version_dir, &band, &roots, observer)?;
+    let manifest_roots = enumerate_manifest_roots(sdk_version_dir, &band, &roots, env, observer)?;
 
     if sdk_name.eq_ignore_ascii_case(WORKLOAD_MANIFEST_TARGETS_LOCATOR) {
         // `CachingWorkloadResolver` keeps only the manifest directories
@@ -549,13 +550,15 @@ fn workload_roots(
                 msi_marker.display()
             )));
         }
-        // A file-based install-state pin overrides manifest versions;
-        // degrade. The real path carries a process-architecture segment
+        // The install state lives under the build process's architecture
         // (`metadata/workloads/{arch}/{band}/InstallState/default.json`,
-        // `WorkloadInstallType.GetInstallStateFolder`); sweep every
-        // arch directory rather than guess which architecture the real
-        // build's dotnet process would report, and keep the older
-        // arch-less location as a candidate too.
+        // `WorkloadInstallType.GetInstallStateFolder`), and
+        // `workload_sets::select` reads it there. A caller that cannot say
+        // which architecture that is declines on an install-state file
+        // under any, and under the older arch-less location too.
+        if env.process_architecture.is_some() {
+            continue;
+        }
         let mut candidates = vec![
             workloads_metadata
                 .join(&band_name)
@@ -601,6 +604,7 @@ fn enumerate_manifest_roots(
     sdk_version_dir: &Path,
     band: &FeatureBand,
     roots: &WorkloadRoots,
+    env: &WorkloadEnvironment<'_>,
     observer: &Observer,
 ) -> Result<Vec<ResolvedManifest>, SdkResolveError> {
     let band_name = band.to_string();
@@ -649,7 +653,26 @@ fn enumerate_manifest_roots(
         break;
     }
 
-    check_workload_sets(band, roots, observer)?;
+    let selection = workload_sets::select(
+        band,
+        roots,
+        &env.global_json,
+        env.process_architecture,
+        observer,
+    )?;
+    // `GetManifests` first checks that every manifest the selected set
+    // names is installed (`HasMissingManifests`), and throws if not.
+    if let Some(set) = &selection.set {
+        for entry in set {
+            if entry.directory(roots, observer).is_none() {
+                return Err(unsupported(format!(
+                    "the selected workload set names a manifest that is not installed: \
+                     {} {}/{}",
+                    entry.id, entry.version, entry.band
+                )));
+            }
+        }
+    }
 
     // Primary pass: every id directory in `{root}/sdk-manifests/{band}`,
     // shadowed **by directory name** — the highest-precedence root wins by name,
@@ -710,6 +733,31 @@ fn enumerate_manifest_roots(
         }
         if let Some(directory) = resolve_manifest_directory(&dir, observer)? {
             found.insert(key, ResolvedManifest { id, directory });
+        }
+    }
+
+    // The selected set's manifests, then the install state's, override what
+    // the scan found (`AddManifest` into a dictionary that keeps the first
+    // spelling of an id and replaces its directory). An install-state
+    // manifest that is not installed throws.
+    for (entries, from) in [
+        (selection.set.as_deref(), "workload set"),
+        (selection.install_state.as_deref(), "install state"),
+    ] {
+        for entry in entries.unwrap_or_default() {
+            let Some(directory) = entry.directory(roots, observer) else {
+                return Err(unsupported(format!(
+                    "the workload {from} names a manifest that is not installed: {} {}/{}",
+                    entry.id, entry.version, entry.band
+                )));
+            };
+            found
+                .entry(entry.id.clone())
+                .and_modify(|resolved| resolved.directory = directory.clone())
+                .or_insert_with(|| ResolvedManifest {
+                    id: entry.id.clone(),
+                    directory,
+                });
         }
     }
 
@@ -827,152 +875,6 @@ fn enumerate_manifest_roots(
         }
     });
     Ok(manifests)
-}
-
-/// The feature band that `SdkDirectoryWorkloadManifestProvider` scans for
-/// workload sets alongside the host band, whatever the host band is: the
-/// SDK installers drop their *baseline* workload set under it ("the baseline
-/// workload sets were merged with a fixed 8.0.100 feature band"), so on a
-/// current Microsoft-packaged install it is normally present.
-const BASELINE_WORKLOAD_SET_BAND: &str = "8.0.100";
-
-/// Degrade wherever a workload set could change the manifest set, or could
-/// make the real resolution throw.
-///
-/// `SdkDirectoryWorkloadManifestProvider.RefreshWorkloadManifests` selects a
-/// workload set in exactly four ways:
-///
-/// 1. a version handed to its constructor — never, on the MSBuild path
-///    (`CachingWorkloadResolver` passes the `global.json` path instead);
-/// 2. `global.json`'s `sdk.workloadVersion` — degraded on by
-///    [`WorkloadEnvironment::global_json_pins_workload_set`];
-/// 3. the install state's `workloadVersion` — degraded on, with every other
-///    install-state shape, by `workload_roots`;
-/// 4. by default, the highest workload set of the **host feature band**
-///    whenever there is one, unless `global.json`'s `workloads-update-mode`
-///    or the install state opts out (`InstallStateContents.ShouldUseWorkloadSets`
-///    is `UseWorkloadSets ?? true`) — degraded on here, whenever the host
-///    band has a `workloadsets` directory under any root.
-///
-/// Sets of any other band are reached only by looking up a version that 2
-/// or 3 named, so when neither applies they cannot change what is imported.
-/// But the provider *loads* the sets of [`BASELINE_WORKLOAD_SET_BAND`]
-/// unconditionally, before it knows whether it needs them, and that load
-/// throws on a malformed set — failing the real evaluation. So those are
-/// held to [`check_loadable_workload_sets`]. Every other band's sets are
-/// never read.
-fn check_workload_sets(
-    band: &FeatureBand,
-    roots: &WorkloadRoots,
-    observer: &Observer,
-) -> Result<(), SdkResolveError> {
-    for root in roots.all() {
-        let manifests = root.join("sdk-manifests");
-        let host_sets = manifests.join(band.to_string()).join("workloadsets");
-        if observed::is_dir(observer, &host_sets) {
-            return Err(unsupported(format!(
-                "workload set present for the host feature band: {}",
-                host_sets.display()
-            )));
-        }
-        let baseline_sets = manifests
-            .join(BASELINE_WORKLOAD_SET_BAND)
-            .join("workloadsets");
-        if observed::is_dir(observer, &baseline_sets) {
-            check_loadable_workload_sets(&baseline_sets, observer)?;
-        }
-    }
-    Ok(())
-}
-
-/// Degrade unless loading every workload set under `workload_sets_root` —
-/// `GetAvailableWorkloadSets`' `AddWorkloadSetsForFeatureBand` over each
-/// subdirectory, through `WorkloadSet.FromWorkloadSetFolder` — certainly does
-/// not throw.
-///
-/// What is certified is a strict subset of what loads: each set directory is
-/// named by a plain version (`major.minor.patch[.n][-prerelease]`, which
-/// `WorkloadSet.GetWorkloadSetFeatureBand` must parse), and each
-/// `*.workloadset.json` in it is a JSON object of string values `version` or
-/// `version/band` keyed by ASCII manifest ids, none repeated in any casing
-/// within a file or across a set's files. Anything else — an unreadable file, an unfamiliar
-/// version spelling — degrades, whether or not the reference would in fact
-/// throw on it.
-///
-/// Candidate files are those whose name ends `.workloadset.json` in any
-/// casing (`Directory.GetFiles` matches case-insensitively off Linux), so a
-/// file Linux would skip is still validated; and any such entry that is not
-/// a regular file degrades.
-fn check_loadable_workload_sets(
-    workload_sets_root: &Path,
-    observer: &Observer,
-) -> Result<(), SdkResolveError> {
-    let malformed = |path: &Path, why: &str| {
-        Err(unsupported(format!(
-            "workload set may fail to load ({why}): {}",
-            path.display()
-        )))
-    };
-    for set_dir in read_dir_or_degrade(workload_sets_root, observer)? {
-        let set_path = set_dir.path.clone();
-        let entries = observed::read_dir(observer, &set_path).map_err(|err| {
-            unsupported(format!("cannot enumerate {}: {err}", set_path.display()))
-        })?;
-        let mut ids: Vec<String> = Vec::new();
-        let mut any_set_file = false;
-        for entry in entries {
-            let entry = entry.map_err(|err| {
-                unsupported(format!("cannot enumerate {}: {err}", set_path.display()))
-            })?;
-            let path = entry.path;
-            let Some(name) = entry.name.to_str().map(str::to_ascii_lowercase) else {
-                return malformed(&path, "non-UTF-8 file name");
-            };
-            if !name.ends_with(".workloadset.json") {
-                continue;
-            }
-            if !observed::is_file(observer, &path) {
-                return malformed(&path, "not a regular file");
-            }
-            let Ok(text) = observed::read_to_string(observer, &path) else {
-                return malformed(&path, "unreadable or not UTF-8");
-            };
-            let Some(entries) = super::global_json::parse_json_string_map(&text) else {
-                return malformed(&path, "not a JSON object of strings");
-            };
-            for (id, value) in entries {
-                // `ManifestId` compares `OrdinalIgnoreCase`; only on ASCII is
-                // that exactly ASCII case folding.
-                if !id.is_ascii() {
-                    return malformed(&path, "non-ASCII manifest id");
-                }
-                let folded = id.to_ascii_lowercase();
-                if ids.contains(&folded) {
-                    return malformed(&path, "manifest id repeated");
-                }
-                ids.push(folded);
-                let mut parts = value.split('/');
-                let version = parts.next().unwrap_or_default();
-                let band = parts.next();
-                if parts.next().is_some()
-                    || !is_plain_release_version(version)
-                    || band.is_some_and(|band| !is_plain_release_version(band))
-                {
-                    return malformed(&path, "manifest version or band not certified to parse");
-                }
-            }
-            any_set_file = true;
-        }
-        // A directory without set files loads as no set, and its name is
-        // never parsed.
-        if any_set_file {
-            let name = set_dir.name;
-            if !name.to_str().is_some_and(is_plain_workload_set_version) {
-                return malformed(&set_path, "workload set version not certified to parse");
-            }
-        }
-    }
-    Ok(())
 }
 
 /// `major.minor.patch[-prerelease]` in strict SemVer 2.0 spelling, without

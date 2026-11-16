@@ -68,7 +68,8 @@ fn parse_at_with_real_sdk(body: &str, project_path: &std::path::Path) -> ParsedP
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
-                global_json_pins_workload_set: false,
+                global_json: Default::default(),
+                process_architecture: None,
             },
             observer,
         )

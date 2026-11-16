@@ -856,10 +856,9 @@ struct SdkContext {
     nuget_packages_dir: Result<PathBuf, String>,
     spec: VersionSpec,
     msbuild_sdks: BTreeMap<String, SdkVersion>,
-    /// Whether the project's global.json engages workload-set
-    /// selection — the corpus's real `dotnet msbuild` comparisons see
-    /// the same file, so the locators must degrade in step.
-    global_json_pins_workload_set: bool,
+    /// What the workload reader reads of the project's global.json — the
+    /// corpus's real `dotnet msbuild` comparisons see the same file.
+    global_json_workloads: borzoi_msbuild::GlobalJsonWorkloads,
 }
 
 impl SdkContext {
@@ -881,7 +880,7 @@ impl SdkContext {
                 nuget_packages_dir,
                 spec: VersionSpec::any_version(true),
                 msbuild_sdks: BTreeMap::new(),
-                global_json_pins_workload_set: false,
+                global_json_workloads: Default::default(),
             });
         };
 
@@ -892,7 +891,7 @@ impl SdkContext {
         let GlobalJson {
             sdk,
             msbuild_sdks,
-            pins_workload_set,
+            workloads,
         } = parsed;
         let (paths, spec) = match sdk {
             Some(mut sdk) => {
@@ -908,7 +907,7 @@ impl SdkContext {
             nuget_packages_dir,
             spec,
             msbuild_sdks,
-            global_json_pins_workload_set: pins_workload_set,
+            global_json_workloads: workloads,
         })
     }
 
@@ -934,7 +933,8 @@ impl SdkContext {
         let workload_env = workloads::WorkloadEnvironment {
             user_dotnet_root: user_dotnet_root.as_deref(),
             overrides_present,
-            global_json_pins_workload_set: self.global_json_pins_workload_set,
+            global_json: self.global_json_workloads.clone(),
+            process_architecture: None,
         };
         // As the LSP's `SdkDiscovery::resolve`: a name NuGet has a version for
         // declines where its folder cannot be said; any other reads no folder.

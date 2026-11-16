@@ -133,7 +133,8 @@ fn visual_studio_version_on_a_real_sdk_project_is_exact_or_declined() {
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
-                global_json_pins_workload_set: false,
+                global_json: Default::default(),
+                process_architecture: None,
             },
             observer,
         )

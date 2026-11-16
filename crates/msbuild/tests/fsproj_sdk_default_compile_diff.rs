@@ -217,7 +217,8 @@ fn ours(project: &Path, xml: &str, seam: Seam) -> Result<Vec<PathBuf>, String> {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
                 // The fixture tempdir has no global.json above it.
-                global_json_pins_workload_set: false,
+                global_json: Default::default(),
+                process_architecture: None,
             },
             observer,
         )

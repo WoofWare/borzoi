@@ -361,7 +361,8 @@ fn evaluate_both(
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present: *overrides_present,
                 // The fixture tempdir has no global.json above it.
-                global_json_pins_workload_set: false,
+                global_json: Default::default(),
+                process_architecture: None,
             },
             observer,
         )

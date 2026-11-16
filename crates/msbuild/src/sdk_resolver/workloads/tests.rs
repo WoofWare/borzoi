@@ -25,7 +25,8 @@ fn no_user_env() -> WorkloadEnvironment<'static> {
     WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     }
 }
 
@@ -221,28 +222,64 @@ fn manifest_without_targets_file_is_silently_excluded() {
     assert_eq!(result, SdkResolution::Roots(Vec::new()));
 }
 
-/// A host-band workload set is selected by default (`ShouldUseWorkloadSets`
-/// is `UseWorkloadSets ?? true`), so even an empty `workloadsets` directory
-/// there degrades rather than be modelled.
+/// A `workloadsets` directory holding no set selects nothing.
 #[test]
-fn host_band_workloadsets_dir_degrades() {
+fn an_empty_host_band_workloadsets_dir_changes_nothing() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
-    manifest(root, "10.0.100", "w.workload", "1.0.0");
-    fs::create_dir_all(root.join("sdk-manifests/10.0.300/workloadsets")).unwrap();
+    let w = manifest(root, "10.0.100", "w.workload", "1.0.0");
+    fs::create_dir_all(root.join("sdk-manifests/10.0.300/workloadsets/10.0.300")).unwrap();
 
+    let result = resolve_targets(root, &version_dir, &no_user_env()).unwrap();
+    assert_eq!(result, SdkResolution::Roots(vec![w]));
+}
+
+/// A host-band workload set is selected by default (`ShouldUseWorkloadSets`
+/// is `UseWorkloadSets ?? true`), and its manifests override the scanned ones;
+/// the install state's `useWorkloadSets: false`, under the build process's
+/// architecture, opts out.
+#[test]
+fn a_host_band_workload_set_is_selected_unless_the_install_state_opts_out() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
+    let old = manifest(root, "10.0.300", "w.workload", "1.0.0");
+    let new = manifest(root, "10.0.300", "w.workload", "2.0.0");
+    write_set(
+        root,
+        "10.0.300",
+        "10.0.300",
+        &[("x.workloadset.json", r#"{"W.Workload": "1.0.0"}"#)],
+    );
+    let env = WorkloadEnvironment {
+        process_architecture: Some("X64"),
+        ..no_user_env()
+    };
+    assert_eq!(
+        resolve_targets(root, &version_dir, &env).unwrap(),
+        SdkResolution::Roots(vec![old])
+    );
+    write(
+        &root.join("metadata/workloads/X64/10.0.300/InstallState/default.json"),
+        r#"{"useWorkloadSets": false,}"#,
+    );
+    assert_eq!(
+        resolve_targets(root, &version_dir, &env).unwrap(),
+        SdkResolution::Roots(vec![new])
+    );
+    // Without the architecture, the install state cannot be found.
     let err = resolve_targets(root, &version_dir, &no_user_env()).unwrap_err();
     assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));
 }
 
 #[test]
-fn host_band_workload_set_in_the_user_root_degrades() {
+fn an_empty_host_band_workload_set_in_the_user_root_changes_nothing() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("dotnet");
     let user = tmp.path().join("user");
     let version_dir = host_sdk(&root, "10.0.300", &["w.workload"]);
-    manifest(&root, "10.0.300", "w.workload", "1.0.0");
+    let w = manifest(&root, "10.0.300", "w.workload", "1.0.0");
     write(&root.join("metadata/workloads/10.0.300/userlocal"), "");
     write_set(
         &user,
@@ -255,8 +292,8 @@ fn host_band_workload_set_in_the_user_root_degrades() {
         ..no_user_env()
     };
 
-    let err = resolve_targets(&root, &version_dir, &env).unwrap_err();
-    assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));
+    let result = resolve_targets(&root, &version_dir, &env).unwrap();
+    assert_eq!(result, SdkResolution::Roots(vec![w]));
 }
 
 /// `{root}/sdk-manifests/{band}/workloadsets/{set}/` holding `files`.
@@ -675,7 +712,8 @@ fn user_root_participates_in_the_primary_band_only() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let result = resolve_targets(&root, &version_dir, &env).unwrap();
     assert_eq!(result, SdkResolution::Roots(vec![shared]));
@@ -696,7 +734,8 @@ fn user_root_shadows_dotnet_root_in_the_current_band() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let result = resolve_targets(&root, &version_dir, &env).unwrap();
     assert_eq!(result, SdkResolution::Roots(vec![user_copy]));
@@ -726,7 +765,8 @@ fn user_root_shadows_by_name_even_when_it_holds_no_valid_manifest() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let result = resolve_targets(&root, &version_dir, &env).unwrap();
     assert_eq!(
@@ -751,7 +791,8 @@ fn user_root_equal_to_dotnet_root_participates_once() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(root),
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let result = resolve_targets(root, &version_dir, &env).unwrap();
     assert_eq!(result, SdkResolution::Roots(vec![expected]));
@@ -868,7 +909,8 @@ fn env_overrides_present_degrade() {
     let env = WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: true,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let err = resolve_targets(root, &version_dir, &env).unwrap_err();
     assert!(matches!(err, SdkResolveError::UnsupportedLayout { .. }));
@@ -1004,7 +1046,8 @@ fn auto_import_scans_user_packs_even_without_user_manifests() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let err =
         resolve_workload_locator(AUTO, &root, &version_dir, &env, &Observer::new()).unwrap_err();
@@ -1029,7 +1072,8 @@ fn manifestless_user_root_still_resolves_targets_from_dotnet() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let result = resolve_targets(&root, &version_dir, &env).unwrap();
     assert_eq!(result, SdkResolution::Roots(vec![expected]));
@@ -1050,7 +1094,8 @@ fn auto_import_empty_when_manifestless_user_root_ships_no_props() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let result =
         resolve_workload_locator(AUTO, &root, &version_dir, &env, &Observer::new()).unwrap();
@@ -1072,18 +1117,17 @@ fn nonexistent_user_root_participates_nowhere() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let result = resolve_targets(&root, &version_dir, &env).unwrap();
     assert_eq!(result, SdkResolution::Roots(vec![expected]));
 }
 
 #[test]
-fn global_json_workload_set_pin_degrades_both_locators() {
+fn a_global_json_pin_of_a_missing_workload_set_degrades_both_locators() {
     // An sdk.workloadVersion in the governing global.json selects a
-    // workload set (or fails the real evaluation when the set is
-    // missing) — either way our loose-manifest enumeration is not what
-    // MSBuild would import.
+    // workload set, and fails the real evaluation when the set is missing.
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let version_dir = host_sdk(root, "10.0.300", &["w.workload"]);
@@ -1092,7 +1136,11 @@ fn global_json_workload_set_pin_degrades_both_locators() {
     let env = WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: false,
-        global_json_pins_workload_set: true,
+        global_json: crate::GlobalJsonWorkloads::Reads {
+            workload_version: Some("10.0.300".to_owned()),
+            use_workload_sets: None,
+        },
+        process_architecture: None,
     };
     for locator in [TARGETS, AUTO] {
         let err = resolve_workload_locator(locator, root, &version_dir, &env, &Observer::new())

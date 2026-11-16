@@ -10,7 +10,7 @@
 //! (`BORZOI_DOTNET_ROOT_SDK11`), so a prerelease SDK's resolver is graded as
 //! well as the release ones.
 //!
-//! Five sweeps, each *certain-implies-exact* (an answer we commit must be the
+//! Six sweeps, each *certain-implies-exact* (an answer we commit must be the
 //! resolver's) with a positive domain where we must commit:
 //!
 //! - the feature band of a host SDK version (`SdkFeatureBand`), over a
@@ -27,6 +27,10 @@
 //! - which of a manifest's version directories wins (the provider's
 //!   `VersionCompare`), over every name alone, every pair and a sample of
 //!   triples of a vocabulary of release, prerelease and malformed names;
+//! - workload sets (of the host band, other bands and the baseline band),
+//!   the install state under the oracle's architecture or another, and a
+//!   `global.json` pinning a set or choosing the update mode, over generated
+//!   layouts (the oracle is handed the `global.json`);
 //! - every existence probe the resolver makes (`File.Exists` of a manifest,
 //!   its targets, a marker, the install state, the known list, the runtime
 //!   identifier chain, and `Directory.GetDirectories` of a band or id
@@ -564,7 +568,8 @@ fn ours(layout: &Layout, locator: &str) -> Option<Vec<String>> {
     let env = WorkloadEnvironment {
         user_dotnet_root: layout.user_root.as_deref(),
         overrides_present: false,
-        global_json_pins_workload_set: false,
+        global_json: Default::default(),
+        process_architecture: None,
     };
     let sdk_dir = layout.dotnet_root.join("sdk").join(&layout.host.version);
     match resolve_workload_locator(
@@ -1556,7 +1561,8 @@ fn the_highest_manifest_version_directory_is_the_resolver_s() {
             let env = WorkloadEnvironment {
                 user_dotnet_root: None,
                 overrides_present: false,
-                global_json_pins_workload_set: false,
+                global_json: Default::default(),
+                process_architecture: None,
             };
             let ours = match resolve_workload_locator(
                 WORKLOAD_MANIFEST_TARGETS_LOCATOR,
@@ -1616,4 +1622,303 @@ fn the_highest_manifest_version_directory_is_the_resolver_s() {
         "{}",
         failures[..failures.len().min(20)].join("\n")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Workload sets, the install state and global.json.
+
+/// A generated layout of the workload-set family: manifests of two ids at
+/// several versions in the host band (and one in an older band); workload
+/// sets of the host band, of other bands and of the 8.0.100 baseline band,
+/// naming installed manifests, missing ones, ids in other casings and other
+/// bands; an install state under the oracle's architecture or another's,
+/// with `useWorkloadSets`, a `workloadVersion` and `manifests`; and a
+/// `global.json` with `workloadVersion` and `workloads-update-mode` in
+/// either casing. `in_domain` is false where something was generated that
+/// we do not certify (a malformed file, a non-object `sdk`).
+struct SetLayout {
+    _dir: tempfile::TempDir,
+    dotnet_root: PathBuf,
+    global_json: Option<PathBuf>,
+    in_domain: bool,
+    description: String,
+}
+
+const HOST: &str = "10.0.100";
+
+fn gen_set_layout(rng: &mut SplitMix64, architecture: &str) -> SetLayout {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = host_fs::canonicalize(dir.path()).unwrap();
+    let dotnet_root = root.join("dotnet");
+    std::fs::create_dir_all(dotnet_root.join("sdk").join(HOST)).unwrap();
+    let mut description = String::new();
+    let mut in_domain = true;
+    for id in ["contoso.one", "contoso.two"] {
+        for version in ["1.0.0", "2.0.0", "3.0.0"] {
+            if rng.below(3) == 0 {
+                continue;
+            }
+            let dir = dotnet_root
+                .join("sdk-manifests")
+                .join(HOST)
+                .join(id)
+                .join(version);
+            write(&dir.join("WorkloadManifest.json"), MANIFEST_JSON);
+            if rng.below(4) != 0 {
+                write(&dir.join("WorkloadManifest.targets"), "<Project />");
+            }
+            description.push_str(&format!("manifest {id} {version}\n"));
+        }
+    }
+    let older = dotnet_root.join("sdk-manifests/9.0.100/contoso.three/1.0.0");
+    write(&older.join("WorkloadManifest.json"), MANIFEST_JSON);
+    write(&older.join("WorkloadManifest.targets"), "<Project />");
+
+    let set_body = |rng: &mut SplitMix64, in_domain: &mut bool| -> String {
+        if rng.below(12) == 0 {
+            *in_domain = false;
+            return "{".to_owned();
+        }
+        let mut entries = Vec::new();
+        for id in ["contoso.one", "Contoso.Two", "contoso.three"] {
+            if rng.below(2) == 0 {
+                continue;
+            }
+            let value = match (id, rng.below(4)) {
+                ("contoso.three", _) => "1.0.0/9.0.105".to_owned(),
+                (_, 0) => "9.9.9".to_owned(),
+                (_, n) => format!("{n}.0.0"),
+            };
+            entries.push(format!("\"{id}\": \"{value}\""));
+        }
+        format!("{{{}}}", entries.join(", "))
+    };
+    const SET_VERSIONS: &[&str] = &["10.0.100", "10.0.101", "10.0.100.1", "10.0.200"];
+    let mut set_versions = Vec::new();
+    for version in SET_VERSIONS {
+        if rng.below(3) != 0 {
+            continue;
+        }
+        let band = if *version == "10.0.200" {
+            "10.0.200"
+        } else {
+            HOST
+        };
+        let body = set_body(rng, &mut in_domain);
+        write(
+            &dotnet_root
+                .join("sdk-manifests")
+                .join(band)
+                .join("workloadsets")
+                .join(version)
+                .join("x.workloadset.json"),
+            &body,
+        );
+        description.push_str(&format!("set {band}/{version}: {body}\n"));
+        set_versions.push(*version);
+    }
+    if rng.below(3) == 0 {
+        let body = set_body(rng, &mut in_domain);
+        write(
+            &dotnet_root.join("sdk-manifests/8.0.100/workloadsets/8.0.100/x.workloadset.json"),
+            &body,
+        );
+        description.push_str(&format!("baseline set 8.0.100: {body}\n"));
+        set_versions.push("8.0.100");
+    }
+    let pick_version = |rng: &mut SplitMix64| -> String {
+        match rng.below(4) {
+            0 => "10.0.105".to_owned(),
+            _ if !set_versions.is_empty() => (*rng.pick(&set_versions)).to_owned(),
+            _ => "10.0.100".to_owned(),
+        }
+    };
+
+    if rng.below(2) == 0 {
+        let arch = if rng.below(5) == 0 {
+            "Arm64"
+        } else {
+            architecture
+        };
+        let mut members = Vec::new();
+        if rng.below(2) == 0 {
+            members.push(format!("\"useWorkloadSets\": {}", rng.below(2) == 0));
+        }
+        if rng.below(3) == 0 {
+            members.push(format!("\"workloadVersion\": \"{}\"", pick_version(rng)));
+        }
+        if rng.below(3) == 0 {
+            members.push(format!(
+                "\"manifests\": {{\"contoso.one\": \"{}.0.0\"}}",
+                1 + rng.below(3)
+            ));
+        }
+        let mut body = format!("{{{}}}", members.join(", "));
+        if rng.below(10) == 0 {
+            body = format!("{{/* c */{}", &body[1..]);
+            in_domain = false;
+        }
+        write(
+            &dotnet_root
+                .join("metadata/workloads")
+                .join(arch)
+                .join(HOST)
+                .join("InstallState/default.json"),
+            &body,
+        );
+        description.push_str(&format!("install state ({arch}): {body}\n"));
+    }
+
+    let global_json = (rng.below(2) == 0).then(|| {
+        let path = root.join("global.json");
+        let (sdk, version, mode) = match rng.below(3) {
+            0 => ("sdk", "workloadVersion", "workloads-update-mode"),
+            1 => ("SDK", "WorkloadVersion", "Workloads-Update-Mode"),
+            _ => ("sdk", "workloadversion", "workloads-update-mode"),
+        };
+        let mut members = Vec::new();
+        if rng.below(2) == 0 {
+            members.push(format!("\"{version}\": \"{}\"", pick_version(rng)));
+        }
+        if rng.below(2) == 0 {
+            let value = *rng.pick(&["manifests", "workload-set", "Manifests", "other"]);
+            members.push(format!("\"{mode}\": \"{value}\""));
+        }
+        let body = match rng.below(12) {
+            0 => {
+                in_domain = false;
+                format!("{{\"{sdk}\": null}}")
+            }
+            // A form feed, which the host-side parse skips and the workload
+            // reader throws on.
+            1 => {
+                in_domain = false;
+                format!("{{\u{c}\"{sdk}\": {{{}}}}}", members.join(", "))
+            }
+            _ => format!("{{\"{sdk}\": {{{}}}}}", members.join(", ")),
+        };
+        write(&path, &body);
+        description.push_str(&format!("global.json: {body}\n"));
+        path
+    });
+    SetLayout {
+        _dir: dir,
+        dotnet_root,
+        global_json,
+        in_domain,
+        description,
+    }
+}
+
+/// Both locators over generated [`SetLayout`]s, ours against each installed
+/// resolver's, certain-implies-exact; where nothing outside the certified
+/// subset was generated and the resolver answers, we must answer too.
+#[test]
+fn workload_sets_and_the_install_state_are_applied_as_the_resolver_applies_them() {
+    sweep_sets(0x0818_5e75, 300);
+}
+
+/// The fresh-seed twin; `BORZOI_MSBUILD_SOAK_SEED` reproduces a run.
+#[test]
+#[ignore = "soak: run with --ignored; BORZOI_MSBUILD_SOAK_SEED reproduces"]
+fn soak_workload_sets_and_the_install_state() {
+    let (seed, cases) = common::soak_parameters("workload_sets", 2000);
+    sweep_sets(seed, cases);
+}
+
+fn sweep_sets(seed: u64, cases: usize) {
+    let mut failures = Vec::new();
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        let architecture = oracle.request(&json!({"op": "identity"}))["processArchitecture"]
+            .as_str()
+            .expect("the oracle names its architecture")
+            .to_owned();
+        let mut rng = SplitMix64(seed);
+        let (mut committed, mut answered) = (0, 0);
+        for case in 0..cases {
+            let layout = gen_set_layout(&mut rng, &architecture);
+            let global_json = layout.global_json.as_ref().map(|path| {
+                borzoi_msbuild::parse_global_json(&host_fs::read_to_string(path).unwrap())
+                    .expect("the generated global.json parses")
+                    .workloads
+            });
+            for locator in [
+                WORKLOAD_MANIFEST_TARGETS_LOCATOR,
+                WORKLOAD_AUTO_IMPORT_PROPS_LOCATOR,
+            ] {
+                let env = WorkloadEnvironment {
+                    user_dotnet_root: None,
+                    overrides_present: false,
+                    global_json: global_json.clone().unwrap_or_default(),
+                    process_architecture: Some(&architecture),
+                };
+                let sdk_dir = layout.dotnet_root.join("sdk").join(HOST);
+                let ours = match resolve_workload_locator(
+                    locator,
+                    &layout.dotnet_root,
+                    &sdk_dir,
+                    &env,
+                    &Observer::new(),
+                ) {
+                    Ok(SdkResolution::Roots(roots)) => Some(
+                        roots
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>(),
+                    ),
+                    Ok(other) => panic!("a locator resolves to roots, not {other:?}"),
+                    Err(_) => None,
+                };
+                let response = oracle.request(&json!({
+                    "op": "resolve",
+                    "sdk": locator,
+                    "dotnetRoot": layout.dotnet_root.to_string_lossy(),
+                    "sdkVersion": HOST,
+                    "userProfileDir": null,
+                    "globalJsonPath": layout.global_json.as_ref().map(|p| p.to_string_lossy()),
+                }));
+                let theirs = (response["ok"] == json!(true)).then(|| {
+                    response["paths"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| p.as_str().unwrap().to_owned())
+                        .collect::<Vec<_>>()
+                });
+                if theirs.is_some() && layout.in_domain {
+                    answered += 1;
+                }
+                let failure = match (&ours, &theirs) {
+                    (Some(ours), Some(theirs)) if ours == theirs => {
+                        committed += 1;
+                        None
+                    }
+                    (Some(ours), _) => {
+                        Some(format!("we commit {ours:#?}, the resolver: {response}"))
+                    }
+                    (None, Some(theirs)) if layout.in_domain => {
+                        Some(format!("we decline, the resolver says {theirs:#?}"))
+                    }
+                    (None, _) => None,
+                };
+                if let Some(failure) = failure
+                    && failures.len() < 8
+                {
+                    failures.push(format!(
+                        "{} case {case}, {locator}: {failure}\n{}",
+                        sdk.display(),
+                        layout.description
+                    ));
+                }
+            }
+        }
+        println!(
+            "{}: committed {committed}, the resolver answered {answered} in the domain, of {}",
+            sdk.display(),
+            cases * 2
+        );
+        assert!(committed >= cases / 2, "{}: {committed}", sdk.display());
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

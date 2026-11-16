@@ -1340,72 +1340,131 @@ fn paths_parser_is_total() {
 }
 
 // ============================================================
-// Workload-set pin detection (`GlobalJson::pins_workload_set`)
+// The workload reader's view (`GlobalJson::workloads`)
 // ============================================================
 
+fn reads(workload_version: Option<&str>, use_workload_sets: Option<bool>) -> GlobalJsonWorkloads {
+    GlobalJsonWorkloads::Reads {
+        workload_version: workload_version.map(str::to_owned),
+        use_workload_sets,
+    }
+}
+
 #[test]
-fn workload_version_in_sdk_block_pins_workload_set() {
+fn a_workload_version_in_the_sdk_block_is_read() {
     let parsed = parse_global_json(r#"{"sdk": {"workloadVersion": "10.0.201"}}"#).unwrap();
-    assert!(parsed.pins_workload_set);
+    assert_eq!(parsed.workloads, reads(Some("10.0.201"), None));
     // The host-side sdk block ignores the key: no version pin arises.
     assert_eq!(parsed.sdk, Some(GlobalJsonSettings::default()));
 }
 
 #[test]
-fn ordinary_sdk_block_does_not_pin_workload_set() {
-    let parsed = parse_global_json(r#"{"sdk": {"version": "10.0.300"}}"#).unwrap();
-    assert!(!parsed.pins_workload_set);
-    let parsed = parse_global_json(r#"{"sdk": {}}"#).unwrap();
-    assert!(!parsed.pins_workload_set);
-    let parsed = parse_global_json("{}").unwrap();
-    assert!(!parsed.pins_workload_set);
+fn an_ordinary_sdk_block_says_nothing_to_the_workload_reader() {
+    for text in [
+        r#"{"sdk": {"version": "10.0.300"}}"#,
+        r#"{"sdk": {}}"#,
+        "{}",
+    ] {
+        assert_eq!(
+            parse_global_json(text).unwrap().workloads,
+            GlobalJsonWorkloads::Silent,
+            "{text}"
+        );
+    }
 }
 
 #[test]
-fn workload_pin_detection_is_case_insensitive() {
-    // The workload GlobalJsonReader matches both the `sdk` key and the
-    // `workloadVersion` key ordinal-case-insensitively — unlike the
-    // host's case-sensitive sdk block, which ignores `"SDK"` entirely.
+fn the_workload_reader_matches_keys_case_insensitively() {
+    // Unlike the host's case-sensitive sdk block, which ignores `"SDK"`.
     let parsed = parse_global_json(r#"{"SDK": {"WORKLOADVERSION": "10.0.201"}}"#).unwrap();
-    assert!(parsed.pins_workload_set);
+    assert_eq!(parsed.workloads, reads(Some("10.0.201"), None));
     assert_eq!(parsed.sdk, None);
 }
 
 #[test]
-fn non_object_sdk_value_pins_workload_set() {
-    // The workload reader throws JsonFormatException on a non-object
-    // `sdk` value (including null), failing the real evaluation, so the
-    // document is outside the workload resolution envelope even though
-    // the host-side parser folds `"sdk": null` into "absent".
+fn a_non_object_sdk_value_is_unmodelled() {
+    // The workload reader throws on a non-object `sdk` value (including
+    // null), failing the real evaluation, though the host-side parser folds
+    // `"sdk": null` into "absent".
     let parsed = parse_global_json(r#"{"sdk": null}"#).unwrap();
-    assert!(parsed.pins_workload_set);
+    assert_eq!(parsed.workloads, GlobalJsonWorkloads::Unmodelled);
     assert_eq!(parsed.sdk, None);
     let parsed = parse_global_json(r#"{"Sdk": 42}"#).unwrap();
-    assert!(parsed.pins_workload_set);
+    assert_eq!(parsed.workloads, GlobalJsonWorkloads::Unmodelled);
 }
 
 #[test]
-fn workloads_update_mode_string_does_not_pin() {
-    // A string workloads-update-mode only toggles the set-vs-manifests
-    // preference, which changes behaviour only when a workloadsets
-    // directory exists — a layout the locator resolution degrades on
-    // independently.
-    let parsed =
-        parse_global_json(r#"{"sdk": {"workloads-update-mode": "workload-set"}}"#).unwrap();
-    assert!(!parsed.pins_workload_set);
-    // A non-string value makes the workload reader throw: pin.
+fn the_update_mode_is_read_and_an_unknown_one_leaves_it() {
+    for (mode, expected) in [
+        ("workload-set", Some(true)),
+        ("Workload-Set", Some(true)),
+        ("manifests", Some(false)),
+        ("other", None),
+    ] {
+        let text = format!(r#"{{"sdk": {{"workloads-update-mode": "{mode}"}}}}"#);
+        assert_eq!(
+            parse_global_json(&text).unwrap().workloads,
+            reads(None, expected),
+            "{mode}"
+        );
+    }
+    let text = r#"{"sdk": {"workloads-update-mode": "manifests", "workloads-update-mode": "x"}}"#;
+    assert_eq!(
+        parse_global_json(text).unwrap().workloads,
+        reads(None, Some(false))
+    );
+    // A non-string value makes the workload reader throw.
     let parsed = parse_global_json(r#"{"sdk": {"workloads-update-mode": true}}"#).unwrap();
-    assert!(parsed.pins_workload_set);
+    assert_eq!(parsed.workloads, GlobalJsonWorkloads::Unmodelled);
+    let parsed = parse_global_json(r#"{"sdk": {"workloadVersion": null}}"#).unwrap();
+    assert_eq!(parsed.workloads, GlobalJsonWorkloads::Unmodelled);
 }
 
 #[test]
-fn duplicate_sdk_keys_pin_if_any_occurrence_pins() {
-    // The workload reader walks every top-level `sdk` occurrence.
+fn every_sdk_block_is_read_in_order() {
     let parsed = parse_global_json(
-        r#"{"sdk": {"version": "10.0.300"}, "sdk": {"workloadVersion": "10.0.201"}}"#,
+        r#"{"sdk": {"workloadVersion": "1.0.100"}, "sdk": {"workloadVersion": "10.0.201"}}"#,
     )
     .unwrap();
-    assert!(parsed.pins_workload_set);
+    assert_eq!(parsed.workloads, reads(Some("10.0.201"), None));
+}
+
+/// The workload reader parses the whole document as `System.Text.Json` does,
+/// so a document it throws on is unmodelled even where the host-side parse
+/// takes it, and even when it names no workload setting.
+#[test]
+fn a_document_the_workload_reader_throws_on_is_unmodelled() {
+    for text in [
+        "{\"sdk\": {\"workloadVersion\": \"10.0.201\"}}\u{c}",
+        "{\u{c}\"sdk\": {}}",
+    ] {
+        if let Ok(parsed) = parse_global_json(text) {
+            assert_eq!(
+                parsed.workloads,
+                GlobalJsonWorkloads::Unmodelled,
+                "{text:?}"
+            );
+        }
+    }
+    let text = "{\"sdk\": {\"workloadVersion\": \"10.0.201\",},}";
+    if let Ok(parsed) = parse_global_json(text) {
+        assert_eq!(parsed.workloads, reads(Some("10.0.201"), None));
+    }
+}
+
+#[test]
+fn a_comment_beside_a_lone_carriage_return_is_unmodelled() {
+    // `System.Text.Json` ends a `//` comment at a lone `\r`; the host-side
+    // comment stripper does not.
+    let text = "{\"sdk\": {} // c\r, \"x\": 1\n}";
+    if let Ok(parsed) = parse_global_json(text) {
+        assert_eq!(parsed.workloads, GlobalJsonWorkloads::Unmodelled);
+    }
+    let text = "{\"sdk\": {\"workloadVersion\": \"10.0.201\"}} // c\n";
+    assert_eq!(
+        parse_global_json(text).unwrap().workloads,
+        reads(Some("10.0.201"), None)
+    );
 }
 
 // ============================================================

@@ -2467,7 +2467,8 @@ fn a_name_without_a_nuget_version_never_reads_the_nuget_folder() {
                 let workload_env = WorkloadEnvironment {
                     user_dotnet_root: None,
                     overrides_present: false,
-                    global_json_pins_workload_set: false,
+                    global_json: Default::default(),
+                    process_architecture: None,
                 };
                 let resolve = |nuget: Option<&Path>| {
                     resolve_sdk(
