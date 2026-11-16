@@ -3595,6 +3595,34 @@ fn pinned_scripts() -> Vec<(&'static str, Case)> {
                 ],
             },
         ),
+        (
+            // An open source with no project in its directory is answered
+            // single-file. A project created beside it owns it (#894), which
+            // moves its `#if` symbols, so the tokens the client shows for
+            // it are owed a refresh, though no fold was ever computed.
+            "a project created beside a project-less source owes its tokens",
+            Case {
+                mode: Mode::Pull,
+                disk: vec![(
+                    FileId::Src(Src::A),
+                    source(vec![Item::IfDef(Sym::Foo, vec![], vec![x_is_zero()])]),
+                )],
+                cmds: vec![
+                    Cmd::Open(FileId::Src(Src::A)),
+                    Cmd::Write(
+                        FileId::Proj(Proj::O),
+                        Content::Project(ProjectSpec {
+                            import_props: false,
+                            defines: vec![Sym::Foo],
+                            compile: vec![Entry::File(Src::B)],
+                            broken: false,
+                            sdk: false,
+                        }),
+                    ),
+                    Cmd::Check,
+                ],
+            },
+        ),
     ]
 }
 

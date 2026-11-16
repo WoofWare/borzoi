@@ -1239,9 +1239,11 @@ impl Dispatcher {
 /// Tell the client what a dropped project evaluation may have staled, as a
 /// structural watch event does ([`State::apply_watched_changes`]): every open
 /// buffer is republished to a push client, a pull client is owed a diagnostic
-/// refresh, every env with an unrecorded reader is dropped (which owes a
-/// semantic-token refresh), and the deferral scope, which a Compile list
-/// decides, is recomputed. Every other cache derived from an evaluation
+/// refresh, every env with an unrecorded reader is dropped, a semantic-token
+/// refresh is owed, and the deferral scope, which a Compile list decides, is
+/// recomputed. The refresh is owed whatever was folded: tokens answered
+/// single-file depend on which project owns the file too, which a project
+/// created beside it moves (#894). Every other cache derived from an evaluation
 /// records the evaluation it was derived from, and is confirmed when read.
 ///
 /// The workspace drops an evaluation when a generation that reads it finds
@@ -1255,6 +1257,7 @@ fn respond_to_moved_evaluations(state: &mut State, conn: &Connection) {
     }
     state.evaluations_reported = current;
     state.semantic.sync_with_evaluations(current);
+    state.semantic.owe_token_refresh();
     state.wants_diagnostic_refresh = true;
     let open: Vec<Uri> = state.docs.keys().cloned().collect();
     for uri in &open {
