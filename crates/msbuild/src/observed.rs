@@ -31,6 +31,11 @@
 //! absent, so a failed query is recorded with its [`Failure`], whose kind is
 //! [`std::io::ErrorKind::NotFound`] for a path that is not there.
 //!
+//! A whole-file read opens only a regular file ([`open_regular`]): a path
+//! that names a FIFO, a socket, a device or a directory fails unopened, since
+//! opening a FIFO waits for a writer that may never come. The `stat` that
+//! decides it is part of the read's query, asked again whenever the read is.
+//!
 //! Test code, which builds fixtures rather than observing a project, reaches
 //! the banned calls through `host_fs` (which the integration tests reach
 //! through the `test-support` feature), because allowing the lint wholesale in
@@ -315,8 +320,9 @@ impl Observer {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ReadCounts {
     /// Files opened to read them whole, whether or not the open succeeded.
-    /// Each successful open is followed by one `fstat` of the open file
-    /// (`std`'s whole-file read asks for the size).
+    /// Each is preceded by a `stat` of the path, which declines a path that
+    /// names no regular file without opening it ([`open_regular`]), and each
+    /// successful open is followed by one `fstat` of the open file.
     pub opens: u64,
     /// Paths `stat`ed or `lstat`ed.
     pub stats: u64,
@@ -781,11 +787,16 @@ pub struct DirEntry {
 /// [`ErrorKind::InvalidData`].
 ///
 /// [`read_to_string`] answers through this function, so a caller that reads
-/// a file in its own way (stamping it first, say) and hands the bytes here
-/// gets the answer the query function would have recorded.
+/// a file in its own way (stamping it first, say, after opening it with
+/// [`open_regular`]) and hands the bytes here gets the answer the query
+/// function would have recorded.
 pub fn text_answer(bytes: std::io::Result<Vec<u8>>) -> Result<String, Failure> {
-    let bytes = bytes.map_err(|e| Failure::of(&e))?;
-    String::from_utf8(bytes).map_err(|_| {
+    text_of(bytes.map_err(|e| Failure::of(&e)))
+}
+
+/// [`text_answer`], of bytes whose read failure is already a [`Failure`].
+fn text_of(bytes: Result<Vec<u8>, Failure>) -> Result<String, Failure> {
+    String::from_utf8(bytes?).map_err(|_| {
         Failure::of(&std::io::Error::new(
             ErrorKind::InvalidData,
             "stream did not contain valid UTF-8",
@@ -798,9 +809,8 @@ pub fn text_digest(answer: &Result<String, Failure>) -> Result<TextDigest, Failu
     answer.as_deref().map(TextDigest::of).map_err(Clone::clone)
 }
 
-#[allow(clippy::disallowed_methods)]
 fn read_text(path: &Path) -> Result<String, Failure> {
-    text_answer(std::fs::read(path))
+    text_of(stamped_bytes(path).1)
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -877,17 +887,49 @@ fn stamp_of(path: &Path) -> Result<FileStamp, Failure> {
         .map_err(|e| Failure::of(&e))
 }
 
-/// The file at `path`, opened and stamped through its descriptor, then read
-/// whole: stamp first, so that a write landing after it moves the stamp.
+/// `path` opened for reading, with the open file's metadata, when it names a
+/// regular file, following symlinks: the open every whole-file read here
+/// makes. A caller that reads files through a counted disk of its own (the
+/// LSP's source cache) opens them here too, so that its reads fail as these
+/// do, and [`text_answer`] of what it reads is what [`read_to_string`]
+/// records.
+///
+/// A path that names anything else fails, unopened, as
+/// [`ErrorKind::InvalidInput`]. The open of a FIFO blocks until a writer
+/// arrives, which may be never (MSBuild waits too, so there is no build to be
+/// exact with), and a device such as `/dev/zero` reads without end; a
+/// directory reads as no text either. So an import, a `Directory.Build.props`
+/// or any other file the walk reads that is one of these fails its read,
+/// which the walk declines as it does any unreadable file. A path that cannot
+/// be `stat`ed fails as its open would: absent, a loop of links, a component
+/// that is no directory or cannot be searched.
+///
+/// The check is a `stat` of the path before the open, so a regular file
+/// replaced by a FIFO between the two still blocks the open: `std` offers no
+/// portable way to open without blocking (`O_NONBLOCK`), and the crate takes
+/// no dependency for one. The open file is checked again (`fstat`), so
+/// whatever was swapped in is never read.
 #[allow(clippy::disallowed_methods)]
+pub fn open_regular(path: &Path) -> std::io::Result<(std::fs::File, std::fs::Metadata)> {
+    let not_regular = || std::io::Error::new(ErrorKind::InvalidInput, "not a regular file");
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    Ok((file, meta))
+}
+
+/// The file at `path`, opened ([`open_regular`]) and stamped through its
+/// descriptor, then read whole: stamp first, so that a write landing after it
+/// moves the stamp.
 fn stamped_bytes(path: &Path) -> (Result<FileStamp, Failure>, Result<Vec<u8>, Failure>) {
     use std::io::Read as _;
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) => return (Err(Failure::of(&e)), Err(Failure::of(&e))),
-    };
-    let stamp = match file.metadata() {
-        Ok(meta) => FileStamp::of(&meta),
+    let (mut file, stamp) = match open_regular(path) {
+        Ok((file, meta)) => (file, FileStamp::of(&meta)),
         Err(e) => return (Err(Failure::of(&e)), Err(Failure::of(&e))),
     };
     // Reserved fallibly, as `std::fs::read` does: a file too large to hold
@@ -1116,6 +1158,17 @@ pub mod host_fs {
 
     pub fn read_to_string(path: impl AsRef<Path>) -> std::io::Result<String> {
         std::fs::read_to_string(path)
+    }
+
+    /// [`std::fs::File::open`]: on a FIFO, it blocks until a writer opens it.
+    pub fn open_for_reading(path: impl AsRef<Path>) -> std::io::Result<std::fs::File> {
+        std::fs::File::open(path)
+    }
+
+    /// The path opened to write, creating nothing: on a FIFO, it blocks
+    /// until a reader opens it.
+    pub fn open_for_writing(path: impl AsRef<Path>) -> std::io::Result<std::fs::File> {
+        std::fs::OpenOptions::new().write(true).open(path)
     }
 
     pub fn read_dir(path: impl AsRef<Path>) -> std::io::Result<std::fs::ReadDir> {
@@ -1641,6 +1694,54 @@ mod tests {
         let (read_set, _) = observer.finish();
         for read in read_set.reads() {
             assert_eq!(answer_now(&read.path, &read.observation), read.observation);
+        }
+    }
+
+    /// A whole-file read of a FIFO, or of a link to one, fails without
+    /// opening it, since the open would wait for a writer: by each query
+    /// that reads whole, and by each asked again ([`Read::still_holds`]),
+    /// which holds until a regular file takes the FIFO's place. Run under a
+    /// deadline, so that an open fails the test rather than hangs it.
+    #[test]
+    #[cfg(unix)]
+    fn a_fifo_is_never_opened() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().host_canonicalize().unwrap();
+        let fifo = dir.join("pipe");
+        crate::with_imports_tests::make_fifo(&fifo);
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+        let reads = crate::with_imports_tests::within_deadline("reading a FIFO", move || {
+            let mut all = Vec::new();
+            for path in [fifo.clone(), link] {
+                let observer = Observer::asking_every_time();
+                let text = read_to_string(&observer, &path).unwrap_err();
+                assert_eq!(text.kind(), ErrorKind::InvalidInput, "{text}");
+                assert_eq!(read_document(&observer, &path).unwrap_err(), text);
+                assert_eq!(read_stamped(&observer, &path).unwrap_err(), text);
+                assert!(!racy_content_now(&path, 0).0);
+                let (reads, _) = observer.finish();
+                assert_eq!(reads.len(), 2, "{reads:#?}");
+                for read in reads.reads() {
+                    match &read.observation {
+                        Observation::Text(Err(failure)) => assert_eq!(*failure, text),
+                        Observation::Stamp(Ok(stamp)) => assert!(stamp.unreadable),
+                        other => panic!("{}: {other:?}", path.display()),
+                    }
+                    assert!(read.still_holds(), "{read:?}");
+                }
+                all.push(reads);
+            }
+            (fifo, all)
+        });
+        let (fifo, all) = reads;
+        std::fs::remove_file(&fifo).unwrap();
+        std::fs::write(&fifo, "<Project />").unwrap();
+        for reads in all {
+            assert!(
+                reads.reads().iter().all(|read| !read.still_holds()),
+                "{reads:#?}"
+            );
         }
     }
 

@@ -40,6 +40,14 @@
 //! its own (installing a new SDK version, or retargeting a link to a tree of
 //! its own, say) through `extra`.
 //!
+//! One such rule the sweep cannot make by itself, since `std` cannot make a
+//! FIFO: every regular file replaced by a link to a FIFO the caller made
+//! outside `root` ([`fifo_perturbations`]). Opening a FIFO to read it blocks
+//! until a writer arrives, so a query that opened one would hang the sweep.
+//! While a perturbation links to a FIFO, the sweep keeps a writer waiting on
+//! it, so such an open returns (reading nothing) and the sweep panics, naming
+//! the perturbation, rather than hanging.
+//!
 //! This is test support: it writes into `root` and restores what it changed.
 
 use std::path::{Path, PathBuf};
@@ -103,6 +111,8 @@ pub enum Why {
     GrowListing,
     /// A symlink deleted or retargeted, or a dangling one's target created.
     Relink,
+    /// A regular file replaced by a link to a FIFO ([`fifo_perturbations`]).
+    Fifo,
     /// The caller's own.
     Extra,
 }
@@ -193,8 +203,29 @@ pub fn sweep_with<T: PartialEq + std::fmt::Debug>(
                 continue;
             }
         };
+        // Armed before the read set is asked again: that asks every read's
+        // query, a whole-file read of the FIFO among them.
+        let watches: Vec<FifoWatch> = perturbation
+            .edits
+            .iter()
+            .filter_map(|edit| match edit {
+                Edit::Link(_, target) if is_fifo(target) => Some(FifoWatch::arm(target)),
+                _ => None,
+            })
+            .collect();
         let stale = base.1.first_stale().cloned();
         let after = compute();
+        for watch in watches {
+            let fifo = watch.fifo.clone();
+            let opened = watch.disarm();
+            assert!(
+                opened == 0,
+                "{perturbation:?}: the evaluation, or the read set asked again, opened the \
+                 FIFO {} to read it {opened} time(s); that open waits for a writer, which \
+                 here might never come",
+                fifo.display()
+            );
+        }
         let touched = undo.changed().any(|path| names(root, &base.1, path));
         undo.restore();
         *tally.made.entry(perturbation.why).or_default() += 1;
@@ -473,6 +504,111 @@ pub fn perturbations(root: &Path, read_set: &ReadSet) -> Vec<Perturbation> {
         }
     }
     out
+}
+
+/// Every regular file under `root` replaced by a link to `fifo`, a FIFO the
+/// caller made outside `root` (`std` cannot make one): perturbations for a
+/// sweep's `extra`, under which the sweep holds every query to not opening
+/// the FIFO (see the module docs). Empty off Unix, where a FIFO is no entry
+/// of the file system.
+pub fn fifo_perturbations(root: &Path, fifo: &Path) -> Vec<Perturbation> {
+    assert!(
+        is_fifo(fifo) && fifo.is_absolute() && !fifo.starts_with(root),
+        "{} is no FIFO by an absolute path outside {}",
+        fifo.display(),
+        root.display()
+    );
+    let mut files = Vec::new();
+    walk(root, &mut files, &mut Vec::new(), &mut Vec::new());
+    files
+        .into_iter()
+        .map(|file| Perturbation {
+            why: Why::Fifo,
+            edits: vec![Edit::Link(file, fifo.to_path_buf())],
+        })
+        .collect()
+}
+
+/// Whether `path` names a FIFO, following symlinks.
+#[cfg(unix)]
+fn is_fifo(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+    host_fs::metadata(path).is_ok_and(|meta| meta.file_type().is_fifo())
+}
+
+#[cfg(not(unix))]
+fn is_fifo(_path: &Path) -> bool {
+    false
+}
+
+/// A writer kept waiting on a FIFO while a perturbation links to it: every
+/// open of the FIFO for reading meets one, so it returns rather than blocks,
+/// and is counted. [`FifoWatch::disarm`] stops the writer and says how many
+/// opens it met.
+struct FifoWatch {
+    fifo: PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    opened: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    writer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FifoWatch {
+    fn arm(fifo: &Path) -> Self {
+        use std::sync::atomic::Ordering::SeqCst;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writer = {
+            let (fifo, stop, opened) = (fifo.to_path_buf(), stop.clone(), opened.clone());
+            std::thread::spawn(move || {
+                loop {
+                    // Blocks until a reader opens the FIFO: the evaluation's
+                    // read, or `disarm`'s own.
+                    match host_fs::open_for_writing(&fifo) {
+                        Ok(_) if stop.load(SeqCst) => return,
+                        // Counted before the writer closes, which is when
+                        // the reader's read returns.
+                        Ok(_) => {
+                            opened.fetch_add(1, SeqCst);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => panic!("open the FIFO {} to write: {e}", fifo.display()),
+                    }
+                }
+            })
+        };
+        FifoWatch {
+            fifo: fifo.to_path_buf(),
+            stop,
+            opened,
+            writer: Some(writer),
+        }
+    }
+
+    /// How many opens for reading met the writer, which is stopped.
+    fn disarm(mut self) -> usize {
+        let opened = self.opened.load(std::sync::atomic::Ordering::SeqCst);
+        self.release();
+        opened
+    }
+
+    /// Stop the writer: an open for reading of our own meets its pending
+    /// open, after which it sees `stop`.
+    fn release(&mut self) {
+        let Some(writer) = self.writer.take() else {
+            return;
+        };
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if !writer.is_finished() {
+            drop(host_fs::open_for_reading(&self.fifo));
+        }
+        let _ = writer.join();
+    }
+}
+
+impl Drop for FifoWatch {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 /// An MSBuild file writing one property.

@@ -1038,8 +1038,8 @@ fn whitespace_variant_sweep_soak() {
 // `Exists()` against the file system.
 // ---------------------------------------------------------------------------
 
-/// `Exists()` over a real tree. Unix-only: the tree is made of symlinks and a
-/// socket.
+/// `Exists()` over a real tree. Unix-only: the tree is made of symlinks, a
+/// socket and a FIFO.
 #[cfg(unix)]
 mod exists_on_disk {
     use super::*;
@@ -1048,7 +1048,8 @@ mod exists_on_disk {
 
     /// A tree of every kind of entry `Exists()` can meet, under a fresh directory:
     /// files, directories, symlinks to each, a dangling symlink and a chain ending
-    /// in one, a symlink loop, a link to `..`, a socket, and a directory link out
+    /// in one, a symlink loop, a link to `..`, a socket, a FIFO (which neither side
+    /// opens to probe), and a directory link out
     /// of the project directory (`d/up`), whose `..` the OS and .NET resolve
     /// differently. `proj` is the project directory every relative path resolves
     /// against.
@@ -1087,6 +1088,12 @@ mod exists_on_disk {
                 symlink(target, proj.join(link)).expect("symlink");
             }
             let socket = std::os::unix::net::UnixListener::bind(proj.join("sock")).ok();
+            common::odd_entry::place(
+                common::odd_entry::Odd::Fifo,
+                &proj.join("pipe"),
+                "",
+                &root.join("aside"),
+            );
             ExistsTree {
                 _dir: dir,
                 root,
@@ -1103,7 +1110,7 @@ mod exists_on_disk {
     /// a case respelling, names that are not there, and the relative segments.
     const EXISTS_SEGMENTS: &[&str] = &[
         "f", "F", "d", "g", "up", "flink", "dlink", "dangling", "chain", "loop", "dirup", "sock",
-        "o", "other", "proj", "missing", "x%00", "..", "..", ".", "",
+        "pipe", "o", "other", "proj", "missing", "x%00", "..", "..", ".", "",
     ];
 
     /// One `Exists()` argument: a `;` list of one to three generated paths, each
@@ -1272,6 +1279,8 @@ mod exists_on_disk {
         ];
         // A socket is no directory, so a file to `File.Exists`.
         cases.push(("sock", tree.socket.is_some()));
+        // So is a FIFO, which `File.Exists` does not open.
+        cases.extend([("pipe", true), ("pipe/", false)]);
         let conditions: Vec<String> = cases
             .iter()
             .map(|(path, _)| format!("Exists('{path}')"))

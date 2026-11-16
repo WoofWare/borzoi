@@ -245,6 +245,13 @@ fn sweep_world(world: &World) -> Tally {
     let (project, source) = build(&root, world);
     let documents = RefCell::new(ImportDocuments::default());
     let read_a_file = std::cell::Cell::new(false);
+    let fifo = Fifo::new();
+    let mut extra = extras(&root, world);
+    if let Some(fifo) = &fifo {
+        extra.extend(crate::observed::soundness::fifo_perturbations(
+            &root, &fifo.path,
+        ));
+    }
     let tally = sweep(
         &root,
         &|| {
@@ -270,7 +277,7 @@ fn sweep_world(world: &World) -> Tally {
             }
             reused
         },
-        &extras(&root, world),
+        &extra,
     );
     // The sweep evaluates the world many times over a tree it changes one
     // file at a time, so once any evaluation reads a file the comparison is
@@ -302,7 +309,8 @@ proptest! {
 /// Every rule of the sweep moves some evaluation over a fixed sample of
 /// worlds, so none of them is vacuous: a rewrite, a same-size rewrite and a
 /// delete of an imported file, a created file where the read set recorded an
-/// absence, a new entry in a listed directory, and a newly installed SDK.
+/// absence, a new entry in a listed directory, a newly installed SDK, and an
+/// imported file made a link to a FIFO.
 #[test]
 fn every_perturbation_rule_moves_some_evaluation() {
     let mut runner = proptest::test_runner::TestRunner::deterministic();
@@ -318,6 +326,8 @@ fn every_perturbation_rule_moves_some_evaluation() {
         Why::CreateAbsent,
         Why::GrowListing,
         Why::Extra,
+        #[cfg(unix)]
+        Why::Fifo,
     ] {
         assert!(
             total.moved(why) > 0,

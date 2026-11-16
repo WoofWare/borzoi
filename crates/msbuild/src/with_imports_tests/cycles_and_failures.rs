@@ -218,3 +218,80 @@ fn depth_limit_aborts_pathological_chain() {
     );
     assert!(result.is_partial);
 }
+
+/// A file the walk reads that is a FIFO, or a link to one, fails its read
+/// unopened, and the walk declines it as an unreadable import: an `<Import>`
+/// of one, an import a wildcard takes, and a `Directory.Build.props` or
+/// `Directory.Build.targets` that is one. MSBuild's own open of it waits for
+/// a writer, so there is no build to be exact with, and the walk may only
+/// decline: a possible rejection, never a certain one. Each evaluation runs
+/// under a deadline, so that an open that blocks fails the test rather than
+/// hangs it.
+#[test]
+#[cfg(unix)]
+fn a_file_the_walk_reads_that_is_a_fifo_declines() {
+    const STD: &str = r#"<Project Sdk="Std" />"#;
+    let cases = [
+        (
+            "pipe.props",
+            r#"<Project><Import Project="pipe.props" /></Project>"#,
+        ),
+        (
+            "imports/pipe.props",
+            r#"<Project><Import Project="imports/*.props" /></Project>"#,
+        ),
+        ("Directory.Build.props", STD),
+        ("Directory.Build.targets", STD),
+    ];
+    for (name, project) in cases {
+        for linked in [false, true] {
+            let case = format!("{name}, linked: {linked}");
+            let tmp = TempDir::new().unwrap();
+            let dir = canon(tmp.path());
+            let project_path = write_at(&dir, "Demo.fsproj", project);
+            let fifo = dir.join(name);
+            std::fs::create_dir_all(fifo.parent().unwrap()).unwrap();
+            let read = if linked {
+                let target = dir.join("elsewhere.pipe");
+                make_fifo(&target);
+                std::os::unix::fs::symlink(&target, &fifo).unwrap();
+                target
+            } else {
+                make_fifo(&fifo);
+                fifo.clone()
+            };
+            let result = within_deadline(&case, move || {
+                let result = if project == STD {
+                    parse_file_std(&project_path)
+                } else {
+                    parse_file(&project_path)
+                };
+                (
+                    format!("{:?}", result.diagnostics),
+                    result.diagnostics.into_iter().any(|d| {
+                        matches!(
+                            d.kind,
+                            DiagnosticKind::ImportFailed {
+                                path,
+                                reason: ImportFailReason::Io { .. },
+                            } if path == read
+                        )
+                    }),
+                    result.rejection.map(|rejection| rejection.certainty),
+                    result.is_partial,
+                )
+            });
+            let (diagnostics, failed, certainty, partial) = result;
+            assert!(
+                failed,
+                "{case}: no unreadable import of the FIFO: {diagnostics}"
+            );
+            assert_eq!(
+                certainty,
+                Some(RejectionCertainty::Possible),
+                "{case}: {diagnostics}"
+            );
+            assert!(partial, "{case}");
+        }
+    }
+}

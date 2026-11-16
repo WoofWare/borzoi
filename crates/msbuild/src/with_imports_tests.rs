@@ -138,7 +138,10 @@ impl Through<'_> {
 /// below the system's temporary directory that holds the project; a project
 /// outside it is evaluated without them):
 ///
-/// - the read-set soundness sweep ([`crate::observed::soundness`]);
+/// - the read-set soundness sweep ([`crate::observed::soundness`]), with
+///   every file of the tree, in turn, a link to a FIFO
+///   ([`crate::observed::soundness::fifo_perturbations`]), which no query
+///   may open;
 /// - at the start and after every perturbation the sweep makes, and after
 ///   every undo before the next, the reused entry point, with every document
 ///   the test's evaluations have parsed so far, equals the reference in all
@@ -158,9 +161,62 @@ fn sound(canon_project: &Path, evaluate: impl Fn(Through<'_>) -> ParsedProject) 
         .ok()
         .and_then(|rest| rest.components().next())
     {
-        crate::observed::soundness::sweep(&temp.join(first), &checked, &[]);
+        let root = temp.join(first);
+        let fifo = Fifo::new();
+        let extra = fifo.as_ref().map_or_else(Vec::new, |fifo| {
+            crate::observed::soundness::fifo_perturbations(&root, &fifo.path)
+        });
+        crate::observed::soundness::sweep(&root, &checked, &extra);
     }
     checked()
+}
+
+/// A FIFO in a temporary directory of its own, which `mkfifo` makes since
+/// `std` cannot; `None` off Unix.
+pub(crate) struct Fifo {
+    pub(crate) path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl Fifo {
+    pub(crate) fn new() -> Option<Fifo> {
+        if !cfg!(unix) {
+            return None;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = canon(dir.path()).join("fifo");
+        make_fifo(&path);
+        Some(Fifo { path, _dir: dir })
+    }
+}
+
+/// `f`'s result, computed on a thread of its own, or a panic naming `what`
+/// when none comes within two minutes: for a test of a read that would block
+/// for good (a FIFO's open), which then fails rather than hangs.
+pub(crate) fn within_deadline<T: Send + 'static>(
+    what: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(f());
+    });
+    match receiver.recv_timeout(std::time::Duration::from_secs(120)) {
+        Ok(out) => out,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{what} did not return within two minutes: some read blocked")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("{what} panicked"),
+    }
+}
+
+/// Make a FIFO at `path`.
+pub(crate) fn make_fifo(path: &Path) {
+    let mut cmd = std::process::Command::new("mkfifo");
+    cmd.arg(path);
+    borzoi_oracle_harness::BoundedCommand::new(cmd)
+        .timeout(std::time::Duration::from_secs(30))
+        .run_ok(format_args!("mkfifo {}", path.display()));
 }
 
 /// [`parse`], reading the body back from `project_path` on disk. Most
