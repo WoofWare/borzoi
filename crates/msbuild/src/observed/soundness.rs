@@ -562,7 +562,7 @@ impl FifoWatch {
             std::thread::spawn(move || {
                 loop {
                     // Blocks until a reader opens the FIFO: the evaluation's
-                    // read, or `disarm`'s own.
+                    // read, or `release`'s own.
                     match host_fs::open_for_writing(&fifo) {
                         Ok(_) if stop.load(SeqCst) => return,
                         // Counted before the writer closes, which is when
@@ -591,17 +591,33 @@ impl FifoWatch {
         opened
     }
 
-    /// Stop the writer: an open for reading of our own meets its pending
-    /// open, after which it sees `stop`.
+    /// Stop the writer. The FIFO is opened to read and write, which does not
+    /// wait for a peer (on Linux and macOS), and held until the writer has
+    /// returned: it is the reader the writer's pending open meets, and any
+    /// open it makes after that, so whenever the writer next looks it sees
+    /// `stop`, and no open of ours waits on a writer that has already left.
+    ///
+    /// It is held with no child being launched: a child between its fork and
+    /// its `exec` holds a copy of it, and would be a reader the next watch of
+    /// this FIFO counts.
     fn release(&mut self) {
         let Some(writer) = self.writer.take() else {
             return;
         };
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        if !writer.is_finished() {
-            drop(host_fs::open_for_reading(&self.fifo));
+        // Nothing in here panics, which would poison the spawn lock.
+        let woken = borzoi_spawn::without_spawns(|| {
+            let wake = host_fs::open_to_read_and_write(&self.fifo)?;
+            let _ = writer.join();
+            drop(wake);
+            Ok::<(), std::io::Error>(())
+        });
+        if let Err(e) = woken {
+            panic!(
+                "open the FIFO {} to read and write: {e}",
+                self.fifo.display()
+            );
         }
-        let _ = writer.join();
     }
 }
 

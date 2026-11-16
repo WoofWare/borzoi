@@ -57,8 +57,10 @@ This is a Cargo workspace with nine members:
   layout — walks the real `Microsoft.Common.props` → `NuGet.props` chain,
   including the `Directory.Packages.props` central-package import.
   Self-contained: depends only on `roxmltree` and `self_cell` (which holds a
-  parsed document beside its text, so the crate forbids `unsafe`). Intended to
-  be reusable outside this repo. Every file-system query an evaluation makes
+  parsed document beside its text, so the crate forbids `unsafe`), and, behind
+  `test-support` only, `borzoi-spawn` (the soundness sweep's FIFO watch holds
+  a reader open while no child is launched). Intended to be reusable outside
+  this repo. Every file-system query an evaluation makes
   goes through `observed`, which records it in the result's `read_set` (absences
   included); the crate's own `clippy.toml` bans the `std` calls elsewhere, and
   test code reaches them through `observed::host_fs`. A resolver the caller
@@ -66,7 +68,11 @@ This is a Cargo workspace with nine members:
   to `observed::soundness::sweep` (perturb each file; a read set that still
   validates must mean an unchanged evaluation), which every
   `with_imports_tests` helper runs over its test's tree, so a new reader that
-  skips the observer fails there or in clippy. An `Observer` asks each query
+  skips the observer fails there or in clippy. A whole-file read opens only a
+  regular file (`observed::open_regular`): a FIFO's open waits for a writer.
+  The helpers' sweeps also make each file a link to a FIFO in turn
+  (`soundness::fifo_perturbations`), and fail, rather than hang, on any query
+  that opens it. An `Observer` asks each query
   once per evaluation, and `parse_fsproj_with_imports_reusing` reuses an
   earlier evaluation's parse of an imported file whose bytes, read again, are
   the same (`observed::ImportDocuments`); `observed::reuse` holds both to the

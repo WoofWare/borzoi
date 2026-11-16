@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 roxmltree.workspace = true
 self_cell.workspace = true
+# Only for `test-support`'s soundness sweep, whose FIFO watch holds a reader
+# open in a moment no child may be launched in (`without_spawns`).
+borzoi-spawn = { workspace = true, optional = true }
 
 [features]
 # Differential-test helpers (the `test_support` module): a public window
@@ -15,7 +18,7 @@ self_cell.workspace = true
 # `tools/msbuild-condition-oracle`. Gated behind a feature so it never
 # widens the crate's runtime public surface; the self-reference in
 # `[dev-dependencies]` activates it for this crate's own `cargo test`.
-test-support = []
+test-support = ["dep:borzoi-spawn"]
 
 [dev-dependencies]
 # Self-reference activates the `test-support` feature when building the
@@ -28,6 +31,8 @@ borzoi-msbuild = { path = ".", features = ["test-support"] }
 # `borzoi-spawn`), so every wait on a child runs under a deadline and
 # every launch takes the one process-global spawn lock.
 borzoi-oracle-harness.workspace = true
+# The soundness sweep's spawn exclusion, for the inline tests (`cfg(test)`).
+borzoi-spawn.workspace = true
 # NuGet's settings model, for the global packages folder the corpus
 # differential's real `dotnet msbuild` resolves versioned SDKs from.
 borzoi-nuget.workspace = true
