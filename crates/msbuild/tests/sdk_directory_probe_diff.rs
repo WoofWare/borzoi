@@ -6,7 +6,10 @@
 //! `msbuild-sdks` pins, NuGet's resolver serves the restored package's `Sdk/`
 //! where `Directory.Exists` finds it and `sdk/` otherwise. Neither looks at
 //! `Sdk.props` or `Sdk.targets` before MSBuild imports them, and neither tries
-//! another version.
+//! another version. For a name NuGet has a version for, the default resolver
+//! still goes first: it serves the running SDK's copy whatever the version,
+//! and NuGet's is read only where the running SDK has none
+//! (`the_running_sdk_s_copy_is_served_before_nuget_s`).
 //!
 //! Each test builds a layout, puts one shape at a path a resolver probes (the
 //! SDK directory, either file in it, the package's restore markers), and asks
