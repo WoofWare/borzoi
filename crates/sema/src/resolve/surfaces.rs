@@ -99,6 +99,43 @@ impl ProjectSurfaces {
     }
 }
 
+/// The surface walk of each of `files`, as the [`ResolvedFile`] a walk that
+/// skips every expression leaves: against the state the surfaces before it
+/// leave, completed at its slot as the fold completes it. What a reader that
+/// walks no body can know of each file (`docs/resolve-what-a-request-reads-plan.md`,
+/// Stage 7a): its declaration defs, its exports, and the resolutions outside
+/// its expressions.
+#[cfg(feature = "test-support")]
+pub(crate) fn surface_walks(files: &[ProjectFile], assemblies: &AssemblyEnv) -> Vec<ResolvedFile> {
+    let partners = signature_partners(files);
+    let surfaces = resolve_project_surfaces(files, files.len(), assemblies);
+    let mut state = FoldState::new(assemblies);
+    let mut out = Vec::with_capacity(files.len());
+    for (index, pf) in files.iter().enumerate() {
+        let mut rf = match &pf.file {
+            super::SourceFile::Sig(sig) => {
+                super::signature_slot(sig, pf, state.preceding(), assemblies)
+            }
+            super::SourceFile::Impl(file) => {
+                let mut rf = super::walk_file(
+                    file,
+                    state.preceding(),
+                    assemblies,
+                    &pf.recovery,
+                    super::Walk::Surface,
+                );
+                state.stamp(&mut rf);
+                rf
+            }
+        };
+        let slot = FoldSlot::of(files, &partners, &surfaces.files, index);
+        slot.complete(&mut rf.surface, assemblies.names());
+        state.advance(&surfaces.files[index], &slot, assemblies.names());
+        out.push(rf);
+    }
+    out
+}
+
 /// The full walk of `files[index]` against `state`, the state entering it,
 /// with `earlier` the surfaces before it: what the full fold publishes there.
 fn walk_at(
