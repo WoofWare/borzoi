@@ -21,11 +21,13 @@
 //! gate's version, FCS must reject the construct the gate admits.
 //!
 //! What "parses back to that tree" covers is the parse, not type checking.
-//! F#'s checker reads some syntax more finely than the parse tree records:
-//! `M(x = 1)` passes a named argument where `M((x = 1))` passes a `bool`. The
-//! printer parenthesises every expression, names included, so it always means
-//! the plain reading (`(x) = (1)` is never a named argument), but a construct
-//! whose meaning rests on such syntax cannot be built from this tree yet.
+//! Where F#'s checker reads syntax more finely than the parse tree records,
+//! the tree models the finer reading. An argument list is one: `M(a, b)`
+//! passes two arguments where `M((a, b))` passes one tuple, and `M(x = 1)`
+//! names an argument where `M((x = 1))` passes a `bool`, so the tree tells an
+//! [`tree::Expr::App`] to one value from an [`tree::Expr::MethodApp`] to an
+//! argument list, and the printer writes each in the parentheses that keep it
+//! so.
 
 pub mod names;
 mod print;

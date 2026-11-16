@@ -820,8 +820,8 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttr
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AllowNullLiteral01.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AssemblyVersion01.fs	kept=3 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AssemblyVersion02.fs	kept=4 dropped=1
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AssemblyVersion03.fs	kept=8 dropped=2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AssemblyVersion04.fs	kept=7 dropped=1
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AssemblyVersion03.fs	kept=6 dropped=4
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AssemblyVersion04.fs	kept=6 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeResolutionInRecursiveScopes.fs	kept=15 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsClass.fs	kept=7 dropped=6
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/AttributeUsage/AttributeTargetsIsCtor01.fs	kept=1 dropped=4
@@ -1129,7 +1129,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefi
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/MethodsAndProperties/typeMethodsCurrable.fs	kept=8 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/NamedArguments/E_MisspeltParam01.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/NamedArguments/E_MustBePrefix.fs	kept=1 dropped=3
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/NamedArguments/E_NonNamedAfterNamed.fs	kept=1 dropped=1
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/NamedArguments/E_NonNamedAfterNamed.fs	kept=0 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/NamedArguments/E_NumParamMismatch01.fs	kept=2 dropped=3
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/NamedArguments/E_ReusedParam.fs	kept=1 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/MemberDefinitions/NamedArguments/E_SyntaxErrors01.fs	kept=1 dropped=2
@@ -2725,7 +2725,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/Overload_ToStr
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/Overrides01.fsx	kept=2 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/Parenthesis01.fsx	kept=6 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/Parenthesis02.fsx	kept=5 dropped=0
-tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/Parenthesis03.fsx	kept=8 dropped=0
+tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/Parenthesis03.fsx	kept=6 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/Recursive01.fsx	kept=2 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/ReflectionOnUnionTypes01.fs	kept=1 dropped=3
 tests/FSharp.Compiler.ComponentTests/Conformance/Types/UnionTypes/SampleFromSpec01.fsx	kept=3 dropped=1
@@ -6639,7 +6639,7 @@ vsintegration/src/FSharp.LanguageService/Intellisense.fs	kept=16 dropped=4
 vsintegration/src/FSharp.LanguageService/LanguageServiceConstants.fs	kept=2 dropped=0
 vsintegration/src/FSharp.LanguageService/ProjectSitesAndFiles.fs	kept=15 dropped=4
 vsintegration/src/FSharp.LanguageService/SourceFile.fs	kept=7 dropped=0
-vsintegration/src/FSharp.LanguageService/Vs.fs	kept=37 dropped=7
+vsintegration/src/FSharp.LanguageService/Vs.fs	kept=36 dropped=8
 vsintegration/src/FSharp.LanguageService/XmlDocumentation.fs	kept=16 dropped=5
 vsintegration/src/FSharp.ProjectSystem.FSharp/AppConfigHelper.fs	kept=31 dropped=2
 vsintegration/src/FSharp.ProjectSystem.FSharp/MSBuildUtilities.fs	kept=9 dropped=1
@@ -6734,7 +6734,7 @@ vsintegration/tests/Salsa/FSharpLanguageServiceTestable.fs	kept=18 dropped=1
 vsintegration/tests/Salsa/SalsaUtils.fs	kept=95 dropped=1
 vsintegration/tests/Salsa/SalsaUtils.fsi	signature file
 vsintegration/tests/Salsa/VsMocks.fs	kept=57 dropped=40
-vsintegration/tests/Salsa/salsa.fs	kept=54 dropped=20
+vsintegration/tests/Salsa/salsa.fs	kept=53 dropped=21
 vsintegration/tests/UnitTests/AssemblyResolver.fs	kept=4 dropped=1
 vsintegration/tests/UnitTests/DocCommentIdParserTests.fs	kept=2 dropped=1
 vsintegration/tests/UnitTests/LegacyLanguageService/Tests.LanguageService.Completion.fs	kept=16 dropped=2

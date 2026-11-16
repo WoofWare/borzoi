@@ -8,18 +8,19 @@
 //!
 //! Lowering a *source* file need not preserve its meaning, only produce some
 //! tree: the property under test is about the printer, which round-trips the
-//! tree it is given. So it may read `M(x = 1)` as an application to a `bool`,
-//! or `(-) x` as the prefix `-x` the currency spells the same way; the printer
-//! then writes that tree as what it means, and the round trip is checked on
-//! that.
+//! tree it is given. So it may read `(-) x` as the prefix `-x` the currency
+//! spells the same way; the printer then writes that tree as what it means,
+//! and the round trip is checked on that.
 //!
-//! Parentheses are dropped everywhere: the tree has none, and the printer adds
-//! its own.
+//! Parentheses are dropped everywhere but one place: the tree has none, and
+//! the printer adds its own. The exception is an argument, where F#'s checker
+//! reads them: `f (a, b)` and `f (x = c)` apply `f` to an argument list, and
+//! `f ((a, b))` to one tuple ([`application`]).
 
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
-    Access, ArrayRank, Attribute, Binding, BindingHead, Const, Expr, Float32, Float64,
-    ForDirection, ImplFile, LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace,
+    Access, Args, ArrayRank, Attribute, AttributeArgs, Binding, BindingHead, Const, Expr, Float32,
+    Float64, ForDirection, ImplFile, LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace,
     NamespaceName, NestedModule, Pat, RecordField, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
 };
 use borzoi_print::vec::{Vec1, Vec2};
@@ -367,7 +368,10 @@ fn attributes_of<V: Version>(lists: &[Vec<NormalisedAttribute>]) -> L<Vec<Attrib
             }
             Ok(Attribute {
                 name: long_ident(&a.type_name)?,
-                arg: expr(&a.arg)?,
+                args: match argument_list(&a.arg) {
+                    Some(elements) => AttributeArgs::List(args(elements)?),
+                    None => AttributeArgs::Value(expr(&a.arg)?),
+                },
             })
         })
         .collect()
@@ -443,10 +447,7 @@ fn expr<V: Version>(e: &NormalisedExpr) -> L<Expr<V>> {
                     rhs: b(arg)?,
                 }
             }
-            _ => Expr::App {
-                func: b(func)?,
-                arg: b(arg)?,
-            },
+            _ => application(func, arg)?,
         },
         N::App {
             is_infix: true,
@@ -633,6 +634,99 @@ fn expr<V: Version>(e: &NormalisedExpr) -> L<Expr<V>> {
             }
         }
         other => return decline(expr_kind(other)),
+    })
+}
+
+/// `func` applied to `arg`, read as F#'s checker reads an argument: in
+/// parentheses, a tuple's elements are an argument list, and so is a single
+/// named argument; anything else, however many parentheses it is in, is one
+/// argument passed whole.
+///
+/// A name or member access in parentheses is refused as the head: the
+/// printer writes one bare, as F#'s checker makes a parenthesised method a
+/// function value first, and the parse is all the oracle sees of that.
+fn application<V: Version>(func: &NormalisedExpr, arg: &NormalisedExpr) -> L<Expr<V>> {
+    if let NormalisedExpr::Paren(inner) = func
+        && match &**inner {
+            NormalisedExpr::Ident(_) | NormalisedExpr::DotGet { .. } => true,
+            // `( + )` is a path too, an operator's, which is never bare.
+            NormalisedExpr::LongIdent(path) => path.iter().all(|s| Ident::new(s).is_ok()),
+            _ => false,
+        }
+    {
+        return decline("expr: application of a parenthesised name");
+    }
+    let func = Box::new(expr(func)?);
+    Ok(match argument_list(arg) {
+        Some(elements) => Expr::MethodApp {
+            func,
+            args: args(elements)?,
+        },
+        None => Expr::App {
+            func,
+            arg: Box::new(expr(arg)?),
+        },
+    })
+}
+
+/// The elements of `arg` if F#'s checker reads it as an argument list.
+fn argument_list(arg: &NormalisedExpr) -> Option<&[NormalisedExpr]> {
+    let NormalisedExpr::Paren(inner) = arg else {
+        return None;
+    };
+    match &**inner {
+        NormalisedExpr::Tuple {
+            is_struct: false,
+            elements,
+        } => Some(elements),
+        one if named_argument(one).is_some() => Some(std::slice::from_ref(one)),
+        _ => None,
+    }
+}
+
+/// `x = e` with `x` a bare name: in an argument list, the argument named `x`.
+fn named_argument(e: &NormalisedExpr) -> Option<(&str, &NormalisedExpr)> {
+    use NormalisedExpr as N;
+    let N::App {
+        is_infix: false,
+        bracket_indexer: false,
+        func,
+        arg: value,
+        ..
+    } = e
+    else {
+        return None;
+    };
+    let N::App {
+        is_infix: true,
+        bracket_indexer: false,
+        func: op,
+        arg: lhs,
+        ..
+    } = &**func
+    else {
+        return None;
+    };
+    match (&**op, &**lhs) {
+        (N::LongIdent(op), N::Ident(name)) if op.as_slice() == ["="] => Some((name, value)),
+        _ => None,
+    }
+}
+
+/// An argument list's elements as [`Args`].
+fn args<V: Version>(elements: &[NormalisedExpr]) -> L<Args<V>> {
+    let mut positional = Vec::new();
+    let mut named = Vec::new();
+    for e in elements {
+        match named_argument(e) {
+            Some((name, value)) => named.push((ident(name)?, expr(value)?)),
+            None if named.is_empty() => positional.push(expr(e)?),
+            None => return decline("expr: positional argument after a named one"),
+        }
+    }
+    Ok(match Vec1::from_vec(named) {
+        Some(named) => Args::Named { positional, named },
+        None => Args::Positional(Vec2::from_vec(positional).ok_or(Decline("short list"))?),
     })
 }
 

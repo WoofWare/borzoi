@@ -20,8 +20,9 @@
 
 use crate::names::{Ident, LongIdent, Operator, TyparName, ValueName};
 use crate::tree::{
-    Access, Attribute, Binding, BindingHead, Const, Expr, ForDirection, ImplFile, LetBindings,
-    MatchClause, ModuleDecl, NamespaceName, NestedModule, Pat, Type, TypeDefn, TypeRepr, UnionCase,
+    Access, Args, Attribute, AttributeArgs, Binding, BindingHead, Const, Expr, ForDirection,
+    ImplFile, LetBindings, MatchClause, ModuleDecl, NamespaceName, NestedModule, Pat, Type,
+    TypeDefn, TypeRepr, UnionCase,
 };
 use crate::version::Version;
 
@@ -301,9 +302,11 @@ impl Printer {
                 self.out.push_str("; ");
             }
             self.long_ident(&a.name);
-            if a.arg != Expr::Const(Const::Unit) {
-                // `expr` parenthesises, so this is `A(arg)`.
-                self.expr(&a.arg);
+            match &a.args {
+                AttributeArgs::Value(Expr::Const(Const::Unit)) => {}
+                // `argument` parenthesises, so this is `A(arg)`.
+                AttributeArgs::Value(e) => self.argument(e),
+                AttributeArgs::List(args) => self.args(args),
             }
         }
         self.out.push_str(">]");
@@ -329,9 +332,14 @@ impl Printer {
             Expr::Name(name) => self.long_ident(name),
             Expr::OpValue(op) => self.operator_value(op),
             Expr::App { func, arg } => {
-                self.expr(func);
+                self.head(func);
                 self.out.push(' ');
-                self.expr(arg);
+                self.argument(arg);
+            }
+            Expr::MethodApp { func, args } => {
+                self.head(func);
+                self.out.push(' ');
+                self.args(args);
             }
             Expr::Infix { op, lhs, rhs } => {
                 self.expr(lhs);
@@ -483,6 +491,58 @@ impl Printer {
             Expr::DotLambda { gate: _, path } => {
                 self.out.push_str("_.");
                 self.long_ident(path);
+            }
+        }
+        self.out.push(')');
+    }
+
+    /// What an application applies. A name or member access is bare: in
+    /// parentheses, F#'s checker makes a method a function value before
+    /// applying it, which loses its named and optional arguments and its
+    /// overloads. Each is atomic, so it needs no parentheses to stay the head.
+    fn head<V: Version>(&mut self, func: &Expr<V>) {
+        match func {
+            Expr::Name(name) => self.long_ident(name),
+            Expr::FieldGet { expr, field } => {
+                self.expr(expr);
+                self.out.push('.');
+                self.ident(field);
+            }
+            _ => self.expr(func),
+        }
+    }
+
+    /// One argument, passed whole. A tuple takes a second pair of parentheses,
+    /// or F#'s checker reads its elements as an argument list.
+    fn argument<V: Version>(&mut self, e: &Expr<V>) {
+        if let Expr::Tuple(_) = e {
+            self.out.push('(');
+            self.expr(e);
+            self.out.push(')');
+        } else {
+            self.expr(e);
+        }
+    }
+
+    /// `(a, b, x = c)`. A named argument's name is bare, so it is not
+    /// parenthesised like every other expression; a positional argument is.
+    fn args<V: Version>(&mut self, args: &Args<V>) {
+        self.out.push('(');
+        match args {
+            Args::Positional(items) => self.separated(items.as_slice(), ", ", Self::expr),
+            Args::Named { positional, named } => {
+                for e in positional {
+                    self.expr(e);
+                    self.out.push_str(", ");
+                }
+                for (i, (name, value)) in named.as_slice().iter().enumerate() {
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.ident(name);
+                    self.out.push_str(" = ");
+                    self.expr(value);
+                }
             }
         }
         self.out.push(')');
@@ -738,9 +798,10 @@ mod tests {
     use super::print_impl_file;
     use crate::names::{Ident, LongIdent, Operator, ValueName};
     use crate::tree::{BindingHead, Const, Pat};
-    use crate::vec::Vec1;
+    use crate::vec::{Vec1, Vec2};
     use crate::version::{Available, DefaultVersion};
 
+    type Args = crate::tree::Args<DefaultVersion>;
     type Binding = crate::tree::Binding<DefaultVersion>;
     type Expr = crate::tree::Expr<DefaultVersion>;
     type ImplFile = crate::tree::ImplFile<DefaultVersion>;
@@ -853,11 +914,38 @@ mod tests {
                 body: Box::new(name("f")),
             }),
         };
-        // `let` is at UTF-16 column 18, though `é` takes two bytes.
+        // `let` is at UTF-16 column 16, though `é` takes two bytes.
         assert_eq!(
             let_x(e),
-            "let x = ((``é``) (let rec f = (1)\n                  and g = (2) in (f)))\n"
+            "let x = (``é`` (let rec f = (1)\n                and g = (2) in (f)))\n"
         );
+    }
+
+    #[test]
+    fn a_tuple_argument_is_parenthesised_twice_and_an_argument_list_once() {
+        let pair = || Expr::Tuple(Vec2::new(name("a"), name("b"), Vec::new()));
+        let one_tuple = Expr::App {
+            func: Box::new(name("M")),
+            arg: Box::new(pair()),
+        };
+        assert_eq!(let_x(one_tuple), "let x = (M (((a), (b))))\n");
+        let two_args = Expr::MethodApp {
+            func: Box::new(name("M")),
+            args: Args::Positional(Vec2::new(name("a"), name("b"), Vec::new())),
+        };
+        assert_eq!(let_x(two_args), "let x = (M ((a), (b)))\n");
+    }
+
+    #[test]
+    fn a_named_arguments_name_is_bare() {
+        let e = Expr::MethodApp {
+            func: Box::new(name("M")),
+            args: Args::Named {
+                positional: vec![name("a")],
+                named: Vec1::new((id("type"), name("b")), Vec::new()),
+            },
+        };
+        assert_eq!(let_x(e), "let x = (M ((a), ``type`` = (b)))\n");
     }
 
     #[test]
