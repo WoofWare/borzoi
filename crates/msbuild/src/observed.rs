@@ -875,9 +875,36 @@ fn listed(
     })
 }
 
+/// `path` with every symlink resolved (`realpath`), failing wherever the
+/// kernel fails to resolve it, on every host.
+///
+/// A non-directory followed by a `.`, a `..` or an empty component (a doubled
+/// or trailing separator) names nothing: `stat`, `open` and Linux's
+/// `realpath` fail `file/`, `file/.` and `file/..` with `ENOTDIR`. macOS's
+/// `realpath` resolves them instead (`file/` and `file/.` to `file`,
+/// `file/..` to the directory holding it), so a caller that opens what it
+/// canonicalised would open a file the path does not name: an import MSBuild
+/// refuses for its trailing separator (MSB4019), say. So a path holding such
+/// a component is `stat`ed first and fails as the `stat` does; one holding
+/// none resolves as `realpath` resolves it, which agrees with the kernel on
+/// both hosts (`canonicalize_fails_exactly_where_the_kernel_does`).
 #[allow(clippy::disallowed_methods)]
 fn canonical_of(path: &Path) -> Result<PathBuf, Failure> {
+    if has_dot_or_empty_component(path) {
+        kind_of(path)?;
+    }
     std::fs::canonicalize(path).map_err(|e| Failure::of(&e))
+}
+
+/// Whether some component of `path` after its first is empty, `.` or `..`:
+/// one the kernel resolves only through a directory, and macOS's `realpath`
+/// resolves through anything.
+fn has_dot_or_empty_component(path: &Path) -> bool {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .split(|&b| std::path::is_separator(char::from(b)))
+        .skip(1)
+        .any(|component| matches!(component, b"" | b"." | b".."))
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -1103,7 +1130,9 @@ pub fn read_dir(
     result
 }
 
-/// [`std::fs::canonicalize`].
+/// [`std::fs::canonicalize`], failing on every host where the kernel fails to
+/// resolve the path: a file followed by a separator, `/.` or `/..` fails, as
+/// it does on Linux, though macOS's `realpath` resolves it.
 pub fn canonicalize(observer: &Observer, path: &Path) -> Result<PathBuf, Failure> {
     if let Some(answer) = observer.recall(|m| &m.canonicals, path) {
         return answer;
@@ -1801,5 +1830,84 @@ mod tests {
         for order in [[3, 2, 1, 0], [1, 3, 0, 2], [2, 0, 3, 1]] {
             assert_eq!(ask(&order), forwards, "asked in the order {order:?}");
         }
+    }
+
+    /// [`canonicalize`] answers as the kernel resolves the path, on every
+    /// host: it fails exactly where `stat` ([`kind`]) does, and otherwise
+    /// names what `stat` names. The paths are every kind of entry followed by
+    /// every sequence of up to three components that are empty (a doubled or
+    /// trailing separator), `.`, `..`, a name that is absent, and a name that
+    /// is present: so a non-directory followed by a trailing separator, `/.`
+    /// or `/..`, which macOS's `realpath` resolves where `stat` fails it.
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_fails_exactly_where_the_kernel_does() {
+        use std::os::unix::fs::{MetadataExt as _, symlink};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().host_canonicalize().unwrap();
+        std::fs::write(dir.join("f"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("sub/inner")).unwrap();
+        symlink("f", dir.join("file-link")).unwrap();
+        symlink("sub", dir.join("dir-link")).unwrap();
+        symlink("sub/inner", dir.join("deep-link")).unwrap();
+        symlink("absent", dir.join("dangling")).unwrap();
+        symlink("loop", dir.join("loop")).unwrap();
+        crate::with_imports_tests::make_fifo(&dir.join("fifo"));
+        let bases = [
+            "f",
+            "sub",
+            "file-link",
+            "dir-link",
+            "deep-link",
+            "dangling",
+            "loop",
+            "fifo",
+            "absent",
+        ];
+        let components = ["", ".", "..", "absent", "f"];
+        let mut tails = vec![String::new()];
+        let mut last = vec![String::new()];
+        for _ in 0..3 {
+            last = last
+                .iter()
+                .flat_map(|tail| components.iter().map(move |c| format!("{tail}/{c}")))
+                .collect();
+            tails.extend(last.iter().cloned());
+        }
+        let (mut failed, mut resolved) = (0, 0);
+        for base in bases {
+            for tail in &tails {
+                let path = dir.join(format!("{base}{tail}"));
+                let observer = Observer::new();
+                let canonical = canonicalize(&observer, &path);
+                match (kind(&observer, &path), &canonical) {
+                    (Err(stat), Err(realpath)) => {
+                        assert_eq!(stat.kind(), realpath.kind(), "{}", path.display());
+                        failed += 1;
+                    }
+                    (Ok(_), Ok(canonical)) => {
+                        let named = super::host_fs::metadata(&path).unwrap();
+                        let canonical_names = super::host_fs::metadata(canonical).unwrap();
+                        assert_eq!(
+                            (named.dev(), named.ino()),
+                            (canonical_names.dev(), canonical_names.ino()),
+                            "{} canonicalised to {}",
+                            path.display(),
+                            canonical.display()
+                        );
+                        resolved += 1;
+                    }
+                    (stat, _) => panic!(
+                        "{}: stat answers {stat:?}, canonicalize {canonical:?}",
+                        path.display()
+                    ),
+                }
+            }
+        }
+        // Both answers occur, or the enumeration stopped reaching one.
+        assert!(
+            failed > 0 && resolved > 0,
+            "{failed} failed, {resolved} resolved"
+        );
     }
 }

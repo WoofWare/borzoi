@@ -5484,8 +5484,8 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
         // MSBuild never imports (MSB4019; probed, `dotnet msbuild` 10.0.401:
         // `E.props/`, `E.props/./` and `E.props/x/../` fail, while `E.props/.`
         // and `E.props/x/..` end in no separator and import `E.props`).
-        // `normalise` drops the separator and macOS's `realpath` accepts a
-        // file spelt with one, so refuse it here rather than at the IO path.
+        // `sdk_import_path` collapses the path, which drops the separator, so
+        // refuse it here, from the text, rather than at the IO path.
         let names_directory = relative.ends_with('/');
         // `Path.Combine(root, Project)` runs on the attribute as written, `\`
         // already `/` (`ProjectImportElement.Project`'s `FixFilePath`), and
@@ -6211,7 +6211,9 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     // that collapsed path too. Collapsing would erase what fails the path in
     // MSBuild: a trailing separator, which names a directory no import loads
     // (MSB4019), and a NUL anywhere (MSB4102). Such a path is opened as
-    // written, and fails as it does in MSBuild.
+    // written, and fails as it does in MSBuild: `observed::canonicalize`
+    // fails a file followed by a separator on every host, as the kernel
+    // does.
     let collapsed = import_open_path(path, collapse);
     let path = collapsed.as_path();
     // MSBuild's duplicate-import skip: an import that resolves to an

@@ -516,6 +516,57 @@ fn sdk_import_project_path_tails_resolve_as_msbuild_does() {
     }
 }
 
+/// Every tail of up to two components on `E.props`, imported alone, both
+/// ways: each separator `/` or `\`, each component empty, `.`, `..`, an absent
+/// name or an escaped `.`. MSBuild imports the tails that collapse to the
+/// file and fails the rest: one ending in a separator names a directory
+/// (MSB4019), `/..` names the SDK directory, and an absent name a child of a
+/// file. The walk must agree on every host, though macOS's `realpath`
+/// resolves `E.props/` to `E.props`; and where MSBuild fails, it must
+/// withdraw the evaluation ([`borzoi_msbuild::ParsedProject::rejection`]),
+/// not only decline.
+#[test]
+fn every_short_tail_on_a_file_resolves_as_msbuild_does() {
+    let layout = Layout::new();
+    let steps: Vec<String> = ["/", "\\"]
+        .iter()
+        .flat_map(|sep| {
+            ["", ".", "..", "ghost", "%2e"]
+                .iter()
+                .map(move |component| format!("{sep}{component}"))
+        })
+        .collect();
+    let mut tails = vec![String::new()];
+    for first in &steps {
+        tails.push(first.clone());
+        for second in &steps {
+            tails.push(format!("{first}{second}"));
+        }
+    }
+    for kind in KINDS {
+        let (mut imported, mut failed) = (0, 0);
+        for tail in &tails {
+            let import = format!("E.props{tail}");
+            let (xml, parsed, theirs) = evaluate_both(&layout, kind, std::slice::from_ref(&import));
+            let label = format!("{kind:?} {import}");
+            if assert_certain_implies_exact(&label, &xml, &parsed, theirs, true) {
+                imported += 1;
+            } else {
+                assert!(
+                    parsed.rejection.is_some(),
+                    "{label}: MSBuild fails, but the walk withdrew nothing:\n{xml}\n{:#?}",
+                    parsed.diagnostics
+                );
+                failed += 1;
+            }
+        }
+        assert!(
+            imported > 0 && failed > 0,
+            "{kind:?}: imported {imported}, failed {failed}"
+        );
+    }
+}
+
 /// A respelling (with or without a tail) split at a random point, one side
 /// held by the property `P`: `$(P)rest` or `first$(P)`. MSBuild joins the SDK
 /// directory to the attribute as written, before expanding it, so a rooted
