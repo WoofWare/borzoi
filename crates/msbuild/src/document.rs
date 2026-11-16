@@ -189,6 +189,15 @@ fn decode(raw: &str) -> Cow<'_, str> {
     Cow::Owned(value)
 }
 
+/// The namespace the `xml` prefix is bound to, which `xml:space` is in.
+const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+
+/// `node`'s `xml:space` attribute, if it has one.
+pub(crate) fn xml_space<'a, 'input>(node: Node<'a, 'input>) -> Option<Attribute<'a, 'input>> {
+    node.attributes()
+        .find(|a| a.namespace() == Some(XML_NAMESPACE) && a.name() == "space")
+}
+
 /// One child of an element as MSBuild's XML reader reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Content<'a> {
@@ -252,10 +261,25 @@ fn pieces(inner: &str) -> Option<Vec<Piece<'_>>> {
     Some(out)
 }
 
+/// Whether a run of element text spelt `raw`, reading `value`, is a whitespace
+/// node to MSBuild's XML reader: its value is XML whitespace, and no decimal
+/// character reference spells any of it. Literal whitespace and hexadecimal
+/// references make a whitespace node, which MSBuild drops; one decimal
+/// reference makes the whole run text, which it keeps. Pinned against
+/// `dotnet msbuild` 10.0 in `fsproj_property_table_diff`: `&#32;`, ` &#32; `
+/// and `&#x20;&#32;` are kept whole, `&#x20;`, `&#xA;&#xD;` and
+/// `<TAB>&#x9;<TAB>` dropped.
+fn run_is_whitespace_node(raw: &str, value: &str) -> bool {
+    let decimal_reference = raw
+        .match_indices("&#")
+        .any(|(at, _)| raw[at + 2..].starts_with(|c: char| c.is_ascii_digit()));
+    is_xml_whitespace(value) && !decimal_reference
+}
+
 /// The children of `element` as MSBuild's XML reader reports them, in order:
-/// text, CDATA sections and comments. Each run of text that is nothing but
-/// literal XML whitespace is dropped, as MSBuild, which loads a project
-/// without preserving whitespace, drops it.
+/// text, CDATA sections and comments. A run of text that is nothing but XML
+/// whitespace is a whitespace node, which MSBuild, loading a project without
+/// preserving whitespace, drops ([`run_is_whitespace_node`]).
 ///
 /// `roxmltree` merges a CDATA section into the text beside it and keeps only
 /// the first piece's range, so this reads the element's source. The reading
@@ -264,14 +288,23 @@ fn pieces(inner: &str) -> Option<Vec<Piece<'_>>> {
 /// [`text`]).
 ///
 /// `None` for an element holding an element or a processing instruction, and
-/// for text whose decoded value is XML whitespace while its source is not
-/// (`&#32;`): MSBuild keeps some such spellings and drops others (`&#32;` and
-/// `&#9;` are kept, `&#x20;` dropped; `dotnet msbuild` 10.0), so neither
-/// reading predicts it.
+/// for one in the scope of an `xml:space` attribute other than `default`:
+/// under `xml:space="preserve"` the reader reports whitespace as
+/// significant, so MSBuild keeps it
+/// (`<Project xml:space="preserve"><PropertyGroup><P>&#x20;` reads `P` as
+/// `" "`; `dotnet msbuild` 10.0).
 pub(crate) fn element_content<'input>(element: Node<'_, 'input>) -> Option<Vec<Content<'input>>> {
     if element
         .children()
         .any(|child| child.is_element() || child.is_pi())
+    {
+        return None;
+    }
+    // The nearest `xml:space` in scope decides how whitespace is read.
+    if element
+        .ancestors()
+        .find_map(xml_space)
+        .is_some_and(|space| space.value() != "default")
     {
         return None;
     }
@@ -306,11 +339,8 @@ pub(crate) fn element_content<'input>(element: Node<'_, 'input>) -> Option<Vec<C
             Piece::Text(raw) => {
                 let value = decode(raw);
                 ours.push_str(&value);
-                if is_xml_whitespace(raw) {
+                if run_is_whitespace_node(raw, &value) {
                     continue;
-                }
-                if !value.is_empty() && is_xml_whitespace(&value) {
-                    return None;
                 }
                 content.push(Content::Text {
                     value,
@@ -784,10 +814,10 @@ mod tests {
     proptest::proptest! {
         /// Any content of text (each character spelt any legal way), comments
         /// and CDATA sections, written into an element, reads back as the
-        /// pieces written: adjacent text as one run, a run of literal XML
-        /// whitespace dropped, and a run of whitespace spelt otherwise
-        /// declined. So the reading of the element's source agrees with
-        /// roxmltree's throughout.
+        /// pieces written: adjacent text as one run, and a run of XML
+        /// whitespace dropped unless a decimal reference spells some of it.
+        /// So the reading of the element's source agrees with roxmltree's
+        /// throughout.
         #[test]
         fn element_content_reads_back_what_was_written(
             written in proptest::collection::vec(written(), 0..6),
@@ -801,11 +831,12 @@ mod tests {
             let mut spelt_text = String::new();
             let end_run = |run: &mut (String, String), expected: &mut Option<Vec<(&str, String)>>| {
                 let (value, spelt) = std::mem::take(run);
-                if spelt.is_empty() || is_xml_whitespace(&spelt) {
+                // A run of whitespace is dropped unless a decimal reference
+                // spells some of it ([`spell`] writes a hexadecimal one as
+                // `&#x…;`, and `&` never as itself).
+                let decimal = spelt.split("&#").skip(1).any(|r| !r.starts_with('x'));
+                if spelt.is_empty() || (is_xml_whitespace(&value) && !decimal) {
                     return;
-                }
-                if is_xml_whitespace(&value) {
-                    *expected = None;
                 }
                 if let Some(expected) = expected {
                     expected.push(("text", value));

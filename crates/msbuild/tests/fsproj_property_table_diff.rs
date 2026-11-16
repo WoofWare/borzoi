@@ -73,8 +73,8 @@ const BODIES: &[&str] = &[
     "a<!-- c --> ",
     "<!-- c --> <!-- d -->",
     "A<!-- c -->B",
-    // Entity-encoded text. MSBuild is self-inconsistent on whitespace here
-    // (`&#32;` is kept, `&#x20;` is dropped), so those must degrade.
+    // Entity-encoded text. Whitespace spelt by a decimal reference is kept
+    // (`&#32;`), and by a hexadecimal one dropped (`&#x20;`).
     "&#32;",
     "&#x20;",
     "&#9;",
@@ -388,11 +388,28 @@ fn bodies_msbuild_reads_as_inner_xml_or_unfolded_are_exact_or_declined() {
         ("a<!-- c\r\n -->b", "ab", true),
         ("\r\n", "", true),
         ("\r", "", true),
-        // Whitespace spelt as a reference, which MSBuild keeps or drops by
-        // its spelling.
-        ("&#13;", "\r", false),
-        ("&#x20;<![CDATA[x]]>", "x", false),
-        ("&#32;<![CDATA[x]]>", " x", false),
+        // Whitespace spelt as a reference: a run one decimal reference
+        // spells is kept whole; one of literal whitespace and hexadecimal
+        // references drops.
+        ("&#13;", "\r", true),
+        ("&#xD;", "", true),
+        ("&#032;", " ", true),
+        ("&#x020;", "", true),
+        (" &#32; ", "   ", true),
+        (" &#x20; ", "", true),
+        ("&#x20;&#32;", "  ", true),
+        ("&#32;&#x20;", "  ", true),
+        ("\t&#x9;\t", "", true),
+        ("&#xa;&#xd;", "", true),
+        ("\r\n&#32;\r\n", "\r\n \r\n", true),
+        ("&#x20;<!--c-->&#32;", " ", true),
+        ("x<!--c-->&#x20;", "x", true),
+        ("&#x20;<![CDATA[x]]>", "x", true),
+        ("&#32;<![CDATA[x]]>", " x", true),
+        ("y<![CDATA[a]]>&#x20;", "y<![CDATA[a]]>", true),
+        ("y<![CDATA[a]]>&#32;", "y<![CDATA[a]]> ", true),
+        ("&#x20;<!--c--><![CDATA[a]]>", "<!--c--><![CDATA[a]]>", true),
+        ("&#32;<!--c--><![CDATA[a]]>", " <!--c--><![CDATA[a]]>", true),
         // CDATA: its content verbatim, line ends and all, and read as the
         // body's text when it is all of it or comes first (after Unicode
         // whitespace), as the body's inner XML otherwise.
@@ -455,6 +472,33 @@ fn bodies_msbuild_reads_as_inner_xml_or_unfolded_are_exact_or_declined() {
                 "the commitment moved: {body:?} at {path:?}"
             );
         }
+    }
+}
+
+/// A character reference spelt with a capital `X` is no reference to XML:
+/// MSBuild refuses the project, and the document does not parse here, so
+/// nothing is committed.
+#[test]
+fn a_capital_x_reference_refuses_the_project() {
+    let mut oracle = Oracle::spawn();
+    let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
+    for body in ["&#X20;", "x&#X41;"] {
+        let xml = project_xml(&[("Alpha", body)]);
+        assert_eq!(
+            oracle.project(&xml, &names, None, &[]),
+            None,
+            "MSBuild evaluates {body:?}"
+        );
+        assert!(
+            parse_fsproj(
+                &xml,
+                Path::new("/repo/proj/Demo.fsproj"),
+                &HashMap::new(),
+                &common::oracle_environment(),
+            )
+            .is_err(),
+            "{body:?} parses"
+        );
     }
 }
 
@@ -1094,11 +1138,12 @@ fn fixed_seed_document_sweep() {
     );
 }
 
-/// Text pieces of a generated CDATA-bearing body, as element content spells
-/// them: plain text, XML whitespace (insignificant alone), Unicode whitespace
-/// that is not XML's (which .NET's `TrimStart` skips before a CDATA section),
-/// whitespace spelt as a reference (which MSBuild keeps or drops by its
-/// spelling), the characters inner XML re-spells, and what expansion reads.
+/// Text pieces of a generated body, as element content spells them: plain
+/// text, XML whitespace (insignificant alone), Unicode whitespace that is not
+/// XML's (which .NET's `TrimStart` skips before a CDATA section), whitespace
+/// spelt as decimal and hexadecimal references (a run a decimal one spells is
+/// kept, and one of literal whitespace and hexadecimal ones dropped), the
+/// characters inner XML re-spells, and what expansion reads.
 const CDATA_TEXT: &[&str] = &[
     "x",
     "a b",
@@ -1113,6 +1158,15 @@ const CDATA_TEXT: &[&str] = &[
     "&#32;",
     "&#x20;",
     "&#13;",
+    "&#xD;",
+    "&#9;",
+    "&#x9;",
+    "&#10;",
+    "&#xA;",
+    "&#032;",
+    "&#x020;",
+    " &#32; ",
+    "\t&#x20;\r\n",
     ">",
     "&gt;",
     "&amp;",
@@ -1158,8 +1212,9 @@ const CDATA_CONTENTS: &[&str] = &[
 
 /// A body of one to five pieces (text, comment or CDATA section, CDATA the
 /// likeliest), as element content spells it, holding at least one CDATA
-/// section.
+/// section in half the bodies.
 fn gen_cdata_body(rng: &mut SplitMix64) -> String {
+    let needs_cdata = rng.below(2) == 0;
     loop {
         let mut body = String::new();
         let mut has_cdata = false;
@@ -1179,7 +1234,7 @@ fn gen_cdata_body(rng: &mut SplitMix64) -> String {
             .split("<![CDATA[")
             .map(|s| s.rsplit("]]>").next().unwrap_or(s))
             .collect();
-        if has_cdata && !outside.contains("]]>") {
+        if (has_cdata || !needs_cdata) && !outside.contains("]]>") {
             return body;
         }
     }
@@ -1318,6 +1373,45 @@ fn cdata_sweep(seed: u64, cases: usize) {
             "too few {position} bodies committed ({committed} of {cases})"
         );
     }
+}
+
+/// Bodies in the scope of `xml:space` on the project element, the one element
+/// MSBuild's loader allows it on. Under `preserve` the reader reports
+/// whitespace as significant, so MSBuild keeps whitespace a body would
+/// otherwise drop, and refuses a project whose containers hold whitespace
+/// between their elements (MSB4067, `<#significant-whitespace>`). Each body,
+/// fixed and generated, is diffed in a compact document MSBuild loads and in
+/// an indented one, under `preserve` and `default`.
+#[test]
+fn bodies_under_xml_space_are_exact_or_declined() {
+    let mut oracle = Oracle::spawn();
+    let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
+    let mut rng = SplitMix64(0x5ace_5ace);
+    let mut bodies: Vec<String> = BODIES.iter().map(|b| (*b).to_owned()).collect();
+    bodies.extend((0..100).map(|_| gen_cdata_body(&mut rng)));
+    let (mut loaded, mut committed) = (0usize, 0usize);
+    for body in &bodies {
+        for space in ["preserve", "default"] {
+            for xml in [
+                format!(
+                    "<Project xml:space=\"{space}\"><PropertyGroup><Alpha>{body}</Alpha>\
+                     <Beta>[$(Alpha)]</Beta><Gamma>g</Gamma></PropertyGroup></Project>"
+                ),
+                format!(
+                    "<Project xml:space=\"{space}\">\n  <PropertyGroup>\n    <Alpha>{body}</Alpha>\n    \
+                     <Gamma>g</Gamma>\n  </PropertyGroup>\n</Project>\n"
+                ),
+            ] {
+                loaded += usize::from(oracle.project(&xml, &names, None, &[]).is_some());
+                committed += check_names_at_path(&mut oracle, &xml, &names, None).len();
+            }
+        }
+    }
+    eprintln!("xml:space documents: {loaded} loaded by MSBuild, {committed} values committed");
+    assert!(
+        loaded >= bodies.len(),
+        "too few documents loaded ({loaded})"
+    );
 }
 
 /// `<Choose>` nesting around MSBuild's ceiling. MSBuild's loader refuses a

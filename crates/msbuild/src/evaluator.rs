@@ -4136,7 +4136,7 @@ fn walk_property_child_inner(
     // — distinct from "undefined", and used in real projects to clear an
     // inherited value.
     let Some(raw) = collect_element_text(node) else {
-        // A body we cannot model (entity-encoded whitespace, an element). Same
+        // A body we cannot model (an element or processing instruction). Same
         // treatment as an unevaluable expansion below: drop any prior binding
         // rather than let a stale value stand in for a write whose result we
         // don't know, and unpin the name so every later read re-surfaces it.
@@ -6520,10 +6520,10 @@ fn contains_metadata_reference(s: &str) -> bool {
 /// references decoded and its line ends as written, so `a<CR><LF>b` is four
 /// characters.
 ///
-/// A run of text that is *literally* nothing but XML whitespace in the source
-/// is **insignificant** and contributes nothing, matching MSBuild's XML layer.
-/// This is a per-run rule, not a whole-value one, and all of it is pinned
-/// against `dotnet msbuild` 10.0.301 (2026-07-11):
+/// A run of text that is nothing but XML whitespace, written literally or as
+/// hexadecimal references, is **insignificant** and contributes nothing,
+/// matching MSBuild's XML layer. This is a per-run rule, not a whole-value one,
+/// and all of it is pinned against `dotnet msbuild` 10.0.301 (2026-07-11):
 ///
 /// - `<P> </P>`, a tab-only body and a CRLF-only body → `""` (so
 ///   `'$(P)' == ''` is *true*).
@@ -6537,6 +6537,9 @@ fn contains_metadata_reference(s: &str) -> bool {
 ///   `a<CR><LF>b`.
 /// - `<P> $(Undefined) </P>` → `"  "`: the rule is pre-expansion, and is not
 ///   re-applied to an expansion result.
+/// - `<P>&#32;</P>` → `" "` but `<P>&#x20;</P>` → `""`: one decimal reference
+///   makes the whole run significant (` &#32; ` is three characters), as
+///   MSBuild's reader classifies it (`dotnet msbuild` 10.0).
 ///
 /// "XML whitespace" is exactly space/tab/CR/LF — a non-breaking space is
 /// content (`&#160;` has length 1) — so this must not use `char::is_whitespace`,
@@ -6554,17 +6557,10 @@ fn contains_metadata_reference(s: &str) -> bool {
 ///   `x>y<![CDATA[z]]>` → `"x&gt;y<![CDATA[z]]>"`: each text re-escaped, and
 ///   whitespace-only runs dropped from between the pieces.
 ///
-/// Returns `None` for the shapes whose value we cannot derive, so callers
-/// degrade rather than commit a guess:
-///
-/// - **Entity-encoded whitespace** (a run whose *decoded* value is all
-///   whitespace but whose source is not, e.g. `&#32;`). MSBuild is
-///   inconsistent here — `&#32;` and `&#9;` are kept (length 1) while
-///   `&#x20;` is dropped (length 0) — so neither the source nor the decoded
-///   test predicts it, and we decline rather than pick a side.
-/// - **An element or processing instruction in the body.** MSBuild then reads
-///   the body's inner XML, which re-spells the markup: `<P>a<x/>b</P>` is
-///   `a<x />b`, where the text alone is `ab`.
+/// Returns `None` for a body holding an element or a processing instruction,
+/// whose value we do not derive, so callers degrade rather than commit a
+/// guess: MSBuild then reads the body's inner XML, which re-spells the
+/// markup (`<P>a<x/>b</P>` is `a<x />b`, where the text alone is `ab`).
 fn collect_element_text(node: Node<'_, '_>) -> Option<String> {
     crate::document::inner_contents(&crate::document::element_content(node)?)
 }

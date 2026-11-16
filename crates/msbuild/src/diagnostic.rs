@@ -327,6 +327,12 @@ pub enum LoadTimeError {
     /// required attribute missing or empty, two of a child it takes once, an
     /// `<OnError>` before other content, and the like.
     Malformed { element: String, rule: &'static str },
+    /// The project element asks for whitespace to be kept: an `xml:space`
+    /// attribute that is not `default`. Under `preserve`, MSBuild's loader
+    /// refuses whitespace between elements (MSB4067, an unrecognised
+    /// `<#significant-whitespace>`), and a project without any is evaluated
+    /// with the whitespace in its bodies kept. Never certain.
+    WhitespaceKept,
 }
 
 /// Why an import may load no file.
