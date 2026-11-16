@@ -138,6 +138,7 @@ const WILD: &[&str] = &[
     "d*",
     "**/Deep/**",
     "**/DEEP/**",
+    "**/**",
 ];
 
 /// A spec's file name: literal names and wildcard ones in several cases, and
@@ -409,6 +410,11 @@ fn case_corners() {
         // A directory a recursive exclude names, in another case.
         corner(&["sub/Deep/d.fs"], "**/*.fs", Some("**/DEEP/**")),
         corner(&["sub/Deep/d.fs"], "sub/**/*.fs", Some("**/deep/*.fs")),
+        // `**/**/**` is the directory-name shape with a name of `**`: one
+        // directory, any name, never none.
+        corner(&["sub/a.fs", "SUB/"], "sub/*.fs", Some("SUB/**/**/**")),
+        corner(&["sub/a.fs", "sub/x/b.fs"], "sub/**/**/**", None),
+        corner(&["sub/a.fs", "sub/x/b.fs"], "**/*.fs", Some("sub/**/**/**")),
         // `i` and `I` where no regular expression compares them.
         corner(&["sub/x/bi.fs"], "**/*.fs", Some("**/BI.fs")),
         corner(&["sub/x/bi.fs"], "sub/x/*.fs", Some("sub/x/BI.fs")),
@@ -428,6 +434,12 @@ fn case_corners() {
         }
     }
     let declining = [
+        // The directory a `**/**/**` exclude needs is above the include's
+        // walk root, which MSBuild never matches against it.
+        (
+            corner(&["sub/x/b.fs"], "sub/x/*.fs", Some("**/**/**")),
+            "GlobstarExcludeAboveIncludeRoot",
+        ),
         // A regular expression compares `i` with `I`, which Turkish keeps
         // apart.
         (

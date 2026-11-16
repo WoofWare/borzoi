@@ -80,7 +80,7 @@ use crate::observed::{self, EntryKind, Observer};
 use crate::{GlobRequest, SpecFragment, Unmodelled};
 
 use crate::glob::{
-    GlobDecline, MatcherPattern, Pattern, compares_unnormalised,
+    GlobDecline, MatcherPattern, Pattern, as_file_matcher_reads, compares_unnormalised,
     has_tilde_after_first_fixed_segment, has_wildcard_directory_part, is_legal_filespec,
     is_recursive_filename_pattern, matches_by_regex, select, select_ignoring_case, split_filespec,
     split_glob_root, split_segments, unmodelled_shape,
@@ -156,8 +156,11 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
                     shape: Unmodelled::TildeInFixedDirectory,
                 });
             }
-            let pattern = Pattern::with_literal_prefix(anchor_prefix(&base_segs, &norm), &norm)
-                .with_all_files_rule();
+            let pattern = Pattern::with_literal_prefix(
+                anchor_prefix(&base_segs, &norm),
+                &as_file_matcher_reads(&norm),
+            )
+            .with_all_files_rule();
             let by_regex = matches_by_regex(&norm);
             Ok(GlobExclude {
                 norm,
@@ -284,8 +287,11 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
         // The pattern keeps the base literal for relative specs; an absolute
         // fragment is parsed on its own (its own wildcards are wildcards). A
         // filename part of `*.*` matches every file, as MSBuild's does.
-        let pat = Pattern::with_literal_prefix(anchor_prefix(&base_segs, &norm), &norm)
-            .with_all_files_rule();
+        let pat = Pattern::with_literal_prefix(
+            anchor_prefix(&base_segs, &norm),
+            &as_file_matcher_reads(&norm),
+        )
+        .with_all_files_rule();
         // Root the walk at the literal anchor so `../shared/*.fs` enumerates
         // the sibling directory and `/opt/lib/*.fs` the absolute one.
         // `anchor_segs` is absolute (or empty → `/`).
@@ -384,7 +390,8 @@ fn globstar_exclude_names(
     absolute: bool,
     base_segs: &[&str],
 ) -> Option<(Vec<String>, Vec<String>)> {
-    let (_, wildcard_dir, _) = split_filespec(norm);
+    let read = as_file_matcher_reads(norm);
+    let (_, wildcard_dir, _) = split_filespec(&read);
     let dirs = split_segments(&wildcard_dir);
     let globstar = dirs.iter().position(|seg| *seg == "**")?;
     let after: Vec<String> = dirs[globstar + 1..]

@@ -437,6 +437,24 @@ pub fn matches_by_regex(spec: &str) -> bool {
     !wildcard.is_empty() && wildcard != "**" && !is_directory_name_pattern(wildcard)
 }
 
+/// A decoded glob as MSBuild's file matcher reads it, spelt for
+/// [`Pattern`]. Where its wildcard directory part has the `**/{name}/**`
+/// shape the matcher takes by directory name, `{name}` matches exactly one
+/// directory name by `FileMatcher.IsMatch`, in which a run of `*` is one `*`.
+/// The only legal `{name}` that reads otherwise as a path pattern is `**`,
+/// which would match no directory at all there: `sub/**/**/**` takes only
+/// files below a directory of `sub`, never `sub/a.fs` (oracle-pinned), so it
+/// is spelt `sub/**/*/**/*.*`.
+pub fn as_file_matcher_reads(spec: &str) -> String {
+    let (fixed, wildcard_dir, filename) = split_filespec(spec);
+    let wildcard = wildcard_dir.trim_end_matches(['/', '\\']);
+    if is_directory_name_pattern(wildcard) && &wildcard[3..wildcard.len() - 3] == "**" {
+        format!("{fixed}**/*/**/{filename}")
+    } else {
+        spec.to_string()
+    }
+}
+
 /// The `**/{name}/**` shape of a wildcard directory part (trailing separators
 /// trimmed) that `GetFileSearchData` matches by directory name: longer than
 /// six characters, with no separator inside `{name}`.
@@ -1496,6 +1514,19 @@ mod tests {
         ] {
             assert!(matches_by_regex(by_regex), "{by_regex}");
         }
+    }
+
+    /// The directory-name shape with a name of `**` needs one directory.
+    #[test]
+    fn the_file_matcher_reads_a_directory_named_globstar_as_one_directory() {
+        assert_eq!(as_file_matcher_reads("sub/**/**/**"), "sub/**/*/**/*.*");
+        assert_eq!(as_file_matcher_reads("**/**/**/*.fs"), "**/*/**/*.fs");
+        for unchanged in ["sub/**", "**/**/*.fs", "**/Deep/**", "**/**/**/**/*.fs"] {
+            assert_eq!(as_file_matcher_reads(unchanged), unchanged);
+        }
+        let read = Pattern::parse(&as_file_matcher_reads("sub/**/**/**")).with_all_files_rule();
+        assert!(!read.matches("sub/a.fs"));
+        assert!(read.matches("sub/x/a.fs"));
     }
 
     /// `FileMatcher.GetLongPathName` looks up a `~` segment after the first.

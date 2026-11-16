@@ -217,7 +217,7 @@ fn structural(rng: &mut SplitMix64) -> String {
         "$(MSBuildProjectDirectory)/sub",
     ];
     const WILD: &[&str] = &[
-        "**", "*", "D*", ".*", "s*", "**/Deep", "*/Deep", "**/*", "Deep/**",
+        "**", "*", "D*", ".*", "s*", "**/Deep", "*/Deep", "**/*", "Deep/**", "**/**",
     ];
     const NAME: &[&str] = &["*.fs", "*.*", "*", "d.fs", "c.fs", "x.fs", "?.fs", "**"];
     let mut parts: Vec<&str> = Vec::new();
