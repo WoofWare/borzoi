@@ -17,11 +17,11 @@ use crate::language_version::LanguageVersion;
 use crate::lexer::lex;
 use crate::tokens::lex_full_trivia;
 
-/// Independent oracle: the FCS-faithful position of a byte `offset`. Line is
-/// 1-based and counts `\n` bytes (so `\r\n` is one break, a lone `\r` none);
-/// column is the byte offset from the start of the current line (one past the
-/// last `\n`, or past a file-start BOM on line 1, saturating inside the BOM).
-/// Works on raw bytes, so it never panics on a char boundary.
+/// Independent oracle: the FCS-faithful position of a byte `offset`, a
+/// character boundary. Line is 1-based and counts `\n` bytes (so `\r\n` is one
+/// break, a lone `\r` none); column is the UTF-16 code units from the start of
+/// the current line (one past the last `\n`, or past a file-start BOM on line
+/// 1, so 0 at offset 0 too) to `offset`.
 fn ref_pos(source: &str, offset: usize) -> Pos {
     let bytes = &source.as_bytes()[..offset];
     let nls = bytes.iter().filter(|&&b| b == b'\n').count() as u32;
@@ -32,7 +32,9 @@ fn ref_pos(source: &str, offset: usize) -> Pos {
     };
     Pos {
         line: 1 + nls,
-        col: offset.saturating_sub(line_start) as u32,
+        col: source[line_start.min(offset)..offset]
+            .encode_utf16()
+            .count() as u32,
     }
 }
 
@@ -169,6 +171,15 @@ fn crlf_line_endings() {
 }
 
 #[test]
+fn columns_count_utf16_code_units() {
+    // FCS's lexbuf reads a .NET string: `é` (2 bytes) and `中` (3) are one
+    // unit each, `𝔸` (4) is a surrogate pair, two.
+    let (start, end) = let_pos("x\n\"é中𝔸\" let x = 1\n");
+    assert_eq!(start, Pos { line: 2, col: 7 });
+    assert_eq!(end, Pos { line: 2, col: 10 });
+}
+
+#[test]
 fn multiple_embedded_newlines_counted() {
     // Comment with three embedded newlines -> `let` on line 4.
     let (start, _) = let_pos("(* a\nb\nc\n*) let x = 1\n");
@@ -193,7 +204,7 @@ fn lone_cr_is_not_a_line_break() {
 
 /// Hold every token [`Filter::pull_raw`] pulls from `raw` (EOF included) to
 /// the oracle: its start and end positions, and, for its start, the byte
-/// offset and UTF-16 column the filter recovers from the position.
+/// offset the filter recovers from the position.
 fn check_positions(raw: &RawTokens<'_>) {
     let source = raw.source();
     let lines = LineStarts::new(source);
@@ -211,17 +222,10 @@ fn check_positions(raw: &RawTokens<'_>) {
             "{:?} at {span:?} in {source:?}",
             tt.token
         );
-        // Below a file-start BOM's end, line 1's columns saturate, so the
-        // position does not determine the offset.
+        // Offset 0 of a source with a file-start BOM has the column of the
+        // BOM's end, so the position does not determine the offset.
         if span.start >= bom_end {
             assert_eq!(f.byte_offset(tt.start), span.start, "{source:?}");
-            let line_start = source[..span.start].rfind('\n').map_or(bom_end, |i| i + 1);
-            assert_eq!(
-                f.utf16_col(tt.start) as usize,
-                source[line_start..span.start].encode_utf16().count(),
-                "{:?} at {span:?} in {source:?}",
-                tt.token
-            );
         }
         if matches!(tt.token, TokenContent::Eof) {
             break;
@@ -265,6 +269,7 @@ fn arb_source() -> impl proptest::strategy::Strategy<Value = String> {
         Just("  ".to_string()),
         Just("\t".to_string()),
         Just("é😃".to_string()),
+        Just("中𝔸".to_string()),
         Just("\u{FEFF}".to_string()),
         Just("\n#if X\nlet y =\n  é\n#else\n(* \r\n *)\n#endif\n".to_string()),
     ];

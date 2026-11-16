@@ -1,15 +1,16 @@
 //! The newline table (`borzoi_cst::tokens::LineStarts`) against the byte
 //! rescan it replaces (`docs/token-pipeline-soa-plan.md`, D3).
 //!
-//! The lex-filter needs the line and byte column of every token boundary it
-//! pulls. It used to rescan the bytes since the previous boundary for `\n`;
-//! it now walks a forward cursor over a table of line starts computed once per
-//! source. The rescan is the reference: for every offset, the cursor must give
-//! the line and column a rescan of the bytes before it gives, whichever offsets
-//! the cursor visited on the way. Line breaks are FCS's: a `\n` (so `\r\n` is
-//! one break and a lone `\r` none), wherever it sits, inside a comment, a
-//! string or inactive code included. A file-start BOM does not count towards
-//! line 1's columns.
+//! The lex-filter needs the line and column of every token boundary it pulls.
+//! It walks a forward cursor over a table of line starts computed once per
+//! source. A rescan of the bytes before each boundary is the reference: for
+//! every character boundary, the cursor must give the line and column the
+//! rescan gives, whichever offsets the cursor visited on the way, and the
+//! table must map that position back to the offset. Line breaks are FCS's: a
+//! `\n` (so `\r\n` is one break and a lone `\r` none), wherever it sits, inside
+//! a comment, a string or inactive code included. Columns are FCS's too: UTF-16
+//! code units, so a character outside the Basic Multilingual Plane counts two.
+//! A file-start BOM does not count towards line 1's columns.
 //!
 //! How the filter uses the cursor (where virtual tokens go, what the FS0058
 //! messages say) is graded against FCS by the lex-filter differential, and
@@ -41,10 +42,11 @@ pub(crate) const NEWLINE_SHAPES: &[&str] = &[
     "x\r\n  y",
     "x\r  y",
     "é\n😃",
+    "中𝔸 x\n 𝔸",
 ];
 
-/// The reference: the position of `offset`, from a rescan of every byte
-/// before it.
+/// The reference: the position of `offset`, a character boundary, from a
+/// rescan of every byte before it.
 fn rescan(source: &str, offset: usize) -> LinePos {
     let before = &source.as_bytes()[..offset];
     let breaks = before.iter().filter(|&&b| b == b'\n').count();
@@ -55,21 +57,44 @@ fn rescan(source: &str, offset: usize) -> LinePos {
     };
     LinePos {
         line: u32::try_from(1 + breaks).unwrap(),
-        col: u32::try_from(offset.saturating_sub(line_start)).unwrap(),
+        col: u32::try_from(
+            source[line_start.min(offset)..offset]
+                .encode_utf16()
+                .count(),
+        )
+        .unwrap(),
     }
 }
 
-/// Advance a fresh cursor over `offsets` (ascending), checking each position
-/// against the rescan.
+/// Advance a fresh cursor over `offsets` (ascending character boundaries),
+/// checking each position against the rescan and the table's way back to the
+/// offset. Offset 0 of a source with a file-start BOM shares its position
+/// with the BOM's end, which is where the way back goes.
 fn check_walk(source: &str, table: &LineStarts, offsets: impl IntoIterator<Item = usize>) {
+    let bom_end = if source.starts_with('\u{FEFF}') {
+        '\u{FEFF}'.len_utf8()
+    } else {
+        0
+    };
     let mut cursor = table.cursor();
     for offset in offsets {
+        let pos = cursor.advance_to(offset);
         assert_eq!(
-            cursor.advance_to(offset),
+            pos,
             rescan(source, offset),
             "at byte {offset} of {source:?}"
         );
+        assert_eq!(
+            table.byte_offset(pos),
+            offset.max(bom_end),
+            "{pos:?} of {source:?}"
+        );
     }
+}
+
+/// The character boundaries of `source`, its end included.
+fn boundaries(source: &str) -> impl Iterator<Item = usize> + '_ {
+    (0..=source.len()).filter(|&i| source.is_char_boundary(i))
 }
 
 /// Hold the table of `source` to the rescan: its line starts, and a cursor
@@ -94,8 +119,8 @@ fn check(source: &str) {
         0
     };
     assert_eq!(table.line_start(1), first, "line 1 of {source:?}");
-    check_walk(source, &table, 0..=source.len());
-    for from in 0..=source.len() {
+    check_walk(source, &table, boundaries(source));
+    for from in boundaries(source) {
         check_walk(source, &table, [from, source.len()]);
     }
     for symbols in [HashSet::new(), HashSet::from(["X".to_string()])] {
@@ -142,6 +167,24 @@ fn every_break_placement_matches_the_rescan() {
     }
 }
 
+/// A non-ASCII character of each width at every offset of sources either
+/// side of a chunk's width or two, alone and with a break straight after it,
+/// so the scan for non-ASCII characters sees one at every offset of a chunk,
+/// in its tail and straddling two.
+#[test]
+fn every_wide_character_placement_matches_the_rescan() {
+    for len in (0..=40).chain([63, 64, 65, 95, 96, 97]) {
+        for i in 0..=len {
+            for wide in ["é", "中", "𝔸"] {
+                for after in ["", "\n"] {
+                    let source = format!("{}{wide}{after}{}", "a".repeat(i), "a".repeat(len - i));
+                    check(&source);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn the_empty_source_has_one_line() {
     check("");
@@ -158,7 +201,28 @@ fn a_file_start_bom_starts_line_one_after_it() {
     let mut cursor = table.cursor();
     assert_eq!(cursor.advance_to(0), LinePos { line: 1, col: 0 });
     assert_eq!(cursor.advance_to(4), LinePos { line: 1, col: 1 });
-    assert_eq!(cursor.advance_to(8), LinePos { line: 2, col: 3 });
+    assert_eq!(cursor.advance_to(8), LinePos { line: 2, col: 1 });
+}
+
+/// A debug assertion: the check is off the release build's hot path.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "inside a character")]
+fn the_cursor_refuses_an_offset_inside_a_character() {
+    let table = LineStarts::new("é");
+    table.cursor().advance_to(1);
+}
+
+#[test]
+#[should_panic(expected = "past the end of its line")]
+fn the_table_refuses_a_column_past_its_line() {
+    LineStarts::new("ab\ncd").byte_offset(LinePos { line: 1, col: 3 });
+}
+
+#[test]
+#[should_panic(expected = "inside a surrogate pair")]
+fn the_table_refuses_a_column_inside_a_surrogate_pair() {
+    LineStarts::new("𝔸").byte_offset(LinePos { line: 1, col: 1 });
 }
 
 #[test]

@@ -82,6 +82,7 @@ mod parser_diff_multiline_infix;
 mod parser_diff_new_expr;
 mod parser_diff_obj_expr;
 mod parser_diff_offside;
+mod parser_diff_offside_utf16_grid;
 mod parser_diff_operator_matrix;
 mod parser_diff_operators;
 mod parser_diff_pat_opname_path;
@@ -120,6 +121,7 @@ mod parser_tree_height;
 mod recovery_sweep;
 mod shape_sensitivity;
 mod token_table_reference;
+mod utf16_width_invariance;
 mod version_dependence_census;
 
 /// Every case group under `tests/all/` must be `mod`-declared here, or it is
