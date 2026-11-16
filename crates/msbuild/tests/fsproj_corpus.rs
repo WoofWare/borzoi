@@ -98,6 +98,7 @@ fn fixture_read_sets_are_sound_through_the_real_sdk_chain() {
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
+                resolver_switched_off: common::workload_resolver_switched_off_from_process(),
                 global_json: Default::default(),
                 process_architecture: None,
             },

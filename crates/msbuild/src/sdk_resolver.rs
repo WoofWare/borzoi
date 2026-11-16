@@ -220,6 +220,7 @@ impl std::error::Error for SdkResolveError {}
 /// let workload_env = workloads::WorkloadEnvironment {
 ///     user_dotnet_root: None,
 ///     overrides_present: false,
+///     resolver_switched_off: false,
 ///     global_json: Default::default(),
 ///     process_architecture: None,
 /// };

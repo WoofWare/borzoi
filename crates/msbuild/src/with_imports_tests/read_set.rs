@@ -219,6 +219,7 @@ fn evaluate(root: &Path, project: &Path, source: &str, through: Through<'_>) -> 
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: None,
                 overrides_present: false,
+                resolver_switched_off: false,
                 global_json: Default::default(),
                 process_architecture: None,
             },
@@ -438,6 +439,7 @@ fn a_file_read_as_text_and_as_xml_is_read_once() {
                     &workloads::WorkloadEnvironment {
                         user_dotnet_root: None,
                         overrides_present: false,
+                        resolver_switched_off: false,
                         global_json: Default::default(),
                         process_architecture: None,
                     },
@@ -932,6 +934,7 @@ fn a_workload_pack_named_as_an_sdk_is_walked_soundly() {
                 &workloads::WorkloadEnvironment {
                     user_dotnet_root: None,
                     overrides_present: false,
+                    resolver_switched_off: false,
                     global_json: Default::default(),
                     process_architecture: None,
                 },

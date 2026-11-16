@@ -618,6 +618,7 @@ fn ours(layout: &Layout, locator: &str) -> Option<Vec<String>> {
     let env = WorkloadEnvironment {
         user_dotnet_root: layout.user_root.as_deref(),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1611,6 +1612,7 @@ fn the_highest_manifest_version_directory_is_the_resolver_s() {
             let env = WorkloadEnvironment {
                 user_dotnet_root: None,
                 overrides_present: false,
+                resolver_switched_off: false,
                 global_json: Default::default(),
                 process_architecture: None,
             };
@@ -1900,6 +1902,7 @@ fn sweep_sets(seed: u64, cases: usize) {
                 let env = WorkloadEnvironment {
                     user_dotnet_root: None,
                     overrides_present: false,
+                    resolver_switched_off: false,
                     global_json: global_json.clone().unwrap_or_default(),
                     process_architecture: Some(
                         ProcessArchitecture::from_name(&architecture)
@@ -2317,6 +2320,7 @@ fn sweep_packs(seed: u64, cases: usize) {
                 let env = WorkloadEnvironment {
                     user_dotnet_root: layout.user_root.as_deref(),
                     overrides_present: false,
+                    resolver_switched_off: false,
                     global_json: Default::default(),
                     process_architecture: None,
                 };
@@ -2449,6 +2453,7 @@ fn the_installed_layouts_resolve_as_their_own_resolvers_do() {
             let env = WorkloadEnvironment {
                 user_dotnet_root: Some(&user_root),
                 overrides_present: false,
+                resolver_switched_off: false,
                 global_json: Default::default(),
                 process_architecture: Some(architecture),
             };
@@ -2497,6 +2502,7 @@ fn the_installed_manifests_packs_resolve_as_their_own_resolvers_do() {
         let env = WorkloadEnvironment {
             user_dotnet_root: None,
             overrides_present: false,
+            resolver_switched_off: false,
             global_json: Default::default(),
             process_architecture: None,
         };
@@ -2753,6 +2759,7 @@ fn planted_sdk_packs_resolve_as_planted() {
             let env = WorkloadEnvironment {
                 user_dotnet_root: Some(&user_root),
                 overrides_present: false,
+                resolver_switched_off: false,
                 global_json: Default::default(),
                 process_architecture: None,
             };
@@ -3188,6 +3195,7 @@ fn sweep_pack_lookups(seed: u64, cases: usize) {
             let env = WorkloadEnvironment {
                 user_dotnet_root: layout.user_root.as_deref(),
                 overrides_present: false,
+                resolver_switched_off: false,
                 global_json: Default::default(),
                 process_architecture: None,
             };
@@ -3457,6 +3465,7 @@ fn planted_pack_lookups_resolve_as_planted() {
             let env = WorkloadEnvironment {
                 user_dotnet_root: Some(&user_root),
                 overrides_present: false,
+                resolver_switched_off: false,
                 global_json: Default::default(),
                 process_architecture: None,
             };
@@ -3544,6 +3553,7 @@ fn the_installed_manifests_imported_packs_resolve_as_their_own_resolvers_do() {
             let env = WorkloadEnvironment {
                 user_dotnet_root: user_root,
                 overrides_present: false,
+                resolver_switched_off: false,
                 global_json: Default::default(),
                 process_architecture: architecture,
             };

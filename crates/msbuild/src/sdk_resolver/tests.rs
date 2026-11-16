@@ -21,6 +21,7 @@ fn no_workloads() -> super::workloads::WorkloadEnvironment<'static> {
     super::workloads::WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     }
@@ -2690,6 +2691,7 @@ fn a_name_without_a_nuget_version_never_reads_the_nuget_folder() {
                 let workload_env = WorkloadEnvironment {
                     user_dotnet_root: None,
                     overrides_present: false,
+                    resolver_switched_off: false,
                     global_json: Default::default(),
                     process_architecture: None,
                 };

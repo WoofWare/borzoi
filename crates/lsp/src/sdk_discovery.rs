@@ -277,11 +277,13 @@ pub struct SdkDiscoveryEnv {
     /// True when any workload-resolution override variable is set
     /// (`DOTNETSDK_WORKLOAD_MANIFEST_ROOTS`,
     /// `DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS`,
-    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`), or `MSBuildEnableWorkloadResolver`
-    /// switches the workload resolver off. The in-house workload resolution
+    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`). The in-house workload resolution
     /// (the locators, and a workload pack named as an SDK) degrades rather
     /// than model those redirections.
     pub workload_overrides_present: bool,
+    /// True when `MSBuildEnableWorkloadResolver` switches the workload
+    /// resolver off ([`borzoi_msbuild::workloads::WorkloadEnvironment::resolver_switched_off`]).
+    pub workload_resolver_switched_off: bool,
     /// The environment MSBuild would fold in as initial properties when
     /// evaluating a project under this configuration.
     ///
@@ -310,6 +312,7 @@ impl Default for SdkDiscoveryEnv {
             host_default_allow_prerelease: true,
             dotnet_cli_home: None,
             workload_overrides_present: false,
+            workload_resolver_switched_off: false,
             build_environment: HashMap::new(),
         }
     }
@@ -395,14 +398,14 @@ impl SdkDiscoveryEnv {
             // even `=false` drops the default roots; PACK_ROOTS goes
             // through `string.IsNullOrEmpty`, so an empty value is a
             // true no-op and must not degrade resolution.
+            workload_overrides_present: get("DOTNETSDK_WORKLOAD_MANIFEST_ROOTS").is_some()
+                || get("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS").is_some()
+                || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some(),
             // `CachingWorkloadResolver` is off where
             // `MSBuildEnableWorkloadResolver` equals `false` as
             // `OrdinalIgnoreCase` compares (untrimmed), and on otherwise.
-            workload_overrides_present: get("DOTNETSDK_WORKLOAD_MANIFEST_ROOTS").is_some()
-                || get("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS").is_some()
-                || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some()
-                || get("MSBuildEnableWorkloadResolver")
-                    .is_some_and(|value| value.eq_ignore_ascii_case("false")),
+            workload_resolver_switched_off: get("MSBuildEnableWorkloadResolver")
+                .is_some_and(|value| value.eq_ignore_ascii_case("false")),
         }
     }
 }
@@ -449,6 +452,8 @@ pub struct SdkDiscovery {
     user_dotnet_root: Option<PathBuf>,
     /// See [`SdkDiscoveryEnv::workload_overrides_present`].
     workload_overrides_present: bool,
+    /// See [`SdkDiscoveryEnv::workload_resolver_switched_off`].
+    workload_resolver_switched_off: bool,
     /// What MSBuild's workload manifest provider reads of the discovered
     /// `global.json` (`GlobalJson::workloads`): MSBuild hands it the same
     /// file, where `sdk.workloadVersion` selects a workload set and
@@ -596,6 +601,7 @@ impl SdkDiscovery {
                 .find(|home| !home.as_os_str().is_empty())
                 .map(|home| home.join(".dotnet")),
             workload_overrides_present: env.workload_overrides_present,
+            workload_resolver_switched_off: env.workload_resolver_switched_off,
             unmodelled_sdks_path_override: build_env_sdks_path_override(&env.build_environment),
         })
     }
@@ -679,6 +685,7 @@ impl SdkDiscovery {
         let workload_env = workloads::WorkloadEnvironment {
             user_dotnet_root: self.user_dotnet_root.as_deref(),
             overrides_present: self.workload_overrides_present,
+            resolver_switched_off: self.workload_resolver_switched_off,
             global_json: self.global_json_workloads.clone(),
             // Only a workload locator reads it, so no other name reads the
             // muxer.

@@ -25,6 +25,7 @@ fn no_user_env() -> WorkloadEnvironment<'static> {
     WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     }
@@ -712,6 +713,7 @@ fn user_root_participates_in_the_primary_band_only() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -734,6 +736,7 @@ fn user_root_shadows_dotnet_root_in_the_current_band() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -765,6 +768,7 @@ fn user_root_shadows_by_name_even_when_it_holds_no_valid_manifest() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -791,6 +795,7 @@ fn user_root_equal_to_dotnet_root_participates_once() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(root),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -909,6 +914,7 @@ fn env_overrides_present_degrade() {
     let env = WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: true,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1058,6 +1064,7 @@ fn auto_import_finds_user_packs_even_without_user_manifests() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1084,6 +1091,7 @@ fn manifestless_user_root_still_resolves_targets_from_dotnet() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1106,6 +1114,7 @@ fn auto_import_empty_when_manifestless_user_root_ships_no_props() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1129,6 +1138,7 @@ fn nonexistent_user_root_participates_nowhere() {
     let env = WorkloadEnvironment {
         user_dotnet_root: Some(&user),
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1148,6 +1158,7 @@ fn a_global_json_pin_of_a_missing_workload_set_degrades_both_locators() {
     let env = WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: false,
+        resolver_switched_off: false,
         global_json: crate::GlobalJsonWorkloads::Reads {
             workload_version: Some("10.0.300".to_owned()),
             use_workload_sets: None,
@@ -1469,6 +1480,7 @@ fn a_name_the_running_sdk_ships_is_never_looked_up_as_a_pack() {
     fs::create_dir_all(layout.root.join("packs/Contoso.Pack/1.0.0")).unwrap();
     let declining = WorkloadEnvironment {
         overrides_present: true,
+        resolver_switched_off: false,
         ..no_user_env()
     };
     assert_eq!(layout.root_of("Contoso.Pack", &no_user_env()), shipped);
@@ -1530,6 +1542,7 @@ fn a_workload_state_we_cannot_resolve_declines_a_name_the_running_sdk_lacks() {
     );
     let declining = WorkloadEnvironment {
         overrides_present: true,
+        resolver_switched_off: false,
         ..no_user_env()
     };
     assert!(matches!(
@@ -1562,4 +1575,30 @@ fn the_disable_sentinel_declines_every_workload_answer() {
     assert_eq!(answers(), [true, true]);
     write(&version_dir.join("DisableWorkloadResolver.sentinel"), "");
     assert_eq!(answers(), [false, false]);
+}
+
+#[test]
+fn a_switched_off_resolver_leaves_a_pack_name_to_nuget_and_declines_a_locator() {
+    // `MSBuildEnableWorkloadResolver=false`: the resolver answers nothing, so
+    // NuGet serves its pinned copy over the installed pack, and a locator,
+    // which the resolvers after it do not serve as the workload resolver does,
+    // declines.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    fs::create_dir_all(layout.root.join("packs/Contoso.Pack/1.0.0")).unwrap();
+    let off = WorkloadEnvironment {
+        resolver_switched_off: true,
+        ..no_user_env()
+    };
+    assert_eq!(
+        layout.root_of("Contoso.Pack", &no_user_env()),
+        layout.root.join("packs/Contoso.Pack/1.0.0/Sdk")
+    );
+    assert_eq!(
+        layout.root_of("Contoso.Pack", &off),
+        layout.nuget.join("contoso.pack/2.0.0/Sdk")
+    );
+    let version_dir = layout.root.join("sdk/10.0.300");
+    assert!(
+        resolve_workload_locator(AUTO, &layout.root, &version_dir, &off, &Observer::new()).is_err()
+    );
 }

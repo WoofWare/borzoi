@@ -173,11 +173,14 @@ pub struct WorkloadEnvironment<'a> {
     /// True when any workload-resolution environment override is set
     /// (`DOTNETSDK_WORKLOAD_MANIFEST_ROOTS`,
     /// `DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS`,
-    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`), or the resolver is switched off
-    /// (`MSBuildEnableWorkloadResolver=false`, which makes it answer nothing
-    /// and leaves every name to the next resolver): those redirect resolution
-    /// in ways we do not model, so their presence degrades.
+    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`): those redirect resolution in ways
+    /// we do not model, so their presence degrades.
     pub overrides_present: bool,
+    /// True when `MSBuildEnableWorkloadResolver` equals `false` as
+    /// `OrdinalIgnoreCase` compares (untrimmed): `CachingWorkloadResolver`
+    /// then answers nothing, leaving every name to the next resolver. A pack
+    /// lookup is then no pack, and a locator declines.
+    pub resolver_switched_off: bool,
     /// What the workload reader reads of the `global.json` governing the
     /// evaluation (`GlobalJson::workloads`): MSBuild passes the discovered
     /// `global.json` path into its workload manifest provider, where an
@@ -268,6 +271,10 @@ pub fn resolve_workload_locator(
     observer: &Observer,
 ) -> Result<SdkResolution, SdkResolveError> {
     debug_assert!(is_workload_locator(sdk_name));
+    // The switched-off resolver leaves a locator to the resolvers after it.
+    if env.resolver_switched_off {
+        return Err(unsupported("the workload resolver is switched off"));
+    }
     let resolver = WorkloadResolver::create(dotnet_root, sdk_version_dir, env, observer)?;
 
     if sdk_name.eq_ignore_ascii_case(WORKLOAD_MANIFEST_TARGETS_LOCATOR) {
@@ -420,6 +427,9 @@ pub fn resolve_workload_pack(
     observer: &Observer,
 ) -> Result<WorkloadPackResolution, SdkResolveError> {
     debug_assert!(!is_workload_locator(sdk_name));
+    if env.resolver_switched_off {
+        return Ok(WorkloadPackResolution::NotAPack);
+    }
     let resolver = WorkloadResolver::create(dotnet_root, sdk_version_dir, env, observer)?;
     let packs = resolver.load_packs(observer)?;
     // `_packs` is keyed by `WorkloadPackId`, which compares as

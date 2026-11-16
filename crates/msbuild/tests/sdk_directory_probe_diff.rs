@@ -43,12 +43,14 @@ use common::odd_entry::{self, Odd};
 
 const SDK: &str = "Contoso.Sdk";
 
-/// A workload environment with nothing to say; the fake roots hold no
-/// workload manifest, so the workload resolver serves no name.
+/// The workload environment of every build here, which runs with
+/// `MSBuildEnableWorkloadResolver=false` ([`base_environment`]): the workload
+/// resolver serves no name.
 fn no_workloads() -> borzoi_msbuild::workloads::WorkloadEnvironment<'static> {
     borzoi_msbuild::workloads::WorkloadEnvironment {
         user_dotnet_root: None,
         overrides_present: false,
+        resolver_switched_off: true,
         global_json: Default::default(),
         process_architecture: None,
     }

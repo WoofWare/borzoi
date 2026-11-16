@@ -216,6 +216,7 @@ fn ours(project: &Path, xml: &str, seam: Seam) -> Result<Vec<PathBuf>, String> {
             &workloads::WorkloadEnvironment {
                 user_dotnet_root: user_dotnet_root.as_deref(),
                 overrides_present,
+                resolver_switched_off: common::workload_resolver_switched_off_from_process(),
                 // The fixture tempdir has no global.json above it.
                 global_json: Default::default(),
                 process_architecture: None,

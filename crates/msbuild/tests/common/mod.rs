@@ -989,6 +989,14 @@ pub fn workload_env_from_process() -> (Option<PathBuf>, bool) {
     (user_dotnet_root, overrides_present)
 }
 
+/// Whether the test process's `MSBuildEnableWorkloadResolver`, which the
+/// `dotnet msbuild` oracle child inherits, switches the workload resolver off
+/// (`false` as `OrdinalIgnoreCase` compares, untrimmed).
+pub fn workload_resolver_switched_off_from_process() -> bool {
+    std::env::var_os("MSBuildEnableWorkloadResolver")
+        .is_some_and(|value| value.eq_ignore_ascii_case("false"))
+}
+
 /// The `globals` field of an oracle request. An *empty* set sends `null` rather
 /// than `{}`, which is MSBuild's own spelling for "no global properties" — so a
 /// caller that passes no globals gets bit-for-bit the evaluation the op

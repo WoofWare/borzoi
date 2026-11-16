@@ -308,6 +308,7 @@ fn assert_sdk_captures_match(xml: &str, extras: &[(&str, &str)]) {
     let workload_env = workloads::WorkloadEnvironment {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
+        resolver_switched_off: common::workload_resolver_switched_off_from_process(),
         // The fixture tempdir has no global.json above it.
         global_json: Default::default(),
         process_architecture: None,
@@ -416,6 +417,7 @@ fn sdk_style_netcoreapp_fsharp_property_functions_leave_no_cause() {
     let workload_env = workloads::WorkloadEnvironment {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
+        resolver_switched_off: common::workload_resolver_switched_off_from_process(),
         // The fixture tempdir has no global.json above it.
         global_json: Default::default(),
         process_architecture: None,
@@ -501,6 +503,7 @@ fn sdk_style_netcoreapp_workflow_gate_no_longer_cascades() {
     let workload_env = workloads::WorkloadEnvironment {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
+        resolver_switched_off: common::workload_resolver_switched_off_from_process(),
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -572,6 +575,7 @@ fn sdk_style_netcoreapp_fsharp_path_property_default_is_inert() {
     let workload_env = workloads::WorkloadEnvironment {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
+        resolver_switched_off: common::workload_resolver_switched_off_from_process(),
         global_json: Default::default(),
         process_architecture: None,
     };
@@ -1168,6 +1172,7 @@ fn eval_cpm_fixture_both_ways(
     let workload_env = workloads::WorkloadEnvironment {
         user_dotnet_root: user_dotnet_root.as_deref(),
         overrides_present,
+        resolver_switched_off: common::workload_resolver_switched_off_from_process(),
         // The fixture tempdir has no global.json above it.
         global_json: Default::default(),
         process_architecture: None,
