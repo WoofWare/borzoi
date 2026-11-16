@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::common::parse_fsproj_with_imports;
+use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
 use borzoi_msbuild::{PropertyRead, RejectionCertainty, parse_fsproj};
 use common::{
     CONTROLLED_PROPERTY_NAMES, Oracle, SplitMix64, breaks_inside_quote, gen_bool_expr, gen_props,
@@ -82,11 +83,20 @@ const BODIES: &[&str] = &[
     "a&amp;b",
     "&lt;x&gt;",
     // CDATA: content is verbatim, and adjacent literal whitespace is still
-    // insignificant.
+    // insignificant. Beside other text it is read as the body's text when it
+    // comes first, and as the body's inner XML otherwise.
     "<![CDATA[ ]]>",
     "<![CDATA[x]]>",
     " <![CDATA[ ]]> ",
     "<![CDATA[a<b]]>",
+    "<![CDATA[]]>",
+    "x<![CDATA[y]]>",
+    "<![CDATA[y]]>x",
+    "<!-- c --><![CDATA[y]]>",
+    "x>&amp;<![CDATA[<y/>]]>",
+    "&#160;<![CDATA[$(Alpha)]]>",
+    "&#x20;<![CDATA[y]]>",
+    "<![CDATA[100%]]>",
     // Line ends, which MSBuild reads as written and roxmltree folds: in a
     // node, split by a comment, spelt as references, and in CDATA.
     "a\r\nb",
@@ -339,9 +349,10 @@ fn reserved_path_properties_are_exact_or_declined() {
     assert!(committed >= 10, "too few committed ({committed})");
 }
 
-/// Bodies MSBuild reads apart from roxmltree's text (#642, #787): an element
-/// or a processing instruction, which make it read the body's inner XML, and
-/// a carriage return, which it keeps where roxmltree folds it. Each body's
+/// Bodies MSBuild reads apart from roxmltree's text (#642, #787, #855): an
+/// element, a processing instruction or a CDATA section, which may make it
+/// read the body's inner XML, and a carriage return, which it keeps where
+/// roxmltree folds it. Each body's
 /// value is pinned to MSBuild's, and whether we commit it is pinned too, so
 /// that a reader which starts declining a body it reads exactly fails here
 /// rather than passing the differential vacuously. Each is diffed alone and
@@ -377,12 +388,55 @@ fn bodies_msbuild_reads_as_inner_xml_or_unfolded_are_exact_or_declined() {
         ("a<!-- c\r\n -->b", "ab", true),
         ("\r\n", "", true),
         ("\r", "", true),
-        // Whitespace spelt as a reference, and CDATA, which MSBuild reads as
-        // inner XML beside other text.
+        // Whitespace spelt as a reference, which MSBuild keeps or drops by
+        // its spelling.
         ("&#13;", "\r", false),
-        ("<![CDATA[a\r\nb]]>", "a\r\nb", false),
-        (" <![CDATA[\r\n]]> ", "\r\n", false),
-        ("x<![CDATA[a\r\nb]]>y", "x<![CDATA[a\r\nb]]>y", false),
+        ("&#x20;<![CDATA[x]]>", "x", false),
+        ("&#32;<![CDATA[x]]>", " x", false),
+        // CDATA: its content verbatim, line ends and all, and read as the
+        // body's text when it is all of it or comes first (after Unicode
+        // whitespace), as the body's inner XML otherwise.
+        ("<![CDATA[a\r\nb]]>", "a\r\nb", true),
+        ("<![CDATA[\r]]>", "\r", true),
+        (" <![CDATA[\r\n]]> ", "\r\n", true),
+        ("<![CDATA[]]>", "", true),
+        ("<![CDATA[y]]>x<![CDATA[z]]>", "yxz", true),
+        ("<![CDATA[]]>x<![CDATA[z]]>", "xz", true),
+        ("<![CDATA[a]]><!--c-->b", "ab", true),
+        ("\r\n  <![CDATA[a]]>\r\n  <!--c-->\r\n", "a", true),
+        ("&#160;<![CDATA[a]]>x", "\u{a0}ax", true),
+        ("\u{85}\u{2003}<![CDATA[a]]>x", "\u{85}\u{2003}ax", true),
+        ("\u{200b}<![CDATA[a]]>x", "\u{200b}<![CDATA[a]]>x", true),
+        ("<![CDATA[<a/>&amp;]]>", "<a/>&amp;", true),
+        ("<![CDATA[]]]]><![CDATA[>]]>", "]]>", true),
+        ("x<![CDATA[a\r\nb]]>y", "x<![CDATA[a\r\nb]]>y", true),
+        ("x<![CDATA[]]>", "x<![CDATA[]]>", true),
+        ("<!--c--><![CDATA[a]]>", "<!--c--><![CDATA[a]]>", true),
+        (
+            "a<!--c--> <![CDATA[z]]> <!--d-->b",
+            "a<!--c--><![CDATA[z]]><!--d-->b",
+            true,
+        ),
+        // Inner XML spells each text afresh: `>` and every reference to one
+        // of `&`, `<` and `>` as an entity, every other character as itself.
+        (
+            "x>y&#38;&lt;&quot;'&#65;\t\r\n<![CDATA[z]]>",
+            "x&gt;y&amp;&lt;\"'A\t\r\n<![CDATA[z]]>",
+            true,
+        ),
+        (
+            "x&#x1D11E;\u{e9}<![CDATA[a]]>",
+            "x\u{1d11e}\u{e9}<![CDATA[a]]>",
+            true,
+        ),
+        (
+            "a<!-- c\r\n d -->b<![CDATA[z]]>",
+            "a<!-- c\r\n d -->b<![CDATA[z]]>",
+            true,
+        ),
+        // Expansion runs on what the XML layer reads, CDATA content included.
+        ("<![CDATA[%41]]>", "A", true),
+        ("x<![CDATA[%41]]>", "x<![CDATA[A]]>", true),
     ] {
         let xml = project_xml(&[("Alpha", body), ("Beta", "[$(Alpha)]")]);
         for at in [None, Some(dir.as_path())] {
@@ -1038,6 +1092,232 @@ fn fixed_seed_document_sweep() {
         committed >= 500,
         "too few committed ({committed}) over {CASES} documents"
     );
+}
+
+/// Text pieces of a generated CDATA-bearing body, as element content spells
+/// them: plain text, XML whitespace (insignificant alone), Unicode whitespace
+/// that is not XML's (which .NET's `TrimStart` skips before a CDATA section),
+/// whitespace spelt as a reference (which MSBuild keeps or drops by its
+/// spelling), the characters inner XML re-spells, and what expansion reads.
+const CDATA_TEXT: &[&str] = &[
+    "x",
+    "a b",
+    " ",
+    "\r\n  ",
+    "\t",
+    "\r",
+    "\u{a0}",
+    "&#160;",
+    "\u{85}\u{2003}",
+    "\u{200b}",
+    "&#32;",
+    "&#x20;",
+    "&#13;",
+    ">",
+    "&gt;",
+    "&amp;",
+    "&lt;",
+    "&quot;'",
+    "&#65;",
+    "\u{1d11e}",
+    "$(Alpha)",
+    "%41",
+    "a;b",
+];
+
+/// Comments of a generated body, one holding what looks like a CDATA section.
+const CDATA_COMMENTS: &[&str] = &[
+    "<!-- c -->",
+    "<!---->",
+    "<!--<![CDATA[x]]>-->",
+    "<!--\r\n-->",
+];
+
+/// CDATA section contents: nothing, whitespace and line ends (verbatim, and
+/// never insignificant), markup-like text (an element, a comment, an entity,
+/// a section opening, `]]`), and what expansion reads.
+const CDATA_CONTENTS: &[&str] = &[
+    "",
+    " ",
+    "x",
+    "a\r\nb",
+    "\r",
+    "<a/>",
+    "<!-- c -->",
+    "&amp;",
+    "<![CDATA[",
+    "]]",
+    "]",
+    ">",
+    "\u{a0}",
+    "$(Alpha)",
+    "%41",
+    "100%",
+    "a;b",
+];
+
+/// A body of one to five pieces (text, comment or CDATA section, CDATA the
+/// likeliest), as element content spells it, holding at least one CDATA
+/// section.
+fn gen_cdata_body(rng: &mut SplitMix64) -> String {
+    loop {
+        let mut body = String::new();
+        let mut has_cdata = false;
+        for _ in 0..1 + rng.below(5) {
+            match rng.below(5) {
+                0 | 1 => body.push_str(rng.pick(CDATA_TEXT)),
+                2 => body.push_str(rng.pick(CDATA_COMMENTS)),
+                _ => {
+                    has_cdata = true;
+                    body.push_str(&format!("<![CDATA[{}]]>", rng.pick(CDATA_CONTENTS)));
+                }
+            }
+        }
+        // Text holding `]]>` is not well formed, so only a body free of it
+        // outside its sections tests anything.
+        let outside: String = body
+            .split("<![CDATA[")
+            .map(|s| s.rsplit("]]>").next().unwrap_or(s))
+            .collect();
+        if has_cdata && !outside.contains("]]>") {
+            return body;
+        }
+    }
+}
+
+/// Start-tag attributes for an element whose body is generated: none, or a
+/// condition holding a `>` and quotes of either kind, which a reader of the
+/// body must not take for the end of the start tag.
+const CDATA_CONDITIONS: &[&str] = &[
+    "",
+    " Condition=\"'>' != '&quot;'\"",
+    " Condition = '&apos;\"&gt;&apos; != &apos;>&apos;' ",
+];
+
+/// `body`, element content, spelt as an attribute value whose reading is
+/// `body` itself.
+fn attribute_spelling(body: &str) -> String {
+    body.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
+}
+
+/// What a generated CDATA sweep committed: property bodies, and metadata
+/// written as an element's content and as an attribute.
+#[derive(Default, Debug)]
+struct CdataTally {
+    properties: usize,
+    content: usize,
+    attribute: usize,
+}
+
+/// One generated CDATA-bearing document: `body` as a property's body (read
+/// back by a later write), as a metadatum's element content, and, spelt as an
+/// attribute, as a metadatum MSBuild stores as element content and reads back
+/// (`SetXmlNodeInnerContents`). Every value we commit must be MSBuild's.
+fn check_cdata_document(oracle: &mut Oracle, body: &str, condition: &str, tally: &mut CdataTally) {
+    let attribute = attribute_spelling(body);
+    let xml = format!(
+        "<Project>\n  <PropertyGroup>\n    <Alpha{condition}>{body}</Alpha>\n    <Beta>[$(Alpha)]</Beta>\n  \
+         </PropertyGroup>\n  <ItemGroup>\n    <Helper Include=\"a\" Attr=\"{attribute}\">\n      \
+         <Content{condition}>{body}</Content>\n    </Helper>\n  </ItemGroup>\n</Project>\n"
+    );
+    let names: Vec<String> = NAMES.iter().map(|n| (*n).to_string()).collect();
+    let committed = check_names_at_path(oracle, &xml, &names, None);
+    tally.properties += usize::from(committed.iter().any(|n| n == "Alpha"));
+
+    let dir = TempDir::new().unwrap();
+    let path = borzoi_msbuild::observed::host_fs::canonicalize(dir.path())
+        .unwrap()
+        .join("p.fsproj");
+    let probe = ReadProbe {
+        item_types: vec!["Helper".to_owned()],
+        ..ReadProbe::default()
+    };
+    let (_, reads) = parse_fsproj_reads(
+        &xml,
+        &path,
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        None,
+        &probe,
+    )
+    .expect("the generated document parses");
+    let read = &reads.items["Helper"];
+    let Some(theirs) = oracle.items_meta(&xml, &path, "Helper", &["Attr", "Content"]) else {
+        assert!(
+            !read.exact,
+            "MSBuild rejects the project, and we read its items\n{xml}"
+        );
+        return;
+    };
+    if !read.exact {
+        return;
+    }
+    let [row] = read.items.as_deref().unwrap_or_default() else {
+        panic!("one Helper item, not {:?}\n{xml}", read.items);
+    };
+    assert_eq!(theirs.len(), 1, "{xml}");
+    for (name, key, count) in [
+        ("Attr", "attr", &mut tally.attribute),
+        ("Content", "content", &mut tally.content),
+    ] {
+        if row.uncertain_metadata.iter().any(|n| n == key) {
+            continue;
+        }
+        let Some(ours) = row.metadata.get(key) else {
+            continue;
+        };
+        assert_eq!(
+            ours, &theirs[0].1[name],
+            "certain-implies-exact violated for %({name}): we read {ours:?}, MSBuild {:?}\n{xml}",
+            theirs[0].1[name]
+        );
+        *count += 1;
+    }
+}
+
+/// Generated bodies holding CDATA sections among text, comments and entities,
+/// with markup-like text inside the sections, in each position MSBuild reads
+/// a body: a property, a metadatum's element content, and a metadatum's
+/// attribute (whose value MSBuild parses as XML when it holds a `<`). Every
+/// committed value must be MSBuild's, and enough commit in each position that
+/// the claim is not vacuous.
+#[test]
+fn generated_cdata_bodies_are_exact_or_declined() {
+    cdata_sweep(0xcda7_a5ec_7105, 500);
+}
+
+/// [`generated_cdata_bodies_are_exact_or_declined`] from a fresh seed, at a
+/// volume `BORZOI_MSBUILD_SOAK_CASES` sets.
+#[test]
+#[ignore = "soak: fresh seed"]
+fn generated_cdata_bodies_soak() {
+    let (seed, cases) = common::soak_parameters("generated_cdata_bodies", 5000);
+    cdata_sweep(seed, cases);
+}
+
+fn cdata_sweep(seed: u64, cases: usize) {
+    let mut oracle = Oracle::spawn();
+    let mut rng = SplitMix64(seed);
+    let mut tally = CdataTally::default();
+    for _ in 0..cases {
+        let body = gen_cdata_body(&mut rng);
+        let condition = *rng.pick(CDATA_CONDITIONS);
+        check_cdata_document(&mut oracle, &body, condition, &mut tally);
+    }
+    eprintln!("generated CDATA bodies: {tally:?} committed over {cases} documents");
+    for (position, committed) in [
+        ("property", tally.properties),
+        ("element content", tally.content),
+        ("attribute", tally.attribute),
+    ] {
+        assert!(
+            committed * 4 >= cases,
+            "too few {position} bodies committed ({committed} of {cases})"
+        );
+    }
 }
 
 /// `<Choose>` nesting around MSBuild's ceiling. MSBuild's loader refuses a

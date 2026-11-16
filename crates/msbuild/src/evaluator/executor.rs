@@ -1281,9 +1281,9 @@ fn plain_references(raw: &str) -> Option<Vec<&str>> {
 }
 
 /// The text of `element` as MSBuild reads it ([`super::collect_element_text`]),
-/// or decline where that reading does: a body holding more than text and
-/// comments (which MSBuild takes as inner XML), CDATA, or whitespace spelt as
-/// a reference.
+/// or decline where that reading does: a body holding an element or a
+/// processing instruction (which MSBuild re-spells as inner XML), or
+/// whitespace spelt as a reference.
 fn element_text(element: Node<'_, '_>) -> Result<String, Decline> {
     super::collect_element_text(element).map_or_else(
         || {

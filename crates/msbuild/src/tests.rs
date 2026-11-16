@@ -2349,15 +2349,21 @@ fn substitution_applies_to_a_metadata_child_element() {
 
 /// Metadata spellings MSBuild reads apart from its text (#642) read as
 /// `Unknown` on a reference: an attribute MSBuild parses as XML (holding a
-/// `<`, here an encoded CDATA section), a value holding a backslash (its Unix
-/// path fixup may rewrite it), and a body holding an element (MSBuild reads the
-/// inner XML). An attribute holding a tab or an entity, and a body holding a
-/// carriage return, read exactly, as MSBuild reads them.
+/// `<`, here an encoded element), a value holding a backslash (its Unix path
+/// fixup may rewrite it), and a body holding an element (MSBuild reads the
+/// inner XML). An attribute holding a tab, an entity or an encoded CDATA
+/// section, and a body holding a carriage return or a CDATA section, read
+/// exactly, as MSBuild reads them.
 #[test]
 fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
     for (metadata, value) in [
         ("ExcludeAssets=\"all\tx\" />", "all\tx"),
         ("ExcludeAssets=\"a&amp;b\" />", "a&b"),
+        ("ExcludeAssets=\"&lt;![CDATA[all]]&gt;\" />", "all"),
+        (
+            "><ExcludeAssets> <![CDATA[all]]> </ExcludeAssets></ProjectReference>",
+            "all",
+        ),
         (
             "><ExcludeAssets>a\r\nb</ExcludeAssets></ProjectReference>",
             "a\r\nb",
@@ -2377,7 +2383,7 @@ fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
         );
     }
     for metadata in [
-        "ExcludeAssets=\"&lt;![CDATA[all]]&gt;\"",
+        "ExcludeAssets=\"a&lt;x/&gt;ll\"",
         "ExcludeAssets=\"\\tmp\\all\"",
         "><ExcludeAssets>a<x/>b</ExcludeAssets></ProjectReference",
         "><ExcludeAssets>a<?p q?>b</ExcludeAssets></ProjectReference",
@@ -2418,7 +2424,9 @@ fn package_metadata_msbuild_reads_its_own_way_is_uncertain() {
         ("Version=\"1.0\t\"", false),
         ("Version=\"1\t0\"", true),
         ("Version=\"1&amp;0\"", true),
-        ("Version=\"&lt;![CDATA[1.0]]&gt;\"", false),
+        ("Version=\"&lt;![CDATA[1.0]]&gt;\"", true),
+        ("Version=\"1&lt;x/&gt;0\"", false),
+        ("><Version> <![CDATA[1.0]]> </Version></X", true),
         ("><Version>1.0</Version></X", true),
         ("><Version>1<x/>0</Version></X", false),
         ("><Version>1<?p q?>0</Version></X", false),
@@ -2483,12 +2491,24 @@ fn a_copy_records_its_unreadable_metadata_in_one_order() {
 }
 
 /// A `CompileOrder` MSBuild reads its own way (#642) declines the compile
-/// order: an attribute MSBuild parses as XML, a backslash, a body holding an
-/// element.
+/// order: an attribute MSBuild parses as XML holding an element, a backslash,
+/// a body holding an element. A CDATA section, in an attribute or a body,
+/// reads as its content.
 #[test]
 fn compile_order_msbuild_reads_its_own_way_declines() {
     for order in [
         "CompileOrder=\"&lt;![CDATA[CompileFirst]]&gt;\" />",
+        "><CompileOrder> <![CDATA[CompileFirst]]> </CompileOrder></Compile>",
+    ] {
+        let src = format!(
+            "<Project><ItemGroup><Compile Include=\"B.fs\" /><Compile Include=\"A.fs\" {order}</ItemGroup></Project>"
+        );
+        let p = parse(&src);
+        assert!(!p.items_uncertain, "{src:?}");
+        assert_eq!(file_names(&p.items), ["A.fs", "B.fs"], "{src:?}");
+    }
+    for order in [
+        "CompileOrder=\"Compile&lt;x/&gt;First\" />",
         "CompileOrder=\"\\tmp\\CompileFirst\" />",
         "><CompileOrder>Compile<x/>First</CompileOrder></Compile>",
     ] {
@@ -2661,18 +2681,16 @@ fn whitespace_only_text_child_drops_per_node_not_per_value() {
 
 #[test]
 fn unmodellable_element_bodies_degrade() {
-    // Two shapes we cannot derive a value for, so we must not commit one:
-    //
-    // * CDATA. MSBuild keeps CDATA content verbatim while dropping adjacent
-    //   literal whitespace (`<P> <![CDATA[ ]]> </P>` is " ", length 1), but
-    //   roxmltree merges CDATA into its neighbouring text node and truncates
-    //   the node's source range, so we cannot tell that apart from `<P>   </P>`
-    //   (which is ""). CDATA in a property body is vanishingly rare: one file
-    //   in the whole SDK chain, none in the F# corpus.
-    // * Entity-encoded whitespace. MSBuild is inconsistent — `&#32;` and
-    //   `&#9;` are kept (length 1), `&#x20;` is dropped (length 0) — so we
-    //   decline rather than pick a side.
-    for body in ["<![CDATA[ ]]>", " <![CDATA[ ]]> ", "&#32;", "&#x20;"] {
+    // Entity-encoded whitespace is a shape we cannot derive a value for, so we
+    // must not commit one: MSBuild is inconsistent — `&#32;` and `&#9;` are
+    // kept (length 1), `&#x20;` is dropped (length 0) — so we decline rather
+    // than pick a side.
+    for body in [
+        "&#32;",
+        "&#x20;",
+        "<![CDATA[x]]>&#x20;",
+        "&#32;<![CDATA[x]]>",
+    ] {
         let src = format!(
             "<Project>\n  <PropertyGroup>\n    <P>{body}</P>\n  </PropertyGroup>\n</Project>"
         );
@@ -2690,11 +2708,35 @@ fn unmodellable_element_bodies_degrade() {
             p.diagnostics
         );
     }
-    // A CDATA body carrying real content degrades too — sound, and it costs
-    // nothing: the shape does not occur in any project we evaluate.
-    let src = "<Project>\n  <PropertyGroup>\n    <P><![CDATA[x]]></P>\n  \
-               </PropertyGroup>\n</Project>";
-    assert!(!parse(src).properties.contains_key("P"));
+}
+
+/// A CDATA section's content is read verbatim, with the literal whitespace
+/// beside it insignificant; beside other text it reads as MSBuild's inner XML
+/// unless it comes first (`fsproj_property_table_diff` pins each against
+/// `dotnet msbuild`).
+#[test]
+fn cdata_bodies_read_as_msbuild_reads_them() {
+    for (body, value) in [
+        ("<![CDATA[ ]]>", " "),
+        (" <![CDATA[ ]]> ", " "),
+        ("<![CDATA[x]]>", "x"),
+        ("<![CDATA[]]>", ""),
+        ("<![CDATA[a\r\nb]]>", "a\r\nb"),
+        ("<![CDATA[a]]>x<!-- c -->", "ax"),
+        ("\u{a0}<![CDATA[a]]>x", "\u{a0}ax"),
+        ("x<![CDATA[y]]>", "x<![CDATA[y]]>"),
+        ("<!-- c --> <![CDATA[y]]>", "<!-- c --><![CDATA[y]]>"),
+        ("x>y&amp;<![CDATA[<z/>]]>", "x&gt;y&amp;<![CDATA[<z/>]]>"),
+    ] {
+        let src = format!(
+            "<Project>\n  <PropertyGroup>\n    <P>{body}</P>\n  </PropertyGroup>\n</Project>"
+        );
+        assert_eq!(
+            parse(&src).properties.get("P").map(String::as_str),
+            Some(value),
+            "{body:?}"
+        );
+    }
 }
 
 #[test]

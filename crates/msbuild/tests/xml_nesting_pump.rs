@@ -33,7 +33,7 @@ const EVERY_CONSTRUCT: &str = r#"<Project Sdk="Microsoft.NET.Sdk" DefaultTargets
   <ItemGroup Condition="true">
     <Compile Include="a.fs" Condition="true"><Link>b.fs</Link><Meta><Nested>n</Nested></Meta></Compile>
     <Compile Remove="c.fs" />
-    <Compile Update="a.fs" Link="d.fs" />
+    <Compile Update="a.fs" Link="d.fs" Meta="&lt;![CDATA[m]]&gt;" />
     <ProjectReference Include="../q/q.fsproj"><Private>false</Private></ProjectReference>
     <PackageReference Include="Pkg" Version="1.0.0"><PrivateAssets>all</PrivateAssets></PackageReference>
     <PackageVersion Include="Pkg" Version="1.0.0" />
