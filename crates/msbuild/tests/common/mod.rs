@@ -373,6 +373,7 @@ impl Oracle {
         Oracle::spawn_in(
             vec!["--msbuild-sdk".into(), sdk_dir.as_os_str().to_owned()],
             Some(working_dir.to_path_buf()),
+            None,
         )
     }
 
@@ -384,11 +385,23 @@ impl Oracle {
         Oracle::spawn_with(vec!["--sdks-path".into(), sdks_path.as_os_str().to_owned()])
     }
 
-    fn spawn_with(args: Vec<std::ffi::OsString>) -> Oracle {
-        Oracle::spawn_in(args, None)
+    /// An oracle whose process runs under the culture `locale` names (as its
+    /// `LANG` and `LC_ALL`), for a differential where MSBuild's answer turns on
+    /// the build's culture. MSBuild also reads the two as properties, which no
+    /// fixture of such a differential may reference.
+    pub fn spawn_with_locale(locale: &str) -> Oracle {
+        Oracle::spawn_in(Vec::new(), None, Some(locale.to_string()))
     }
 
-    fn spawn_in(args: Vec<std::ffi::OsString>, working_dir: Option<PathBuf>) -> Oracle {
+    fn spawn_with(args: Vec<std::ffi::OsString>) -> Oracle {
+        Oracle::spawn_in(args, None, None)
+    }
+
+    fn spawn_in(
+        args: Vec<std::ffi::OsString>,
+        working_dir: Option<PathBuf>,
+        locale: Option<String>,
+    ) -> Oracle {
         let bin = ensure_oracle_built().to_path_buf();
         // A factory rather than a bare program+args: the child's environment must
         // be scrubbed (see `scrub_oracle_env`), and every respawn must scrub it
@@ -400,6 +413,9 @@ impl Oracle {
                 cmd.current_dir(dir);
             }
             scrub_oracle_env(&mut cmd);
+            if let Some(locale) = &locale {
+                cmd.env("LANG", locale).env("LC_ALL", locale);
+            }
             cmd
         };
         Oracle {

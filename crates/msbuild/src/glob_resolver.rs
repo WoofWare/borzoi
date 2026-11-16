@@ -66,11 +66,13 @@
 //!   a directory already on the walk's path is a cycle, which declines
 //!   ([`GlobDecline::SymlinkCycle`]) rather than guess what MSBuild does.
 //! - A literal include meets its excludes ignoring ASCII case on every host,
-//!   as MSBuild's `FileSpecMatcherTester` does. Against a glob include,
-//!   selection and order decline where ASCII case or a non-ASCII name would
-//!   decide them (see `crate::glob`): the file matcher's case rule there
-//!   depends on which directories exist and on the include's walk root
-//!   (#607).
+//!   as MSBuild's `FileSpecMatcherTester` does.
+//! - A glob include meets them as MSBuild's file matcher does on Linux
+//!   (`crate::glob::select_ignoring_case`): the file system decides which
+//!   directories exist, the include's fixed directory and each exclude's
+//!   looked up as written, and every comparison past that ignores ASCII
+//!   case. It declines where the build's culture would decide, and on any
+//!   other host wherever ASCII case would (#607).
 
 use std::path::{Path, PathBuf};
 
@@ -78,10 +80,25 @@ use crate::observed::{self, EntryKind, Observer};
 use crate::{GlobRequest, SpecFragment, Unmodelled};
 
 use crate::glob::{
-    GlobDecline, Pattern, compares_unnormalised, has_wildcard_directory_part, is_legal_filespec,
-    is_recursive_filename_pattern, select, split_filespec, split_glob_root, split_segments,
+    GlobDecline, MatcherPattern, Pattern, as_file_matcher_reads, compares_unnormalised,
+    has_tilde_after_first_fixed_segment, has_wildcard_directory_part, is_legal_filespec,
+    is_recursive_filename_pattern, matches_by_regex, regex_filename, regex_question_readings,
+    select, select_ignoring_case, split_filespec, split_glob_root, split_segments,
     unmodelled_shape,
 };
+
+/// Whether this host's glob case rule is the one [`select_ignoring_case`]
+/// models: MSBuild's file matcher as measured on Linux. Elsewhere a glob
+/// include declines wherever ASCII case would decide its selection.
+const FILE_MATCHER_CASE_RULE_MODELLED: bool = cfg!(target_os = "linux");
+
+/// A glob exclude as the file matcher is handed it: its decoded spelling, and
+/// whether the matcher compares files with it by regular expression.
+#[derive(Debug, Clone)]
+struct GlobExclude {
+    norm: String,
+    by_regex: bool,
+}
 
 /// Maximum number of path components a recursive (`**`) glob descends.
 const MAX_GLOB_DEPTH: usize = 64;
@@ -117,10 +134,12 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
     // all-files reading of `*.*`. An absolute exclude keeps its path; a
     // relative one is rooted at the project directory with the base kept
     // literal. The list is consulted only by a glob include, so what it
-    // cannot model declines only there: a filespec the matcher refuses, and
-    // an exclude with a `.` segment, which the matcher compares by spelling
-    // and `Pattern` would drop (`GlobDecline::CurDirSegmentExclude`).
-    let glob_excludes: Result<Vec<Pattern>, GlobDecline> = req
+    // cannot model declines only there: a filespec the matcher refuses, an
+    // exclude with a `.` segment, which the matcher compares by spelling and
+    // `Pattern` would drop (`GlobDecline::CurDirSegmentExclude`), and one
+    // whose fixed directory the matcher resolves against the build's working
+    // directory (`Unmodelled::TildeInFixedDirectory`).
+    let glob_excludes: Result<Vec<GlobExclude>, GlobDecline> = req
         .excludes
         .iter()
         .filter(|e| e.excludes_from_globs())
@@ -132,57 +151,20 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
             if has_cur_dir_segment(&norm) {
                 return Err(GlobDecline::CurDirSegmentExclude { pattern: norm });
             }
-            Ok(
-                Pattern::with_literal_prefix(anchor_prefix(&base_segs, &norm), &norm)
-                    .with_all_files_rule(),
-            )
+            if has_tilde_after_first_fixed_segment(&norm) {
+                return Err(GlobDecline::OutsideModelledShape {
+                    spec: norm,
+                    shape: Unmodelled::TildeInFixedDirectory,
+                });
+            }
+            let by_regex = matches_by_regex(&norm);
+            Ok(GlobExclude { norm, by_regex })
         })
         .collect();
-    // The glob excludes with a wildcard directory part, each with whether it
-    // is absolute. Such an exclude must be anchored as the glob include it
-    // filters is (`Unmodelled::MixedAnchoring`), and must not meet an include
-    // with a `..` segment (`Unmodelled::ParentSegmentUnderWildcardExclude`).
-    let glob_exclude_anchoring: Vec<(String, bool)> = req
-        .excludes
-        .iter()
-        .filter(|e| e.excludes_from_globs())
-        .map(|e| e.unescape().replace('\\', "/"))
-        .filter(|norm| has_wildcard_directory_part(norm))
-        .map(|norm| {
-            let absolute = norm.starts_with('/');
-            (norm, absolute)
-        })
-        .collect();
-
-    // The same excludes, each with its fixed directory as absolute segments
-    // and the directory segments its wildcard part names after its first
-    // `**`. MSBuild applies those only to directories its walk enters, which
-    // start below the include's own fixed directory
-    // (`Unmodelled::GlobstarExcludeAboveIncludeRoot`).
-    let globstar_excludes: Vec<(String, Vec<String>, Vec<String>)> = glob_exclude_anchoring
-        .iter()
-        .filter_map(|(norm, absolute)| {
-            let (_, wildcard_dir, _) = split_filespec(norm);
-            let dirs = split_segments(&wildcard_dir);
-            let globstar = dirs.iter().position(|seg| *seg == "**")?;
-            let after: Vec<String> = dirs[globstar + 1..]
-                .iter()
-                .filter(|seg| **seg != "**")
-                .map(|seg| seg.to_string())
-                .collect();
-            let prefix = split_glob_root(norm).prefix;
-            let base: Vec<String> = if *absolute {
-                prefix
-            } else {
-                base_segs
-                    .iter()
-                    .map(|s| s.to_string())
-                    .chain(prefix)
-                    .collect()
-            };
-            Some((norm.clone(), base, after))
-        })
-        .collect();
+    // The glob excludes that take part: those whose fixed directory exists
+    // (`fixed_directory_exists`). Asked of the file system once, by the first
+    // glob include, so a list of literal includes reads nothing.
+    let mut live_excludes: Option<Vec<GlobExclude>> = None;
 
     let mut out: Vec<PathBuf> = Vec::new();
     // The evaluator already split, trimmed and $()-expanded each fragment
@@ -210,7 +192,37 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
         if !is_legal_filespec(&norm) {
             return Err(GlobDecline::IllegalFilespec { pattern: norm });
         }
+        if has_cur_dir_segment(&split_filespec(&norm).1) {
+            return Err(GlobDecline::OutsideModelledShape {
+                spec: norm,
+                shape: Unmodelled::CurDirInWildcardDirectory,
+            });
+        }
+        if has_tilde_after_first_fixed_segment(&norm) {
+            return Err(GlobDecline::OutsideModelledShape {
+                spec: norm,
+                shape: Unmodelled::TildeInFixedDirectory,
+            });
+        }
         let glob_excludes = glob_excludes.as_ref().map_err(Clone::clone)?;
+        let live_excludes = live_excludes.get_or_insert_with(|| {
+            glob_excludes
+                .iter()
+                .filter(|e| fixed_directory_exists(&e.norm, req.base_dir, req.observer))
+                .cloned()
+                .collect()
+        });
+        // The live excludes with a wildcard directory part, each with whether
+        // it is absolute. Such an exclude must be anchored as the glob include
+        // it filters is (`Unmodelled::MixedAnchoring`), and must not meet an
+        // include with a `..` segment
+        // (`Unmodelled::ParentSegmentUnderWildcardExclude`).
+        let glob_exclude_anchoring: Vec<(&str, bool)> = live_excludes
+            .iter()
+            .map(|e| e.norm.as_str())
+            .filter(|norm| has_wildcard_directory_part(norm))
+            .map(|norm| (norm, norm.starts_with('/')))
+            .collect();
         if has_parent_segment(&norm) && !glob_exclude_anchoring.is_empty() {
             return Err(GlobDecline::OutsideModelledShape {
                 spec: norm,
@@ -222,11 +234,11 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
             .find(|(_, exclude_absolute)| *exclude_absolute != absolute)
         {
             return Err(GlobDecline::OutsideModelledShape {
-                spec: exclude.clone(),
+                spec: exclude.to_string(),
                 shape: Unmodelled::MixedAnchoring,
             });
         }
-        if !glob_excludes.is_empty() && has_cur_dir_segment(&norm) {
+        if !live_excludes.is_empty() && has_cur_dir_segment(&norm) {
             return Err(GlobDecline::CurDirSegmentExclude { pattern: norm });
         }
         // A glob: no escaped wildcard (that would have made it literal), so
@@ -250,12 +262,11 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
         // after a `**` cannot take one of them; matched by full path, it
         // would (`**/Deep/**` against `sub/Deep/*.fs`). Decline where it
         // could, ignoring case, the conservative direction.
-        if let Some((exclude, _, _)) = globstar_excludes.iter().find(|(_, base, after)| {
-            anchor_segs.len() > base.len()
-                && anchor_segs
-                    .iter()
-                    .zip(base)
-                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        if let Some((exclude, _)) = glob_exclude_anchoring.iter().find(|(exclude, _)| {
+            let Some((base, after)) = globstar_exclude_names(exclude, &base_segs) else {
+                return false;
+            };
+            walk_root_below(&anchor_segs, &base)
                 && after.iter().any(|named| {
                     let named = Pattern::parse(named);
                     anchor_segs[base.len()..]
@@ -264,15 +275,17 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
                 })
         }) {
             return Err(GlobDecline::OutsideModelledShape {
-                spec: exclude.clone(),
+                spec: exclude.to_string(),
                 shape: Unmodelled::GlobstarExcludeAboveIncludeRoot,
             });
         }
-        // The pattern keeps the base literal for relative specs; an absolute
+        // The patterns keep the base literal for relative specs; an absolute
         // fragment is parsed on its own (its own wildcards are wildcards). A
         // filename part of `*.*` matches every file, as MSBuild's does.
-        let pat = Pattern::with_literal_prefix(anchor_prefix(&base_segs, &norm), &norm)
-            .with_all_files_rule();
+        let include = MatcherPattern {
+            patterns: file_matcher_patterns(&norm, anchor_prefix(&base_segs, &norm), false)?,
+            by_regex: matches_by_regex(&norm),
+        };
         // Root the walk at the literal anchor so `../shared/*.fs` enumerates
         // the sibling directory and `/opt/lib/*.fs` the absolute one.
         // `anchor_segs` is absolute (or empty → `/`).
@@ -291,9 +304,11 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
         // not: a name outside it could match where the plain reading says it
         // does not. A non-ASCII name is the exception, being common and
         // harmless to an ASCII pattern (which the specs are) except in two
-        // ways: a `?` meeting a character two UTF-16 units wide, and
-        // `OrdinalIgnoreCase` folding `ı` or `ſ` onto ASCII. So it is held
-        // only where a `?` is in play, or it has one of those two.
+        // ways: a `?` meeting a character two UTF-16 units wide, and a letter
+        // folded onto ASCII, by `OrdinalIgnoreCase` (`ı`, `ſ`) or by the file
+        // matcher's case-ignoring regular expressions (`K`, the Kelvin sign,
+        // onto `k`, and `İ` onto `i`, on any culture: oracle-pinned). So it is
+        // held only where a `?` is in play, or it has one of those letters.
         let question = norm.contains('?')
             || req
                 .excludes
@@ -304,9 +319,7 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
             .into_iter()
             .map(|rel| {
                 let shape = match unmodelled_shape(&rel) {
-                    Some(Unmodelled::NonAscii)
-                        if !question && !rel.contains(['\u{131}', '\u{17f}']) =>
-                    {
+                    Some(Unmodelled::NonAscii) if !question && !rel.contains(FOLDED_ONTO_ASCII) => {
                         unmodelled_shape(&rel.replace(|c: char| !c.is_ascii(), "x"))
                     }
                     shape => shape,
@@ -322,11 +335,165 @@ pub fn resolve(req: &GlobRequest<'_>) -> Result<Vec<PathBuf>, GlobDecline> {
             })
             .collect::<Result<_, _>>()?;
         let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-        for key in select(&key_refs, std::slice::from_ref(&pat), glob_excludes)? {
+        // Each live exclude as this include's walk meets it: one based above
+        // the walk root is handed every file below it (`file_matcher_patterns`).
+        let excludes: Vec<MatcherPattern> = live_excludes
+            .iter()
+            .map(|e| {
+                let walked_from_root = e.by_regex
+                    && walk_root_below(
+                        &anchor_segs,
+                        &fixed_directory_segments(&e.norm, &base_segs),
+                    );
+                Ok(MatcherPattern {
+                    patterns: file_matcher_patterns(
+                        &e.norm,
+                        anchor_prefix(&base_segs, &e.norm),
+                        walked_from_root,
+                    )?,
+                    by_regex: e.by_regex,
+                })
+            })
+            .collect::<Result<_, GlobDecline>>()?;
+        let selected = if FILE_MATCHER_CASE_RULE_MODELLED {
+            select_ignoring_case(&key_refs, &include, &excludes)?
+        } else {
+            // `select` takes one pattern per include fragment.
+            let [pat] = include.patterns.as_slice() else {
+                return Err(GlobDecline::OutsideModelledShape {
+                    spec: norm,
+                    shape: Unmodelled::RegexQuestionAcrossSeparator,
+                });
+            };
+            let excludes: Vec<Pattern> = excludes
+                .iter()
+                .flat_map(|e| e.patterns.iter().cloned())
+                .collect();
+            select(&key_refs, std::slice::from_ref(pat), &excludes)?
+        };
+        for key in selected {
             out.push(Path::new("/").join(&key));
         }
     }
     Ok(out)
+}
+
+/// Non-ASCII letters MSBuild's matchers fold onto ASCII ones: `ı` and `ſ`
+/// under `OrdinalIgnoreCase`, and `K` (the Kelvin sign) and `İ` under the file
+/// matcher's case-ignoring regular expressions.
+const FOLDED_ONTO_ASCII: [char; 4] = ['\u{131}', '\u{17f}', '\u{212a}', '\u{130}'];
+
+/// Whether a decoded glob exclude's fixed directory exists, as MSBuild's
+/// `FileMatcher.GetFileSearchData` asks before using it (`Directory.Exists`
+/// of that directory as written, rooted at the project directory unless
+/// absolute). One that does not is dropped. The host's file system answers,
+/// so on a case-sensitive one `SUB/*.fs` excludes nothing where only `sub`
+/// exists, and excludes from `sub` too where an empty `SUB` exists
+/// (oracle-pinned, #607).
+fn fixed_directory_exists(norm: &str, base_dir: &Path, observer: &Observer) -> bool {
+    let (fixed, _, _) = split_filespec(norm);
+    observed::is_dir(observer, &base_dir.join(fixed))
+}
+
+/// The readings of a decoded glob the file matcher is handed, as
+/// [`Pattern`]s rooted under `prefix`: the spelling it reads
+/// ([`as_file_matcher_reads`]), and where it compares by regular expression,
+/// that spelling with each `?` past the walk's fixed depth also read as a
+/// separator ([`regex_question_readings`]). A glob compared name by name
+/// takes `*.*` for every file (`IsAllFilesWildcard`); a regular expression's
+/// file name is already spelt as it reads (`regex_filename`). Declines where
+/// there are too many such `?`s to read.
+///
+/// The walk's fixed depth ends at the glob's first `**`, or, for an exclude
+/// based above the include's walk root (`walked_from_root`), at its fixed
+/// directory: `GetFilesImplementation` then hands it every file below that
+/// root with a wildcard directory part of `**`, and its regular expression
+/// alone decides, so `Exclude="s*/a?b.fs"` takes `sub/a/b.fs` from
+/// `sub/**/*.fs` (oracle-pinned).
+fn file_matcher_patterns(
+    norm: &str,
+    prefix: &[&str],
+    walked_from_root: bool,
+) -> Result<Vec<Pattern>, GlobDecline> {
+    let by_regex = matches_by_regex(norm);
+    Ok(file_matcher_readings(norm, walked_from_root)?
+        .iter()
+        .map(|reading| {
+            let pattern = Pattern::with_literal_prefix(prefix, reading);
+            if by_regex {
+                pattern
+            } else {
+                pattern.with_all_files_rule()
+            }
+        })
+        .collect())
+}
+
+/// [`file_matcher_patterns`]' readings, as spellings.
+fn file_matcher_readings(norm: &str, walked_from_root: bool) -> Result<Vec<String>, GlobDecline> {
+    let read = as_file_matcher_reads(norm);
+    if !matches_by_regex(norm) {
+        return Ok(vec![read]);
+    }
+    let fixed_depth_end = if walked_from_root {
+        Some(split_filespec(norm).0.len())
+    } else {
+        read.find("**")
+    };
+    match fixed_depth_end {
+        Some(from) => {
+            regex_question_readings(&read, from).ok_or_else(|| GlobDecline::OutsideModelledShape {
+                spec: norm.to_string(),
+                shape: Unmodelled::RegexQuestionAcrossSeparator,
+            })
+        }
+        None => Ok(vec![read]),
+    }
+}
+
+/// Whether a glob's walk root lies strictly inside a directory, comparing
+/// absolute segments ignoring ASCII case, as `IsSubdirectoryOf` does with
+/// `OrdinalIgnoreCase`.
+fn walk_root_below(walk_root: &[String], dir: &[String]) -> bool {
+    walk_root.len() > dir.len()
+        && walk_root
+            .iter()
+            .zip(dir)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// A decoded glob's fixed directory as absolute segments.
+fn fixed_directory_segments(norm: &str, base_segs: &[&str]) -> Vec<String> {
+    let fixed = split_segments(split_filespec(norm).0);
+    anchor_prefix(base_segs, norm)
+        .iter()
+        .chain(&fixed)
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// A live glob exclude's fixed directory as absolute segments, and the
+/// directory segments its wildcard part names after its first `**` in any
+/// of its readings ([`file_matcher_readings`]), or `None` when that part has
+/// no `**`. MSBuild applies those names only to directories its walk enters,
+/// which start below the include's own fixed directory
+/// (`Unmodelled::GlobstarExcludeAboveIncludeRoot`).
+fn globstar_exclude_names(norm: &str, base_segs: &[&str]) -> Option<(Vec<String>, Vec<String>)> {
+    // Too many readings decline when the exclude's patterns are built.
+    let readings = file_matcher_readings(norm, false).ok()?;
+    let mut after: Vec<String> = Vec::new();
+    for read in &readings {
+        let (_, wildcard_dir, _) = split_filespec(read);
+        let dirs = split_segments(&wildcard_dir);
+        let globstar = dirs.iter().position(|seg| *seg == "**")?;
+        after.extend(
+            dirs[globstar + 1..]
+                .iter()
+                .filter(|seg| **seg != "**")
+                .map(|seg| seg.to_string()),
+        );
+    }
+    Some((fixed_directory_segments(norm, base_segs), after))
 }
 
 /// The literal segments a decoded spec is anchored under: none for an
@@ -393,28 +560,36 @@ fn lexical_full_path(base_segs: &[&str], spelling: &str) -> String {
 /// spelling.
 ///
 /// - An exclude MSBuild classifies as a glob ([`SpecFragment::is_wildcard`])
-///   is a pattern over the item's full path, with the all-files reading of
-///   `*.*` except in the filename-only branch
-///   ([`is_recursive_filename_pattern`]). One the file matcher would refuse
-///   declines.
+///   is a pattern over the item's full path. Outside the filename-only
+///   branch ([`is_recursive_filename_pattern`]) it is a regular expression,
+///   whose file name is read its own way ([`regex_filename`]: `a*.*` takes
+///   `ab`) and whose `?` can match a separator ([`regex_question_readings`]).
+///   One the file matcher would refuse declines.
 /// - Any other exclude is a name. Two names are compared as full paths
 ///   (`./a.fs` is `a.fs`), unless either is a spelling MSBuild does not
 ///   normalise ([`compares_unnormalised`]), which is compared as written.
 ///
 /// Comparison ignores ASCII case, directories included, on every host:
-/// `FileSpecMatcherTester` compares names `OrdinalIgnoreCase` and its
-/// `GlobPattern` folds the whole path (oracle-pinned on Linux, and in neither
-/// is the comparison the host's). The allow-list keeps both sides ASCII below
-/// the project directory, so ASCII folding is the whole of it.
+/// `FileSpecMatcherTester` compares names `OrdinalIgnoreCase`, and matches a
+/// glob outside the filename-only branch by a regular expression over the
+/// whole path that ignores case (oracle-pinned on Linux, and in neither is the
+/// comparison the host's). That expression ignores case by the build's
+/// culture, so where keeping `i` and `I` apart, as Turkish does, would change
+/// the verdict, this declines ([`GlobDecline::CultureDependentCase`]). The
+/// allow-list keeps both sides ASCII below the project directory, so ASCII
+/// folding is the whole of it.
 fn literal_survives_excludes(
     item: &str,
     excludes: &[SpecFragment],
     base_segs: &[&str],
 ) -> Result<bool, GlobDecline> {
     let item_full = lexical_full_path(base_segs, item);
+    // Whether some exclude takes the item: under a culture that folds `i` onto
+    // `I`, and under one that keeps them apart.
+    let (mut excluded, mut excluded_but_i) = (false, false);
     for exclude in excludes {
         let spelling = exclude.unescape();
-        let excluded = if exclude.is_wildcard() {
+        let (takes, takes_but_i) = if exclude.is_wildcard() {
             let norm = spelling.replace('\\', "/");
             if !is_legal_filespec(&norm) {
                 return Err(GlobDecline::IllegalFilespec { pattern: norm });
@@ -427,12 +602,36 @@ fn literal_survives_excludes(
             let fixed_full =
                 lexical_full_path(base_segs, if fixed.is_empty() { "." } else { fixed });
             let fixed_segs = split_segments(&fixed_full);
-            let mut pattern =
-                Pattern::with_literal_prefix(&fixed_segs, &format!("{wildcard_dir}{filename}"));
-            if !is_recursive_filename_pattern(&norm) {
-                pattern = pattern.with_all_files_rule();
+            if is_recursive_filename_pattern(&norm) {
+                // `FileMatcher.IsMatch` on the name, which no culture moves.
+                let pattern =
+                    Pattern::with_literal_prefix(&fixed_segs, &format!("{wildcard_dir}{filename}"));
+                let takes = pattern.matches_ignoring_ascii_case(&item_full);
+                (takes, takes)
+            } else {
+                // A regular expression over the whole path, which reads the
+                // file name its own way and a `?` as any character, a
+                // separator included.
+                let tail = format!("{wildcard_dir}{}", regex_filename(&filename));
+                let readings = regex_question_readings(&tail, 0).ok_or_else(|| {
+                    GlobDecline::OutsideModelledShape {
+                        spec: norm.clone(),
+                        shape: Unmodelled::RegexQuestionAcrossSeparator,
+                    }
+                })?;
+                let patterns: Vec<Pattern> = readings
+                    .iter()
+                    .map(|reading| Pattern::with_literal_prefix(&fixed_segs, reading))
+                    .collect();
+                (
+                    patterns
+                        .iter()
+                        .any(|p| p.matches_ignoring_ascii_case(&item_full)),
+                    patterns
+                        .iter()
+                        .any(|p| p.matches_ignoring_ascii_case_but_i(&item_full)),
+                )
             }
-            pattern.matches_ignoring_ascii_case(&item_full)
         } else {
             // Each operand is normalised, or not, on its own spelling
             // (`NormalizePathForComparisonNoThrow` is applied to each side).
@@ -443,11 +642,19 @@ fn literal_survives_excludes(
                     format!("/{}", lexical_full_path(base_segs, spelling))
                 }
             };
-            operand(item).eq_ignore_ascii_case(&operand(&spelling))
+            let takes = operand(item).eq_ignore_ascii_case(&operand(&spelling));
+            (takes, takes)
         };
-        if excluded {
+        excluded |= takes;
+        excluded_but_i |= takes_but_i;
+        if excluded && excluded_but_i {
             return Ok(false);
         }
+    }
+    if excluded != excluded_but_i {
+        return Err(GlobDecline::CultureDependentCase {
+            path: item.to_string(),
+        });
     }
     Ok(true)
 }
@@ -731,6 +938,72 @@ mod tests {
         assert_eq!(try_resolve(tmp.path(), "sub/c.fs", &["S*/c.fs"]), Ok(0));
         assert_eq!(try_resolve(tmp.path(), "sub/c.fs", &["SUB/*.fs"]), Ok(0));
         assert_eq!(try_resolve(tmp.path(), "a.fs;b.fs", &["**/A.fs"]), Ok(1));
+        // A regular expression compares `i` with `I`, which the build's
+        // culture decides; the filename-only branch does not.
+        assert!(matches!(
+            try_resolve(tmp.path(), "bi.fs", &["BI*.fs"]),
+            Err(GlobDecline::CultureDependentCase { .. })
+        ));
+        assert_eq!(try_resolve(tmp.path(), "bi.fs", &["BI*.fs", "b*"]), Ok(0));
+        assert_eq!(try_resolve(tmp.path(), "bi.fs", &["**/BI.fs"]), Ok(0));
+    }
+
+    /// Against a glob include on Linux, an exclude takes part only where its
+    /// fixed directory exists as written, and then folds case like the rest
+    /// (oracle-pinned, #607).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_glob_include_meets_its_excludes_as_the_file_matcher_does() {
+        let tmp = fixture();
+        assert_eq!(
+            run_rel(tmp.path(), "*.fs", &["A.FS"]),
+            ["b.fs", "m.fs", "z.fs"]
+        );
+        assert_eq!(run_rel(tmp.path(), "S*/*.FS", &[]), ["sub/c.fs"]);
+        assert_eq!(run_rel(tmp.path(), "SUB/*.fs", &[]), Vec::<String>::new());
+        assert_eq!(run_rel(tmp.path(), "sub/*.fs", &["SUB/*.fs"]), ["sub/c.fs"]);
+        assert_eq!(run_rel(tmp.path(), "**/*.fs", &["**/DEEP/**"]).len(), 5);
+        fs::create_dir(tmp.path().join("SUB")).unwrap();
+        assert_eq!(
+            run_rel(tmp.path(), "sub/*.fs", &["SUB/*.fs"]),
+            Vec::<String>::new()
+        );
+        assert_eq!(run_rel(tmp.path(), "**/*.fs", &["SUB/C.fs"]).len(), 5);
+        // A regular expression's `i` is the build's culture's to decide.
+        fs::write(tmp.path().join("sub/bi.fs"), b"").unwrap();
+        assert!(matches!(
+            try_resolve(tmp.path(), "s*/BI.fs", &[]),
+            Err(GlobDecline::CultureDependentCase { .. })
+        ));
+        assert_eq!(try_resolve(tmp.path(), "sub/BI.fs", &[]), Ok(1));
+    }
+
+    /// Names a regular expression folds onto ASCII, and a `~` the file matcher
+    /// looks up from the working directory, decline.
+    #[test]
+    fn what_a_glob_folds_beyond_ascii_case_declines() {
+        let tmp = fixture();
+        fs::create_dir_all(tmp.path().join("k/a~b")).unwrap();
+        fs::write(tmp.path().join("k/\u{212a}.fs"), b"").unwrap();
+        assert!(matches!(
+            try_resolve(tmp.path(), "k/*.fs", &[]),
+            Err(GlobDecline::OutsideModelledShape {
+                shape: Unmodelled::NonAscii,
+                ..
+            })
+        ));
+        for (include, excludes) in [("k/A~B/*.fs", &[][..]), ("**/*.fs", &["k/A~B/*.fs"][..])] {
+            assert!(
+                matches!(
+                    try_resolve(tmp.path(), include, excludes),
+                    Err(GlobDecline::OutsideModelledShape {
+                        shape: Unmodelled::TildeInFixedDirectory,
+                        ..
+                    })
+                ),
+                "{include}"
+            );
+        }
     }
 
     /// Against a literal include, ordinary names compare as full paths and a
@@ -781,6 +1054,13 @@ mod tests {
             Err(GlobDecline::CurDirSegmentExclude { .. })
         ));
         assert_eq!(try_resolve(tmp.path(), "./*.fs", &[]), Ok(4));
+        assert!(matches!(
+            try_resolve(tmp.path(), "*/./**/*.fs", &[]),
+            Err(GlobDecline::OutsideModelledShape {
+                shape: Unmodelled::CurDirInWildcardDirectory,
+                ..
+            })
+        ));
         assert_eq!(run_rel(tmp.path(), "*.*", &["*.fs"]), ["noext"]);
         assert_eq!(run_rel(tmp.path(), "*", &["%2a.%2a"]), Vec::<String>::new());
     }
