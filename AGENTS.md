@@ -310,6 +310,13 @@ This is a Cargo workspace with ten members:
   recurses per element; `borzoi-msbuild`'s `xml_nesting_pump` and
   `borzoi-nuget`'s `dgspec::xml_nesting_pump` hold every reader of untrusted
   XML to that without naming the recursive paths. A new reader belongs in one.
+  And `project_graph`: the request and response of `fcs-dump`'s project-graph
+  oracle (`uses-project-graph-batch`, below), and `ProjectGraphFixture`, the
+  multi-project fixture layout every graph differential shares — one
+  directory per project with its sources and a buildable `.fsproj` whose SDK
+  `AssemblyInfo.fs`/`AssemblyAttributes.fs` generation is off, so a project
+  built fresh (`build_fixtures`, one `dotnet build` of a solution of them all)
+  and the same project referenced from source declare the same entities.
 - `crates/print/` — `borzoi-print`. An owned F# syntax tree a program builds
   (`tree`, with validated names in `names`), and a *reference* printer that
   writes it as source: every expression, pattern and type parenthesised, every
@@ -484,6 +491,28 @@ This is a Cargo workspace with ten members:
   `borzoi-sema`, and `borzoi-spawn` (the `fcs-dump` driver lives in
   its library, not its tests, so it is a regular dependency); driven by
   `docs/project-corpus-diff-runner.md`.
+  It also drives the **project-graph oracle** (`ProjectGraphOracle`,
+  `fcs-dump uses-project-graph-batch`): FCS checking one project with each F#
+  `<ProjectReference>` passed from source as an
+  `FSharpReferencedProject.FSharpReference`, which is how an IDE references
+  an F# project and the semantics borzoi resolves project references
+  against. A project-reference `-r:` names no file, so nothing is built; every
+  project's assembly name is pinned with `-o:`, because FCS otherwise names
+  it after its last source file and no `InternalsVisibleTo` would match. The
+  oracle is held to itself in `tests/project_resolution/source_references.rs`:
+  on generated two-project graphs (every declaration kind a library exports,
+  `.fsi` hiding, `internal` with and without `InternalsVisibleTo`,
+  assembly-level `AutoOpen`, names colliding with FSharp.Core and the BCL),
+  the consumer's records and diagnostics with the library from source must
+  equal those with the library built fresh and referenced as a DLL, and a
+  friend's use of an internal must bind only under its pinned name. Later
+  stages' source-surface-equals-DLL oracles rest on that equality.
+  `BORZOI_SOURCE_REF_CASES` and `BORZOI_SOURCE_REF_SEED` widen the run.
+  `not_built_census` (`not_built.rs`, run by `tools/not-built-census.sh`) is
+  the report-only measurement beside it: every project of the corpus's
+  repositories that references an F# project, loaded through the LSP with
+  its references unbuilt (`NotBuilt`), graded against the graph oracle, and
+  each reference's reasons it could not be read from source counted.
 
 Workspace-level files (`tools/`, `docs/`, `flake.nix`) sit at
 the repo root. The LSP is the only crate with a binary, so `cargo run` from the

@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use borzoi_oracle_harness::fcs_position::LineIndex;
+use borzoi_oracle_harness::project_graph::{GraphRequest, GraphResponse, parse_graph_response};
 use borzoi_oracle_harness::{BatchChild, BatchFailure};
 use borzoi_spawn::{BoundedCommand, ChildFailure};
 
@@ -52,6 +53,7 @@ pub mod deferral_shape;
 pub mod handler_diff;
 pub mod lsp_client;
 pub mod manifest;
+pub mod not_built;
 pub mod perturb;
 pub mod utf16;
 
@@ -815,6 +817,47 @@ impl UsesProjectOracle {
     }
 }
 
+/// The resident `fcs-dump uses-project-graph-batch` oracle: FCS checking one
+/// project of a [`GraphRequest`], each F# project it references passed from
+/// source as an IDE passes it (`FSharpReferencedProject.FSharpReference`).
+///
+/// Spawned, and the tool built, on the first request, like
+/// [`UsesProjectOracle`]; a request the child cannot answer fails alone, and the
+/// next request starts a fresh child.
+#[derive(Default)]
+pub struct ProjectGraphOracle {
+    child: Option<BatchChild>,
+}
+
+impl ProjectGraphOracle {
+    /// FCS's answer to `request`: the checked project's `uses-project` records
+    /// and the projects it referenced.
+    pub fn check(&mut self, request: &GraphRequest) -> Result<GraphResponse, FcsInvokeError> {
+        self.check_raw(request)
+            .and_then(|line| parse_graph_response(&line).map_err(FcsInvokeError::Refused))
+    }
+
+    /// [`Self::check`]'s response line, unparsed: what [`parse_project_uses`]
+    /// reads, since its `Files` are the `uses-project` payload.
+    pub fn check_raw(&mut self, request: &GraphRequest) -> Result<String, FcsInvokeError> {
+        if self.child.is_none() {
+            self.child = Some(spawn_project_batch("uses-project-graph-batch")?);
+        }
+        let child = self.child.as_mut().expect("spawned above");
+        let line = child
+            .try_request(&request.to_json_line())
+            .map_err(FcsInvokeError::Oracle)?;
+        match batch_error(&line) {
+            Some(message) => Err(FcsInvokeError::Refused(message)),
+            None => Ok(line),
+        }
+    }
+}
+
+fn spawn_uses_project_batch() -> Result<BatchChild, FcsInvokeError> {
+    spawn_project_batch("uses-project-batch")
+}
+
 /// The resident child, its command located once by [`fcs_dump_command`]: a
 /// respawn reuses that program and its arguments, so the factory, which cannot
 /// fail, has no build to fail.
@@ -825,8 +868,8 @@ impl UsesProjectOracle {
 /// request gets a fresh child either way. Too tight a bound would be worse
 /// than none: a healthy but large project would be killed and recorded as
 /// skipped, quietly shrinking the corpus the diff claims to cover.
-fn spawn_uses_project_batch() -> Result<BatchChild, FcsInvokeError> {
-    let built = fcs_dump_command("uses-project-batch")?;
+fn spawn_project_batch(subcommand: &'static str) -> Result<BatchChild, FcsInvokeError> {
+    let built = fcs_dump_command(subcommand)?;
     assert!(
         built.get_envs().next().is_none() && built.get_current_dir().is_none(),
         "a respawn rebuilds the command from its program and arguments alone"
@@ -839,7 +882,7 @@ fn spawn_uses_project_batch() -> Result<BatchChild, FcsInvokeError> {
             cmd.args(&args);
             cmd
         }),
-        "fcs-dump uses-project-batch",
+        format!("fcs-dump {subcommand}"),
         PROJECT_TIMEOUT,
         1,
     ))
@@ -894,8 +937,8 @@ impl fmt::Display for FcsInvokeError {
                 )
             }
             Self::Harness(e) => write!(f, "fcs-dump did not answer: {e}"),
-            Self::Oracle(e) => write!(f, "fcs-dump uses-project-batch did not answer: {e}"),
-            Self::Refused(message) => write!(f, "fcs-dump uses-project-batch failed: {message}"),
+            Self::Oracle(e) => write!(f, "the resident fcs-dump did not answer: {e}"),
+            Self::Refused(message) => write!(f, "the resident fcs-dump refused: {message}"),
         }
     }
 }

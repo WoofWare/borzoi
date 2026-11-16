@@ -33,6 +33,13 @@ use borzoi_sema::{
 use lsp_types::Position;
 use tempfile::TempDir;
 
+// Under this binary's own directory, so Cargo does not take them for test
+// targets of their own.
+#[path = "project_resolution/source_reference_gen.rs"]
+mod source_reference_gen;
+#[path = "project_resolution/source_references.rs"]
+mod source_references;
+
 fn write(path: &Path, text: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create parent dir");
