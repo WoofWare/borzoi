@@ -713,14 +713,12 @@ pub enum Token<'a> {
     /// into a dead, non-accepting path and then fail to fall back to the
     /// shorter `DotDot` accept (it errors instead of splitting). Capping at one
     /// keeps the dead path ≤1 char — never longer than the `DotDot`/`QMarkQMark`
-    /// (length-2) accept — so logos always falls back. Real F# operators carry
-    /// at most one leading ignored char (`.+`, `.*`, `?+`); an operator with two
-    /// or more (`..+`, `.?+`) instead splits (`DotDot` + `Op("+")`), diverging
-    /// from FCS — but a full F# corpus sweep finds zero such cases,
-    /// and the alternatives are strictly worse: unbounded `*` lex-errors on
-    /// `...`, and a 2-char bound re-introduces errors on mixed runs like `.?`
+    /// (length-2) accept — so logos always falls back. Unbounded, `*` lex-errors
+    /// on `...`, and a 2-char bound re-introduces errors on mixed runs like `.?`
     /// (dead path of 2 with no length-2 token to fall back to). One is the safe
-    /// maximum, and these forms still lex (never error).
+    /// maximum. An operator with two or more leading ignored chars (`..-`, `..|`, `.?+`) is read
+    /// whole by the driver instead ([`interp::InterpDriver`]), which extends the
+    /// shorter token Logos finds at its start to the operator FCS reads.
     #[regex(r"[.$?]?[!%&*+\-/<=>@^|~$][!$%&*+\-./<=>?@^|~:]*", priority = 1)]
     Op(&'a str),
 }

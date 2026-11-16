@@ -348,7 +348,17 @@ pub fn collapse_interp_brace_digraphs(body: &str) -> String {
 
 /// `` ``foo bar`` `` → `foo bar`; `foo` → `foo`. FCS stores the unquoted
 /// text in `Ident.idText` (no backticks survive the lexer's normalisation).
+/// The range-step operator's name reads as FCS spells it, `.. ..`.
 pub(super) fn strip_backticks(text: &str) -> &str {
+    // The range-step operator's name is one token spanning both `..`s and
+    // the spaces between them; FCS spells it `.. ..` whatever the spacing.
+    if text.len() > 4
+        && text.starts_with("..")
+        && text.ends_with("..")
+        && text[2..text.len() - 2].bytes().all(|b| b == b' ')
+    {
+        return ".. ..";
+    }
     text.strip_prefix("``")
         .and_then(|t| t.strip_suffix("``"))
         .unwrap_or(text)

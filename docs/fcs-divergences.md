@@ -86,6 +86,14 @@ exists.
   the differential oracle (FCS 43.13.101), so it is not a divergence today. No
   differential coverage — FCS errors on `(or)`. (`is_paren_operator_name`,
   `crates/cst/src/parser/classify.rs`)
+- **A comment inside the range-step operator's name is an error** —
+  `let ( .. (* c *) .. ) a b c = …`. FCS's `operatorName: DOT_DOT DOT_DOT`
+  reads the two `..` tokens through any trivia; we take the name only when
+  spaces separate them, because it is one `IDENT_TOK` spanning both `..`s
+  whose spelling `borzoi_assembly::op_name` must read as `op_RangeStep`. Any
+  other separator leaves the `( .. … .. )` unrecognised, a parse error rather
+  than a wrong name. (`range_step_op_at`, `crates/cst/src/parser/expr_atom.rs`;
+  pinned by `parser_diff_operators::range_step_name_with_a_comment_inside_is_our_error`)
 - **Dotted longident head in lambda-arg position not parsed** — `fun X.Y -> …`.
   Verified live 2026-05-31. (`a5b00d8`)
 - **Sign-folding: overflow recovery values on genuine errors** — adjacent-sign

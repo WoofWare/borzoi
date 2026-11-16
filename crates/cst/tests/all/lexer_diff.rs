@@ -296,3 +296,97 @@ fn assert_streams_match(source: &str) {
         report_divergence(source, &rust_tokens, &fcs_tokens);
     }
 }
+
+/// The characters [`diff_every_short_operator_run`] spells runs from: the
+/// `ignored_op_char`s `.` and `?`, the `:` that is an `op_char` but never
+/// starts an operator, and significant characters from most of `lex.fsl`'s
+/// operator classes, `|` among them for the `|]` closer.
+///
+/// Two `op_char`s are left out for divergences of their own. `$` is both an
+/// `ignored_op_char` and the head of `INFIX_COMPARE_OP`, and FCS classes a run
+/// such as `$-` by the rule that comes first in `lex.fsl` (`PLUS_MINUS_OP`),
+/// where our classifier reads the `$`. And `!` glued to an identifier is
+/// FCS's `ident '!'` rule (FS1199 unless the identifier is `let`), which our
+/// lexer does not have.
+const OPERATOR_RUN_ALPHABET: &[char] = &['.', '?', ':', '|', '-', '*', '<', '>', '^', '@'];
+
+/// The non-trivia tokens of `source` from our lexer, or the lex error.
+fn rust_stream(source: &str) -> Result<Vec<NormalisedToken>, String> {
+    let symbols: HashSet<String> = HashSet::new();
+    lex_with_symbols(source, &symbols)
+        .filter_map(|(tok, span)| match tok {
+            Ok(tok) if is_trivia(&tok) => None,
+            Ok(tok) => Some(Ok(NormalisedToken {
+                kind: rust_kind_name(&tok),
+                start: span.start,
+                end: span.end,
+            })),
+            Err(e) => Some(Err(format!("{e:?}"))),
+        })
+        .collect()
+}
+
+/// Every run of one to three operator characters
+/// ([`OPERATOR_RUN_ALPHABET`]) between two operands, bare and inside an
+/// array's brackets, lexes as FCS lexes it.
+///
+/// `lex.fsl` reads an operator as `ignored_op_char* SIG op_char*` and every
+/// fixed token (`..`, `...`, `..^`, `?`, `::`, `|]`, `<@`, …) by its own rule,
+/// taking the longest match, so where a run splits depends on all of its
+/// characters together: `..-` is one operator, `..^` its own token, `..|]` an
+/// operator and a `]`. Exhaustive over short runs, so no boundary depends on
+/// someone having thought of it.
+#[test]
+fn diff_every_short_operator_run() {
+    let mut runs = Vec::new();
+    let mut frontier = vec![String::new()];
+    for _ in 0..3 {
+        frontier = frontier
+            .iter()
+            .flat_map(|r| OPERATOR_RUN_ALPHABET.iter().map(move |c| format!("{r}{c}")))
+            .collect();
+        runs.extend(frontier.iter().cloned());
+    }
+    let sources: Vec<String> = runs
+        .iter()
+        .flat_map(|r| [format!("let x = a{r}b\n"), format!("let x = [a{r}]\n")])
+        .collect();
+    // FCS lexes `>|]` as `GREATER_BAR_RBRACK`, a token our lexer does not
+    // have. Each must still diverge, so the list cannot outlive the defect.
+    let known = ["let x = [a>|]\n"];
+    let divergent: Vec<String> = crate::common::par_map(sources.len(), |i| {
+        let source = &sources[i];
+        let mut tmp = NamedTempFile::with_suffix(".fs").expect("create temp .fs file");
+        tmp.write_all(source.as_bytes()).expect("write source");
+        let fcs = parse_fcs_dump(&fcs_tokens_raw_batch(tmp.path()), source);
+        let is_known = known.contains(&source.as_str());
+        match rust_stream(source) {
+            Ok(rust) if (rust == fcs) != is_known => None,
+            Ok(_) if is_known => Some(format!(
+                "{source:?} is listed as divergent but now lexes as FCS does"
+            )),
+            Ok(rust) => Some(format!(
+                "{source:?}\n  rust: {}\n  fcs:  {}",
+                rust.iter()
+                    .map(crate::common::fmt_token)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                fcs.iter()
+                    .map(crate::common::fmt_token)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )),
+            Err(e) => Some(format!("{source:?}: rust lex error {e}")),
+        }
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    assert!(
+        divergent.is_empty(),
+        "{} of {} operator-run sources lex differently from FCS:\n{}",
+        divergent.len(),
+        sources.len(),
+        divergent.join("\n"),
+    );
+}

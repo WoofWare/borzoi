@@ -177,11 +177,24 @@ fn classify(spelling: &str) -> OpSpelling {
     }
     if let Some(&(_, compiled)) = OP_NAME_TABLE.iter().find(|&&(k, _)| k == spelling) {
         OpSpelling::Table(compiled)
+    } else if is_spaced_range_step(spelling) {
+        OpSpelling::Table("op_RangeStep")
     } else if spelling.contains(' ') {
         OpSpelling::NotOperator
     } else {
         OpSpelling::Custom
     }
+}
+
+/// Whether `spelling` is the range-step operator: two `..`s with one or more
+/// spaces between them (the table holds the one-space `.. ..`). F# reads its name from two `..` tokens whatever
+/// separates them, and a parser that keeps the name as one token spanning both
+/// spells it with the spaces the source has.
+fn is_spaced_range_step(spelling: &str) -> bool {
+    spelling
+        .strip_prefix("..")
+        .and_then(|s| s.strip_suffix(".."))
+        .is_some_and(|gap| !gap.is_empty() && gap.bytes().all(|b| b == b' '))
 }
 
 /// Whether `spelling` is an operator: a table entry, or a non-empty run of
@@ -282,6 +295,15 @@ mod tests {
         assert_eq!(compile_op_name("|>"), "op_PipeRight");
         assert_eq!(compile_op_name("~-"), "op_UnaryNegation");
         assert_eq!(compile_op_name("::"), "op_ColonColon");
+    }
+
+    #[test]
+    fn the_range_step_operator_is_named_whatever_its_spacing() {
+        assert_eq!(compile_op_name(".. .."), "op_RangeStep");
+        assert_eq!(compile_op_name("..   .."), "op_RangeStep");
+        assert_eq!(compile_op_name(".."), "op_Range");
+        assert_eq!(compile_op_name("...."), "op_DotDotDotDot");
+        assert!(!is_operator_spelling(". ."));
     }
 
     #[test]

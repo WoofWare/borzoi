@@ -321,6 +321,13 @@ fn operators() {
     assert_eq!(toks(":?>"), vec![Token::ColonQMarkGreater]);
     assert_eq!(toks(".."), vec![Token::DotDot]);
     assert_eq!(toks("..^"), vec![Token::DotDotHat]);
+    // Two or more leading `ignored_op_char`s: one operator, as FCS reads it.
+    assert_eq!(toks("..-"), vec![Token::Op("..-")]);
+    assert_eq!(toks(".?+"), vec![Token::Op(".?+")]);
+    assert_eq!(toks("..|]"), vec![Token::Op("..|"), Token::RBrack]);
+    assert_eq!(toks("..^-"), vec![Token::Op("..^-")]);
+    assert_eq!(toks("..."), vec![Token::DotDotDot]);
+    assert_eq!(toks("...."), vec![Token::DotDotDot, Token::Dot]);
     assert_eq!(toks("=>"), vec![Token::Op("=>")]);
     assert_eq!(toks("|>"), vec![Token::Op("|>")]);
     assert_eq!(toks("<="), vec![Token::Op("<=")]);

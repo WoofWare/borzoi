@@ -327,6 +327,19 @@ impl<'a> Iterator for InterpDriver<'a> {
             return Some((Ok(Token::Equals), abs.start..abs.start + 1));
         }
 
+        // An operator with two or more leading `ignored_op_char`s (`..-`,
+        // `..|`, `.?+`), which [`Token::Op`]'s regex cannot take: the token
+        // Logos found (`..`, `.`) is a prefix of the operator FCS's longer
+        // match reads.
+        if tok.is_ok()
+            && let Some(len) = operator_len(&self.source.as_bytes()[abs.start..])
+            && len > abs.len()
+        {
+            let end = abs.start + len;
+            self.restart_inner(end);
+            return Some((Ok(Token::Op(&self.source[abs.start..end])), abs.start..end));
+        }
+
         // An extended opener below F# 8.0, whether or not the Logos arm found
         // its end: lex it as triple-quoted.
         if !self.extended_interpolation
@@ -423,6 +436,49 @@ impl<'a> Iterator for InterpDriver<'a> {
             other => Some((other, abs)),
         }
     }
+}
+
+/// The length of the operator `lex.fsl`'s general operator rules read at the
+/// start of `rest` (`ignored_op_char* SIG op_char*`, `lex.fsl` lines 961-989,
+/// where `ignored_op_char` is `.`, `$` or `?` and the significant `SIG` is any
+/// `op_char` but `.`, `?` and `:`), or `None` when they read none there.
+///
+/// The longest match is the whole run of `op_char`s at the start of `rest`,
+/// provided a significant character sits in it after nothing but ignored ones.
+fn operator_len(rest: &[u8]) -> Option<usize> {
+    const fn is_op_char(b: u8) -> bool {
+        matches!(
+            b,
+            b'!' | b'$'
+                | b'%'
+                | b'&'
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b'<'
+                | b'='
+                | b'>'
+                | b'?'
+                | b'@'
+                | b'^'
+                | b'|'
+                | b'~'
+                | b':'
+        )
+    }
+    let run = rest.iter().take_while(|&&b| is_op_char(b)).count();
+    let significant_after_ignored = rest[..run]
+        .iter()
+        .take_while(|&&b| matches!(b, b'.' | b'$' | b'?'))
+        .chain(
+            rest[..run]
+                .iter()
+                .find(|&&b| !matches!(b, b'.' | b'$' | b'?')),
+        )
+        .any(|&b| !matches!(b, b'.' | b'?' | b':'));
+    significant_after_ignored.then_some(run)
 }
 
 /// Whether `rest` is an `=` immediately followed by an interpolated-string
