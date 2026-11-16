@@ -8,7 +8,7 @@
 //! the project's `global.json` and a regular one (or none) a level up, and
 //! holds `find_global_json` to the trace: a file we name must be the one
 //! hostfxr found, and finding none must be hostfxr finding none. Where we
-//! decline ([`UndecidedGlobalJson`]) we make no claim; the test prints what
+//! decline (`UndecidedGlobalJson`) we make no claim; the test prints what
 //! hostfxr did, which is the measurement the decline rests on.
 //!
 //! A FIFO is not handed to hostfxr, whose read of it never returns; our side
@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use borzoi_msbuild::find_global_json;
 use borzoi_msbuild::observed::{Observer, host_fs};
-use borzoi_msbuild::{UndecidedGlobalJson, find_global_json};
 use borzoi_oracle_harness::BoundedCommand;
 use common::odd_entry::{self, Odd};
 
@@ -100,20 +100,18 @@ fn find_global_json_names_the_file_hostfxr_finds() {
             }
             let theirs = hostfxr_found(&dotnet, &project, &trace);
             println!("{case}: ours {ours:?}, hostfxr found {theirs:?}");
-            match ours {
-                Ok(ours) => {
-                    committed += 1;
-                    // Above the scratch directory both walks meet the same
-                    // ancestors; within it, the files must agree.
-                    let theirs_here = theirs.filter(|p| p.starts_with(&base));
-                    let ours_here = ours.filter(|p| p.starts_with(&base));
-                    if ours_here != theirs_here {
-                        failures.push(format!(
-                            "{case}: we find {ours_here:?}, hostfxr {theirs_here:?}"
-                        ));
-                    }
+            // A decline (`UndecidedGlobalJson`) makes no claim.
+            if let Ok(ours) = ours {
+                committed += 1;
+                // Above the scratch directory both walks meet the same
+                // ancestors; within it, the files must agree.
+                let theirs_here = theirs.filter(|p| p.starts_with(&base));
+                let ours_here = ours.filter(|p| p.starts_with(&base));
+                if ours_here != theirs_here {
+                    failures.push(format!(
+                        "{case}: we find {ours_here:?}, hostfxr {theirs_here:?}"
+                    ));
                 }
-                Err(UndecidedGlobalJson { .. }) => {}
             }
         }
     }

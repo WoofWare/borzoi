@@ -79,7 +79,7 @@
 //! FIFO never returns.
 //!
 //! Every existence probe asks what CLR `File.Exists` answers
-//! ([`dotnet_io::file_exists`]), which `tools/workload-oracle` grades with a
+//! (`dotnet_io::file_exists`), which `tools/workload-oracle` grades with a
 //! dangling link, a link loop, a directory, a link to one, a socket and a FIFO
 //! at each probed path (`workload_locator_diff`).
 
