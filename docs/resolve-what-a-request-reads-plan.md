@@ -582,8 +582,14 @@ types, cases, records and constructor names. `FileFacts::build` computes
 all four from the file's declarations and the earlier files' declared
 facts, before the walk starts, and the walk leaves them as they are.
 `whole_prefix_facts_divergence` holds that. It folds each file's declared
-facts without walking it (`declared_named_file`), and compares every file's
-contribution, value verdicts aside, with `infer_project`'s. It runs over
+facts from its surface walk, which never meets a body, without inferring it
+(`surface_walks`, `declared_named_file`). It then compares every file's
+contribution, value verdicts aside, with `infer_project`'s. The comparison
+found one body dependency: a headerless file counted every value it binds,
+locals included, as contesting a case name, so a local in a body could
+withhold a later file's case use. No later file can name a local, so a file
+now publishes its declarations' count alone, and keeps the locals for its
+own uses (`ConstructorNameReach`). It runs over
 fixtures (the `let Red = 0` case, a case and a record naming an earlier
 file's type, a signatured pair), over the edit-script generator's projects,
 and in corpus-diff on every project the whole-project gate infers. Two

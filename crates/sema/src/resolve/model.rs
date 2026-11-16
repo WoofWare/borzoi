@@ -4812,6 +4812,13 @@ impl ResolvedFile {
         self.surface.defs.iter().chain(self.local_defs.iter())
     }
 
+    /// The defs the walk interned outside every expression
+    /// ([`DefSpace::Declaration`]): what the file declares, without the
+    /// locals its bodies bind.
+    pub(crate) fn declaration_defs(&self) -> impl Iterator<Item = &Def> + '_ {
+        self.surface.defs.iter()
+    }
+
     /// The items this file exports.
     pub fn exports(&self) -> &ExportedItems {
         &self.surface.exports

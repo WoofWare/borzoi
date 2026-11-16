@@ -109,6 +109,8 @@ pub use model::{
 pub use state::ActivePatternShape;
 pub(crate) use state::ImplicitSeed;
 use state::{Resolver, implicit_open_groups, implicit_shortening_prefixes};
+#[cfg(feature = "test-support")]
+pub(crate) use surfaces::surface_walks;
 pub use surfaces::{
     ProjectSurfaces, TargetResolution, resolve_project_surfaces,
     resolve_project_surfaces_incremental, resolve_target,

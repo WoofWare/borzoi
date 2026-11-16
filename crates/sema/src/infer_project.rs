@@ -634,7 +634,8 @@ pub fn infer_project_reusing_with_reuse(
 /// over the earlier files' declarations alone: the first file whose
 /// contribution, value verdicts aside, differs between [`infer_project`]'s
 /// fold (`inferred`, of `files` and `resolved` against `env`) and a fold
-/// that builds each file's declared facts without walking it, described;
+/// that builds each file's declared facts from its surface walk, which
+/// skips every expression, without inferring it, described;
 /// `None` when no file's does (`docs/resolve-what-a-request-reads-plan.md`,
 /// Stage 7a).
 ///
@@ -652,6 +653,8 @@ pub(crate) fn whole_prefix_facts_divergence(
     inferred: &InferredProject,
 ) -> Option<String> {
     let partners = signature_partners(files);
+    // What a reader that walks no body knows of each file.
+    let surfaces = crate::resolve::surface_walks(files, env);
     let mut declared = PrecedingTypes::default();
     let mut implementations: HashSet<&str> = HashSet::default();
     for (idx, rf) in resolved.files().iter().enumerate() {
@@ -664,11 +667,16 @@ pub(crate) fn whole_prefix_facts_divergence(
             None
         } else {
             files[idx].file.as_impl().map(|impl_file| {
-                declared_named_file(impl_file, rf, env, &declared, &files[idx].qnof)
+                declared_named_file(impl_file, &surfaces[idx], env, &declared, &files[idx].qnof)
             })
         };
-        let from_declarations =
-            FileContribution::of(env.names(), idx, rf, declared_file.as_ref(), screened);
+        let from_declarations = FileContribution::of(
+            env.names(),
+            idx,
+            &surfaces[idx],
+            declared_file.as_ref(),
+            screened,
+        );
         let from_inference =
             FileContribution::of(env.names(), idx, rf, inferred.file(idx), screened);
         if !from_declarations.same_declarations(&from_inference) {

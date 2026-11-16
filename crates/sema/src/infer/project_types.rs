@@ -671,6 +671,17 @@ impl<'a> FileFacts<'a> {
     }
 }
 
+/// Whose uses a [`constructor_names`] count is for.
+#[derive(Clone, Copy)]
+pub(super) enum ConstructorNameReach {
+    /// The file's own uses, which a local value of the name may contest.
+    OwnUses,
+    /// A later file's uses, which no local value of the file can reach: what
+    /// the file publishes, a function of its declarations alone
+    /// (`docs/resolve-what-a-request-reads-plan.md`, Stage 7a).
+    LaterFiles,
+}
+
 /// How many declarations in `file` could be what a use of each name means
 /// where a union case of that name is expected: every top-level export (a
 /// value, a union or `exception` case, an active pattern's case) and every
@@ -681,19 +692,26 @@ impl<'a> FileFacts<'a> {
 /// A file with no header exports only its top-level values: its cases, its
 /// `exception` constructors, its active patterns' cases and its nested
 /// modules' values have no cross-file handle. So there every definition of
-/// those kinds counts, and every value's, local ones included, which can only
-/// make a name contested.
+/// those kinds counts, which can only make a name contested. `reach` says
+/// whose count it is ([`ConstructorNameReach`]): the file's own uses also
+/// count every local value, and a later file's count none, since nothing
+/// outside a body can name its locals.
 pub(super) fn constructor_names(
     file: &ImplFile,
     resolved: &ResolvedFile,
     env: &AssemblyEnv,
+    reach: ConstructorNameReach,
 ) -> HashMap<String, usize> {
     let mut counts: HashMap<String, usize> = HashMap::default();
     for e in resolved.exports().iter() {
         *counts.entry(e.name(env).to_string()).or_default() += 1;
     }
     if is_headerless(file) {
-        for def in resolved.defs() {
+        let defs: Box<dyn Iterator<Item = &crate::def::Def>> = match reach {
+            ConstructorNameReach::OwnUses => Box::new(resolved.defs()),
+            ConstructorNameReach::LaterFiles => Box::new(resolved.declaration_defs()),
+        };
+        for def in defs {
             if matches!(
                 def.kind,
                 DefKind::Value { .. }

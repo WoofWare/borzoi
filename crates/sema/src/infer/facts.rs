@@ -31,9 +31,12 @@ pub(super) struct FileFacts<'a> {
     /// The cases of the file's own unions whose fields are all bridged, by
     /// how the resolver names the case ([`Self::project_type_schemes`]).
     pub(super) project_cases: HashMap<OwnCase, ProjectCase>,
-    /// How many constructor-like declarations of each name the file makes
-    /// ([`constructor_names`]).
+    /// How many constructor-like declarations of each name the file makes,
+    /// as its own uses see them ([`constructor_names`]).
     constructor_names: HashMap<String, usize>,
+    /// The same, as a later file's uses see them: what the file publishes
+    /// ([`ConstructorNameReach::LaterFiles`]).
+    published_constructor_names: HashMap<String, usize>,
     /// The file's own records whose fields inference reads
     /// ([`Self::project_type_schemes`]).
     pub(super) project_records: ProjectRecords,
@@ -83,6 +86,7 @@ impl<'a> FileFacts<'a> {
             project_types: HashMap::default(),
             project_cases: HashMap::default(),
             constructor_names: HashMap::default(),
+            published_constructor_names: HashMap::default(),
             project_records: HashMap::default(),
             own_union_cases: HashSet::default(),
             sealed_project_types: HashMap::default(),
@@ -99,7 +103,10 @@ impl<'a> FileFacts<'a> {
             .filter(|e| matches!(e.case_kind(), Some(CaseKind::Union { .. })))
             .map(|e| e.id())
             .collect();
-        facts.constructor_names = constructor_names(file, resolved, env);
+        facts.constructor_names =
+            constructor_names(file, resolved, env, ConstructorNameReach::OwnUses);
+        facts.published_constructor_names =
+            constructor_names(file, resolved, env, ConstructorNameReach::LaterFiles);
         (facts.project_cases, facts.project_records) = facts.project_type_schemes(file, tys);
         facts.sealed_project_types = facts.sealed_project_types();
         facts
@@ -140,7 +147,7 @@ impl<'a> FileFacts<'a> {
                     OwnCase::Def(_) => None,
                 })
                 .collect(),
-            constructor_names: self.constructor_names,
+            constructor_names: self.published_constructor_names,
             project_records: self.project_records,
             deepest_expr_depth,
             type_budget_exceeded,

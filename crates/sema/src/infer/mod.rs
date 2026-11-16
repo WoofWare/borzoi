@@ -631,7 +631,9 @@ pub struct InferredFile {
     /// so a later file's use of one types exactly as this file's would.
     project_cases: HashMap<ItemId, ProjectCase>,
     /// How many constructor-like declarations of each name the file makes,
-    /// for later files' case screen.
+    /// for later files' case screen: its declarations alone, since no later
+    /// file can name a local
+    /// ([`ConstructorNameReach::LaterFiles`](project_types::ConstructorNameReach::LaterFiles)).
     constructor_names: HashMap<String, usize>,
     /// The records this file declares whose fields inference reads.
     project_records: ProjectRecords,

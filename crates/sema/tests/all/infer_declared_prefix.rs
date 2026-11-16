@@ -193,6 +193,41 @@ fn a_signatured_pair_declares_the_same_in_both_folds() {
     assert_whole_prefix_facts_are_declared(&project, env);
 }
 
+/// A headerless file's local value has no handle a later file could use, in
+/// FCS or here, so it contests no later file's case name: renaming a local
+/// `Red` in an earlier headerless file's body moves nothing in a later file's
+/// inference, and the whole-prefix facts read off the earlier file's surface
+/// walk, which never meets the local, agree with the full fold's.
+#[test]
+fn an_earlier_headerless_files_body_locals_contest_no_later_case_name() {
+    let env = fsharp_core_env();
+    let colour = "module B\ntype Color = Red | Blue\nlet r = Red\n";
+    let red = nth_range(colour, "Red", 1);
+    let use_type = |local: &str| {
+        let project = fold(
+            &owned(&[
+                (
+                    "A.fs",
+                    &format!("let f () =\n    let {local} = 0\n    {local}\n"),
+                ),
+                ("B.fs", colour),
+            ]),
+            env,
+        );
+        assert_whole_prefix_facts_are_declared(&project, env);
+        project
+            .inferred
+            .file(1)
+            .and_then(|f| f.type_at(red))
+            .map(|ty| ty.render(env))
+    };
+    assert_eq!(use_type("Red"), use_type("Rdx"));
+    assert!(
+        use_type("Red").is_some(),
+        "the later use is the case, typed"
+    );
+}
+
 /// A case whose payload names an earlier file's record, and a record whose
 /// field does: their schemes read the earlier file's declared types, so the
 /// declarations-only fold must thread its own table to publish them. The
