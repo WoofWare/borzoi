@@ -6607,6 +6607,104 @@ let private graphOutputPath (p: GraphProject) : string =
     let dir = Option.ofObj (Path.GetDirectoryName p.Paths.[0]) |> Option.defaultValue "."
     Path.Combine(dir, "fcs-dump-graph-out", p.Id, p.AssemblyName + ".dll")
 
+/// A graph request's projects by id, and the one to check. Refuses a
+/// duplicate id or assembly name, and a `check` naming no project.
+let private readGraphRequest (root: JsonElement) =
+    let projects =
+        match root.TryGetProperty("projects") with
+        | true, arr when arr.ValueKind = JsonValueKind.Array ->
+            arr.EnumerateArray() |> Seq.map readGraphProject |> Seq.toArray
+        | _ -> failwith "no projects in request"
+    let byId = System.Collections.Generic.Dictionary<string, GraphProject>()
+    for p in projects do
+        if not (byId.TryAdd(p.Id, p)) then
+            failwithf "duplicate project id %s" p.Id
+    projects
+    |> Array.countBy (fun p -> p.AssemblyName.ToLowerInvariant())
+    |> Array.tryFind (fun (_, n) -> n > 1)
+    |> Option.iter (fun (name, _) -> failwithf "two projects are named %s" name)
+    let checkId =
+        match root.TryGetProperty("check") with
+        | true, v when v.ValueKind = JsonValueKind.String -> Option.ofObj (v.GetString())
+        | _ -> None
+    match checkId with
+    | Some id when byId.ContainsKey id -> byId, byId.[id]
+    | other -> failwithf "check names no project of the request: %A" other
+
+/// `p`'s options in the graph, given its references' (`referenced`: each
+/// one's output path and options): [`projectOptionsOf`]'s, plus `-o:` and a
+/// `-r:` and an `FSharpReference` per reference.
+let private graphProjectOptions
+    (checker: FSharpChecker)
+    (p: GraphProject)
+    (referenced: (string * FSharpProjectOptions)[])
+    : FSharpProjectOptions =
+    let baseOpts =
+        projectOptionsOf checker p.Paths p.RefArgs p.ExclusiveRefs p.DefineArgs p.LangVersionArgs
+    let dir = Option.ofObj (Path.GetDirectoryName p.Paths.[0]) |> Option.defaultValue "."
+    let isOutput (o: string) =
+        o.StartsWith "-o:" || o.StartsWith "--out:" || o.StartsWith "/out:"
+    { baseOpts with
+        ProjectFileName = Path.Combine(dir, "fcs-dump-" + p.Id + ".fsproj")
+        OtherOptions =
+            Array.concat
+                [ baseOpts.OtherOptions |> Array.filter (isOutput >> not)
+                  [| "-o:" + graphOutputPath p |]
+                  referenced |> Array.map (fun (out, _) -> "-r:" + out) ]
+        ReferencedProjects =
+            referenced
+            |> Array.map (fun (out, opts) -> FSharpReferencedProject.FSharpReference(out, opts)) }
+
+/// Options for `check` and every project it reaches, built depth first:
+/// each project's options by id, and the projects in dependency order.
+let private graphOptions
+    (checker: FSharpChecker)
+    (byId: System.Collections.Generic.Dictionary<string, GraphProject>)
+    (check: GraphProject)
+    =
+    let built = System.Collections.Generic.Dictionary<string, FSharpProjectOptions>()
+    let order = ResizeArray<GraphProject>()
+    let inProgress = System.Collections.Generic.HashSet<string>()
+    let rec optionsOf (p: GraphProject) : FSharpProjectOptions =
+        match built.TryGetValue p.Id with
+        | true, opts -> opts
+        | _ ->
+            if not (inProgress.Add p.Id) then
+                failwithf "project reference cycle through %s" p.Id
+            let referenced =
+                p.ProjectRefs
+                |> Array.distinct
+                |> Array.map (fun id ->
+                    match byId.TryGetValue id with
+                    | true, r -> graphOutputPath r, optionsOf r
+                    | _ -> failwithf "project %s references unknown project %s" p.Id id)
+            let opts = graphProjectOptions checker p referenced
+            inProgress.Remove p.Id |> ignore
+            built.[p.Id] <- opts
+            order.Add p
+            opts
+    optionsOf check |> ignore
+    built, order
+
+/// One `uses-project-graph-batch` request's response.
+let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
+    let byId, check = readGraphRequest root
+    let built, order = graphOptions checker byId check
+    let files = checkProjectFiles checker built.[check.Id] check.Paths
+    let referenced =
+        order
+        |> Seq.filter (fun p -> p.Id <> check.Id)
+        |> Seq.map (fun p ->
+            let results =
+                checker.ParseAndCheckProject(built.[p.Id], userOpName = "fcs-dump-uses-project-graph")
+                |> Async.RunSynchronously
+            {| Id = p.Id
+               AssemblyName = p.AssemblyName
+               OutputPath = graphOutputPath p
+               Diagnostics = results.Diagnostics |> Array.map projectDiagnostic |})
+        |> Seq.toArray
+    {| Files = files; Referenced = referenced |}
+
 /// `uses-project-graph-batch`: check one project of a project *graph*, each of
 /// its F# project references passed as `FSharpReferencedProject.FSharpReference`,
 /// which is how an IDE references an F# project: FCS type-checks the
@@ -6644,82 +6742,7 @@ let private usesProjectGraphBatchCore () =
     let respond (line: string) : string =
         try
             use doc = JsonDocument.Parse(line: string)
-            let root = doc.RootElement
-            let projects =
-                match root.TryGetProperty("projects") with
-                | true, arr when arr.ValueKind = JsonValueKind.Array ->
-                    arr.EnumerateArray() |> Seq.map readGraphProject |> Seq.toArray
-                | _ -> failwith "no projects in request"
-            let byId = System.Collections.Generic.Dictionary<string, GraphProject>()
-            for p in projects do
-                if not (byId.TryAdd(p.Id, p)) then
-                    failwithf "duplicate project id %s" p.Id
-            projects
-            |> Array.countBy (fun p -> p.AssemblyName.ToLowerInvariant())
-            |> Array.tryFind (fun (_, n) -> n > 1)
-            |> Option.iter (fun (name, _) -> failwithf "two projects are named %s" name)
-            let check =
-                match root.TryGetProperty("check") with
-                | true, v when v.ValueKind = JsonValueKind.String ->
-                    match Option.ofObj (v.GetString()) with
-                    | Some id when byId.ContainsKey id -> byId.[id]
-                    | other -> failwithf "check names no project of the request: %A" other
-                | _ -> failwith "no check in request"
-
-            // Options per project, built depth first; `order` is the closure
-            // in dependency order, `inProgress` catches a cycle.
-            let built = System.Collections.Generic.Dictionary<string, FSharpProjectOptions>()
-            let order = ResizeArray<GraphProject>()
-            let inProgress = System.Collections.Generic.HashSet<string>()
-            let rec optionsOf (p: GraphProject) : FSharpProjectOptions =
-                match built.TryGetValue p.Id with
-                | true, opts -> opts
-                | _ ->
-                    if not (inProgress.Add p.Id) then
-                        failwithf "project reference cycle through %s" p.Id
-                    let referenced =
-                        p.ProjectRefs
-                        |> Array.distinct
-                        |> Array.map (fun id ->
-                            match byId.TryGetValue id with
-                            | true, r -> graphOutputPath r, optionsOf r
-                            | _ -> failwithf "project %s references unknown project %s" p.Id id)
-                    let baseOpts =
-                        projectOptionsOf checker p.Paths p.RefArgs p.ExclusiveRefs p.DefineArgs p.LangVersionArgs
-                    let dir = Option.ofObj (Path.GetDirectoryName p.Paths.[0]) |> Option.defaultValue "."
-                    let isOutput (o: string) =
-                        o.StartsWith "-o:" || o.StartsWith "--out:" || o.StartsWith "/out:"
-                    let opts =
-                        { baseOpts with
-                            ProjectFileName = Path.Combine(dir, "fcs-dump-" + p.Id + ".fsproj")
-                            OtherOptions =
-                                Array.concat
-                                    [ baseOpts.OtherOptions |> Array.filter (isOutput >> not)
-                                      [| "-o:" + graphOutputPath p |]
-                                      referenced |> Array.map (fun (out, _) -> "-r:" + out) ]
-                            ReferencedProjects =
-                                referenced
-                                |> Array.map (fun (out, opts) -> FSharpReferencedProject.FSharpReference(out, opts)) }
-                    inProgress.Remove p.Id |> ignore
-                    built.[p.Id] <- opts
-                    order.Add p
-                    opts
-
-            let checkOpts = optionsOf check
-            let files = checkProjectFiles checker checkOpts check.Paths
-            let referenced =
-                order
-                |> Seq.filter (fun p -> p.Id <> check.Id)
-                |> Seq.map (fun p ->
-                    let results =
-                        checker.ParseAndCheckProject(built.[p.Id], userOpName = "fcs-dump-uses-project-graph")
-                        |> Async.RunSynchronously
-                    {| Id = p.Id
-                       AssemblyName = p.AssemblyName
-                       OutputPath = graphOutputPath p
-                       Diagnostics = results.Diagnostics |> Array.map projectDiagnostic |})
-                |> Seq.toArray
-            JsonSerializer.Serialize({| Files = files; Referenced = referenced |}, compact)
+            JsonSerializer.Serialize(respondGraph checker doc.RootElement, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
 
