@@ -2471,22 +2471,23 @@ impl UpdateBatches {
     const MAX_STATES: usize = 16;
 
     /// Step every state by `step`, keeping each state as it was too when the
-    /// operation `may_not_run`. Returns whether any step strands.
+    /// operation `may_not_run`. Returns whether any step strands. A state is
+    /// moved into its step, and copied only to keep the branch where the
+    /// operation did not run, so an operation that runs costs what its step
+    /// does.
     fn advance(
         &mut self,
         may_not_run: bool,
-        step: impl Fn(&UpdateBatchRun) -> (UpdateBatchRun, bool),
+        step: impl Fn(UpdateBatchRun) -> (UpdateBatchRun, bool),
     ) -> Option<bool> {
         let states = self.states.as_mut()?;
-        let mut next: Vec<UpdateBatchRun> = Vec::new();
+        let mut next: Vec<UpdateBatchRun> = Vec::with_capacity(states.len());
         let mut strands = false;
-        for run in states.iter() {
+        for run in std::mem::take(states) {
+            let kept = may_not_run.then(|| run.clone());
             let (stepped, stranded) = step(run);
             strands |= stranded;
-            for candidate in [Some(stepped), may_not_run.then(|| run.clone())]
-                .into_iter()
-                .flatten()
-            {
+            for candidate in [Some(stepped), kept].into_iter().flatten() {
                 if !next.contains(&candidate) {
                     next.push(candidate);
                 }
@@ -2571,7 +2572,7 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
                 let next = if run.pending {
                     UpdateBatchRun::default()
                 } else {
-                    run.clone()
+                    run
                 };
                 (next, false)
             });
@@ -2607,8 +2608,7 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
 
 /// The batch after an `Update` of `fragments` runs on `run`, and whether it
 /// strands an entry ([`update_strands_late`]).
-fn step_update(run: &UpdateBatchRun, fragments: &[UpdateFragment]) -> (UpdateBatchRun, bool) {
-    let mut run = run.clone();
+fn step_update(mut run: UpdateBatchRun, fragments: &[UpdateFragment]) -> (UpdateBatchRun, bool) {
     // Whether the walk cannot tell if the fragment it stopped at joined.
     let mut undecided = false;
     let mut left_at = None;
