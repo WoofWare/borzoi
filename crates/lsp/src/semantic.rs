@@ -994,6 +994,20 @@ impl SemanticState {
         .dlls
     }
 
+    /// The project-reference graph the env fold for `project` walks under
+    /// `target_framework`: each node evaluated under the producer TFM the
+    /// entry's restore selected for it, as [`Self::reference_dlls_for_project`]
+    /// walks it. An observability surface, so an oracle can be handed the
+    /// projects the env was composed from rather than a re-derivation of them.
+    pub fn compile_graph_for_project(
+        &self,
+        project: &Path,
+        target_framework: &ServedTfm,
+        workspace: &Workspace,
+    ) -> ProjectGraph {
+        compile_graph(project, target_framework, workspace, &Observer::new()).0
+    }
+
     /// [`Self::reference_dlls_for_project`]'s whole resolution: the DLLs and
     /// what became of each declared project-reference edge.
     fn reference_set_for_project(
@@ -1040,9 +1054,8 @@ impl SemanticState {
         let _span =
             tracing::info_span!("resolve_references", project = %project.display()).entered();
         self.env_resolutions += 1;
-        let recovered_ref_tfms = env_ref_tfms(project, target_framework.as_deref(), observer);
-        let graph =
-            workspace.project_graph_with_producer_tfms(project, &recovered_ref_tfms, observer);
+        let (graph, recovered_ref_tfms) =
+            compile_graph(project, target_framework, workspace, observer);
         let ref_targets = graph_ref_targets(&graph, project, observer);
         // Borrow `sidecar` (mut) as a disjoint field — it drives any C#
         // `.csproj` references this project has, lazily spawning on first
@@ -3712,6 +3725,20 @@ fn csharp_project_ref_edges(
 /// verdict, 3.3d round 19) and seeds nothing — consistent with the walk,
 /// whose untrusted-TFM demotion fires before any seed is consulted (and
 /// moot for the env fold, whose untrusted arm serves no DLLs at all).
+/// The graph [`SemanticState::resolve_references`] walks for `project`, and
+/// the producer TFMs it was seeded with ([`env_ref_tfms`]), which the
+/// resolution reads again to locate each producer's output.
+fn compile_graph(
+    project: &Path,
+    target_framework: &ServedTfm,
+    workspace: &Workspace,
+    observer: &Observer,
+) -> (ProjectGraph, BTreeMap<PathBuf, String>) {
+    let recovered_ref_tfms = env_ref_tfms(project, target_framework.as_deref(), observer);
+    let graph = workspace.project_graph_with_producer_tfms(project, &recovered_ref_tfms, observer);
+    (graph, recovered_ref_tfms)
+}
+
 fn env_ref_tfms(
     entry_project: &Path,
     entry_tfm: Option<&str>,

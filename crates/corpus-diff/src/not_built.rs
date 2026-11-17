@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use borzoi::project_deferral::FoldOutcome;
 use borzoi::project_graph::ProjectKind;
-use borzoi::semantic::ProjectId;
+use borzoi::semantic::{ProjectId, SemanticState};
 use borzoi::workspace::Workspace;
 use borzoi_msbuild::{ItemMetadataValue, ParsedProject};
 use borzoi_oracle_harness::project_graph::{
@@ -108,18 +108,20 @@ fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// The F# projects `project` compiles against, as the LSP's env fold walks
-/// them ([`Workspace::project_graph_with_producer_tfms`]): only edges that
+/// The F# projects `project` compiles against: the graph the LSP's env fold
+/// walks for it ([`SemanticState::compile_graph_for_project`], under its
+/// served TFM and the producer TFMs its restore selected), so only edges that
 /// contribute to compilation (a `ReferenceOutputAssembly="false"` edge does
 /// not), transitive edges followed except through an edge that excludes them,
 /// canonicalised, `project` itself excluded. `true` when some node's
 /// reference list was suppressed as untrusted, so the set may be short.
-fn compile_closure(workspace: &Workspace, project: &Path) -> (Vec<PathBuf>, bool) {
-    let graph = workspace.project_graph_with_producer_tfms(
-        project,
-        &BTreeMap::new(),
-        &borzoi_msbuild::observed::Observer::new(),
-    );
+fn compile_closure(
+    semantic: &SemanticState,
+    workspace: &mut Workspace,
+    project: &Path,
+) -> (Vec<PathBuf>, bool) {
+    let tfm = workspace.served_tfm_for_project(project);
+    let graph = semantic.compile_graph_for_project(project, &tfm, workspace);
     let entry = canonical(project);
     let suppressed = graph.nodes.iter().any(|n| n.references_uncertain);
     let closure = graph
@@ -159,14 +161,14 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
 
     // Every project the request needs: B's compile closure, and each of
     // those projects' own (which an output-only edge leaves out of B's).
-    let (b_closure, b_suppressed) = compile_closure(&workspace, project);
+    let (b_closure, b_suppressed) = compile_closure(&semantic, &mut workspace, project);
     let mut closures: BTreeMap<PathBuf, (Vec<PathBuf>, bool)> = BTreeMap::new();
     let mut pending: Vec<PathBuf> = b_closure.clone();
     while let Some(a) = pending.pop() {
         if closures.contains_key(&a) {
             continue;
         }
-        let (closure, suppressed) = compile_closure(&workspace, &a);
+        let (closure, suppressed) = compile_closure(&semantic, &mut workspace, &a);
         pending.extend(
             closure
                 .iter()

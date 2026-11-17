@@ -55,5 +55,5 @@ list="$(IFS=:; echo "${dependents[*]}")"
 cd "$repo"
 nix develop --command env \
   BORZOI_NOT_BUILT_PROJECT_LIST="$list" \
-  cargo test -p borzoi-corpus-diff --test project_resolution not_built_census \
+  cargo test --profile gate -p borzoi-corpus-diff --test project_resolution not_built_census \
   -- --ignored --nocapture
