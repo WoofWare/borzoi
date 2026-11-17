@@ -134,6 +134,9 @@ enum Cond {
     SwitchEq(bool),
     UndefEmpty,
     UndefEqTrue,
+    /// A gate the walk cannot decide (a property function it leaves as
+    /// text), which MSBuild evaluates to this boolean.
+    Undecided(bool),
 }
 
 impl Cond {
@@ -143,6 +146,10 @@ impl Cond {
             Cond::SwitchEq(want) => format!(" Condition=\"'$(Switch)' == '{want}'\""),
             Cond::UndefEmpty => " Condition=\"'$(NeverSet)' == ''\"".to_string(),
             Cond::UndefEqTrue => " Condition=\"'$(NeverSet)' == 'true'\"".to_string(),
+            Cond::Undecided(holds) => format!(
+                " Condition=\"$([System.String]::IsNullOrWhiteSpace('{}'))\"",
+                if holds { "" } else { "x" }
+            ),
         }
     }
 }
@@ -313,8 +320,10 @@ enum Boundary {
     /// `<Compile Remove="…">`.
     Remove(UpdateSpec),
     /// `<Compile Update="…" Visible="false">`: an `Update` that writes no
-    /// `CompileOrder`, so it cannot move anything.
-    OtherMetadataUpdate(UpdateSpec),
+    /// `CompileOrder`, so it cannot move anything, but joins MSBuild's batch
+    /// of updates when it runs. Under a false condition it does not, and under
+    /// one the walk cannot decide the walk must follow both batches.
+    OtherMetadataUpdate(UpdateSpec, Cond),
     /// `<Compile Include="a" Exclude="b">`.
     Exclude(IncludeSpec, usize),
     /// `<Compile Include="@(Compile)">`: duplicates every item so far.
@@ -327,9 +336,11 @@ impl ItemDecl {
             ItemDecl::Boundary(boundary) => {
                 let line = match boundary {
                     Boundary::Remove(spec) => format!("<Compile Remove=\"{}\" />", spec.render()),
-                    Boundary::OtherMetadataUpdate(spec) => {
-                        format!("<Compile Update=\"{}\" Visible=\"false\" />", spec.render())
-                    }
+                    Boundary::OtherMetadataUpdate(spec, cond) => format!(
+                        "<Compile Update=\"{}\" Visible=\"false\"{} />",
+                        spec.render(),
+                        cond.render()
+                    ),
                     Boundary::Exclude(spec, file) => format!(
                         "<Compile Include=\"{}\" Exclude=\"{}\" />",
                         spec.render(),
@@ -601,7 +612,16 @@ fn item_strategy() -> impl Strategy<Value = ItemDecl> {
 fn boundary_strategy() -> impl Strategy<Value = Boundary> {
     prop_oneof![
         update_spec_strategy().prop_map(Boundary::Remove),
-        update_spec_strategy().prop_map(Boundary::OtherMetadataUpdate),
+        (
+            update_spec_strategy(),
+            prop_oneof![
+                2 => Just(Cond::None),
+                2 => proptest::bool::ANY.prop_map(Cond::SwitchEq),
+                1 => Just(Cond::UndefEqTrue),
+                2 => proptest::bool::ANY.prop_map(Cond::Undecided),
+            ],
+        )
+            .prop_map(|(spec, cond)| Boundary::OtherMetadataUpdate(spec, cond)),
         (include_spec_strategy(), file()).prop_map(|(spec, file)| Boundary::Exclude(spec, file)),
         Just(Boundary::SelfReference),
     ]
@@ -1230,4 +1250,52 @@ fn a_condition_false_update_joins_no_batch() {
             assert_eq!(ours, theirs, "{body}");
         }
     }
+}
+
+/// An `Update` whose condition the walk cannot decide may or may not join the
+/// batch of updates, and a later `Update` strands an entry in one of the two
+/// batches only: here, when the first runs, `A.fs` then fails at its first
+/// fragment, `A.fs;A.fs` joins and leaves, and `B.fs;A.fs` strands `B.fs`
+/// (MSBuild orders `C.fs B.fs`). The walk must follow both batches, so it
+/// commits no order MSBuild does not compute, whichever way the gate goes.
+#[test]
+fn an_update_the_walk_cannot_gate_is_followed_both_ways() {
+    let mut certain = 0;
+    for condition in [
+        "$([System.String]::IsNullOrWhiteSpace(''))",
+        "$([System.String]::IsNullOrWhiteSpace('x'))",
+    ] {
+        let body: &'static str = Box::leak(
+            format!(
+                r#"    <Compile Update="A.fs;B.fs" Condition="{condition}" />
+    <Compile Update="A.fs" />
+    <Compile Update="A.fs;A.fs" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileLast" />
+    <Compile Include="B.fs;C.fs" />"#
+            )
+            .into_boxed_str(),
+        );
+        let fixture = Fixture {
+            sdk_props: Vec::new(),
+            project: vec![Group::Raw(body)],
+            sdk_targets: Vec::new(),
+        };
+        let (laid, parsed) = write_and_parse(&fixture);
+        let theirs = shared()
+            .oracle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .target_items(&laid.proj, "FSharpSourceCodeCompileOrder", "Compile")
+            .expect("MSBuild evaluates the project");
+        if !parsed.items_uncertain {
+            certain += 1;
+            let ours: Vec<String> = parsed
+                .items
+                .iter()
+                .map(|item| full_path(&item.include))
+                .collect();
+            assert_eq!(ours, theirs, "{body}\n{:#?}", parsed.diagnostics);
+        }
+    }
+    eprintln!("{certain} of 2 committed");
 }

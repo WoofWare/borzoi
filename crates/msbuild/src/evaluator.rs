@@ -895,7 +895,7 @@ struct State<'r> {
     /// MSBuild's batch of `Update`s for each item type whose `Update`s the walk
     /// models (`Compile`, `PackageReference`), as far as the walk can follow it
     /// ([`item_pass`]'s `update_strands_late`), keyed by lowercased item type.
-    update_batches: HashMap<String, item_pass::UpdateBatchRun>,
+    update_batches: HashMap<String, item_pass::UpdateBatches>,
     package_versions: Vec<PackageVersion>,
     package_versions_untracked: bool,
     global_package_references: Vec<GlobalPackageReference>,

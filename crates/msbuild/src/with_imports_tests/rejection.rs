@@ -640,6 +640,27 @@ fn an_illegal_condition_msbuild_may_not_evaluate_may_be_rejected() {
         format!(
             "<Choose><When Condition=\"{UNDECIDED_TRUE}\" /><Otherwise><ItemGroup><I Include=\"x\" Condition=\"tr ue\" /></ItemGroup></Otherwise></Choose>"
         ),
+        // In such a branch, an item-pass gate reads the final property table,
+        // which a later write changes from what the walk holds there.
+        format!(
+            "<PropertyGroup><RunItems>false</RunItems></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\"><ItemGroup Condition=\"'$(RunItems)' == 'true'\">\
+             <I Include=\"x\" Condition=\"tr ue\" /></ItemGroup></When></Choose>\
+             <PropertyGroup><RunItems>true</RunItems></PropertyGroup>"
+        ),
+        format!(
+            "<PropertyGroup><RunItems>false</RunItems></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\"><ItemGroup>\
+             <I Include=\"x\" Condition=\"'$(RunItems)' == 'true'\"><M Condition=\"tr ue\">m</M></I>\
+             </ItemGroup></When></Choose>\
+             <PropertyGroup><RunItems>true</RunItems></PropertyGroup>"
+        ),
+        format!(
+            "<PropertyGroup><Word>5</Word></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\"><ItemGroup>\
+             <I Include=\"x\" Condition=\"$(Word) &gt; 1\" /></ItemGroup></When></Choose>\
+             <PropertyGroup><Word>abc</Word></PropertyGroup>"
+        ),
         // An `Update`'s metadata, evaluated only where the update applies.
         "<ItemGroup><I Update=\"x\"><M Condition=\"tr ue\">m</M></I></ItemGroup>".to_owned(),
         // An ill-typed comparison on a value the walk is not certain of.

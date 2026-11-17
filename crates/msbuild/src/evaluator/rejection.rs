@@ -33,7 +33,10 @@
 //! certain inputs ([`judge_unwalked`]), and every condition of the item pass,
 //! judged group by group ([`judge_deferred`]) where a build evaluates it
 //! (below), since the walk's item capture gates an illegal condition's
-//! contents as an unmodelled one's.
+//! contents as an unmodelled one's. A group of the item pass in a branch the
+//! walk could not decide is judged there too, against the final property
+//! table as MSBuild evaluates it ([`State::defer_judgement`]), not against the
+//! properties the walk holds where it meets the group.
 //!
 //! **Certain.** A [`RejectionCertainty::Certain`] site is a claim the
 //! differentials grade, so it needs MSBuild to reach the construct for
@@ -99,7 +102,7 @@ use crate::document::attribute;
 use crate::imports::normalise;
 use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 
-use super::item_pass::expand_silent;
+use super::item_pass::{DeferredGroupKind, expand_silent};
 use super::observed::{self, EntryKind};
 use super::{
     SdkResolution, State, condition, condition_exists, directory_build, import_dedup_key, loader,
@@ -380,6 +383,17 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
             judge_condition(node, dir, reached, state);
         }
         "Choose" => judge_whens(node, 0, dir, reached, state),
+        // MSBuild evaluates these against the final property table: the
+        // property pass leaves them to the item pass.
+        "ItemGroup" | "ItemDefinitionGroup" if !state.in_item_pass => {
+            debug_assert!(!reached, "the property pass judges only undecided branches");
+            let kind = if node.has_tag_name("ItemGroup") {
+                DeferredGroupKind::ItemGroup
+            } else {
+                DeferredGroupKind::ItemDefinitionGroup
+            };
+            state.defer_judgement(node, kind);
+        }
         "ItemGroup" => judge_item_group(node, reached, state),
         "ItemDefinitionGroup" => judge_item_definition_group(node, reached, state),
         // A `<UsingTask>` resolves `Exists` against its own file's directory.
@@ -465,7 +479,8 @@ pub(super) fn judge_branch(branch: Node<'_, '_>, dir: &Path, reached: bool, stat
 /// Judge the conditions of a group the item pass replays: `<ItemGroup>`,
 /// `<ItemDefinitionGroup>` or `<UsingTask>`, against the final property
 /// table. `reached`: whether MSBuild reaches the group for certain, as the
-/// property pass found it ([`reach_is_certain`] there).
+/// property pass found it ([`reach_is_certain`] there; never for a group it
+/// only recorded for judgement).
 pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
     judge_unwalked(node, dir, reached, state);
 }
