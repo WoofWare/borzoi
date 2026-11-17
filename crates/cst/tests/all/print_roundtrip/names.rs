@@ -16,7 +16,9 @@ type Binding = borzoi_print::tree::Binding<DefaultVersion>;
 type LetBindings = borzoi_print::tree::LetBindings<DefaultVersion>;
 type NestedModule = borzoi_print::tree::NestedModule<DefaultVersion>;
 type NamedModule = borzoi_print::tree::NamedModule<DefaultVersion>;
+type Args = borzoi_print::tree::Args<DefaultVersion>;
 type Attribute = borzoi_print::tree::Attribute<DefaultVersion>;
+type AttributeArgs = borzoi_print::tree::AttributeArgs<DefaultVersion>;
 type TypeDefn = borzoi_print::tree::TypeDefn<DefaultVersion>;
 
 use super::round_trips;
@@ -127,7 +129,10 @@ fn name_positions(id: &Ident) -> ImplFile {
         ModuleDecl::Let(LetBindings::NonRec(Box::new(Binding {
             attributes: vec![Attribute {
                 name: path.clone(),
-                arg: name(id),
+                args: AttributeArgs::List(Args::Named {
+                    positional: vec![name(id)],
+                    named: Vec1::new((id.clone(), name(id)), Vec::new()),
+                }),
             }],
             is_inline: false,
             head: BindingHead::Function {
@@ -145,9 +150,15 @@ fn name_positions(id: &Ident) -> ImplFile {
                 ),
             },
             body: Expr::Sequential(
-                Box::new(Expr::FieldGet {
-                    expr: Box::new(name(id)),
-                    field: id.clone(),
+                Box::new(Expr::MethodApp {
+                    func: Box::new(Expr::FieldGet {
+                        expr: Box::new(name(id)),
+                        field: id.clone(),
+                    }),
+                    args: Args::Named {
+                        positional: Vec::new(),
+                        named: Vec1::new((id.clone(), name(id)), Vec::new()),
+                    },
                 }),
                 Box::new(Expr::Sequential(
                     Box::new(Expr::Set {

@@ -11,8 +11,8 @@
 
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
-    Access, ArrayRank, Attribute, Binding, BindingHead, Const, Expr, Float32, Float64,
-    ForDirection, ImplFile, LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace,
+    Access, Args, ArrayRank, Attribute, AttributeArgs, Binding, BindingHead, Const, Expr, Float32,
+    Float64, ForDirection, ImplFile, LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace,
     NamespaceName, NestedModule, Pat, RecordField, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
 };
 use borzoi_print::vec::{Vec1, Vec2};
@@ -277,15 +277,32 @@ fn pat() -> BoxedStrategy<Pat> {
     .boxed()
 }
 
+fn args<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Args<V>> {
+    prop_oneof![
+        prop::collection::vec(expr.clone(), 2..=3)
+            .prop_map(|es| Args::Positional(Vec2::from_vec(es).expect("two"))),
+        (
+            prop::collection::vec(expr.clone(), 0..=2),
+            prop::collection::vec((ident(), expr), 1..=2),
+        )
+            .prop_map(|(positional, named)| Args::Named {
+                positional,
+                named: Vec1::from_vec(named).expect("non-empty"),
+            }),
+    ]
+    .boxed()
+}
+
 fn attributes<V: Version>(arg: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Vec<Attribute<V>>> {
+    let args = prop_oneof![
+        2 => Just(AttributeArgs::Value(Expr::Const(Const::Unit))),
+        1 => arg.clone().prop_map(AttributeArgs::Value),
+        1 => args(arg).prop_map(AttributeArgs::List),
+    ];
     prop_oneof![
         3 => Just(Vec::new()),
         1 => prop::collection::vec(
-            (
-                long_ident(),
-                prop_oneof![2 => Just(Expr::Const(Const::Unit)), 1 => arg],
-            )
-                .prop_map(|(name, arg)| Attribute { name, arg }),
+            (long_ident(), args).prop_map(|(name, args)| Attribute { name, args }),
             1..=2,
         ),
     ]
@@ -360,6 +377,16 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
         let items = prop::collection::vec(inner.clone(), 0..=2);
         prop_oneof![
             (b.clone(), b.clone()).prop_map(|(func, arg)| Expr::App { func, arg }),
+            // A tuple argument is where `App` and `MethodApp` meet, and a
+            // recursive draw rarely lands on one.
+            (b.clone(), prop::collection::vec(inner.clone(), 2..=3)).prop_map(|(func, es)| {
+                Expr::App {
+                    func,
+                    arg: Box::new(Expr::Tuple(Vec2::from_vec(es).expect("two"))),
+                }
+            }),
+            (b.clone(), args(inner.clone()))
+                .prop_map(|(func, args)| Expr::MethodApp { func, args }),
             (infix_operator(), b.clone(), b.clone()).prop_map(|(op, lhs, rhs)| Expr::Infix {
                 op,
                 lhs,

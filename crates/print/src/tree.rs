@@ -61,13 +61,39 @@ pub enum Access {
     Private,
 }
 
-/// An attribute, `[<Name(arg)>]`.
+/// An attribute, `[<Name(args)>]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribute<V: Version> {
     pub name: LongIdent,
-    /// The argument; [`Const::Unit`] is an attribute written without one,
-    /// which is how F# reads `[<A>]` and `[<A()>]` alike.
-    pub arg: Expr<V>,
+    pub args: AttributeArgs<V>,
+}
+
+/// What an attribute is applied to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttributeArgs<V: Version> {
+    /// `[<A(e)>]`: one argument, passed whole, so a tuple is one argument.
+    /// [`Const::Unit`] is an attribute written without one, which is how F#
+    /// reads `[<A>]` and `[<A()>]` alike.
+    Value(Expr<V>),
+    /// `[<A(a, b, X = c)>]`: an argument list.
+    List(Args<V>),
+}
+
+/// A parenthesised argument list, `(a, b, x = c)`, as F#'s checker reads one:
+/// each comma-separated element is an argument, and an element `x = c` whose
+/// left side is a bare name is the argument named `x`. One positional argument
+/// is no list (it is [`Expr::App`]'s argument), and F# requires the named
+/// arguments to come last, so the two cases are a list of at least two
+/// positional arguments, and positional arguments followed by named ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Args<V: Version> {
+    /// `(a, b, …)`
+    Positional(Vec2<Expr<V>>),
+    /// `(a, …, x = c, …)`
+    Named {
+        positional: Vec<Expr<V>>,
+        named: Vec1<(Ident, Expr<V>)>,
+    },
 }
 
 /// A declaration in a module or namespace.
@@ -256,10 +282,17 @@ pub enum Expr<V: Version> {
     Name(LongIdent),
     /// An operator as a value, `( + )`.
     OpValue(Operator),
-    /// `f x`
+    /// `f x`: `func` applied to one argument, passed whole, so `f (a, b)`
+    /// with a tuple argument is printed `f ((a, b))`.
     App {
         func: Box<Expr<V>>,
         arg: Box<Expr<V>>,
+    },
+    /// `f (a, b, x = c)`: `func` applied to an argument list, as a method is
+    /// called.
+    MethodApp {
+        func: Box<Expr<V>>,
+        args: Args<V>,
     },
     /// `a op b`
     Infix {
