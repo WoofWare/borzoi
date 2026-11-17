@@ -12,9 +12,12 @@
 //! uses FCS binds into a referenced project.
 //!
 //! It also counts, per referenced project, the reasons borzoi could not read
-//! it from source today (an untrusted Compile set or defines, several target
-//! frameworks, a damaged parse, a refused fold): the darkness a
-//! source-reading design would introduce where it reads nothing.
+//! it from source today (an untrusted Compile set or defines, a damaged
+//! parse, a refused fold): the darkness a source-reading design would
+//! introduce where it reads nothing. A dependent whose closure holds a
+//! multi-targeted project is skipped, naming it: the LSP evaluates one TFM
+//! per project, so the census cannot hand FCS the variant the dependent
+//! compiles against.
 //!
 //! It asserts nothing about the numbers. It is a measurement, run by hand
 //! (`tools/not-built-census.sh`), whose output is the input to the
@@ -184,6 +187,17 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
         let Some(parsed_a) = workspace.project(a).cloned() else {
             return skipped(format!("its reference {} did not evaluate", a.display()));
         };
+        // The LSP evaluates a project at one TFM, its first declared, while
+        // a dependant may compile it at another; with no per-TFM evaluation
+        // the census cannot hand FCS the build the dependant compiles
+        // against, so it measures nothing rather than another variant.
+        if parsed_a.target_frameworks.len() > 1 {
+            return skipped(format!(
+                "its reference {} declares {} target frameworks, and the LSP evaluates only one",
+                a.display(),
+                parsed_a.target_frameworks.len()
+            ));
+        }
         match oracle_name(a, &parsed_a) {
             Ok((id, _)) => ids.insert(a.clone(), id),
             Err(why) => return skipped(format!("its reference {}: {why}", a.display())),
@@ -208,12 +222,6 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
         }
         if parsed_a.project_references_uncertain || *suppressed {
             unreadable.push("untrusted project references".to_owned());
-        }
-        if parsed_a.target_frameworks.len() > 1 {
-            unreadable.push(format!(
-                "{} target frameworks",
-                parsed_a.target_frameworks.len()
-            ));
         }
         if !name_trusted {
             unreadable.push("untrusted assembly name".to_owned());
