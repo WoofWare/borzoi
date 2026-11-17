@@ -687,11 +687,10 @@ impl SdkDiscovery {
             overrides_present: self.workload_overrides_present,
             resolver_switched_off: self.workload_resolver_switched_off,
             global_json: self.global_json_workloads.clone(),
-            // Only a workload locator reads it, so no other name reads the
-            // muxer.
-            process_architecture: workloads::is_workload_locator(sdk_name)
-                .then(|| self.build_process_architecture(observer))
-                .flatten(),
+            // A workload locator reads it, and so does any name the running
+            // SDK does not ship, which the workload resolver looks up as a
+            // pack.
+            process_architecture: self.build_process_architecture(observer),
         };
         let locate = |root: &Path, name: &str| {
             resolve_sdk(
@@ -735,7 +734,8 @@ impl SdkDiscovery {
     ///
     /// `None` where the host root is unnamed ([`Self::host_root`]), the muxer
     /// cannot be read, or its header does not settle the architecture (a
-    /// universal binary of two, say): the locators then decline wherever an
+    /// universal binary of two, say): workload resolution (the locators, and
+    /// any name the running SDK does not ship) then declines wherever an
     /// install-state file exists. The muxer is the host root's, as discovery
     /// names it: a `$DOTNET_ROOT` naming another install than the `dotnet` the
     /// user builds with is outside what discovery models, here as for the
