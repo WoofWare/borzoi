@@ -8,7 +8,6 @@
 //! whole import graph) before evaluating any item, and keeping the two
 //! passes in one module made that ordering easy to violate.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::*;
@@ -2448,65 +2447,29 @@ fn walk_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
 }
 
 /// MSBuild's batch of `Update`s for one item type, as far as the walk follows
-/// it ([`update_strands_late`]): every state the batch may be in. An operation
-/// whose condition the walk cannot decide may or may not have run, so the walk
-/// follows both. Past [`UpdateBatches::MAX_STATES`] it stops following and
-/// takes any `Update` that could strand as one that does.
+/// it ([`update_strands_late`]). An operation whose condition the walk cannot
+/// decide may or may not have run, so after one the walk no longer knows what
+/// the batch holds: it stops following it, and takes every later `Update` that
+/// could strand as one that does.
 #[derive(Debug)]
 pub(super) struct UpdateBatches {
-    /// The states the batch may be in; `None` once there were too many.
-    states: Option<Vec<UpdateBatchRun>>,
+    /// The batch, while the walk knows it.
+    run: Option<UpdateBatchRun>,
 }
 
 impl Default for UpdateBatches {
     fn default() -> Self {
         UpdateBatches {
-            states: Some(vec![UpdateBatchRun::default()]),
+            run: Some(UpdateBatchRun::default()),
         }
     }
 }
 
-impl UpdateBatches {
-    /// How many states the walk follows before it stops.
-    const MAX_STATES: usize = 16;
-
-    /// Step every state by `step`, keeping each state as it was too when the
-    /// operation `may_not_run`. Returns whether any step strands. A state is
-    /// moved into its step, and copied only to keep the branch where the
-    /// operation did not run, so an operation that runs costs what its step
-    /// does.
-    fn advance(
-        &mut self,
-        may_not_run: bool,
-        step: impl Fn(UpdateBatchRun) -> (UpdateBatchRun, bool),
-    ) -> Option<bool> {
-        let states = self.states.as_mut()?;
-        let mut next: Vec<UpdateBatchRun> = Vec::with_capacity(states.len());
-        let mut strands = false;
-        for run in std::mem::take(states) {
-            let kept = may_not_run.then(|| run.clone());
-            let (stepped, stranded) = step(run);
-            strands |= stranded;
-            for candidate in [Some(stepped), kept].into_iter().flatten() {
-                if !next.contains(&candidate) {
-                    next.push(candidate);
-                }
-            }
-        }
-        if next.len() > Self::MAX_STATES {
-            self.states = None;
-        } else {
-            *states = next;
-        }
-        Some(strands)
-    }
-}
-
-/// One state of MSBuild's batch of `Update`s for one item type.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// MSBuild's batch of `Update`s for one item type, where the walk knows it.
+#[derive(Debug, Default)]
 struct UpdateBatchRun {
     /// The comparison keys the batch holds.
-    keys: BTreeSet<String>,
+    keys: HashSet<String>,
     /// Some fragment the batch may hold has no key the walk can compute, so
     /// any later fragment may collide with it.
     unknown: bool,
@@ -2533,8 +2496,8 @@ struct UpdateFragment {
 /// it goes. Run for every such element, before its condition is acted on: a
 /// build batches no condition-false `Update` (it builds no operation for one;
 /// probed, `ProjectInstance`, dotnet 10), though design-time evaluation does.
-/// An operation whose condition the walk cannot decide may or may not run, and
-/// the walk follows both ([`UpdateBatches`]).
+/// After an operation whose condition the walk cannot decide, the walk no
+/// longer follows the batch ([`UpdateBatches`]).
 ///
 /// The mechanism is `LazyItemList.ComputeItems`. Consecutive `Update`s of one
 /// type join a batch keyed by full path (`NormalizePathForComparisonNoThrow`,
@@ -2549,11 +2512,12 @@ struct UpdateFragment {
 /// `Update="Alpha;Alpha"` then `Update="Beta;Alpha" VersionOverride="1.0"`
 /// then `Include="Alpha;Beta"` gives `Beta` the override.
 ///
-/// So this answers true when, in some state the batch may be in, an `Update`
-/// leaves the batch at its second fragment or later, with one of those before
-/// it strandable (its written text not its key, ignoring case) and no batch
-/// pending. It over-approximates, as the conservative reading: a fragment
-/// without a computable key may collide with anything.
+/// So this answers true when an `Update` leaves the batch at its second
+/// fragment or later, with one of those before it strandable (its written text
+/// not its key, ignoring case) and no batch pending. It over-approximates, as
+/// the conservative reading: a fragment without a computable key may collide
+/// with anything, and once the walk stops following the batch every `Update`
+/// of more than one fragment may strand.
 fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> bool {
     let key = item_key(item_type);
     let (include, update) = (attribute(node, "Include"), attribute(node, "Update"));
@@ -2566,16 +2530,15 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
     let update = match (include.as_deref(), update.as_deref()) {
         (None, Some(update)) => update,
         _ => {
-            // Another operation flushes a pending batch.
+            // Another operation flushes a pending batch, if it runs.
             let batches = state.update_batches.entry(key).or_default();
-            batches.advance(may_not_run, |run| {
-                let next = if run.pending {
-                    UpdateBatchRun::default()
-                } else {
-                    run
-                };
-                (next, false)
-            });
+            if may_not_run {
+                batches.run = None;
+            } else if let Some(run) = batches.run.as_mut()
+                && run.pending
+            {
+                *run = UpdateBatchRun::default();
+            }
             return false;
         }
     };
@@ -2601,14 +2564,19 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
         })
         .collect();
     let batches = state.update_batches.entry(key).or_default();
-    batches
-        .advance(may_not_run, |run| step_update(run, &fragments))
-        .unwrap_or(fragments.len() > 1)
+    if may_not_run {
+        // Whether or not it runs, the walk no longer knows the batch after it.
+        batches.run = None;
+    }
+    match batches.run.as_mut() {
+        Some(run) => step_update(run, &fragments),
+        None => fragments.len() > 1,
+    }
 }
 
-/// The batch after an `Update` of `fragments` runs on `run`, and whether it
-/// strands an entry ([`update_strands_late`]).
-fn step_update(mut run: UpdateBatchRun, fragments: &[UpdateFragment]) -> (UpdateBatchRun, bool) {
+/// Run an `Update` of `fragments` on the batch `run`: whether it strands an
+/// entry ([`update_strands_late`]).
+fn step_update(run: &mut UpdateBatchRun, fragments: &[UpdateFragment]) -> bool {
     // Whether the walk cannot tell if the fragment it stopped at joined.
     let mut undecided = false;
     let mut left_at = None;
@@ -2635,21 +2603,21 @@ fn step_update(mut run: UpdateBatchRun, fragments: &[UpdateFragment]) -> (Update
     match left_at {
         None => {
             run.pending = true;
-            (run, false)
+            false
         }
         Some(i) if undecided => {
             // It may have joined (no flush) or left (a flush, if pending): keep
             // every key, take no batch as pending, and count a strand whether
             // or not one was.
             run.pending = false;
-            (run, i > 0 && strandable)
+            i > 0 && strandable
         }
         Some(i) => {
             let strands_late = i > 0 && strandable && !run.pending;
             if run.pending {
-                run = UpdateBatchRun::default();
+                *run = UpdateBatchRun::default();
             }
-            (run, strands_late)
+            strands_late
         }
     }
 }

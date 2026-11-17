@@ -322,7 +322,8 @@ enum Boundary {
     /// `<Compile Update="…" Visible="false">`: an `Update` that writes no
     /// `CompileOrder`, so it cannot move anything, but joins MSBuild's batch
     /// of updates when it runs. Under a false condition it does not, and under
-    /// one the walk cannot decide the walk must follow both batches.
+    /// one the walk cannot decide the walk cannot know which batch MSBuild
+    /// holds after it.
     OtherMetadataUpdate(UpdateSpec, Cond),
     /// `<Compile Include="a" Exclude="b">`.
     Exclude(IncludeSpec, usize),
@@ -1256,8 +1257,9 @@ fn a_condition_false_update_joins_no_batch() {
 /// batch of updates, and a later `Update` strands an entry in one of the two
 /// batches only: here, when the first runs, `A.fs` then fails at its first
 /// fragment, `A.fs;A.fs` joins and leaves, and `B.fs;A.fs` strands `B.fs`
-/// (MSBuild orders `C.fs B.fs`). The walk must follow both batches, so it
-/// commits no order MSBuild does not compute, whichever way the gate goes.
+/// (MSBuild orders `C.fs B.fs`). The walk cannot know which batch MSBuild
+/// holds, so it commits no order MSBuild does not compute, whichever way the
+/// gate goes.
 #[test]
 fn an_update_the_walk_cannot_gate_is_followed_both_ways() {
     let mut certain = 0;

@@ -380,32 +380,45 @@ fn compile_update_compile_order_scales_with_items_and_targets() {
 }
 
 /// Following MSBuild's batch of updates costs a key per fragment, not a copy
-/// of the batch per `Update`: thousands of consecutive single-file `Update`s,
-/// every one joining one growing batch, finish at once. Copying the batch at
-/// each takes seconds here even optimised.
+/// or comparison of the batch per `Update`: thousands of consecutive
+/// single-file `Update`s, every one joining one growing batch, finish at
+/// once, and so they do after `Update`s whose conditions the walk cannot
+/// decide. Copying the batch at each takes seconds here even optimised.
 #[test]
 fn update_batch_tracking_scales_with_consecutive_updates() {
     const N: usize = 32_000;
-    let mut src = String::from("<Project>\n  <ItemGroup>\n");
-    for i in 0..N {
-        src.push_str(&format!("    <Compile Update=\"F{i}.fs\" Visible=\"false\" />\n"));
+    let undecided = "$([System.String]::IsNullOrWhiteSpace(''))";
+    for prefix in 0..=4 {
+        let mut src = String::from("<Project>\n  <ItemGroup>\n");
+        for i in 0..prefix {
+            src.push_str(&format!(
+                "    <Compile Update=\"Z{i}.fs\" Visible=\"false\" Condition=\"{undecided}\" />\n"
+            ));
+        }
+        for i in 0..N {
+            src.push_str(&format!(
+                "    <Compile Update=\"F{i}.fs\" Visible=\"false\" />\n"
+            ));
+        }
+        src.push_str("    <Compile Include=\"F0.fs\" />\n  </ItemGroup>\n</Project>");
+        let start = std::time::Instant::now();
+        let p = parse_fsproj(
+            &src,
+            Path::new("/repo/Demo.fsproj"),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("well-formed XML parses");
+        let elapsed = start.elapsed();
+        assert_eq!(file_names(&p.items), ["F0.fs"]);
+        if prefix == 0 {
+            assert!(!p.items_uncertain, "{:?}", p.diagnostics);
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "{N} consecutive updates after {prefix} undecided ones took {elapsed:?}"
+        );
     }
-    src.push_str("    <Compile Include=\"F0.fs\" />\n  </ItemGroup>\n</Project>");
-    let start = std::time::Instant::now();
-    let p = parse_fsproj(
-        &src,
-        Path::new("/repo/Demo.fsproj"),
-        &HashMap::new(),
-        &HashMap::new(),
-    )
-    .expect("well-formed XML parses");
-    let elapsed = start.elapsed();
-    assert_eq!(file_names(&p.items), ["F0.fs"]);
-    assert!(!p.items_uncertain, "{:?}", p.diagnostics);
-    assert!(
-        elapsed < std::time::Duration::from_secs(20),
-        "{N} consecutive updates took {elapsed:?}"
-    );
 }
 
 /// MSBuild compares a spelling it cannot normalise (`a:b.fs` — `:` is invalid
