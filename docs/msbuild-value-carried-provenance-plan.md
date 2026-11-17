@@ -1259,6 +1259,37 @@ The metamorphic gate's opacity tier pays for this in reach: its SDK holds a
 `Directory.Build.targets` point, which opacity leaves in doubt, so the whole
 evaluation is withdrawn and the tier commits few of its 14,400 facts.
 
+#### #988: the default-fill exemption behind opacity, withdrawn
+
+The residual the stale rule left, an *unbound* name hidden content may have
+defined, read by the default-fill idiom, was the over-commitment
+`self_default_absence_is_a_fact` made by design. #985 found a route to it that
+needs no unusual SDK: an import whose path is built from
+`MSBuildStartupDirectory`, which a served evaluation never has, followed by
+`<X Condition="'$(X)' == ''">default</X>`. The walk committed `default`; MSBuild
+started beside the file reads the file's value.
+
+Measured before withdrawing it, by logging every exemption the predicate
+granted while the walk was opaque:
+
+| population | exemptions granted behind opacity | projects | what made the walk opaque |
+| --- | ---: | ---: | --- |
+| F# corpus, real SDK (77 projects) | 2,580, over 238 names | 8 | 6 `docs/fcs-samples` projects: an import of a missing `netfx.props` (MSBuild rejects them, MSB4019); 2 `buildtools/checkpackages` projects: the SDK gate on `IsPathRooted($(MSBuildProjectExtensionsPath))` (their item sets and `LangVersion` already decline) |
+| LSP project corpus (`project-corpus-gate.sh resolution`) | 0 | 0 | — |
+| restore-cone census, pinned projects | 0 | 0 | — |
+
+So every exemption granted behind opacity was in a project MSBuild rejects
+or whose items the walk declines already. With the predicate holding opacity
+too, the F# corpus manifest moves no line, and the crate suite moves only the
+attribution of one opaque fixture (its `Directory.Build.targets` point is now
+charged too, since the SDK block's discovery reads the path through the
+idiom). `startup_directory_diff` holds the shape #985 found to MSBuild started
+from each of its directories. Narrowing instead, to opacity whose gate read
+an input the evaluation lacks, would not have been sound: `fsproj_sdk_import_graph_generative_diff`'s `Ran_` channel
+commits a wrong `no` in 11 of its 600 cases with the exemption in place, among
+them `Ran_behindt` behind an import gated on a function the walk does not
+compute (`Substring`), which reads no missing input.
+
 ### The census, re-run — and what it says about P3's priority
 
 Measured 2026-08-02 against the pinned SDK **10.0.301** (the P1 member table

@@ -120,3 +120,45 @@ fn retargeting_the_startup_directory_s_link_invalidates_the_evaluation() {
     let tally = sweep(&root, &evaluate, &[]);
     assert!(tally.moved(Why::Relink) > 0, "{tally:?}");
 }
+
+/// An import the startup directory selects, then the self-default idiom over
+/// a name the imported file writes. MSBuild started beside the file reads the
+/// file's value and skips the default, and started anywhere else takes the
+/// default (`fsproj_global_perturbation_diff`'s `startup-selected-self-default`
+/// holds both to the oracle). So a served evaluation, which has no startup
+/// directory, cannot know which branch the default takes, while one started in
+/// a directory commits what MSBuild reads there.
+#[cfg(unix)]
+#[test]
+fn a_self_default_after_an_import_the_startup_directory_selects_commits_only_with_the_directory() {
+    const SOURCE: &str = "<Project>\n  \
+        <Import Project=\"$(MSBuildStartupDirectory)/x.props\" \
+        Condition=\"Exists('$(MSBuildStartupDirectory)/x.props')\" />\n  \
+        <PropertyGroup><Seen Condition=\"'$(Seen)' == ''\">default</Seen></PropertyGroup>\n\
+        </Project>";
+    let tmp = TempDir::new().unwrap();
+    let root = canon(tmp.path());
+    let project = write_at(&root, "proj/App.proj", SOURCE);
+    write_at(
+        &root,
+        "beside/x.props",
+        "<Project><PropertyGroup><Seen>imported</Seen></PropertyGroup></Project>",
+    );
+    std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+    let served = started_in(&project, SOURCE, &HashMap::new(), None);
+    assert_eq!(committed_seen(&served), None, "{:?}", served.diagnostics);
+    let beside = started_in(
+        &project,
+        SOURCE,
+        &HashMap::new(),
+        Some(&root.join("beside")),
+    );
+    assert_eq!(committed_seen(&beside), Some("imported"));
+    let elsewhere = started_in(
+        &project,
+        SOURCE,
+        &HashMap::new(),
+        Some(&root.join("elsewhere")),
+    );
+    assert_eq!(committed_seen(&elsewhere), Some("default"));
+}

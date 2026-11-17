@@ -12,7 +12,8 @@
 //!   an imported file, in an item `Include` (where a raw `;` splits the list),
 //!   in conditions (an equality with `MSBuildProjectDirectory`, which MSBuild
 //!   escapes where it splices this name raw; `HasTrailingSlash`; `Exists`), a
-//!   `<Choose>` arm, an `<Import>` path built from it, and a gated `Compile`
+//!   `<Choose>` arm, an `<Import>` path built from it (and the self-default
+//!   idiom over the name the imported file writes), and a gated `Compile`
 //!   item. Where MSBuild rejects a project, the walk must commit nothing.
 //! - **Without it**, as every evaluation the LSP serves runs, nothing the walk
 //!   commits may move between two of MSBuild's working directories: a value
@@ -74,13 +75,18 @@ const APP: &str = r#"<Project>
 "#;
 
 /// The name in the functions that take a scalar, which MSBuild refuses a `;`
-/// in (it rejects the project), and in the path of an `<Import>`.
+/// in (it rejects the project), and in the path of an `<Import>`, followed by
+/// the self-default idiom over the name the imported file writes: the walk
+/// without a startup directory cannot know which branch the default takes.
 const PROBES: &str = r#"<Project>
   <PropertyGroup>
     <Slash Condition="HasTrailingSlash('$(MSBuildStartupDirectory)')">yes</Slash>
     <Present Condition="Exists('$(MSBuildStartupDirectory)')">yes</Present>
   </PropertyGroup>
   <Import Project="$(MSBuildStartupDirectory)/start.props" Condition="Exists('$(MSBuildStartupDirectory)/start.props')" />
+  <PropertyGroup>
+    <FromStart Condition="'$(FromStart)' == ''">no</FromStart>
+  </PropertyGroup>
 </Project>
 "#;
 
@@ -349,9 +355,10 @@ fn a_supplied_startup_directory_reads_as_msbuild_reads_it() {
         "MSBuild splices the startup directory raw, so `%20` decodes"
     );
     assert_eq!(
-        property("Probes", "pct%20enc", "FromStart"),
-        None,
-        "the decoded path names no directory, so its start.props is not imported"
+        property("Probes", "pct%20enc", "FromStart").as_deref(),
+        Some("no"),
+        "the decoded path names no directory, so its start.props is not imported \
+         and the self-default fills the name"
     );
     assert_eq!(
         property("Probes", "with space", "FromStart").as_deref(),

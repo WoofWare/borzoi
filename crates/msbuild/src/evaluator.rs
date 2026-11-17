@@ -1714,13 +1714,22 @@ impl<'r> State<'r> {
     /// the default-fill exemption ([`evaluate_condition_with_exemptions`]),
     /// whose whole justification is the former.
     ///
-    /// That exemption deliberately over-commits on two axes — it believes the
-    /// environment model, and it believes an undefined read even under
-    /// [`Self::walk_opaque`] — because the SDK leans on the idiom pervasively
-    /// and flagging it would refuse every real project. Neither over-commitment
-    /// extends to a name the walk has **direct evidence** the real build gives
-    /// a value:
+    /// The exemption believes the walker's environment model (a name absent
+    /// from the caller's environment snapshot, and written by no file the walk
+    /// saw, is unset), and nothing more. So it does not extend to a name the
+    /// real build may give a value the walk cannot see:
     ///
+    /// * [`Self::walk_opaque`] — the walk has passed content it could not see
+    ///   (an import it could not follow, or one whose gate or path it could not
+    ///   decide), and that content may write the name. The file may be one
+    ///   only an input the evaluation lacks can locate: a build's working
+    ///   directory (`MSBuildStartupDirectory`, which a served evaluation never
+    ///   has) or a toolset value the walk does not seed, so neither the
+    ///   project nor its SDK says what it writes. The SDK leans on the idiom
+    ///   pervasively, but on the measured corpora the walk reaches it behind
+    ///   hidden content only in projects MSBuild rejects or whose items it
+    ///   declines already (`docs/msbuild-value-carried-provenance-plan.md`,
+    ///   "the default-fill exemption behind opacity, withdrawn").
     /// * [`Trust::refused`] — a write we refused. Its emptiness here
     ///   is our failure to compute, not a fact; MSBuild holds what it computed
     ///   and takes the other branch.
@@ -1734,14 +1743,15 @@ impl<'r> State<'r> {
     ///   or the toolset is one whose value we do not know), and the real build
     ///   holds its own value all the same.
     ///
-    /// The other two [`Trust`] channels are deliberately *not* consulted: both
-    /// describe a value we hold and may have wrong, whereas this asks about a
-    /// name that read as absent. Widening to [`Trust::is_certain`] would refuse
-    /// the idiom wherever any earlier write to the name was undecided, which is
-    /// the wholesale decline the over-commitment above exists to avoid.
+    /// The value channels of [`Trust`] (taint, unpinned, stale) are
+    /// deliberately *not* consulted: each describes a value we hold and may
+    /// have wrong, whereas this asks about a name that read as absent.
+    /// Widening to [`Trust::is_certain`] would refuse the idiom wherever any
+    /// earlier write to the name was undecided.
     fn self_default_absence_is_a_fact(&self, name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
-        !self.trust_of(name).refused()
+        self.walk_opaque.is_none()
+            && !self.trust_of(name).refused()
             && !self.env_property_names.contains(&lower)
             && !is_toolset_predefined_name(&lower)
     }
@@ -4437,7 +4447,9 @@ fn evaluate_property_group_condition(
 /// exempt: there the emptiness is our failure to compute a value rather than a
 /// fact about the real build, and MSBuild — holding the value it did compute —
 /// takes the opposite branch of the very condition the exemption calls
-/// deterministic.
+/// deterministic. Nor is any name once the walk has passed content it could
+/// not see ([`State::walk_opaque`]), which may have written it;
+/// [`State::self_default_absence_is_a_fact`] is the whole precondition.
 fn evaluate_condition_with_exemptions(
     node: Node<'_, '_>,
     current_file_dir: &Path,
