@@ -1,19 +1,22 @@
 //! Gates decided on values the walk holds from before content it could not
 //! see (#1037), held certain-implies-exact to MSBuild.
 //!
-//! Each generated project binds some names, then imports `hidden.props` under
-//! a gate the walk cannot decide (`'$(G.ToUpperInvariant())' == 'X'`, which
-//! MSBuild decides on the global `G`): the walk passes it unseen and the values
-//! it holds go stale. The hidden file rewrites some of those names, and may
+//! Each generated project binds the gate names, then imports `hidden.props`
+//! under a gate the walk cannot decide (`'$(G.ToUpperInvariant())' == 'X'`,
+//! which MSBuild decides on the global `G`): the walk passes it unseen and the
+//! values it holds go stale. The hidden file rewrites some gate names, and may
 //! take a caller global back from the caller (`TreatAsLocalProperty="G"`) and
-//! rewrite it. After it come the routes by which a gate decides what the walk
-//! evaluates, each gated on a name the hidden file may have rewritten:
+//! rewrite it. After it, each route's output is bound afresh, and then come the
+//! routes by which a gate decides what the walk evaluates, each gated on a name
+//! the hidden file may have rewritten and each writing an output no other
+//! route, and not the hidden file, writes:
 //!
 //! - a property's own gate;
 //! - a `<PropertyGroup>`'s gate;
-//! - a `<Choose>`'s `<When>`s, with or without an `<Otherwise>`;
+//! - a `<Choose>`'s `<When>`s, with or without an `<Otherwise>`, among gates
+//!   decided either way and gates the walk cannot decide;
 //! - an `<Import>`'s gate, and an `<ImportGroup>`'s, over a sibling file that
-//!   writes the names;
+//!   writes the output;
 //! - a group the walk cannot evaluate at all, holding a child with its own
 //!   gate.
 //!
@@ -41,12 +44,21 @@ const UNDECIDABLE: &str = "'$(G.ToUpperInvariant())' == 'X'";
 const GLOBALS: &[&str] = &["x", "y", "z"];
 /// The names the routes gate on, which the hidden file may rewrite.
 const GATES: &[&str] = &["Gate", "Flag"];
-/// The names the routes write.
-const WRITTEN: &[&str] = &["A", "B", "C"];
-/// Every name read back: the written ones, the gates, the global, and copies
-/// of a written name and the global made after every route.
-const READ: &[&str] = &["A", "B", "C", "Gate", "Flag", "G", "CopyA", "CopyG"];
-const SIDES: &[&str] = &["side0.props", "side1.props"];
+/// Every name read back: each route's output, the gates, the global, and
+/// copies of the outputs and the global made after every route.
+const READ: &[&str] = &[
+    "ROwn",
+    "RGroup",
+    "RChoose",
+    "RImport",
+    "RImportGroup",
+    "RUnsupported",
+    "Gate",
+    "Flag",
+    "G",
+    "CopyAll",
+    "CopyG",
+];
 
 /// The routes, for the census.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -68,6 +80,29 @@ const ROUTES: &[Route] = &[
     Route::UnsupportedGroup,
 ];
 
+impl Route {
+    /// The name only this route writes.
+    fn output(self) -> &'static str {
+        match self {
+            Route::OwnGate => "ROwn",
+            Route::Group => "RGroup",
+            Route::Choose => "RChoose",
+            Route::Import => "RImport",
+            Route::ImportGroup => "RImportGroup",
+            Route::UnsupportedGroup => "RUnsupported",
+        }
+    }
+
+    /// The sibling file an import route takes, writing its output.
+    fn side(self) -> Option<&'static str> {
+        match self {
+            Route::Import => Some("side_import.props"),
+            Route::ImportGroup => Some("side_group.props"),
+            _ => None,
+        }
+    }
+}
+
 /// A gate on a name the hidden file may rewrite.
 fn stale_gate(rng: &mut SplitMix64) -> String {
     let name = rng.pick(GATES);
@@ -76,48 +111,74 @@ fn stale_gate(rng: &mut SplitMix64) -> String {
     format!(" Condition=\"'$({name})' {op} '{value}'\"")
 }
 
+/// A route's gate: mostly a stale one; now and then one decided on certain
+/// values, under which the walk must go on committing what the route leaves
+/// alone.
+fn route_gate(rng: &mut SplitMix64) -> String {
+    if rng.below(4) == 0 {
+        certain_gate(rng).to_owned()
+    } else {
+        stale_gate(rng)
+    }
+}
+
+/// A gate decided on certain values, either way.
+fn certain_gate(rng: &mut SplitMix64) -> &'static str {
+    rng.pick(&[" Condition=\"'k' == 'k'\"", " Condition=\"'k' == 'j'\""])
+}
+
 fn literal(rng: &mut SplitMix64) -> &'static str {
     rng.pick(&["yes", "no", "", "v1", "v2"])
 }
 
-fn write_one(rng: &mut SplitMix64, out: &mut String) {
-    let name = rng.pick(WRITTEN);
-    let value = rng.pick(&["w1", "w2", "", "$(Gate)", "$(A)x"]);
-    let _ = write!(out, "<{name}>{value}</{name}>");
+/// A write of `name`, now and then under a gate decided on certain values.
+fn write_output(rng: &mut SplitMix64, name: &str, out: &mut String) {
+    let value = rng.pick(&["w1", "w2", "", "$(Gate)", "$(ROwn)x"]);
+    let own = if rng.below(4) == 0 {
+        certain_gate(rng)
+    } else {
+        ""
+    };
+    let _ = write!(out, "<{name}{own}>{value}</{name}>");
 }
 
 fn route(rng: &mut SplitMix64, route: Route, out: &mut String) {
+    let name = route.output();
     match route {
         Route::OwnGate => {
-            let name = rng.pick(WRITTEN);
             let _ = write!(
                 out,
                 "<PropertyGroup><{name}{}>own</{name}></PropertyGroup>",
-                stale_gate(rng)
+                route_gate(rng)
             );
         }
         Route::Group => {
-            let _ = write!(out, "<PropertyGroup{}>", stale_gate(rng));
-            write_one(rng, out);
+            let _ = write!(out, "<PropertyGroup{}>", route_gate(rng));
+            write_output(rng, name, out);
             out.push_str("</PropertyGroup>");
         }
         Route::Choose => {
             out.push_str("<Choose>");
-            for _ in 0..1 + rng.below(2) {
-                // Now and then a gate the walk cannot decide at all, after
-                // which every branch is in doubt.
-                let gate = if rng.below(4) == 0 {
-                    format!(" Condition=\"{UNDECIDABLE}\"")
-                } else {
-                    stale_gate(rng)
+            for _ in 0..1 + rng.below(3) {
+                // Mostly stale gates; now and then one the walk cannot decide
+                // at all, or one decided on certain values either way.
+                let gate = match rng.below(6) {
+                    0 => format!(" Condition=\"{UNDECIDABLE}\""),
+                    1 => certain_gate(rng).to_owned(),
+                    _ => stale_gate(rng),
                 };
-                let _ = write!(out, "<When{gate}><PropertyGroup>");
-                write_one(rng, out);
+                let group = if rng.below(4) == 0 {
+                    certain_gate(rng)
+                } else {
+                    ""
+                };
+                let _ = write!(out, "<When{gate}><PropertyGroup{group}>");
+                write_output(rng, name, out);
                 out.push_str("</PropertyGroup></When>");
             }
             if rng.below(2) == 0 {
                 out.push_str("<Otherwise><PropertyGroup>");
-                write_one(rng, out);
+                write_output(rng, name, out);
                 out.push_str("</PropertyGroup></Otherwise>");
             }
             out.push_str("</Choose>");
@@ -126,24 +187,31 @@ fn route(rng: &mut SplitMix64, route: Route, out: &mut String) {
             let _ = write!(
                 out,
                 "<Import Project=\"{}\"{} />",
-                rng.pick(SIDES),
-                stale_gate(rng)
+                route.side().expect("an import route"),
+                route_gate(rng)
             );
         }
         Route::ImportGroup => {
-            let _ = write!(
-                out,
-                "<ImportGroup{}><Import Project=\"{}\" /></ImportGroup>",
-                stale_gate(rng),
-                rng.pick(SIDES)
-            );
+            let _ = write!(out, "<ImportGroup{}>", route_gate(rng));
+            for _ in 0..1 + rng.below(2) {
+                let own = if rng.below(3) == 0 {
+                    certain_gate(rng)
+                } else {
+                    ""
+                };
+                let _ = write!(
+                    out,
+                    "<Import Project=\"{}\"{own} />",
+                    route.side().expect("an import route")
+                );
+            }
+            out.push_str("</ImportGroup>");
         }
         Route::UnsupportedGroup => {
-            let name = rng.pick(WRITTEN);
             let _ = write!(
                 out,
                 "<PropertyGroup Condition=\"{UNDECIDABLE}\"><{name}{}>unsupported</{name}></PropertyGroup>",
-                stale_gate(rng)
+                route_gate(rng)
             );
         }
     }
@@ -152,32 +220,28 @@ fn route(rng: &mut SplitMix64, route: Route, out: &mut String) {
 struct Case {
     project: String,
     hidden: String,
-    sides: Vec<String>,
+    /// Each import route's sibling file, by name.
+    sides: Vec<(&'static str, String)>,
     routes: BTreeSet<Route>,
 }
 
 fn case(rng: &mut SplitMix64) -> Case {
-    // What the walk holds before the hidden file: every gate name and some
-    // written ones.
+    // What the walk holds before the hidden file: the gate names.
     let mut project = String::from("<Project><PropertyGroup>");
     for name in GATES {
         let _ = write!(project, "<{name}>{}</{name}>", literal(rng));
-    }
-    for name in WRITTEN {
-        if rng.below(2) == 0 {
-            let _ = write!(project, "<{name}>{}</{name}>", literal(rng));
-        }
     }
     project.push_str("</PropertyGroup>");
     let _ = write!(
         project,
         "<Import Project=\"hidden.props\" Condition=\"{UNDECIDABLE}\" />"
     );
-    // Written names bound again after it are fresh, so the walk commits them
-    // unless a route below leaves them in doubt; the gate names stay stale.
+    // The outputs bound after it are fresh, so the walk commits them unless a
+    // route below leaves them in doubt; the gate names stay stale.
     project.push_str("<PropertyGroup>");
-    for name in WRITTEN {
+    for route in ROUTES {
         if rng.below(4) != 0 {
+            let name = route.output();
             let _ = write!(project, "<{name}>{}</{name}>", literal(rng));
         }
     }
@@ -188,8 +252,14 @@ fn case(rng: &mut SplitMix64) -> Case {
         routes.insert(chosen);
         route(rng, chosen, &mut project);
     }
-    project.push_str(
-        "<PropertyGroup><CopyA>$(A)</CopyA><CopyG>$(G)</CopyG></PropertyGroup></Project>",
+    let all: Vec<String> = ROUTES
+        .iter()
+        .map(|route| format!("$({})", route.output()))
+        .collect();
+    let _ = write!(
+        project,
+        "<PropertyGroup><CopyAll>{}</CopyAll><CopyG>$(G)</CopyG></PropertyGroup></Project>",
+        all.join("|")
     );
 
     let local = rng.below(3) == 0;
@@ -198,20 +268,21 @@ fn case(rng: &mut SplitMix64) -> Case {
     } else {
         "<Project><PropertyGroup>"
     });
-    for name in GATES.iter().chain(WRITTEN) {
-        if rng.below(2) == 0 {
+    for name in GATES {
+        if rng.below(4) != 0 {
             let _ = write!(hidden, "<{name}>{}</{name}>", literal(rng));
         }
     }
     hidden.push_str("</PropertyGroup></Project>");
 
-    let sides = SIDES
+    let sides = ROUTES
         .iter()
-        .map(|_| {
-            let mut side = String::from("<Project><PropertyGroup>");
-            write_one(rng, &mut side);
-            side.push_str("</PropertyGroup></Project>");
-            side
+        .filter_map(|route| {
+            let side = route.side()?;
+            let mut text = String::from("<Project><PropertyGroup>");
+            write_output(rng, route.output(), &mut text);
+            text.push_str("</PropertyGroup></Project>");
+            Some((side, text))
         })
         .collect();
     Case {
@@ -242,11 +313,11 @@ struct Violation {
 #[derive(Debug, Default)]
 struct Census {
     cases: usize,
-    /// Per route: cases holding it where MSBuild's value of some written name
-    /// moved across the globals, which only the hidden file can move.
+    /// Per route: cases holding it where MSBuild's value of its output moved
+    /// across the globals, which only the route can move.
     live: BTreeMap<Route, usize>,
-    /// Per route: cases holding it where the walk still committed some written
-    /// name, so declining is not all the walk does there.
+    /// Per route: cases holding it where the walk still committed its output,
+    /// so declining is not all the walk does there.
     committing: BTreeMap<Route, usize>,
     /// Committed `(case, global, name)` points.
     commits: usize,
@@ -271,7 +342,7 @@ fn sweep(
         let case = case(rng);
         std::fs::write(&path, &case.project).unwrap();
         std::fs::write(dir.join("hidden.props"), &case.hidden).unwrap();
-        for (name, side) in SIDES.iter().zip(&case.sides) {
+        for (name, side) in &case.sides {
             std::fs::write(dir.join(name), side).unwrap();
         }
         census.cases += 1;
@@ -314,6 +385,11 @@ fn sweep(
                         census.commits += 1;
                         ours_by_name.insert(name);
                         if ours != real {
+                            let sides: Vec<String> = case
+                                .sides
+                                .iter()
+                                .map(|(name, text)| format!("{name}: {text}"))
+                                .collect();
                             violations.push(Violation {
                                 routes: case.routes.clone(),
                                 name,
@@ -324,7 +400,7 @@ fn sweep(
                                      --- sides ---\n{}",
                                     case.project,
                                     case.hidden,
-                                    case.sides.join("\n")
+                                    sides.join("\n")
                                 ),
                             });
                         }
@@ -332,17 +408,15 @@ fn sweep(
                 }
             }
         }
-        let live = WRITTEN.iter().any(|name| {
-            theirs_by_name
-                .get(name)
-                .is_some_and(|values| values.len() > 1)
-        });
-        let committing = WRITTEN.iter().any(|name| ours_by_name.contains(name));
         for route in &case.routes {
-            if live {
+            let output = route.output();
+            if theirs_by_name
+                .get(output)
+                .is_some_and(|values| values.len() > 1)
+            {
                 *census.live.entry(*route).or_default() += 1;
             }
-            if committing {
+            if ours_by_name.contains(output) {
                 *census.committing.entry(*route).or_default() += 1;
             }
         }
@@ -383,11 +457,11 @@ fn stale_gates_are_exact_or_declined() {
     let mut oracle = Oracle::spawn();
     let mut rng = SplitMix64(0x1037_57a1_e6a7);
     let mut violations = Vec::new();
-    let census = sweep(&mut oracle, &mut rng, 400, &mut violations);
+    let census = sweep(&mut oracle, &mut rng, 800, &mut violations);
     eprintln!("stale gates: {census:?}");
     assert_none(violations);
-    // Anti-vacuity: every route sits in cases where the hidden file moves
-    // what MSBuild ends with, and in cases where the walk still commits.
+    // Anti-vacuity: every route moves its own output in MSBuild across the
+    // globals in some cases, and leaves it committed in others.
     assert!(census.commits >= 1000, "{census:?}");
     for route in ROUTES {
         assert!(
@@ -414,6 +488,16 @@ fn stale_gates_soak() {
     assert_none(violations);
 }
 
+/// A pinned shape: what it shows, the project, `hidden.props`, `side0.props`,
+/// and what MSBuild ends with when the hidden file is taken.
+type Shape = (
+    &'static str,
+    String,
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+);
+
 /// The four shapes of #1037, an import and an import group taken on a stale
 /// gate, and a `<Choose>` branch decided on one before an undecided gate, each
 /// with what MSBuild ends with when the hidden file is taken (`G=x`): the walk
@@ -423,7 +507,7 @@ fn issue_1037_shapes_are_exact_or_declined() {
     let hidden_gate = format!("<Import Project=\"hidden.props\" Condition=\"{UNDECIDABLE}\" />");
     let gate_yes = "<Project><PropertyGroup><Gate>yes</Gate></PropertyGroup></Project>";
     let gate_no = "<Project><PropertyGroup><Gate>no</Gate></PropertyGroup></Project>";
-    let shapes: Vec<(&str, String, &str, &str, &[(&str, &str)])> = vec![
+    let shapes: Vec<Shape> = vec![
         (
             "a group skipped on a stale gate",
             format!(
