@@ -1301,3 +1301,67 @@ fn an_update_the_walk_cannot_gate_is_followed_both_ways() {
     }
     eprintln!("{certain} of 2 committed");
 }
+
+/// Gates the walk cannot decide around the batch of updates, each case held to
+/// certain-implies-exact and, where marked, required to commit:
+///
+/// - an `<ItemGroup>` gate hides a metadata-only `Update` that, when the group
+///   runs, joins the batch, so the later `Update`s strand as in
+///   [`an_update_the_walk_cannot_gate_is_followed_both_ways`] (MSBuild orders
+///   `C.fs B.fs`): the walk must not take the batch as empty;
+/// - an `Update` under such a gate that strands nothing whether or not it
+///   runs (two distinct files on an empty batch): the walk must commit.
+#[test]
+fn undecided_gates_around_the_batch_of_updates() {
+    const UNDECIDED: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
+    let cases: [(String, bool); 2] = [
+        (
+            format!(
+                r#"    </ItemGroup>
+  <ItemGroup Condition="{UNDECIDED}">
+    <Compile Update="A.fs" Visible="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Update="A.fs" Condition="'$(NeverSet)' == 'true'" />
+    <Compile Update="A.fs" />
+    <Compile Update="A.fs;A.fs" />
+    <Compile Update="B.fs;A.fs" CompileOrder="CompileLast" />
+    <Compile Include="B.fs;C.fs" />"#
+            ),
+            false,
+        ),
+        (
+            format!(
+                r#"    <Compile Include="A.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" Visible="false" Condition="{UNDECIDED}" />"#
+            ),
+            true,
+        ),
+    ];
+    for (body, must_commit) in cases {
+        let body: &'static str = Box::leak(body.into_boxed_str());
+        let fixture = Fixture {
+            sdk_props: Vec::new(),
+            project: vec![Group::Raw(body)],
+            sdk_targets: Vec::new(),
+        };
+        let (laid, parsed) = write_and_parse(&fixture);
+        let theirs = shared()
+            .oracle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .target_items(&laid.proj, "FSharpSourceCodeCompileOrder", "Compile")
+            .expect("MSBuild evaluates the project");
+        if must_commit {
+            assert!(!parsed.items_uncertain, "{body}\n{:#?}", parsed.diagnostics);
+        }
+        if !parsed.items_uncertain {
+            let ours: Vec<String> = parsed
+                .items
+                .iter()
+                .map(|item| full_path(&item.include))
+                .collect();
+            assert_eq!(ours, theirs, "{body}\n{:#?}", parsed.diagnostics);
+        }
+    }
+}

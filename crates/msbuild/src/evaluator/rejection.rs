@@ -138,7 +138,15 @@ impl State<'_> {
         if replaces {
             self.rejection = Some(rejection);
         }
-        self.push(kind, span);
+        // A group judged in both passes may note one construct twice.
+        let effective = self.effective_span(span.clone());
+        if !self
+            .diagnostics
+            .iter()
+            .any(|d| d.kind == kind && d.span == effective)
+        {
+            self.push(kind, span);
+        }
     }
 
     /// [`Self::note_rejection`] of a [`RejectionCertainty::Possible`] site.
@@ -337,6 +345,24 @@ fn judge_gate(
     }
 }
 
+/// [`judge_gate`] of a gate MSBuild evaluates in its item pass, against the
+/// final property table. Outside the walk's item pass (in a branch it could not
+/// decide) a later write may still change what the gate reads, so there it
+/// decides nothing.
+fn judge_item_pass_gate(
+    node: Node<'_, '_>,
+    exists_dir: &Path,
+    reached: bool,
+    state: &mut State<'_>,
+) -> Judged {
+    let judged = judge_gate(node, exists_dir, reached, state);
+    if state.in_item_pass {
+        judged
+    } else {
+        Judged::Undecided
+    }
+}
+
 /// [`judge_condition`] of the condition `text` at `node`, returning its outcome.
 fn judge_text(
     node: Node<'_, '_>,
@@ -383,13 +409,17 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
             judge_condition(node, dir, reached, state);
         }
         "Choose" => judge_whens(node, 0, dir, reached, state),
-        // MSBuild evaluates these against the final property table: the
-        // property pass leaves them to the item pass.
+        // MSBuild evaluates these against the final property table, which the
+        // branch the walk could not decide may change: judged against the
+        // properties the walk holds here, deciding no gate, and again against
+        // the final table in the item pass.
         "ItemGroup" | "ItemDefinitionGroup" if !state.in_item_pass => {
             debug_assert!(!reached, "the property pass judges only undecided branches");
             let kind = if node.has_tag_name("ItemGroup") {
+                judge_item_group(node, reached, state);
                 DeferredGroupKind::ItemGroup
             } else {
+                judge_item_definition_group(node, reached, state);
                 DeferredGroupKind::ItemDefinitionGroup
             };
             state.defer_judgement(node, kind);
@@ -494,11 +524,12 @@ pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, stat
 /// `Include` names no item: then its conditions are only possibly evaluated.
 fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
-    let Some(inner) = judge_gate(node, &entry_dir, reached, state).inner(reached) else {
+    let Some(inner) = judge_item_pass_gate(node, &entry_dir, reached, state).inner(reached) else {
         return;
     };
     for item in node.children().filter(Node::is_element) {
-        let Some(reached) = judge_gate(item, &entry_dir, inner, state).inner(inner) else {
+        let Some(reached) = judge_item_pass_gate(item, &entry_dir, inner, state).inner(inner)
+        else {
             continue;
         };
         if let Some(sure) = loader::remove_matching_more_than_items(item) {
@@ -535,11 +566,12 @@ fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
 /// against the project's directory, as for every item-pass condition.
 fn judge_item_definition_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
-    let Some(inner) = judge_gate(node, &entry_dir, reached, state).inner(reached) else {
+    let Some(inner) = judge_item_pass_gate(node, &entry_dir, reached, state).inner(reached) else {
         return;
     };
     for definition in node.children().filter(Node::is_element) {
-        let Some(metadata_reached) = judge_gate(definition, &entry_dir, inner, state).inner(inner)
+        let Some(metadata_reached) =
+            judge_item_pass_gate(definition, &entry_dir, inner, state).inner(inner)
         else {
             continue;
         };

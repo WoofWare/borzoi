@@ -661,6 +661,14 @@ fn an_illegal_condition_msbuild_may_not_evaluate_may_be_rejected() {
              <I Include=\"x\" Condition=\"$(Word) &gt; 1\" /></ItemGroup></When></Choose>\
              <PropertyGroup><Word>abc</Word></PropertyGroup>"
         ),
+        // ... or that the branch keeps from being written, so the value the
+        // walk holds where it meets the group is MSBuild's.
+        format!(
+            "<PropertyGroup><Word>abc</Word></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\"><PropertyGroup><Flag>skip</Flag></PropertyGroup>\
+             <ItemGroup><I Include=\"x\" Condition=\"$(Word) &gt; 1\" /></ItemGroup></When></Choose>\
+             <PropertyGroup><Word Condition=\"'$(Flag)' == ''\">5</Word></PropertyGroup>"
+        ),
         // An `Update`'s metadata, evaluated only where the update applies.
         "<ItemGroup><I Update=\"x\"><M Condition=\"tr ue\">m</M></I></ItemGroup>".to_owned(),
         // An ill-typed comparison on a value the walk is not certain of.
