@@ -261,14 +261,19 @@ fn assert_channel_consistent(
         PropertyRead::Unset => Some(""),
         PropertyRead::UnsetInexact(_) | PropertyRead::Untrusted(_) => None,
     };
-    // One past the budget is one the channel keeps none of.
+    // One past the budget is one the channel keeps none of. The budget counts
+    // escaped bytes, which number at least the decoded value's and at most
+    // three times them (`%XX`), so between those the channel may keep either.
     if let Some(committed) = committed {
-        let expected = (committed.len() <= MAX_CANDIDATE_BYTES)
-            .then(|| BTreeSet::from([committed.to_owned()]));
-        assert_eq!(
-            candidates,
-            expected.as_ref(),
-            "the walk commits {name} = {committed:?}, so that is its only candidate\n{}",
+        let singleton = BTreeSet::from([committed.to_owned()]);
+        let ok = match candidates {
+            Some(candidates) => *candidates == singleton && committed.len() <= MAX_CANDIDATE_BYTES,
+            None => committed.len() * 3 > MAX_CANDIDATE_BYTES,
+        };
+        assert!(
+            ok,
+            "the walk commits {name} = {committed:?}, so that is its only candidate, not \
+             {candidates:?}\n{}",
             context()
         );
     }
@@ -483,6 +488,62 @@ fn an_imported_opt_out_of_a_global_withdraws_the_channel() {
     for name in &probe.properties {
         assert_eq!(candidates[name], None, "{name}");
     }
+}
+
+/// An imported document whose `TreatAsLocalProperty` names the global `G`
+/// through a property withdraws the channel too: MSBuild expands the list.
+#[test]
+fn a_computed_opt_out_of_a_global_withdraws_the_channel() {
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let path = dir.join("Demo.fsproj");
+    let xml = "<Project><PropertyGroup><L>G</L></PropertyGroup>\
+               <Import Project=\"computed.props\" />\
+               <PropertyGroup><CopyG>$(G)</CopyG></PropertyGroup></Project>";
+    std::fs::write(&path, xml).unwrap();
+    std::fs::write(
+        dir.join("computed.props"),
+        "<Project TreatAsLocalProperty=\"$(L)\"><PropertyGroup><G>override</G></PropertyGroup></Project>",
+    )
+    .unwrap();
+    let probe = ReadProbe {
+        properties: ["G", "CopyG"].map(str::to_owned).to_vec(),
+        ..ReadProbe::default()
+    };
+    let mut oracle = Oracle::spawn();
+    let (theirs, reads) =
+        evaluate(&mut oracle, xml, &path, &probe, "x").expect("MSBuild evaluates it");
+    assert_eq!(
+        theirs.get("G").map(String::as_str),
+        Some("override"),
+        "MSBuild expands the opt-out and applies the import's write"
+    );
+    assert!(reads.candidates_withdrawn);
+    for name in &probe.properties {
+        assert_eq!(reads.candidates[name], None, "{name}");
+    }
+}
+
+/// A group skipped on a gate that reads a name the walk unpinned widens what
+/// it writes once: an optional append to `x` names `x` and `xy`.
+#[test]
+fn a_skipped_group_widens_once() {
+    let xml = "<Project><PropertyGroup><A>x</A>\
+               <P Condition=\"'$(G.ToUpperInvariant())' == 'X'\">p</P></PropertyGroup>\
+               <PropertyGroup Condition=\"'$(P)' == 'q'\"><A>$(A)y</A></PropertyGroup></Project>";
+    assert_eq!(
+        candidates_alone(xml, "A"),
+        Some(BTreeSet::from(["x".to_owned(), "xy".to_owned()]))
+    );
+}
+
+/// `MSBuildAllProjects` holds, once the evaluation has finished, what MSBuild
+/// adds to it then: the walk's value at its end is no claim about it.
+#[test]
+fn the_final_msbuild_all_projects_is_no_claim() {
+    let xml = "<Project><PropertyGroup><MSBuildAllProjects>abc</MSBuildAllProjects>\
+               </PropertyGroup></Project>";
+    assert_eq!(candidates_alone(xml, "MSBuildAllProjects"), None);
 }
 
 /// Each `<Choose>` the walk cannot decide widens what its branches write

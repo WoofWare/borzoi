@@ -137,10 +137,12 @@ impl State<'_> {
             .iter()
             .map(|name| {
                 // The current file's names hold the file's while the walk
-                // expands it, and nothing once it has finished: what the
-                // walk holds at its end is no claim about what MSBuild does.
+                // expands it, and nothing once it has finished, and MSBuild
+                // adds to `MSBuildAllProjects` once it has: what the walk
+                // holds at its end is no claim about either (#1043).
                 if properties::THIS_FILE_NAMES
                     .iter()
+                    .chain(&["MSBuildAllProjects"])
                     .any(|this| this.eq_ignore_ascii_case(name))
                 {
                     return (name.clone(), None);

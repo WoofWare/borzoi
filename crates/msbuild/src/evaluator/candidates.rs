@@ -56,6 +56,14 @@ impl State<'_> {
     /// anything otherwise.
     pub(super) fn candidates_of(&self, name: &str) -> Candidates {
         if self.held_exactly_for_candidates(name) {
+            // One past the budget is not copied only to be dropped.
+            if self
+                .lookup
+                .held_len(name)
+                .is_some_and(|len| len > MAX_CANDIDATE_BYTES)
+            {
+                return Candidates::Anything;
+            }
             return Candidates::one(
                 self.lookup
                     .held_candidate(name)
@@ -95,7 +103,8 @@ impl State<'_> {
     /// text that splices plain references is, whose length the candidates it
     /// splices bound before it is built.
     pub(super) fn value_candidates(&self, raw: &str) -> Candidates {
-        if !splices_plain_references_only(raw) {
+        // The text alone bounds every expansion of it from below.
+        if raw.len() > MAX_CANDIDATE_BYTES || !splices_plain_references_only(raw) {
             return Candidates::Anything;
         }
         // Each name `raw` reads, first spelling first, with how many times.
@@ -127,13 +136,12 @@ impl State<'_> {
         loop {
             // The expansion splices each candidate where its name is read, so
             // this bounds its length before it is built.
-            let length = raw.len()
-                + names
-                    .iter()
-                    .zip(&choice)
-                    .zip(&each)
-                    .map(|(((_, count), &at), options)| count * options[at].text.len())
-                    .sum::<usize>();
+            let length = names
+                .iter()
+                .zip(&choice)
+                .zip(&each)
+                .map(|(((_, count), &at), options)| count.saturating_mul(options[at].text.len()))
+                .fold(raw.len(), usize::saturating_add);
             if length > MAX_CANDIDATE_BYTES {
                 return Candidates::Anything;
             }

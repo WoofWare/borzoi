@@ -476,6 +476,8 @@ fn sweep(
                         case.hidden
                     );
                 }
+                // Past the channel's byte budget (4096 escaped bytes) it may
+                // keep none; the generated values are far shorter.
                 if let Some(ours) = committed(&reads.properties[*name]) {
                     assert_eq!(
                         reads.candidates[*name],

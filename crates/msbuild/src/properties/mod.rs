@@ -372,6 +372,12 @@ impl PropertyMap {
         );
     }
 
+    /// The length, in escaped bytes, of the value bound to `key`.
+    pub(crate) fn held_len(&self, key: &str) -> Option<usize> {
+        let entry = self.inner.get(&key.to_ascii_lowercase())?;
+        Some(entry.value.as_ref()?.as_escaped().len())
+    }
+
     /// The value bound to `key` as a candidate: its text and origin.
     pub(crate) fn held_candidate(&self, key: &str) -> Option<Candidate> {
         let entry = self.inner.get(&key.to_ascii_lowercase())?;

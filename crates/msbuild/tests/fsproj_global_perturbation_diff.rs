@@ -625,12 +625,17 @@ fn assert_among_candidates(
             PropertyRead::Unset => Some(String::new()),
             PropertyRead::UnsetInexact(_) | PropertyRead::Untrusted(_) => None,
         };
+        // Past the channel's byte budget (4096 escaped bytes, which number
+        // between one and three per decoded byte) it may keep none.
         if let Some(committed) = committed {
-            assert_eq!(
-                candidates.as_ref(),
-                Some(&BTreeSet::from([committed.clone()])),
+            let ok = match candidates {
+                Some(candidates) => *candidates == BTreeSet::from([committed.clone()]),
+                None => committed.len() * 3 > 4096,
+            };
+            assert!(
+                ok,
                 "{what}: we commit ${{{name}}} = {committed:?} under globals {globals:?}, so \
-                 that is its only candidate\n--- xml ---\n{xml}"
+                 that is its only candidate, not {candidates:?}\n--- xml ---\n{xml}"
             );
         }
     }

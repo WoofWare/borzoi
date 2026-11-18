@@ -226,6 +226,7 @@ pub fn walk_with_imports<'r>(
         startup_directory,
         observer,
     );
+    state.candidates_withdrawn = local_overrides_are_computed(root);
     // The entry project is never inside an SDK.
     state
         .foreign_definitions
@@ -694,6 +695,13 @@ pub(crate) fn is_msbuild_true(value: &str) -> bool {
 /// — a real-world divergence (the F# SDK uses this attribute for
 /// `RestoreAdditionalProjectSources`). Names are stored lowercased to
 /// match MSBuild's OrdinalIgnoreCase property-name comparison.
+/// Whether `root`'s `TreatAsLocalProperty` names anything through an
+/// expansion, which MSBuild evaluates and [`collect_local_overrides`] reads as
+/// text: the names it opts out are then unknown to the walk (#1045).
+fn local_overrides_are_computed(root: Node<'_, '_>) -> bool {
+    attribute(root, "TreatAsLocalProperty").is_some_and(|names| names.contains(['$', '@', '%']))
+}
+
 fn collect_local_overrides(root: Node<'_, '_>) -> HashSet<String> {
     attribute(root, "TreatAsLocalProperty")
         .as_deref()
@@ -864,7 +872,8 @@ struct State<'r> {
     /// protection (`TreatAsLocalProperty`). MSBuild keeps the opt-out past
     /// the import and the walk does not (#1041), so from then on a value the
     /// walk holds of that global, or computes from it, may not be MSBuild's,
-    /// and the candidate channel names no value at all ([`candidates`]).
+    /// and the candidate channel names no value at all ([`candidates`]). So
+    /// does a root whose opt-out list the walk cannot read (#1045).
     candidates_withdrawn: bool,
     /// What the caller's environment said about `MSBuildExtensionsPath`, held
     /// aside rather than promoted: whether that value survives is the one
@@ -3808,7 +3817,9 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                                 state.mark_skipped_write_stale(child.tag_name().name(), &cause);
                             }
                         }
-                    } else if !gate_certain {
+                    } else if !gate_certain
+                        && !(group_condition_maybe_wrong || sdk_group_condition_taint)
+                    {
                         // Undecided for another reason the walk raises no
                         // diagnostic for: what the group writes, the real build
                         // may hold ([`candidates`]).
@@ -7134,7 +7145,8 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
         .into_iter()
         .filter(|name| !state.reserved.contains(name) && state.protected.remove(name))
         .collect();
-    state.candidates_withdrawn |= !unprotected.is_empty();
+    state.candidates_withdrawn |=
+        !unprotected.is_empty() || local_overrides_are_computed(doc.root_element());
     // Nested SDK roots are spliced through the same machinery the
     // entry project uses: `resolve_project_sdk` returns paths on a
     // happy resolve and pushes the appropriate diagnostic for every
