@@ -294,7 +294,9 @@ pub enum Throws {
     /// claims nothing either way, as for [`Outcome::Unsupported`]
     /// ([`Judgement::unevaluated`]).
     Never,
-    /// It throws on some value of those properties, and perhaps not on others.
+    /// A throw cannot be ruled out: it may throw on some value of those
+    /// properties, though leaves judged one at a time (contradictory guards,
+    /// say) may make the throwing operand unreachable on every one.
     Maybe,
     /// It throws whatever they hold.
     Certainly,
@@ -2105,10 +2107,10 @@ pub(crate) fn parse_msbuild_bool(value: &str) -> Option<bool> {
 /// `Version.TryParse` as MSBuild condition operands (and
 /// `[System.Version]::Parse`) see it: 2–4 dot-separated components, each
 /// parsed like .NET `int.TryParse(NumberStyles.Integer)` — whitespace-trimmed
-/// with an optional leading `+`, so `' 2 . 5 '` and `'+2.5'` are versions.
-/// Missing components are `-1`, ranking below an explicit zero. (.NET also
-/// accepts `-0` components and trims non-ASCII Unicode whitespace; both are
-/// degenerate spellings we reject toward Unsupported instead.)
+/// with an optional leading sign, so `' 2 . 5 '`, `'+2.5'` and `'1.-0'` are
+/// versions; a negative component (`'1.-1'`) is none. Missing components are
+/// `-1`, ranking below an explicit zero. (.NET also trims non-ASCII Unicode
+/// whitespace, a degenerate spelling we reject toward Unsupported instead.)
 fn parse_system_version(value: &str) -> Result<[i64; 4], ()> {
     let parts: Vec<&str> = value.split('.').collect();
     if !(2..=4).contains(&parts.len()) {
