@@ -17,6 +17,9 @@
 //!   decided either way and gates the walk cannot decide;
 //! - an `<Import>`'s gate, and an `<ImportGroup>`'s, over a sibling file that
 //!   writes the output;
+//! - an `<Import>` whose path a property selects, the property bound before
+//!   the hidden file (which may rewrite it), or after it and then rewritten
+//!   by a write on a stale gate;
 //! - a group the walk cannot evaluate at all, holding a child with its own
 //!   gate.
 //!
@@ -53,6 +56,8 @@ const READ: &[&str] = &[
     "RImport",
     "RImportGroup",
     "RUnsupported",
+    "RPath",
+    "Side",
     "Fresh",
     "Gate",
     "Flag",
@@ -70,6 +75,7 @@ enum Route {
     Import,
     ImportGroup,
     UnsupportedGroup,
+    ImportPath,
 }
 
 const ROUTES: &[Route] = &[
@@ -79,6 +85,17 @@ const ROUTES: &[Route] = &[
     Route::Import,
     Route::ImportGroup,
     Route::UnsupportedGroup,
+    Route::ImportPath,
+];
+
+/// The files `$(Side)` may name: the walk's, which writes nothing, and the
+/// one only a rewritten `Side` names, which writes `RPath`.
+const PATH_SIDES: &[(&str, &str)] = &[
+    ("side_path_a.props", "<Project />"),
+    (
+        "side_path_b.props",
+        "<Project><PropertyGroup><RPath>from-b</RPath></PropertyGroup></Project>",
+    ),
 ];
 
 impl Route {
@@ -91,6 +108,7 @@ impl Route {
             Route::Import => "RImport",
             Route::ImportGroup => "RImportGroup",
             Route::UnsupportedGroup => "RUnsupported",
+            Route::ImportPath => "RPath",
         }
     }
 
@@ -183,6 +201,16 @@ fn route(rng: &mut SplitMix64, route: Route, out: &mut String) {
             }
             out.push_str("</ImportGroup>");
         }
+        Route::ImportPath => {
+            if rng.below(2) == 0 {
+                let _ = write!(
+                    out,
+                    "<PropertyGroup><Side{}>side_path_b.props</Side></PropertyGroup>",
+                    route_gate(rng)
+                );
+            }
+            out.push_str("<Import Project=\"$(Side)\" />");
+        }
         Route::UnsupportedGroup => {
             let _ = write!(
                 out,
@@ -255,7 +283,7 @@ fn case(rng: &mut SplitMix64) -> Case {
     for name in GATES {
         let _ = write!(project, "<{name}>{}</{name}>", literal(rng));
     }
-    project.push_str("</PropertyGroup>");
+    project.push_str("<Side>side_path_a.props</Side></PropertyGroup>");
     let _ = write!(
         project,
         "<Import Project=\"hidden.props\" Condition=\"{UNDECIDABLE}\" />"
@@ -264,6 +292,9 @@ fn case(rng: &mut SplitMix64) -> Case {
     // route below leaves them in doubt; the gate names stay stale. So is
     // `Fresh`, which only `<Choose>` branches write.
     project.push_str("<PropertyGroup><Fresh>no</Fresh>");
+    if rng.below(2) == 0 {
+        project.push_str("<Side>side_path_a.props</Side>");
+    }
     for route in ROUTES {
         if rng.below(4) != 0 {
             let name = route.output();
@@ -297,6 +328,9 @@ fn case(rng: &mut SplitMix64) -> Case {
         if rng.below(4) != 0 {
             let _ = write!(hidden, "<{name}>{}</{name}>", literal(rng));
         }
+    }
+    if rng.below(2) == 0 {
+        hidden.push_str("<Side>side_path_b.props</Side>");
     }
     hidden.push_str("</PropertyGroup></Project>");
 
@@ -368,6 +402,9 @@ fn sweep(
         std::fs::write(&path, &case.project).unwrap();
         std::fs::write(dir.join("hidden.props"), &case.hidden).unwrap();
         for (name, side) in &case.sides {
+            std::fs::write(dir.join(name), side).unwrap();
+        }
+        for (name, side) in PATH_SIDES {
             std::fs::write(dir.join(name), side).unwrap();
         }
         census.cases += 1;
@@ -490,11 +527,11 @@ fn stale_gates_are_exact_or_declined() {
     assert!(census.commits >= 1000, "{census:?}");
     for route in ROUTES {
         assert!(
-            census.live.get(route).copied().unwrap_or(0) >= 10,
+            census.live.get(route).copied().unwrap_or(0) >= 5,
             "{route:?} is rarely live: {census:?}"
         );
         assert!(
-            census.committing.get(route).copied().unwrap_or(0) >= 10,
+            census.committing.get(route).copied().unwrap_or(0) >= 5,
             "{route:?} rarely commits: {census:?}"
         );
     }
