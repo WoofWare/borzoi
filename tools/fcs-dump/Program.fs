@@ -6538,6 +6538,9 @@ type private GraphReference =
 type private GraphProject =
     { Id: string
       AssemblyName: string
+      /// The project file: FCS's `ProjectFileName`, whose directory is the one
+      /// project-relative inputs (a type provider's sample file) resolve from.
+      ProjectFile: string
       Paths: string[]
       /// In compile order: FCS resolves a name two references declare by
       /// their order, so a project passed from source keeps its DLL's place.
@@ -6607,6 +6610,10 @@ let private readGraphProject (e: JsonElement) : GraphProject =
             Path.GetFullPath path)
     if Array.isEmpty paths then
         failwithf "project %s has no paths" id
+    let projectFile =
+        match str "projectFile" with
+        | Some f when Path.IsPathFullyQualified f -> Path.GetFullPath f
+        | other -> failwithf "project %s: projectFile must be an absolute path, got %A" id other
     let references =
         match e.TryGetProperty("references") with
         | true, arr when arr.ValueKind = JsonValueKind.Array ->
@@ -6654,6 +6661,7 @@ let private readGraphProject (e: JsonElement) : GraphProject =
         failwithf "project %s: langversion %A is below the F# 8 the graph oracle can check at" id langVersion
     { Id = id
       AssemblyName = assemblyName
+      ProjectFile = projectFile
       Paths = paths
       References = references
       ExclusiveRefs =
@@ -6676,10 +6684,10 @@ let private readGraphProject (e: JsonElement) : GraphProject =
 /// dependants' `-r:` and `FSharpReference` carry. It is never written, and
 /// nothing reads it: FCS resolves a `-r:` that names a project reference
 /// without touching the disk (`TcConfig.TryResolveLibWithDirectories`), so
-/// the directory need not exist. It is per project id, beside the project's
-/// first source file, so two projects of one request never share it.
+/// the directory need not exist. It is per project id, beside the project
+/// file, so two projects of one request never share it.
 let private graphOutputPath (p: GraphProject) : string =
-    let dir = Option.ofObj (Path.GetDirectoryName p.Paths.[0]) |> Option.defaultValue "."
+    let dir = Option.ofObj (Path.GetDirectoryName p.ProjectFile) |> Option.defaultValue "."
     Path.Combine(dir, "fcs-dump-graph-out", p.Id, p.AssemblyName + ".dll")
 
 /// A graph request's projects by id, and the one to check. Refuses a
@@ -6698,6 +6706,10 @@ let private readGraphRequest (root: JsonElement) =
     |> Array.countBy (fun p -> p.AssemblyName.ToLowerInvariant())
     |> Array.tryFind (fun (_, n) -> n > 1)
     |> Option.iter (fun (name, _) -> failwithf "two projects are named %s" name)
+    projects
+    |> Array.countBy (fun p -> p.ProjectFile)
+    |> Array.tryFind (fun (_, n) -> n > 1)
+    |> Option.iter (fun (file, _) -> failwithf "two projects have the project file %s" file)
     let checkId =
         match root.TryGetProperty("check") with
         | true, v when v.ValueKind = JsonValueKind.String -> Option.ofObj (v.GetString())
@@ -6735,6 +6747,7 @@ let private readGraphRequest (root: JsonElement) =
 /// plus `-o:`, `--target:` and an `FSharpReference` per project reference.
 let private graphProjectOptions
     (checker: FSharpChecker)
+    (stamp: int64)
     (p: GraphProject)
     (outputOf: string -> string)
     (referenced: (string * FSharpProjectOptions)[])
@@ -6746,12 +6759,12 @@ let private graphProjectOptions
             | Project id -> "-r:" + outputOf id)
     let baseOpts =
         projectOptionsOf checker p.Paths refArgs p.ExclusiveRefs p.DefineArgs p.LangVersionArgs
-    let dir = Option.ofObj (Path.GetDirectoryName p.Paths.[0]) |> Option.defaultValue "."
     let isOutput (o: string) =
         o.StartsWith "-o:" || o.StartsWith "--out:" || o.StartsWith "/out:"
         || o.StartsWith "--target:" || o.StartsWith "/target:" || o = "-a"
     { baseOpts with
-        ProjectFileName = Path.Combine(dir, "fcs-dump-" + p.Id + ".fsproj")
+        ProjectFileName = p.ProjectFile
+        Stamp = Some stamp
         OtherOptions =
             Array.concat
                 [ baseOpts.OtherOptions |> Array.filter (isOutput >> not)
@@ -6766,6 +6779,7 @@ let private graphOptions
     (checker: FSharpChecker)
     (byId: System.Collections.Generic.Dictionary<string, GraphProject>)
     (check: GraphProject)
+    (stamp: int64)
     =
     let built = System.Collections.Generic.Dictionary<string, FSharpProjectOptions>()
     let order = ResizeArray<GraphProject>()
@@ -6794,7 +6808,7 @@ let private graphOptions
                     if r.Target = "module" then
                         failwithf "project %s references %s, a module, which is no assembly" p.Id id
                     graphOutputPath r, optionsOf r)
-            let opts = graphProjectOptions checker p (lookup >> graphOutputPath) referenced
+            let opts = graphProjectOptions checker stamp p (lookup >> graphOutputPath) referenced
             inProgress.Remove p.Id |> ignore
             built.[p.Id] <- opts
             order.Add p
@@ -6802,51 +6816,96 @@ let private graphOptions
     optionsOf check |> ignore
     built, order
 
-/// One `uses-project-graph-batch` request's response.
-/// Whether FCS hands a dependant `results`' project as no in-memory signature
-/// at all: a project whose assembly carries `TypeProviderAssemblyAttribute`
-/// yields `ProjectAssemblyDataResult.Unavailable true`
-/// (`IncrementalBuild.fs`, beside `CreatesGeneratedProvidedTypes`), and
-/// `TcImports` then reads the project's output DLL from disk instead
-/// (`CompilerImports.fs`, `OpenILBinaryModule`). The attribute is
-/// classified as FCS classifies it, by the resolved type.
-let private readFromDisk (results: FSharpCheckProjectResults) : bool =
-    let named =
-        try
-            results.AssemblySignature.Attributes
-            |> Seq.exists (fun a ->
-                try
-                    a.AttributeType.FullName = "Microsoft.FSharp.Core.CompilerServices.TypeProviderAssemblyAttribute"
-                with _ ->
-                    false)
-        with _ ->
-            false
-    named
+/// FCS's own verdict on whether a dependant gets `opts`' project from source:
+/// `Ok true` when its assembly data is `ProjectAssemblyDataResult.Available`
+/// (the in-memory signature), `Ok false` when it is `Unavailable` and
+/// `TcImports` would read the project's output DLL from disk instead
+/// (`CompilerImports.fs`, `OpenILBinaryModule`). FCS decides `Unavailable`
+/// for a type provider assembly, for a project that creates generated
+/// provided types, and when building the data fails (`IncrementalBuild.fs`,
+/// `tcAssemblyDataOpt`); the oracle reads the decision rather than guessing
+/// its causes. Read by reflection, since FCS exposes it only internally
+/// (`IBackgroundCompiler.GetAssemblyData`, the method a dependant's
+/// `FSharpReference` is evaluated through); `Error` when the reflection
+/// target is not there to read.
+let private assemblyDataAvailable
+    (checker: FSharpChecker)
+    (opts: FSharpProjectOptions)
+    (outputPath: string)
+    : Result<bool, string> =
+    try
+        let instance = BindingFlags.Instance ||| BindingFlags.NonPublic ||| BindingFlags.Public
+        match checker.GetType().GetField("backgroundCompiler", instance) with
+        | null -> Error "FSharpChecker has no backgroundCompiler field"
+        | field ->
+            match field.GetValue checker with
+            | null -> Error "FSharpChecker's backgroundCompiler is null"
+            | background ->
+            let getAssemblyData =
+                background.GetType().GetInterfaces()
+                |> Array.filter (fun i -> i.Name = "IBackgroundCompiler")
+                |> Array.collect (fun i -> i.GetMethods())
+                |> Array.tryFind (fun m ->
+                    let ps = m.GetParameters()
+                    m.Name = "GetAssemblyData"
+                    && ps.Length = 3
+                    && ps.[0].ParameterType = typeof<FSharpProjectOptions>)
+            match getAssemblyData, typeof<Async>.GetMethod("RunSynchronously") with
+            | None, _ -> Error "IBackgroundCompiler.GetAssemblyData(options, outputFileName, userOpName) not found"
+            | _, null -> Error "Async.RunSynchronously not found"
+            | Some m, runSynchronously ->
+                let computation =
+                    m.Invoke(background, [| box opts; box outputPath; box "fcs-dump-uses-project-graph" |])
+                let resultType = m.ReturnType.GetGenericArguments().[0]
+                let run = runSynchronously.MakeGenericMethod([| resultType |])
+                let result = run.Invoke(null, [| computation; null; null |])
+                let case, _ = FSharpValue.GetUnionFields(result, resultType, true)
+                match case.Name with
+                | "Available" -> Ok true
+                | "Unavailable" -> Ok false
+                | other -> Error(sprintf "unknown ProjectAssemblyDataResult case %s" other)
+    with ex ->
+        Error ex.Message
 
+/// The next request's stamp: every options record a request builds carries
+/// it, so FCS's caches, keyed by options, never hand one request a signature
+/// another request checked. A file rewritten with its timestamp unchanged is
+/// therefore read afresh.
+let private nextGraphStamp =
+    let mutable last = 0L
+    fun () ->
+        last <- last + 1L
+        last
+
+/// One `uses-project-graph-batch` request's response.
 let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
     let byId, check = readGraphRequest root
-    let built, order = graphOptions checker byId check
+    let built, order = graphOptions checker byId check (nextGraphStamp ())
     let projectResults (opts: FSharpProjectOptions) =
         checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-uses-project-graph")
         |> Async.RunSynchronously
     // A reference FCS reads from disk is no reference from source: with no
-    // DLL there, the dependant would be checked without it and the answer
-    // would look clean. Refuse it before checking anything.
+    // DLL there the dependant is checked without it and the answer looks
+    // clean. Refuse unless FCS itself says it reads each one from source.
+    for p in order do
+        if p.Id <> check.Id then
+            match assemblyDataAvailable checker built.[p.Id] (graphOutputPath p) with
+            | Ok true -> ()
+            | Ok false ->
+                failwithf
+                    "project %s: FCS reads it from its output DLL rather than from source (a type provider assembly, or one that creates generated provided types)"
+                    p.Id
+            | Error why -> failwithf "project %s: cannot tell whether FCS reads it from source: %s" p.Id why
     let referenced =
         order
         |> Seq.filter (fun p -> p.Id <> check.Id)
         |> Seq.map (fun p ->
-            let results = projectResults built.[p.Id]
-            if readFromDisk results then
-                failwithf
-                    "project %s is a type provider assembly, which FCS reads from its output DLL rather than from source"
-                    p.Id
             {| Id = p.Id
                AssemblyName = p.AssemblyName
                OutputPath = graphOutputPath p
                // A whole-project check finds what no file's check reports
                // (FS0240, a signature with no implementation).
-               Diagnostics = results.Diagnostics |> Array.map projectDiagnostic |})
+               Diagnostics = (projectResults built.[p.Id]).Diagnostics |> Array.map projectDiagnostic |})
         |> Seq.toArray
     let files = checkProjectFiles checker built.[check.Id] check.Paths
     {| Files = files
@@ -6863,7 +6922,7 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
 ///
 /// ```text
 /// { "projects": [ { "id", "assemblyName", "target": library|exe|winexe|module,
-///                   "paths": [<abs .fs/.fsi>…],
+///                   "projectFile": <abs .fsproj>, "paths": [<abs .fs/.fsi>…],
 ///                   "references": [ {"dll": <abs .dll>} | {"project": <id>} … ],
 ///                   "defines": [<sym>…], "langversion": <token|null>,
 ///                   "exclusiveRefs": <bool> } … ],
@@ -6879,9 +6938,10 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
 /// the entry's place among the `dll` entries' (FCS resolves a name two
 /// references declare by their order). A project referencing a `module`
 /// target is refused, as fsc refuses a netmodule reference, and so is a pin
-/// below F# 8, which this oracle cannot check at, and a referenced type
-/// provider assembly, which FCS reads from its DLL rather than from source
-/// ([`readFromDisk`]). A
+/// below F# 8, which this oracle cannot check at, and any reference FCS
+/// itself would read from its DLL rather than from source
+/// ([`assemblyDataAvailable`]). Every options record of a request carries a
+/// stamp of its own, so no request reuses another's checked signature. A
 /// project's options are built once per request, so a project several others
 /// reference is one referenced project.
 ///
@@ -8994,7 +9054,7 @@ let private usage () =
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
     eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files} response/line"
-    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,assemblyName,target,paths,references:[{dll}|{project}],defines,langversion,exclusiveRefs}],check}, F# project refs as FSharpReference; one compact {Files,Diagnostics,Referenced} response/line"
+    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,assemblyName,target,projectFile,paths,references:[{dll}|{project}],defines,langversion,exclusiveRefs}],check}, F# project refs as FSharpReference; one compact {Files,Diagnostics,Referenced} response/line"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
     eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files} response/line"
     2

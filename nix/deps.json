@@ -265,6 +265,11 @@
     "hash": "sha256-HmQBQ808F5jGNQ1We6Ry16G98kPnBVoyoZ8oTyOGoiQ="
   },
   {
+    "pname": "SwaggerProvider",
+    "version": "1.0.1",
+    "hash": "sha256-zCfTEXZStDfoSNkMf2EMs1uZmX3GxHLbjTqmBEebSyk="
+  },
+  {
     "pname": "System.CodeDom",
     "version": "8.0.0",
     "hash": "sha256-uwVhi3xcvX7eiOGQi7dRETk3Qx1EfHsUfchZsEto338="

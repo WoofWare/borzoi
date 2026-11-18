@@ -119,6 +119,25 @@ printf 'module App\n[<EntryPoint>]\nlet main _ = 0\n' >"$syn/fsharp/App.fs"
 echo "restoring synthetic bundled-e2e pair" >&2
 dotnet restore "$syn/fsharp/App.fsproj" --packages "$packages" --configfile "$config"
 
+# `borzoi-corpus-diff`'s project-graph oracle test of a library that consumes
+# a generative type provider passes SwaggerProvider's runtime assembly to FCS
+# from the packages folder, unrestored: `PackageDownload` fetches the one
+# package without its dependency closure, which that test does not read.
+tp="$work/typeprovider"
+mkdir -p "$tp"
+cat >"$tp/Download.fsproj" <<'EOF'
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageDownload Include="SwaggerProvider" Version="[1.0.1]" />
+  </ItemGroup>
+</Project>
+EOF
+echo "downloading SwaggerProvider for the generative type provider test" >&2
+dotnet restore "$tp/Download.fsproj" --packages "$packages" --configfile "$config"
+
 echo "writing $out" >&2
 nuget-to-json "$packages" >"$repo_root/$out"
 echo "wrote $repo_root/$out" >&2

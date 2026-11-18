@@ -608,3 +608,124 @@ fn a_referenced_type_provider_assembly_is_refused() {
         other => panic!("a type provider reference must be refused: {other:#?}"),
     }
 }
+
+/// The resident oracle never answers from a signature an earlier request
+/// checked: a referenced project's source rewritten with its timestamp put
+/// back is read afresh. Later incremental differentials put one graph to the
+/// oracle again after each edit.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn a_rewritten_reference_is_read_afresh_whatever_its_timestamp() {
+    let fixture = ProjectGraphFixture::materialise(vec![
+        FixtureProject {
+            name: name("Lib"),
+            files: files(vec![(
+                "Lib.fs".into(),
+                "module Lib\n\nlet x : int = 1\n".into(),
+            )]),
+            project_refs: Vec::new(),
+            defines: Vec::new(),
+        },
+        FixtureProject {
+            name: name("App"),
+            files: files(vec![(
+                "Use.fs".into(),
+                "module Use\n\nlet y = Lib.x\n".into(),
+            )]),
+            project_refs: vec![name("Lib")],
+            defines: Vec::new(),
+        },
+    ])
+    .expect("a graph");
+    let type_of_x = |answer: &GraphResponse| -> String {
+        uses(answer)
+            .find(|u| u["FullName"] == "Lib.x" && u["IsFromDefinition"] == false)
+            .and_then(|u| u["Value"]["TypeCanon"].as_str())
+            .unwrap_or_else(|| panic!("no typed use of Lib.x: {answer:#?}"))
+            .to_owned()
+    };
+    let request = fixture.source_request(&name("App"));
+    let mut oracle = ProjectGraphOracle::default();
+    let before = type_of_x(&oracle.check(&request).expect("the graph oracle answers"));
+
+    let lib = fixture.paths(&name("Lib")).remove(0);
+    let stamp = std::fs::metadata(&lib)
+        .and_then(|m| m.modified())
+        .expect("read the library's timestamp");
+    std::fs::write(&lib, "module Lib\n\nlet x : string = \"\"\n").expect("rewrite the library");
+    std::fs::File::options()
+        .write(true)
+        .open(&lib)
+        .and_then(|f| f.set_modified(stamp))
+        .expect("put the library's timestamp back");
+
+    let after = type_of_x(&oracle.check(&request).expect("the graph oracle answers"));
+    assert_ne!(before, after, "the rewrite must be seen");
+    assert!(after.contains("String"), "{after}");
+}
+
+/// A library that consumes a generative type provider is refused, though it
+/// carries no `TypeProviderAssemblyAttribute`: FCS hands a dependant no
+/// in-memory signature for a project that creates generated provided types,
+/// either. Its schema is named relative to the project, so the provider
+/// finds it only if the oracle checks the library from its project file's
+/// directory. SwaggerProvider's runtime assembly comes from the packages
+/// folder (`nix/deps.json` holds it), passed to FCS unrestored.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn a_reference_that_creates_generated_provided_types_is_refused() {
+    let packages = std::env::var_os("NUGET_PACKAGES")
+        .expect("NUGET_PACKAGES names the packages folder (the devshell sets it)");
+    let runtime = std::path::Path::new(&packages)
+        .join("swaggerprovider/1.0.1/lib/netstandard2.0/SwaggerProvider.Runtime.dll");
+    assert!(runtime.is_file(), "{} is missing", runtime.display());
+    let fixture = ProjectGraphFixture::materialise(vec![
+        FixtureProject {
+            name: name("Client"),
+            files: files(vec![(
+                "Lib.fs".into(),
+                "namespace Provided\n\nopen SwaggerProvider\n\n\
+                 type Api = OpenApiClientProvider<\"schema.json\">\n\n\
+                 [<AutoOpen>]\nmodule Exports =\n    let id (x: int) = x + 1\n"
+                    .into(),
+            )]),
+            project_refs: Vec::new(),
+            defines: Vec::new(),
+        },
+        FixtureProject {
+            name: name("Bee"),
+            files: files(vec![(
+                "Use.fs".into(),
+                "module Use\n\nopen Provided\n\nlet y = id 1\n".into(),
+            )]),
+            project_refs: vec![name("Client")],
+            defines: Vec::new(),
+        },
+    ])
+    .expect("a graph");
+    std::fs::write(
+        fixture.dir(&name("Client")).join("schema.json"),
+        r#"{"openapi":"3.0.0","info":{"title":"T","version":"1"},"paths":{"/pets":{"get":{"operationId":"listPets","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"string"}}}}}}}}}"#,
+    )
+    .expect("write the schema");
+    let source = fixture.source_request(&name("Bee"));
+    let projects: Vec<GraphProject> = source
+        .projects()
+        .iter()
+        .map(|p| {
+            let mut p = p.clone();
+            if p.id == name("Client") {
+                p.references.push(GraphReference::Dll(runtime.clone()));
+            }
+            p
+        })
+        .collect();
+    let request = GraphRequest::new(projects, name("Bee")).expect("a graph");
+    match ProjectGraphOracle::default().check(&request) {
+        Err(FcsInvokeError::Refused(message)) => assert!(
+            message.contains("rather than from source"),
+            "refused for another reason: {message}"
+        ),
+        other => panic!("a generative provider's consumer must be refused: {other:#?}"),
+    }
+}

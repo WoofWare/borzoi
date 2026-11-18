@@ -86,6 +86,9 @@ pub struct GraphProject {
     /// it FCS names the assembly after the project's last source file, and no
     /// `InternalsVisibleTo` naming the real assembly would match.
     pub assembly_name: PlainName,
+    /// Its project file, absolute: FCS's `ProjectFileName`, whose directory
+    /// project-relative inputs (a type provider's sample file) resolve from.
+    pub project_file: PathBuf,
     /// Its source files, absolute, in Compile order.
     pub paths: Vec<PathBuf>,
     /// What it references, in compile order: assemblies on disk and projects
@@ -178,6 +181,10 @@ pub enum GraphError {
     NoPaths(PlainName),
     /// A source or reference path that is not absolute.
     RelativePath(PathBuf),
+    /// A path that is not UTF-8, which the JSON wire cannot carry unchanged.
+    NotUtf8(PathBuf),
+    /// Two projects with one project file.
+    DuplicateProjectFile(PathBuf),
     /// A fixture source name that is not a relative path inside its project
     /// directory.
     UncontainedFile(String),
@@ -214,6 +221,10 @@ impl fmt::Display for GraphError {
             GraphError::UnknownCheck(id) => write!(f, "no project {id} to check"),
             GraphError::NoPaths(id) => write!(f, "project {id} has no source files"),
             GraphError::RelativePath(p) => write!(f, "{} is not absolute", p.display()),
+            GraphError::NotUtf8(p) => write!(f, "{} is not UTF-8", p.display()),
+            GraphError::DuplicateProjectFile(p) => {
+                write!(f, "two projects have the project file {}", p.display())
+            }
             GraphError::ModuleReference { from, to } => {
                 write!(
                     f,
@@ -255,6 +266,7 @@ impl GraphRequest {
     pub fn new(projects: Vec<GraphProject>, check: PlainName) -> Result<Self, GraphError> {
         let mut by_id = BTreeMap::new();
         let mut names = BTreeSet::new();
+        let mut project_files = BTreeSet::new();
         for p in &projects {
             if p.assembly_name.as_str().eq_ignore_ascii_case("FSharp.Core") {
                 return Err(GraphError::FSharpCoreName(p.id.clone()));
@@ -262,14 +274,26 @@ impl GraphRequest {
             if p.paths.is_empty() {
                 return Err(GraphError::NoPaths(p.id.clone()));
             }
-            if let Some(relative) = p.paths.iter().chain(p.dlls()).find(|q| !q.is_absolute()) {
-                return Err(GraphError::RelativePath(relative.clone()));
+            let all_paths: Vec<&PathBuf> = std::iter::once(&p.project_file)
+                .chain(&p.paths)
+                .chain(p.dlls())
+                .collect();
+            if let Some(relative) = all_paths.iter().find(|q| !q.is_absolute()) {
+                return Err(GraphError::RelativePath((*relative).clone()));
+            }
+            // The wire is JSON text: a path that is not UTF-8 would reach the
+            // oracle as some other path.
+            if let Some(lossy) = all_paths.iter().find(|q| q.to_str().is_none()) {
+                return Err(GraphError::NotUtf8((*lossy).clone()));
             }
             if by_id.insert(p.id.clone(), p).is_some() {
                 return Err(GraphError::DuplicateId(p.id.clone()));
             }
             if !names.insert(p.assembly_name.as_str().to_ascii_lowercase()) {
                 return Err(GraphError::DuplicateAssemblyName(p.assembly_name.clone()));
+            }
+            if !project_files.insert(&p.project_file) {
+                return Err(GraphError::DuplicateProjectFile(p.project_file.clone()));
             }
         }
         for p in &projects {
@@ -331,6 +355,7 @@ impl GraphRequest {
                 serde_json::json!({
                     "id": p.id.as_str(),
                     "assemblyName": p.assembly_name.as_str(),
+                    "projectFile": p.project_file.display().to_string(),
                     "target": p.target.as_target(),
                     "paths": path_strings(&p.paths),
                     "references": p.references.iter().map(|r| match r {
@@ -534,6 +559,7 @@ impl ProjectGraphFixture {
             .map(|p| GraphProject {
                 id: p.name.clone(),
                 assembly_name: p.name.clone(),
+                project_file: PathBuf::from("/").join(format!("{}.fsproj", p.name)),
                 paths: vec![PathBuf::from("/").join(p.name.as_str())],
                 references: p
                     .project_refs
@@ -664,6 +690,7 @@ impl ProjectGraphFixture {
         GraphProject {
             id: p.name.clone(),
             assembly_name: p.name.clone(),
+            project_file: self.fsproj(&p.name),
             paths: self.paths(&p.name),
             references,
             defines: p.defines.clone(),
@@ -833,6 +860,7 @@ mod tests {
         GraphProject {
             id: name(id),
             assembly_name: name(&format!("Asm{id}")),
+            project_file: PathBuf::from(format!("/src/{id}.fsproj")),
             paths: vec![PathBuf::from(format!("/src/{id}.fs"))],
             references: refs
                 .iter()
@@ -1066,6 +1094,21 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_request_refuses_a_path_json_cannot_carry() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = PathBuf::from(std::ffi::OsStr::from_bytes(b"/src/\xff.fs"));
+        let p = GraphProject {
+            paths: vec![bad.clone()],
+            ..project("a", &[])
+        };
+        assert_eq!(
+            GraphRequest::new(vec![p], name("a")),
+            Err(GraphError::NotUtf8(bad))
+        );
     }
 
     #[test]
