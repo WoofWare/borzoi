@@ -34,13 +34,21 @@ pub enum ProjectSpelling {
 }
 
 /// Every spelling, [`ProjectSpelling::AsIs`] first.
-pub const SPELLINGS: [ProjectSpelling; 5] = [
+///
+/// Only [`ProjectSpelling::AsIs`] off Unix: the harnesses hand over
+/// canonicalised fixture paths, which Windows spells verbatim (`\\?\`), and a
+/// verbatim path takes `//`, `.` and `..` as written rather than normalising
+/// them.
+#[cfg(unix)]
+pub const SPELLINGS: &[ProjectSpelling] = &[
     ProjectSpelling::AsIs,
     ProjectSpelling::DoubledSeparator,
     ProjectSpelling::CurDir,
     ProjectSpelling::ParentDir,
     ProjectSpelling::Mixed,
 ];
+#[cfg(not(unix))]
+pub const SPELLINGS: &[ProjectSpelling] = &[ProjectSpelling::AsIs];
 
 /// `path` (an absolute path to a file whose directory has a parent) spelt as
 /// `spelling` says. Every spelling names the same file as `path` through the

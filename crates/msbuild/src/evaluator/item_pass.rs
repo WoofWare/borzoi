@@ -4052,6 +4052,10 @@ fn route_item_through_resolver(
             return;
         }
     };
+    if let Some(path) = matched.iter().find(|path| holds_nul(path)) {
+        decline_nul_path(path, node, state);
+        return;
+    }
     let span = state.effective_span(node.range());
     for path in matched {
         push_resolved_item(
@@ -4135,6 +4139,10 @@ fn push_include_entry(
     });
     let normalised = identity.replace('\\', "/");
     let path = state.entry_project_dir.join(normalised);
+    if holds_nul(&path) {
+        decline_nul_path(&path, node, state);
+        return;
+    }
     let span = state.effective_span(node.range());
     push_resolved_item(
         state,
@@ -4155,6 +4163,26 @@ fn push_include_entry(
     if let Some(pushed) = bucket_for_placement(state, placement).last_mut() {
         pushed.row = row;
     }
+}
+
+/// Whether `path` holds a NUL (a decoded `%00`), for which MSBuild computes
+/// no `FullPath` (`Path.GetFullPath` throws), so the item's path, which
+/// [`crate::ResolvedItem::include`] is, has no value to commit.
+fn holds_nul(path: &Path) -> bool {
+    path.as_os_str().as_encoded_bytes().contains(&0)
+}
+
+/// Decline an item whose path [`holds_nul`].
+fn decline_nul_path(path: &Path, node: Node<'_, '_>, state: &mut State<'_>) {
+    state.push(
+        DiagnosticKind::UnsupportedConstruct {
+            element: format!(
+                "an item path holding a NUL ({}), whose full path MSBuild cannot compute",
+                path.display()
+            ),
+        },
+        node.range(),
+    );
 }
 
 fn bucket_for_placement<'s, 'r>(

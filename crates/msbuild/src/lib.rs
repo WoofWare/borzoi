@@ -1158,6 +1158,10 @@ pub enum ParseError {
     /// caller handed over, or refuses the project (MSB4025) where that path
     /// names no file.
     BackslashInProjectPath(PathBuf),
+    /// `project_path`'s full path names no file: it is the file-system root
+    /// (`/work/..`), or it ends in a separator. MSBuild loads no project
+    /// from either.
+    ProjectPathNamesNoFile(PathBuf),
     /// `extra_properties` contained a key that names an MSBuild
     /// reserved property (any spelling, under MSBuild's case-insensitive
     /// comparison, of a name in `ReservedPropertyNames`:
@@ -1202,6 +1206,14 @@ impl fmt::Display for ParseError {
                     p.display()
                 )
             }
+            ParseError::ProjectPathNamesNoFile(p) => {
+                write!(
+                    f,
+                    "project_path {} names no file: its full path is the root, or ends in a \
+                     separator",
+                    p.display()
+                )
+            }
             ParseError::ReservedPropertyInExtras(name) => {
                 write!(
                     f,
@@ -1230,6 +1242,7 @@ impl Error for ParseError {
             ParseError::Xml(e) => Some(e),
             ParseError::RelativeProjectPath(_) => None,
             ParseError::BackslashInProjectPath(_) => None,
+            ParseError::ProjectPathNamesNoFile(_) => None,
             ParseError::ReservedPropertyInExtras(_) => None,
             ParseError::InvalidPropertyNameInExtras(_) => None,
             ParseError::DuplicateExtraProperty { .. } => None,
@@ -1567,7 +1580,8 @@ fn parse_fsproj_observed(
 
 /// Input-validation shared between the pure and with-imports entry
 /// points. Both reject the same set of malformed `extra_properties`,
-/// non-rooted project paths and (on Unix) backslash-bearing ones up front,
+/// non-rooted project paths, ones naming no file and (on Unix)
+/// backslash-bearing ones up front,
 /// before any XML parsing, and return the project's path as MSBuild takes it.
 ///
 /// MSBuild evaluates a project at its full path (`Path.GetFullPath`): `.`
@@ -1592,9 +1606,21 @@ fn validate_inputs(
     if !project_path.has_root() {
         return Err(ParseError::RelativeProjectPath(project_path.to_path_buf()));
     }
-    // On Unix MSBuild reads every `\` of the path it loads a project from as
-    // `/` (`FileUtilities.FixFilePath`), so it loads some other file, or none.
-    if cfg!(unix) && project_path.as_os_str().as_encoded_bytes().contains(&b'\\') {
+    let full_path = imports::normalise(project_path);
+    let spelt = project_path.as_os_str().as_encoded_bytes();
+    if full_path.file_name().is_none()
+        || spelt.last() == Some(&b'/')
+        || (cfg!(windows) && spelt.last() == Some(&b'\\'))
+    {
+        return Err(ParseError::ProjectPathNamesNoFile(
+            project_path.to_path_buf(),
+        ));
+    }
+    // On Unix MSBuild reads every `\` of the full path it loads a project from
+    // as `/` (`FileUtilities.FixFilePath`, after `GetFullPath`, so a `..` may
+    // first take a backslash-bearing segment away), and so loads some other
+    // file, or none.
+    if cfg!(unix) && full_path.as_os_str().as_encoded_bytes().contains(&b'\\') {
         return Err(ParseError::BackslashInProjectPath(
             project_path.to_path_buf(),
         ));
@@ -1636,7 +1662,7 @@ fn validate_inputs(
             return Err(ParseError::ReservedPropertyInExtras(key.clone()));
         }
     }
-    Ok(imports::normalise(project_path))
+    Ok(full_path)
 }
 
 #[cfg(test)]

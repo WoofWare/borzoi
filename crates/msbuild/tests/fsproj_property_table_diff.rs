@@ -426,7 +426,7 @@ fn reserved_path_properties_are_exact_under_every_project_spelling() {
         .chain(["Slash"])
         .map(str::to_string)
         .collect();
-    for spelling in path_spelling::SPELLINGS {
+    for &spelling in path_spelling::SPELLINGS {
         let at = path_spelling::respell(&plain, spelling);
         let missing = |committed: &[String], probes: bool| -> Vec<String> {
             names
@@ -579,7 +579,7 @@ fn import_spellings_are_read_as_msbuild_normalises_them() {
             raw_attribute(import)
         );
         std::fs::write(&plain, &xml).unwrap();
-        for spelling in path_spelling::SPELLINGS {
+        for &spelling in path_spelling::SPELLINGS {
             let at = path_spelling::respell(&plain, spelling);
             committed += check_imports_at_project(&mut oracle, &xml, &names, &at).len();
         }
@@ -661,6 +661,52 @@ fn a_project_path_holding_a_backslash_is_refused() {
             ),
             "{}: {followed:?}",
             at.display()
+        );
+    }
+}
+
+/// MSBuild takes the project's full path before it reads a backslash as a
+/// separator, so a backslash in a segment a `..` takes away is no backslash at
+/// all: `dir/a\b/../Demo.fsproj` is `dir/Demo.fsproj`. Every path reader must
+/// commit there, both ways.
+#[cfg(unix)]
+#[test]
+fn a_backslash_a_parent_segment_removes_is_no_backslash() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let dir = root.join("proj");
+    std::fs::create_dir_all(dir.join("a\\b")).unwrap();
+    let xml = path_reader_xml();
+    std::fs::write(dir.join("Demo.fsproj"), &xml).unwrap();
+    let at = dir.join("a\\b/../Demo.fsproj");
+    let names: Vec<String> = PATH_READERS
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect();
+    let pure = check_names_at_project(&mut oracle, &xml, &names, Some(&at));
+    assert_eq!(pure, names, "{}", at.display());
+    let followed = check_imports_at_project(&mut oracle, &xml, &names, &at);
+    assert_eq!(followed, names, "{}", at.display());
+}
+
+/// A project path whose full path names no file (the root, or one ending in a
+/// separator) is refused: MSBuild loads no project from it.
+#[test]
+fn a_project_path_naming_no_file_is_refused() {
+    for at in ["/work/..", "/work/./..", "/work/Demo.fsproj/", "/"] {
+        let refused = parse_fsproj(
+            "<Project />",
+            Path::new(at),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(borzoi_msbuild::ParseError::ProjectPathNamesNoFile(_))
+            ),
+            "{at}: {refused:?}"
         );
     }
 }

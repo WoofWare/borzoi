@@ -390,6 +390,35 @@ fn check_with(oracle: &mut Oracle, fixture: &Fixture, with_resolver: bool) -> Ou
     Outcome::Committed
 }
 
+/// An item whose decoded path holds a NUL has no full path in MSBuild
+/// (`Path.GetFullPath` throws when `FullPath` is read), so neither seam may
+/// commit one, even where a `..` would collapse the NUL-bearing segment away.
+#[test]
+fn an_item_path_holding_a_nul_is_declined() {
+    let mut oracle = Oracle::spawn();
+    for include in [
+        "bad%00/../plain.fs",
+        "pl%00ain.fs",
+        "plain.fs;sub/x%00/../c.fs",
+    ] {
+        let fixture = Fixture {
+            esc: "plain.fs".to_string(),
+            pct: "pct%".to_string(),
+            includes: vec![include.to_string()],
+            exclude: None,
+            condition: None,
+            spelling: ProjectSpelling::AsIs,
+        };
+        for with_resolver in [false, true] {
+            assert_ne!(
+                check_with(&mut oracle, &fixture, with_resolver),
+                Outcome::Committed,
+                "{include} (resolver: {with_resolver})"
+            );
+        }
+    }
+}
+
 /// Hand-picked corners: one per finding the three review rounds turned up, and
 /// one per reading of an escaped wildcard MSBuild's source distinguishes
 /// (`ItemSpec.BuildItemFragments`, `EngineFileUtilities.IsValidExclude`,
@@ -554,7 +583,7 @@ fn hand_picked_corners() {
     // excludes by design, so it is checked wherever it commits.
     // And each under every spelling of the project's path.
     for mut fixture in cases {
-        for spelling in path_spelling::SPELLINGS {
+        for &spelling in path_spelling::SPELLINGS {
             fixture.spelling = spelling;
             check_with(&mut oracle, &fixture, false);
             let outcome = check_with(&mut oracle, &fixture, true);

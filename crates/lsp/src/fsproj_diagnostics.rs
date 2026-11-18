@@ -190,9 +190,10 @@ fn buffer_diagnostics_observed(
             diags
         }
         Err(ParseError::Xml(e)) => vec![lsp_error_at_origin(format!("malformed XML: {e}"))],
-        // `parse_fsproj_with_imports` rejects only four other inputs:
+        // `parse_fsproj_with_imports` rejects only five other inputs:
         // a relative `project_path` (we always pass a rooted one from
-        // the LSP URL), on Unix a `project_path` holding a `\` (a file
+        // the LSP URL), one whose full path names no file (the root, or
+        // a trailing separator), on Unix a `project_path` holding a `\` (a file
         // name the URL may well carry: MSBuild would load another file,
         // or none), a reserved or invalid name in `extra_properties`,
         // and case-insensitive duplicate `extra_properties` keys (we pass
