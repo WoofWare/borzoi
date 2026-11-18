@@ -599,8 +599,12 @@ fn leaf_may_throw_on_some_value(expr: &BoolExpr) -> bool {
             rhs,
         } => scalar(lhs) || scalar(rhs),
         BoolExpr::Exists(raw) => !plain_references_only(raw),
-        // A boolean literal standing alone (`true`, `on`) coerces.
-        BoolExpr::CoerceBool(ScalarExpr::Bare(word)) if parse_msbuild_bool(word).is_some() => false,
+        // A boolean literal standing alone (`true`, `'on'`) coerces.
+        BoolExpr::CoerceBool(ScalarExpr::Bare(word) | ScalarExpr::String(word))
+            if !word.contains(['$', '%']) && parse_msbuild_bool(word).is_some() =>
+        {
+            false
+        }
         BoolExpr::Compare { .. }
         | BoolExpr::CoerceBool(_)
         | BoolExpr::HasTrailingSlash(_)
@@ -749,12 +753,15 @@ fn explicit_references(raw: &str, out: &mut Vec<String>) {
 /// `$( … )` and before the arguments), reads
 /// `MSBuildDisableFeaturesFromVersion`.
 fn implicit_references(raw: &str, out: &mut Vec<String>) {
-    let squeezed: String = raw
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    if squeezed.contains("$([msbuild]::arefeaturesenabled(") {
+    let calls = raw.match_indices("$(").any(|(at, _)| {
+        let squeezed: String = raw[at + 2..]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        squeezed.starts_with("[msbuild]::arefeaturesenabled(")
+    });
+    if calls {
         out.push("MSBuildDisableFeaturesFromVersion".to_owned());
     }
 }
@@ -1707,10 +1714,8 @@ fn eval_bool(
             );
             let lhs = expand_scalar_for_condition(lhs, props, fs.map(|fs| fs.observer), undefined)?;
             let rhs = expand_scalar_for_condition(rhs, props, fs.map(|fs| fs.observer), undefined)?;
-            // As equality reads a number (or may), or a version.
-            let numeric = |value: &str| {
-                !matches!(equality_number(value), Ok(None)) || parse_system_version(value).is_ok()
-            };
+            // As equality reads a number, or may (it compares no versions).
+            let numeric = |value: &str| !matches!(equality_number(value), Ok(None));
             if matches!(op, CompareOp::Eq | CompareOp::Neq)
                 && ((lhs_toolset && numeric(&rhs)) || (rhs_toolset && numeric(&lhs)))
             {
@@ -2306,6 +2311,11 @@ mod tests {
             evaluate("'$(MSBuildToolsVersion)' == 'Current'", &props),
             Outcome::True
         );
+        // Equality compares no versions, so beside one the text decides.
+        assert_eq!(
+            evaluate("'$(MSBuildToolsVersion)' == '18.0.0'", &props),
+            Outcome::False
+        );
         // A number as equality reads one, a trailing NUL included.
         assert_eq!(
             evaluate("'$(MSBuildToolsVersion)' == '18%00'", &props),
@@ -2353,6 +2363,7 @@ mod tests {
         implicit_references("AreFeaturesEnabled", &mut references);
         implicit_references("[MSBuild]::AreFeaturesEnabled('1')", &mut references);
         implicit_references("$(A)[MSBuild]::AreFeaturesEnabled(x)", &mut references);
+        implicit_references("$ ([MSBuild]::AreFeaturesEnabled(x))", &mut references);
         assert!(references.is_empty(), "{references:?}");
     }
 

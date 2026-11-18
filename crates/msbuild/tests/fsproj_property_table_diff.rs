@@ -1746,6 +1746,8 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         "'NaN' == 'NaN' And 1 &lt; abc And '$(Shaky)' == ''",
         "'1%00' != '1' And 1 &lt; abc And '$(Shaky)' == ''",
         "'$(MSBuildToolsVersion)' != '18' And 1 &lt; abc And '$(Shaky)' == ''",
+        // Equality compares no versions: `Current` is no `18.0.0`.
+        "'$(MSBuildToolsVersion)' == '18.0.0' And 1 &lt; abc",
         "'-0.1' &lt; '0.0.0' And 1 &lt; abc And '$(Shaky)' == ''",
     ];
     // MSBuild evaluates a condition left to right and stops at the operand

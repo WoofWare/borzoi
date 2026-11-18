@@ -698,9 +698,12 @@ fn an_operand_past_the_one_that_settles_the_question_is_not_probed() {
         "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail')\">\
          <R>x</R></PropertyGroup>"
             .to_owned(),
-        // ... nor a boolean literal after it.
+        // ... nor a boolean literal after it, quoted or not.
         "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
          And true\"><R>x</R></PropertyGroup>"
+            .to_owned(),
+        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
+         And 'true'\"><R>x</R></PropertyGroup>"
             .to_owned(),
         // Evaluation stops at an operand it cannot evaluate; whether MSBuild
         // may throw is settled in the `Or`, before `Exists`.
