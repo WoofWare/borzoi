@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 
 use borzoi_corpus_diff::ProjectGraphOracle;
 use borzoi_oracle_harness::project_graph::{
-    FixtureFile, FixtureProject, GraphProject, GraphRequest, GraphResponse, PlainName,
-    ProjectGraphFixture, build_fixtures,
+    FixtureFile, FixtureProject, GraphProject, GraphReference, GraphRequest, GraphResponse,
+    PlainName, ProjectGraphFixture, build_fixtures,
 };
 use serde_json::Value;
 
@@ -156,21 +156,35 @@ fn a_friend_binds_an_internal_only_under_its_pinned_assembly_name() {
     assert!(binds(&stranger, "Alpha.Visible.shown", "Ay"));
 }
 
-/// Cases the generated differential runs: `BORZOI_SOURCE_REF_CASES`, else 24.
-fn case_count() -> usize {
-    std::env::var("BORZOI_SOURCE_REF_CASES")
-        .ok()
-        .map(|s| s.parse().expect("BORZOI_SOURCE_REF_CASES is a count"))
-        .unwrap_or(24)
-}
+/// The default run's seed, fixed so it is the same run everywhere.
+const DEFAULT_SEED: u64 = 0x005e_ed0f_5ce5;
 
-/// The run's seed: `BORZOI_SOURCE_REF_SEED`, else a fixed one, so the default
-/// run is the same run everywhere.
-fn seed() -> u64 {
-    std::env::var("BORZOI_SOURCE_REF_SEED")
+/// How many cases the default run generates.
+const DEFAULT_CASES: usize = 24;
+
+/// The `(seed, index)` of every case the differential runs: the default run,
+/// always, and, when `BORZOI_SOURCE_REF_SEED` or `BORZOI_SOURCE_REF_CASES` is
+/// set, that many cases of that seed besides (each defaulting to the default
+/// run's), so widening the sweep never drops the cases whose coverage
+/// [`the_generated_graphs_cover_every_declaration_kind`] pins.
+fn cases() -> Vec<(u64, usize)> {
+    let seed = std::env::var("BORZOI_SOURCE_REF_SEED")
         .ok()
-        .map(|s| s.parse().expect("BORZOI_SOURCE_REF_SEED is a u64"))
-        .unwrap_or(0x005e_ed0f_5ce5)
+        .map(|s| s.parse::<u64>().expect("BORZOI_SOURCE_REF_SEED is a u64"));
+    let count = std::env::var("BORZOI_SOURCE_REF_CASES").ok().map(|s| {
+        s.parse::<usize>()
+            .expect("BORZOI_SOURCE_REF_CASES is a count")
+    });
+    let mut cases: Vec<(u64, usize)> = (0..DEFAULT_CASES).map(|i| (DEFAULT_SEED, i)).collect();
+    if seed.is_some() || count.is_some() {
+        let seed = seed.unwrap_or(DEFAULT_SEED);
+        for i in 0..count.unwrap_or(DEFAULT_CASES) {
+            if !cases.contains(&(seed, i)) {
+                cases.push((seed, i));
+            }
+        }
+    }
+    cases
 }
 
 fn case_fixture(case: &Case) -> ProjectGraphFixture {
@@ -264,8 +278,20 @@ fn answer_diff(source: &GraphResponse, dll: &GraphResponse) -> Vec<String> {
 #[test]
 #[ignore = "builds fixtures and runs FCS; use --ignored for oracle smoke"]
 fn source_references_equal_fresh_dlls_on_generated_graphs() {
-    let seed = seed();
-    let cases: Vec<Case> = (0..case_count()).map(|i| generate(seed, i)).collect();
+    let seeds = cases();
+    // Projects of one build are named apart, whichever seed made them.
+    let cases: Vec<Case> = seeds
+        .iter()
+        .enumerate()
+        .map(|(ordinal, &(seed, i))| {
+            let mut case = generate(seed, i);
+            case.library = format!("Ay{ordinal}");
+            if case.middle.is_some() {
+                case.middle = Some(format!("Mid{ordinal}"));
+            }
+            case
+        })
+        .collect();
     let fixtures: Vec<ProjectGraphFixture> = cases.iter().map(case_fixture).collect();
     build_fixtures(
         &cases
@@ -284,7 +310,7 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
     let mut failures = Vec::new();
     let mut into_library: BTreeMap<String, usize> = BTreeMap::new();
     let mut consumer_errors = 0usize;
-    for (i, (case, fixture)) in cases.iter().zip(&fixtures).enumerate() {
+    for ((case, fixture), &(seed, i)) in cases.iter().zip(&fixtures).zip(&seeds) {
         let consumer = name(&case.consumer);
         let source = oracle
             .check(&fixture.source_request(&consumer))
@@ -322,7 +348,7 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
                 .map(|(n, t)| format!("--- {n}\n{t}"))
                 .collect();
             failures.push(format!(
-                "case {i} (seed {seed}):\n  {}\n{sources}",
+                "case {i} of seed {seed}:\n  {}\n{sources}",
                 problems.join("\n  ")
             ));
         }
@@ -347,10 +373,9 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
 /// what the differential above covers.
 #[test]
 fn the_generated_graphs_cover_every_declaration_kind() {
-    let seed = seed();
     let mut seen = std::collections::BTreeSet::new();
-    for i in 0..case_count() {
-        seen.extend(kinds(&generate(seed, i)));
+    for i in 0..DEFAULT_CASES {
+        seen.extend(kinds(&generate(DEFAULT_SEED, i)));
     }
     let want = [
         "namespace",
@@ -383,8 +408,7 @@ fn the_generated_graphs_cover_every_declaration_kind() {
     let missing: Vec<&str> = want.iter().copied().filter(|k| !seen.contains(k)).collect();
     assert!(
         missing.is_empty(),
-        "the run of {} cases (seed {seed}) never generates: {missing:?}",
-        case_count()
+        "the default run of {DEFAULT_CASES} cases (seed {DEFAULT_SEED}) never generates: {missing:?}"
     );
 }
 
@@ -420,4 +444,82 @@ fn a_referenced_library_is_checked_as_a_library() {
         library.errors().any(|e| e["ErrorNumber"] == 222),
         "a library's top-level code is FS0222 from source as in its build: {library:#?}"
     );
+}
+
+/// Two references that declare one name: FCS takes the later one, so a
+/// project passed from source must keep its DLL's place in the order. With
+/// the first reference from source and the second a DLL, the consumer binds
+/// exactly as with both DLLs, and as with both from source.
+#[test]
+#[ignore = "builds fixtures and runs FCS; use --ignored for oracle smoke"]
+fn a_reference_from_source_keeps_its_place_in_the_order() {
+    let library = |n: &str, ty: &str, value: &str| FixtureProject {
+        name: name(n),
+        files: files(vec![(
+            "Lib.fs".into(),
+            format!("namespace Duplicate\n\nmodule Mod =\n    let x : {ty} = {value}\n"),
+        )]),
+        project_refs: Vec::new(),
+        defines: Vec::new(),
+    };
+    let fixture = ProjectGraphFixture::materialise(vec![
+        library("Ay", "int", "1"),
+        library("Zed", "string", "\"z\""),
+        FixtureProject {
+            name: name("Bee"),
+            files: files(vec![(
+                "Use.fs".into(),
+                "module Use\n\nlet y = Duplicate.Mod.x\n".into(),
+            )]),
+            project_refs: vec![name("Ay"), name("Zed")],
+            defines: Vec::new(),
+        },
+    ])
+    .expect("a graph");
+    build_fixtures(&[fixture.fsproj(&name("Ay")), fixture.fsproj(&name("Zed"))]);
+
+    let bee = name("Bee");
+    let source = fixture.source_request(&bee);
+    let dll = fixture.dll_request(&bee);
+    // Ay from source, Zed as its DLL, in the same order.
+    let mixed = {
+        let projects: Vec<GraphProject> = source
+            .projects()
+            .iter()
+            .filter(|p| p.id != name("Zed"))
+            .map(|p| {
+                let mut p = p.clone();
+                if p.id == bee {
+                    p.references = vec![
+                        GraphReference::Project(name("Ay")),
+                        GraphReference::Dll(fixture.output_dll(&name("Zed"))),
+                    ];
+                }
+                p
+            })
+            .collect();
+        GraphRequest::new(projects, bee.clone()).expect("a graph")
+    };
+    let mut oracle = ProjectGraphOracle::default();
+    let mut answers = Vec::new();
+    for (label, request) in [("source", &source), ("dll", &dll), ("mixed", &mixed)] {
+        let answer = oracle.check(request).expect("the graph oracle answers");
+        assert_eq!(
+            errors(&answer),
+            Vec::<&Value>::new(),
+            "{label}: {answer:#?}"
+        );
+        assert!(
+            binds(&answer, "Duplicate.Mod.x", "Zed"),
+            "{label}: the later reference wins: {answer:#?}"
+        );
+        answers.push((label, answer));
+    }
+    for (label, answer) in &answers[1..] {
+        assert_eq!(
+            answer_diff(&answers[0].1, answer),
+            Vec::<String>::new(),
+            "source against {label}"
+        );
+    }
 }
