@@ -599,6 +599,9 @@ fn an_illegal_condition_msbuild_never_evaluates_is_not_rejected() {
         "<ItemGroup><I Include=\"x\" Condition=\"false\"><M Condition=\"tr ue\">m</M></I></ItemGroup>",
         "<ItemGroup Condition=\"false\"><I Include=\"x\"><M Condition=\"1 &lt; abc\">m</M></I></ItemGroup>",
         "<ItemDefinitionGroup Condition=\"false\"><I><M Condition=\"tr ue\">m</M></I></ItemDefinitionGroup>",
+        // A gate that reads no property is false whichever branch MSBuild
+        // takes around it.
+        "<Choose><When Condition=\"$([System.String]::IsNullOrWhiteSpace(''))\"><ItemGroup Condition=\"false\"><I Include=\"x\" Condition=\"tr ue\" /></ItemGroup></When></Choose>",
         "<ItemDefinitionGroup><I Condition=\"false\"><M Condition=\"tr ue\">m</M></I></ItemDefinitionGroup>",
         "<ImportGroup Condition=\"false\"><Import Project=\"nope.props\" Condition=\"tr ue\" /></ImportGroup>",
         "<Choose><When Condition=\"true\" /><When Condition=\"tr ue\" /></Choose>",
@@ -668,6 +671,12 @@ fn an_illegal_condition_msbuild_may_not_evaluate_may_be_rejected() {
              <Choose><When Condition=\"{UNDECIDED_TRUE}\"><PropertyGroup><Flag>skip</Flag></PropertyGroup>\
              <ItemGroup><I Include=\"x\" Condition=\"$(Word) &gt; 1\" /></ItemGroup></When></Choose>\
              <PropertyGroup><Word Condition=\"'$(Flag)' == ''\">5</Word></PropertyGroup>"
+        ),
+        // A gate false by its last conjunct, whose first may throw on a value
+        // the walk is not sure of before that one decides.
+        format!(
+            "<PropertyGroup><X>1</X><X Condition=\"{UNDECIDED_TRUE}\">abc</X></PropertyGroup>\
+             <ItemGroup Condition=\"$(X) &gt; 2 And false\"><I Include=\"x\" Condition=\"tr ue\" /></ItemGroup>"
         ),
         // An `Update`'s metadata, evaluated only where the update applies.
         "<ItemGroup><I Update=\"x\"><M Condition=\"tr ue\">m</M></I></ItemGroup>".to_owned(),

@@ -139,12 +139,8 @@ impl State<'_> {
             self.rejection = Some(rejection);
         }
         // A group judged in both passes may note one construct twice.
-        let effective = self.effective_span(span.clone());
-        if !self
-            .diagnostics
-            .iter()
-            .any(|d| d.kind == kind && d.span == effective)
-        {
+        let site = (self.effective_span(span.clone()), format!("{kind:?}"));
+        if self.noted_rejection_sites.insert(site) {
             self.push(kind, span);
         }
     }
@@ -346,9 +342,12 @@ fn judge_gate(
 }
 
 /// [`judge_gate`] of a gate MSBuild evaluates in its item pass, against the
-/// final property table. Outside the walk's item pass (in a branch it could not
-/// decide) a later write may still change what the gate reads, so there it
-/// decides nothing.
+/// final property table. It decides only when every name it reads is read as
+/// the build reads it ([`operands_are_certain`]): MSBuild evaluates a
+/// condition left to right, so an operand the walk is not sure of may throw
+/// before a later one decides the boolean. Outside the walk's item pass (in a
+/// branch it could not decide) a later write may still change what the gate
+/// reads, so there only a gate that reads no property decides.
 fn judge_item_pass_gate(
     node: Node<'_, '_>,
     exists_dir: &Path,
@@ -356,11 +355,13 @@ fn judge_item_pass_gate(
     state: &mut State<'_>,
 ) -> Judged {
     let judged = judge_gate(node, exists_dir, reached, state);
-    if state.in_item_pass {
-        judged
+    let text = attribute(node, "Condition").unwrap_or_default();
+    let stable = if state.in_item_pass {
+        operands_are_certain(state, &text)
     } else {
-        Judged::Undecided
-    }
+        properties::property_references(&text).next().is_none()
+    };
+    if stable { judged } else { Judged::Undecided }
 }
 
 /// [`judge_condition`] of the condition `text` at `node`, returning its outcome.

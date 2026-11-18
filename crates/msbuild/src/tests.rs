@@ -421,6 +421,32 @@ fn update_batch_tracking_scales_with_consecutive_updates() {
     }
 }
 
+/// Noting a rejection costs a lookup, not a scan of every diagnostic so far:
+/// thousands of items each with an illegal condition finish at once.
+#[test]
+fn rejection_notes_scale_with_rejected_items() {
+    const N: usize = 40_000;
+    let mut src = String::from("<Project>\n  <ItemGroup>\n");
+    for i in 0..N {
+        src.push_str(&format!("    <I Include=\"x{i}\" Condition=\"tr ue\" />\n"));
+    }
+    src.push_str("  </ItemGroup>\n</Project>");
+    let start = std::time::Instant::now();
+    let p = parse_fsproj(
+        &src,
+        Path::new("/repo/Demo.fsproj"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect("well-formed XML parses");
+    let elapsed = start.elapsed();
+    assert!(p.rejection.is_some());
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "{N} rejected items took {elapsed:?}"
+    );
+}
+
 /// MSBuild compares a spelling it cannot normalise (`a:b.fs` — `:` is invalid
 /// in a Windows filename) *as written*, so `a:b.fs` and its rooted spelling
 /// are different items to an `Update`, though they name one file. The

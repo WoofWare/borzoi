@@ -1310,11 +1310,25 @@ fn an_update_the_walk_cannot_gate_is_followed_both_ways() {
 ///   [`an_update_the_walk_cannot_gate_is_followed_both_ways`] (MSBuild orders
 ///   `C.fs B.fs`): the walk must not take the batch as empty;
 /// - an `Update` under such a gate that strands nothing whether or not it
-///   runs (two distinct files on an empty batch): the walk must commit.
+///   runs (two distinct files on an empty batch): the walk must commit;
+/// - such a group whose only `Update` is false for certain builds nothing
+///   whether or not it runs, so the batch stays known: the walk must commit.
 #[test]
 fn undecided_gates_around_the_batch_of_updates() {
     const UNDECIDED: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
-    let cases: [(String, bool); 2] = [
+    let cases: [(String, bool); 3] = [
+        (
+            format!(
+                r#"    </ItemGroup>
+  <ItemGroup Condition="{UNDECIDED}">
+    <Compile Update="X.fs" Visible="false" Condition="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="A.fs;B.fs" />
+    <Compile Update="A.fs;B.fs" CompileOrder="CompileLast" />"#
+            ),
+            true,
+        ),
         (
             format!(
                 r#"    </ItemGroup>

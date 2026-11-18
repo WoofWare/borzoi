@@ -2584,6 +2584,14 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
 /// knows what those batches hold after it ([`update_strands_late`]).
 fn forget_update_batches_under(node: Node<'_, '_>, state: &mut State<'_>) {
     for child in node.children().filter(Node::is_element) {
+        // A child whose own condition is false for certain builds nothing,
+        // whether or not the group runs.
+        if matches!(
+            evaluate_item_condition_silent(child, state),
+            (CondGate::Skip, false)
+        ) {
+            continue;
+        }
         if let Some(item_type) = batched_item_type(child) {
             state
                 .update_batches
