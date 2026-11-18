@@ -6616,6 +6616,22 @@ let private readGraphProject (e: JsonElement) : GraphProject =
     // The current FCS no longer behaves as compilers below F# 8 did, and
     // this oracle has no legacy twin, so it refuses to check at one.
     let langVersion = str "langversion"
+    // Only a version's spelling: anything else, `?` among it, FCS may read
+    // as another switch (`--langversion:?` prints help and ends the process).
+    let isVersion (v: string) =
+        let v = v.Trim()
+        let digits (s: string) = s <> "" && s |> Seq.forall Char.IsAsciiDigit
+        match v with
+        | "latest" | "latestmajor" | "preview" | "default" -> true
+        | _ ->
+            match v.Split('.') with
+            | [| major |] -> digits major
+            | [| major; minor |] -> digits major && digits minor
+            | _ -> false
+    match langVersion with
+    | Some v when not (isVersion v) ->
+        failwithf "project %s: langversion %A is not a language version" id v
+    | _ -> ()
     let belowFloor =
         match langVersion |> Option.map (fun v -> v.Trim().Split('.')) with
         | Some parts when parts.Length >= 1 && parts.Length <= 2 ->
