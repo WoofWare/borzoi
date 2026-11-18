@@ -23,6 +23,9 @@
 //! target that acts only when the compiler really runs), and project
 //! references, built as a real build builds them: one a hook needs built
 //! first, and a C# one that fails to compile, after which nothing is built.
+//! A `global.json` no installed SDK satisfies builds nothing either, and
+//! compiler arguments set ahead of the response file (in
+//! `DotnetFscCompilerPath`) leave the driver unable to answer.
 
 mod common;
 
@@ -45,6 +48,8 @@ enum Expect {
     Compiles,
     /// Nothing built: the build fails before fsc runs.
     NoBuild,
+    /// No answer: fsc runs on arguments the response file does not hold.
+    Unanswered,
 }
 
 struct Fixture {
@@ -84,7 +89,7 @@ const BROKEN_LIB: &[(&str, &str)] = &[
 ];
 
 fn fixtures() -> Vec<Fixture> {
-    use Expect::{Compiles, NoBuild};
+    use Expect::{Compiles, NoBuild, Unanswered};
     let props = |name, body, compiles_to| Fixture {
         name,
         body,
@@ -194,6 +199,23 @@ fn fixtures() -> Vec<Fixture> {
             ..props(
                 "a C# project reference that does not compile",
                 "<ItemGroup><ProjectReference Include=\"Broken/Broken.csproj\" /></ItemGroup>",
+                "",
+            )
+        },
+        Fixture {
+            files: &[(
+                "global.json",
+                "{\"sdk\":{\"version\":\"9.9.999\",\"rollForward\":\"disable\"}}",
+            )],
+            expect: NoBuild,
+            ..props("a global.json no installed SDK satisfies", "", "")
+        },
+        Fixture {
+            expect: Unanswered,
+            ..props(
+                "compiler arguments ahead of the response file",
+                "<PropertyGroup><DotnetFscCompilerPath>\"$(MSBuildBinPath)/FSharp/fsc.dll\" \
+                 --define:EXTRACLI</DotnetFscCompilerPath></PropertyGroup>",
                 "",
             )
         },
@@ -373,6 +395,7 @@ fn fsc_args_reads_what_real_builds_hand_fsc() {
                 failures.extend(check_build(fixture, &dir, &control, &build))
             }
             (Expect::NoBuild, Err(FscArgsDecline::NoBuild(_))) => {}
+            (Expect::Unanswered, Err(FscArgsDecline::Unanswered(_))) => {}
             (expect, answer) => failures.push(format!(
                 "`{}`: expected {expect:?}, got {answer:?}",
                 fixture.name

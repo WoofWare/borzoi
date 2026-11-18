@@ -827,13 +827,19 @@ type private FscRun =
       Globals: Collections.Generic.IDictionary<string, string>
       Assembly: string
       Inputs: Collections.Generic.Dictionary<string, string>
-      Messages: ResizeArray<string> }
+      Messages: ResizeArray<string>
+      /// The errors the task raised that say it could not start the compiler
+      /// (`MSB6003`, `MSB6004`), as against errors the compiler reported.
+      LaunchFailures: ResizeArray<string> }
 
 /// The response file `run` handed fsc, read off the command line the task
 /// logged before running it (`ToolTask` logs
 /// `<tool path> <command-line commands> <response-file commands>`; `Fsc`'s
 /// tool path is `ToolPath` joined with `ToolExe`, and its command-line
 /// commands are its `DotnetFscCompilerPath`, verbatim), or why it cannot be.
+/// The command-line commands reach fsc as arguments of their own, ahead of
+/// the response file, so they must be the compiler's path alone: one quoted
+/// path, or none.
 let private responseFileOf (run: FscRun) : Result<string, string> =
     let input name =
         match run.Inputs.TryGetValue name with
@@ -841,16 +847,33 @@ let private responseFileOf (run: FscRun) : Result<string, string> =
         | _ -> ""
 
     let tool = Path.Combine(input "ToolPath", input "ToolExe")
+    let compiler = input "DotnetFscCompilerPath"
+
+    let pathAlone =
+        compiler = ""
+        || (compiler.Length >= 2
+            && compiler.StartsWith "\""
+            && compiler.EndsWith "\""
+            && not (compiler.Substring(1, compiler.Length - 2).Contains '"')
+            && not (compiler.StartsWith "\"@" || compiler.StartsWith "\"-"))
+        || not (
+            compiler.StartsWith '@'
+            || compiler.StartsWith '-'
+            || compiler |> Seq.exists (fun c -> Char.IsWhiteSpace c || c = '"')
+        )
 
     let prefix =
-        match input "DotnetFscCompilerPath" with
+        match compiler with
         | "" -> tool + "  "
         | compiler -> tool + " " + compiler + " "
 
-    match run.Messages |> Seq.filter (fun m -> m.StartsWith(prefix, StringComparison.Ordinal)) |> List.ofSeq with
-    | [ message ] -> Ok(message.Substring prefix.Length)
-    | [] -> Error $"Fsc logged no command line starting %s{prefix}"
-    | many -> Error $"Fsc logged %d{many.Length} command lines"
+    if not pathAlone then
+        Error $"DotnetFscCompilerPath holds more than the compiler's path: %s{compiler}"
+    else
+        match run.Messages |> Seq.filter (fun m -> m.StartsWith(prefix, StringComparison.Ordinal)) |> List.ofSeq with
+        | [ message ] -> Ok(message.Substring prefix.Length)
+        | [] -> Error $"Fsc logged no command line starting %s{prefix}"
+        | many -> Error $"Fsc logged %d{many.Length} command lines"
 
 /// Records every `Fsc` invocation of a real build, for the `fsc_args` driver
 /// in `borzoi-oracle-harness`, which loads it into `dotnet msbuild -restore
@@ -858,9 +881,10 @@ let private responseFileOf (run: FscRun) : Result<string, string> =
 /// assembly>;<file>`). When the build ends it writes to `<file>`, as JSON,
 /// whether the build succeeded, its errors, and for each invocation the
 /// project and global properties it ran under, the task assembly, the
-/// parameters choosing the program it runs (logged only under
-/// `MSBUILDLOGTASKINPUTS`), and the response file it handed fsc (or why that
-/// could not be read).
+/// parameters choosing the program it runs (MSBuild logs a task's inputs only when
+/// asked: the driver asks with a binary log, `-bl`, which sets nothing the
+/// build can read), whether it started the compiler, and the response file
+/// it handed fsc (or why that could not be read).
 ///
 /// A real build, not an imitation of one: the restore, the targets, the
 /// project references and the compiler are the CLI's own, so what it reports
@@ -910,7 +934,8 @@ type FscArgsLogger() =
                           Globals = globals
                           Assembly = e.TaskAssemblyLocation
                           Inputs = Collections.Generic.Dictionary<string, string>()
-                          Messages = ResizeArray<string>() }
+                          Messages = ResizeArray<string>()
+                          LaunchFailures = ResizeArray<string>() }
 
                     order.Add k)
 
@@ -937,7 +962,16 @@ type FscArgsLogger() =
                 | Some run, e -> run.Messages.Add e.Message
                 | None, _ -> ())
 
-            source.ErrorRaised.Add(fun e -> errors.Add $"%s{e.File}(%d{e.LineNumber}): %s{e.Code} %s{e.Message}")
+            source.ErrorRaised.Add(fun e ->
+                errors.Add $"%s{e.File}(%d{e.LineNumber}): %s{e.Code} %s{e.Message}"
+
+                match e.BuildEventContext with
+                | null -> ()
+                | context ->
+                    match runs.TryGetValue(key context) with
+                    | true, run when e.Code = "MSB6003" || e.Code = "MSB6004" -> run.LaunchFailures.Add e.Message
+                    | _ -> ())
+
             source.BuildFinished.Add(fun e -> succeeded <- e.Succeeded)
 
         member _.Shutdown() =
@@ -957,9 +991,11 @@ type FscArgsLogger() =
                            compiler = run.Inputs
                            responseFile = file
                            // `Fsc` logs its command line, then skips the compiler
-                           // when told to: such an invocation hands fsc nothing.
+                           // when told to, or fails to start it: such an
+                           // invocation hands fsc nothing.
                            executed =
-                            not (
+                            run.LaunchFailures.Count = 0
+                            && not (
                                 match run.Inputs.TryGetValue "SkipCompilerExecution" with
                                 | true, skip -> skip.Equals("true", StringComparison.OrdinalIgnoreCase)
                                 | _ -> false

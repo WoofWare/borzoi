@@ -125,20 +125,34 @@ pub fn source_fingerprint(project: &Path) -> u64 {
 
 /// The environment [`fsc_args`]'s build runs under: the runtime essentials,
 /// the `DOTNET_*`/`NUGET_*` variables, `RestoreSources` (the devshell's
-/// offline feed, so the restore is hermetic), and `MSBUILDLOGTASKINPUTS`, so
-/// the task's parameters reach the logger; nothing else, since MSBuild reads
-/// every variable as a property. An evaluation compared with the build must
-/// see the same set.
+/// offline feed, so the restore is hermetic); nothing else, since MSBuild
+/// reads every variable as a property. An evaluation compared with the build
+/// must see the same set.
 pub fn build_environment() -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = std::env::vars()
+    std::env::vars()
         .filter(|(key, _)| {
             matches!(key.as_str(), "PATH" | "HOME" | "TMPDIR" | "RestoreSources")
                 || key.starts_with("DOTNET_")
                 || key.starts_with("NUGET_")
         })
-        .collect();
-    env.push(("MSBUILDLOGTASKINPUTS".into(), "1".into()));
-    env
+        .collect()
+}
+
+/// `path` with its `.` and `..` components folded away lexically, as MSBuild
+/// names a project it is handed, without resolving links.
+fn lexically_normal(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut normal = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normal.pop();
+            }
+            other => normal.push(other),
+        }
+    }
+    normal
 }
 
 /// One `Fsc` invocation of the build.
@@ -194,18 +208,21 @@ pub enum FscArgsDecline {
 /// What fsc is handed for the project at `project` (on disk) in a real
 /// `dotnet msbuild -restore -t:Build` under the global properties `globals`,
 /// in [`build_environment`] plus `env`. The project is built by the path
-/// given, made absolute but not resolved through links (MSBuild names the
-/// project after the path it is handed). A global's value may not hold `;`,
+/// given, made absolute and lexically normal but not resolved through links
+/// (MSBuild names the project after the path it is handed). A global's value may not hold `;`,
 /// `,` or `"`, which the command line would split or strip. A build the
 /// `dotnet` host refuses before MSBuild starts (no SDK the project's
-/// `global.json` admits) builds nothing.
+/// `global.json` admits) builds nothing; one that leaves no report otherwise
+/// is unanswered.
 pub fn fsc_args(
     project: &Path,
     globals: &[(String, String)],
     env: &[(String, String)],
 ) -> Result<FscBuild, FscArgsDecline> {
-    let project = std::path::absolute(project)
-        .unwrap_or_else(|e| panic!("absolute path of {}: {e}", project.display()));
+    let project = lexically_normal(
+        &std::path::absolute(project)
+            .unwrap_or_else(|e| panic!("absolute path of {}: {e}", project.display())),
+    );
     let dir = project.parent().expect("a project file has a directory");
     let scratch = scratch_dir();
     let out = scratch.join("fsc-args.json");
@@ -224,7 +241,12 @@ pub fn fsc_args(
             "-logger:MsBuildConditionOracle.Program+FscArgsLogger,{};{}",
             logger.display(),
             out.display()
-        ));
+        ))
+        // A binary log makes MSBuild log every task's inputs, on every node,
+        // which is how the logger learns the `Fsc` task's compiler
+        // parameters; unlike `MSBUILDLOGTASKINPUTS`, it sets nothing the
+        // build can read. It goes to the call's scratch directory.
+        .arg(format!("-bl:{}", scratch.join("build.binlog").display()));
     for (name, value) in globals {
         assert!(
             !value.contains([';', ',', '"']),
@@ -254,10 +276,24 @@ pub fn fsc_args(
             "dotnet msbuild of {} wrote no fsc arguments ({e}):\n{report}",
             project.display()
         ),
-        // The `dotnet` host stopped before MSBuild ran.
-        Err(_) => Err(FscArgsDecline::NoBuild(vec![report])),
+        // The `dotnet` host refused to select an SDK, before MSBuild ran.
+        Err(_) if HOST_SDK_FAILURES.iter().any(|m| report.contains(m)) => {
+            Err(FscArgsDecline::NoBuild(vec![report]))
+        }
+        // Anything else that left no report (the build killed, say) may have
+        // run fsc: the answer is unknown.
+        Err(e) => Err(FscArgsDecline::Unanswered(vec![format!(
+            "the build left no report ({e}):\n{report}"
+        )])),
     }
 }
+
+/// What the `dotnet` host prints when no installed SDK satisfies the
+/// project's `global.json`, which it does before MSBuild starts.
+const HOST_SDK_FAILURES: &[&str] = &[
+    "A compatible .NET SDK was not found",
+    "A compatible installed .NET SDK for global.json version",
+];
 
 /// A directory of [`fsc_args`]'s own for one call, which no other call in
 /// any process shares: named for this process and a process-wide counter,
@@ -307,7 +343,7 @@ fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDe
         .as_array()
         .expect("FscArgsLogger writes its invocations")
     {
-        let run_project = PathBuf::from(run["project"].as_str().unwrap_or_default());
+        let run_project = lexically_normal(Path::new(run["project"].as_str().unwrap_or_default()));
         if run_project != project || run["executed"].as_bool() != Some(true) {
             continue;
         }

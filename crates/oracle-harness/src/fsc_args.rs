@@ -41,7 +41,8 @@ pub struct FscArguments {
     /// The target the last `--target:` or `-a` (`--target:library`) sets
     /// (`library`, `exe`, …).
     pub target: Option<String>,
-    /// The lines fsc takes for sources, in order.
+    /// The lines fsc takes for sources, in order, their quotes trimmed as fsc
+    /// trims them.
     pub sources: Vec<String>,
     /// Every option line, in order.
     pub options: Vec<FscOption>,
@@ -75,7 +76,9 @@ impl FscArguments {
                 if line.starts_with('-') || is_slash_option(line) {
                     return Err(FscArgsError::UnrecognisedOption(line.to_string()));
                 }
-                args.sources.push(line.to_string());
+                // fsc trims a source's quotes after classifying the line
+                // (`FileSystemUtils.trimQuotes`).
+                args.sources.push(line.trim_matches([' ', '"']).to_string());
                 continue;
             };
             let value = (!option.argument.is_empty()).then(|| option.argument.clone());
@@ -217,6 +220,8 @@ mod tests {
         assert_eq!(args.lang_version.as_deref(), Some("preview"));
         assert_eq!(args.target.as_deref(), Some("library"));
         assert_eq!(args.sources, ["A.fs", "B.fs"]);
+        let quoted = FscArguments::parse("-o:A.dll\n\"B.fs\"").unwrap();
+        assert_eq!(quoted.sources, ["B.fs"]);
         assert_eq!(args.options.len(), 7);
     }
 }
