@@ -763,35 +763,81 @@ fn a_consumer_signature_is_its_built_dll_signature() {
     );
 }
 
-/// A project whose source text FCS's check need not read as fsc does is
-/// refused: a signing attribute names a key file FCS resolves against its
-/// own directory, fsc against the project's; and FCS's per-file check, which
-/// gives the file records, defines `EDITING`, which the build does not.
+/// A project whose source names a signing key file is refused: FCS resolves
+/// the file against its own directory, fsc against the project's, so the
+/// two can give the assembly different identities.
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
-fn source_text_read_apart_from_the_build_is_refused() {
-    for (token, text) in [
-        (
-            "AssemblyKeyFile",
-            "module Lib\n\n[<assembly: System.Reflection.AssemblyKeyFileAttribute(\"key.snk\")>]\ndo ()\n\nlet x = 1\n",
-        ),
-        (
-            "EDITING",
-            "module Lib\n\n#if EDITING\nlet x = \"\"\n#else\nlet x = 1\n#endif\n",
-        ),
-    ] {
-        let fixture = ProjectGraphFixture::materialise(vec![project(
-            "Lib",
-            vec![("Lib.fs".into(), text.into())],
-            &[],
-        )])
-        .expect("a graph");
-        let args = fixture.fsc_args(&name("Lib"));
-        match ProjectGraphOracle::default().check(&fixture.source_request(&args, &name("Lib"))) {
-            Err(FcsInvokeError::Refused(why)) if why.contains(token) => {}
-            other => panic!("source holding {token} must be refused: {other:?}"),
-        }
+fn a_source_signing_attribute_is_refused() {
+    let fixture = ProjectGraphFixture::materialise(vec![project(
+        "Lib",
+        vec![(
+            "Lib.fs".into(),
+            "module Lib\n\n[<assembly: System.Reflection.AssemblyKeyFileAttribute(\"key.snk\")>]\ndo ()\n\nlet x = 1\n"
+                .into(),
+        )],
+        &[],
+    )])
+    .expect("a graph");
+    let args = fixture.fsc_args(&name("Lib"));
+    match ProjectGraphOracle::default().check(&fixture.source_request(&args, &name("Lib"))) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("AssemblyKeyFile") => {}
+        other => panic!("a signing attribute must be refused: {other:?}"),
     }
+}
+
+/// Every record the oracle returns describes the code the build compiled.
+/// FCS's per-file check defines `EDITING`, which fsc does not; here the
+/// producer and the consumer each say one thing under `EDITING` and another
+/// without, and the file records, like the build-agreement and signature
+/// checks, must read the build's branch.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn file_records_read_the_branch_the_build_compiled() {
+    let fixture = ProjectGraphFixture::materialise(vec![
+        project(
+            "Lib",
+            vec![(
+                "Lib.fs".into(),
+                "module Lib\n\n#if EDITING\nlet x = \"\"\n#else\nlet x = 1\n#endif\n".into(),
+            )],
+            &[],
+        ),
+        project(
+            "App",
+            vec![(
+                "App.fs".into(),
+                "module App\n\n#if EDITING\nlet onlyEditing : string = Lib.x\n#else\nlet onlyBuild : int = Lib.x\n#endif\n"
+                    .into(),
+            )],
+            &["Lib"],
+        ),
+    ])
+    .expect("a graph");
+    let args = fixture.fsc_args(&name("App"));
+    assert!(
+        args.succeeded(&name("App")),
+        "the build compiles the non-EDITING branch"
+    );
+    let request = fixture.source_request(&args, &name("App"));
+    let mut oracle = ProjectGraphOracle::default();
+    let answer = oracle.check(&request).expect("the graph oracle answers");
+    assert_eq!(args.errors_agree(&request, &answer), Ok(()));
+    let problems = signature_disagreements(&mut oracle, &fixture, &args, &request, &answer);
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert!(
+        errors(&answer).is_empty(),
+        "no file record holds an error: {answer:#?}"
+    );
+    let named = |n: &str| uses(&answer).any(|u| u["FullName"] == format!("App.{n}"));
+    assert!(
+        named("onlyBuild"),
+        "the build's branch is recorded: {answer:#?}"
+    );
+    assert!(
+        !named("onlyEditing"),
+        "the EDITING branch is not: {answer:#?}"
+    );
 }
 
 /// The rendered signature tells apart what a consumer tells apart: one

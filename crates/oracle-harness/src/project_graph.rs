@@ -37,7 +37,9 @@
 //!   closed value grammar, no path-valued switch FCS would resolve elsewhere,
 //!   FSharp.Core explicit), and a source naming a signing key file.
 //! - **Error agreement.** FCS finds errors in exactly the projects whose real
-//!   build failed ([`FixtureArgs::errors_agree`]).
+//!   build failed ([`FixtureArgs::errors_agree`]). The file records come from
+//!   that same whole-project check, not FCS's per-file check, which defines
+//!   `EDITING` where fsc does not.
 //! - **Signature agreement.** Every project whose build succeeded, producers
 //!   and the checked project alike, has the F# signature FCS checked from
 //!   source that FCS reads from the DLL the build wrote

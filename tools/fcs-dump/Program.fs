@@ -6352,8 +6352,8 @@ let private projectOptionsOf
         UseScriptResolutionRules = false }
 
 /// Check each of `paths` in `projOpts` and project its `{ Path, Diagnostics,
-/// Uses }` record: [`usesProjectFiles`]'s second half, and how the
-/// project-graph oracle ([`usesProjectGraphBatchCore`]) checks its project.
+/// Uses }` record: [`usesProjectFiles`]'s second half. Each file goes through
+/// FCS's per-file check, which defines `EDITING` where fsc does not.
 let private checkProjectFiles (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (paths: string[]) =
     paths
     |> Array.map (fun absolute ->
@@ -7076,11 +7076,27 @@ let private renderSignature (signature: FSharpAssemblySignature) : string[] =
 
 /// Source text whose meaning FCS's check and the build need not share, so a
 /// project holding any is outside the oracle's domain: a signing attribute
-/// names a file FCS resolves against its own directory, not the project's,
-/// and FCS's per-file check, which gives the file records, defines
-/// `EDITING`, which fsc and the whole-project check do not. A textual match,
-/// so a mention in a comment declines too.
-let private outOfDomainText = [ "AssemblyKeyFile"; "AssemblyKeyName"; "EDITING" ]
+/// names a file FCS resolves against its own directory, not the project's.
+/// A textual match, so a mention in a comment declines too.
+let private outOfDomainText = [ "AssemblyKeyFile"; "AssemblyKeyName" ]
+
+/// The graph oracle's per-file records, `{ Path, Diagnostics, Uses }` for
+/// each of `paths`, taken from `results`, the whole-project check. FCS's
+/// per-file check (what the `uses-project` oracle's [`checkProjectFiles`]
+/// runs) is not the compile: it defines `EDITING`, which fsc does not. The
+/// project check is the one the build-agreement and signature checks grade,
+/// so the records come from it and describe the code the build compiled.
+let private graphFileRecords (results: FSharpCheckProjectResults) (paths: string[]) =
+    let uses = results.GetAllUsesOfAllSymbols()
+    let inFile (path: string) (file: string) = Path.GetFullPath file = path
+    paths
+    |> Array.map (fun path ->
+        {| Path = path
+           Diagnostics =
+            results.Diagnostics
+            |> Array.filter (fun d -> inFile path d.FileName)
+            |> Array.map projectDiagnostic
+           Uses = uses |> Array.filter (fun u -> inFile path u.FileName) |> Array.map projectSymbolUse |})
 
 /// One `uses-project-graph-batch` request's response.
 let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
@@ -7126,8 +7142,8 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
                Diagnostics = results.Diagnostics |> Array.map projectDiagnostic
                Signature = renderSignature results.AssemblySignature |})
         |> List.toArray
-    let files = checkProjectFiles checker built.[graph.Check.Id] graph.Check.Sources
     let checkedResults = projectResults built.[graph.Check.Id]
+    let files = graphFileRecords checkedResults graph.Check.Sources
     {| Files = files
        Diagnostics = checkedResults.Diagnostics |> Array.map projectDiagnostic
        Signature = renderSignature checkedResults.AssemblySignature
@@ -9315,7 +9331,7 @@ let private usage () =
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
     eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files} response/line"
-    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,projectFile,args:[fsc response-file line],projectRefs:[{project,reference}]}],check}, F# project refs as FSharpReference; one compact {Files,Diagnostics,Referenced} response/line"
+    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,projectFile,args:[fsc response-file line],projectRefs:[{project,reference}]}],check}, F# project refs as FSharpReference; one compact {Files,Diagnostics,Signature,Referenced} response/line; or {signatureOf:<project>,dll} for a built DLL's {Signature}"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
     eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files} response/line"
     2
