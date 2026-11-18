@@ -816,10 +816,8 @@ let private isFsc (name: string) =
     name.Equals("Fsc", StringComparison.OrdinalIgnoreCase)
     || name.EndsWith(".Fsc", StringComparison.OrdinalIgnoreCase)
 
-/// The `Fsc` task's parameters that choose the program it runs, and whether it
-/// runs one.
-let private compilerParameters =
-    [ "ToolPath"; "ToolExe"; "DotnetFscCompilerPath"; "SkipCompilerExecution" ]
+/// The `Fsc` task's parameters that choose the program it runs.
+let private compilerParameters = [ "ToolPath"; "ToolExe"; "DotnetFscCompilerPath" ]
 
 /// One `Fsc` invocation as [`FscArgsLogger`] sees it.
 type private FscRun =
@@ -828,9 +826,10 @@ type private FscRun =
       Assembly: string
       Inputs: Collections.Generic.Dictionary<string, string>
       Messages: ResizeArray<string>
-      /// The errors the task raised that say it could not start the compiler
-      /// (`MSB6003`, `MSB6004`), as against errors the compiler reported.
-      LaunchFailures: ResizeArray<string> }
+      /// The diagnostics fsc itself reported (errors and warnings coded
+      /// `FS…`, raised in the task's context): evidence fsc ran, read its
+      /// arguments, and got as far as compiling.
+      CompilerDiagnostics: ResizeArray<string> }
 
 /// The response file `run` handed fsc, read off the command line the task
 /// logged before running it (`ToolTask` logs
@@ -864,7 +863,7 @@ let private responseFileOf (run: FscRun) : Result<string, string> =
 
     let prefix =
         match compiler with
-        | "" -> tool + "  "
+        | "" -> tool + " "
         | compiler -> tool + " " + compiler + " "
 
     if not pathAlone then
@@ -881,10 +880,14 @@ let private responseFileOf (run: FscRun) : Result<string, string> =
 /// assembly>;<file>`). When the build ends it writes to `<file>`, as JSON,
 /// whether the build succeeded, its errors, and for each invocation the
 /// project and global properties it ran under, the task assembly, the
-/// parameters choosing the program it runs (MSBuild logs a task's inputs only when
-/// asked: the driver asks with a binary log, `-bl`, which sets nothing the
-/// build can read), whether it started the compiler, and the response file
-/// it handed fsc (or why that could not be read).
+/// parameters choosing the program it runs (MSBuild logs a task's inputs only
+/// when asked: the driver asks with a diagnostic file log, which sets nothing
+/// the build can read), the diagnostics fsc itself reported, and the response
+/// file it handed fsc (or why that could not be read).
+///
+/// That `Fsc` started is MSBuild's account; that fsc ran is fsc's, which the
+/// driver reads from fsc's own evidence: the diagnostics here, or the output
+/// file the build wrote.
 ///
 /// A real build, not an imitation of one: the restore, the targets, the
 /// project references and the compiler are the CLI's own, so what it reports
@@ -935,7 +938,7 @@ type FscArgsLogger() =
                           Assembly = e.TaskAssemblyLocation
                           Inputs = Collections.Generic.Dictionary<string, string>()
                           Messages = ResizeArray<string>()
-                          LaunchFailures = ResizeArray<string>() }
+                          CompilerDiagnostics = ResizeArray<string>() }
 
                     order.Add k)
 
@@ -962,15 +965,20 @@ type FscArgsLogger() =
                 | Some run, e -> run.Messages.Add e.Message
                 | None, _ -> ())
 
-            source.ErrorRaised.Add(fun e ->
-                errors.Add $"%s{e.File}(%d{e.LineNumber}): %s{e.Code} %s{e.Message}"
-
-                match e.BuildEventContext with
+            let compilerSpoke (context: Microsoft.Build.Framework.BuildEventContext) (code: string) message =
+                match context with
                 | null -> ()
                 | context ->
                     match runs.TryGetValue(key context) with
-                    | true, run when e.Code = "MSB6003" || e.Code = "MSB6004" -> run.LaunchFailures.Add e.Message
-                    | _ -> ())
+                    | true, run when not (isNull code) && code.StartsWith("FS", StringComparison.Ordinal) ->
+                        run.CompilerDiagnostics.Add $"%s{code} %s{message}"
+                    | _ -> ()
+
+            source.ErrorRaised.Add(fun e ->
+                errors.Add $"%s{e.File}(%d{e.LineNumber}): %s{e.Code} %s{e.Message}"
+                compilerSpoke e.BuildEventContext e.Code e.Message)
+
+            source.WarningRaised.Add(fun e -> compilerSpoke e.BuildEventContext e.Code e.Message)
 
             source.BuildFinished.Add(fun e -> succeeded <- e.Succeeded)
 
@@ -990,16 +998,7 @@ type FscArgsLogger() =
                            taskAssembly = run.Assembly
                            compiler = run.Inputs
                            responseFile = file
-                           // `Fsc` logs its command line, then skips the compiler
-                           // when told to, or fails to start it: such an
-                           // invocation hands fsc nothing.
-                           executed =
-                            run.LaunchFailures.Count = 0
-                            && not (
-                                match run.Inputs.TryGetValue "SkipCompilerExecution" with
-                                | true, skip -> skip.Equals("true", StringComparison.OrdinalIgnoreCase)
-                                | _ -> false
-                            )
+                           compilerDiagnostics = List.ofSeq run.CompilerDiagnostics
                            problem = problem |})
                     |> List.ofSeq
 

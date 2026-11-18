@@ -46,9 +46,11 @@ use borzoi_oracle_harness::msbuild_oracle::{
 enum Expect {
     /// One invocation, compiling to [`Fixture::compiles_to`].
     Compiles,
-    /// Nothing built: the build fails before fsc runs.
+    /// Nothing built: the `dotnet` host refuses the build.
     NoBuild,
-    /// No answer: fsc runs on arguments the response file does not hold.
+    /// No answer: no fsc run of the project's left evidence (the build
+    /// failed first), or one ran on arguments the response file does not
+    /// hold.
     Unanswered,
 }
 
@@ -101,6 +103,13 @@ fn fixtures() -> Vec<Fixture> {
     };
     vec![
         props("plain", "", "Demo"),
+        props(
+            "OtherFlags gated on what a logging switch would set",
+            "<PropertyGroup Condition=\"'$(MSBuildBinaryLoggerEnabled)$(MSBuildLogImports)\
+             $(MSBUILDLOGTASKINPUTS)' != ''\"><OtherFlags>--out:obj/Instrumented.dll</OtherFlags>\
+             </PropertyGroup>",
+            "Demo",
+        ),
         props(
             "AssemblyName",
             "<PropertyGroup><AssemblyName>Friend</AssemblyName></PropertyGroup>",
@@ -186,7 +195,7 @@ fn fixtures() -> Vec<Fixture> {
             )
         },
         Fixture {
-            expect: NoBuild,
+            expect: Unanswered,
             ..props(
                 "a target that fails every build",
                 "<Target Name=\"Fail\" BeforeTargets=\"CoreCompile\"><Error Text=\"no\" /></Target>",
@@ -195,7 +204,7 @@ fn fixtures() -> Vec<Fixture> {
         },
         Fixture {
             files: BROKEN_LIB,
-            expect: NoBuild,
+            expect: Unanswered,
             ..props(
                 "a C# project reference that does not compile",
                 "<ItemGroup><ProjectReference Include=\"Broken/Broken.csproj\" /></ItemGroup>",
@@ -324,6 +333,25 @@ fn check_build(fixture: &Fixture, dir: &Path, control: &Path, build: &FscBuild) 
             }
         }
         other => failures.push(format!("`{}`: no output read: {other:?}", fixture.name)),
+    }
+    // The reference assembly, which only the response file carries: every
+    // fixture targets a framework that produces one, and fsc writes it.
+    let refout: Vec<String> = invocation
+        .arguments()
+        .map(|args| {
+            args.options
+                .into_iter()
+                .filter(|option| option.name == "refout")
+                .map(|option| option.argument)
+                .collect()
+        })
+        .unwrap_or_default();
+    match refout.as_slice() {
+        [path] if dir.join(path).host_is_file() => {}
+        other => failures.push(format!(
+            "`{}`: the reference assembly fsc wrote is not the one --refout names: {other:?}",
+            fixture.name
+        )),
     }
     let (graded_dir, control_dir) = (dir.display().to_string(), control.display().to_string());
     let reported = comparable(

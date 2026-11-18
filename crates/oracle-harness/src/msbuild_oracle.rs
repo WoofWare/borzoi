@@ -4,13 +4,15 @@
 //! each `Fsc` invocation's response file into an [`FscArguments`] at the
 //! boundary.
 //!
-//! It runs the build rather than imitating one, and adds nothing to it but
-//! the logger: the restore, the targets, the project references, the global
-//! properties and the compiler are the CLI's own, so what it reports is what
-//! fsc is handed, and "MSBuild built nothing" means the build never ran fsc.
-//! A project already built is up to date, so its build runs no compiler, and
-//! the driver says it cannot answer rather than forcing one; the fixtures it
-//! serves are built fresh.
+//! It runs the build rather than imitating one, and adds nothing to it the
+//! build can read, only loggers: the restore, the targets, the project
+//! references, the global properties and the compiler are the CLI's own. The
+//! arguments are MSBuild's account of what the `Fsc` task handed fsc; that
+//! fsc ran on them is fsc's own account (its diagnostics, or the output it
+//! wrote), so an invocation that logged a command line and ran no compiler is
+//! not reported. A project already built is up to date, so its build runs no
+//! compiler, and the driver says it cannot answer rather than forcing one;
+//! the fixtures it serves are built fresh.
 //!
 //! The tool is built once (marker-gated, with the marker and fingerprint
 //! `borzoi-msbuild`'s tests use, so the two never rebuild over each other).
@@ -186,22 +188,25 @@ pub struct FscBuild {
     /// Whether the whole build succeeded (it may fail after fsc ran: a
     /// compile error, or a later target).
     pub succeeded: bool,
-    /// Every `Fsc` invocation for the project itself that ran the compiler,
-    /// in the order they started: one per inner build (a single-targeted
-    /// project has one).
+    /// Every `Fsc` invocation for the project itself that ran fsc, in the
+    /// order they started: one per inner build (a single-targeted project
+    /// has one). That fsc ran is fsc's own evidence: it reported diagnostics,
+    /// or the output its arguments name was written during the build. An
+    /// invocation that logged its command line but ran no compiler (one told
+    /// to skip it, or one whose compiler could not start) is not here.
     pub invocations: Vec<FscInvocation>,
 }
 
 /// Why [`fsc_args`] gives no [`FscBuild`], with MSBuild's messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FscArgsDecline {
-    /// The build failed before starting `Fsc` for the project, so fsc is
-    /// handed nothing.
+    /// The `dotnet` host refused the build before MSBuild ran (no installed
+    /// SDK satisfies the project's `global.json`), so fsc is handed nothing.
     NoBuild(Vec<String>),
-    /// fsc may be handed arguments that cannot be reported: the build
-    /// succeeded without running fsc for the project (it was up to date, or
-    /// `CoreCompile` was replaced), or an invocation's command line could not
-    /// be read.
+    /// No fsc run of the project's can be reported: the build ran none that
+    /// left evidence (it failed first, the project was up to date, or a
+    /// replaced `CoreCompile` compiles some other way), or one ran on
+    /// arguments the driver cannot read. With the build's errors.
     Unanswered(Vec<String>),
 }
 
@@ -210,10 +215,7 @@ pub enum FscArgsDecline {
 /// in [`build_environment`] plus `env`. The project is built by the path
 /// given, made absolute and lexically normal but not resolved through links
 /// (MSBuild names the project after the path it is handed). A global's value may not hold `;`,
-/// `,` or `"`, which the command line would split or strip. A build the
-/// `dotnet` host refuses before MSBuild starts (no SDK the project's
-/// `global.json` admits) builds nothing; one that leaves no report otherwise
-/// is unanswered.
+/// `,` or `"`, which the command line would split or strip.
 pub fn fsc_args(
     project: &Path,
     globals: &[(String, String)],
@@ -224,8 +226,8 @@ pub fn fsc_args(
             .unwrap_or_else(|e| panic!("absolute path of {}: {e}", project.display())),
     );
     let dir = project.parent().expect("a project file has a directory");
-    let scratch = scratch_dir();
-    let out = scratch.join("fsc-args.json");
+    let scratch = ScratchDir::new();
+    let out = scratch.0.join("fsc-args.json");
     let logger = apphost().with_extension("dll");
 
     let mut cmd = Command::new("dotnet");
@@ -242,11 +244,14 @@ pub fn fsc_args(
             logger.display(),
             out.display()
         ))
-        // A binary log makes MSBuild log every task's inputs, on every node,
-        // which is how the logger learns the `Fsc` task's compiler
-        // parameters; unlike `MSBUILDLOGTASKINPUTS`, it sets nothing the
-        // build can read. It goes to the call's scratch directory.
-        .arg(format!("-bl:{}", scratch.join("build.binlog").display()));
+        // A diagnostic file log makes MSBuild log every task's inputs, which
+        // is how the logger learns the `Fsc` task's compiler parameters; it
+        // sets nothing the build can read (`MSBUILDLOGTASKINPUTS` and `-bl`
+        // each set a property). It goes to the call's scratch directory.
+        .arg(format!(
+            "-flp:v=diag;logfile={}",
+            scratch.0.join("build.log").display()
+        ));
     for (name, value) in globals {
         assert!(
             !value.contains([';', ',', '"']),
@@ -257,19 +262,19 @@ pub fn fsc_args(
     cmd.arg(&project).env_clear();
     cmd.envs(build_environment());
     cmd.envs(env.iter().map(|(name, value)| (name, value)));
+    let started = std::time::SystemTime::now();
     let output = BoundedCommand::new(cmd)
         .timeout(FSC_ARGS_TIMEOUT)
         .run()
         .unwrap_or_else(|e| panic!("dotnet msbuild of {}: {e}", project.display()));
     let json = std::fs::read_to_string(&out);
-    let _ = std::fs::remove_dir_all(&scratch);
     let report = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     match json {
-        Ok(json) => parse_logger_output(&project, &json),
+        Ok(json) => parse_logger_output(&project, &json, started),
         // MSBuild's own command-line errors (`MSB1xxx`: a switch it rejects,
         // a logger it cannot load) are this driver's fault, and loud.
         Err(e) if report.contains("error MSB1") || output.status.success() => panic!(
@@ -319,8 +324,28 @@ fn scratch_dir() -> PathBuf {
     }
 }
 
+/// A [`scratch_dir`], removed when dropped, on every path out of
+/// [`fsc_args`], a panic among them.
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn new() -> ScratchDir {
+        ScratchDir(scratch_dir())
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// [`fsc_args`]'s reading of what `FscArgsLogger` wrote for `project`.
-fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDecline> {
+fn parse_logger_output(
+    project: &Path,
+    json: &str,
+    started: std::time::SystemTime,
+) -> Result<FscBuild, FscArgsDecline> {
     let value: serde_json::Value = serde_json::from_str(json).expect("FscArgsLogger writes JSON");
     let strings = |v: &serde_json::Value| -> BTreeMap<String, String> {
         v.as_object()
@@ -344,15 +369,31 @@ fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDe
         .expect("FscArgsLogger writes its invocations")
     {
         let run_project = lexically_normal(Path::new(run["project"].as_str().unwrap_or_default()));
-        if run_project != project || run["executed"].as_bool() != Some(true) {
+        if run_project != project {
             continue;
         }
+        // A command line that cannot be read may be one fsc ran on.
         let Some(response_file) = run["responseFile"].as_str() else {
             return Err(FscArgsDecline::Unanswered(vec![format!(
-                "an Fsc invocation's command line could not be read: {}",
+                "an Fsc command line could not be read: {}",
                 run["problem"]
             )]));
         };
+        let compiler_spoke = run["compilerDiagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| !diagnostics.is_empty());
+        // fsc writes its output relative to the project's directory.
+        let wrote_output = FscArguments::parse(response_file)
+            .ok()
+            .and_then(|args| args.output)
+            .and_then(|output| {
+                let path = project.parent()?.join(output);
+                std::fs::metadata(path).ok()?.modified().ok()
+            })
+            .is_some_and(|modified| modified >= started);
+        if !compiler_spoke && !wrote_output {
+            continue;
+        }
         invocations.push(FscInvocation {
             project: run_project,
             globals: strings(&run["globals"]),
@@ -361,17 +402,18 @@ fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDe
             compiler: strings(&run["compiler"]),
         });
     }
-    match (invocations.is_empty(), succeeded) {
-        (false, _) => Ok(FscBuild {
+    if invocations.is_empty() {
+        let mut why = vec![format!(
+            "the build {} and left no evidence fsc ran for the project",
+            if succeeded { "succeeded" } else { "failed" }
+        )];
+        why.extend(errors);
+        Err(FscArgsDecline::Unanswered(why))
+    } else {
+        Ok(FscBuild {
             succeeded,
             invocations,
-        }),
-        (true, false) => Err(FscArgsDecline::NoBuild(errors)),
-        (true, true) => Err(FscArgsDecline::Unanswered(vec![
-            "the build succeeded without running fsc for the project: it was up to date \
-             (already built), or CoreCompile was replaced"
-                .to_string(),
-        ])),
+        })
     }
 }
 

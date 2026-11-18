@@ -58,6 +58,9 @@ pub enum FscArgsError {
     /// `-out:x`), which it reports as an error rather than reading as a
     /// source.
     UnrecognisedOption(String),
+    /// A positional argument naming an assembly (`Custom.dll`), which fsc
+    /// rejects rather than compiling.
+    PositionalAssembly(String),
 }
 
 impl FscArguments {
@@ -77,8 +80,13 @@ impl FscArguments {
                     return Err(FscArgsError::UnrecognisedOption(line.to_string()));
                 }
                 // fsc trims a source's quotes after classifying the line
-                // (`FileSystemUtils.trimQuotes`).
-                args.sources.push(line.trim_matches([' ', '"']).to_string());
+                // (`FileSystemUtils.trimQuotes`), and takes a positional
+                // `.dll` for an assembly it rejects (FS2020), not a source.
+                let source = line.trim_matches([' ', '"']);
+                if source.to_ascii_lowercase().ends_with(".dll") {
+                    return Err(FscArgsError::PositionalAssembly(source.to_string()));
+                }
+                args.sources.push(source.to_string());
                 continue;
             };
             let value = (!option.argument.is_empty()).then(|| option.argument.clone());
@@ -170,10 +178,8 @@ mod tests {
             Ok(Some("B.x".into()))
         );
         assert_eq!(name(&["-o:obj/A.dll", "/out:B.dll"]), Ok(Some("B".into())));
-        assert_eq!(
-            name(&["-o:obj/A.dll", "/out:d/B.dll"]),
-            Ok(Some("A".into()))
-        );
+        // Not a switch (a second `/`), so a positional assembly fsc rejects.
+        assert!(name(&["-o:obj/A.dll", "/out:d/B.dll"]).is_err());
         assert_eq!(name(&["-o:obj/A.dll", "/o:d/B.dll"]), Ok(Some("B".into())));
         assert!(name(&["-o:obj/A.dll", "--o:B.dll"]).is_err());
         assert_eq!(name(&["-o:obj/A.dll", "--OUT:B.dll"]), Ok(Some("A".into())));
@@ -222,6 +228,7 @@ mod tests {
         assert_eq!(args.sources, ["A.fs", "B.fs"]);
         let quoted = FscArguments::parse("-o:A.dll\n\"B.fs\"").unwrap();
         assert_eq!(quoted.sources, ["B.fs"]);
+        assert!(FscArguments::parse("-o:A.dll\nCustom.DLL\nA.fs").is_err());
         assert_eq!(args.options.len(), 7);
     }
 }
