@@ -536,11 +536,16 @@ This is a Cargo workspace with ten members:
   itself (`FixtureArgs::errors_agree`): FCS must find errors in exactly the
   projects whose real build failed; and every project whose build succeeded,
   the checked one included, must have the signature from source that FCS
-  reads from its built DLL (a `signatureOf` request). The module doc of
+  reads from its built DLL (a `signatureOf` request; types are rendered by
+  identity, each nominal type with its defining assembly, units of measure
+  normalised, literals with their values, entities by full name), and the
+  response must answer for every producer of the request. The module doc of
   `borzoi_oracle_harness::project_graph` states this trust base: inputs,
   errors and signatures are checked; FCS equalling fsc below the signature
-  on identical inputs is assumed. A source naming a signing key file
-  (`AssemblyKeyFile`, `AssemblyKeyName`) is refused. It also refuses a reference FCS
+  on identical inputs is assumed. Source text FCS's check need not read as
+  fsc does is refused: a signing key file (`AssemblyKeyFile`,
+  `AssemblyKeyName`), and `EDITING`, which FCS's per-file check defines. A
+  netmodule target is outside the domain. It also refuses a reference FCS
   itself would read from its DLL rather than from source (a type provider
   assembly, a project that creates generated provided types), reading FCS's
   own decision, and clears FCS's caches (`InvalidateAll`) before each
@@ -552,7 +557,13 @@ This is a Cargo workspace with ten members:
   through a middle project), the consumer's records and diagnostics with the
   library from source must equal those with the library built fresh and
   referenced as the DLL its build compiles against, and a friend's use of an
-  internal must bind only under its `-o:` name.
+  internal must bind only under its `-o:` name. Most generated consumers use
+  what they cannot see, so their builds fail and leave no DLL; each case
+  therefore also gets a clean twin (the consumer's uses and opens FCS
+  rejects removed, round by round), built and held to its DLLs, and every
+  kind of use the run makes, colliding or not, must reach a matched twin's
+  exports (`PINNED_CASES` add the indices that make the default run cover
+  them). The run prints how many twins built and matched.
   The two requests are held to differ by that substitution alone, with every
   project's registrations exactly its closure in the fixture
   (`only_substitution`), the source check runs with every registered DLL

@@ -195,6 +195,9 @@ pub struct Case {
     pub opens: Vec<String>,
     /// Lines of B's body.
     pub uses: Vec<String>,
+    /// Each line of [`Self::uses`]'s coverage tag: the kind of the item it
+    /// uses, and whether that item's name collides with FSharp.Core's.
+    pub use_tags: Vec<String>,
 }
 
 const NAMESPACES: &[&str] = &[
@@ -516,6 +519,7 @@ pub fn generate(seed: u64, index: usize) -> Case {
         middle: None,
         opens: Vec::new(),
         uses: Vec::new(),
+        use_tags: Vec::new(),
     };
     let targets = open_targets(&case);
     if rng.chance(30) && !targets.is_empty() {
@@ -527,7 +531,7 @@ pub fn generate(seed: u64, index: usize) -> Case {
         opens.swap(i, rng.below(i + 1));
     }
     case.opens = opens;
-    case.uses = consumer_uses(&case, &mut rng);
+    (case.uses, case.use_tags) = consumer_uses(&case, &mut rng);
     if rng.chance(40) {
         case.middle = Some(format!("Mid{index}"));
     }
@@ -571,9 +575,11 @@ fn open_targets(case: &Case) -> Vec<String> {
     out
 }
 
-/// B's body: for every item of A, its uses, qualified and bare.
-fn consumer_uses(case: &Case, rng: &mut Rng) -> Vec<String> {
+/// B's body: for every item of A, its uses, qualified and bare, and each
+/// line's coverage tag.
+fn consumer_uses(case: &Case, rng: &mut Rng) -> (Vec<String>, Vec<String>) {
     let mut out = Vec::new();
+    let mut tags = Vec::new();
     let mut k = 0usize;
     let mut next = || {
         k += 1;
@@ -584,12 +590,15 @@ fn consumer_uses(case: &Case, rng: &mut Rng) -> Vec<String> {
         decls: &[Decl],
         rng: &mut Rng,
         out: &mut Vec<String>,
+        tags: &mut Vec<String>,
         next: &mut dyn FnMut() -> String,
     ) {
         for d in decls {
+            let before = out.len();
             uses_of(prefix, &d.item, rng, out, next);
+            tags.extend(std::iter::repeat_n(use_tag(&d.item), out.len() - before));
             if let Item::Module { name, items, .. } = &d.item {
-                walk(&format!("{prefix}.{name}"), items, rng, out, next);
+                walk(&format!("{prefix}.{name}"), items, rng, out, tags, next);
             }
         }
     }
@@ -597,12 +606,12 @@ fn consumer_uses(case: &Case, rng: &mut Rng) -> Vec<String> {
         for b in &f.blocks {
             match b {
                 Block::Namespace { path, decls } | Block::TopModule { path, decls, .. } => {
-                    walk(path, decls, rng, &mut out, &mut next)
+                    walk(path, decls, rng, &mut out, &mut tags, &mut next)
                 }
             }
         }
     }
-    out
+    (out, tags)
 }
 
 fn uses_of(
@@ -1093,41 +1102,82 @@ pub fn consumer_files(case: &Case) -> Vec<(String, String)> {
     ]
 }
 
+/// An item's declaration kind, by name.
+pub fn item_kind(item: &Item) -> &'static str {
+    match item {
+        Item::Module {
+            auto_open: true, ..
+        } => "auto-open module",
+        Item::Module { rqa: true, .. } => "rqa module",
+        Item::Module { .. } => "module",
+        Item::Value { .. } => "value",
+        Item::Literal { .. } => "literal",
+        Item::Function {
+            compiled_name: Some(_),
+            ..
+        } => "compiled-name function",
+        Item::Function { .. } => "function",
+        Item::ActivePattern { .. } => "active pattern",
+        Item::Record { .. } => "record",
+        Item::Union { .. } => "union",
+        Item::Class { .. } => "class",
+        Item::Interface { .. } => "interface",
+        Item::Enum { .. } => "enum",
+        Item::Delegate { .. } => "delegate",
+        Item::Struct { .. } => "struct",
+        Item::Abbrev { .. } => "abbreviation",
+        Item::Exception { .. } => "exception",
+        Item::Measure { .. } => "measure",
+        Item::OptExtension { .. } => "optional extension",
+        Item::CsExtension { .. } => "C#-style extension",
+    }
+}
+
+/// Names A's items take that FSharp.Core also declares, so a use of one
+/// can bind either way.
+const CORE_NAMES: &[&str] = &[
+    "List", "Option", "String", "Result", "id", "map", "length", "max", "Some", "None", "Ok",
+    "Error",
+];
+
+/// Whether `item`'s name is one FSharp.Core also declares.
+fn collides(item: &Item) -> bool {
+    let name = match item {
+        Item::Module { name, .. }
+        | Item::Value { name, .. }
+        | Item::Literal { name }
+        | Item::Function { name, .. }
+        | Item::Record { name, .. }
+        | Item::Class { name, .. }
+        | Item::Delegate { name, .. }
+        | Item::Struct { name, .. }
+        | Item::Interface { name, .. }
+        | Item::Abbrev { name, .. }
+        | Item::Exception { name, .. }
+        | Item::Measure { name } => name,
+        Item::Union { cases, .. } | Item::Enum { cases, .. } => &cases[0],
+        Item::ActivePattern { case } => case,
+        Item::OptExtension { member, .. } | Item::CsExtension { member, .. } => member,
+    };
+    CORE_NAMES.contains(&name.as_str())
+}
+
+/// The coverage tag of a use of `item`: its kind, and whether its name
+/// collides with FSharp.Core's.
+fn use_tag(item: &Item) -> String {
+    if collides(item) {
+        format!("{} (colliding)", item_kind(item))
+    } else {
+        item_kind(item).to_owned()
+    }
+}
+
 /// The declaration kinds of `case`'s A, by name: what a coverage census
 /// reports against.
 pub fn kinds(case: &Case) -> BTreeSet<&'static str> {
-    fn kind(item: &Item) -> &'static str {
-        match item {
-            Item::Module {
-                auto_open: true, ..
-            } => "auto-open module",
-            Item::Module { rqa: true, .. } => "rqa module",
-            Item::Module { .. } => "module",
-            Item::Value { .. } => "value",
-            Item::Literal { .. } => "literal",
-            Item::Function {
-                compiled_name: Some(_),
-                ..
-            } => "compiled-name function",
-            Item::Function { .. } => "function",
-            Item::ActivePattern { .. } => "active pattern",
-            Item::Record { .. } => "record",
-            Item::Union { .. } => "union",
-            Item::Class { .. } => "class",
-            Item::Interface { .. } => "interface",
-            Item::Enum { .. } => "enum",
-            Item::Delegate { .. } => "delegate",
-            Item::Struct { .. } => "struct",
-            Item::Abbrev { .. } => "abbreviation",
-            Item::Exception { .. } => "exception",
-            Item::Measure { .. } => "measure",
-            Item::OptExtension { .. } => "optional extension",
-            Item::CsExtension { .. } => "C#-style extension",
-        }
-    }
     fn walk(decls: &[Decl], out: &mut BTreeSet<&'static str>) {
         for d in decls {
-            out.insert(kind(&d.item));
+            out.insert(item_kind(&d.item));
             if d.hidden {
                 out.insert("fsi-hidden item");
             }

@@ -530,7 +530,30 @@ impl FixtureArgs {
     /// own directory), or one fsc rejects and FCS checks cleanly (a switch
     /// combination fsc refuses), is read apart from its build, and an answer
     /// over it grades nothing.
-    pub fn errors_agree(&self, response: &GraphResponse, check: &PlainName) -> Result<(), String> {
+    ///
+    /// `response` must also answer for exactly the producers of `request`
+    /// (every project of it but the checked one), each once: a producer the
+    /// response leaves out would otherwise go unchecked.
+    pub fn errors_agree(
+        &self,
+        request: &GraphRequest,
+        response: &GraphResponse,
+    ) -> Result<(), String> {
+        let check = request.check();
+        let mut expected: Vec<&str> = request
+            .projects()
+            .iter()
+            .map(|p| p.id.as_str())
+            .filter(|id| *id != check.as_str())
+            .collect();
+        let mut answered: Vec<&str> = response.referenced.iter().map(|r| r.id.as_str()).collect();
+        expected.sort_unstable();
+        answered.sort_unstable();
+        if expected != answered {
+            return Err(format!(
+                "the response answers for producers {answered:?}, the request has {expected:?}"
+            ));
+        }
         let verdicts = response
             .referenced
             .iter()
@@ -1230,6 +1253,21 @@ mod tests {
                 },
             }],
         };
+        let request = GraphRequest::new(
+            vec![project("Lib", &[]), project("App", &["Lib"])],
+            name("App"),
+        )
+        .expect("a graph");
+        let all_built = FixtureArgs {
+            args: BTreeMap::new(),
+            succeeded: BTreeMap::from([(name("Lib"), true), (name("App"), true)]),
+        };
+        // A response that leaves a producer out answers for too little.
+        let omitting = GraphResponse {
+            referenced: Vec::new(),
+            ..response(false, false)
+        };
+        assert!(all_built.errors_agree(&request, &omitting).is_err());
         for lib_built in [false, true] {
             for app_built in [false, true] {
                 let args = FixtureArgs {
@@ -1239,7 +1277,7 @@ mod tests {
                 for lib_errors in [false, true] {
                     for app_errors in [false, true] {
                         let agrees = args
-                            .errors_agree(&response(lib_errors, app_errors), &name("App"))
+                            .errors_agree(&request, &response(lib_errors, app_errors))
                             .is_ok();
                         assert_eq!(
                             agrees,

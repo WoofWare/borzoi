@@ -6696,7 +6696,8 @@ let private isPassedSwitch (line: string) =
 ///   `--reference:`, `-a`), and `--refonly`;
 /// - no `-o:<path>`, `--target:` or `--langversion:`, or more than one; more
 ///   than one `--refout:<path>`;
-/// - a `--target:` outside `library`, `exe`, `winexe`, `module`;
+/// - a `--target:` outside `library`, `exe`, `winexe` (a netmodule is no
+///   assembly: nothing references one, and FCS reads no signature from one);
 /// - a `--langversion:` that is not a version number of F# 8 or later. A
 ///   word (`latest`, `preview`, `default`) names the checking compiler's
 ///   version, which need not be the build's, and below F# 8 the current FCS
@@ -6761,8 +6762,8 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
     if String.Equals(assemblyName, "FSharp.Core", StringComparison.OrdinalIgnoreCase) then
         failwithf "%s: FCS does not reference a project named FSharp.Core from source" where
     let target = single "--target:"
-    if not (List.contains target [ "library"; "exe"; "winexe"; "module" ]) then
-        failwithf "%s: --target:%s is not library, exe, winexe or module" where target
+    if not (List.contains target [ "library"; "exe"; "winexe" ]) then
+        failwithf "%s: --target:%s is not library, exe or winexe" where target
     let langVersion = single "--langversion:"
     let isVersion =
         match langVersion.Split('.') with
@@ -6826,9 +6827,8 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
 /// Parse a whole graph request into the [`ValidGraph`] the checking code
 /// receives: [`parseGraphProject`] for each project, then the graph, checked
 /// once: ids, project files and assembly names unique, each project reference
-/// naming a project of the request that is not a `module` (fsc refuses a
-/// netmodule as an assembly reference, FS0192) by a file of the name its
-/// `-o:` gives, no cycle, and `check` one of the projects.
+/// naming a project of the request by a file of the name its `-o:` gives, no
+/// cycle, and `check` one of the projects.
 let private parseGraphRequest (root: JsonElement) : ValidGraph =
     let fields = strictObject "request" [ "projects"; "check" ] root
     let projects =
@@ -6847,8 +6847,6 @@ let private parseGraphRequest (root: JsonElement) : ValidGraph =
         for reference, id in p.ProjectRefs do
             match Map.tryFind id byId with
             | None -> failwithf "project %s references unknown project %s" p.Id id
-            | Some q when q.Target = "module" ->
-                failwithf "project %s references %s, a module, which is no assembly" p.Id id
             // FCS matches a `-r:` to its `FSharpReference` by the file named,
             // and the assembly name it checks the referenced project under is
             // that file's; the producer's `-o:` gives it another.
@@ -6962,9 +6960,66 @@ let private assemblyDataAvailable
 let private accessOf (a: FSharpAccessibility) =
     if a.IsPublic then "public" else "nonpublic"
 
-let private formatSignatureType (t: FSharpType) =
+/// The unit-of-measure operator `t` is (`MeasureOne`, `MeasureProduct`2`,
+/// `MeasureInverse`1`), if it is one.
+let private measureOperator (t: FSharpType) : string option =
+    if not t.HasTypeDefinition then
+        None
+    else
+        match t.TypeDefinition.TryFullName with
+        | Some full when full.StartsWith "Microsoft.FSharp.Core.CompilerServices.Measure" ->
+            Some(full.Substring "Microsoft.FSharp.Core.CompilerServices.".Length)
+        | _ -> None
+
+let private isMeasureOperator (t: FSharpType) = (measureOperator t).IsSome
+
+/// A type's identity, not its display: abbreviations expanded, and each
+/// nominal type named by its defining assembly and full name, inside
+/// generic arguments, functions and tuples too. Two types a consumer could
+/// not substitute for one another render differently.
+let rec private formatSignatureType (t: FSharpType) : string =
     try
-        t.Format(FSharpDisplayContext.Empty)
+        let t = if t.IsAbbreviation then t.StripAbbreviations() else t
+        let args () =
+            t.GenericArguments |> Seq.map formatSignatureType |> String.concat ", "
+        if t.IsGenericParameter then
+            "'" + t.GenericParameter.Name
+        elif t.IsFunctionType then
+            "(" + (t.GenericArguments |> Seq.map formatSignatureType |> String.concat " -> ") + ")"
+        elif t.IsTupleType then
+            (if t.IsStructTupleType then "struct " else "")
+            + "(" + (t.GenericArguments |> Seq.map formatSignatureType |> String.concat " * ") + ")"
+        elif t.IsAnonRecordType then
+            let names = t.AnonRecordTypeDetails.SortedFieldNames
+            "{|" + (Seq.zip names t.GenericArguments |> Seq.map (fun (n, a) -> n + ": " + formatSignatureType a) |> String.concat "; ") + "|}"
+        elif t.HasTypeDefinition && (isMeasureOperator t || t.TypeDefinition.IsMeasure) then
+            // A unit of measure is an abelian-group element, which FCS keeps
+            // in whatever form it last normalised (`kg` from source,
+            // `kg * 1` from a pickle): render it as its sorted factors.
+            let rec factors (t: FSharpType) : string list =
+                let t = if t.IsAbbreviation then t.StripAbbreviations() else t
+                match measureOperator t with
+                | Some "MeasureOne" -> []
+                | Some "MeasureProduct`2" -> t.GenericArguments |> Seq.toList |> List.collect factors
+                | Some "MeasureInverse`1" -> factors t.GenericArguments.[0] |> List.map (fun f -> "/" + f)
+                | _ when t.HasTypeDefinition && t.TypeDefinition.IsMeasure ->
+                    let d = t.TypeDefinition
+                    let assembly = try d.Assembly.SimpleName with _ -> "?"
+                    [ assembly + "!" + (d.TryFullName |> Option.defaultValue d.CompiledName) ]
+                | _ -> [ formatSignatureType t ]
+            match factors t |> List.sort with
+            | [] -> "1"
+            | fs -> "[" + String.concat " * " fs + "]"
+        elif t.HasTypeDefinition then
+            let d = t.TypeDefinition
+            let assembly = try d.Assembly.SimpleName with _ -> "?"
+            let name =
+                if d.IsArrayType then sprintf "array%d" d.ArrayRank
+                else d.TryFullName |> Option.defaultValue d.CompiledName
+            let a = args ()
+            sprintf "%s!%s%s" assembly name (if a = "" then "" else "<" + a + ">")
+        else
+            t.Format(FSharpDisplayContext.Empty)
     with ex ->
         "<unformattable: " + ex.Message + ">"
 
@@ -6982,7 +7037,9 @@ let rec private renderEntity (indent: string) (out: ResizeArray<string>) (e: FSh
         elif e.IsInterface then "interface"
         elif e.IsValueType then "struct"
         else "class"
-    out.Add(sprintf "%s%s %s %s`%d" indent kind (accessOf e.Accessibility) e.CompiledName e.GenericParameters.Count)
+    // The full name, so one module under two namespaces reads apart.
+    let identity = e.TryFullName |> Option.defaultValue e.CompiledName
+    out.Add(sprintf "%s%s %s %s (%s)`%d" indent kind (accessOf e.Accessibility) identity e.CompiledName e.GenericParameters.Count)
     let inner = indent + "  "
     if not e.IsFSharpAbbreviation then
         if e.IsFSharpUnion then
@@ -6995,7 +7052,13 @@ let rec private renderEntity (indent: string) (out: ResizeArray<string>) (e: FSh
                 out.Add(sprintf "%sfield %s %s : %s" inner (accessOf f.Accessibility) f.Name (formatSignatureType f.FieldType))
         for m in e.MembersFunctionsAndValues do
             if not m.IsCompilerGenerated then
-                out.Add(sprintf "%sval %s %s : %s" inner (accessOf m.Accessibility) m.CompiledName (formatSignatureType m.FullType))
+                // A literal's value is embedded at each use, and only a
+                // literal may be matched against or put in an attribute.
+                let literal =
+                    match m.LiteralValue with
+                    | Some v -> sprintf " = literal %A" v
+                    | None -> ""
+                out.Add(sprintf "%sval %s %s : %s%s" inner (accessOf m.Accessibility) m.CompiledName (formatSignatureType m.FullType) literal)
         for n in e.NestedEntities do
             renderEntity inner out n
 
@@ -7011,11 +7074,13 @@ let private renderSignature (signature: FSharpAssemblySignature) : string[] =
         renderEntity "" out e
     out.ToArray()
 
-/// Source attributes that name a file FCS would resolve against its own
-/// directory rather than the project's, as fsc does: a project carrying one
-/// is outside the oracle's domain. A textual match, so a mention in a
-/// comment declines too.
-let private signingAttributes = [ "AssemblyKeyFile"; "AssemblyKeyName" ]
+/// Source text whose meaning FCS's check and the build need not share, so a
+/// project holding any is outside the oracle's domain: a signing attribute
+/// names a file FCS resolves against its own directory, not the project's,
+/// and FCS's per-file check, which gives the file records, defines
+/// `EDITING`, which fsc and the whole-project check do not. A textual match,
+/// so a mention in a comment declines too.
+let private outOfDomainText = [ "AssemblyKeyFile"; "AssemblyKeyName"; "EDITING" ]
 
 /// One `uses-project-graph-batch` request's response.
 let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
@@ -7023,9 +7088,9 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
     for p in graph.Order do
         for source in p.Sources do
             let text = File.ReadAllText source
-            match signingAttributes |> List.tryFind (fun a -> text.Contains a) with
-            | Some attribute ->
-                failwithf "project %s: %s names %s, which FCS resolves apart from fsc" p.Id source attribute
+            match outOfDomainText |> List.tryFind (fun a -> text.Contains a) with
+            | Some token ->
+                failwithf "project %s: %s holds %s, whose meaning FCS's check need not share with fsc's" p.Id source token
             | None -> ()
     // Stateless: nothing an earlier request read is reused. FCS's caches are
     // keyed by options and by a file's path and timestamp (the background

@@ -102,14 +102,16 @@ fn signature_disagreements(
     request: &GraphRequest,
     answer: &GraphResponse,
 ) -> Vec<String> {
-    let from_source = std::iter::once((request.check().clone(), &answer.signature)).chain(
-        answer
-            .referenced
-            .iter()
-            .map(|r| (name(&r.id), &r.signature)),
-    );
     let mut problems = Vec::new();
-    for (project, source) in from_source {
+    for project in request.projects().iter().map(|p| p.id.clone()) {
+        let source = if &project == request.check() {
+            &answer.signature
+        } else if let Some(r) = answer.referenced.iter().find(|r| r.id == project.as_str()) {
+            &r.signature
+        } else {
+            problems.push(format!("{project} has no signature in the response"));
+            continue;
+        };
         if source.is_empty() {
             problems.push(format!("{project}'s signature is empty"));
         }
@@ -246,6 +248,12 @@ const DEFAULT_SEED: u64 = 0x005e_ed0f_5ce5;
 /// How many cases the default run generates.
 const DEFAULT_CASES: usize = 24;
 
+/// Indices of [`DEFAULT_SEED`] beyond [`DEFAULT_CASES`] the default run adds,
+/// so that every kind of use, colliding or not, reaches a clean twin's
+/// exports: the first [`DEFAULT_CASES`] use a colliding function with a
+/// `CompiledName` only where the consumer cannot see it.
+const PINNED_CASES: &[usize] = &[77, 92, 129];
+
 /// The `(seed, index)` of every case the differential runs: the default run,
 /// always, and, when `BORZOI_SOURCE_REF_SEED` or `BORZOI_SOURCE_REF_CASES` is
 /// set, that many cases of that seed besides (each defaulting to the default
@@ -259,7 +267,10 @@ fn cases() -> Vec<(u64, usize)> {
         s.parse::<usize>()
             .expect("BORZOI_SOURCE_REF_CASES is a count")
     });
-    let mut cases: Vec<(u64, usize)> = (0..DEFAULT_CASES).map(|i| (DEFAULT_SEED, i)).collect();
+    let mut cases: Vec<(u64, usize)> = (0..DEFAULT_CASES)
+        .chain(PINNED_CASES.iter().copied())
+        .map(|i| (DEFAULT_SEED, i))
+        .collect();
     if seed.is_some() || count.is_some() {
         let seed = seed.unwrap_or(DEFAULT_SEED);
         for i in 0..count.unwrap_or(DEFAULT_CASES) {
@@ -378,6 +389,8 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
     let mut into_library: BTreeMap<String, usize> = BTreeMap::new();
     let mut consumer_errors = 0usize;
     let mut consumers_built = 0usize;
+    let mut twins: Vec<Option<Case>> = Vec::new();
+    let mut why_dropped: BTreeMap<String, String> = BTreeMap::new();
     for (((case, fixture), args), &(seed, i)) in cases.iter().zip(&fixtures).zip(&args).zip(&seeds)
     {
         let consumer = name(&case.consumer);
@@ -399,8 +412,11 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
         let mut problems = answer_diff(&source, &dll);
         // Each side must find errors exactly where fsc failed a build, or it
         // reads some project apart from the compiler.
-        for (side, answer) in [("source", &source), ("DLL", &dll)] {
-            if let Err(why) = args.errors_agree(answer, &consumer) {
+        for (side, request, answer) in [
+            ("source", &source_request, &source),
+            ("DLL", &dll_request, &dll),
+        ] {
+            if let Err(why) = args.errors_agree(request, answer) {
                 problems.push(format!(
                     "the {side} answer disagrees with the builds: {why}"
                 ));
@@ -465,13 +481,169 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
             let kind = u["SymbolKind"].as_str().unwrap_or("?").to_owned();
             *into_library.entry(kind).or_default() += 1;
         }
+        twins.push(clean_twin(
+            &mut oracle,
+            fixture,
+            args,
+            case,
+            &source,
+            &mut why_dropped,
+        ));
     }
+
+    // Each case's clean twin, built and held to its DLLs: most generated
+    // consumers use what they cannot see and so build no DLL, which leaves
+    // their own signature unchecked.
+    let twin_cases: Vec<&Case> = twins.iter().flatten().collect();
+    let twin_fixtures: Vec<ProjectGraphFixture> =
+        twin_cases.iter().map(|c| case_fixture(c)).collect();
+    let twin_args: Vec<FixtureArgs> = par_map(twin_fixtures.len(), |i| {
+        twin_fixtures[i].fsc_args(&name(&twin_cases[i].consumer))
+    });
+    let (mut twins_built, mut twins_matched) = (0usize, 0usize);
+    let mut covered: BTreeSet<&str> = BTreeSet::new();
+    for ((twin, fixture), args) in twin_cases.iter().zip(&twin_fixtures).zip(&twin_args) {
+        let consumer = name(&twin.consumer);
+        let request = fixture.source_request(args, &consumer);
+        let answer = oracle
+            .check(&request)
+            .unwrap_or_else(|e| panic!("twin of {}: the source check failed: {e}", twin.library));
+        let mut problems: Vec<String> = args
+            .errors_agree(&request, &answer)
+            .err()
+            .into_iter()
+            .collect();
+        twins_built += usize::from(args.succeeded(&consumer));
+        problems.extend(signature_disagreements(
+            &mut oracle,
+            fixture,
+            args,
+            &request,
+            &answer,
+        ));
+        if !args.succeeded(&consumer) {
+            problems.push("FCS checks the twin's consumer clean, but its build failed".to_owned());
+        }
+        if problems.is_empty() {
+            twins_matched += 1;
+            covered.extend(twin.use_tags.iter().map(String::as_str));
+        } else {
+            failures.push(format!(
+                "the clean twin of {}:\n  {}\n{}",
+                twin.library,
+                problems.join("\n  "),
+                consumer_files(twin)[0].1
+            ));
+        }
+    }
+    // Every kind of use the cases make, colliding and not, reaches a
+    // consumer's exports in some twin that matched.
+    let required: BTreeSet<&str> = cases
+        .iter()
+        .flat_map(|c| c.use_tags.iter().map(String::as_str))
+        .collect();
+    let uncovered: Vec<&&str> = required.difference(&covered).collect();
     println!(
         "source references vs fresh DLLs: {} cases, {consumers_built} consumers built (their signatures held to their DLLs), {} consumer errors, uses binding into the library by kind: {into_library:?}",
         cases.len(),
         consumer_errors
     );
+    println!(
+        "clean twins: {} of {} cleaned, {twins_built} built, {twins_matched} matched their DLLs; use kinds reaching a matched twin's exports: {covered:?}",
+        twin_cases.len(),
+        cases.len()
+    );
+    if !uncovered.is_empty() {
+        let examples: Vec<String> = cases
+            .iter()
+            .flat_map(|c| {
+                c.uses
+                    .iter()
+                    .zip(&c.use_tags)
+                    .filter(|(_, t)| uncovered.contains(&&t.as_str()))
+                    .map(|(u, t)| {
+                        let key = format!("{}: {u}", c.library);
+                        let why = why_dropped.get(&key).map_or("", String::as_str);
+                        format!("{key} ({t}) dropped for: {why}")
+                    })
+            })
+            .collect();
+        failures.push(format!(
+            "no matched twin exports a use of: {uncovered:?}; the cases' uses of them:\n  {}",
+            examples.join("\n  ")
+        ));
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// The lines of the consumer's `Use.fs` on which `answer` reports an error.
+fn use_error_lines(answer: &GraphResponse) -> BTreeMap<usize, String> {
+    answer
+        .files
+        .iter()
+        .filter(|f| f["Path"].as_str().is_some_and(|p| p.ends_with("/Use.fs")))
+        .flat_map(|f| f["Diagnostics"].as_array().into_iter().flatten())
+        .filter(|d| d["Severity"] == "Error")
+        .filter_map(|d| {
+            let line = usize::try_from(d["Range"]["Start"]["Line"].as_u64()?).ok()?;
+            Some((line, d["Message"].as_str().unwrap_or("?").to_owned()))
+        })
+        .collect()
+}
+
+/// `case`'s clean twin: the same graph and inputs, with each consumer use
+/// and `open` FCS reports an error on removed, round by round (removing an
+/// `open` can break a later bare use). Each round rewrites `fixture`'s
+/// `Use.fs` and checks it from source again. `None` when a line other than a
+/// use or an `open` errs, an error lies outside `Use.fs`, or four rounds do
+/// not reach a clean consumer.
+fn clean_twin(
+    oracle: &mut ProjectGraphOracle,
+    fixture: &ProjectGraphFixture,
+    args: &FixtureArgs,
+    case: &Case,
+    first: &GraphResponse,
+    why_dropped: &mut BTreeMap<String, String>,
+) -> Option<Case> {
+    let consumer = name(&case.consumer);
+    let request = fixture.source_request(args, &consumer);
+    let use_fs = fixture.dir(&consumer).join("Use.fs");
+    let mut twin = case.clone();
+    let mut answer = first.clone();
+    for _ in 0..4 {
+        let bad = use_error_lines(&answer);
+        if bad.is_empty() {
+            return answer.errors().next().is_none().then_some(twin);
+        }
+        let text = consumer_files(&twin)[0].1.clone();
+        let lines: Vec<&str> = text.lines().collect();
+        let dropped: BTreeSet<&str> = bad
+            .iter()
+            .filter_map(|(l, message)| {
+                let line = lines.get(l - 1)?;
+                why_dropped.insert(format!("{}: {line}", case.library), message.clone());
+                Some(line)
+            })
+            .copied()
+            .collect();
+        let removable = |l: &str| twin.uses.iter().any(|u| u == l) || l.starts_with("open ");
+        if !dropped.iter().all(|l| removable(l)) {
+            return None;
+        }
+        let kept: Vec<(String, String)> = twin
+            .uses
+            .iter()
+            .zip(&twin.use_tags)
+            .filter(|(u, _)| !dropped.contains(u.as_str()))
+            .map(|(u, t)| (u.clone(), t.clone()))
+            .collect();
+        (twin.uses, twin.use_tags) = kept.into_iter().unzip();
+        twin.opens
+            .retain(|o| !dropped.contains(format!("open {o}").as_str()));
+        std::fs::write(&use_fs, &consumer_files(&twin)[0].1).expect("rewrite Use.fs");
+        answer = oracle.check(&request).ok()?;
+    }
+    None
 }
 
 /// The generator's coverage: over the default run, every declaration kind
@@ -538,15 +710,16 @@ fn a_library_is_checked_as_a_library() {
     )])
     .expect("a graph");
     let args = fixture.fsc_args(&name("Lib"));
+    let request = fixture.source_request(&args, &name("Lib"));
     let answer = ProjectGraphOracle::default()
-        .check(&fixture.source_request(&args, &name("Lib")))
+        .check(&request)
         .expect("the graph oracle answers");
     assert!(
         answer.errors().any(|e| e["ErrorNumber"] == 222),
         "a library's top-level code is FS0222 to FCS as to its build: {answer:#?}"
     );
     assert!(!args.succeeded(&name("Lib")), "fsc fails the build");
-    assert_eq!(args.errors_agree(&answer, &name("Lib")), Ok(()));
+    assert_eq!(args.errors_agree(&request, &answer), Ok(()));
 }
 
 /// The checked project's own exported surface is held to the DLL its build
@@ -577,40 +750,97 @@ fn a_consumer_signature_is_its_built_dll_signature() {
     let request = fixture.source_request(&args, &name("App"));
     let mut oracle = ProjectGraphOracle::default();
     let answer = oracle.check(&request).expect("the graph oracle answers");
-    assert_eq!(args.errors_agree(&answer, &name("App")), Ok(()));
+    assert_eq!(args.errors_agree(&request, &answer), Ok(()));
     let problems = signature_disagreements(&mut oracle, &fixture, &args, &request, &answer);
     assert!(problems.is_empty(), "{}", problems.join("\n"));
     assert!(
         answer
             .signature
             .iter()
-            .any(|l| l.contains("exported") && l.contains("int")),
+            .any(|l| l.contains("exported") && l.contains("System.Int32")),
         "the Release build's export is an int: {:#?}",
         answer.signature
     );
 }
 
-/// A project whose source names a signing key file is refused: FCS resolves
-/// the file against its own directory, fsc against the project's, so the
-/// two can give the assembly different identities.
+/// A project whose source text FCS's check need not read as fsc does is
+/// refused: a signing attribute names a key file FCS resolves against its
+/// own directory, fsc against the project's; and FCS's per-file check, which
+/// gives the file records, defines `EDITING`, which the build does not.
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
-fn a_source_signing_attribute_is_refused() {
+fn source_text_read_apart_from_the_build_is_refused() {
+    for (token, text) in [
+        (
+            "AssemblyKeyFile",
+            "module Lib\n\n[<assembly: System.Reflection.AssemblyKeyFileAttribute(\"key.snk\")>]\ndo ()\n\nlet x = 1\n",
+        ),
+        (
+            "EDITING",
+            "module Lib\n\n#if EDITING\nlet x = \"\"\n#else\nlet x = 1\n#endif\n",
+        ),
+    ] {
+        let fixture = ProjectGraphFixture::materialise(vec![project(
+            "Lib",
+            vec![("Lib.fs".into(), text.into())],
+            &[],
+        )])
+        .expect("a graph");
+        let args = fixture.fsc_args(&name("Lib"));
+        match ProjectGraphOracle::default().check(&fixture.source_request(&args, &name("Lib"))) {
+            Err(FcsInvokeError::Refused(why)) if why.contains(token) => {}
+            other => panic!("source holding {token} must be refused: {other:?}"),
+        }
+    }
+}
+
+/// The rendered signature tells apart what a consumer tells apart: one
+/// module name under two namespaces, a literal from a value and one
+/// literal's value from another, and a type by the assembly that defines it.
+/// Its every line also equals the built DLL's.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn the_signature_tells_apart_paths_literals_and_defining_assemblies() {
     let fixture = ProjectGraphFixture::materialise(vec![project(
         "Lib",
         vec![(
             "Lib.fs".into(),
-            "module Lib\n\n[<assembly: System.Reflection.AssemblyKeyFileAttribute(\"key.snk\")>]\ndo ()\n\nlet x = 1\n"
+            "namespace First\n\nmodule Values =\n    [<Literal>]\n    let Export = 1\n    let plain = 1\n\n\
+             namespace Second\n\nmodule Values =\n    [<Literal>]\n    let Export = 2\n    \
+             type Token = Token of int\n    let make () = Token 0\n"
                 .into(),
         )],
         &[],
     )])
     .expect("a graph");
     let args = fixture.fsc_args(&name("Lib"));
-    match ProjectGraphOracle::default().check(&fixture.source_request(&args, &name("Lib"))) {
-        Err(FcsInvokeError::Refused(why)) if why.contains("AssemblyKeyFile") => {}
-        other => panic!("a signing attribute must be refused: {other:?}"),
+    let request = fixture.source_request(&args, &name("Lib"));
+    let mut oracle = ProjectGraphOracle::default();
+    let answer = oracle.check(&request).expect("the graph oracle answers");
+    assert_eq!(args.errors_agree(&request, &answer), Ok(()));
+    let problems = signature_disagreements(&mut oracle, &fixture, &args, &request, &answer);
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    let signature = answer.signature.join("\n");
+    for expected in [
+        "First.Values",
+        "Second.Values",
+        "System.Int32 = literal 1",
+        "System.Int32 = literal 2",
+        "plain : ",
+        "Lib!Second.Values.Token",
+    ] {
+        assert!(
+            signature.contains(expected),
+            "the signature must hold {expected:?}:\n{signature}"
+        );
     }
+    assert!(
+        answer
+            .signature
+            .iter()
+            .any(|l| l.contains(" plain : ") && !l.contains("literal")),
+        "a value is no literal:\n{signature}"
+    );
 }
 
 /// Two references that declare one name: FCS takes the later one, so a
@@ -1054,7 +1284,7 @@ fn the_graph_parser_refuses_everything_outside_its_domain() {
             edit(&|v| v["projects"][1]["id"] = Value::String("Ay".into())),
         ),
         (
-            "module reference",
+            "a netmodule target",
             edit(&|v| {
                 let ay = v["projects"][0]["args"].as_array_mut().expect("args");
                 for l in ay.iter_mut() {
