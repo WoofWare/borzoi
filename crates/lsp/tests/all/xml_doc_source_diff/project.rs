@@ -312,7 +312,7 @@ fn fixture_project_docs_agree_with_fcs() {
     // references beside it; nothing graded here depends on an assembly.
     let fcs = oracle(&loaded, false);
     for f in &fcs {
-        assert!(f.ok && !f.has_errors(), "FCS rejects the fixture: {f:?}");
+        assert!(!f.has_errors(), "FCS rejects the fixture: {f:?}");
     }
     let graded = grade(&loaded.ours, &fcs);
     let named: Vec<(&str, &str)> = files.iter().map(|(n, t)| (*n, *t)).collect();
@@ -396,6 +396,7 @@ fn pinned_projects_docs_agree_with_fcs() {
             project.display()
         );
         let fcs = oracle(&loaded, true);
+        // Each file's own errors, and the project's in no file once.
         let errors: usize = fcs
             .iter()
             .map(|f| {
@@ -404,7 +405,13 @@ fn pinned_projects_docs_agree_with_fcs() {
                     .filter(|d| d.severity == "Error")
                     .count()
             })
-            .sum();
+            .sum::<usize>()
+            + fcs.first().map_or(0, |f| {
+                f.in_no_file
+                    .iter()
+                    .filter(|d| d.severity == "Error")
+                    .count()
+            });
         let graded = grade(&loaded.ours, &fcs);
         let names: Vec<String> = loaded.paths.iter().map(|p| checkout_key(p)).collect();
         let named: Vec<(&str, &str)> = names

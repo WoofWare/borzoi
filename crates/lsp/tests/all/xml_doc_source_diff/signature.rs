@@ -88,12 +88,7 @@ fn graded_for(sig: Doc, imp: Doc) -> (Vec<Graded>, [(&'static str, String); 3]) 
     let files: Vec<(&str, &str)> = owned.iter().map(|(n, t)| (*n, t.as_str())).collect();
     let (graded, fcs) = run_fixture(&files, &[]);
     for f in &fcs {
-        let errors: Vec<_> = f
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == "Error")
-            .map(|d| d.message.clone())
-            .collect();
+        let errors: Vec<_> = f.errors().map(|d| d.message.clone()).collect();
         assert!(errors.is_empty(), "{}: {errors:?}\n{owned:#?}", f.path);
     }
     (graded, owned)
@@ -197,9 +192,7 @@ fn a_use_outside_the_implementation_shows_the_signature_doc_only() {
 fn assert_compiles(fcs: &[super::harness::OracleFile], files: &[(&str, &str)]) {
     for f in fcs {
         let errors: Vec<_> = f
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == "Error")
+            .errors()
             .map(|d| format!("FS{:04} {}", d.error_number, d.message))
             .collect();
         assert!(errors.is_empty(), "{}: {errors:?}\n{files:#?}", f.path);

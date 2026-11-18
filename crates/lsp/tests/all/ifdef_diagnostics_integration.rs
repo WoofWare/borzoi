@@ -285,7 +285,7 @@ fn sdk_paths_empty_list_drops_repo_local_define() {
 #[test]
 fn file_outside_any_project_uses_default_symbol_set() {
     // A file with no owning `.fsproj` gets only the implicit defines
-    // (`{COMPILED, EDITING}`) — never `FOO`. The `#if FOO` arm is therefore
+    // (`{COMPILED}`) — never `FOO`. The `#if FOO` arm is therefore
     // inactive and the bad `#else` is live.
     let tmp = TempDir::new().unwrap();
     let file = tmp.path().join("Lib.fs");

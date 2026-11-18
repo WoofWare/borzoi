@@ -1047,6 +1047,19 @@ fn ask_fcs(
     let _ = std::fs::remove_dir_all(&root);
     let raw: serde_json::Value = serde_json::from_str(&json).expect("uses-project JSON");
     let mut errors = Vec::new();
+    // What the check reported in no file bears on the whole program.
+    for d in raw["Diagnostics"]
+        .as_array()
+        .expect("a project-check response says what it reported in no file")
+    {
+        if d["Severity"].as_str() == Some("Error") {
+            errors.push(FcsError {
+                file: "(in no file)".to_string(),
+                line: 0,
+                message: d["Message"].as_str().unwrap_or_default().to_string(),
+            });
+        }
+    }
     for file in raw["Files"].as_array().into_iter().flatten() {
         let name = Path::new(file["Path"].as_str().unwrap_or_default())
             .file_name()

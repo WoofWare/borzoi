@@ -410,7 +410,7 @@ recovering ~36 members per framework. It was never a feature gap. (`#711`)
   see `docs/workspace-index-plan.md`). However ownership resolves, `symbols_for`
   uses the chosen project's `DefineConstants` — which, whenever the fallback
   fired, may be the wrong project's — and yields only the implicit symbol set
-  for the file kind (e.g. `{COMPILED, EDITING}` for compiled files) when no
+  for the file kind (e.g. `{COMPILED}` for compiled files) when no
   ancestor `.fsproj` is found at all or the chosen one fails to evaluate.
   (`91ebdea`, `3087ae4`, `97afac4` (#611))
 

@@ -34,7 +34,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use borzoi_cst::language_version::LanguageVersion;
@@ -3366,14 +3366,20 @@ pub struct FileUses {
     pub path: PathBuf,
     pub uses: Vec<NormalisedProjectUse>,
     /// The message of every `Severity=Error` diagnostic FCS reported for the
-    /// file — empty for a file that checked cleanly.
-    pub errors: Vec<String>,
+    /// file, and of every one it reported in no file, which bears on every
+    /// file and whose message every file shares — empty for a file that
+    /// checked cleanly.
+    pub errors: Vec<Arc<str>>,
 }
 
 #[derive(Deserialize)]
 struct ProjectUsesDump {
     #[serde(rename = "Files")]
     files: Vec<RawFileUses>,
+    /// What the check reported in no file. Required: an oracle that does not
+    /// say is not the project check, and could have dropped one.
+    #[serde(rename = "Diagnostics")]
+    diagnostics: Vec<RawProjectDiagnostic>,
 }
 
 #[derive(Deserialize)]
@@ -3406,6 +3412,12 @@ struct RawProjectDiagnostic {
 pub fn parse_fcs_uses_project(json: &str, sources: &[(PathBuf, String)]) -> Vec<FileUses> {
     let dump: ProjectUsesDump =
         serde_json::from_str(json).expect("fcs-dump uses-project JSON shape");
+    let in_no_file: Vec<Arc<str>> = dump
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "Error")
+        .map(|d| Arc::from(d.message.as_str()))
+        .collect();
 
     // One line index per source: a use's declaration converts through its
     // file's, and a project of generated cells has thousands of uses.
@@ -3466,7 +3478,8 @@ pub fn parse_fcs_uses_project(json: &str, sources: &[(PathBuf, String)]) -> Vec<
                     .diagnostics
                     .into_iter()
                     .filter(|d| d.severity == "Error")
-                    .map(|d| d.message)
+                    .map(|d| Arc::from(d.message))
+                    .chain(in_no_file.iter().cloned())
                     .collect(),
             }
         })

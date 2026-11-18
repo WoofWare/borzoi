@@ -13188,7 +13188,7 @@ WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fs
 WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj Types.fs:94:29-94:33	trie Parameter use agree-none
 WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj Types.fs:94:40-94:44	slot Value { is_function: false } use agree-none
 WoofWare.LiangHyphenation/WoofWare.LiangHyphenation/WoofWare.LiangHyphenation.fsproj Types.fs:9:6-9:15	trieState Type def agree-doc
-WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj	compared oracle-errors=35
+WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj	compared oracle-errors=0
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AccessCheck.fs:100:44-100:73	assemblyOrFriendAccessAllowed Value { is_function: true } use agree-doc
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AccessCheck.fs:100:74-100:86	sameAssembly Parameter use agree-none
 WoofWare.PawPrint/WoofWare.PawPrint.Domain/WoofWare.PawPrint.Domain.fsproj AccessCheck.fs:100:87-100:95	accessor Parameter use agree-none

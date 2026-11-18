@@ -1528,11 +1528,18 @@ fn sweep(cells: Vec<Cell>) -> SweepOutcome {
 
 /// Every FCS **error** in a `uses-project` reply, keyed by file name, as
 /// `(line, column, number, message)` — 1-based line, 0-based column, the
-/// convention [`line_col`] reproduces.
+/// convention [`line_col`] reproduces. An error FCS reported in no file is in
+/// every file's list, at FCS's placeholder `(1, 0)`: no file of the project
+/// can be called clean.
 fn fcs_errors_by_file(
     json: &str,
 ) -> std::collections::HashMap<std::ffi::OsString, Vec<(u64, u64, u64, String)>> {
     let dump: serde_json::Value = serde_json::from_str(json).expect("uses-project JSON");
+    let in_no_file: Vec<&serde_json::Value> = dump["Diagnostics"]
+        .as_array()
+        .expect("a Diagnostics array")
+        .iter()
+        .collect();
     let mut out = std::collections::HashMap::new();
     for file in dump["Files"].as_array().expect("a Files array") {
         let path = PathBuf::from(file["Path"].as_str().expect("a Path"));
@@ -1540,6 +1547,7 @@ fn fcs_errors_by_file(
             .as_array()
             .expect("a Diagnostics array")
             .iter()
+            .chain(in_no_file.iter().copied())
             .filter(|d| d["Severity"] == "Error")
             .map(|d| {
                 (

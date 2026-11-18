@@ -5,7 +5,7 @@
 
 ## The defect
 
-The LSP folds every file under `{COMPILED, EDITING} ∪ define_constants`
+The LSP folds every file under `{COMPILED} ∪ define_constants`
 (`workspace.rs`, `symbols_for_project` → `extend_with_define_constants`). For
 an SDK F# project fsc receives more than that. On a plain `net8.0` project with
 `<DefineConstants>$(DefineConstants);MINE</DefineConstants>` (audit,
@@ -247,7 +247,7 @@ here, but the perturbation census should keep reporting it.
   name bound only in that branch lands in it.
 - A corpus differential over the six pinned `corpus-diff` projects. The LSP's
   symbol set for each file (`Workspace::symbols_for`) must equal the
-  design-time `FscCommandLineArgs` defines ∪ `{COMPILED, EDITING}` for the
+  design-time `FscCommandLineArgs` defines ∪ `{COMPILED}` for the
   served TFM. The contract is certain-implies-exact, and the gate is per
   project.
 - `corpus-diff` stops feeding FCS our own `BORZOI_FCS_DEFINES`. It takes them

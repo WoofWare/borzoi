@@ -48,13 +48,16 @@ fn parse(oracle: &str, line: &str) -> Value {
     v
 }
 
-/// The error numbers of a `{ Files: [ { Diagnostics } ] }` response.
+/// The error numbers of a `{ Files: [ { Diagnostics } ], Diagnostics }`
+/// response: each file's, and those the check reported in no file (FS3880
+/// names no source).
 fn project_codes(v: &Value) -> Vec<i64> {
     v["Files"]
         .as_array()
         .expect("Files")
         .iter()
         .flat_map(|f| f["Diagnostics"].as_array().expect("Diagnostics"))
+        .chain(v["Diagnostics"].as_array().expect("Diagnostics"))
         .map(|d| d["ErrorNumber"].as_i64().expect("ErrorNumber"))
         .collect()
 }

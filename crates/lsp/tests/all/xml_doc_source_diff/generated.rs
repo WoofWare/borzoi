@@ -765,9 +765,7 @@ fn generated_table_agrees_with_fcs() {
     // clean-file gates for its whole file.
     for (file, f) in owned.iter().zip(&fcs) {
         let errors: Vec<_> = f
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == "Error")
+            .errors()
             .map(|d| format!("FS{:04} {}", d.error_number, d.message))
             .collect();
         assert!(

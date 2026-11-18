@@ -368,8 +368,22 @@ pub enum PerturbedSkip {
     /// FCS could not be asked about the copy, or its answer was unreadable.
     Fcs(String),
     /// FCS type-checked the copy with errors, so it is not a copy with the
-    /// original's meaning: `(file, line, column, error number)` for each.
-    FcsErrors(Vec<(PathBuf, u32, u32, i32)>),
+    /// original's meaning: each error, once.
+    FcsErrors(Vec<PerturbedError>),
+}
+
+/// One error FCS reported checking a perturbed copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PerturbedError {
+    /// In `file`, at one-based `col` of `line`.
+    Located {
+        file: PathBuf,
+        line: u32,
+        col: u32,
+        number: i32,
+    },
+    /// In no file (`crate::FcsDiagnostic::in_no_file`).
+    InNoFile { number: i32 },
 }
 
 /// The handler differential's verdict on one project.
@@ -1873,6 +1887,7 @@ mod tests {
             is_constructor: false,
         };
         let fcs = [FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: path.clone(),
             diagnostics: Vec::new(),
             uses: vec![u.clone()],

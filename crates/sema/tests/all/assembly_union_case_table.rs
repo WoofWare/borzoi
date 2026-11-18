@@ -1312,22 +1312,22 @@ const ROWS: &[Row] = &[
         label: "an earlier namespace global block of the same file",
         decls: &[],
         src: "namespace global\n\
-              type UcR40U = Some of int | Other\n\
+              type UcR45U = Some of int | Other\n\
               [<AutoOpen>]\n\
-              module UcR40M =\n    let id (x: int) = x + 1\n\
-              namespace UcR40\n\
+              module UcR45M =\n    let id (x: int) = x + 1\n\
+              namespace UcR45\n\
               module Use =\n    let a = Some 1\n    let b = id 1\n",
         probes: &[
             defer(
                 "Some",
                 1,
-                "proj:UcR40U.Some:unioncase",
+                "proj:UcR45U.Some:unioncase",
                 "an earlier block's root contribution",
             ),
             defer(
                 "id",
                 1,
-                "proj:UcR40M.id:member",
+                "proj:UcR45M.id:member",
                 "an earlier block's root contribution",
             ),
         ],

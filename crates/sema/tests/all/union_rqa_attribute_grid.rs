@@ -637,7 +637,7 @@ fn every_union_rqa_cell_agrees_with_fcs() {
             .iter()
             .find(|f| f.path.file_name() == probe_path.file_name())
             .unwrap_or_else(|| panic!("no FCS uses for {}", cell.label));
-        let errors: Vec<&String> = fcs.iter().flat_map(|f| &f.errors).collect();
+        let errors: Vec<&std::sync::Arc<str>> = fcs.iter().flat_map(|f| &f.errors).collect();
         let theirs = fcs_at(fu, cell.probe);
         let rendered = render_fcs(theirs);
 

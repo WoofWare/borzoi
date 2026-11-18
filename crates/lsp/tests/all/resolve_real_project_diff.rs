@@ -307,8 +307,8 @@ fn project_resolution_matches_fcs() {
     // cheaply.)
     let lang_version = Some(workspace.lang_version_for_project(&project).to_string());
 
-    // The `#if` symbols our side parsed each file under (implicit `COMPILED` /
-    // `EDITING` + the project's `$(DefineConstants)`). Threaded through to the FCS
+    // The `#if` symbols our side parsed each file under (implicit `COMPILED`
+    // + the project's `$(DefineConstants)`). Threaded through to the FCS
     // oracle below so both sides take the same conditional-compilation branches —
     // otherwise a project with defines would diverge on `#if`.
     let symbols = workspace.symbols_for_project(&project);
@@ -420,11 +420,25 @@ fn project_resolution_matches_fcs() {
         let rf = proj.file(i);
         let src = &parses.texts[i];
 
-        tally.oracle_errors += fu.errors.len();
-        if let Some(first) = fu.errors.first()
+        // An error in no file is in every file's list: count it once.
+        tally.oracle_errors += fu.errors.iter().filter(|e| i == 0 || !e.in_no_file).count();
+        // A file's sample is one of its own errors; one in no file is sampled
+        // once, with no file.
+        let sample = fu
+            .errors
+            .iter()
+            .find(|e| !e.in_no_file)
+            .map(|e| (path.clone(), e))
+            .or_else(|| {
+                (i == 0)
+                    .then(|| fu.errors.iter().find(|e| e.in_no_file))
+                    .flatten()
+                    .map(|e| (PathBuf::from("(in no file)"), e))
+            });
+        if let Some((site, first)) = sample
             && tally.oracle_error_sites.len() < sample_limit()
         {
-            tally.oracle_error_sites.push((path.clone(), first.clone()));
+            tally.oracle_error_sites.push((site, first.clone()));
         }
 
         for u in &fu.uses {
