@@ -379,6 +379,37 @@ fn compile_update_compile_order_scales_with_items_and_targets() {
     );
 }
 
+/// Judging whether a condition may throw past an operand the walk cannot
+/// evaluate costs a pass over its chain, not a rescan of the rest at each
+/// operand: a gate with thousands of operands before an illegal one finishes
+/// at once (and may make MSBuild reject the project).
+#[test]
+fn judging_a_long_condition_chain_is_linear() {
+    const N: usize = 40_000;
+    let mut condition = String::from("$([System.String]::IsNullOrWhiteSpace(''))");
+    for _ in 0..N {
+        condition.push_str(" And 'a' == 'a'");
+    }
+    condition.push_str(" And 1 &lt; abc");
+    let src = format!(
+        "<Project><PropertyGroup Condition=\"{condition}\"><R>x</R></PropertyGroup></Project>"
+    );
+    let start = std::time::Instant::now();
+    let p = parse_fsproj(
+        &src,
+        Path::new("/repo/Demo.fsproj"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect("well-formed XML parses");
+    let elapsed = start.elapsed();
+    assert!(p.rejection.is_some());
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "a chain of {N} operands took {elapsed:?}"
+    );
+}
+
 /// MSBuild compares a spelling it cannot normalise (`a:b.fs` — `:` is invalid
 /// in a Windows filename) *as written*, so `a:b.fs` and its rooted spelling
 /// are different items to an `Update`, though they name one file. The

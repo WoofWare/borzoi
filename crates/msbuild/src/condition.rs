@@ -509,11 +509,17 @@ fn judge_chain(
     let mut reached_for_certain = true;
     let mut unknown = false;
     let mut unevaluated = false;
+    // For the possible-throw walk: the last operand of this chain that can
+    // throw, found once.
+    let last_throwing = match walk {
+        Walk::Possibility { .. } => operands.iter().rposition(may_throw_somewhere),
+        _ => None,
+    };
     for (index, operand) in operands.iter().enumerate() {
         let walk = match walk {
             Walk::Possibility { later } => {
-                let later = later || operands[index + 1..].iter().any(may_throw_somewhere);
-                if !later && !may_throw_somewhere(operand) {
+                let later = later || last_throwing.is_some_and(|last| last > index);
+                if !later && last_throwing != Some(index) {
                     // Nothing from here on can throw, nor be reached by
                     // anything that can.
                     return Judgement::of(None, throws, unevaluated);
@@ -593,6 +599,8 @@ fn leaf_may_throw_on_some_value(expr: &BoolExpr) -> bool {
             rhs,
         } => scalar(lhs) || scalar(rhs),
         BoolExpr::Exists(raw) => !plain_references_only(raw),
+        // A boolean literal standing alone (`true`, `on`) coerces.
+        BoolExpr::CoerceBool(ScalarExpr::Bare(word)) if parse_msbuild_bool(word).is_some() => false,
         BoolExpr::Compare { .. }
         | BoolExpr::CoerceBool(_)
         | BoolExpr::HasTrailingSlash(_)

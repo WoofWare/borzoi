@@ -995,9 +995,13 @@ fn render_rejection_cause(cause: &RejectionCause, certain: bool) -> String {
                  {rejects} the whole project"
             )
         }
-        RejectionCause::IllegalCondition { condition } => format!(
+        RejectionCause::IllegalCondition { condition } if certain => format!(
             "the condition `{condition}`, which MSBuild cannot evaluate, so MSBuild {rejects} \
              the whole project"
+        ),
+        RejectionCause::IllegalCondition { condition } => format!(
+            "the condition `{condition}`, in which MSBuild may reach an operand it cannot \
+             evaluate, so MSBuild {rejects} the whole project"
         ),
         RejectionCause::LoadTime(error) => format!(
             "{}, which MSBuild refuses when it loads the file, so MSBuild {rejects} the whole \
