@@ -617,9 +617,9 @@ fn grade_project(c: &Project, expect_errors: bool, g: &mut Graded) -> Result<(),
     let folded = fold(&root, &c.files, full_bcl_env());
     let _ = std::fs::remove_dir_all(&root);
     let label = &c.label;
-    let errors: Vec<&String> = fcs_uses.iter().flat_map(|f| &f.errors).collect();
+    let errors: Vec<&std::sync::Arc<str>> = fcs_uses.iter().flat_map(|f| &f.errors).collect();
     if errors.is_empty() == expect_errors {
-        return Err(errors.into_iter().cloned().collect());
+        return Err(errors.into_iter().map(|e| e.to_string()).collect());
     }
     let dump = |files: &[(String, String)]| {
         files

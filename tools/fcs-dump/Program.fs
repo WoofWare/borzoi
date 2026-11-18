@@ -6297,31 +6297,14 @@ type private CheckedFiles(paths: string[]) =
 /// (`FSharpProjectOptions.Stamp`).
 let mutable private projectCheckRequests = 0L
 
-/// The `#if` symbols fsc compiles `projOpts`'s sources under: `COMPILED`
-/// and each `--define`.
-let private buildDefines (projOpts: FSharpProjectOptions) : string list =
-    let defined =
-        projOpts.OtherOptions
-        |> Array.choose (fun o ->
-            [ "--define:"; "-d:"; "/define:"; "/d:" ]
-            |> List.tryFind (fun prefix -> o.StartsWith prefix)
-            |> Option.map (fun prefix -> o.Substring prefix.Length))
-        |> Array.toList
-    "COMPILED" :: defined
-
-/// Whether `text`, lexed as fsc lexes it under `defines`, holds a line
-/// directive (`#line 7 "f.fs"`, `# 7`) in a branch it compiles. FCS's own
-/// lexer says, so a directive anywhere on a line counts and one in a comment,
-/// a string or an inactive `#if` branch does not.
-let private holdsLineDirective (defines: string list) (text: string) : bool =
-    let mutable found = false
-    FSharpLexer.Tokenize(
-        SourceText.ofString text,
-        (fun token -> if token.Kind = FSharpTokenKind.HashLine then found <- true),
-        conditionalDefines = defines,
-        flags = enum<FSharpLexerFlags> 0
-    )
-    found
+/// Whether `text` may hold a line directive (`#line 7 "f.fs"`, `# 7`): a `#`
+/// anywhere, followed by optional blanks and then `line` or a digit. FCS
+/// honours a directive after other text on its line, and the lexer that
+/// knows which `#` is a directive does not report one, so this reads the
+/// text and over-approximates: a mention in a comment, a string or an
+/// inactive `#if` branch matches too, which costs only a decline.
+let private mayHoldLineDirective (text: string) : bool =
+    System.Text.RegularExpressions.Regex.IsMatch(text, @"#[ \t]*(line|[0-9])")
 
 /// The hash directives fsc acts on in a source (`ProcessMetaCommandsFromInput`):
 /// in a script, those at the top of the file and at the top of each module
@@ -6348,21 +6331,17 @@ let private sourceReferenceDirectives = set [ "r"; "reference"; "load"; "I"; "i"
 /// Refuse a project whose meaning the project check cannot describe as fsc
 /// sees it:
 ///
-/// - a source holding a line directive in a branch the build compiles. A
+/// - a source that may hold a line directive ([`mayHoldLineDirective`]). A
 ///   `#line` changes where fsc reports a range and what `__SOURCE_FILE__` and
 ///   `__LINE__` are, so the check must apply it, and then a record cannot say
 ///   which file holds what it reports.
 /// - a directive in [`sourceReferenceDirectives`] that fsc acts on
 ///   ([`processedHashDirectives`]), read from the check's own parse
 ///   (`parsed`), so one under `#if EDITING` is in no branch it parsed.
-let private refuseUndescribedSources
-    (defines: string list)
-    (paths: string[])
-    (parsed: string -> ParsedInput)
-    =
+let private refuseUndescribedSources (paths: string[]) (parsed: string -> ParsedInput) =
     for path in paths do
-        if holdsLineDirective defines (File.ReadAllText path) then
-            failwithf "%s holds a line directive, which moves the ranges the project check reports to another place than the text" path
+        if mayHoldLineDirective (File.ReadAllText path) then
+            failwithf "%s may hold a line directive, which moves the ranges the project check reports to another place than the text" path
         match
             processedHashDirectives (parsed path)
             |> List.tryFind (fun (ParsedHashDirective(ident, _, _)) -> sourceReferenceDirectives.Contains ident)
@@ -6371,8 +6350,25 @@ let private refuseUndescribedSources
             failwithf "%s holds #%s, which names code the project check does not read" path ident
         | None -> ()
 
+/// Refuse a reference fsc would reject: one that is not a file, or not an
+/// assembly (FS0084). FCS's project check resolves its references without
+/// reporting these, so a project with one would otherwise look clean.
+let private refuseUnreadableReferences (projOpts: FSharpProjectOptions) =
+    for o in projOpts.OtherOptions do
+        match [ "-r:"; "/r:"; "--reference:" ] |> List.tryFind (fun prefix -> o.StartsWith prefix) with
+        | Some prefix ->
+            let path = o.Substring prefix.Length
+            if not (File.Exists path) then
+                failwithf "reference %s is not a file" path
+            try
+                System.Reflection.AssemblyName.GetAssemblyName path |> ignore
+            with ex ->
+                failwithf "reference %s is not an assembly: %s" path ex.Message
+        | None -> ()
+
 /// The whole-project check of `projOpts`, read from the sources as they are
-/// now, refused where it cannot describe them ([`refuseUndescribedSources`]).
+/// now, refused where it cannot describe them ([`refuseUnreadableReferences`],
+/// [`refuseUndescribedSources`]).
 ///
 /// FCS keeps a checked project by its options and reads its sources again
 /// only when a file's modification time moves, so a resident oracle asked
@@ -6385,13 +6381,14 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
         { projOpts with
             Stamp = Some(System.Threading.Interlocked.Increment(&projectCheckRequests)) }
     let release () = checker.ClearCache([ opts ])
+    refuseUnreadableReferences opts
     try
         let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
         let parsed (path: string) =
             (checker.GetBackgroundParseResultsForFileInProject(path, opts, userOpName = userOpName)
              |> Async.RunSynchronously)
                 .ParseTree
-        refuseUndescribedSources (buildDefines opts) opts.SourceFiles parsed
+        refuseUndescribedSources opts.SourceFiles parsed
         results, release
     with _ ->
         release ()

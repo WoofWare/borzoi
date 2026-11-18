@@ -56,18 +56,30 @@ struct OracleResponse {
 #[serde(rename_all = "PascalCase")]
 pub struct OracleFile {
     pub path: String,
-    /// What the project check reported in this file, and what it reported in
-    /// no file ([`fcs_check_with`] puts those in every file's list, marked
-    /// [`OracleDiagnostic::in_no_file`]).
+    /// What the project check reported in this file.
     pub diagnostics: Vec<OracleDiagnostic>,
     pub uses: Vec<OracleUse>,
+    /// What it reported in no file: one list, shared by every file of the
+    /// project ([`fcs_check_or_refusal`] fills it), since it bears on every
+    /// file.
+    #[serde(skip)]
+    pub in_no_file: Arc<[OracleDiagnostic]>,
 }
 
 impl OracleFile {
+    /// The errors that bear on this file: its own, then the project's in no
+    /// file.
+    pub fn errors(&self) -> impl Iterator<Item = &OracleDiagnostic> {
+        self.diagnostics
+            .iter()
+            .chain(self.in_no_file.iter())
+            .filter(|d| d.severity == "Error")
+    }
+
     /// Whether FCS reported an error (parse or check) in this file, or one in
-    /// no file, which bears on every file.
+    /// no file.
     pub fn has_errors(&self) -> bool {
-        self.diagnostics.iter().any(|d| d.severity == "Error")
+        self.errors().next().is_some()
     }
 }
 
@@ -75,10 +87,6 @@ impl OracleFile {
 #[serde(rename_all = "PascalCase")]
 pub struct OracleDiagnostic {
     pub severity: String,
-    /// The check reported this in no file. Every file's list holds it, so it
-    /// makes every file erroring, and a count takes it once.
-    #[serde(skip)]
-    pub in_no_file: bool,
     pub error_number: i32,
     pub message: String,
 }
@@ -166,18 +174,13 @@ pub fn fcs_check_or_refusal(
     if let Some(err) = response.batch_error {
         return Err(err);
     }
-    // A diagnostic in no file bears on every file, so every file's list holds
-    // it, marked, and a count takes it once.
-    let in_no_file = response
+    let in_no_file: Arc<[OracleDiagnostic]> = response
         .diagnostics
-        .expect("a project-check response says what it reported in no file");
+        .expect("a project-check response says what it reported in no file")
+        .into();
     let mut files = response.files.expect("Files");
     for f in &mut files {
-        f.diagnostics
-            .extend(in_no_file.iter().map(|d| OracleDiagnostic {
-                in_no_file: true,
-                ..d.clone()
-            }));
+        f.in_no_file = Arc::clone(&in_no_file);
     }
     Ok(files)
 }

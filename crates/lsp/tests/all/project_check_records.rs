@@ -12,7 +12,9 @@
 //!   time moving, which FCS would answer from the text it checked before;
 //! - a `#r` in a source. Under `#if EDITING` it is no reference of the build's,
 //!   and an active one is a reference FCS's project check does not read, so
-//!   the oracles refuse a source whose build branches hold one.
+//!   the oracles refuse a source whose build branches hold one;
+//! - a reference that is not a file or not an assembly, which fsc rejects and
+//!   FCS's project check does not report, so the oracles refuse it.
 
 use std::path::{Path, PathBuf};
 
@@ -33,9 +35,19 @@ fn ask(
     oracle: &str,
     paths: &[&Path],
 ) -> Result<Value, String> {
+    ask_with_refs(child, oracle, paths, &[])
+}
+
+/// [`ask`], with `refs` referenced beside the SDK's own.
+fn ask_with_refs(
+    child: &mut borzoi_oracle_harness::BatchChild,
+    oracle: &str,
+    paths: &[&Path],
+    refs: &[&Path],
+) -> Result<Value, String> {
     let request = serde_json::json!({
         "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-        "refs": [],
+        "refs": refs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
     })
     .to_string();
     let line = child.request(&request);
@@ -141,24 +153,25 @@ fn a_line_directive_after_other_text_is_refused() {
     }
 }
 
-/// A line directive in a branch the build does not compile, or in a comment,
-/// is none, and the project is checked.
+/// A reference fsc would reject (FS0084: not a file, or not an assembly) is
+/// refused. FCS's project check resolves its references without reporting
+/// these, so without the refusal a project with one would look clean.
 #[test]
-fn a_line_directive_the_build_does_not_read_is_checked() {
+fn an_unreadable_reference_is_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
     let a = dir.path().join("A.fs");
-    write(
-        &a,
-        "module A\n#if EDITING\n#line 1 \"Elsewhere.fs\"\n#endif\n// #line 1 \"Elsewhere.fs\"\nlet x = 1\n",
-    );
+    write(&a, "module A\nlet x = 1\n");
+    let missing = dir.path().join("Missing.dll");
+    let not_an_assembly = dir.path().join("NotAnAssembly.dll");
+    write(&not_an_assembly, "not an assembly");
     for oracle in ORACLES {
         let mut child = fcs_dump_batch_child(oracle);
-        let answer = check(&mut child, oracle, &[&a]);
-        assert_eq!(
-            error_numbers(record(&answer, "A.fs")),
-            Vec::<i64>::new(),
-            "{oracle}: {answer}"
-        );
+        for reference in [&missing, &not_an_assembly] {
+            match ask_with_refs(&mut child, oracle, &[&a], &[reference]) {
+                Err(why) if why.contains("reference") => {}
+                other => panic!("{oracle}: {reference:?} must be refused: {other:?}"),
+            }
+        }
     }
 }
 

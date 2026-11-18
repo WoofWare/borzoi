@@ -1159,7 +1159,7 @@ fn binders_declined_in_one_file_stay_declined_in_the_next() {
         let paths: Vec<&std::path::Path> = written.iter().map(|(p, _)| p.as_path()).collect();
         let fcs = parse_fcs_uses_project(&invoke_fcs_dump_project_with_refs(&paths, &[]), &written);
         let _ = std::fs::remove_dir_all(&root);
-        let errors: Vec<&String> = fcs.iter().flat_map(|f| &f.errors).collect();
+        let errors: Vec<&std::sync::Arc<str>> = fcs.iter().flat_map(|f| &f.errors).collect();
         if !errors.is_empty() {
             failures.push(format!("{id}: FCS rejects it: {errors:?}"));
             continue;
@@ -1283,7 +1283,7 @@ fn possible_cases_decline_only_what_they_can_capture() {
         let paths: Vec<&std::path::Path> = written.iter().map(|(p, _)| p.as_path()).collect();
         let fcs = parse_fcs_uses_project(&invoke_fcs_dump_project_with_refs(&paths, &[]), &written);
         let _ = std::fs::remove_dir_all(&root);
-        let errors: Vec<&String> = fcs.iter().flat_map(|f| &f.errors).collect();
+        let errors: Vec<&std::sync::Arc<str>> = fcs.iter().flat_map(|f| &f.errors).collect();
         if !errors.is_empty() {
             failures.push(format!("{id}: FCS rejects it: {errors:?}"));
             continue;

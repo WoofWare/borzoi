@@ -5670,6 +5670,7 @@ mod tests {
         let b_src: Arc<str> = Arc::from("module B\nlet y = A.x\n");
         let json = format!(
             r#"{{
+  "Diagnostics": [],
   "Files": [
     {{
       "Path": "{}",
@@ -5716,6 +5717,7 @@ mod tests {
     fn one_use_json(path: &Path, decl_file: &str) -> String {
         format!(
             r#"{{
+  "Diagnostics": [],
   "Files": [
     {{
       "Path": "{}",
@@ -6562,6 +6564,7 @@ mod tests {
         let src: Arc<str> = Arc::from("\u{feff}module A\nlet x = 1\n");
         let json = format!(
             r#"{{
+  "Diagnostics": [],
   "Files": [
     {{
       "Path": "{0}",
@@ -6604,6 +6607,7 @@ mod tests {
         let unknown = root.join("Other.fs");
         let json = format!(
             r#"{{
+  "Diagnostics": [],
   "Files": [
     {{
       "Path": "{}",

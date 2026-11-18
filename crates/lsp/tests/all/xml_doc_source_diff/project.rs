@@ -396,18 +396,22 @@ fn pinned_projects_docs_agree_with_fcs() {
             project.display()
         );
         let fcs = oracle(&loaded, true);
-        // An error in no file is in every file's record: count it once, from
-        // the first file's.
+        // Each file's own errors, and the project's in no file once.
         let errors: usize = fcs
             .iter()
-            .enumerate()
-            .map(|(i, f)| {
+            .map(|f| {
                 f.diagnostics
                     .iter()
-                    .filter(|d| d.severity == "Error" && (i == 0 || !d.in_no_file))
+                    .filter(|d| d.severity == "Error")
                     .count()
             })
-            .sum();
+            .sum::<usize>()
+            + fcs.first().map_or(0, |f| {
+                f.in_no_file
+                    .iter()
+                    .filter(|d| d.severity == "Error")
+                    .count()
+            });
         let graded = grade(&loaded.ours, &fcs);
         let names: Vec<String> = loaded.paths.iter().map(|p| checkout_key(p)).collect();
         let named: Vec<(&str, &str)> = names

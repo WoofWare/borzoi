@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use borzoi_oracle_harness::{BatchChild, default_timeout};
@@ -674,7 +674,8 @@ pub struct NormalisedProjectUse {
 /// turns every use into a silent non-comparison rather than a divergence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FcsError {
-    pub message: String,
+    /// Shared by every file's copy of an error in no file.
+    pub message: Arc<str>,
     pub error_number: i32,
     /// FCS reported this in no file. [`parse_fcs_uses_project`] puts it in
     /// every file's errors, since it bears on every file, so a count takes it
@@ -735,7 +736,7 @@ pub fn parse_fcs_uses_project(json: &str, sources: &[(PathBuf, String)]) -> Vec<
         .iter()
         .filter(|d| d.severity == "Error")
         .map(|d| FcsError {
-            message: d.message.clone(),
+            message: Arc::from(d.message.as_str()),
             error_number: d.error_number,
             in_no_file: true,
         })
@@ -829,7 +830,7 @@ pub fn parse_fcs_uses_project(json: &str, sources: &[(PathBuf, String)]) -> Vec<
                     .into_iter()
                     .filter(|d| d.severity == "Error")
                     .map(|d| FcsError {
-                        message: d.message,
+                        message: Arc::from(d.message),
                         error_number: d.error_number,
                         in_no_file: false,
                     })

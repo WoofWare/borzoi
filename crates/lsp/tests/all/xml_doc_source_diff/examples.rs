@@ -31,12 +31,7 @@ fn at_definition(src: &str, name: &str) -> (Vec<String>, Verdict) {
     let files = [("M.fs", src)];
     let (graded, fcs) = run_fixture(&files, &["DEFINED_X"]);
     for f in &fcs {
-        let errors: Vec<_> = f
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == "Error")
-            .map(|d| d.message.clone())
-            .collect();
+        let errors: Vec<_> = f.errors().map(|d| d.message.clone()).collect();
         assert!(
             errors.is_empty(),
             "fixture does not compile: {errors:?}\n{src}"
