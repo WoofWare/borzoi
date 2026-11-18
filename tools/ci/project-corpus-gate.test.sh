@@ -128,9 +128,14 @@ EOF
 #!/usr/bin/env bash
 stats_bin() {
   local dir="${CARGO_TARGET_DIR:-$FAKE_WORKSPACE/target}/debug"
+  local tmpexe
   mkdir -p "$dir"
-  printf '#!/usr/bin/env bash\ncat "$FAKE_PLAN"\n' >"$dir/borzoi-stats"
-  chmod +x "$dir/borzoi-stats"
+  # Published by rename, as concurrent runs build it at once: rewriting it in
+  # place lets one run exec it half-written.
+  tmpexe="$(mktemp "$dir/.borzoi-stats.XXXXXX")"
+  printf '#!/usr/bin/env bash\ncat "$FAKE_PLAN"\n' >"$tmpexe"
+  chmod +x "$tmpexe"
+  mv -f "$tmpexe" "$dir/borzoi-stats"
   echo "$dir/borzoi-stats"
 }
 if [[ " $* " == *" -p borzoi-stats "* ]]; then
