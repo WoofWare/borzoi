@@ -708,6 +708,22 @@ fn evaluate_both(
     let served = our_side(&served, read_names);
 
     let names: Vec<String> = read_names.iter().map(|n| (*n).to_string()).collect();
+    // The served walk's candidates, which every startup directory's MSBuild
+    // value must be among.
+    let (_, served_reads) = parse_fsproj_reads(
+        xml,
+        &project_path,
+        &extra,
+        &common::oracle_environment(),
+        sdk_resolver,
+        None,
+        None,
+        &ReadProbe {
+            properties: names.clone(),
+            ..ReadProbe::default()
+        },
+    )
+    .expect("well-formed XML parses");
     let mut supplied = Vec::new();
     let mut theirs = Vec::new();
     for startup in startups.iter_mut() {
@@ -731,6 +747,13 @@ fn evaluate_both(
             .project(xml, &names, Some(&project_path), globals);
         let what = format!("started in {}", startup.label);
         assert_among_candidates(&reads, answer.as_ref(), &what, globals, xml);
+        assert_among_candidates(
+            &served_reads,
+            answer.as_ref(),
+            &format!("{what} (ours served, with no startup directory)"),
+            globals,
+            xml,
+        );
         assert_exact(
             &served,
             answer.as_ref(),

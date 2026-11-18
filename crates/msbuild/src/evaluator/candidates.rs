@@ -41,6 +41,7 @@
 //! is its only one.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 
 use roxmltree::Node;
 
@@ -55,6 +56,9 @@ impl State<'_> {
     /// where it holds it exactly; what the walk recorded, where it doubts it;
     /// anything otherwise.
     pub(super) fn candidates_of(&self, name: &str) -> Candidates {
+        if !self.track_candidates {
+            return Candidates::Anything;
+        }
         if self.held_exactly_for_candidates(name) {
             // One past the budget is not copied only to be dropped.
             if self
@@ -103,6 +107,9 @@ impl State<'_> {
     /// text that splices plain references is, whose length the candidates it
     /// splices bound before it is built.
     pub(super) fn value_candidates(&self, raw: &str) -> Candidates {
+        if !self.track_candidates {
+            return Candidates::Anything;
+        }
         // The text alone bounds every expansion of it from below.
         if raw.len() > MAX_CANDIDATE_BYTES || !splices_plain_references_only(raw) {
             return Candidates::Anything;
@@ -196,6 +203,9 @@ impl State<'_> {
     /// run though the walk did not: what the name holds now, or the element's
     /// value.
     pub(super) fn widened_candidates(&self, element: Node<'_, '_>) -> Candidates {
+        if !self.track_candidates {
+            return Candidates::Anything;
+        }
         let name = element.tag_name().name();
         let value = collect_element_text(element)
             .map_or(Candidates::Anything, |raw| self.value_candidates(&raw));
@@ -205,6 +215,9 @@ impl State<'_> {
     /// Widen, one write after another, the candidates of every property
     /// `group` writes: a group the walk skipped, which the real build may take.
     pub(super) fn widen_group_candidates(&mut self, group: Node<'_, '_>) {
+        if !self.track_candidates {
+            return;
+        }
         for element in group.children().filter(Node::is_element) {
             let name = element.tag_name().name();
             if self.protected.contains(&name.to_ascii_lowercase())
@@ -213,24 +226,43 @@ impl State<'_> {
                 continue;
             }
             let widened = self.widened_candidates(element);
-            self.lookup.record_candidates(name, widened);
+            self.record_candidates(name, widened);
         }
     }
 
     /// [`Self::widen_group_candidates`] for every property group in `branch`
     /// (a `<When>` or `<Otherwise>`), nested `<Choose>`s' branches included: a
     /// branch the walk did not take, which the real build may.
-    pub(super) fn widen_branch_candidates(&mut self, branch: Node<'_, '_>) {
+    /// `current_file_dir` resolves a group's `Exists`. A group or a nested
+    /// branch a gate rules out on every input is skipped, its children
+    /// unread.
+    pub(super) fn widen_branch_candidates(
+        &mut self,
+        branch: Node<'_, '_>,
+        current_file_dir: &Path,
+    ) {
+        if !self.track_candidates {
+            return;
+        }
         for child in branch.children().filter(Node::is_element) {
             match child.tag_name().name() {
-                "PropertyGroup" => self.widen_group_candidates(child),
+                "PropertyGroup" if !self.ruled_out(child, current_file_dir) => {
+                    self.widen_group_candidates(child);
+                }
                 "Choose" => {
-                    for nested in child.children().filter(Node::is_element) {
-                        self.widen_branch_candidates(nested);
+                    for nested in self.choose_branches_from(child, 0, None) {
+                        self.widen_branch_candidates(nested, current_file_dir);
                     }
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Record `name`'s candidates, where the walk tracks them.
+    pub(super) fn record_candidates(&mut self, name: &str, candidates: Candidates) {
+        if self.track_candidates {
+            self.lookup.record_candidates(name, candidates);
         }
     }
 
@@ -247,6 +279,9 @@ impl State<'_> {
         value: Option<Candidates>,
         carried_certain: bool,
     ) {
+        if !self.track_candidates {
+            return;
+        }
         if before.is_none() && value.is_none() && self.held_exactly_for_candidates(name) {
             // What it holds is its only candidate already.
             return;
@@ -265,7 +300,7 @@ impl State<'_> {
             }
         });
         let candidates = before.map_or(value.clone(), |before| before.union(value));
-        self.lookup.record_candidates(name, candidates);
+        self.record_candidates(name, candidates);
     }
 }
 

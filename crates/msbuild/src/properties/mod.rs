@@ -412,11 +412,6 @@ impl PropertyMap {
         self.candidates.insert(lower, candidates);
     }
 
-    /// Drop `key`'s record, leaving what it may hold to its trust.
-    pub(crate) fn forget_candidates(&mut self, key: &str) {
-        self.remove_record(&key.to_ascii_lowercase());
-    }
-
     /// Drop the record of `lower`, a lowercase name, and its bytes.
     fn remove_record(&mut self, lower: &str) {
         if let Some(old) = self.candidates.remove(lower) {

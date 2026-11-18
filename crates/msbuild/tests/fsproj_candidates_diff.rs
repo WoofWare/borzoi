@@ -602,6 +602,49 @@ fn a_widened_group_skips_a_child_that_cannot_write() {
     );
 }
 
+/// An import followed on a stale path is one MSBuild may not have made, so a
+/// later literal import of the same file may be MSBuild's first (#1046): the
+/// channel must not name a value written between the two. The walk follows
+/// the first as a doubted import today, and so declines past the second.
+#[test]
+fn a_value_written_before_a_possible_first_import_is_not_named() {
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let path = dir.join("Demo.fsproj");
+    let xml = "<Project><PropertyGroup><Side>side_a.props</Side></PropertyGroup>\
+               <Import Project=\"hidden.props\" Condition=\"'$(G.ToUpperInvariant())' == 'X'\" />\
+               <Import Project=\"$(Side)\" />\
+               <PropertyGroup><X>between</X></PropertyGroup>\
+               <Import Project=\"side_a.props\" /></Project>";
+    std::fs::write(&path, xml).unwrap();
+    std::fs::write(
+        dir.join("hidden.props"),
+        "<Project><PropertyGroup><Side>side_b.props</Side></PropertyGroup></Project>",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("side_a.props"),
+        "<Project><PropertyGroup><X>from-a</X></PropertyGroup></Project>",
+    )
+    .unwrap();
+    std::fs::write(dir.join("side_b.props"), "<Project />").unwrap();
+    let probe = ReadProbe {
+        properties: vec!["X".to_owned()],
+        ..ReadProbe::default()
+    };
+    let mut oracle = Oracle::spawn();
+    let (theirs, reads) =
+        evaluate(&mut oracle, xml, &path, &probe, "x").expect("MSBuild evaluates it");
+    assert_eq!(
+        theirs.get("X").map(String::as_str),
+        Some("from-a"),
+        "MSBuild imports side_a.props for the first time at the literal import"
+    );
+    if let Some(candidates) = &reads.candidates["X"] {
+        assert!(candidates.contains("from-a"), "{candidates:?}");
+    }
+}
+
 /// Each `<Choose>` the walk cannot decide widens what its branches write
 /// once: four optional appends name the five strings they can make.
 #[test]

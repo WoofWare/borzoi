@@ -227,6 +227,10 @@ pub fn walk_with_imports<'r>(
         observer,
     );
     state.candidates_withdrawn = local_overrides_are_computed(root);
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        state.track_candidates = probe.is_some_and(|probe| !probe.properties.is_empty());
+    }
     // The entry project is never inside an SDK.
     state
         .foreign_definitions
@@ -875,6 +879,10 @@ struct State<'r> {
     /// and the candidate channel names no value at all ([`candidates`]). So
     /// does a root whose opt-out list the walk cannot read (#1045).
     candidates_withdrawn: bool,
+    /// Whether the walk tracks candidates at all: only a probe that reads
+    /// properties consumes them yet ([`candidates`]), so no other evaluation
+    /// pays for them.
+    track_candidates: bool,
     /// What the caller's environment said about `MSBuildExtensionsPath`, held
     /// aside rather than promoted: whether that value survives is the one
     /// toolset behaviour that differs across the SDKs we support, so it cannot
@@ -1641,6 +1649,7 @@ impl<'r> State<'r> {
             #[cfg(any(test, feature = "test-support"))]
             sticky_globals,
             candidates_withdrawn: false,
+            track_candidates: false,
             env_extensions_path,
             written: HashMap::new(),
             compile_first: Vec::new(),
@@ -2123,6 +2132,7 @@ impl<'r> State<'r> {
             #[cfg(any(test, feature = "test-support"))]
                 sticky_globals: _,
             candidates_withdrawn: _,
+            track_candidates: _,
             env_extensions_path: _,
             written,
             compile_first,
@@ -2786,8 +2796,7 @@ impl<'r> State<'r> {
         // caller that can name them records them after. A name the walk still
         // holds exactly reads as its value whatever is recorded
         // ([`candidates`]).
-        self.lookup
-            .record_candidates(name, properties::candidates::Candidates::Anything);
+        self.record_candidates(name, properties::candidates::Candidates::Anything);
     }
 
     /// Store an evaluated write's value and its verdict together, so a value
@@ -4167,7 +4176,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             // ones' marks widened theirs.
             for branch in &whens[first..from] {
                 if !state.ruled_out(*branch, &exists_dir) {
-                    state.widen_branch_candidates(*branch);
+                    state.widen_branch_candidates(*branch, current_file_dir);
                 }
             }
         }
@@ -4221,7 +4230,7 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // walk's: what each writes, the real build may hold ([`candidates`]).
     if let (Some(first), None) = (first_unsure, &choice_stale) {
         for branch in state.choose_branches_from(node, first, Some(walked)) {
-            state.widen_branch_candidates(branch);
+            state.widen_branch_candidates(branch, current_file_dir);
         }
     }
     let Some(branch) = chosen.map(|(_, when)| when).or(otherwise) else {
@@ -4515,7 +4524,9 @@ fn walk_property_child_inner(
             let widened = (own_condition_maybe_wrong
                 || (!own_gate_decided && stale_gate.is_none()))
             .then(|| state.widened_candidates(node));
-            let kept = state.lookup.recorded_candidates(&name).cloned();
+            // What it may hold now, recorded or held: the verdict below may
+            // change its trust, though not what it holds.
+            let kept = state.candidates_of(&name);
             state.apply_property_provenance(
                 &name,
                 PropertyProvenance {
@@ -4527,10 +4538,7 @@ fn walk_property_child_inner(
                     stale,
                 },
             );
-            match widened.or(kept) {
-                Some(candidates) => state.lookup.record_candidates(&name, candidates),
-                None => state.lookup.forget_candidates(&name),
-            }
+            state.record_candidates(&name, widened.unwrap_or(kept));
             return;
         }
         CondGate::Unsupported => {
@@ -4551,7 +4559,7 @@ fn walk_property_child_inner(
                     stale: StaleOutcome::Keep,
                 },
             );
-            state.lookup.record_candidates(&name, candidates);
+            state.record_candidates(&name, candidates);
             emit_unsupported_condition(node, state);
             return;
         }
@@ -4768,7 +4776,8 @@ fn walk_property_child_inner(
     // computed before the write, which may read the name itself.
     let doubted = write_condition_maybe_wrong || !own_gate_decided || state.inside_doubted_gate();
     let before = doubted.then(|| state.candidates_of(&name));
-    let value_candidates = (!state.reads_only_certain(&raw)).then(|| state.value_candidates(&raw));
+    let value_candidates = (state.track_candidates && !state.reads_only_certain(&raw))
+        .then(|| state.value_candidates(&raw));
     let carried_certain = carried.is_certain();
     state.write_property(&name, value, provenance);
     state.record_write_candidates(&name, before, value_candidates, carried_certain);
@@ -5663,7 +5672,7 @@ fn mark_property_group_children_provenance(
                 stale: StaleOutcome::Keep,
             },
         );
-        state.lookup.record_candidates(name, candidates);
+        state.record_candidates(name, candidates);
     }
 }
 
