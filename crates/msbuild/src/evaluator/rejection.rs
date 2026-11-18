@@ -250,16 +250,20 @@ pub(super) fn judge_condition_rejection(
     if outcome != condition::Outcome::Illegal {
         return;
     }
-    let observer = state.observer;
-    let exists = |path: &str| condition_exists(observer, path, exists_dir);
-    let probes = state.follow_imports.then_some(condition::Probes {
-        exists: &exists,
-        observer,
-    });
-    let uncertain = |name: &str| !directory_build::is_certain(state, name);
-    let certainly = condition::judge(condition, &state.lookup, probes, &uncertain).throws
-        == condition::Throws::Certainly;
-    let certainty = certain_if(reached && certainly);
+    // Reached only perhaps, it is Possible however its operands stand, and
+    // judging them would only probe the file system for nothing.
+    let certainly = reached && {
+        let observer = state.observer;
+        let exists = |path: &str| condition_exists(observer, path, exists_dir);
+        let probes = state.follow_imports.then_some(condition::Probes {
+            exists: &exists,
+            observer,
+        });
+        let uncertain = |name: &str| !directory_build::is_certain(state, name);
+        condition::judge(condition, &state.lookup, probes, &uncertain).throws
+            == condition::Throws::Certainly
+    };
+    let certainty = certain_if(certainly);
     state.note_rejection(
         certainty,
         RejectionCause::IllegalCondition {

@@ -1711,7 +1711,14 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     ];
     // Ill typed on the values written: `Word` holds `abc` for certain,
     // `Maybe` under a gate the walk cannot decide.
-    let by_value = ["1 &lt; abc", "$(Word) &gt; 1", "$(Word)", "$(Maybe) &gt; 1"];
+    let by_value = [
+        "1 &lt; abc",
+        "$(Word) &gt; 1",
+        "$(Word)",
+        "$(Maybe) &gt; 1",
+        // A NaN spelling is no empty string, so MSBuild reaches the error.
+        "'NaN' != '' And 1 &lt; abc",
+    ];
     // Ill typed exactly where `Exists` resolves against the project's
     // directory, which holds `flag`, or exactly where it resolves against the
     // imported file's, which does not: each position's `Exists` directory,
@@ -1725,8 +1732,10 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         "'a' == 'b'",
         "false and 1 &lt; abc",
         UNDECIDED_TRUE,
-        // NaN equals nothing, so MSBuild stops before the illegal operand.
+        // NaN equals nothing, and a number with a NUL after it is that
+        // number, so MSBuild stops before the illegal operand.
         "'NaN' == 'NaN' And 1 &lt; abc And '$(Shaky)' == ''",
+        "'1%00' != '1' And 1 &lt; abc And '$(Shaky)' == ''",
     ];
     // MSBuild evaluates a condition left to right and stops at the operand
     // that decides it. The first throws on a certain operand before one the

@@ -673,6 +673,35 @@ fn an_illegal_condition_msbuild_may_not_evaluate_may_be_rejected() {
     }
 }
 
+/// Neither deciding a gate nor judging a rejection probes an operand past one
+/// that settles the question: an operand we cannot evaluate ends a decision,
+/// and a condition only possibly reached is Possible however its operands
+/// stand. So `tail`, which only such an operand reads, is not in the read set,
+/// and a change to it does not invalidate the evaluation.
+#[test]
+fn an_operand_past_the_one_that_settles_the_question_is_not_probed() {
+    for body in [
+        "<PropertyGroup><P>abc</P></PropertyGroup>\
+         <PropertyGroup Condition=\"'$(P.Substring(5))' == '' And Exists('tail')\"><R>x</R></PropertyGroup>"
+            .to_owned(),
+        format!(
+            "<PropertyGroup><U>1</U><U Condition=\"{UNDECIDED_TRUE}\">true</U></PropertyGroup>\
+             <PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><R Condition=\"$(U) And Exists('tail')\">x</R></PropertyGroup>"
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let project_path = project(&tmp, &format!("  {body}"), &[]);
+        let parsed = parse_file(&project_path);
+        let probed: Vec<_> = parsed
+            .read_set
+            .reads()
+            .iter()
+            .filter(|read| read.path.ends_with("tail"))
+            .collect();
+        assert!(probed.is_empty(), "{body}: {probed:#?}");
+    }
+}
+
 /// An illegal operand MSBuild reaches through operands of certain value
 /// rejects the project for certain, whatever a later operand it never reaches
 /// reads; reached only past an operand the walk is not certain of, which may

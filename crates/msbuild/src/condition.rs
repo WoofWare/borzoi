@@ -289,7 +289,7 @@ fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
 pub enum Throws {
     /// It throws on no value of the properties the caller is not certain of
     /// (in an item's condition, on none whose substitution forms no item or
-    /// metadata expression; see [`leaf_may_throw_on_some_value`]). A part of the
+    /// metadata expression; see `leaf_may_throw_on_some_value`). A part of the
     /// condition outside the grammar we model, reached on certain values,
     /// claims nothing either way, as for [`Outcome::Unsupported`]
     /// ([`Judgement::unevaluated`]).
@@ -301,7 +301,7 @@ pub enum Throws {
 }
 
 /// What MSBuild makes of a condition when some of the properties it reads are
-/// not certain ([`judge`]).
+/// not certain (`judge`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Judgement {
     /// The condition's value wherever MSBuild does not throw, if one value
@@ -351,30 +351,42 @@ pub fn judge(
     uncertain: &dyn Fn(&str) -> bool,
 ) -> Judgement {
     match parse_condition(source) {
-        Ok(Some(expr)) => judge_expr(&expr, props, fs, uncertain),
+        Ok(Some(expr)) => judge_expr(&expr, props, fs, uncertain, Walk::Judge),
         Ok(None) => Judgement::of(Some(true), Throws::Never, false),
         Err(Reject::Illegal) => Judgement::of(None, Throws::Certainly, true),
         Err(Reject::Unmodelled) => Judgement::of(None, Throws::Never, true),
     }
 }
 
-/// [`judge`] of a parsed condition.
+/// How far [`judge_expr`] walks a condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Walk {
+    /// To the operand that ends each chain, judging whether MSBuild throws.
+    Judge,
+    /// To the first operand we cannot evaluate, past which nothing is
+    /// decided ([`Judgement::unevaluated`]): a caller that only decides need
+    /// not evaluate, nor probe the file system for, the operands after it.
+    Decide,
+}
+
+/// [`judge`] of a parsed condition, walked as `walk` says.
 fn judge_expr(
     expr: &BoolExpr,
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
     uncertain: &dyn Fn(&str) -> bool,
+    walk: Walk,
 ) -> Judgement {
     match expr {
         BoolExpr::Not(inner) => {
-            let judged = judge_expr(inner, props, fs, uncertain);
+            let judged = judge_expr(inner, props, fs, uncertain, walk);
             Judgement {
                 value: judged.value.map(|value| !value),
                 ..judged
             }
         }
-        BoolExpr::And(operands) => judge_chain(operands, false, props, fs, uncertain),
-        BoolExpr::Or(operands) => judge_chain(operands, true, props, fs, uncertain),
+        BoolExpr::And(operands) => judge_chain(operands, false, props, fs, uncertain, walk),
+        BoolExpr::Or(operands) => judge_chain(operands, true, props, fs, uncertain, walk),
         BoolExpr::True
         | BoolExpr::False
         | BoolExpr::Exists(_)
@@ -419,14 +431,18 @@ fn judge_chain(
     props: &PropertyMap,
     fs: Option<Probes<'_>>,
     uncertain: &dyn Fn(&str) -> bool,
+    walk: Walk,
 ) -> Judgement {
     let mut throws = Throws::Never;
     let mut reached_for_certain = true;
     let mut unknown = false;
     let mut unevaluated = false;
     for operand in operands {
-        let judged = judge_expr(operand, props, fs, uncertain);
+        let judged = judge_expr(operand, props, fs, uncertain, walk);
         unevaluated |= judged.unevaluated;
+        if walk == Walk::Decide && unevaluated {
+            return Judgement::of(None, throws.max(judged.throws), true);
+        }
         if judged.throws == Throws::Certainly {
             return if reached_for_certain {
                 Judgement::of(None, Throws::Certainly, unevaluated)
@@ -536,7 +552,7 @@ pub fn decide_without(
         Ok(None) => return Decision::Decided(true),
         Err(_) => return Decision::Unsupported,
     };
-    match judge_expr(&expr, props, fs, untrusted) {
+    match judge_expr(&expr, props, fs, untrusted, Walk::Decide) {
         Judgement {
             unevaluated: true, ..
         } => Decision::Unsupported,
@@ -571,7 +587,7 @@ pub fn decided_conjunctwise(
             BoolExpr::And(operands) => pending.extend(operands),
             BoolExpr::Exists(arg) if fs.is_some() && is_the_exists(arg) => {}
             other => {
-                let judged = judge_expr(other, props, fs, untrusted);
+                let judged = judge_expr(other, props, fs, untrusted, Walk::Decide);
                 if judged.value.is_none() || judged.unevaluated {
                     return false;
                 }
@@ -1797,19 +1813,20 @@ fn compare_version_and_number(version: &[i64; 4], number: f64) -> std::cmp::Orde
 /// ordinal case-insensitive string equality. Unlike the relational operators,
 /// equality never compares versions: `'01.0.0' == '1.0.0'` is false.
 fn compare_equality_values(lhs: &str, rhs: &str) -> Result<bool, ()> {
+    if lhs.is_empty() || rhs.is_empty() {
+        // The empty string is no number, version or boolean.
+        return Ok(lhs.is_empty() && rhs.is_empty());
+    }
     // MSBuild reads a NaN spelling as a number (.NET's `double.TryParse`
     // matches the symbol whatever the number style), and NaN equals nothing,
-    // itself included: `'NaN' == 'NaN'` is false (probed, msbuild-condition-
-    // oracle, SDK 10.0.401, with any case, a sign, and padding). Not modelled.
-    if is_nan_spelling(lhs) || is_nan_spelling(rhs) {
+    // itself included: `'NaN' == 'NaN'` is false. It reads a number followed
+    // by NULs as that number: `'1' == '1%00'` is true. (Both probed,
+    // msbuild-condition-oracle, SDK 10.0.401.) Neither is modelled.
+    if is_nan_spelling(lhs) || is_nan_spelling(rhs) || lhs.contains('\0') || rhs.contains('\0') {
         return Err(());
     }
     if lhs == rhs {
         return Ok(true);
-    }
-    if lhs.is_empty() || rhs.is_empty() {
-        // Exactly one side is empty (both-empty was byte-equal above).
-        return Ok(false);
     }
     if let (Some(lhs), Some(rhs)) = (parse_msbuild_number(lhs), parse_msbuild_number(rhs)) {
         return Ok(lhs == rhs);

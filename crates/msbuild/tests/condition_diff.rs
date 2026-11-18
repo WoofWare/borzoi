@@ -1241,6 +1241,72 @@ fn judge_sweep_soak() {
     eprintln!("judge soak: {census:?}");
 }
 
+/// Equality and order over every pair of an alphabet of spellings at the edge
+/// of what .NET's number, version and boolean parsing accept (NaN, infinity,
+/// signs, padding, a trailing NUL, exponents, hex, fullwidth digits, versions,
+/// booleans, the empty string), held to certain-implies-exact. The rejection
+/// judgement certifies reach through such comparisons, so a committed boolean
+/// here must be MSBuild's.
+#[test]
+fn comparisons_of_edge_spellings_are_certain_implies_exact() {
+    const SPELLINGS: &[&str] = &[
+        "",
+        "1",
+        "01",
+        "1.0",
+        "1.",
+        ".5",
+        "+1",
+        "-1",
+        "-0",
+        "0",
+        " 1",
+        "1 ",
+        "1%00",
+        "%001",
+        "1e3",
+        "1E3",
+        "0x1",
+        "0X1",
+        "0x",
+        "0xFFFFFFFF",
+        "\u{ff11}",
+        "NaN",
+        "nan",
+        "-NaN",
+        "Infinity",
+        "-Infinity",
+        "\u{221e}",
+        "1.2.3",
+        "1.2.3.4",
+        "1.2.3.4.5",
+        "v1.2",
+        "true",
+        "on",
+        "!false",
+        "yes",
+        "abc",
+        "1,000",
+        "1_000",
+    ];
+    let mut oracle = Oracle::spawn();
+    let mut committed = 0usize;
+    for lhs in SPELLINGS {
+        for rhs in SPELLINGS {
+            for op in ["==", "!=", "<", ">="] {
+                let condition = format!("'{lhs}' {op} '{rhs}'");
+                if matches!(
+                    check_certain_implies_exact(&mut oracle, &condition, &[]),
+                    Verdict::True | Verdict::False
+                ) {
+                    committed += 1;
+                }
+            }
+        }
+    }
+    assert!(committed >= 2000, "only {committed} committed");
+}
+
 /// MSBuild reads a NaN spelling as a number, and NaN equals nothing, itself
 /// included; it orders against nothing either, without throwing. Each
 /// spelling, beside itself, another NaN, a number and a word, held to
