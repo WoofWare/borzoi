@@ -673,6 +673,21 @@ fn an_illegal_condition_msbuild_may_not_evaluate_may_be_rejected() {
     }
 }
 
+/// Past an operand the walk cannot evaluate, a literal that throws only once
+/// the file system has its say (`/tmp\a;b`: the Unix path adjustment, then
+/// two items) is still judged, with the file system: MSBuild may reach it.
+#[test]
+fn a_literal_needing_the_file_system_past_an_unevaluable_operand_may_reject() {
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(
+        &tmp,
+        "  <PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And \
+         HasTrailingSlash('/tmp\\a;b')\"><R>x</R></PropertyGroup>",
+        &[],
+    );
+    assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
+}
+
 /// Neither deciding a gate nor judging a rejection probes an operand past one
 /// that settles the question: an operand we cannot evaluate ends a decision,
 /// and a condition only possibly reached is Possible however its operands
@@ -704,10 +719,6 @@ fn an_operand_past_the_one_that_settles_the_question_is_not_probed() {
             .to_owned(),
         "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
          And 'true'\"><R>x</R></PropertyGroup>"
-            .to_owned(),
-        // ... nor a comparison of literals that evaluates.
-        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
-         And 1 &lt; 2\"><R>x</R></PropertyGroup>"
             .to_owned(),
         // Evaluation stops at an operand it cannot evaluate; whether MSBuild
         // may throw is settled in the `Or`, before `Exists`.
