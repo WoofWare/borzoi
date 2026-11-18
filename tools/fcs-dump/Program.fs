@@ -6293,62 +6293,122 @@ type private CheckedFiles(paths: string[]) =
             resolved[fileName] <- file
             file
 
-/// One diagnostic of a project-check record: [`projectDiagnostic`]'s fields
-/// and `InNoFile`, whether the check reported it in no source file (see
-/// [`projectCheckRecords`]).
-let private projectCheckDiagnostic (inNoFile: bool) (d: FSharp.Compiler.Diagnostics.FSharpDiagnostic) =
-    {| Severity = d.Severity.ToString()
-       Message = d.Message
-       ErrorNumber = d.ErrorNumber
-       Range = d.Range
-       InNoFile = inNoFile |}
-
 /// Distinguishes the options of one project-check request from every other's
 /// (`FSharpProjectOptions.Stamp`).
 let mutable private projectCheckRequests = 0L
 
-/// The whole-project check of `projOpts`, read from the sources as they are
-/// now.
+/// Whether `text` may hold a line directive (`#line 7 "f.fs"`, `# 7`): a line
+/// whose first non-blank characters are `#`, optional blanks, then `line` or
+/// a digit. It may match where no directive is (an inactive `#if` branch, a
+/// multi-line string), which costs only a decline.
+let private mayHoldLineDirective (text: string) : bool =
+    text.Split('\n')
+    |> Array.exists (fun line ->
+        let t = line.TrimStart()
+        t.StartsWith "#"
+        && (let rest = t.Substring(1).TrimStart()
+            rest.StartsWith "line" || (rest.Length > 0 && Char.IsDigit rest[0])))
+
+/// The hash directives of a list of implementation declarations, nested
+/// modules' included.
+let rec private implHashDirectives (decls: SynModuleDecl list) : ParsedHashDirective list =
+    decls
+    |> List.collect (fun decl ->
+        match decl with
+        | SynModuleDecl.HashDirective(directive, _) -> [ directive ]
+        | SynModuleDecl.NestedModule(decls = inner) -> implHashDirectives inner
+        | _ -> [])
+
+/// The hash directives of a list of signature declarations, nested modules'
+/// included.
+let rec private sigHashDirectives (decls: SynModuleSigDecl list) : ParsedHashDirective list =
+    decls
+    |> List.collect (fun decl ->
+        match decl with
+        | SynModuleSigDecl.HashDirective(directive, _) -> [ directive ]
+        | SynModuleSigDecl.NestedModule(moduleDecls = inner) -> sigHashDirectives inner
+        | _ -> [])
+
+/// Every hash directive of a parsed source.
+let private hashDirectives (input: ParsedInput) : ParsedHashDirective list =
+    match input with
+    | ParsedInput.ImplFile(ParsedImplFileInput(hashDirectives = top; contents = modules)) ->
+        top @ (modules |> List.collect (fun (SynModuleOrNamespace(decls = decls)) -> implHashDirectives decls))
+    | ParsedInput.SigFile(ParsedSigFileInput(hashDirectives = top; contents = modules)) ->
+        top
+        @ (modules |> List.collect (fun (SynModuleOrNamespaceSig(decls = decls)) -> sigHashDirectives decls))
+
+/// The directives by which a source names other code to compile against:
+/// `#r` (`#reference`), `#load` and `#I`. FCS's project check reads the
+/// references and sources its options name and no others, so a project whose
+/// build reads one of these is outside what the check describes.
+let private sourceReferenceDirectives = set [ "r"; "reference"; "load"; "I" ]
+
+/// Refuse a project whose meaning the project check cannot describe as fsc
+/// sees it, reading each source as the check parsed it (`parsed`):
 ///
-/// It ignores line directives (`--ignorelinedirectives`), so every range it
-/// reports is in the file and at the place that holds the text. A `#line`
-/// moves only where fsc reports a range, never what the code means, and both
-/// sides of a differential locate a site in the file that holds it.
+/// - a source that may hold a line directive. A `#line` changes where fsc
+///   reports a range and what `__SOURCE_FILE__` and `__LINE__` are, so the
+///   check must apply it, and then a record cannot say which file holds what
+///   it reports.
+/// - a directive in [`sourceReferenceDirectives`] in the build's branches.
+///   One under `#if EDITING` is in no branch the check parsed, and costs
+///   nothing.
+let private refuseUndescribedSources (paths: string[]) (parsed: string -> ParsedInput) =
+    for path in paths do
+        if mayHoldLineDirective (File.ReadAllText path) then
+            failwithf "%s may hold a line directive, which moves the ranges the project check reports to another place than the text" path
+        match
+            hashDirectives (parsed path)
+            |> List.tryFind (fun (ParsedHashDirective(ident, _, _)) -> sourceReferenceDirectives.Contains ident)
+        with
+        | Some(ParsedHashDirective(ident, _, _)) ->
+            failwithf "%s holds #%s, which names code the project check does not read" path ident
+        | None -> ()
+
+/// The whole-project check of `projOpts`, read from the sources as they are
+/// now, refused where it cannot describe them ([`refuseUndescribedSources`]).
 ///
 /// FCS keeps a checked project by its options and reads its sources again
 /// only when a file's modification time moves, so a resident oracle asked
 /// about a file rewritten within one tick would answer from the old text. A
 /// stamp of its own gives each request a project FCS has not checked, and the
-/// check is dropped from FCS's caches once read, so no request's answer
-/// depends on another's.
+/// check is dropped from FCS's caches once read (the returned release), so no
+/// request's answer depends on another's.
 let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (userOpName: string) =
     let opts =
         { projOpts with
-            OtherOptions = Array.append projOpts.OtherOptions [| "--ignorelinedirectives" |]
             Stamp = Some(System.Threading.Interlocked.Increment(&projectCheckRequests)) }
-    let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
-    results, (fun () -> checker.ClearCache([ opts ]))
+    let release () = checker.ClearCache([ opts ])
+    try
+        let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
+        let parsed (path: string) =
+            (checker.GetBackgroundParseResultsForFileInProject(path, opts, userOpName = userOpName)
+             |> Async.RunSynchronously)
+                .ParseTree
+        refuseUndescribedSources opts.SourceFiles parsed
+        results, release
+    with _ ->
+        release ()
+        reraise ()
 
-/// A project-check oracle's payload, `{ Files }`, taken from `results`, the
-/// whole-project check of `paths`: each file's record `{ Path, Diagnostics,
-/// Uses }` holds its uses, each projected by `projectUse`, and the
-/// diagnostics the check reports in it.
+/// A project-check oracle's payload, `{ Files, Diagnostics }`, taken from
+/// `results`, the whole-project check of `paths`: each file's record
+/// `{ Path, Diagnostics, Uses }` holds its uses, each projected by
+/// `projectUse`, and the diagnostics the check reports in it, and
+/// `Diagnostics` holds those it reports in no file.
 ///
 /// The records come from the whole-project check because it compiles what
 /// fsc compiles. FCS's per-file check (`ParseAndCheckFileInProject`) does
 /// not: it parses the file it checks with `EDITING` defined, which fsc does
 /// not define, so its records can describe a branch the build never saw.
 ///
-/// The project check reports some diagnostics in no file: an error FCS
-/// raises without a location (`range0`, file `unknown`), such as FS0708 for a
-/// computation expression whose builder lacks a method, or FS0193 for an
-/// import that does not resolve. The per-file check drops such a diagnostic,
-/// keeping only those in the file it checks, so a project fsc rejects could
-/// look clean. The project check cannot say which file raised it, so every
-/// file's record carries it, marked `InNoFile`: a reader that asks whether a
-/// file checked cleanly gets no for every file, never a yes the compile did
-/// not give, and a reader that counts or locates errors counts each marked
-/// one once, for the project.
+/// A diagnostic in no file is an error FCS raises without a location
+/// (`range0`, file `unknown`), such as FS0708 for a computation expression
+/// whose builder lacks a method, or FS0193 for an import that does not
+/// resolve. The per-file check drops it, keeping only those in the file it
+/// checks, so a project fsc rejects could look clean. It bears on every file,
+/// so a reader that asks whether a file checked cleanly must read it too.
 ///
 /// A use in no file cannot happen, since every use the check reports is in
 /// one of its sources, so one fails the request.
@@ -6362,9 +6422,8 @@ let private projectCheckRecords
         results.Diagnostics |> Array.groupBy (fun d -> files.Of d.FileName) |> Map.ofArray
     let diagnosticsIn (file: string option) =
         match Map.tryFind file diagnosticsByFile with
-        | Some diagnostics -> diagnostics |> Array.map (projectCheckDiagnostic file.IsNone)
+        | Some diagnostics -> diagnostics |> Array.map projectDiagnostic
         | None -> [||]
-    let inNoFile = diagnosticsIn None
     let usesByFile =
         results.GetAllUsesOfAllSymbols()
         |> Array.groupBy (fun u ->
@@ -6380,8 +6439,9 @@ let private projectCheckRecords
         paths
         |> Array.map (fun path ->
             {| Path = path
-               Diagnostics = Array.append (diagnosticsIn (Some path)) inNoFile
-               Uses = usesIn path |}) |}
+               Diagnostics = diagnosticsIn (Some path)
+               Uses = usesIn path |})
+       Diagnostics = diagnosticsIn None |}
 
 /// [`projectCheckRecords`] of the project check of `projOpts`
 /// ([`checkProjectNow`]), whose sources are `paths`.
@@ -6547,8 +6607,8 @@ let private dumpUsesProject () =
 /// `{ "paths": [<abs .fs>…], "refs": [<dll>…], "defines": [<sym>…],
 /// "langversion": <token|null>, "exclusiveRefs": <bool> }`, Compile order
 /// preserved — and one compact
-/// `{ "Files": [ { Path, Diagnostics, Uses } … ] }` response line
-/// ([`projectCheckRecords`]): the SAME
+/// `{ "Files": [ { Path, Diagnostics, Uses } … ], "Diagnostics": […] }`
+/// response line ([`projectCheckRecords`]): the SAME
 /// payload the one-shot emits (compact rather than indented; the `serde_json`
 /// consumer is whitespace-insensitive). Per-request failures become
 /// `{ "BatchError": <msg> }`, exactly as in `file-batch`.
@@ -8560,9 +8620,9 @@ let private xmlDocProjectFiles
 /// "refs": [<dll>…], "exclusiveRefs": <bool> }`, Compile order — type-checked as
 /// ONE project against the SDK references plus `refs` (or `refs` alone, when
 /// `exclusiveRefs`), and
-/// one compact `{ "Files": [ { Path, Diagnostics, Uses } … ] }` line back
-/// ([`projectCheckRecords`]), `Uses` holding every symbol use with its
-/// symbol's documentation (see [`projectXmlDocUse`]). Tolerant: a
+/// one compact `{ "Files": [ { Path, Diagnostics, Uses } … ], "Diagnostics":
+/// […] }` line back ([`projectCheckRecords`]), `Uses` holding every symbol
+/// use with its symbol's documentation (see [`projectXmlDocUse`]). Tolerant: a
 /// type error is a diagnostic, never an abort, so a single isolated corpus
 /// file is a valid one-path request. A request-level failure is
 /// `{ "BatchError": <msg> }`.
@@ -8644,9 +8704,9 @@ let private usage () =
     eprintfn "  binder-types <source-path>  dump per-binder inferred types (Phase-3 binder-type oracle)"
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
-    eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files} response/line, from the whole-project check"
+    eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files,Diagnostics} response/line, from the whole-project check"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
-    eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files} response/line, from the whole-project check"
+    eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files,Diagnostics} response/line, from the whole-project check"
     2
 
 /// Refuse to run as a self-contained publish. Every script-mode check

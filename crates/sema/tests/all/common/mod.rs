@@ -3366,6 +3366,7 @@ pub struct FileUses {
     pub path: PathBuf,
     pub uses: Vec<NormalisedProjectUse>,
     /// The message of every `Severity=Error` diagnostic FCS reported for the
+    /// file, and of every one it reported in no file, which bears on every
     /// file — empty for a file that checked cleanly.
     pub errors: Vec<String>,
 }
@@ -3374,6 +3375,9 @@ pub struct FileUses {
 struct ProjectUsesDump {
     #[serde(rename = "Files")]
     files: Vec<RawFileUses>,
+    /// What the check reported in no file.
+    #[serde(rename = "Diagnostics", default)]
+    diagnostics: Vec<RawProjectDiagnostic>,
 }
 
 #[derive(Deserialize)]
@@ -3406,6 +3410,12 @@ struct RawProjectDiagnostic {
 pub fn parse_fcs_uses_project(json: &str, sources: &[(PathBuf, String)]) -> Vec<FileUses> {
     let dump: ProjectUsesDump =
         serde_json::from_str(json).expect("fcs-dump uses-project JSON shape");
+    let in_no_file: Vec<String> = dump
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "Error")
+        .map(|d| d.message.clone())
+        .collect();
 
     // One line index per source: a use's declaration converts through its
     // file's, and a project of generated cells has thousands of uses.
@@ -3467,6 +3477,7 @@ pub fn parse_fcs_uses_project(json: &str, sources: &[(PathBuf, String)]) -> Vec<
                     .into_iter()
                     .filter(|d| d.severity == "Error")
                     .map(|d| d.message)
+                    .chain(in_no_file.iter().cloned())
                     .collect(),
             }
         })

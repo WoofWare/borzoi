@@ -1,17 +1,18 @@
 //! The project-check oracles (`uses-project-batch`, `xmldoc-batch`) describe
-//! the code fsc compiles, as it is when they are asked.
+//! the code fsc compiles, as it is when they are asked, or refuse.
 //!
-//! Each takes its records from FCS's whole-project check. Three things could
-//! still put something other than the build's code in a record, and each case
-//! here puts one to both oracles:
+//! Each takes its records from FCS's whole-project check. These could still
+//! put something other than the build's code in a record, and each case here
+//! puts one to both oracles:
 //!
-//! - a `#line` directive, which moves where FCS reports a range, so a record
-//!   keyed by the reported file would hold another file's diagnostics;
+//! - a `#line` directive, which moves where FCS reports a range (so a record
+//!   keyed by the reported file would hold another file's diagnostics) and
+//!   what `__SOURCE_FILE__` is. The oracles refuse a source that may hold one.
 //! - a resident oracle asked about a file rewritten without its modification
 //!   time moving, which FCS would answer from the text it checked before;
-//! - a script directive under `#if EDITING` in the first source, which the
-//!   script resolution that supplies the SDK's references reads with
-//!   `EDITING` defined, as fsc does not.
+//! - a `#r` in a source. Under `#if EDITING` it is no reference of the build's,
+//!   and an active one is a reference FCS's project check does not read, so
+//!   the oracles refuse a source whose build branches hold one.
 
 use std::path::{Path, PathBuf};
 
@@ -25,8 +26,13 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).expect("write fixture");
 }
 
-/// `oracle`'s answer for the project of `paths`, a `BatchError` panicking.
-fn check(child: &mut borzoi_oracle_harness::BatchChild, oracle: &str, paths: &[&Path]) -> Value {
+/// `oracle`'s answer for the project of `paths`: the payload, or the
+/// refusal's message.
+fn ask(
+    child: &mut borzoi_oracle_harness::BatchChild,
+    oracle: &str,
+    paths: &[&Path],
+) -> Result<Value, String> {
     let request = serde_json::json!({
         "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "refs": [],
@@ -35,10 +41,15 @@ fn check(child: &mut borzoi_oracle_harness::BatchChild, oracle: &str, paths: &[&
     let line = child.request(&request);
     let v: Value = serde_json::from_str(&line)
         .unwrap_or_else(|e| panic!("{oracle}: unparseable response ({e}): {line}"));
-    if let Some(err) = v.get("BatchError") {
-        panic!("{oracle} refused the request: {err}");
+    match v.get("BatchError") {
+        Some(err) => Err(err.as_str().unwrap_or_default().to_string()),
+        None => Ok(v),
     }
-    v
+}
+
+/// `oracle`'s answer for the project of `paths`, a refusal panicking.
+fn check(child: &mut borzoi_oracle_harness::BatchChild, oracle: &str, paths: &[&Path]) -> Value {
+    ask(child, oracle, paths).unwrap_or_else(|err| panic!("{oracle} refused the request: {err}"))
 }
 
 /// The record of the file named `name`.
@@ -81,10 +92,11 @@ fn use_names(file: &Value) -> Vec<String> {
         .collect()
 }
 
-/// A `#line` naming another source moves only where FCS would report a
-/// range: the error and the binding after it stay in `A.fs`'s record.
+/// A source that may hold a line directive is refused: one naming another
+/// source would put this file's error in that file's record, and one naming
+/// a file of a name `__SOURCE_FILE__` reads changes what the code means.
 #[test]
-fn a_line_directive_moves_no_record_to_another_file() {
+fn a_line_directive_is_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
     let a = dir.path().join("A.fs");
     let b = dir.path().join("B.fs");
@@ -98,21 +110,10 @@ fn a_line_directive_moves_no_record_to_another_file() {
     write(&b, "module B\nlet y = 1\n");
     for oracle in ORACLES {
         let mut child = fcs_dump_batch_child(oracle);
-        let answer = check(&mut child, oracle, &[&a, &b]);
-        assert_eq!(
-            error_numbers(record(&answer, "A.fs")),
-            [1],
-            "{oracle}: the error is in A.fs's record: {answer}"
-        );
-        assert_eq!(
-            error_numbers(record(&answer, "B.fs")),
-            Vec::<i64>::new(),
-            "{oracle}: B.fs's record is clean: {answer}"
-        );
-        assert!(
-            use_names(record(&answer, "A.fs")).contains(&"movedBinding".to_string()),
-            "{oracle}: the binding is in A.fs's record: {answer}"
-        );
+        match ask(&mut child, oracle, &[&a, &b]) {
+            Err(why) if why.contains("line directive") => {}
+            other => panic!("{oracle}: a line directive must be refused: {other:?}"),
+        }
     }
 }
 
@@ -141,6 +142,29 @@ fn a_rewrite_that_keeps_the_modification_time_is_read() {
             names.contains(&"afterw".to_string()) && !names.contains(&"before".to_string()),
             "{oracle}: the second answer reads the new text: {second}"
         );
+    }
+}
+
+/// An active `#r` in a source names an assembly the build references and the
+/// project check does not read, so the request is refused.
+#[test]
+fn an_active_source_reference_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let dll = ensure_fsharp_compiler_service_dll();
+    let script: PathBuf = dir.path().join("A.fsx");
+    write(
+        &script,
+        &format!(
+            "#r \"{}\"\nlet z = FSharp.Compiler.Text.Range.Zero\n",
+            dll.display()
+        ),
+    );
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        match ask(&mut child, oracle, &[&script]) {
+            Err(why) if why.contains("#r") => {}
+            other => panic!("{oracle}: an active #r must be refused: {other:?}"),
+        }
     }
 }
 

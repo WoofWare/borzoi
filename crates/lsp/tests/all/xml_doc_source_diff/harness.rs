@@ -44,6 +44,9 @@ use crate::common::{LineIndex, fcs_dump_batch_child};
 struct OracleResponse {
     #[serde(rename = "Files")]
     files: Option<Vec<OracleFile>>,
+    /// What the check reported in no file.
+    #[serde(rename = "Diagnostics", default)]
+    diagnostics: Vec<OracleDiagnostic>,
     #[serde(rename = "BatchError")]
     batch_error: Option<String>,
 }
@@ -53,7 +56,8 @@ struct OracleResponse {
 pub struct OracleFile {
     pub path: String,
     /// What the project check reported in this file, and what it reported in
-    /// no file, which the oracle puts in every file's record.
+    /// no file ([`fcs_check_with`] puts those in every file's list, marked
+    /// [`OracleDiagnostic::in_no_file`]).
     pub diagnostics: Vec<OracleDiagnostic>,
     pub uses: Vec<OracleUse>,
 }
@@ -70,9 +74,9 @@ impl OracleFile {
 #[serde(rename_all = "PascalCase")]
 pub struct OracleDiagnostic {
     pub severity: String,
-    /// The check reported this in no file. Every file's record carries it,
-    /// so it makes every file erroring, and a count takes it once.
-    #[serde(default)]
+    /// The check reported this in no file. Every file's list holds it, so it
+    /// makes every file erroring, and a count takes it once.
+    #[serde(skip)]
     pub in_no_file: bool,
     pub error_number: i32,
     pub message: String,
@@ -155,7 +159,17 @@ pub fn fcs_check_with(
     if let Some(err) = response.batch_error {
         panic!("xmldoc-batch failed: {err}");
     }
-    response.files.expect("Files")
+    // A diagnostic in no file bears on every file, so every file's list holds
+    // it, marked, and a count takes it once.
+    let mut files = response.files.expect("Files");
+    for f in &mut files {
+        f.diagnostics
+            .extend(response.diagnostics.iter().map(|d| OracleDiagnostic {
+                in_no_file: true,
+                ..d.clone()
+            }));
+    }
+    files
 }
 
 // ============================================================================

@@ -420,7 +420,8 @@ fn project_resolution_matches_fcs() {
         let rf = proj.file(i);
         let src = &parses.texts[i];
 
-        tally.oracle_errors += fu.errors.len();
+        // An error in no file is in every file's list: count it once.
+        tally.oracle_errors += fu.errors.iter().filter(|e| i == 0 || !e.in_no_file).count();
         if let Some(first) = fu.errors.first()
             && tally.oracle_error_sites.len() < sample_limit()
         {

@@ -1127,7 +1127,7 @@ pub struct FcsErrorFile {
 
 /// An erroring project's errors, each once: every file's own, with the file,
 /// and those the check reported in no file ([`FcsDiagnostic::in_no_file`]),
-/// which every file's record carries, taken from the first file.
+/// which every file's list holds, taken from the first file.
 pub fn distinct_fcs_errors(
     error_files: &[FcsErrorFile],
 ) -> (Vec<(&Path, &FcsDiagnostic)>, Vec<&FcsDiagnostic>) {
@@ -1247,9 +1247,10 @@ pub struct FcsDiagnostic {
     pub error_number: i32,
     pub range: FcsRange,
     /// The check reported this in no source file: an error FCS raises with
-    /// no location. Every file's record carries it, so it makes every file
-    /// erroring, and a count or a list of errors takes it once, for the
-    /// project ([`distinct_fcs_errors`]).
+    /// no location. The oracle reports it once, for the project, and
+    /// [`parse_project_uses`] puts it in every file's list, so it makes every
+    /// file erroring; a count or a list of errors takes it once
+    /// ([`distinct_fcs_errors`]).
     pub in_no_file: bool,
 }
 
@@ -1275,6 +1276,9 @@ pub struct FcsPos {
 struct ProjectUsesDump {
     #[serde(rename = "Files")]
     files: Vec<RawFileUses>,
+    /// What the check reported in no file.
+    #[serde(rename = "Diagnostics", default)]
+    diagnostics: Vec<RawDiagnostic>,
 }
 
 #[derive(Deserialize)]
@@ -1297,8 +1301,18 @@ struct RawDiagnostic {
     error_number: i32,
     #[serde(rename = "Range")]
     range: FcsRange,
-    #[serde(rename = "InNoFile", default)]
-    in_no_file: bool,
+}
+
+impl RawDiagnostic {
+    fn into_fcs(self, in_no_file: bool) -> FcsDiagnostic {
+        FcsDiagnostic {
+            severity: self.severity,
+            message: self.message,
+            error_number: self.error_number,
+            range: self.range,
+            in_no_file,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1358,6 +1372,13 @@ pub fn parse_project_uses(
         by_path.get(&path_key(Path::new(fcs_path))).copied()
     };
 
+    // A diagnostic in no file bears on every file, so every file's list holds
+    // it, marked, and whatever counts or lists errors takes it once.
+    let in_no_file: Vec<FcsDiagnostic> = dump
+        .diagnostics
+        .into_iter()
+        .map(|d| d.into_fcs(true))
+        .collect();
     dump.files
         .into_iter()
         .map(|f| {
@@ -1367,13 +1388,8 @@ pub fn parse_project_uses(
             let diagnostics = f
                 .diagnostics
                 .into_iter()
-                .map(|d| FcsDiagnostic {
-                    severity: d.severity,
-                    message: d.message,
-                    error_number: d.error_number,
-                    range: d.range,
-                    in_no_file: d.in_no_file,
-                })
+                .map(|d| d.into_fcs(false))
+                .chain(in_no_file.iter().cloned())
                 .collect();
             let uses = f
                 .uses

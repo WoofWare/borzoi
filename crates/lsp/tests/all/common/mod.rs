@@ -676,6 +676,10 @@ pub struct NormalisedProjectUse {
 pub struct FcsError {
     pub message: String,
     pub error_number: i32,
+    /// FCS reported this in no file. [`parse_fcs_uses_project`] puts it in
+    /// every file's errors, since it bears on every file, so a count takes it
+    /// once.
+    pub in_no_file: bool,
 }
 
 /// All symbol uses FCS reported for one project file, plus the errors it hit
@@ -691,6 +695,9 @@ pub struct FileUses {
 struct ProjectUsesDump {
     #[serde(rename = "Files")]
     files: Vec<RawFileUses>,
+    /// What the check reported in no file.
+    #[serde(rename = "Diagnostics", default)]
+    diagnostics: Vec<RawDiagnostic>,
 }
 
 #[derive(Deserialize)]
@@ -722,6 +729,16 @@ struct RawDiagnostic {
 pub fn parse_fcs_uses_project(json: &str, sources: &[(PathBuf, String)]) -> Vec<FileUses> {
     let dump: ProjectUsesDump =
         serde_json::from_str(json).expect("fcs-dump uses-project JSON shape");
+    let in_no_file: Vec<FcsError> = dump
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "Error")
+        .map(|d| FcsError {
+            message: d.message.clone(),
+            error_number: d.error_number,
+            in_no_file: true,
+        })
+        .collect();
 
     let by_name: HashMap<&OsStr, (&Path, &str)> = sources
         .iter()
@@ -813,7 +830,9 @@ pub fn parse_fcs_uses_project(json: &str, sources: &[(PathBuf, String)]) -> Vec<
                     .map(|d| FcsError {
                         message: d.message,
                         error_number: d.error_number,
+                        in_no_file: false,
                     })
+                    .chain(in_no_file.iter().cloned())
                     .collect(),
             }
         })
