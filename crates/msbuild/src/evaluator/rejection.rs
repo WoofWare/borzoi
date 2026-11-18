@@ -31,9 +31,12 @@
 //! site too ([`illegal_condition_at`]), and so is one MSBuild may evaluate
 //! where the walk does not: under a gate the walk could not decide from
 //! certain inputs ([`judge_unwalked`]), and every condition of the item pass,
-//! judged group by group ([`judge_deferred`]) because MSBuild evaluates an
-//! item's condition, and an `Include` item's metadata conditions, whatever
-//! its group's or its own gate holds.
+//! judged group by group ([`judge_deferred`]) where a build evaluates it
+//! (below), since the walk's item capture gates an illegal condition's
+//! contents as an unmodelled one's. A group of the item pass in a branch the
+//! walk could not decide is judged there too, against the final property
+//! table as MSBuild evaluates it ([`State::defer_judgement`]), not against the
+//! properties the walk holds where it meets the group.
 //!
 //! **Certain.** A [`RejectionCertainty::Certain`] site is a claim the
 //! differentials grade, so it needs MSBuild to reach the construct for
@@ -60,22 +63,22 @@
 //! Short of that, the same construct is a Possible site.
 //!
 //! Where MSBuild evaluates a condition at all is pinned against the oracle in
-//! `tests/condition_diff.rs`'s `where_msbuild_evaluates_a_condition`: never
-//! under a false `<PropertyGroup>`, `<ItemDefinitionGroup>` (or false item
+//! `tests/condition_diff.rs`'s `where_msbuild_evaluates_a_condition`, which
+//! also holds these judgements to it: never under a false `<PropertyGroup>`,
+//! `<ItemGroup>` (or false item), `<ItemDefinitionGroup>` (or false item
 //! definition) or `<ImportGroup>`, an unchosen `<When>` (nor a `<When>` after
 //! the chosen one), on or inside a `<Target>`, or on a write of a global
-//! property; always for an `<ItemGroup>`'s items and an `Include` item's
-//! metadata; an `Update` item's metadata only when the update applies.
+//! property; an `Update` item's metadata only when the update applies.
 //!
-//! "Always" is design-time evaluation's rule (the editable `Project`, which
-//! `dotnet msbuild -getProperty:` with no target also builds), and the one
-//! these judgements follow. A build (`ProjectInstance`: `dotnet build`, `dotnet
-//! restore`) evaluates an item under a false gate not at all, so it accepts
-//! every project whose only illegal condition sits there. Design-time
-//! evaluation rejects every project a build rejects, so a withdrawal by this
-//! rule commits nothing a build rejects; a Certain claim on such an item is a
-//! claim about design-time evaluation. The same test pins which projects only
-//! design-time evaluation rejects.
+//! That is a build's evaluation (`ProjectInstance`: `dotnet build`, `dotnet
+//! restore`), the compilation the LSP models, and the one these judgements
+//! follow. Under a false `<ItemGroup>` or item it evaluates nothing of the
+//! item: not its condition (under a false group), its `Include`, `Exclude` or
+//! metadata, nor the item operation it would build. Design-time evaluation
+//! (the editable `Project`, which `dotnet msbuild -getProperty:` with no target
+//! also builds) evaluates all of those but an `Update`'s, so it rejects
+//! projects a build accepts; the same test pins which, and the walk evaluates
+//! each as a build does.
 //!
 //! **What is not judged.** Content the walk did not see may hold an import
 //! that fails, or rewrite a value so that one the walk reached fails; the walk
@@ -99,7 +102,7 @@ use crate::document::attribute;
 use crate::imports::normalise;
 use crate::{Rejection, RejectionCause, RejectionCertainty, UnloadableImport};
 
-use super::item_pass::expand_silent;
+use super::item_pass::{DeferredGroupKind, expand_silent};
 use super::observed::{self, EntryKind};
 use super::{
     SdkResolution, State, condition, condition_exists, directory_build, import_dedup_key, loader,
@@ -135,7 +138,11 @@ impl State<'_> {
         if replaces {
             self.rejection = Some(rejection);
         }
-        self.push(kind, span);
+        // A group judged in both passes may note one construct twice.
+        let site = (self.effective_span(span.clone()), format!("{kind:?}"));
+        if self.noted_rejection_sites.insert(site) {
+            self.push(kind, span);
+        }
     }
 
     /// [`Self::note_rejection`] of a [`RejectionCertainty::Possible`] site.
@@ -334,6 +341,29 @@ fn judge_gate(
     }
 }
 
+/// [`judge_gate`] of a gate MSBuild evaluates in its item pass, against the
+/// final property table. It decides only when every name it reads is read as
+/// the build reads it ([`operands_are_certain`]): MSBuild evaluates a
+/// condition left to right, so an operand the walk is not sure of may throw
+/// before a later one decides the boolean. Outside the walk's item pass (in a
+/// branch it could not decide) a later write may still change what the gate
+/// reads, so there only a gate that reads no property decides.
+fn judge_item_pass_gate(
+    node: Node<'_, '_>,
+    exists_dir: &Path,
+    reached: bool,
+    state: &mut State<'_>,
+) -> Judged {
+    let judged = judge_gate(node, exists_dir, reached, state);
+    let text = attribute(node, "Condition").unwrap_or_default();
+    let stable = if state.in_item_pass {
+        operands_are_certain(state, &text)
+    } else {
+        properties::property_references(&text).next().is_none()
+    };
+    if stable { judged } else { Judged::Undecided }
+}
+
 /// [`judge_condition`] of the condition `text` at `node`, returning its outcome.
 fn judge_text(
     node: Node<'_, '_>,
@@ -380,6 +410,21 @@ pub(super) fn judge_unwalked(node: Node<'_, '_>, dir: &Path, reached: bool, stat
             judge_condition(node, dir, reached, state);
         }
         "Choose" => judge_whens(node, 0, dir, reached, state),
+        // MSBuild evaluates these against the final property table, which the
+        // branch the walk could not decide may change: judged against the
+        // properties the walk holds here, deciding no gate, and again against
+        // the final table in the item pass.
+        "ItemGroup" | "ItemDefinitionGroup" if !state.in_item_pass => {
+            debug_assert!(!reached, "the property pass judges only undecided branches");
+            let kind = if node.has_tag_name("ItemGroup") {
+                judge_item_group(node, reached, state);
+                DeferredGroupKind::ItemGroup
+            } else {
+                judge_item_definition_group(node, reached, state);
+                DeferredGroupKind::ItemDefinitionGroup
+            };
+            state.defer_judgement(node, kind);
+        }
         "ItemGroup" => judge_item_group(node, reached, state),
         "ItemDefinitionGroup" => judge_item_definition_group(node, reached, state),
         // A `<UsingTask>` resolves `Exists` against its own file's directory.
@@ -465,23 +510,29 @@ pub(super) fn judge_branch(branch: Node<'_, '_>, dir: &Path, reached: bool, stat
 /// Judge the conditions of a group the item pass replays: `<ItemGroup>`,
 /// `<ItemDefinitionGroup>` or `<UsingTask>`, against the final property
 /// table. `reached`: whether MSBuild reaches the group for certain, as the
-/// property pass found it ([`reach_is_certain`] there).
+/// property pass found it ([`reach_is_certain`] there; never for a group it
+/// only recorded for judgement).
 pub(super) fn judge_deferred(node: Node<'_, '_>, dir: &Path, reached: bool, state: &mut State<'_>) {
     judge_unwalked(node, dir, reached, state);
 }
 
 /// Judge the `<ItemGroup>` at `node`, which MSBuild reaches as `reached` says.
-/// MSBuild evaluates each item's condition whatever the group's holds, and an
-/// `Include` item's metadata conditions whatever the item's holds; an
-/// `Update`'s metadata only where the update applies. Metadata that reads
-/// item metadata (`%(…)`) or an item list (`@(…)`) is evaluated item by item,
-/// so not at all when the `Include` names no item: then its conditions are
-/// only possibly evaluated.
+/// A build evaluates an item's condition only under a true group, and the
+/// rest of the item (the operation it builds, and an `Include` item's
+/// metadata conditions) only under a true item; an `Update`'s metadata only
+/// where the update applies. Metadata that reads item metadata (`%(…)`) or an
+/// item list (`@(…)`) is evaluated item by item, so not at all when the
+/// `Include` names no item: then its conditions are only possibly evaluated.
 fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
-    judge_condition(node, &entry_dir, reached, state);
+    let Some(inner) = judge_item_pass_gate(node, &entry_dir, reached, state).inner(reached) else {
+        return;
+    };
     for item in node.children().filter(Node::is_element) {
-        judge_condition(item, &entry_dir, reached, state);
+        let Some(reached) = judge_item_pass_gate(item, &entry_dir, inner, state).inner(inner)
+        else {
+            continue;
+        };
         if let Some(sure) = loader::remove_matching_more_than_items(item) {
             state.note_rejection(
                 certain_if(reached && sure),
@@ -516,11 +567,12 @@ fn judge_item_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
 /// against the project's directory, as for every item-pass condition.
 fn judge_item_definition_group(node: Node<'_, '_>, reached: bool, state: &mut State<'_>) {
     let entry_dir = state.entry_project_dir.clone();
-    let Some(inner) = judge_gate(node, &entry_dir, reached, state).inner(reached) else {
+    let Some(inner) = judge_item_pass_gate(node, &entry_dir, reached, state).inner(reached) else {
         return;
     };
     for definition in node.children().filter(Node::is_element) {
-        let Some(metadata_reached) = judge_gate(definition, &entry_dir, inner, state).inner(inner)
+        let Some(metadata_reached) =
+            judge_item_pass_gate(definition, &entry_dir, inner, state).inner(inner)
         else {
             continue;
         };

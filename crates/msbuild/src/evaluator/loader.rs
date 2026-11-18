@@ -885,11 +885,11 @@ fn holds_cdata(text: Node<'_, '_>) -> bool {
 /// `MatchOnMetadata` that names more than item types ("Only item types may be
 /// referenced when removing with MatchOnMetadata"; probed, `dotnet msbuild`
 /// 10.0): `Some(true)` for certain, `Some(false)` perhaps. Not the loader's
-/// rule but the item operation's, which MSBuild builds for every item of an
-/// item group it evaluates, under a false condition too, but not in a
-/// `<When>` it does not choose. Both lists are split at `;` and trimmed, and
-/// an empty one makes no claim; text a property, item or escape may change is
-/// only perhaps refused.
+/// rule but the item operation's, which a build builds for an item whose
+/// group's and own conditions hold (design-time evaluation, under false ones
+/// too), and not in a `<When>` it does not choose. Both lists are split at
+/// `;` and trimmed, and an empty one makes no claim; text a property, item or
+/// escape may change is only perhaps refused.
 pub(super) fn remove_matching_more_than_items(item: Node<'_, '_>) -> Option<bool> {
     let fragments = |text: &str| -> Vec<String> {
         text.split(';')

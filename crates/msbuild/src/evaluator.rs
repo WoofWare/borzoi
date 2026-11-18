@@ -895,7 +895,7 @@ struct State<'r> {
     /// MSBuild's batch of `Update`s for each item type whose `Update`s the walk
     /// models (`Compile`, `PackageReference`), as far as the walk can follow it
     /// ([`item_pass`]'s `update_strands_late`), keyed by lowercased item type.
-    update_batches: HashMap<String, item_pass::UpdateBatchRun>,
+    update_batches: HashMap<String, item_pass::UpdateBatches>,
     package_versions: Vec<PackageVersion>,
     package_versions_untracked: bool,
     global_package_references: Vec<GlobalPackageReference>,
@@ -1219,6 +1219,9 @@ struct State<'r> {
     /// ([`rejection`]); [`Self::into_project`] withdraws what the walk publishes
     /// when it is set.
     rejection: Option<crate::Rejection>,
+    /// Each rejection site noted so far, by span and diagnostic, so that a
+    /// group judged in both passes ([`rejection`]) reports a construct once.
+    noted_rejection_sites: HashSet<(Range<usize>, String)>,
     /// How many constructs the walk is inside whose gate it did not decide
     /// from certain inputs and took: a `<PropertyGroup>`, a `<Choose>` past a
     /// `<When>` so decided, or an import whose path it did not compute from
@@ -1670,6 +1673,7 @@ impl<'r> State<'r> {
             env_property_names,
             walk_opaque: None,
             rejection: None,
+            noted_rejection_sites: HashSet::new(),
             reach_doubted: 0,
             taken_import_path_certain: false,
             in_item_pass: false,
@@ -2148,6 +2152,7 @@ impl<'r> State<'r> {
             env_property_names: _,
             walk_opaque: _,
             rejection,
+            noted_rejection_sites: _,
             reach_doubted: _,
             taken_import_path_certain: _,
             in_item_pass: _,

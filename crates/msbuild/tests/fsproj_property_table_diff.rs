@@ -1688,13 +1688,11 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
 /// cannot decide stands between the condition and a position MSBuild never
 /// evaluates, the walk must not withdraw either.
 ///
-/// "MSBuild" is design-time evaluation (`Oracle::project_both`), as the walk's
-/// rejection model is: it evaluates an item's condition under a false
-/// `<ItemGroup>`, and an `Include` item's metadata's under a false item, which
-/// a build never reads. Every project a build rejects, design-time evaluation
-/// rejects too, so withdrawing what it rejects commits nothing a build
-/// rejects; the count of projects only design-time evaluation rejects is
-/// printed.
+/// "MSBuild" is a build's evaluation, as the walk's rejection model is.
+/// Design-time evaluation (`Oracle::project_both`) also evaluates an item's
+/// condition under a false `<ItemGroup>`, and an `Include` item's metadata's
+/// under a false item, which a build never reads; a project only it rejects
+/// is one the walk must evaluate, and the count of them is printed.
 #[test]
 fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     const UNDECIDED_TRUE: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
@@ -1798,11 +1796,32 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         ),
         (
             "<ItemGroup Condition=\"false\"><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
+            true,
+        ),
+        (
+            "<ItemGroup Condition=\"false\"><I Update=\"x\" Condition=\"{c}\" /></ItemGroup>",
+            true,
+        ),
+        (
+            "<ItemGroup Condition=\"false\"><I Include=\"x\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            true,
+        ),
+        (
+            "<ItemGroup Condition=\"UNDECIDED_FALSE\"><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
             false,
         ),
         (
             "<ItemGroup><I Include=\"x\" Condition=\"false\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
+            true,
+        ),
+        (
+            "<ItemGroup><I Include=\"x\" Condition=\"UNDECIDED_FALSE\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
             false,
+        ),
+        (
+            "<Choose><When Condition=\"true\"><ItemGroup Condition=\"false\"><I Include=\"x\" Condition=\"{c}\" />\
+             </ItemGroup></When></Choose>",
+            true,
         ),
         (
             "<ItemGroup><I Update=\"x\"><M Condition=\"{c}\">m</M></I></ItemGroup>",
@@ -1865,7 +1884,7 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         .map(String::from)
         .to_vec();
     let (mut rejected, mut committed, mut certain, mut possible) = (0usize, 0, 0, 0);
-    let mut design_time_only = 0usize;
+    let (mut design_time_only, mut design_time_only_evaluated) = (0usize, 0usize);
     let conditions = by_syntax
         .iter()
         .chain(&by_value)
@@ -1933,8 +1952,9 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
                 None => {}
             }
             let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
-            design_time_only += usize::from(both.design_time_only_rejects());
-            let Some(theirs) = both.design_time else {
+            let only_design_time_rejects = both.design_time_only_rejects();
+            design_time_only += usize::from(only_design_time_rejects);
+            let Some(theirs) = both.build else {
                 rejected += 1;
                 assert!(
                     ours.is_empty(),
@@ -1973,14 +1993,31 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
                     describe()
                 );
             }
+            // Where only design-time evaluation rejects and the walk decides
+            // every gate, the walk evaluates the project as a build does.
+            if only_design_time_rejects && decided && !template.contains("UNDECIDED") {
+                assert_eq!(
+                    parsed.rejection,
+                    None,
+                    "only design-time evaluation rejects this project\n{}",
+                    describe()
+                );
+                design_time_only_evaluated += 1;
+            }
         }
     }
     eprintln!(
-        "illegal conditions: {rejected} rejected by MSBuild ({design_time_only} by \
-         design-time evaluation alone); we claim {certain} rejections and allow {possible} \
-         more; {committed} values committed"
+        "illegal conditions: {rejected} rejected by MSBuild ({design_time_only} more by \
+         design-time evaluation alone, {design_time_only_evaluated} of them evaluated as a \
+         build does); we claim {certain} rejections and allow {possible} more; {committed} \
+         values committed"
     );
     // Anti-vacuity: each side of the contract is exercised, the claim too.
+    assert!(
+        design_time_only_evaluated >= 100,
+        "only {design_time_only_evaluated} projects only design-time evaluation rejects \
+         were evaluated"
+    );
     assert!(certain >= 150, "only {certain} rejections claimed");
     assert!(possible >= 50, "only {possible} rejections allowed");
     assert!(rejected >= 200, "only {rejected} rejected");
@@ -2248,12 +2285,11 @@ fn load_time_errors_reject_exactly_where_msbuild_loads_them() {
 /// the property table is held to certain-implies-exact, a claimed rejection to
 /// MSBuild's, and a project MSBuild evaluates must not be withdrawn.
 ///
-/// "MSBuild" is design-time evaluation (`Oracle::project_both`), as the walk's
-/// rejection model is: it also evaluates the items of a false `<ItemGroup>`,
-/// so an item it cannot evaluate there (a `Remove` with `MatchOnMetadata` and
-/// no item type) rejects the project, which a build accepts. Every project a
-/// build rejects, design-time evaluation rejects too, so withdrawing what it
-/// rejects commits nothing a build rejects.
+/// "MSBuild" is a build's evaluation, as the walk's rejection model is.
+/// Design-time evaluation (`Oracle::project_both`) also evaluates the items of
+/// a false `<ItemGroup>`, so an item it cannot evaluate there (a `Remove` with
+/// `MatchOnMetadata` and no item type) rejects the project, which a build
+/// accepts and the walk must evaluate; the count of such projects is printed.
 #[test]
 fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
     // `{a}` is where an attribute goes, `{c}` where a child goes.
@@ -2282,8 +2318,9 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
             "updating item",
             "<ItemGroup><I Update=\"x\"{a}>{c}</I></ItemGroup>",
         ),
-        // An item operation MSBuild builds in a group it evaluates, under a
-        // false condition too, but not in a `<When>` it does not choose.
+        // An item operation a build builds only for an item it evaluates: not
+        // under a false group (where design-time evaluation builds it), nor in
+        // a `<When>` it does not choose.
         (
             "removing item under a false group",
             "<ItemGroup Condition=\"false\"><I Remove=\"x\"{a}>{c}</I></ItemGroup>",
@@ -2552,7 +2589,7 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
         );
         let both = oracle.project_both(&xml, &names, Some(&project_path), &[]);
         design_time_only += usize::from(both.design_time_only_rejects());
-        let Some(theirs) = both.design_time else {
+        let Some(theirs) = both.build else {
             rejected += 1;
             if !ours.is_empty() {
                 failures.push(format!("MSBuild rejects, we committed {ours:?}: {site}"));
@@ -2583,8 +2620,8 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
     );
     eprintln!(
         "loader schema: {} cases; {rejected} rejected by MSBuild ({design_time_only} \
-         by design-time evaluation alone), {certain} claimed, {possible} more withdrawn; \
-         {evaluated} evaluated",
+         more by design-time evaluation alone), {certain} claimed, {possible} more \
+         withdrawn; {evaluated} evaluated",
         2 * cases.len()
     );
     // Anti-vacuity: both verdicts occur in numbers, and the claim covers most

@@ -553,13 +553,11 @@ fn an_illegal_condition_msbuild_evaluates_is_rejected() {
         "<PropertyGroup><W>abc</W><R Condition=\"$(W) &gt; 1\">x</R></PropertyGroup>",
         // A scalar outside the boolean vocabulary.
         "<PropertyGroup><R Condition=\"$(Unset)\">x</R></PropertyGroup>",
-        // An item's condition, whatever its group's holds.
+        // An item's condition under a true group, and an `Include` item's
+        // metadata under a true item.
         "<ItemGroup><I Include=\"x\" Condition=\"tr ue\" /></ItemGroup>",
-        "<ItemGroup Condition=\"false\"><I Include=\"x\" Condition=\"1 &lt; abc\" /></ItemGroup>",
-        "<ItemGroup Condition=\"false\"><I Remove=\"x\" Condition=\"tr ue\" /></ItemGroup>",
-        // An `Include` item's metadata, whatever the item's holds.
-        "<ItemGroup><I Include=\"x\" Condition=\"false\"><M Condition=\"tr ue\">m</M></I></ItemGroup>",
-        "<ItemGroup Condition=\"false\"><I Include=\"x\"><M Condition=\"1 &lt; abc\">m</M></I></ItemGroup>",
+        "<ItemGroup><I Remove=\"x\" Condition=\"tr ue\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\"><M Condition=\"1 &lt; abc\">m</M></I></ItemGroup>",
         "<ItemDefinitionGroup Condition=\"tr ue\" />",
         "<ItemDefinitionGroup><I Condition=\"tr ue\" /></ItemDefinitionGroup>",
         "<ItemDefinitionGroup><I><M Condition=\"1 &lt; abc\">m</M></I></ItemDefinitionGroup>",
@@ -593,7 +591,17 @@ fn an_illegal_condition_msbuild_never_evaluates_is_not_rejected() {
         "<PropertyGroup Condition=\"false\"><R Condition=\"tr ue\">x</R></PropertyGroup>",
         "<PropertyGroup Condition=\"false\"><R Condition=\"1 &lt; abc\">x</R></PropertyGroup>",
         "<ItemGroup Condition=\"false and 1 &lt; abc\"><I Include=\"x\" /></ItemGroup>",
+        // Nothing of a false-gated item, in a build.
+        "<ItemGroup Condition=\"false\"><I Include=\"x\" Condition=\"1 &lt; abc\" /></ItemGroup>",
+        "<ItemGroup Condition=\"false\"><I Remove=\"x\" Condition=\"tr ue\" /></ItemGroup>",
+        "<ItemGroup Condition=\"false\"><I Remove=\"x\" MatchOnMetadata=\"k\" /></ItemGroup>",
+        "<ItemGroup><I Remove=\"x\" MatchOnMetadata=\"k\" Condition=\"false\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" Condition=\"false\"><M Condition=\"tr ue\">m</M></I></ItemGroup>",
+        "<ItemGroup Condition=\"false\"><I Include=\"x\"><M Condition=\"1 &lt; abc\">m</M></I></ItemGroup>",
         "<ItemDefinitionGroup Condition=\"false\"><I><M Condition=\"tr ue\">m</M></I></ItemDefinitionGroup>",
+        // A gate that reads no property is false whichever branch MSBuild
+        // takes around it.
+        "<Choose><When Condition=\"$([System.String]::IsNullOrWhiteSpace(''))\"><ItemGroup Condition=\"false\"><I Include=\"x\" Condition=\"tr ue\" /></ItemGroup></When></Choose>",
         "<ItemDefinitionGroup><I Condition=\"false\"><M Condition=\"tr ue\">m</M></I></ItemDefinitionGroup>",
         "<ImportGroup Condition=\"false\"><Import Project=\"nope.props\" Condition=\"tr ue\" /></ImportGroup>",
         "<Choose><When Condition=\"true\" /><When Condition=\"tr ue\" /></Choose>",
@@ -634,6 +642,41 @@ fn an_illegal_condition_msbuild_may_not_evaluate_may_be_rejected() {
         ),
         format!(
             "<Choose><When Condition=\"{UNDECIDED_TRUE}\" /><Otherwise><ItemGroup><I Include=\"x\" Condition=\"tr ue\" /></ItemGroup></Otherwise></Choose>"
+        ),
+        // In such a branch, an item-pass gate reads the final property table,
+        // which a later write changes from what the walk holds there.
+        format!(
+            "<PropertyGroup><RunItems>false</RunItems></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\"><ItemGroup Condition=\"'$(RunItems)' == 'true'\">\
+             <I Include=\"x\" Condition=\"tr ue\" /></ItemGroup></When></Choose>\
+             <PropertyGroup><RunItems>true</RunItems></PropertyGroup>"
+        ),
+        format!(
+            "<PropertyGroup><RunItems>false</RunItems></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\"><ItemGroup>\
+             <I Include=\"x\" Condition=\"'$(RunItems)' == 'true'\"><M Condition=\"tr ue\">m</M></I>\
+             </ItemGroup></When></Choose>\
+             <PropertyGroup><RunItems>true</RunItems></PropertyGroup>"
+        ),
+        format!(
+            "<PropertyGroup><Word>5</Word></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\"><ItemGroup>\
+             <I Include=\"x\" Condition=\"$(Word) &gt; 1\" /></ItemGroup></When></Choose>\
+             <PropertyGroup><Word>abc</Word></PropertyGroup>"
+        ),
+        // ... or that the branch keeps from being written, so the value the
+        // walk holds where it meets the group is MSBuild's.
+        format!(
+            "<PropertyGroup><Word>abc</Word></PropertyGroup>\
+             <Choose><When Condition=\"{UNDECIDED_TRUE}\"><PropertyGroup><Flag>skip</Flag></PropertyGroup>\
+             <ItemGroup><I Include=\"x\" Condition=\"$(Word) &gt; 1\" /></ItemGroup></When></Choose>\
+             <PropertyGroup><Word Condition=\"'$(Flag)' == ''\">5</Word></PropertyGroup>"
+        ),
+        // A gate false by its last conjunct, whose first may throw on a value
+        // the walk is not sure of before that one decides.
+        format!(
+            "<PropertyGroup><X>1</X><X Condition=\"{UNDECIDED_TRUE}\">abc</X></PropertyGroup>\
+             <ItemGroup Condition=\"$(X) &gt; 2 And false\"><I Include=\"x\" Condition=\"tr ue\" /></ItemGroup>"
         ),
         // An `Update`'s metadata, evaluated only where the update applies.
         "<ItemGroup><I Update=\"x\"><M Condition=\"tr ue\">m</M></I></ItemGroup>".to_owned(),

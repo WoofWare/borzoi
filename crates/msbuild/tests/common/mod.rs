@@ -881,9 +881,10 @@ impl Oracle {
     }
 
     /// MSBuild's answer for one document in both evaluations, holding the two
-    /// to what makes design-time evaluation a sound stand-in for a build's
-    /// rejections: a build rejects only what design-time evaluation rejects,
-    /// and where both evaluate the document they read the same values.
+    /// to how they relate: a build rejects only what design-time evaluation
+    /// rejects, and where both evaluate the document they read the same
+    /// values. The walk is graded against [`BothEvaluations::build`]; a
+    /// document only design-time evaluation rejects is one it must evaluate.
     pub fn project_both(
         &mut self,
         xml: &str,

@@ -149,6 +149,9 @@ pub(super) struct DeferredItemGroup {
     /// Whether MSBuild reaches the group for certain, as the property pass
     /// found it ([`rejection::reach_is_certain`]).
     reach_certain: bool,
+    /// Whether the walk evaluates the group, or only judges its conditions:
+    /// one in a branch the walk could not decide ([`State::defer_judgement`]).
+    evaluated: bool,
 }
 
 impl<'r> State<'r> {
@@ -159,7 +162,20 @@ impl<'r> State<'r> {
     /// must not be resolved against the properties-so-far table the
     /// property pass is still building.
     pub(super) fn defer_item_group(&mut self, node: Node<'_, '_>, kind: DeferredGroupKind) {
-        if self.directory_build.fallback.is_some()
+        self.defer(node, kind, true);
+    }
+
+    /// Record a group of the item pass in a branch the walk could not decide
+    /// and does not walk, whose conditions MSBuild may evaluate: judged
+    /// ([`rejection::judge_deferred`]) against the final property table, as
+    /// MSBuild evaluates them, and not evaluated.
+    pub(super) fn defer_judgement(&mut self, node: Node<'_, '_>, kind: DeferredGroupKind) {
+        self.defer(node, kind, false);
+    }
+
+    fn defer(&mut self, node: Node<'_, '_>, kind: DeferredGroupKind, evaluated: bool) {
+        if evaluated
+            && self.directory_build.fallback.is_some()
             && node.children().any(|child| {
                 child.is_element()
                     && child
@@ -207,7 +223,8 @@ impl<'r> State<'r> {
             range: node.range(),
             import_site_span: self.import_site_span.clone(),
             in_sdk_subtree: self.in_sdk_subtree,
-            reach_certain: rejection::reach_is_certain(self),
+            reach_certain: evaluated && rejection::reach_is_certain(self),
+            evaluated,
         });
     }
 }
@@ -253,7 +270,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                 let node = resolve_deferred_node(entry_doc, group);
                 let dir = state.entry_project_dir.clone();
                 judge(node, &dir, state);
-                evaluate(node, state);
+                if group.evaluated {
+                    evaluate(node, state);
+                }
             }
             DeferredFileKey::Imported(index) => {
                 let file = &files[index];
@@ -270,7 +289,9 @@ pub(super) fn replay_deferred_item_groups(entry_doc: &Document<'_>, state: &mut 
                     .map(Path::to_path_buf)
                     .unwrap_or_default();
                 judge(node, &dir, state);
-                evaluate(node, state);
+                if group.evaluated {
+                    evaluate(node, state);
+                }
                 state.exit_this_file(frame);
             }
         }
@@ -596,6 +617,12 @@ fn evaluate_item_group(node: Node<'_, '_>, state: &mut State<'_>) {
     if has_package_child {
         state.note_package_uncertain_if_condition_uses_sdk_taint(node);
     }
+    if !matches!(
+        evaluate_item_condition_silent(node, state),
+        (CondGate::Run | CondGate::Skip, false)
+    ) {
+        forget_update_batches_under(node, state);
+    }
     let gate = evaluate_item_condition(node, state);
     if group_condition_tainted {
         item_lists_tainted_by_group_condition.apply(state);
@@ -838,15 +865,9 @@ fn walk_item_child(node: Node<'_, '_>, state: &mut State<'_>) {
 
 fn walk_item_child_unattributed(node: Node<'_, '_>, state: &mut State<'_>) {
     // MSBuild's batch of `Update`s, followed for the types whose `Update`s the
-    // walk models, before any condition: see [`update_strands_late`].
-    let batched = match package_item_kind_for_element(node) {
-        Some(PackageItemKind::PackageReference) => Some("PackageReference"),
-        Some(_) => None,
-        None => {
-            (modelled_item_kind_for_element(node) == Some(ItemKind::Compile)).then_some("Compile")
-        }
-    };
-    if let Some(item_type) = batched
+    // walk models, before the item's condition gates the rest: see
+    // [`update_strands_late`].
+    if let Some(item_type) = batched_item_type(node)
         && update_strands_late(node, item_type, state)
     {
         let update = attribute(node, "Update").unwrap_or_default().to_string();
@@ -2425,9 +2446,27 @@ fn walk_package_reference(node: Node<'_, '_>, state: &mut State<'_>) {
 }
 
 /// MSBuild's batch of `Update`s for one item type, as far as the walk follows
-/// it ([`update_strands_late`]).
+/// it ([`update_strands_late`]). An operation whose condition the walk cannot
+/// decide may or may not have run, so after one the walk no longer knows what
+/// the batch holds: it stops following it, and takes every later `Update` that
+/// could strand as one that does.
+#[derive(Debug)]
+pub(super) struct UpdateBatches {
+    /// The batch, while the walk knows it.
+    run: Option<UpdateBatchRun>,
+}
+
+impl Default for UpdateBatches {
+    fn default() -> Self {
+        UpdateBatches {
+            run: Some(UpdateBatchRun::default()),
+        }
+    }
+}
+
+/// MSBuild's batch of `Update`s for one item type, where the walk knows it.
 #[derive(Debug, Default)]
-pub(super) struct UpdateBatchRun {
+struct UpdateBatchRun {
     /// The comparison keys the batch holds.
     keys: HashSet<String>,
     /// Some fragment the batch may hold has no key the walk can compute, so
@@ -2438,11 +2477,26 @@ pub(super) struct UpdateBatchRun {
     pending: bool,
 }
 
+/// One fragment of an `Update` spec, as [`update_strands_late`] reads it.
+struct UpdateFragment {
+    /// Whether it holds an expansion character, which makes the `Update` leave.
+    expands: bool,
+    /// Its comparison key, where the walk can compute one.
+    key: Option<String>,
+    /// Whether leaving after it joined would strand it: its written text is
+    /// not its key, so removing it by text misses. (A spelling MSBuild compares
+    /// unnormalised is its own key.)
+    strandable: bool,
+}
+
 /// Whether `node`, an element of an item type whose `Update`s the walk models
 /// (`Compile`, `PackageReference`), leaves entries in MSBuild's batch of
 /// updates that it applies late, out of document order; feeding the batch as
-/// it goes. Run for every such element, before its condition: MSBuild batches
-/// a condition-false `Update` too (probed).
+/// it goes. Run for every such element, before its condition is acted on: a
+/// build batches no condition-false `Update` (it builds no operation for one;
+/// probed, `ProjectInstance`, dotnet 10), though design-time evaluation does.
+/// After an operation whose condition the walk cannot decide, the walk no
+/// longer follows the batch ([`UpdateBatches`]).
 ///
 /// The mechanism is `LazyItemList.ComputeItems`. Consecutive `Update`s of one
 /// type join a batch keyed by full path (`NormalizePathForComparisonNoThrow`,
@@ -2459,23 +2513,27 @@ pub(super) struct UpdateBatchRun {
 ///
 /// So this answers true when an `Update` leaves the batch at its second
 /// fragment or later, with one of those before it strandable (its written text
-/// not its key, ignoring case) and no batch pending. It over-approximates, as the
-/// conservative reading: a fragment without a computable key may collide with
-/// anything, and an operation whose condition the walk cannot
-/// decide does not flush.
+/// not its key, ignoring case) and no batch pending. It over-approximates, as
+/// the conservative reading: a fragment without a computable key may collide
+/// with anything, and once the walk stops following the batch every `Update`
+/// of more than one fragment may strand.
 fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_>) -> bool {
     let key = item_key(item_type);
     let (include, update) = (attribute(node, "Include"), attribute(node, "Update"));
+    let gate = evaluate_item_condition_silent(node, state);
+    // A build builds no operation for an item whose condition is false.
+    if matches!(gate, (CondGate::Skip, false)) {
+        return false;
+    }
+    let may_not_run = !matches!(gate, (CondGate::Run, false));
     let update = match (include.as_deref(), update.as_deref()) {
         (None, Some(update)) => update,
         _ => {
             // Another operation flushes a pending batch, if it runs.
-            let runs = matches!(
-                evaluate_item_condition_silent(node, state),
-                (CondGate::Run, false)
-            );
-            if runs
-                && let Some(run) = state.update_batches.get_mut(&key)
+            let batches = state.update_batches.entry(key).or_default();
+            if may_not_run {
+                batches.run = None;
+            } else if let Some(run) = batches.run.as_mut()
                 && run.pending
             {
                 *run = UpdateBatchRun::default();
@@ -2484,29 +2542,95 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
         }
     };
     let expansion = expand_silent(update, state);
+    let had_issue = expansion.had_issue();
+    let spec = expansion.value.ignoring_trust();
     let project_dir = state.entry_project_dir.clone();
-    let run = state.update_batches.entry(key).or_default();
-    let fragments: Vec<&str> = spec_fragments(expansion.value.ignoring_trust()).collect();
-    // Whether the walk cannot tell if the fragment it stopped at joined.
-    let mut undecided = false;
-    let mut left_at = None;
-    // Whether a fragment that joined is one leaving would strand: its written
-    // text is not its key, so removing it by text misses. (A spelling MSBuild
-    // compares unnormalised is its own key.)
-    let mut strandable = false;
-    for (i, fragment) in fragments.iter().enumerate() {
+    // Read lazily: MSBuild, and the walk, stop at the first fragment that
+    // leaves the batch.
+    let fragments = spec_fragments(spec).map(|fragment| {
         let expands = ["*", "?", "$(", "@(", "%"]
             .iter()
             .any(|marker| fragment.contains(marker));
-        let fragment_key = (!expands && !expansion.had_issue())
+        let key = (!expands && !had_issue)
             .then(|| item_spec::comparison_key(&fragment_identity(fragment), &project_dir))
             .flatten();
-        let joins = match &fragment_key {
-            Some(fragment_key) => !run.unknown && run.keys.insert(fragment_key.clone()),
+        let strandable = !crate::glob::compares_unnormalised(&fragment_identity(fragment))
+            && key
+                .as_ref()
+                .is_some_and(|key| *key != fragment.to_ascii_lowercase());
+        UpdateFragment {
+            expands,
+            key,
+            strandable,
+        }
+    });
+    let batches = state.update_batches.entry(key).or_default();
+    // One that may not run strands nothing where it does not, and where it
+    // does, what it strands on the batch it meets.
+    let strands = match batches.run.as_mut() {
+        Some(run) => step_update(run, fragments),
+        None => spec_fragments(spec).nth(1).is_some(),
+    };
+    if may_not_run {
+        // Whether or not it ran, the walk no longer knows the batch after it.
+        batches.run = None;
+    }
+    strands
+}
+
+/// Stop following the batches of updates of the item types `node`, an
+/// `<ItemGroup>` whose gate the walk did not decide from trusted inputs, holds
+/// an operation of: whether or not MSBuild runs the group, the walk no longer
+/// knows what those batches hold after it ([`update_strands_late`]).
+fn forget_update_batches_under(node: Node<'_, '_>, state: &mut State<'_>) {
+    for child in node.children().filter(Node::is_element) {
+        // A child whose own condition is false for certain builds nothing,
+        // whether or not the group runs.
+        if matches!(
+            evaluate_item_condition_silent(child, state),
+            (CondGate::Skip, false)
+        ) {
+            continue;
+        }
+        if let Some(item_type) = batched_item_type(child) {
+            state
+                .update_batches
+                .entry(item_key(item_type))
+                .or_default()
+                .run = None;
+        }
+    }
+}
+
+/// The item type of the element `node`, when it is one whose batch of
+/// `Update`s the walk follows ([`update_strands_late`]).
+fn batched_item_type(node: Node<'_, '_>) -> Option<&'static str> {
+    match package_item_kind_for_element(node) {
+        Some(PackageItemKind::PackageReference) => Some("PackageReference"),
+        Some(_) => None,
+        None => {
+            (modelled_item_kind_for_element(node) == Some(ItemKind::Compile)).then_some("Compile")
+        }
+    }
+}
+
+/// Run an `Update` of `fragments` on the batch `run`: whether it strands an
+/// entry ([`update_strands_late`]).
+fn step_update(
+    run: &mut UpdateBatchRun,
+    fragments: impl IntoIterator<Item = UpdateFragment>,
+) -> bool {
+    // Whether the walk cannot tell if the fragment it stopped at joined.
+    let mut undecided = false;
+    let mut left_at = None;
+    let mut strandable = false;
+    for (i, fragment) in fragments.into_iter().enumerate() {
+        let joins = match &fragment.key {
+            Some(key) => !run.unknown && run.keys.insert(key.clone()),
             None => {
                 // A fragment without a key may have joined, and may collide
                 // with any later one.
-                if !expands {
+                if !fragment.expands {
                     run.unknown = true;
                     undecided = true;
                 }
@@ -2517,9 +2641,7 @@ fn update_strands_late(node: Node<'_, '_>, item_type: &str, state: &mut State<'_
             left_at = Some(i);
             break;
         }
-        let decoded = fragment_identity(fragment);
-        strandable |= !crate::glob::compares_unnormalised(&decoded)
-            && fragment_key.is_some_and(|key| key != fragment.to_ascii_lowercase());
+        strandable |= fragment.strandable;
     }
     match left_at {
         None => {
