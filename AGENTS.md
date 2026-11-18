@@ -520,7 +520,10 @@ This is a Cargo workspace with ten members:
   its output kind with `--target:`, because FCS otherwise checks a library as
   an executable and accepts what its build rejects. Each project must be
   handed the references its build compiles against, transitive ones
-  included: FCS does not infer them from a referenced project's own. The
+  included (FCS does not infer them from a referenced project's own), as one
+  ordered list of DLLs and projects: FCS resolves a name two references
+  declare by their order, so a project from source keeps its DLL's place.
+  Fixture builds pin the oracle's language version and FSharp.Core. The
   oracle is held to itself in `tests/project_resolution/source_references.rs`:
   on generated graphs (every declaration kind a library exports, `.fsi`
   hiding, `internal` with and without `InternalsVisibleTo`, assembly-level
