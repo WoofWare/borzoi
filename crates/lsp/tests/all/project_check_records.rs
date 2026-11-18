@@ -230,6 +230,27 @@ fn a_reference_rewritten_in_place_is_read() {
     }
 }
 
+/// Two sources FCS takes for one file (names equal under its culture-aware,
+/// case-blind comparison) are refused: one file's record would hold the
+/// other's uses, and the other's none.
+#[test]
+fn sources_fcs_takes_for_one_file_are_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("Slot.fs");
+    let b = dir.path().join("Sl\u{ad}ot.fs");
+    let c = dir.path().join("Use.fs");
+    write(&a, "module Slot\nlet a = 1\n");
+    write(&b, "module Slot2\nlet b = 2\n");
+    write(&c, "module Use\nlet c = Slot.a + Slot2.b\n");
+    for oracle in ORACLES {
+        let mut child = resident(oracle);
+        match ask(&mut child, oracle, &[&a, &b, &c]) {
+            Err(why) if why.contains("one file") => {}
+            other => panic!("{oracle}: conflated sources must be refused: {other:?}"),
+        }
+    }
+}
+
 /// A resident oracle reads the sources as they are now: a file rewritten
 /// with its modification time put back is answered from its new text.
 #[test]

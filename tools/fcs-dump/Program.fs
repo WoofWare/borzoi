@@ -6429,9 +6429,21 @@ let private projectChecker () =
                 })
     )
 
+/// Refuse a project two of whose sources FCS would take for one file. FCS
+/// finds a file's results by comparing names under the current culture,
+/// ignoring case, so two such names (differing in case on a case-sensitive
+/// file system, or by an ignorable character such as U+00AD) would give one
+/// file's uses for both and none for the other.
+let private refuseConflatedSources (paths: string[]) =
+    for i in 0 .. paths.Length - 1 do
+        for j in i + 1 .. paths.Length - 1 do
+            if String.Equals(paths[i], paths[j], StringComparison.CurrentCultureIgnoreCase) then
+                failwithf "%s and %s are one file to FCS" paths[i] paths[j]
+
 /// The whole-project check of `projOpts` by a [`projectChecker`], of its
 /// sources as they are when the request starts, refused where it cannot
-/// describe them ([`readableReferences`], [`refuseUndescribedSources`]).
+/// describe them ([`refuseConflatedSources`], [`readableReferences`],
+/// [`refuseUndescribedSources`]).
 ///
 /// No request's answer depends on another's. The sources are read afresh
 /// into [`requestSources`]; a reference whose bytes changed clears FCS's
@@ -6445,6 +6457,7 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
     let release () =
         checker.ClearCache([ opts ])
         requestSources.Clear()
+    refuseConflatedSources opts.SourceFiles
     if referencesChanged (readableReferences opts) then
         checker.InvalidateAll()
     requestSources.Clear()
