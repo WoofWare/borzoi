@@ -6789,6 +6789,9 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
     match references |> List.filter (fun r -> Path.GetFileName r = "FSharp.Core.dll") with
     | [ _ ] -> ()
     | _ -> failwithf "%s: expected exactly one -r: naming FSharp.Core.dll" where
+    // Without it, fsc and FCS each add the framework beside themselves.
+    if not (List.contains "--noframework" switches) then
+        failwithf "%s: expected --noframework, so the framework is the -r: arguments" where
     let passed =
         switches
         |> List.choose (fun line ->
@@ -6979,7 +6982,7 @@ let private isMeasureOperator (t: FSharpType) = (measureOperator t).IsSome
 /// not substitute for one another render differently.
 let rec private formatSignatureType (t: FSharpType) : string =
     try
-        let t = if t.IsAbbreviation then t.StripAbbreviations() else t
+        let t = if t.IsAbbreviation && not t.IsMeasureType then t.StripAbbreviations() else t
         let args () =
             t.GenericArguments |> Seq.map formatSignatureType |> String.concat ", "
         if t.IsGenericParameter then
@@ -6997,7 +7000,7 @@ let rec private formatSignatureType (t: FSharpType) : string =
             // in whatever form it last normalised (`kg` from source,
             // `kg * 1` from a pickle): render it as its sorted factors.
             let rec factors (t: FSharpType) : string list =
-                let t = if t.IsAbbreviation then t.StripAbbreviations() else t
+                let t = if t.IsAbbreviation && not t.IsMeasureType then t.StripAbbreviations() else t
                 match measureOperator t with
                 | Some "MeasureOne" -> []
                 | Some "MeasureProduct`2" -> t.GenericArguments |> Seq.toList |> List.collect factors
@@ -7087,16 +7090,20 @@ let private outOfDomainText = [ "AssemblyKeyFile"; "AssemblyKeyName" ]
 /// project check is the one the build-agreement and signature checks grade,
 /// so the records come from it and describe the code the build compiled.
 let private graphFileRecords (results: FSharpCheckProjectResults) (paths: string[]) =
-    let uses = results.GetAllUsesOfAllSymbols()
-    let inFile (path: string) (file: string) = Path.GetFullPath file = path
+    // Partitioned once by normalised file name, then read in Compile order.
+    let byFile (fileOf: 'T -> string) (xs: 'T[]) =
+        xs |> Array.groupBy (fun x -> Path.GetFullPath(fileOf x)) |> dict
+    let uses = results.GetAllUsesOfAllSymbols() |> byFile (fun u -> u.FileName)
+    let diagnostics = results.Diagnostics |> byFile (fun d -> d.FileName)
+    let inFile (table: System.Collections.Generic.IDictionary<string, 'T[]>) path =
+        match table.TryGetValue path with
+        | true, xs -> xs
+        | _ -> [||]
     paths
     |> Array.map (fun path ->
         {| Path = path
-           Diagnostics =
-            results.Diagnostics
-            |> Array.filter (fun d -> inFile path d.FileName)
-            |> Array.map projectDiagnostic
-           Uses = uses |> Array.filter (fun u -> inFile path u.FileName) |> Array.map projectSymbolUse |})
+           Diagnostics = inFile diagnostics path |> Array.map projectDiagnostic
+           Uses = inFile uses path |> Array.map projectSymbolUse |})
 
 /// One `uses-project-graph-batch` request's response.
 let private respondGraph (checker: FSharpChecker) (root: JsonElement) =

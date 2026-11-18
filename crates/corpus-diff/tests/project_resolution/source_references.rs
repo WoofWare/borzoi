@@ -389,7 +389,7 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
     let mut into_library: BTreeMap<String, usize> = BTreeMap::new();
     let mut consumer_errors = 0usize;
     let mut consumers_built = 0usize;
-    let mut twins: Vec<Option<Case>> = Vec::new();
+    let mut twins: Vec<Case> = Vec::new();
     let mut why_dropped: BTreeMap<String, String> = BTreeMap::new();
     for (((case, fixture), args), &(seed, i)) in cases.iter().zip(&fixtures).zip(&args).zip(&seeds)
     {
@@ -481,20 +481,18 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
             let kind = u["SymbolKind"].as_str().unwrap_or("?").to_owned();
             *into_library.entry(kind).or_default() += 1;
         }
-        twins.push(clean_twin(
-            &mut oracle,
-            fixture,
-            args,
-            case,
-            &source,
-            &mut why_dropped,
-        ));
+        // Every case must get its twin: a lost one leaves that consumer's
+        // signature unchecked, which tag coverage over the run cannot see.
+        match clean_twin(&mut oracle, fixture, args, case, &source, &mut why_dropped) {
+            Ok(twin) => twins.push(twin),
+            Err(why) => failures.push(format!("case {i} of seed {seed} has no clean twin: {why}")),
+        }
     }
 
     // Each case's clean twin, built and held to its DLLs: most generated
     // consumers use what they cannot see and so build no DLL, which leaves
     // their own signature unchecked.
-    let twin_cases: Vec<&Case> = twins.iter().flatten().collect();
+    let twin_cases: Vec<&Case> = twins.iter().collect();
     let twin_fixtures: Vec<ProjectGraphFixture> =
         twin_cases.iter().map(|c| case_fixture(c)).collect();
     let twin_args: Vec<FixtureArgs> = par_map(twin_fixtures.len(), |i| {
@@ -505,9 +503,13 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
     for ((twin, fixture), args) in twin_cases.iter().zip(&twin_fixtures).zip(&twin_args) {
         let consumer = name(&twin.consumer);
         let request = fixture.source_request(args, &consumer);
-        let answer = oracle
-            .check(&request)
-            .unwrap_or_else(|e| panic!("twin of {}: the source check failed: {e}", twin.library));
+        // As in the original check, a reference read from disk instead of
+        // from source finds nothing there.
+        let answer = with_registered_references_hidden(&request, || {
+            oracle.check(&request).unwrap_or_else(|e| {
+                panic!("twin of {}: the source check failed: {e}", twin.library)
+            })
+        });
         let mut problems: Vec<String> = args
             .errors_agree(&request, &answer)
             .err()
@@ -594,9 +596,9 @@ fn use_error_lines(answer: &GraphResponse) -> BTreeMap<usize, String> {
 /// `case`'s clean twin: the same graph and inputs, with each consumer use
 /// and `open` FCS reports an error on removed, round by round (removing an
 /// `open` can break a later bare use). Each round rewrites `fixture`'s
-/// `Use.fs` and checks it from source again. `None` when a line other than a
-/// use or an `open` errs, an error lies outside `Use.fs`, or four rounds do
-/// not reach a clean consumer.
+/// `Use.fs` and checks it from source again. An error, saying why, when a
+/// line other than a use or an `open` errs, an error lies outside `Use.fs`,
+/// the oracle refuses a round, or four rounds do not reach a clean consumer.
 fn clean_twin(
     oracle: &mut ProjectGraphOracle,
     fixture: &ProjectGraphFixture,
@@ -604,7 +606,7 @@ fn clean_twin(
     case: &Case,
     first: &GraphResponse,
     why_dropped: &mut BTreeMap<String, String>,
-) -> Option<Case> {
+) -> Result<Case, String> {
     let consumer = name(&case.consumer);
     let request = fixture.source_request(args, &consumer);
     let use_fs = fixture.dir(&consumer).join("Use.fs");
@@ -613,7 +615,10 @@ fn clean_twin(
     for _ in 0..4 {
         let bad = use_error_lines(&answer);
         if bad.is_empty() {
-            return answer.errors().next().is_none().then_some(twin);
+            return match answer.errors().next() {
+                None => Ok(twin),
+                Some(e) => Err(format!("an error outside Use.fs: {e}")),
+            };
         }
         let text = consumer_files(&twin)[0].1.clone();
         let lines: Vec<&str> = text.lines().collect();
@@ -627,8 +632,8 @@ fn clean_twin(
             .copied()
             .collect();
         let removable = |l: &str| twin.uses.iter().any(|u| u == l) || l.starts_with("open ");
-        if !dropped.iter().all(|l| removable(l)) {
-            return None;
+        if let Some(l) = dropped.iter().find(|l| !removable(l)) {
+            return Err(format!("an error on a line that is no use or open: {l}"));
         }
         let kept: Vec<(String, String)> = twin
             .uses
@@ -641,9 +646,11 @@ fn clean_twin(
         twin.opens
             .retain(|o| !dropped.contains(format!("open {o}").as_str()));
         std::fs::write(&use_fs, &consumer_files(&twin)[0].1).expect("rewrite Use.fs");
-        answer = oracle.check(&request).ok()?;
+        answer = oracle
+            .check(&request)
+            .map_err(|e| format!("the oracle refused a round: {e}"))?;
     }
-    None
+    Err("four rounds did not reach a clean consumer".to_owned())
 }
 
 /// The generator's coverage: over the default run, every declaration kind
@@ -853,7 +860,8 @@ fn the_signature_tells_apart_paths_literals_and_defining_assemblies() {
             "Lib.fs".into(),
             "namespace First\n\nmodule Values =\n    [<Literal>]\n    let Export = 1\n    let plain = 1\n\n\
              namespace Second\n\nmodule Values =\n    [<Literal>]\n    let Export = 2\n    \
-             type Token = Token of int\n    let make () = Token 0\n"
+             type Token = Token of int\n    let make () = Token 0\n\n\
+             namespace Third\n\n[<Measure>] type kg\n[<Measure>] type N = kg\n\nmodule Forces =\n    let force = 1.0<N>\n"
                 .into(),
         )],
         &[],
@@ -1374,6 +1382,7 @@ fn the_graph_parser_refuses_everything_outside_its_domain() {
             }),
         ),
         ("one source twice", add_line("./Use.fs")),
+        ("no --noframework", drop_line("--noframework")),
         (
             "a platform fsc refuses for a library",
             add_line("--platform:anycpu32bitpreferred"),
