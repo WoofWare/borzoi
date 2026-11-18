@@ -331,10 +331,11 @@ impl PropertyMap {
             .map_or(Trust::certain_ref(), |entry| &entry.trust)
     }
 
-    /// Mark every bound name not in `protected` (lowercase) stale under
-    /// `cause`: the walk has passed content it cannot see, which may have
-    /// rewritten any value it holds — any but a reserved name or a caller
-    /// global, which no file can write.
+    /// Mark every bound name not in `protected` (lowercase: the reserved
+    /// names) stale under `cause`: the walk has passed content it cannot see,
+    /// which may have rewritten any value it holds but a reserved name's. A
+    /// caller global is no exception: the content may name it in its project's
+    /// `TreatAsLocalProperty` and write it (#1037).
     ///
     /// Visits only [`Self::fresh`]: every other bound entry was left stale by
     /// the previous call, and only a binding or a verdict can make one fresh
@@ -350,6 +351,35 @@ impl PropertyMap {
                 && !protected.contains(&lower)
             {
                 entry.trust.go_stale(cause);
+            }
+        }
+    }
+
+    /// The trust of `key`'s entry, `None` where it has none: what
+    /// [`Self::restore_trust`] puts back after verdicts that leave every value
+    /// alone.
+    pub(crate) fn entry_trust(&self, key: &str) -> Option<Trust> {
+        self.inner
+            .get(&key.to_ascii_lowercase())
+            .map(|entry| entry.trust.clone())
+    }
+
+    /// Put back what [`Self::entry_trust`] recorded for `key`, across verdicts
+    /// that left its value alone and its entry, if any, in place. A name it
+    /// leaves in [`Self::fresh`] only goes stale at the next latch, as every
+    /// bound name does.
+    pub(crate) fn restore_trust(&mut self, key: &str, trust: Option<Trust>) {
+        let lower = key.to_ascii_lowercase();
+        match trust {
+            Some(trust) => {
+                let entry = self
+                    .inner
+                    .get_mut(&lower)
+                    .expect("a verdict removes no entry it marks uncertain");
+                entry.trust = trust;
+            }
+            None => {
+                self.inner.remove(&lower);
             }
         }
     }

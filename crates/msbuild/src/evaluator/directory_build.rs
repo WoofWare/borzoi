@@ -857,6 +857,16 @@ pub(super) fn is_certain(state: &State<'_>, name: &str) -> bool {
 /// not certain of hold ([`is_certain`]), within the grammar. The pure walker
 /// has no file system, so an `Exists` leaf is outside it there.
 pub(super) fn decided_from_certain_inputs(state: &State<'_>, condition: &str, dir: &Path) -> bool {
+    decision_from_certain_inputs(state, condition, dir).is_some()
+}
+
+/// The way `condition` decides whatever the names the walk is not certain of
+/// hold, where it does ([`decided_from_certain_inputs`]).
+pub(super) fn decision_from_certain_inputs(
+    state: &State<'_>,
+    condition: &str,
+    dir: &Path,
+) -> Option<bool> {
     let observer = state.observer;
     let exists = |path: &str| condition_exists(observer, path, dir);
     let probes = state.follow_imports.then_some(condition::Probes {
@@ -864,8 +874,8 @@ pub(super) fn decided_from_certain_inputs(state: &State<'_>, condition: &str, di
         observer,
     });
     let unknown = |name: &str| !is_certain(state, name);
-    matches!(
-        condition::decide_without(condition, &state.lookup, probes, &unknown),
-        condition::Decision::Decided(_)
-    )
+    match condition::decide_without(condition, &state.lookup, probes, &unknown) {
+        condition::Decision::Decided(value) => Some(value),
+        _ => None,
+    }
 }
