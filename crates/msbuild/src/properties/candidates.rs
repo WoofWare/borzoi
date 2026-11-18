@@ -24,6 +24,11 @@ use super::escaping::Escaped;
 /// work of building one.
 pub(crate) const MAX_CANDIDATES: usize = 16;
 
+/// The bytes of escaped text every name's recorded candidates in one table may
+/// take together, past which a further record is [`Candidates::Anything`]:
+/// each name's are bounded, but copies of one set are not.
+pub(crate) const MAX_RECORDED_CANDIDATE_BYTES: usize = 1 << 20;
+
 /// The longest candidate, in bytes of escaped text, a name keeps before it
 /// holds [`Candidates::Anything`]. A value that splices a name twice doubles
 /// its candidates' length while their count stays put, so the count alone
@@ -95,6 +100,14 @@ impl Candidates {
             Candidates::Anything
         } else {
             Candidates::OneOf(values)
+        }
+    }
+
+    /// The bytes of escaped text the candidates take.
+    pub(crate) fn bytes(&self) -> usize {
+        match self {
+            Candidates::Anything => 0,
+            Candidates::OneOf(values) => values.iter().map(|value| value.text.len()).sum(),
         }
     }
 

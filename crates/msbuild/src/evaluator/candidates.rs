@@ -119,6 +119,13 @@ impl State<'_> {
                 }
             }
         }
+        // The bytes outside the references, each `$(Name)` spelt in
+        // `Name.len() + 3` of them.
+        let literal_bytes = raw.len()
+            - names
+                .iter()
+                .map(|(name, count)| count * (name.len() + 3))
+                .sum::<usize>();
         let mut each: Vec<Vec<Candidate>> = Vec::with_capacity(names.len());
         let mut product = 1usize;
         for (name, _) in &names {
@@ -141,7 +148,7 @@ impl State<'_> {
                 .zip(&choice)
                 .zip(&each)
                 .map(|(((_, count), &at), options)| count.saturating_mul(options[at].text.len()))
-                .fold(raw.len(), usize::saturating_add);
+                .fold(literal_bytes, usize::saturating_add);
             if length > MAX_CANDIDATE_BYTES {
                 return Candidates::Anything;
             }
@@ -179,11 +186,10 @@ impl State<'_> {
         raw: &str,
         table: &PropertyMap,
     ) -> (properties::Provenanced<Escaped>, Vec<properties::Issue>) {
-        if self.follow_imports {
-            properties::substitute_with_fs(raw, table, self.observer)
-        } else {
-            properties::substitute(raw, table)
-        }
+        // Without the file system: a speculative value is no reason for the
+        // evaluation to depend on what a probe would find, so one the Unix
+        // path adjustment would probe for is an issue, and anything.
+        properties::substitute(raw, table)
     }
 
     /// The candidates of a property element whose write the real build may
@@ -201,7 +207,9 @@ impl State<'_> {
     pub(super) fn widen_group_candidates(&mut self, group: Node<'_, '_>) {
         for element in group.children().filter(Node::is_element) {
             let name = element.tag_name().name();
-            if self.protected.contains(&name.to_ascii_lowercase()) {
+            if self.protected.contains(&name.to_ascii_lowercase())
+                || !super::property_child_could_write(element, self)
+            {
                 continue;
             }
             let widened = self.widened_candidates(element);
@@ -243,9 +251,18 @@ impl State<'_> {
             // What it holds is its only candidate already.
             return;
         }
-        let value = value.unwrap_or_else(|| match self.lookup.held_candidate(name) {
-            Some(held) if carried_certain => Candidates::one(held),
-            _ => Candidates::Anything,
+        let value = value.unwrap_or_else(|| {
+            let within_budget = self
+                .lookup
+                .held_len(name)
+                .is_none_or(|len| len <= MAX_CANDIDATE_BYTES);
+            match carried_certain && within_budget {
+                true => self
+                    .lookup
+                    .held_candidate(name)
+                    .map_or(Candidates::Anything, Candidates::one),
+                false => Candidates::Anything,
+            }
         });
         let candidates = before.map_or(value.clone(), |before| before.union(value));
         self.lookup.record_candidates(name, candidates);

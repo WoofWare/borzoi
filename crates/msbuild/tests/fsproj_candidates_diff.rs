@@ -546,6 +546,62 @@ fn the_final_msbuild_all_projects_is_no_claim() {
     assert_eq!(candidates_alone(xml, "MSBuildAllProjects"), None);
 }
 
+/// A copy of a value as long as the budget allows keeps its candidates: the
+/// bound counts the bytes outside the references, not their spelling.
+#[test]
+fn a_copy_at_the_budget_keeps_its_candidates() {
+    let long = "x".repeat(MAX_CANDIDATE_BYTES);
+    let xml = format!(
+        "<Project><PropertyGroup>\
+         <A Condition=\"'$(G.ToUpperInvariant())' == 'X'\">{long}</A><B>$(A)</B>\
+         </PropertyGroup></Project>"
+    );
+    assert_eq!(
+        candidates_alone(&xml, "B"),
+        Some(BTreeSet::from([String::new(), long]))
+    );
+}
+
+/// A value expanded only to name candidates asks the file system nothing: the
+/// evaluation's read set, which decides when it is stale, holds no path a
+/// skipped write's Unix path adjustment would probe.
+#[test]
+fn a_speculative_expansion_probes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("Demo.fsproj");
+    let xml = "<Project><PropertyGroup>\
+               <P Condition=\"'$(G.ToUpperInvariant())' == 'X'\">/probe-only-path\\foo</P>\
+               </PropertyGroup></Project>";
+    std::fs::write(&path, xml).unwrap();
+    let (parsed, _) = parse_fsproj_reads(
+        xml,
+        &path,
+        &HashMap::from([("G".to_owned(), "y".to_owned())]),
+        &common::oracle_environment(),
+        None,
+        None,
+        None,
+        &ReadProbe::default(),
+    )
+    .expect("well-formed");
+    let reads = format!("{:?}", parsed.read_set);
+    assert!(!reads.contains("probe-only-path"), "{reads}");
+}
+
+/// A child of a widened group whose own gate fails on every input cannot
+/// write: the name keeps the candidates it had.
+#[test]
+fn a_widened_group_skips_a_child_that_cannot_write() {
+    let xml = "<Project><PropertyGroup><R>$(G.ToUpperInvariant())</R><R>v</R>\
+               <P Condition=\"'$(G.ToUpperInvariant())' == 'X'\">p</P></PropertyGroup>\
+               <PropertyGroup Condition=\"'$(R)' == 'w'\">\
+               <P Condition=\"'k' == 'j'\">$(G.ToUpperInvariant())</P></PropertyGroup></Project>";
+    assert_eq!(
+        candidates_alone(xml, "P"),
+        Some(BTreeSet::from([String::new(), "p".to_owned()]))
+    );
+}
+
 /// Each `<Choose>` the walk cannot decide widens what its branches write
 /// once: four optional appends name the five strings they can make.
 #[test]

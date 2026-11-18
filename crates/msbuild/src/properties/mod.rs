@@ -117,6 +117,9 @@ pub struct PropertyMap {
     /// does. A binding of the name drops its record, and so does
     /// [`Self::go_stale`]; each record's name is in [`Self::fresh`].
     candidates: HashMap<String, Candidates>,
+    /// The bytes of every candidate in [`Self::candidates`], held to
+    /// [`candidates::MAX_RECORDED_CANDIDATE_BYTES`].
+    candidate_bytes: usize,
 }
 
 /// A value read from a [`PropertyMap`]. The field is private: a reader says it
@@ -172,6 +175,7 @@ impl PropertyMap {
             inner: HashMap::new(),
             fresh: Vec::new(),
             candidates: HashMap::new(),
+            candidate_bytes: 0,
         }
     }
 
@@ -224,7 +228,7 @@ impl PropertyMap {
         let key = key.into();
         let lower = key.to_ascii_lowercase();
         self.fresh.push(lower.clone());
-        self.candidates.remove(&lower);
+        self.remove_record(&lower);
         match self.inner.entry(lower) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
                 let entry = slot.get_mut();
@@ -292,7 +296,7 @@ impl PropertyMap {
     /// substitutions resolve to the stale value rather than emit Undefined.
     pub(crate) fn unbind(&mut self, key: &str) {
         let lower = key.to_ascii_lowercase();
-        self.candidates.remove(&lower);
+        self.remove_record(&lower);
         if let std::collections::hash_map::Entry::Occupied(mut slot) = self.inner.entry(lower) {
             if slot.get().trust.is_certain() {
                 slot.remove();
@@ -358,7 +362,7 @@ impl PropertyMap {
         for lower in std::mem::take(&mut self.fresh) {
             // The content just passed may have written any name, so no record
             // bounds what it holds now.
-            self.candidates.remove(&lower);
+            self.remove_record(&lower);
             if let Some(entry) = self.inner.get_mut(&lower)
                 && entry.value.is_some()
                 && !protected.contains(&lower)
@@ -367,7 +371,7 @@ impl PropertyMap {
             }
         }
         debug_assert!(
-            self.candidates.is_empty(),
+            self.candidates.is_empty() && self.candidate_bytes == 0,
             "every record's name is fresh until the next latch"
         );
     }
@@ -390,16 +394,34 @@ impl PropertyMap {
         self.candidates.get(&key.to_ascii_lowercase())
     }
 
-    /// Record the values the real build may hold for `key` now.
+    /// Record the values the real build may hold for `key` now: anything,
+    /// where keeping them would take the table's records past
+    /// [`candidates::MAX_RECORDED_CANDIDATE_BYTES`].
     pub(crate) fn record_candidates(&mut self, key: &str, candidates: Candidates) {
         let lower = key.to_ascii_lowercase();
+        self.remove_record(&lower);
+        let candidates = if self.candidate_bytes.saturating_add(candidates.bytes())
+            > candidates::MAX_RECORDED_CANDIDATE_BYTES
+        {
+            Candidates::Anything
+        } else {
+            candidates
+        };
+        self.candidate_bytes += candidates.bytes();
         self.fresh.push(lower.clone());
         self.candidates.insert(lower, candidates);
     }
 
     /// Drop `key`'s record, leaving what it may hold to its trust.
     pub(crate) fn forget_candidates(&mut self, key: &str) {
-        self.candidates.remove(&key.to_ascii_lowercase());
+        self.remove_record(&key.to_ascii_lowercase());
+    }
+
+    /// Drop the record of `lower`, a lowercase name, and its bytes.
+    fn remove_record(&mut self, lower: &str) {
+        if let Some(old) = self.candidates.remove(lower) {
+            self.candidate_bytes -= old.bytes();
+        }
     }
 
     /// A table holding only `bindings`, each name bound to its candidate (an
