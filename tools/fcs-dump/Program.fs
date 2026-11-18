@@ -6537,7 +6537,9 @@ type private GraphProject =
       ExclusiveRefs: bool
       DefineArgs: string[]
       LangVersionArgs: string[]
-      ProjectRefs: string[] }
+      ProjectRefs: string[]
+      /// `--target:` — what the project's build produces.
+      Target: string }
 
 /// Whether `s` is a non-empty run of ASCII letters, digits, `.`, `_` and `-`:
 /// what a graph request's project ids and assembly names must be, so that
@@ -6545,6 +6547,8 @@ type private GraphProject =
 /// name rather than a path or a display name.
 let private isPlainName (s: string) =
     s <> ""
+    && s <> "."
+    && s <> ".."
     && s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '.' || c = '_' || c = '-')
 
 /// Read one project object of a graph request.
@@ -6595,7 +6599,14 @@ let private readGraphProject (e: JsonElement) : GraphProject =
          | _ -> false)
       DefineArgs = strArray "defines" |> Array.map (fun d -> "--define:" + d.Trim())
       LangVersionArgs = pinnedLangVersionArgs (str "langversion")
-      ProjectRefs = strArray "projectRefs" }
+      ProjectRefs = strArray "projectRefs"
+      // Required, never defaulted: without `--target:` FCS checks a project
+      // as an executable, which accepts what a library's build rejects
+      // (FS0222, top-level code in a library's last file).
+      Target =
+        match str "target" with
+        | Some ("library" | "exe" | "winexe" | "module" as t) -> t
+        | other -> failwithf "project %s: target must be library, exe, winexe or module, got %A" id other }
 
 /// The output path a graph project is named by: its `-o:`, and the string its
 /// dependants' `-r:` and `FSharpReference` carry. It is never written, and
@@ -6644,12 +6655,13 @@ let private graphProjectOptions
     let dir = Option.ofObj (Path.GetDirectoryName p.Paths.[0]) |> Option.defaultValue "."
     let isOutput (o: string) =
         o.StartsWith "-o:" || o.StartsWith "--out:" || o.StartsWith "/out:"
+        || o.StartsWith "--target:" || o.StartsWith "/target:" || o = "-a"
     { baseOpts with
         ProjectFileName = Path.Combine(dir, "fcs-dump-" + p.Id + ".fsproj")
         OtherOptions =
             Array.concat
                 [ baseOpts.OtherOptions |> Array.filter (isOutput >> not)
-                  [| "-o:" + graphOutputPath p |]
+                  [| "-o:" + graphOutputPath p; "--target:" + p.Target |]
                   referenced |> Array.map (fun (out, _) -> "-r:" + out) ]
         ReferencedProjects =
             referenced
@@ -6714,17 +6726,19 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
 /// One JSON request per stdin line:
 ///
 /// ```text
-/// { "projects": [ { "id", "assemblyName", "paths": [<abs .fs/.fsi>…],
+/// { "projects": [ { "id", "assemblyName", "target": library|exe|winexe|module,
+///                   "paths": [<abs .fs/.fsi>…],
 ///                   "refs": [<abs .dll>…], "defines": [<sym>…],
 ///                   "langversion": <token|null>, "exclusiveRefs": <bool>,
 ///                   "projectRefs": [<id>…] } … ],
 ///   "check": <id> }
 /// ```
 ///
-/// Each project is checked as [`usesProjectFiles`] checks one, with two
+/// Each project is checked as [`usesProjectFiles`] checks one, with three
 /// additions: `-o:<graphOutputPath>`, which names its assembly
 /// `assemblyName` (FCS otherwise names it after its last source file, and no
-/// `InternalsVisibleTo` would ever match), and, per entry of `projectRefs`, a
+/// `InternalsVisibleTo` would ever match); `--target:`, so a library is
+/// checked as one; and, per entry of `projectRefs`, a
 /// `-r:` and an `FSharpReference` carrying that project's output path. A
 /// project's options are built once per request, so a project several others
 /// reference is one referenced project.
@@ -8836,7 +8850,7 @@ let private usage () =
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
     eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files} response/line"
-    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,assemblyName,paths,refs,defines,langversion,exclusiveRefs,projectRefs}],check}, F# project refs as FSharpReference; one compact {Files,Referenced} response/line"
+    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,assemblyName,target,paths,refs,defines,langversion,exclusiveRefs,projectRefs}],check}, F# project refs as FSharpReference; one compact {Files,Referenced} response/line"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
     eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files} response/line"
     2
