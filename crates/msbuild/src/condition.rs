@@ -691,10 +691,14 @@ fn scalar_reads_toolset_version(scalar: &ScalarExpr) -> bool {
 /// `MSBuildDisableFeaturesFromVersion`).
 fn raw_references(raw: &str, out: &mut Vec<String>) {
     out.extend(super::properties::property_references(raw).map(str::to_string));
-    if raw
-        .to_ascii_lowercase()
-        .contains("[msbuild]::arefeaturesenabled(")
-    {
+    // A call, however it is spaced (the property-expression parser allows
+    // whitespace before the arguments, and within `$( … )`).
+    let squeezed: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if squeezed.contains("[msbuild]::arefeaturesenabled(") && squeezed.contains("$(") {
         out.push("MSBuildDisableFeaturesFromVersion".to_owned());
     }
 }
@@ -1636,8 +1640,9 @@ fn eval_bool(
             );
             let lhs = expand_scalar_for_condition(lhs, props, fs.map(|fs| fs.observer), undefined)?;
             let rhs = expand_scalar_for_condition(rhs, props, fs.map(|fs| fs.observer), undefined)?;
+            // As equality reads a number (or may), or a version.
             let numeric = |value: &str| {
-                parse_msbuild_number(value).is_some() || parse_system_version(value).is_ok()
+                !matches!(equality_number(value), Ok(None)) || parse_system_version(value).is_ok()
             };
             if matches!(op, CompareOp::Eq | CompareOp::Neq)
                 && ((lhs_toolset && numeric(&rhs)) || (rhs_toolset && numeric(&lhs)))
@@ -2234,6 +2239,11 @@ mod tests {
             evaluate("'$(MSBuildToolsVersion)' == 'Current'", &props),
             Outcome::True
         );
+        // A number as equality reads one, a trailing NUL included.
+        assert_eq!(
+            evaluate("'$(MSBuildToolsVersion)' == '18%00'", &props),
+            Outcome::Unsupported
+        );
         assert_eq!(
             evaluate("'$(MSBuildToolsVersion)' != '18'", &props),
             Outcome::Unsupported
@@ -2253,9 +2263,17 @@ mod tests {
             &uncertain,
         );
         assert_ne!(judged.throws, Throws::Certainly, "{judged:?}");
-        // A literal that only spells the name reads nothing.
+        // A spaced call reads it too; a literal that only spells the name
+        // reads nothing.
+        let mut references = Vec::new();
+        raw_references(
+            "$([MSBuild]::AreFeaturesEnabled ('99.99'))",
+            &mut references,
+        );
+        assert_eq!(references, ["MSBuildDisableFeaturesFromVersion"]);
         let mut references = Vec::new();
         raw_references("AreFeaturesEnabled", &mut references);
+        raw_references("[MSBuild]::AreFeaturesEnabled('1')", &mut references);
         assert!(references.is_empty(), "{references:?}");
     }
 
