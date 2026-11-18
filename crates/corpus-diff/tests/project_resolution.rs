@@ -2230,6 +2230,45 @@ fn an_oracle_error_skip_quotes_the_diagnostics() {
     );
 }
 
+/// An error the check reported in no file is in every file's record, and is
+/// counted and quoted once, for the project, never at a file's site.
+#[test]
+fn an_oracle_error_in_no_file_is_counted_once() {
+    let in_no_file = FcsDiagnostic {
+        in_no_file: true,
+        ..fcs_error(
+            708,
+            "This control construct may only be used if the computation expression builder defines a 'Yield' method",
+            1,
+            0,
+        )
+    };
+    let files = [
+        FcsErrorFile {
+            path: PathBuf::from("/proj/A.fs"),
+            errors: vec![in_no_file.clone()],
+        },
+        FcsErrorFile {
+            path: PathBuf::from("/proj/B.fs"),
+            errors: vec![
+                fcs_error(39, "The type 'X' is not defined.", 3, 4),
+                in_no_file.clone(),
+            ],
+        },
+    ];
+    let reason = fcs_error_skip_reason(&files);
+    assert!(
+        reason.starts_with("1 files had FCS error diagnostics (2 errors): "),
+        "the error in no file is counted once, and makes no file erroring: {reason}"
+    );
+    assert_eq!(reason.matches("FS0708").count(), 1, "quoted once: {reason}");
+    assert!(
+        reason.contains("(in no file) FS0708") && !reason.contains("A.fs:1:0"),
+        "quoted without a site: {reason}"
+    );
+    assert!(reason.contains("B.fs:3:4 FS0039"), "{reason}");
+}
+
 /// Only the leading diagnostics are quoted — an 8473-error project must not
 /// paste 8473 messages into a one-line skip reason — and the tail is *counted*
 /// rather than dropped silently.
@@ -2267,6 +2306,7 @@ fn fcs_error(number: i32, message: &str, line: u32, col: u32) -> FcsDiagnostic {
             start: FcsPos { line, col },
             end: FcsPos { line, col },
         },
+        in_no_file: false,
     }
 }
 
@@ -3607,8 +3647,8 @@ fn generated_qualifier_cursors_agree_with_the_project_use_stream() {
 fn the_manifest_lists_every_inconsistent_handler_probe() {
     use borzoi_corpus_diff::AnswerSurface;
     use borzoi_corpus_diff::handler_diff::{
-        Expectation, Handler, HandlerReport, Outcome, PerturbedSkip, Probe, ProbeItem, Selected,
-        Variant,
+        Expectation, Handler, HandlerReport, Outcome, PerturbedError, PerturbedSkip, Probe,
+        ProbeItem, Selected, Variant,
     };
 
     let lib = "module Shared\nlet foo = 1\n";
@@ -3668,7 +3708,15 @@ fn the_manifest_lists_every_inconsistent_handler_probe() {
             ),
         ],
         divergences: Vec::new(),
-        perturbed_skip: Some(PerturbedSkip::FcsErrors(vec![(b.clone(), 2, 5, 39)])),
+        perturbed_skip: Some(PerturbedSkip::FcsErrors(vec![
+            PerturbedError::Located {
+                file: b.clone(),
+                line: 2,
+                col: 5,
+                number: 39,
+            },
+            PerturbedError::InNoFile { number: 708 },
+        ])),
         perturbed_texts: vec![Arc::from(lib), Arc::from(perturbed_using)],
         owned_elsewhere: vec![loaded.parses.paths[0].clone()],
         // The perturbed run was skipped, so only the plain copy's is a line.
@@ -3712,7 +3760,8 @@ fn the_manifest_lists_every_inconsistent_handler_probe() {
             "Synthetic.fsproj B.fs:2:19-29 \"foo\" handlers perturbed references middle\t\
              referenced-differently expected served-project",
             "Synthetic.fsproj B.fs:2:5 handlers perturbed fcs-error\tFS0039",
-            "Synthetic.fsproj handlers perturbed\tskipped fcs-errors errors=1",
+            "Synthetic.fsproj handlers perturbed\tskipped fcs-errors errors=2",
+            "Synthetic.fsproj handlers perturbed fcs-error in no file\tFS0708",
         ]
         .map(String::from)
         .iter()

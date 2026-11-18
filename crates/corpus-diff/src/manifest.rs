@@ -20,7 +20,9 @@
 //! - `<project>` → `comparable assets=…` or `skipped <why>`. A project that
 //!   stops being comparable moves its line; one the oracle cannot type-check
 //!   *grades nothing*, so it is `skipped fcs-errors` and its errors are listed
-//!   (`<file>:<line>:<col> fcs-error` → `FS<n>`) rather than hidden.
+//!   (`<file>:<line>:<col> fcs-error` → `FS<n>`, and an error the check
+//!   reported in no file once, as `<project> fcs-error in no file` → `FS<n>`)
+//!   rather than hidden.
 //! - `<file>` → `compared records=… definitions=…` for each Compile file the
 //!   oracle reported on — how many records it reported, and how many of those
 //!   are its own defining occurrences — or `unreported` for one it said nothing
@@ -51,7 +53,7 @@
 //! `root:<path>` for a file outside it): two projects may compile one file, and
 //! each project's results for it are separate facts.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use borzoi_oracle_harness::corpus_key::{Positions, corpus_relative};
@@ -59,10 +61,12 @@ use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_sema::DeferredReason;
 
 use crate::deferral_shape::DeferralCause;
-use crate::handler_diff::{HandlerReport, PerturbedSkip, Probe, Variant, consistent};
+use crate::handler_diff::{
+    HandlerReport, PerturbedError, PerturbedSkip, Probe, Variant, consistent,
+};
 use crate::{
     AnswerSurface, Graded, ItemOutcome, LoadSkip, ProjectAssetsStatus, ProjectRecord, ProjectSkip,
-    ProjectVerdict, ServedDecline, SetAside,
+    ProjectVerdict, ServedDecline, SetAside, distinct_fcs_errors,
 };
 
 /// Why a run could not be rendered as a manifest.
@@ -247,18 +251,23 @@ pub fn project_corpus_manifest(
             ProjectVerdict::Skipped(skip) => {
                 items.push((project.clone(), format!("skipped {}", skip_label(skip))));
                 if let ProjectSkip::FcsErrors { files } = skip {
-                    for file in files {
-                        let erroring = file_key(root, &record.project, &project, &file.path)?;
-                        for error in &file.errors {
-                            items.push((
-                                format!(
-                                    "{erroring}:{}:{} fcs-error",
-                                    error.range.start.line,
-                                    error.range.start.col + 1
-                                ),
-                                format!("FS{:04}", error.error_number),
-                            ));
-                        }
+                    let (located, in_no_file) = distinct_fcs_errors(files);
+                    for (path, error) in located {
+                        let erroring = file_key(root, &record.project, &project, path)?;
+                        items.push((
+                            format!(
+                                "{erroring}:{}:{} fcs-error",
+                                error.range.start.line,
+                                error.range.start.col + 1
+                            ),
+                            format!("FS{:04}", error.error_number),
+                        ));
+                    }
+                    for error in in_no_file {
+                        items.push((
+                            format!("{project} fcs-error in no file"),
+                            format!("FS{:04}", error.error_number),
+                        ));
                     }
                 }
             }
@@ -403,14 +412,26 @@ fn handler_entries(
                 format!("{project} handlers perturbed"),
                 format!("skipped fcs-errors errors={}", errors.len()),
             ));
-            for (path, line, col, number) in errors {
-                items.push((
-                    format!(
-                        "{}:{line}:{col} handlers perturbed fcs-error",
-                        file_key(root, &record.project, project, path)?
+            for error in errors {
+                let (key, number) = match error {
+                    PerturbedError::Located {
+                        file,
+                        line,
+                        col,
+                        number,
+                    } => (
+                        format!(
+                            "{}:{line}:{col} handlers perturbed fcs-error",
+                            file_key(root, &record.project, project, file)?
+                        ),
+                        number,
                     ),
-                    format!("FS{number:04}"),
-                ));
+                    PerturbedError::InNoFile { number } => (
+                        format!("{project} handlers perturbed fcs-error in no file"),
+                        number,
+                    ),
+                };
+                items.push((key, format!("FS{number:04}")));
             }
         }
     }
@@ -457,11 +478,16 @@ fn skip_label(skip: &ProjectSkip) -> String {
         .to_string(),
         ProjectSkip::FcsInvoke => "fcs-invoke-failed".to_string(),
         ProjectSkip::FcsParse => "fcs-output-unparseable".to_string(),
-        ProjectSkip::FcsErrors { files } => format!(
-            "fcs-errors files={} errors={}",
-            files.len(),
-            files.iter().map(|f| f.errors.len()).sum::<usize>()
-        ),
+        ProjectSkip::FcsErrors { files } => {
+            // An error in no file is counted once, and makes no file erroring.
+            let (located, in_no_file) = distinct_fcs_errors(files);
+            let erroring: BTreeSet<&Path> = located.iter().map(|(path, _)| *path).collect();
+            format!(
+                "fcs-errors files={} errors={}",
+                erroring.len(),
+                located.len() + in_no_file.len()
+            )
+        }
     }
 }
 

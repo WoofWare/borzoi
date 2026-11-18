@@ -70,6 +70,10 @@ impl OracleFile {
 #[serde(rename_all = "PascalCase")]
 pub struct OracleDiagnostic {
     pub severity: String,
+    /// The check reported this in no file. Every file's record carries it,
+    /// so it makes every file erroring, and a count takes it once.
+    #[serde(default)]
+    pub in_no_file: bool,
     pub error_number: i32,
     pub message: String,
 }

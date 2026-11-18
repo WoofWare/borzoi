@@ -1125,6 +1125,33 @@ pub struct FcsErrorFile {
     pub errors: Vec<FcsDiagnostic>,
 }
 
+/// An erroring project's errors, each once: every file's own, with the file,
+/// and those the check reported in no file ([`FcsDiagnostic::in_no_file`]),
+/// which every file's record carries, taken from the first file.
+pub fn distinct_fcs_errors(
+    error_files: &[FcsErrorFile],
+) -> (Vec<(&Path, &FcsDiagnostic)>, Vec<&FcsDiagnostic>) {
+    let located = error_files
+        .iter()
+        .flat_map(|f| {
+            f.errors
+                .iter()
+                .filter(|d| !d.in_no_file)
+                .map(|d| (f.path.as_path(), d))
+        })
+        .collect();
+    let in_no_file = error_files
+        .first()
+        .map(|f| f.errors.iter().filter(|d| d.in_no_file).collect())
+        .unwrap_or_default();
+    (located, in_no_file)
+}
+
+/// A file's errors that are its own: not those the check reported in no file.
+fn located_in(file: &FcsErrorFile) -> Vec<&FcsDiagnostic> {
+    file.errors.iter().filter(|d| !d.in_no_file).collect()
+}
+
 /// How many of an erroring project's diagnostics the skip reason quotes.
 /// Bounded because a project missing a reference errors on nearly every line
 /// (8473 diagnostics across 113 files, measured on `WoofWare.PawPrint`) and the
@@ -1140,30 +1167,40 @@ const QUOTED_FCS_MESSAGE_CHARS: usize = 110;
 /// quoted.
 ///
 /// One error is quoted per file before any file's second error, so a single
-/// pathological file cannot crowd out the diagnostic that names the cause.
+/// pathological file cannot crowd out the diagnostic that names the cause. An
+/// error in no file is quoted first, once, since it may be the cause of the
+/// rest; it is counted once, though every file's record carries it.
 pub fn fcs_error_skip_reason(error_files: &[FcsErrorFile]) -> String {
-    let total: usize = error_files.iter().map(|f| f.errors.len()).sum();
-    let mut quotes = Vec::new();
+    let (located, in_no_file) = distinct_fcs_errors(error_files);
+    let total = located.len() + in_no_file.len();
+    let mut quotes: Vec<String> = in_no_file
+        .iter()
+        .take(QUOTED_FCS_ERRORS)
+        .map(|diag| quote_fcs_error_in_no_file(diag))
+        .collect();
     // Round-robin over files: rank 0 takes each file's first error, rank 1 its
     // second, and so on.
     let deepest = error_files
         .iter()
-        .map(|f| f.errors.len())
+        .map(|f| located_in(f).len())
         .max()
         .unwrap_or(0);
     'quoting: for rank in 0..deepest {
         for file in error_files {
-            if let Some(diag) = file.errors.get(rank) {
+            if quotes.len() == QUOTED_FCS_ERRORS {
+                break 'quoting;
+            }
+            if let Some(diag) = located_in(file).get(rank) {
                 quotes.push(quote_fcs_error(&file.path, diag));
-                if quotes.len() == QUOTED_FCS_ERRORS {
-                    break 'quoting;
-                }
             }
         }
     }
+    let files = error_files
+        .iter()
+        .filter(|f| !located_in(f).is_empty())
+        .count();
     let mut reason = format!(
-        "{} files had FCS error diagnostics ({total} errors): {}",
-        error_files.len(),
+        "{files} files had FCS error diagnostics ({total} errors): {}",
         quotes.join("; ")
     );
     let omitted = total.saturating_sub(quotes.len());
@@ -1178,15 +1215,29 @@ fn quote_fcs_error(path: &Path, diag: &FcsDiagnostic) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
+    format!(
+        "{file}:{}:{} FS{:04} {}",
+        diag.range.start.line,
+        diag.range.start.col,
+        diag.error_number,
+        quoted_message(diag)
+    )
+}
+
+fn quote_fcs_error_in_no_file(diag: &FcsDiagnostic) -> String {
+    format!(
+        "(in no file) FS{:04} {}",
+        diag.error_number,
+        quoted_message(diag)
+    )
+}
+
+fn quoted_message(diag: &FcsDiagnostic) -> String {
     let message = diag.message.replace('\n', " ");
-    let message = match message.char_indices().nth(QUOTED_FCS_MESSAGE_CHARS) {
+    match message.char_indices().nth(QUOTED_FCS_MESSAGE_CHARS) {
         Some((cut, _)) => format!("{}…", &message[..cut]),
         None => message,
-    };
-    format!(
-        "{file}:{}:{} FS{:04} {message}",
-        diag.range.start.line, diag.range.start.col, diag.error_number
-    )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1195,6 +1246,11 @@ pub struct FcsDiagnostic {
     pub message: String,
     pub error_number: i32,
     pub range: FcsRange,
+    /// The check reported this in no source file: an error FCS raises with
+    /// no location. Every file's record carries it, so it makes every file
+    /// erroring, and a count or a list of errors takes it once, for the
+    /// project ([`distinct_fcs_errors`]).
+    pub in_no_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1241,6 +1297,8 @@ struct RawDiagnostic {
     error_number: i32,
     #[serde(rename = "Range")]
     range: FcsRange,
+    #[serde(rename = "InNoFile", default)]
+    in_no_file: bool,
 }
 
 #[derive(Deserialize)]
@@ -1314,6 +1372,7 @@ pub fn parse_project_uses(
                     message: d.message,
                     error_number: d.error_number,
                     range: d.range,
+                    in_no_file: d.in_no_file,
                 })
                 .collect();
             let uses = f
@@ -2876,7 +2935,7 @@ fn perturbed_fcs(
     oracle: &mut UsesProjectOracle,
     files: &[perturb::Perturbed],
 ) -> Result<Vec<FileUses>, handler_diff::PerturbedSkip> {
-    use handler_diff::PerturbedSkip;
+    use handler_diff::{PerturbedError, PerturbedSkip};
     let dir = tempfile::tempdir().map_err(|e| PerturbedSkip::Fcs(e.to_string()))?;
     let mut copies = Vec::new();
     for (path, file) in loaded.parses.paths.iter().zip(files) {
@@ -2908,20 +2967,27 @@ fn perturbed_fcs(
         }
     };
     let mut errors = Vec::new();
-    for file in &mut fcs {
+    for (i, file) in fcs.iter_mut().enumerate() {
         respell(&mut file.path);
         for u in &mut file.uses {
             if let UseDecl::InProject(decl) = &mut u.decl {
                 respell(&mut decl.file);
             }
         }
+        // An error in no file is in every file's record; it is listed once.
         for error in file.error_diagnostics() {
-            errors.push((
-                file.path.clone(),
-                error.range.start.line,
-                error.range.start.col + 1,
-                error.error_number,
-            ));
+            if !error.in_no_file {
+                errors.push(PerturbedError::Located {
+                    file: file.path.clone(),
+                    line: error.range.start.line,
+                    col: error.range.start.col + 1,
+                    number: error.error_number,
+                });
+            } else if i == 0 {
+                errors.push(PerturbedError::InNoFile {
+                    number: error.error_number,
+                });
+            }
         }
     }
     if errors.is_empty() {

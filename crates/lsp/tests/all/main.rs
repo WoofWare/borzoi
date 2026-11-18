@@ -45,6 +45,7 @@ mod observed_counts;
 mod parse_cache;
 mod parser_corpus_sweep;
 mod project_assets_integration;
+mod project_check_records;
 mod project_deferral_e2e;
 mod reference_set_msbuild_diff;
 mod resolve_real_project_diff;

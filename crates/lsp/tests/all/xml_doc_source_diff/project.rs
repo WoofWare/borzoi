@@ -396,12 +396,15 @@ fn pinned_projects_docs_agree_with_fcs() {
             project.display()
         );
         let fcs = oracle(&loaded, true);
+        // An error in no file is in every file's record: count it once, from
+        // the first file's.
         let errors: usize = fcs
             .iter()
-            .map(|f| {
+            .enumerate()
+            .map(|(i, f)| {
                 f.diagnostics
                     .iter()
-                    .filter(|d| d.severity == "Error")
+                    .filter(|d| d.severity == "Error" && (i == 0 || !d.in_no_file))
                     .count()
             })
             .sum();

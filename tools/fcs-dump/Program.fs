@@ -6272,14 +6272,62 @@ let private scriptOptionsBatch () =
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
-/// Which of `paths` the check reported `fileName` in, if any. A diagnostic
-/// that belongs to no source names `startup`, `unknown` or nothing.
-let private checkedFileOf (paths: string[]) (fileName: string) : string option =
-    if String.IsNullOrEmpty fileName then
-        None
-    else
-        let full = Path.GetFullPath fileName
-        paths |> Array.tryFind (fun p -> p = full)
+/// Which of a project's sources each file name the check reports is, if any,
+/// with each distinct name resolved once: a large project reports hundreds of
+/// thousands of uses over a few hundred names. A diagnostic that belongs to no
+/// source names `startup`, `unknown` or nothing.
+type private CheckedFiles(paths: string[]) =
+    let sources = System.Collections.Generic.HashSet<string>(paths)
+    let resolved = System.Collections.Generic.Dictionary<string, string option>()
+
+    member _.Of(fileName: string) : string option =
+        match resolved.TryGetValue fileName with
+        | true, file -> file
+        | false, _ ->
+            let file =
+                if String.IsNullOrEmpty fileName then
+                    None
+                else
+                    let full = Path.GetFullPath fileName
+                    if sources.Contains full then Some full else None
+            resolved[fileName] <- file
+            file
+
+/// One diagnostic of a project-check record: [`projectDiagnostic`]'s fields
+/// and `InNoFile`, whether the check reported it in no source file (see
+/// [`projectCheckRecords`]).
+let private projectCheckDiagnostic (inNoFile: bool) (d: FSharp.Compiler.Diagnostics.FSharpDiagnostic) =
+    {| Severity = d.Severity.ToString()
+       Message = d.Message
+       ErrorNumber = d.ErrorNumber
+       Range = d.Range
+       InNoFile = inNoFile |}
+
+/// Distinguishes the options of one project-check request from every other's
+/// (`FSharpProjectOptions.Stamp`).
+let mutable private projectCheckRequests = 0L
+
+/// The whole-project check of `projOpts`, read from the sources as they are
+/// now.
+///
+/// It ignores line directives (`--ignorelinedirectives`), so every range it
+/// reports is in the file and at the place that holds the text. A `#line`
+/// moves only where fsc reports a range, never what the code means, and both
+/// sides of a differential locate a site in the file that holds it.
+///
+/// FCS keeps a checked project by its options and reads its sources again
+/// only when a file's modification time moves, so a resident oracle asked
+/// about a file rewritten within one tick would answer from the old text. A
+/// stamp of its own gives each request a project FCS has not checked, and the
+/// check is dropped from FCS's caches once read, so no request's answer
+/// depends on another's.
+let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (userOpName: string) =
+    let opts =
+        { projOpts with
+            OtherOptions = Array.append projOpts.OtherOptions [| "--ignorelinedirectives" |]
+            Stamp = Some(System.Threading.Interlocked.Increment(&projectCheckRequests)) }
+    let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
+    results, (fun () -> checker.ClearCache([ opts ]))
 
 /// A project-check oracle's payload, `{ Files }`, taken from `results`, the
 /// whole-project check of `paths`: each file's record `{ Path, Diagnostics,
@@ -6297,8 +6345,10 @@ let private checkedFileOf (paths: string[]) (fileName: string) : string option =
 /// import that does not resolve. The per-file check drops such a diagnostic,
 /// keeping only those in the file it checks, so a project fsc rejects could
 /// look clean. The project check cannot say which file raised it, so every
-/// file's record carries it: a reader that asks whether a file checked
-/// cleanly then gets no for every file, never a yes the compile did not give.
+/// file's record carries it, marked `InNoFile`: a reader that asks whether a
+/// file checked cleanly gets no for every file, never a yes the compile did
+/// not give, and a reader that counts or locates errors counts each marked
+/// one once, for the project.
 ///
 /// A use in no file cannot happen, since every use the check reports is in
 /// one of its sources, so one fails the request.
@@ -6307,17 +6357,18 @@ let private projectCheckRecords
     (results: FSharpCheckProjectResults)
     (paths: string[])
     =
+    let files = CheckedFiles paths
     let diagnosticsByFile =
-        results.Diagnostics |> Array.groupBy (fun d -> checkedFileOf paths d.FileName) |> Map.ofArray
+        results.Diagnostics |> Array.groupBy (fun d -> files.Of d.FileName) |> Map.ofArray
     let diagnosticsIn (file: string option) =
         match Map.tryFind file diagnosticsByFile with
-        | Some diagnostics -> diagnostics |> Array.map projectDiagnostic
+        | Some diagnostics -> diagnostics |> Array.map (projectCheckDiagnostic file.IsNone)
         | None -> [||]
     let inNoFile = diagnosticsIn None
     let usesByFile =
         results.GetAllUsesOfAllSymbols()
         |> Array.groupBy (fun u ->
-            match checkedFileOf paths u.FileName with
+            match files.Of u.FileName with
             | Some path -> path
             | None -> failwithf "the project check reported a use in %s, which is not a source file" u.FileName)
         |> dict
@@ -6331,6 +6382,21 @@ let private projectCheckRecords
             {| Path = path
                Diagnostics = Array.append (diagnosticsIn (Some path)) inNoFile
                Uses = usesIn path |}) |}
+
+/// [`projectCheckRecords`] of the project check of `projOpts`
+/// ([`checkProjectNow`]), whose sources are `paths`.
+let private checkedProjectRecords
+    (checker: FSharpChecker)
+    (projOpts: FSharpProjectOptions)
+    (userOpName: string)
+    (projectUse: FSharpSymbolUse -> 'U)
+    (paths: string[])
+    =
+    let results, release = checkProjectNow checker projOpts userOpName
+    try
+        projectCheckRecords projectUse results paths
+    finally
+        release ()
 
 /// Project-aware sibling of `dumpUses`: type-check an ordered set of source
 /// files as a *single project* (not isolated scripts), so name resolution sees
@@ -6380,12 +6446,12 @@ let private usesProjectFiles
     (defineArgs: string[])
     (langVersionArgs: string[])
     =
+    // Script resolution supplies the SDK's references and nothing else, so it
+    // reads no source: a script's directives (`#r`, `#load`, `#I`) are read
+    // with `EDITING` defined, and the project check reads each source's own
+    // directives as fsc does.
     let scriptOpts, scriptDiags =
-        projectScriptOptions
-            checker
-            paths.[0]
-            (File.ReadAllText(paths.[0]))
-            (Array.append defineArgs langVersionArgs)
+        projectScriptOptions checker paths.[0] "" (Array.append defineArgs langVersionArgs)
 
     let blocking =
         scriptDiags
@@ -6428,10 +6494,7 @@ let private usesProjectFiles
             OtherOptions = otherOptions
             UseScriptResolutionRules = false }
 
-    let results =
-        checker.ParseAndCheckProject(projOpts, userOpName = "fcs-dump-uses-project")
-        |> Async.RunSynchronously
-    projectCheckRecords projectSymbolUse results paths
+    checkedProjectRecords checker projOpts "fcs-dump-uses-project" projectSymbolUse paths
 
 let private dumpUsesProject () =
     let paths =
@@ -8460,7 +8523,8 @@ let private xmlDocProjectFiles
     (defineArgs: string[])
     (langVersionArgs: string[])
     =
-    let baseOpts, _ = projectScriptOptions checker paths.[0] (File.ReadAllText paths.[0]) [||]
+    // The SDK's references alone, as in `usesProjectFiles`: no source's text.
+    let baseOpts, _ = projectScriptOptions checker paths.[0] "" [||]
     let switches =
         baseOpts.OtherOptions
         |> Array.filter (fun o -> o.StartsWith("-") || o.StartsWith("/"))
@@ -8489,10 +8553,7 @@ let private xmlDocProjectFiles
                         switches
                 Array.concat [ switches; refArgs; defineArgs; langVersionArgs ]
             UseScriptResolutionRules = false }
-    let results =
-        checker.ParseAndCheckProject(projOpts, userOpName = "fcs-dump-xmldoc")
-        |> Async.RunSynchronously
-    projectCheckRecords projectXmlDocUse results paths
+    checkedProjectRecords checker projOpts "fcs-dump-xmldoc" projectXmlDocUse paths
 
 /// Resident source-XML-doc oracle. One JSON request per stdin line —
 /// `{ "paths": [<abs .fs/.fsi>…], "defines": [<sym>…], "langversion": <token|null>,
