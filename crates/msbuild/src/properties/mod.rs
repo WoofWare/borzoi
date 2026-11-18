@@ -27,6 +27,7 @@ use std::path::Path;
 
 pub(crate) mod escaping;
 mod expr;
+pub(crate) use expr::is_name_byte;
 pub(crate) mod path_fixup;
 pub(crate) mod trust;
 

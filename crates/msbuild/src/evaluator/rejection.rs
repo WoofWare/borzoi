@@ -28,7 +28,7 @@
 //! of which an import loads, so either is still a rejection.
 //!
 //! A condition the walk evaluates to [`condition::Outcome::Illegal`] is a
-//! site too ([`illegal_condition_at`]), and so is one MSBuild may evaluate
+//! site too ([`judge_condition_rejection`]), and so is one MSBuild may evaluate
 //! where the walk does not: under a gate the walk could not decide from
 //! certain inputs ([`judge_unwalked`]), and every condition of the item pass,
 //! judged group by group ([`judge_deferred`]) because MSBuild evaluates an
@@ -52,10 +52,12 @@
 //!   missing file at a path with nothing to collapse and an empty path are
 //!   claimed: what the walk's XML reader and file system call malformed or
 //!   unreadable, MSBuild may read;
-//! - an illegal condition whose verdict depends on the values it reads
-//!   (MSB4086, a non-boolean scalar) must read only certain values, the
-//!   stale channel included ([`operands_are_certain`]); a syntax error
-//!   rejects whatever they hold ([`condition::rejected_by_syntax`]).
+//! - an illegal condition must throw whatever the names it reaches that the
+//!   walk is not certain of hold, the stale channel included
+//!   ([`judge_condition_rejection`]): a syntax error, or an ill-typed operand
+//!   (MSB4086, a non-boolean scalar) reached, left to right, through operands
+//!   of certain value. What an operand MSBuild never reaches reads does not
+//!   matter.
 //!
 //! Short of that, the same construct is a Possible site.
 //!
@@ -218,19 +220,74 @@ pub(super) fn import_failure_certainty(
     )
 }
 
-/// A condition the walk evaluated to [`condition::Outcome::Illegal`], at
-/// `span`: MSBuild rejects the project if it evaluates it with the values the
-/// walk read. `reached`: whether MSBuild evaluates it for certain.
-pub(super) fn illegal_condition_at(
+/// Note the rejection MSBuild may make evaluating `condition`, at `span`,
+/// which the walk evaluated to `outcome` on the values it holds, `Exists`
+/// resolved against `exists_dir`. `reached`: whether MSBuild evaluates the
+/// condition for certain.
+///
+/// A condition that throws on the values the walk holds
+/// ([`condition::Outcome::Illegal`]) may make MSBuild reject the project. The
+/// rejection is certain where MSBuild throws whatever the names the walk is
+/// not certain of hold ([`directory_build::is_certain`], the stale channel
+/// included): MSBuild evaluates the condition left to right and stops at the
+/// operand that decides it ([`condition::throws_whatever`]), so a throw on certain
+/// values that MSBuild reaches through operands of certain value is certain,
+/// whatever an operand it never reaches reads.
+///
+/// One whose evaluation stopped at an operand we cannot evaluate
+/// ([`condition::Outcome::Unsupported`]) is a Possible site where, on the
+/// values the walk holds, that operand may let MSBuild reach one it throws
+/// on.
+///
+/// A condition legal on the values the walk holds is no site, though one it
+/// reaches may throw on another value of a name the walk is not certain of
+/// ([`condition::Throws::Maybe`]): judging that withdraws every project the
+/// SDK's own conditions read such a name in, so it waits on knowing what
+/// values such a name may hold (#1009).
+pub(super) fn judge_condition_rejection(
     state: &mut State<'_>,
     condition: &str,
+    outcome: condition::Outcome,
+    exists_dir: &Path,
     reached: bool,
     span: Range<usize>,
 ) {
-    let certain = reached
-        && (condition::rejected_by_syntax(condition) || operands_are_certain(state, condition));
+    let observer = state.observer;
+    let exists = |path: &str| condition_exists(observer, path, exists_dir);
+    let probes = state.follow_imports.then_some(condition::Probes {
+        exists: &exists,
+        observer,
+    });
+    match outcome {
+        condition::Outcome::True | condition::Outcome::False => return,
+        condition::Outcome::Unsupported => {
+            // Evaluation stopped at an operand we cannot evaluate, which may
+            // return a value that lets MSBuild reach one it throws on with
+            // the values the walk holds. What an operand past it reads from
+            // the file system may decide whether it throws, so the judgement
+            // probes as the evaluation would have.
+            if condition::may_throw(condition, &state.lookup, probes, &|_| false) {
+                state.note_rejection(
+                    RejectionCertainty::Possible,
+                    RejectionCause::IllegalCondition {
+                        condition: condition.to_owned(),
+                    },
+                    span,
+                );
+            }
+            return;
+        }
+        condition::Outcome::Illegal => {}
+    }
+    // Reached only perhaps, it is Possible however its operands stand, and
+    // judging them would only probe the file system for nothing.
+    let certainly = reached && {
+        let uncertain = |name: &str| !directory_build::is_certain(state, name);
+        condition::throws_whatever(condition, &state.lookup, probes, &uncertain)
+    };
+    let certainty = certain_if(certainly);
     state.note_rejection(
-        certain_if(certain),
+        certainty,
         RejectionCause::IllegalCondition {
             condition: condition.to_owned(),
         },
@@ -353,9 +410,7 @@ fn judge_text(
     } else {
         condition::evaluate(text, &state.lookup).outcome
     };
-    if outcome == condition::Outcome::Illegal {
-        illegal_condition_at(state, text, reached, node.range());
-    }
+    judge_condition_rejection(state, text, outcome, exists_dir, reached, node.range());
     outcome
 }
 

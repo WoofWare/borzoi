@@ -1711,7 +1711,23 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     ];
     // Ill typed on the values written: `Word` holds `abc` for certain,
     // `Maybe` under a gate the walk cannot decide.
-    let by_value = ["1 &lt; abc", "$(Word) &gt; 1", "$(Word)", "$(Maybe) &gt; 1"];
+    let by_value = [
+        "1 &lt; abc",
+        "$(Word) &gt; 1",
+        "$(Word)",
+        "$(Maybe) &gt; 1",
+        // A NaN spelling is no empty string, nor the word `abc`, so MSBuild
+        // reaches the error.
+        "'NaN' != '' And 1 &lt; abc",
+        "'NaN' != 'abc' And 1 &lt; abc",
+        // MSBuild may reach the error past an operand the walk cannot evaluate:
+        // an unknown function, a `$(MSBuildToolsVersion)` equality (MSBuild
+        // reads its `Current` as Visual Studio's version beside a number), or
+        // a comparison that reads the file system.
+        "$([System.String]::Unknown()) == '' And 1 &lt; abc",
+        "'$(MSBuildToolsVersion)' == '18' And 1 &lt; abc",
+        "'Current' != '18' And $([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildProjectDirectory)', 'flag')) &gt; 1",
+    ];
     // Ill typed exactly where `Exists` resolves against the project's
     // directory, which holds `flag`, or exactly where it resolves against the
     // imported file's, which does not: each position's `Exists` directory,
@@ -1725,6 +1741,49 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         "'a' == 'b'",
         "false and 1 &lt; abc",
         UNDECIDED_TRUE,
+        // NaN equals nothing, and a number with a NUL after it is that
+        // number, so MSBuild stops before the illegal operand.
+        "'NaN' == 'NaN' And 1 &lt; abc And '$(Shaky)' == ''",
+        "'1%00' != '1' And 1 &lt; abc And '$(Shaky)' == ''",
+        "'$(MSBuildToolsVersion)' != '18' And 1 &lt; abc And '$(Shaky)' == ''",
+        // Equality compares no versions: `Current` is no `18.0.0`.
+        "'$(MSBuildToolsVersion)' == '18.0.0' And 1 &lt; abc",
+        "'-0.1' &lt; '0.0.0' And 1 &lt; abc And '$(Shaky)' == ''",
+    ];
+    // MSBuild evaluates a condition left to right and stops at the operand
+    // that decides it. The first throws on a certain operand before one the
+    // walk is not sure of, however that one decides: a rejection as certain as
+    // the condition's reach. The second throws on the value the walk holds for
+    // `Shaky` (`1`, no boolean) and on MSBuild's.
+    let reaches_uncertain = ["1 &lt; abc Or $(Maybe) == 'x'", "$(Shaky) Or true"];
+    // Each of these reaches `Shaky` (`1`, then `abc` under a gate the walk
+    // cannot decide, so the walk holds a legal value it is not sure of) where
+    // it throws on MSBuild's value, however a later operand decides. MSBuild
+    // rejects the project; the walk does not yet judge a condition legal on
+    // the values it holds (#1009), so it commits. Pinned where nothing else is
+    // in doubt, so that judging them shows here.
+    let legal_on_held_values = [
+        "$(Shaky) &gt; 2 And false",
+        "$(Shaky) &gt; 2 Or true",
+        "false Or ($(Shaky) &gt; 2 And 'a' == 'b')",
+        "!($(Shaky) &gt; 2) Or true",
+    ];
+    // A property function MSBuild throws on, held (`Maybe` unset) and real
+    // (`abc`) alike, which the walk does not model: an operand it cannot
+    // evaluate claims nothing, so it commits. Pinned likewise.
+    let unmodelled_throwing_call = ["$(Maybe.Substring(5)) == ''"];
+    let not_yet_judged: Vec<&str> = legal_on_held_values
+        .iter()
+        .chain(&unmodelled_throwing_call)
+        .copied()
+        .collect();
+    // ... and each of these stops before it, so MSBuild never reads it.
+    let stops_before_uncertain = [
+        "false And $(Shaky) &gt; 2",
+        "true Or $(Shaky) &gt; 2",
+        "('a' == 'b' And $(Shaky)) Or 'a' == 'a'",
+        "!(true Or $(Shaky) &gt; 2) Or 'a' == 'a'",
+        "false And $(Maybe.Substring(5)) == ''",
     ];
     // `(template, never)`: `{c}` is the condition, and `never` says MSBuild
     // evaluates it in no build, the walk deciding every gate that says so.
@@ -1866,11 +1925,16 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         .to_vec();
     let (mut rejected, mut committed, mut certain, mut possible) = (0usize, 0, 0, 0);
     let mut design_time_only = 0usize;
+    let mut short_circuit_checked = 0usize;
+    let mut not_yet_judged_pinned = 0usize;
     let conditions = by_syntax
         .iter()
         .chain(&by_value)
         .chain(&by_directory)
-        .chain(&legal);
+        .chain(&legal)
+        .chain(&reaches_uncertain)
+        .chain(&not_yet_judged)
+        .chain(&stops_before_uncertain);
     for (condition, &(template, never)) in
         conditions.flat_map(|c| positions.iter().map(move |p| (c, p)))
     {
@@ -1901,7 +1965,8 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
             };
             let xml = format!(
                 "<Project>\n  <PropertyGroup><Word>abc</Word>\
-                 <Maybe Condition=\"{UNDECIDED_TRUE}\">abc</Maybe><Beta>b</Beta></PropertyGroup>\n  \
+                 <Maybe Condition=\"{UNDECIDED_TRUE}\">abc</Maybe><Beta>b</Beta>\
+                 <Shaky>1</Shaky><Shaky Condition=\"{UNDECIDED_TRUE}\">abc</Shaky></PropertyGroup>\n  \
                  {before}\n  {site}\n  <PropertyGroup><Gamma>g</Gamma></PropertyGroup>\n</Project>\n"
             );
             std::fs::write(&project_path, &xml).unwrap();
@@ -1936,6 +2001,20 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
             design_time_only += usize::from(both.design_time_only_rejects());
             let Some(theirs) = both.design_time else {
                 rejected += 1;
+                if not_yet_judged.contains(condition) {
+                    // Today's verdict (#1009): no site, so the walk commits.
+                    if context == Context::Plain && !template.contains("UNDECIDED") {
+                        assert_eq!(
+                            parsed.rejection,
+                            None,
+                            "a condition the walk does not yet judge is judged now: \
+                             update the pin (#1009)\n{}",
+                            describe()
+                        );
+                        not_yet_judged_pinned += 1;
+                    }
+                    continue;
+                }
                 assert!(
                     ours.is_empty(),
                     "certain-implies-exact violated: MSBuild rejects this project, but we \
@@ -1964,6 +2043,7 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
             // a position MSBuild never evaluates: no doubt to withdraw for.
             let decided = context != Context::AfterHiddenContent
                 && !condition.contains("Maybe")
+                && !condition.contains("Shaky")
                 && !condition.contains("IsNullOrWhiteSpace");
             if never && decided {
                 assert_eq!(
@@ -1973,8 +2053,31 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
                     describe()
                 );
             }
+            // An operand MSBuild never reaches is no cause to withdraw: where
+            // nothing else the walk cannot decide is in play, the condition
+            // cannot throw.
+            if stops_before_uncertain.contains(condition)
+                && context != Context::AfterHiddenContent
+                && !template.contains("UNDECIDED")
+            {
+                assert_eq!(
+                    parsed.rejection,
+                    None,
+                    "MSBuild stops before the operand the walk is not sure of\n{}",
+                    describe()
+                );
+                short_circuit_checked += 1;
+            }
         }
     }
+    assert!(
+        short_circuit_checked >= 50,
+        "only {short_circuit_checked} short-circuited cases checked"
+    );
+    assert!(
+        not_yet_judged_pinned >= 20,
+        "only {not_yet_judged_pinned} cases pinned the conditions not yet judged"
+    );
     eprintln!(
         "illegal conditions: {rejected} rejected by MSBuild ({design_time_only} by \
          design-time evaluation alone); we claim {certain} rejections and allow {possible} \

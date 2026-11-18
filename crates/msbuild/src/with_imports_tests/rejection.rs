@@ -587,6 +587,31 @@ fn an_illegal_condition_msbuild_evaluates_is_rejected() {
 }
 
 #[test]
+fn an_operand_msbuild_never_reaches_is_no_cause_to_withdraw() {
+    // MSBuild stops at the operand that decides the condition, so it never
+    // reads `X`, which the walk is not certain of, in any of these.
+    for position in [
+        "<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>",
+        "<PropertyGroup Condition=\"{c}\"><R>x</R></PropertyGroup>",
+        "<ImportGroup Condition=\"{c}\"><Import Project=\"nope.props\" /></ImportGroup>",
+        "<Import Project=\"nope.props\" Condition=\"{c}\" />",
+        "<ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
+        "<Choose><When Condition=\"{c}\" /></Choose>",
+    ] {
+        for c in ["false And $(X) &gt; 2", "!(true Or $(X) &gt; 2)"] {
+            let body = format!(
+                "<PropertyGroup><X>1</X><X Condition=\"{UNDECIDED_TRUE}\">abc</X></PropertyGroup>{}",
+                position.replace("{c}", c)
+            );
+            for parsed in both_walkers(&format!("  {body}")) {
+                assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+            }
+        }
+    }
+}
+
+#[test]
 fn an_illegal_condition_msbuild_never_evaluates_is_not_rejected() {
     for body in [
         "<PropertyGroup><R Condition=\"false and 1 &lt; abc\">x</R></PropertyGroup>",
@@ -644,6 +669,134 @@ fn an_illegal_condition_msbuild_may_not_evaluate_may_be_rejected() {
     ] {
         for parsed in both_walkers(&format!("  {body}")) {
             assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// Past an operand the walk cannot evaluate, a literal that throws only once
+/// the file system has its say (`/tmp\a;b`: the Unix path adjustment, then
+/// two items) is still judged, with the file system: MSBuild may reach it.
+#[test]
+fn a_literal_needing_the_file_system_past_an_unevaluable_operand_may_reject() {
+    let tmp = TempDir::new().unwrap();
+    let project_path = project(
+        &tmp,
+        "  <PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And \
+         HasTrailingSlash('/tmp\\a;b')\"><R>x</R></PropertyGroup>",
+        &[],
+    );
+    assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
+}
+
+/// Neither deciding a gate nor judging a rejection probes an operand past one
+/// that settles the question: an operand we cannot evaluate ends a decision,
+/// and a condition only possibly reached is Possible however its operands
+/// stand. So `tail`, which only such an operand reads, is not in the read set,
+/// and a change to it does not invalidate the evaluation.
+#[test]
+fn an_operand_past_the_one_that_settles_the_question_is_not_probed() {
+    for body in [
+        // The walk's evaluation stops at `U` (`x`, true); deciding the gate
+        // without trusting `U` goes on, and stops at the operand it cannot
+        // evaluate.
+        format!(
+            "<PropertyGroup><P>abc</P><U>x</U><U Condition=\"{UNDECIDED_TRUE}\">y</U></PropertyGroup>\
+             <PropertyGroup Condition=\"'$(U)' == 'x' Or ('$(P.Substring(5))' == '' And Exists('tail'))\">\
+             <R>x</R></PropertyGroup>"
+        ),
+        format!(
+            "<PropertyGroup><U>1</U><U Condition=\"{UNDECIDED_TRUE}\">true</U></PropertyGroup>\
+             <PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><R Condition=\"$(U) And Exists('tail')\">x</R></PropertyGroup>"
+        ),
+        // Evaluation stops at an operand it cannot evaluate; `Exists` cannot
+        // throw, nor gates an operand that can.
+        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail')\">\
+         <R>x</R></PropertyGroup>"
+            .to_owned(),
+        // ... nor a boolean literal after it, quoted or not.
+        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
+         And true\"><R>x</R></PropertyGroup>"
+            .to_owned(),
+        "<PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And Exists('tail') \
+         And 'true'\"><R>x</R></PropertyGroup>"
+            .to_owned(),
+        // Evaluation stops at an operand it cannot evaluate; whether MSBuild
+        // may throw is settled in the `Or`, before `Exists`.
+        "<PropertyGroup Condition=\"($([System.String]::IsNullOrWhiteSpace('')) Or 1 &lt; abc) \
+         And Exists('tail')\"><R>x</R></PropertyGroup>"
+            .to_owned(),
+        // Reached for certain, throwing on the value the walk holds (unset)
+        // but not certainly on MSBuild's: whether it throws for certain is
+        // settled at `U`.
+        format!(
+            "<PropertyGroup><U Condition=\"{UNDECIDED_TRUE}\">true</U></PropertyGroup>\
+             <UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Condition=\"$(U) And Exists('tail')\" />"
+        ),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let project_path = project(&tmp, &format!("  {body}"), &[]);
+        let parsed = parse_file(&project_path);
+        let probed: Vec<_> = parsed
+            .read_set
+            .reads()
+            .iter()
+            .filter(|read| read.path.ends_with("tail"))
+            .collect();
+        assert!(probed.is_empty(), "{body}: {probed:#?}");
+    }
+}
+
+/// An illegal operand MSBuild reaches through operands of certain value
+/// rejects the project for certain, whatever a later operand it never reaches
+/// reads; reached only past an operand the walk is not certain of, which may
+/// decide the condition first, it may.
+#[test]
+fn an_illegal_condition_is_certain_as_far_as_its_reach() {
+    let prefix =
+        format!("<PropertyGroup><X>1</X><X Condition=\"{UNDECIDED_TRUE}\">abc</X></PropertyGroup>");
+    for c in [
+        "1 &lt; abc Or '$(X)' == 'x'",
+        "'a' == 'a' And 1 &lt; abc And $(X) &gt; 2",
+    ] {
+        let body = format!("{prefix}<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_rejected(&parsed, &["Before", "After"]);
+        }
+    }
+    for c in [
+        "'$(X)' == 'abc' Or 1 &lt; abc",
+        "'$(X)' == '1' And 1 &lt; abc",
+    ] {
+        let body = format!("{prefix}<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// A comparison MSBuild reaches, left to right, before a later operand decides
+/// the condition, on a value the walk holds legal but is not certain of
+/// (`1`, which MSBuild overwrites with `abc`): MSBuild rejects the project. The
+/// walk does not yet judge a condition legal on the values it holds (#1009),
+/// so it withdraws nothing. Pinned, in every position a condition takes that
+/// raises no other doubt, so that judging them shows here.
+#[test]
+fn a_condition_legal_on_the_values_the_walk_holds_is_not_yet_judged() {
+    for position in [
+        "<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>",
+        "<PropertyGroup Condition=\"{c}\"><R>x</R></PropertyGroup>",
+        "<ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
+        "<Choose><When Condition=\"{c}\" /></Choose>",
+    ] {
+        for c in ["$(X) &gt; 2 And false", "$(X) &gt; 2 Or true"] {
+            let body = format!(
+                "<PropertyGroup><X>1</X><X Condition=\"{UNDECIDED_TRUE}\">abc</X></PropertyGroup>{}",
+                position.replace("{c}", c)
+            );
+            for parsed in both_walkers(&format!("  {body}")) {
+                assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+            }
         }
     }
 }

@@ -173,7 +173,7 @@ struct Member<'a> {
 // Parser
 // ============================================================================
 
-fn is_name_byte(b: u8) -> bool {
+pub(crate) fn is_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
 }
 

@@ -994,13 +994,14 @@ fn rejection_message(cause: &RejectionCause, certain: bool) -> String {
                 )
             }
         }
-        RejectionCause::IllegalCondition { condition } => {
-            let rejects = if certain { "rejects" } else { "may reject" };
-            format!(
-                "MSBuild {rejects} this project: it cannot evaluate the condition `{condition}` \
-                 — no evaluated value is trusted"
-            )
-        }
+        RejectionCause::IllegalCondition { condition } if certain => format!(
+            "MSBuild rejects this project: it cannot evaluate the condition `{condition}` — \
+             no evaluated value is trusted"
+        ),
+        RejectionCause::IllegalCondition { condition } => format!(
+            "MSBuild may reject this project: it may be unable to evaluate the condition \
+             `{condition}` — no evaluated value is trusted"
+        ),
         RejectionCause::LoadTime(error) => {
             let rejects = if certain { "rejects" } else { "may reject" };
             format!(
