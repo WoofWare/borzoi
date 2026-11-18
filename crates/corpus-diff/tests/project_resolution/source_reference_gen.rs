@@ -102,6 +102,20 @@ pub enum Item {
         name: String,
         access: Access,
     },
+    Enum {
+        name: String,
+        access: Access,
+        cases: Vec<String>,
+    },
+    Delegate {
+        name: String,
+        access: Access,
+    },
+    /// A struct with a primary constructor.
+    Struct {
+        name: String,
+        access: Access,
+    },
     Interface {
         name: String,
         access: Access,
@@ -276,9 +290,9 @@ impl Gen<'_> {
         in_module: bool,
     ) -> Decl {
         let access = self.access(in_module);
-        // Index 8 is a nested module, below the nesting bound only.
-        let pick = match self.rng.below(9) {
-            8 if depth >= 2 => 0,
+        // Index 11 is a nested module, below the nesting bound only.
+        let pick = match self.rng.below(12) {
+            11 if depth >= 2 => 0,
             k => k,
         };
         let item = match pick {
@@ -323,6 +337,26 @@ impl Gen<'_> {
                 holder: Self::fresh(self.rng, HOLDERS, taken, ns),
                 access,
                 member: self.rng.pick(EXT_MEMBERS).to_string(),
+            },
+            8 => {
+                let n = 1 + self.rng.below(3);
+                let mut cases = BTreeSet::new();
+                while cases.len() < n {
+                    cases.insert(self.rng.pick(CASES).to_string());
+                }
+                Item::Enum {
+                    name: Self::fresh(self.rng, TYPES, taken, ns),
+                    access,
+                    cases: cases.into_iter().collect(),
+                }
+            }
+            9 => Item::Delegate {
+                name: Self::fresh(self.rng, TYPES, taken, ns),
+                access,
+            },
+            10 => Item::Struct {
+                name: Self::fresh(self.rng, TYPES, taken, ns),
+                access,
             },
             _ => {
                 let name = Self::fresh(self.rng, MODULES, taken, ns);
@@ -379,7 +413,7 @@ impl Gen<'_> {
             },
             2 => {
                 let name = Self::fresh(self.rng, VALUES, taken, ns);
-                let compiled_name = self.rng.chance(30).then(|| format!("Compiled{name}"));
+                let compiled_name = self.rng.chance(50).then(|| format!("Compiled{name}"));
                 Item::Function {
                     name,
                     access,
@@ -410,6 +444,9 @@ fn item_access(item: &Item) -> Access {
         | Item::Record { access, .. }
         | Item::Union { access, .. }
         | Item::Class { access, .. }
+        | Item::Enum { access, .. }
+        | Item::Delegate { access, .. }
+        | Item::Struct { access, .. }
         | Item::Interface { access, .. }
         | Item::Abbrev { access, .. }
         | Item::Exception { access, .. }
@@ -637,6 +674,24 @@ fn uses_of(
         Item::Interface { name, .. } => {
             push(format!("let {} (i: {p}.{name}) = i.Get ()", next()));
         }
+        Item::Enum { name, cases, .. } => {
+            let case = &cases[0];
+            push(format!("let {} = int {p}.{name}.{case}", next()));
+            push(format!(
+                "let {} (e: {p}.{name}) = match e with {p}.{name}.{case} -> 0 | _ -> 1",
+                next()
+            ));
+        }
+        Item::Delegate { name, .. } => {
+            push(format!("let {} = {p}.{name}(fun x -> x + 1)", next()));
+            push(format!("let {} (d: {p}.{name}) = d.Invoke 1", next()));
+        }
+        Item::Struct { name, .. } => {
+            push(format!("let {} = {p}.{name}(1).X", next()));
+            if bare {
+                push(format!("let {} = {name}(2)", next()));
+            }
+        }
         Item::Abbrev { name, .. } => {
             push(format!(
                 "let {} : {p}.{name} = Unchecked.defaultof<_>",
@@ -750,6 +805,30 @@ fn print_impl_item(item: &Item, pad: &str, indent: usize, out: &mut String) {
             w(out, &format!("type {}{name} =", access.keyword()));
             w(out, "    abstract Get: unit -> int");
         }
+        Item::Enum {
+            name,
+            access,
+            cases,
+        } => {
+            let cases: Vec<String> = cases
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("| {c} = {i}"))
+                .collect();
+            w(
+                out,
+                &format!("type {}{name} = {}", access.keyword(), cases.join(" ")),
+            )
+        }
+        Item::Delegate { name, access } => w(
+            out,
+            &format!("type {}{name} = delegate of int -> int", access.keyword()),
+        ),
+        Item::Struct { name, access } => {
+            w(out, "[<Struct>]");
+            w(out, &format!("type {}{name}(x: int) =", access.keyword()));
+            w(out, "    member _.X = x");
+        }
         Item::Abbrev {
             name,
             access,
@@ -836,6 +915,12 @@ fn print_sig(decls: &[Decl], indent: usize, out: &mut String) {
                 w(out, "    member Inst: int");
                 w(out, "    static member Stat: int");
             }
+            Item::Struct { name, access } => {
+                w(out, "[<Struct>]");
+                w(out, &format!("type {}{name} =", access.keyword()));
+                w(out, &format!("    new: x: int -> {name}"));
+                w(out, "    member X: int");
+            }
             Item::OptExtension { target, member } => {
                 w(out, &format!("type {target} with"));
                 w(out, &format!("    member {member}: int"));
@@ -861,6 +946,8 @@ fn print_sig(decls: &[Decl], indent: usize, out: &mut String) {
             other @ (Item::Record { .. }
             | Item::Union { .. }
             | Item::Interface { .. }
+            | Item::Enum { .. }
+            | Item::Delegate { .. }
             | Item::Abbrev { .. }
             | Item::Exception { .. }
             | Item::Measure { .. }) => print_impl_item(other, &pad, indent, out),
@@ -1028,6 +1115,9 @@ pub fn kinds(case: &Case) -> BTreeSet<&'static str> {
             Item::Union { .. } => "union",
             Item::Class { .. } => "class",
             Item::Interface { .. } => "interface",
+            Item::Enum { .. } => "enum",
+            Item::Delegate { .. } => "delegate",
+            Item::Struct { .. } => "struct",
             Item::Abbrev { .. } => "abbreviation",
             Item::Exception { .. } => "exception",
             Item::Measure { .. } => "measure",

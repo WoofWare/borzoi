@@ -411,6 +411,9 @@ fn the_generated_graphs_cover_every_declaration_kind() {
         "union",
         "class",
         "interface",
+        "enum",
+        "delegate",
+        "struct",
         "abbreviation",
         "exception",
         "measure",
@@ -540,4 +543,24 @@ fn a_reference_from_source_keeps_its_place_in_the_order() {
             "source against {label}"
         );
     }
+}
+
+/// Fixtures are built together however their projects are named: two
+/// fixtures each holding a project `Lib` build in one `build_fixtures` call.
+#[test]
+#[ignore = "builds fixtures; use --ignored for oracle smoke"]
+fn same_named_projects_of_two_fixtures_build_together() {
+    let fixture = || {
+        ProjectGraphFixture::materialise(vec![FixtureProject {
+            name: name("Lib"),
+            files: files(vec![("Lib.fs".into(), "module Lib\n\nlet x = 1\n".into())]),
+            project_refs: Vec::new(),
+            defines: Vec::new(),
+        }])
+        .expect("a graph")
+    };
+    let (first, second) = (fixture(), fixture());
+    build_fixtures(&[first.fsproj(&name("Lib")), second.fsproj(&name("Lib"))]);
+    assert!(first.output_dll(&name("Lib")).is_file());
+    assert!(second.output_dll(&name("Lib")).is_file());
 }

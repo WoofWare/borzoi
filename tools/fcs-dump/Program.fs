@@ -6560,9 +6560,13 @@ let private isPlainName (s: string) =
 
 /// Read one project object of a graph request.
 let private readGraphProject (e: JsonElement) : GraphProject =
+    // A field present with the wrong JSON kind is refused, never read as
+    // absent: a mistyped option would otherwise check other compiler inputs.
     let str (name: string) =
         match e.TryGetProperty(name) with
         | true, v when v.ValueKind = JsonValueKind.String -> Option.ofObj (v.GetString())
+        | true, v when v.ValueKind = JsonValueKind.Null -> None
+        | true, _ -> failwithf "%s: expected a string" name
         | _ -> None
     let strArray (name: string) : string[] =
         match e.TryGetProperty(name) with
@@ -6647,7 +6651,9 @@ let private readGraphProject (e: JsonElement) : GraphProject =
       References = references
       ExclusiveRefs =
         (match e.TryGetProperty("exclusiveRefs") with
-         | true, v -> v.ValueKind = JsonValueKind.True
+         | true, v when v.ValueKind = JsonValueKind.True -> true
+         | true, v when v.ValueKind = JsonValueKind.False -> false
+         | true, _ -> failwith "exclusiveRefs: expected a boolean"
          | _ -> false)
       DefineArgs = strArray "defines" |> Array.map (fun d -> "--define:" + d.Trim())
       LangVersionArgs = pinnedLangVersionArgs langVersion
