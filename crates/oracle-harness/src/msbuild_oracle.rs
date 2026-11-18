@@ -4,13 +4,13 @@
 //! each `Fsc` invocation's response file into an [`FscArguments`] at the
 //! boundary.
 //!
-//! It runs the build rather than imitating one: the restore, the targets,
-//! the project references and the compiler are the CLI's own, so what it
-//! reports is what fsc is handed, and "MSBuild built nothing" means the build
-//! never started `Fsc`. The one setting it adds is `NonExistentFile` (which
-//! design-time builds also set), naming a file that does not exist among
-//! `CoreCompile`'s outputs, so an already-built project compiles again rather
-//! than skipping the target.
+//! It runs the build rather than imitating one, and adds nothing to it but
+//! the logger: the restore, the targets, the project references, the global
+//! properties and the compiler are the CLI's own, so what it reports is what
+//! fsc is handed, and "MSBuild built nothing" means the build never ran fsc.
+//! A project already built is up to date, so its build runs no compiler, and
+//! the driver says it cannot answer rather than forcing one; the fixtures it
+//! serves are built fresh.
 //!
 //! The tool is built once (marker-gated, with the marker and fingerprint
 //! `borzoi-msbuild`'s tests use, so the two never rebuild over each other).
@@ -126,9 +126,9 @@ pub fn source_fingerprint(project: &Path) -> u64 {
 /// The environment [`fsc_args`]'s build runs under: the runtime essentials,
 /// the `DOTNET_*`/`NUGET_*` variables, `RestoreSources` (the devshell's
 /// offline feed, so the restore is hermetic), and `MSBUILDLOGTASKINPUTS`, so
-/// the task's parameters are logged; nothing else, since MSBuild reads every
-/// variable as a property. An evaluation compared with the build must see the
-/// same set.
+/// the task's parameters reach the logger; nothing else, since MSBuild reads
+/// every variable as a property. An evaluation compared with the build must
+/// see the same set.
 pub fn build_environment() -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(key, _)| {
@@ -172,8 +172,9 @@ pub struct FscBuild {
     /// Whether the whole build succeeded (it may fail after fsc ran: a
     /// compile error, or a later target).
     pub succeeded: bool,
-    /// Every `Fsc` invocation for the project itself, in the order they
-    /// started: one per inner build (a single-targeted project has one).
+    /// Every `Fsc` invocation for the project itself that ran the compiler,
+    /// in the order they started: one per inner build (a single-targeted
+    /// project has one).
     pub invocations: Vec<FscInvocation>,
 }
 
@@ -184,32 +185,29 @@ pub enum FscArgsDecline {
     /// handed nothing.
     NoBuild(Vec<String>),
     /// fsc may be handed arguments that cannot be reported: the build
-    /// succeeded without starting `Fsc` for the project (a replaced
-    /// `CoreCompile`, say), or an invocation's command line could not be read.
+    /// succeeded without running fsc for the project (it was up to date, or
+    /// `CoreCompile` was replaced), or an invocation's command line could not
+    /// be read.
     Unanswered(Vec<String>),
 }
 
 /// What fsc is handed for the project at `project` (on disk) in a real
 /// `dotnet msbuild -restore -t:Build` under the global properties `globals`,
-/// in [`build_environment`] plus `env`. A global's value may not hold `;` or
-/// `"`, which the command line would split or strip.
+/// in [`build_environment`] plus `env`. The project is built by the path
+/// given, made absolute but not resolved through links (MSBuild names the
+/// project after the path it is handed). A global's value may not hold `;`,
+/// `,` or `"`, which the command line would split or strip. A build the
+/// `dotnet` host refuses before MSBuild starts (no SDK the project's
+/// `global.json` admits) builds nothing.
 pub fn fsc_args(
     project: &Path,
     globals: &[(String, String)],
     env: &[(String, String)],
 ) -> Result<FscBuild, FscArgsDecline> {
-    let project = std::fs::canonicalize(project)
-        .unwrap_or_else(|e| panic!("canonicalise {}: {e}", project.display()));
+    let project = std::path::absolute(project)
+        .unwrap_or_else(|e| panic!("absolute path of {}: {e}", project.display()));
     let dir = project.parent().expect("a project file has a directory");
-    let scratch = std::env::temp_dir().join(format!(
-        "borzoi-fsc-args-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    std::fs::create_dir_all(&scratch).expect("create the scratch directory");
+    let scratch = scratch_dir();
     let out = scratch.join("fsc-args.json");
     let logger = apphost().with_extension("dll");
 
@@ -223,17 +221,13 @@ pub fn fsc_args(
             "-t:Build",
         ])
         .arg(format!(
-            "-p:NonExistentFile={}",
-            scratch.join("__NonExistentFile__").display()
-        ))
-        .arg(format!(
             "-logger:MsBuildConditionOracle.Program+FscArgsLogger,{};{}",
             logger.display(),
             out.display()
         ));
     for (name, value) in globals {
         assert!(
-            !value.contains([';', '"']),
+            !value.contains([';', ',', '"']),
             "global {name}={value:?} cannot be passed on the command line verbatim"
         );
         cmd.arg(format!("-p:{name}={value}"));
@@ -245,16 +239,48 @@ pub fn fsc_args(
         .timeout(FSC_ARGS_TIMEOUT)
         .run()
         .unwrap_or_else(|e| panic!("dotnet msbuild of {}: {e}", project.display()));
-    let json = std::fs::read_to_string(&out).unwrap_or_else(|e| {
-        panic!(
-            "dotnet msbuild of {} wrote no fsc arguments ({e}):\n{}\n{}",
-            project.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
+    let json = std::fs::read_to_string(&out);
     let _ = std::fs::remove_dir_all(&scratch);
-    parse_logger_output(&project, &json)
+    let report = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    match json {
+        Ok(json) => parse_logger_output(&project, &json),
+        // MSBuild's own command-line errors (`MSB1xxx`: a switch it rejects,
+        // a logger it cannot load) are this driver's fault, and loud.
+        Err(e) if report.contains("error MSB1") || output.status.success() => panic!(
+            "dotnet msbuild of {} wrote no fsc arguments ({e}):\n{report}",
+            project.display()
+        ),
+        // The `dotnet` host stopped before MSBuild ran.
+        Err(_) => Err(FscArgsDecline::NoBuild(vec![report])),
+    }
+}
+
+/// A directory of [`fsc_args`]'s own for one call, which no other call in
+/// any process shares: named for this process and a process-wide counter,
+/// and made with `create_dir`, which fails rather than adopt one that already
+/// exists (left by an earlier process of the same id, say), in which case the
+/// next name is tried. Concurrent calls each write their logger's output into
+/// their own directory and remove only it.
+fn scratch_dir() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let temp = std::env::temp_dir();
+    loop {
+        let dir = temp.join(format!(
+            "borzoi-fsc-args-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("create {}: {e}", dir.display()),
+        }
+    }
 }
 
 /// [`fsc_args`]'s reading of what `FscArgsLogger` wrote for `project`.
@@ -276,14 +302,13 @@ fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDe
         .map(|e| e.as_str().unwrap_or_default().to_string())
         .collect();
     let succeeded = value["succeeded"].as_bool() == Some(true);
-    let canonical = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
     let mut invocations = Vec::new();
     for run in value["invocations"]
         .as_array()
         .expect("FscArgsLogger writes its invocations")
     {
-        let run_project = canonical(run["project"].as_str().unwrap_or_default());
-        if run_project != project {
+        let run_project = PathBuf::from(run["project"].as_str().unwrap_or_default());
+        if run_project != project || run["executed"].as_bool() != Some(true) {
             continue;
         }
         let Some(response_file) = run["responseFile"].as_str() else {
@@ -307,7 +332,72 @@ fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDe
         }),
         (true, false) => Err(FscArgsDecline::NoBuild(errors)),
         (true, true) => Err(FscArgsDecline::Unanswered(vec![
-            "the build succeeded without starting Fsc for the project".to_string(),
+            "the build succeeded without running fsc for the project: it was up to date \
+             (already built), or CoreCompile was replaced"
+                .to_string(),
         ])),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fsc_args, scratch_dir};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn scratch_directories_are_never_shared() {
+        let dirs: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| scope.spawn(|| (0..32).map(|_| scratch_dir()).collect::<Vec<_>>()))
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("no thread panics"))
+                .collect()
+        });
+        let distinct: BTreeSet<_> = dirs.iter().collect();
+        assert_eq!(distinct.len(), dirs.len(), "two calls shared a directory");
+        for dir in &dirs {
+            assert!(dir.is_dir(), "{} was not made", dir.display());
+            std::fs::remove_dir(dir).unwrap();
+        }
+    }
+
+    /// Several real builds at once, as a parallel differential runs them: each
+    /// must read its own logger's output, none removed under it.
+    #[test]
+    fn concurrent_calls_each_answer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let projects: Vec<_> = (0..6)
+            .map(|i| {
+                let dir = tmp.path().join(format!("p{i}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("A.fs"), "module A\nlet x = 1\n").unwrap();
+                let project = dir.join(format!("P{i}.fsproj"));
+                std::fs::write(
+                    &project,
+                    "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+                     <TargetFramework>net10.0</TargetFramework></PropertyGroup>\
+                     <ItemGroup><Compile Include=\"A.fs\" /></ItemGroup></Project>",
+                )
+                .unwrap();
+                project
+            })
+            .collect();
+        let answers: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = projects
+                .iter()
+                .map(|project| scope.spawn(move || fsc_args(project, &[], &[])))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("no fsc_args call panics"))
+                .collect()
+        });
+        for (i, answer) in answers.into_iter().enumerate() {
+            let build = answer.unwrap_or_else(|e| panic!("P{i}: {e:?}"));
+            let name = build.invocations[0].arguments().unwrap().assembly_name();
+            assert_eq!(name.as_deref(), Some(format!("P{i}").as_str()));
+        }
     }
 }

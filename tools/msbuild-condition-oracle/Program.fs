@@ -816,8 +816,10 @@ let private isFsc (name: string) =
     name.Equals("Fsc", StringComparison.OrdinalIgnoreCase)
     || name.EndsWith(".Fsc", StringComparison.OrdinalIgnoreCase)
 
-/// The `Fsc` task's parameters that choose the program it runs.
-let private compilerParameters = [ "ToolPath"; "ToolExe"; "DotnetFscCompilerPath" ]
+/// The `Fsc` task's parameters that choose the program it runs, and whether it
+/// runs one.
+let private compilerParameters =
+    [ "ToolPath"; "ToolExe"; "DotnetFscCompilerPath"; "SkipCompilerExecution" ]
 
 /// One `Fsc` invocation as [`FscArgsLogger`] sees it.
 type private FscRun =
@@ -954,6 +956,14 @@ type FscArgsLogger() =
                            taskAssembly = run.Assembly
                            compiler = run.Inputs
                            responseFile = file
+                           // `Fsc` logs its command line, then skips the compiler
+                           // when told to: such an invocation hands fsc nothing.
+                           executed =
+                            not (
+                                match run.Inputs.TryGetValue "SkipCompilerExecution" with
+                                | true, skip -> skip.Equals("true", StringComparison.OrdinalIgnoreCase)
+                                | _ -> false
+                            )
                            problem = problem |})
                     |> List.ofSeq
 

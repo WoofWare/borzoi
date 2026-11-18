@@ -136,6 +136,11 @@ fn fixtures() -> Vec<Fixture> {
             "%41",
         ),
         props(
+            "a doubly escaped percent in the name",
+            "<PropertyGroup><AssemblyName>%252541</AssemblyName></PropertyGroup>",
+            "%2541",
+        ),
+        props(
             "a backslash in the name",
             "<PropertyGroup><TargetName>back\\slash</TargetName></PropertyGroup>",
             "slash",
@@ -195,9 +200,10 @@ fn fixtures() -> Vec<Fixture> {
     ]
 }
 
-/// The `FscCommandLineArgs` a second real build of `project` reports through
-/// `-getItem` (unescaped), compiling again (`NonExistentFile`, as
-/// `fsc_args` sets it), in the environment `fsc_args` builds in.
+/// The `FscCommandLineArgs` a real build of `project` reports through
+/// `-getItem` (unescaped), in the environment `fsc_args` builds in. Run on a
+/// second copy of the fixture, so it builds from scratch and leaves the
+/// graded build's tree alone.
 fn reported_arguments(project: &Path, globals: &[(&str, &str)]) -> Vec<String> {
     let dir = project.parent().unwrap();
     let out_file = dir.join("fsc-args-items.json");
@@ -211,10 +217,6 @@ fn reported_arguments(project: &Path, globals: &[(&str, &str)]) -> Vec<String> {
         "-p:ProvideCommandLineArgs=true",
         "-getItem:FscCommandLineArgs",
     ]);
-    cmd.arg(format!(
-        "-p:NonExistentFile={}",
-        dir.join("__NonExistentFile__").display()
-    ));
     for (name, value) in globals {
         cmd.arg(format!("-p:{name}={value}"));
     }
@@ -258,18 +260,27 @@ fn canonical_reference(argument: &str) -> String {
     }
 }
 
-/// The lines of a response file as the reported items spell them: decoded,
-/// each `\` a `/`, the reference paths canonical, and without the
-/// `--refout:`/`--refonly` the task does not report.
-fn as_reported(lines: impl Iterator<Item = String>) -> Vec<String> {
+/// Arguments as the comparison reads them: split at line breaks (as fsc
+/// reads them), without the `--refout:`/`--refonly` the task does not
+/// report, the reference paths canonical.
+fn comparable(lines: impl Iterator<Item = String>) -> Vec<String> {
     lines
         .filter(|line| !line.starts_with("--refout:") && line != "--refonly")
-        .map(|line| canonical_reference(&unescape(&line.replace('\\', "/"))))
+        .map(|line| canonical_reference(&line))
         .collect()
 }
 
+/// The response file's lines as the reported items spell them: decoded once,
+/// and each `\` a `/`.
+fn spelled_as_items(line: &str) -> String {
+    unescape(&line.replace('\\', "/"))
+}
+
 /// Check one fixture's [`FscBuild`]; the failures it shows.
-fn check_build(fixture: &Fixture, dir: &Path, project: &Path, build: &FscBuild) -> Vec<String> {
+///
+/// The file the reading names is checked first, before the control build
+/// (in `control`, a second copy of the fixture) could write anything.
+fn check_build(fixture: &Fixture, dir: &Path, control: &Path, build: &FscBuild) -> Vec<String> {
     let mut failures = Vec::new();
     let [invocation] = build.invocations.as_slice() else {
         return vec![format!(
@@ -278,22 +289,6 @@ fn check_build(fixture: &Fixture, dir: &Path, project: &Path, build: &FscBuild) 
             build.invocations.len()
         )];
     };
-    let reported = as_reported(
-        reported_arguments(project, fixture.globals)
-            .join("\n")
-            .split('\n')
-            .map(str::to_string),
-    );
-    let read = as_reported(invocation.response_file.split('\n').map(str::to_string));
-    if read != reported {
-        let only_read: Vec<&String> = read.iter().filter(|a| !reported.contains(a)).collect();
-        let only_reported: Vec<&String> = reported.iter().filter(|a| !read.contains(a)).collect();
-        failures.push(format!(
-            "`{}`: the logged response file is not the reported arguments\n  only the file's: \
-             {only_read:?}\n  only the reported: {only_reported:?}",
-            fixture.name
-        ));
-    }
     match invocation.arguments().map(|args| args.output) {
         Ok(Some(path)) => {
             if !dir.join(&path).host_is_file() {
@@ -308,7 +303,52 @@ fn check_build(fixture: &Fixture, dir: &Path, project: &Path, build: &FscBuild) 
         }
         other => failures.push(format!("`{}`: no output read: {other:?}", fixture.name)),
     }
+    let (graded_dir, control_dir) = (dir.display().to_string(), control.display().to_string());
+    let reported = comparable(
+        reported_arguments(&control.join("Demo.fsproj"), fixture.globals)
+            .join("\n")
+            .split('\n')
+            .map(|line| line.replace(&control_dir, &graded_dir)),
+    );
+    let read = comparable(invocation.response_file.split('\n').map(spelled_as_items));
+    if read != reported {
+        let only_read: Vec<&String> = read.iter().filter(|a| !reported.contains(a)).collect();
+        let only_reported: Vec<&String> = reported.iter().filter(|a| !read.contains(a)).collect();
+        failures.push(format!(
+            "`{}`: the logged response file is not the reported arguments\n  only the file's: \
+             {only_read:?}\n  only the reported: {only_reported:?}",
+            fixture.name
+        ));
+    }
     failures
+}
+
+/// Write `fixture`'s files under `dir`; the project file's path.
+fn lay_out(fixture: &Fixture, dir: &Path) -> std::path::PathBuf {
+    let project = dir.join("Demo.fsproj");
+    let compile: String = fixture
+        .compile
+        .iter()
+        .chain(&["A.fs"])
+        .map(|c| format!("<Compile Include=\"{c}\" />"))
+        .collect();
+    std::fs::write(
+        &project,
+        format!(
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
+             <TargetFramework>net10.0</TargetFramework></PropertyGroup>{}\
+             <ItemGroup>{compile}</ItemGroup></Project>",
+            fixture.body
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("A.fs"), "module A\nlet x = 1\n").unwrap();
+    for (name, contents) in fixture.files {
+        let file = dir.join(name);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, contents).unwrap();
+    }
+    project
 }
 
 #[test]
@@ -317,30 +357,12 @@ fn fsc_args_reads_what_real_builds_hand_fsc() {
     let all = fixtures();
     for fixture in &all {
         let tmp = tempfile::TempDir::new().expect("tempdir for fixture");
-        let dir = host_fs::canonicalize(tmp.path()).unwrap();
-        let project = dir.join("Demo.fsproj");
-        let compile: String = fixture
-            .compile
-            .iter()
-            .chain(&["A.fs"])
-            .map(|c| format!("<Compile Include=\"{c}\" />"))
-            .collect();
-        std::fs::write(
-            &project,
-            format!(
-                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>\
-                 <TargetFramework>net10.0</TargetFramework></PropertyGroup>{}\
-                 <ItemGroup>{compile}</ItemGroup></Project>",
-                fixture.body
-            ),
-        )
-        .unwrap();
-        std::fs::write(dir.join("A.fs"), "module A\nlet x = 1\n").unwrap();
-        for (name, contents) in fixture.files {
-            let file = dir.join(name);
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(file, contents).unwrap();
-        }
+        let root = host_fs::canonicalize(tmp.path()).unwrap();
+        let (dir, control) = (root.join("graded"), root.join("control"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&control).unwrap();
+        let project = lay_out(fixture, &dir);
+        lay_out(fixture, &control);
         let globals: Vec<(String, String)> = fixture
             .globals
             .iter()
@@ -348,7 +370,7 @@ fn fsc_args_reads_what_real_builds_hand_fsc() {
             .collect();
         match (fixture.expect, fsc_args(&project, &globals, &[])) {
             (Expect::Compiles, Ok(build)) => {
-                failures.extend(check_build(fixture, &dir, &project, &build))
+                failures.extend(check_build(fixture, &dir, &control, &build))
             }
             (Expect::NoBuild, Err(FscArgsDecline::NoBuild(_))) => {}
             (expect, answer) => failures.push(format!(
