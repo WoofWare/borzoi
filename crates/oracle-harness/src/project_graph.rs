@@ -162,6 +162,10 @@ pub enum GraphError {
     /// A fixture source name that is not a relative path inside its project
     /// directory.
     UncontainedFile(String),
+    /// A project pinned below [`crate::FCS_SUPPORT_FLOOR`]: the current FCS
+    /// no longer behaves as the older compilers did, and the graph oracle
+    /// has no legacy twin.
+    BelowSupportFloor(PlainName),
 }
 
 impl fmt::Display for GraphError {
@@ -183,6 +187,11 @@ impl fmt::Display for GraphError {
             GraphError::UnknownCheck(id) => write!(f, "no project {id} to check"),
             GraphError::NoPaths(id) => write!(f, "project {id} has no source files"),
             GraphError::RelativePath(p) => write!(f, "{} is not absolute", p.display()),
+            GraphError::BelowSupportFloor(id) => write!(
+                f,
+                "project {id} is pinned below F# {}, which the graph oracle cannot check at",
+                crate::FCS_SUPPORT_FLOOR
+            ),
             GraphError::UncontainedFile(n) => {
                 write!(f, "{n:?} is not a relative path inside its project")
             }
@@ -235,6 +244,12 @@ impl GraphRequest {
         if let Some(id) = first_cycle(&projects) {
             return Err(GraphError::Cycle(id));
         }
+        if let Some(p) = projects
+            .iter()
+            .find(|p| p.lang_version.as_deref().is_some_and(below_support_floor))
+        {
+            return Err(GraphError::BelowSupportFloor(p.id.clone()));
+        }
         if !by_id.contains_key(&check) {
             return Err(GraphError::UnknownCheck(check));
         }
@@ -273,6 +288,20 @@ impl GraphRequest {
             })
             .collect();
         serde_json::json!({ "projects": projects, "check": self.check.as_str() }).to_string()
+    }
+}
+
+/// Whether a `<LangVersion>` spelling names a numbered version below
+/// [`crate::FCS_SUPPORT_FLOOR`]. A word (`latest`, `preview`, `default`)
+/// names the current compiler's, never below it.
+fn below_support_floor(lang_version: &str) -> bool {
+    let number = |s: &str| -> Option<(u32, u32)> {
+        let (major, minor) = s.trim().split_once('.').unwrap_or((s.trim(), "0"));
+        Some((major.parse().ok()?, minor.parse().ok()?))
+    };
+    match (number(lang_version), number(crate::FCS_SUPPORT_FLOOR)) {
+        (Some(v), Some(floor)) => v < floor,
+        _ => false,
     }
 }
 
@@ -466,7 +495,11 @@ impl ProjectGraphFixture {
             let project_dir = fixture.dir(&p.name);
             std::fs::create_dir_all(&project_dir).expect("create a fixture project directory");
             for f in &p.files {
-                std::fs::write(project_dir.join(&f.name), &f.text).expect("write a fixture source");
+                let path = project_dir.join(&f.name);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("create a fixture source directory");
+                }
+                std::fs::write(path, &f.text).expect("write a fixture source");
             }
             std::fs::write(fixture.fsproj(&p.name), fsproj_text(p))
                 .expect("write a fixture .fsproj");
@@ -942,6 +975,42 @@ mod tests {
             Some(OutputKind::WinExe)
         );
         assert_eq!(OutputKind::from_output_type(Some("AppContainerExe")), None);
+    }
+
+    #[test]
+    fn a_request_refuses_a_version_below_the_support_floor() {
+        let pinned = |v: &str| GraphProject {
+            lang_version: Some(v.to_owned()),
+            ..project("a", &[])
+        };
+        for below in ["7.0", "7", "4.6", "5.0"] {
+            assert_eq!(
+                GraphRequest::new(vec![pinned(below)], name("a")),
+                Err(GraphError::BelowSupportFloor(name("a"))),
+                "{below}"
+            );
+        }
+        for at_or_above in ["8.0", "8", "10.0", "latest", "preview", "default"] {
+            assert!(
+                GraphRequest::new(vec![pinned(at_or_above)], name("a")).is_ok(),
+                "{at_or_above}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fixture_writes_a_nested_source() {
+        let fixture = ProjectGraphFixture::materialise(vec![FixtureProject {
+            name: name("A"),
+            files: vec![FixtureFile {
+                name: "src/Lib.fs".into(),
+                text: "module Lib\n".into(),
+            }],
+            project_refs: Vec::new(),
+            defines: Vec::new(),
+        }])
+        .expect("a graph");
+        assert!(fixture.paths(&name("A"))[0].is_file());
     }
 
     #[test]
