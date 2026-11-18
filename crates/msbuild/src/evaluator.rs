@@ -2755,15 +2755,16 @@ impl<'r> State<'r> {
     ///
     /// Every latch, not only the first, also marks each value bound now stale
     /// ([`Trust::stale`]): the content just passed may have rewritten it. A
-    /// reserved name or a caller global cannot be rewritten by any file, so
-    /// neither goes stale.
+    /// reserved name cannot be rewritten by any file, so it does not go stale;
+    /// a caller global can, by a file that names it in its project's
+    /// `TreatAsLocalProperty` (#1037).
     ///
     /// The first latch also withdraws the define set, in an SDK file as
     /// anywhere, recording the construct at `span` as the cause
     /// ([`DefineConstantsUncertaintyCauseKind::HiddenContent`] says why).
     fn latch_walk_opaque(&mut self, cause: OpacityCause, span: Range<usize>) {
         self.lookup
-            .go_stale(&std::sync::Arc::new(cause.clone()), &self.protected);
+            .go_stale(&std::sync::Arc::new(cause.clone()), &self.reserved);
         if self.walk_opaque.is_none() {
             self.define_constants_uncertain = true;
             self.define_constants_uncertainties
@@ -2782,6 +2783,65 @@ impl<'r> State<'r> {
         if !self.default_targets_decided {
             self.default_targets_decided = true;
             self.lookup.unbind("MSBuildProjectDefaultTargets");
+        }
+    }
+
+    /// The opacity behind `node`'s gate where the walk did not decide it from
+    /// certain inputs (`decided` false) and it reads a value content the walk
+    /// could not see may have rewritten ([`Trust::stale`]). Such a gate raises
+    /// no diagnostic, unlike one reading an undefined or unpinned name, and may
+    /// go the other way in the real build (#1037).
+    fn stale_gate_cause(
+        &self,
+        node: Node<'_, '_>,
+        decided: bool,
+    ) -> Option<properties::trust::StaleCause> {
+        if decided {
+            return None;
+        }
+        let condition = attribute(node, "Condition")?;
+        self.trust_for_raw(&condition).stale().cloned()
+    }
+
+    /// Mark `name` stale under `cause`: the walk skipped a write to it on a
+    /// stale gate, which the real build may have run. A name the frame
+    /// protects is one the real build's write would leave alone.
+    fn mark_skipped_write_stale(&mut self, name: &str, cause: &properties::trust::StaleCause) {
+        if self.protected.contains(&name.to_ascii_lowercase()) {
+            return;
+        }
+        self.apply_property_provenance(
+            name,
+            PropertyProvenance {
+                taint: TaintOutcome::Keep,
+                unpinned: UnpinnedOutcome::Keep,
+                refused: RefusedOutcome::Keep,
+                stale: StaleOutcome::Set(cause.clone()),
+            },
+        );
+    }
+
+    /// [`Self::mark_skipped_write_stale`] for every property `branch` (a
+    /// `<When>` or `<Otherwise>`) may write, nested `<Choose>`s included.
+    fn mark_skipped_branch_stale(
+        &mut self,
+        branch: Node<'_, '_>,
+        cause: &properties::trust::StaleCause,
+    ) {
+        for child in branch.children().filter(Node::is_element) {
+            match child.tag_name().name() {
+                "PropertyGroup" => {
+                    for property in child.children().filter(Node::is_element) {
+                        self.mark_skipped_write_stale(property.tag_name().name(), cause);
+                    }
+                }
+                "Choose" => {
+                    for nested in child.children().filter(Node::is_element) {
+                        self.mark_skipped_branch_stale(nested, cause);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -3548,6 +3608,16 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                             state,
                         );
                     }
+                    // A gate decided on a stale value may hold in the real
+                    // build, which then runs every write a child's own gate
+                    // does not rule out.
+                    if let Some(cause) = state.stale_gate_cause(node, gate_certain) {
+                        for child in node.children().filter(Node::is_element) {
+                            if property_child_could_write(child, state) {
+                                state.mark_skipped_write_stale(child.tag_name().name(), &cause);
+                            }
+                        }
+                    }
                     state.define_context = prev;
                     state.package_context = prev_pkg;
                 }
@@ -3590,6 +3660,13 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                 || matches!(gate, CondGate::Unsupported);
             let undecided = gate_raised_doubt
                 .then(|| state.latch_undecided_import_gate(node, diagnostics_before_gate));
+            // A gate decided on a stale value may go the other way in the
+            // real build, as an undecided one may (#1037).
+            let stale_gate = if gate_raised_doubt {
+                None
+            } else {
+                state.stale_gate_cause(node, route_decided)
+            };
             match gate {
                 CondGate::Run => {
                     state.import_gate_context = prev_gate;
@@ -3622,6 +3699,10 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     if gate_raised_doubt || !route_decided {
                         rejection::judge_imports(node, current_file_dir, false, state);
                         rejection::undecided_import_group(node, current_file_dir, state);
+                    }
+                    // The imports the walk did not see may run.
+                    if let Some(cause) = stale_gate {
+                        state.latch_walk_opaque((*cause).clone(), node.range());
                     }
                 }
                 CondGate::Unsupported => {
@@ -3843,6 +3924,13 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             scan_undecided_choose_branch(branch, unpinned_root.as_ref(), state, &mut items);
         }
         items.apply(node.range(), state);
+        // The branches before the undecided gate, from the first the walk
+        // decided on a stale value, may be the one MSBuild takes.
+        if let (Some(first), Some(cause)) = (first_unsure, choice_stale.clone()) {
+            for branch in &whens[first..from] {
+                state.mark_skipped_branch_stale(*branch, &cause);
+            }
+        }
         // MSBuild may choose any of those branches, and evaluate the gates
         // after this one.
         for branch in &whens[first_unsure.unwrap_or(from)..=from] {
@@ -3864,6 +3952,21 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     }
     if !chosen_is_certain {
         rejection::judge_whens(node, walked + 1, current_file_dir, false, state);
+    }
+    // From the first gate the walk decided on a stale value, MSBuild may take
+    // any branch but the walk's: what each writes, the real build may hold.
+    // The branch the walk takes is walked under that gate's staleness below.
+    if let (Some(first), Some(cause)) = (first_unsure, choice_stale.clone()) {
+        let untaken: Vec<Node<'_, '_>> = whens[first..]
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| first + at != walked)
+            .map(|(_, when)| *when)
+            .chain(otherwise.filter(|_| chosen.is_some()))
+            .collect();
+        for branch in untaken {
+            state.mark_skipped_branch_stale(branch, &cause);
+        }
     }
     let Some(branch) = chosen.map(|(_, when)| when).or(otherwise) else {
         // Every gate cleanly false and no <Otherwise>: an exact no-op.
@@ -4097,6 +4200,10 @@ fn walk_property_child_inner(
                     .sdk_package()
                     .is_some()
             });
+    // Asked of the values the gate reads before its evaluation.
+    let own_gate_decided = attribute(node, "Condition").is_none_or(|condition| {
+        directory_build::decided_from_certain_inputs(state, &condition, &entry_dir)
+    });
     let diagnostics_before_condition = state.diagnostics.len();
     let gate = evaluate_property_condition(node, state);
     let own_condition_maybe_wrong = state.diagnostics.len() != diagnostics_before_condition
@@ -4133,6 +4240,11 @@ fn walk_property_child_inner(
             } else {
                 UnpinnedOutcome::Keep
             };
+            // A gate decided on a stale value may hold in the real build.
+            let stale = match state.stale_gate_cause(node, own_gate_decided) {
+                Some(cause) => StaleOutcome::Set(cause),
+                None => StaleOutcome::Keep,
+            };
             state.apply_property_provenance(
                 &name,
                 PropertyProvenance {
@@ -4141,7 +4253,7 @@ fn walk_property_child_inner(
                     // The write may or may not have happened; either way we
                     // refused no value of our own.
                     refused: RefusedOutcome::Keep,
-                    stale: StaleOutcome::Keep,
+                    stale,
                 },
             );
             return;
@@ -5182,14 +5294,14 @@ fn is_cpm_flag_property_name(name: &str) -> bool {
 
 /// Whether a property-group child could write at all if its group ran.
 /// `false` only on exact knowledge: the child's own condition evaluates
-/// cleanly false — defined properties, supported grammar, no unpinned
-/// reads — so the write cannot happen regardless of the group gate.
+/// cleanly false, decided from values the walk is certain of (none stale),
+/// so the write cannot happen regardless of the group gate.
 fn property_child_could_write(child: Node<'_, '_>, state: &State<'_>) -> bool {
     let cond = attribute(child, "Condition");
     let Some(cond) = cond.as_deref() else {
         return true;
     };
-    let mut eval = if state.follow_imports {
+    let eval = if state.follow_imports {
         let exists = |path: &str| condition_exists(state.observer, path, &state.entry_project_dir);
         condition::evaluate_with_exists(
             cond,
@@ -5202,20 +5314,14 @@ fn property_child_could_write(child: Node<'_, '_>, state: &State<'_>) -> bool {
     } else {
         condition::evaluate(cond, &state.lookup)
     };
-    // C.2b: an undefined read the walk can prove is undefined in the real
-    // build too substitutes to exactly "", so the outcome that used it is
-    // exact — the same exemption `evaluate_condition_with_exemptions`
-    // applies at the read sites. Without it a child gated on a provably-false
-    // `'$(NoSuch)' != ''` reads as maybe-writing and needlessly unpins the
-    // property, which downstream (e.g. an untrusted
-    // `ParsedProject::property` read) then refuses on.
-    eval.undefined_properties
-        .retain(|name| !state.undefined_read_is_exact(name));
+    // Ruled out only by a gate decided from certain inputs: a stale value may
+    // have been rewritten so that the gate holds (#1037). An undefined read
+    // the walk can prove is undefined in the real build too is certain there
+    // (C.2b), so a child gated on a provably-false `'$(NoSuch)' != ''` is
+    // ruled out.
     let exists_dir = state.entry_project_dir.clone();
     !(eval.outcome == condition::Outcome::False
-        && state.condition_is_decided_exactly(cond, Some(&exists_dir), &|name| {
-            state.undefined_read_is_exact(name)
-        }))
+        && directory_build::decided_from_certain_inputs(state, cond, &exists_dir))
 }
 
 /// Mark every unprotected, possibly-writing child of a maybe-run/maybe-skipped
@@ -5364,6 +5470,13 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
         state.diagnostics.len() != diagnostics_before_gate || matches!(gate, CondGate::Unsupported);
     let undecided =
         gate_raised_doubt.then(|| state.latch_undecided_import_gate(node, diagnostics_before_gate));
+    // A gate decided on a stale value may go the other way in the real
+    // build, as an undecided one may (#1037).
+    let stale_gate = if gate_raised_doubt {
+        None
+    } else {
+        state.stale_gate_cause(node, route_decided)
+    };
     match gate {
         CondGate::Run => {}
         CondGate::Skip => {
@@ -5371,6 +5484,10 @@ fn follow_explicit_import(node: Node<'_, '_>, current_file_dir: &Path, state: &m
             // the build, which then makes the import (#820).
             if gate_raised_doubt || !route_decided {
                 rejection::undecided_import(node, current_file_dir, state);
+            }
+            // The file the walk did not see may run.
+            if let Some(cause) = stale_gate {
+                state.latch_walk_opaque((*cause).clone(), node.range());
             }
             return;
         }

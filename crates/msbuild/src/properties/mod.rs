@@ -331,10 +331,11 @@ impl PropertyMap {
             .map_or(Trust::certain_ref(), |entry| &entry.trust)
     }
 
-    /// Mark every bound name not in `protected` (lowercase) stale under
-    /// `cause`: the walk has passed content it cannot see, which may have
-    /// rewritten any value it holds — any but a reserved name or a caller
-    /// global, which no file can write.
+    /// Mark every bound name not in `protected` (lowercase: the reserved
+    /// names) stale under `cause`: the walk has passed content it cannot see,
+    /// which may have rewritten any value it holds but a reserved name's. A
+    /// caller global is no exception: the content may name it in its project's
+    /// `TreatAsLocalProperty` and write it (#1037).
     ///
     /// Visits only [`Self::fresh`]: every other bound entry was left stale by
     /// the previous call, and only a binding or a verdict can make one fresh
