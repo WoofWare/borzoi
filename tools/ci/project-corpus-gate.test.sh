@@ -70,7 +70,7 @@ tmp=
 setup_fixture() {
   tmp="$(mktemp -d)"
   local fake="$tmp/repo" bin="$tmp/bin"
-  mkdir -p "$fake/tools/ci" "$fake/target/debug" "$bin" "$tmp/nops" "$tmp/slowps" "$tmp/racymkdir" "$tmp/remote/owner"
+  mkdir -p "$fake/tools/ci" "$bin" "$tmp/nops" "$tmp/slowps" "$tmp/racymkdir" "$tmp/remote/owner"
   cp "$here/project-corpus-gate.sh" "$here/project-corpus.sh" "$fake/tools/ci/"
 
   # One upstream repository with two pins, each holding the project.
@@ -92,10 +92,6 @@ setup_fixture() {
   printf 'owner/repo\t%s\tproj/P.fsproj\n' "$rev1" >"$tmp/plan1"
   printf 'owner/repo\t%s\tproj/P.fsproj\n' "$rev2" >"$tmp/plan2"
 
-  cat >"$fake/target/debug/borzoi-stats" <<'EOF'
-#!/usr/bin/env bash
-cat "$FAKE_PLAN"
-EOF
   cat >"$bin/nix" <<'EOF'
 #!/usr/bin/env bash
 [ "$1 $2" = "develop --command" ] || { echo "fake nix: unexpected $*" >&2; exit 99; }
@@ -124,12 +120,32 @@ case "$1" in
   *) echo "fake dotnet: unexpected $*" >&2; exit 99 ;;
 esac
 EOF
-  # A gate step: it reads the corpus for a while, and fails if what it reads
-  # is not the pin its run materialised.
+  # `borzoi-stats` is built where cargo would put it: under CARGO_TARGET_DIR
+  # if set, else the workspace's `target/`. Any other `run` or `test` is a
+  # gate step: it reads the corpus for a while, and fails if what it reads is
+  # not the pin its run materialised.
   cat >"$bin/cargo" <<'EOF'
 #!/usr/bin/env bash
+stats_bin() {
+  local dir="${CARGO_TARGET_DIR:-$FAKE_WORKSPACE/target}/debug"
+  mkdir -p "$dir"
+  printf '#!/usr/bin/env bash\ncat "$FAKE_PLAN"\n' >"$dir/borzoi-stats"
+  chmod +x "$dir/borzoi-stats"
+  echo "$dir/borzoi-stats"
+}
+if [[ " $* " == *" -p borzoi-stats "* ]]; then
+  case "$1" in
+    build) stats_bin >/dev/null; exit 0 ;;
+    run)
+      exe="$(stats_bin)"
+      while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
+      shift
+      exec "$exe" "$@"
+      ;;
+    *) echo "fake cargo: unexpected $*" >&2; exit 99 ;;
+  esac
+fi
 case "$1" in
-  build) exit 0 ;;
   run | test) ;;
   *) echo "fake cargo: unexpected $*" >&2; exit 99 ;;
 esac
@@ -171,7 +187,7 @@ EOF
 [ -d "${*: -1}" ] && exit 0
 PATH="${PATH#*:}" exec mkdir "$@"
 EOF
-  chmod +x "$fake/target/debug/borzoi-stats" "$bin"/* "$tmp/nops/ps" "$tmp/slowps/ps" "$tmp/racymkdir/mkdir"
+  chmod +x "$bin"/* "$tmp/nops/ps" "$tmp/slowps/ps" "$tmp/racymkdir/mkdir"
 }
 
 # run_gate NAME PLAN REV [STEP...]: one local gate run, in the background of
@@ -180,7 +196,7 @@ run_gate() {
   local name="$1" plan="$2" rev="$3"
   shift 3
   (
-    env -u BORZOI_PROJECT_LIST -u RUNNER_TEMP -u GITHUB_ENV \
+    env -u BORZOI_PROJECT_LIST -u RUNNER_TEMP -u GITHUB_ENV -u CARGO_TARGET_DIR \
       PATH="${EXTRA_PATH:+$EXTRA_PATH:}$tmp/bin:$PATH" \
       TZ="${RUN_TZ:-UTC}" LC_ALL="${RUN_LC_ALL:-C}" \
       BORZOI_PROJECT_CORPUS_CACHE="$tmp/cache" \
@@ -191,7 +207,8 @@ run_gate() {
       FAKE_LOG="$tmp/log" FAKE_RESTORE_FAILS="${FAKE_RESTORE_FAILS:-}" \
       FAKE_RESTORE_FAILS_AFTER="${FAKE_RESTORE_FAILS_AFTER:-}" \
       FAKE_PS_SLOW_PID="${FAKE_PS_SLOW_PID:-}" FAKE_PS_ENTERED="$tmp/ps-entered" \
-      FAKE_DIR="$tmp" \
+      FAKE_DIR="$tmp" FAKE_WORKSPACE="$tmp/repo" \
+      ${FAKE_TARGET_DIR:+CARGO_TARGET_DIR="$FAKE_TARGET_DIR"} \
       bash "$tmp/repo/tools/ci/project-corpus-gate.sh" "$@" >"$tmp/$name.out" 2>&1
     echo $? >"$tmp/$name.status"
   ) 2>/dev/null
@@ -224,6 +241,15 @@ test_concurrency() {
   assert_eq "both runs' steps ran" 2 "$(count_log step)"
   assert_eq "no run left an env or plan file in the cache" "" \
     "$(cd "$tmp/cache/v2" && ls -d corpus-env* project-corpus-plan* 2>/dev/null)"
+
+  # A target directory outside the workspace, as on a shared build box.
+  : >"$tmp/log"
+  rm -rf "$tmp/repo/target"
+  FAKE_TARGET_DIR="$tmp/elsewhere" run_gate t "$tmp/plan1" "$rev1" "$step"
+  assert_eq "a run with CARGO_TARGET_DIR outside the workspace succeeds" 0 "$(cat "$tmp/t.status")"
+  show_failure t
+  assert_eq "and builds nothing into the workspace's target/" "" \
+    "$(ls -d "$tmp/repo/target" 2>/dev/null)"
 
   : >"$tmp/log"
   run_gate c "$tmp/plan1" "$rev1" "$step"
