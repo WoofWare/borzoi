@@ -25,6 +25,7 @@ mod diagnostic;
 pub mod document;
 mod dotnet_io;
 mod evaluator;
+pub mod fsc;
 mod glob;
 pub mod glob_resolver;
 mod imports;

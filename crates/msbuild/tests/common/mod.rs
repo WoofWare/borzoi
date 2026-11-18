@@ -23,6 +23,7 @@
 #![allow(dead_code)] // each importer uses a different subset.
 
 pub mod case_axis;
+pub mod fsc_reading;
 #[cfg(unix)]
 pub mod odd_entry;
 pub mod sdk_chain;
@@ -709,6 +710,55 @@ impl Oracle {
         (answer["ok"] == serde_json::Value::Bool(true)).then_some(answer)
     }
 
+    /// The arguments the `Fsc` task passes fsc for the project already on disk
+    /// at `path` under `globals` (the `fscArgs` op): MSBuild restores it, runs
+    /// a real `Build`'s targets through `Compile` with the compiler's run
+    /// skipped, and reports each argument as the task wrote it.
+    ///
+    /// `Err` carries why there is no answer: MSBuild's errors, or a build the
+    /// op does not take for a real `Build` (a replaced `Build` target, `Fsc`
+    /// run other than once, …).
+    pub fn fsc_args(
+        &mut self,
+        path: &Path,
+        globals: &[(String, String)],
+    ) -> Result<FscInvocation, Vec<String>> {
+        let resp = self.request(&serde_json::json!({
+            "op": "fscArgs",
+            "path": path.to_str().expect("UTF-8 project path"),
+            "globals": globals_object(globals),
+        }));
+        let strings = |value: &serde_json::Value, what: &str| -> Vec<String> {
+            value
+                .as_array()
+                .unwrap_or_else(|| panic!("oracle fscArgs response carries a `{what}` array"))
+                .iter()
+                .map(|v| v.as_str().expect("each entry is a string").to_string())
+                .collect()
+        };
+        if resp["ok"].as_bool() != Some(true) {
+            return Err(strings(&resp["errors"], "errors"));
+        }
+        let compiler = resp["compiler"]
+            .as_object()
+            .expect("oracle fscArgs response carries a `compiler` object")
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+            .collect();
+        Ok(FscInvocation {
+            args: strings(&resp["args"], "args"),
+            response_file: resp["responseFile"]
+                .as_str()
+                .expect("oracle fscArgs response carries the response file")
+                .to_string(),
+            task_assembly: resp["taskAssembly"]
+                .as_str()
+                .expect("oracle fscArgs response names the task assembly")
+                .to_string(),
+            compiler,
+        })
+    }
+
     /// The `items` op enriched for dependency items, where `FullPath` is
     /// meaningless: each evaluated item of `item_type` comes back as its
     /// identity (`EvaluatedInclude` — what `Update`/`Remove` match against) and
@@ -987,6 +1037,24 @@ pub fn workload_env_from_process() -> (Option<PathBuf>, bool) {
         || std::env::var_os("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS").is_some()
         || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some();
     (user_dotnet_root, overrides_present)
+}
+
+/// One compile as the oracle's `fscArgs` op reports it.
+#[derive(Debug, Clone)]
+pub struct FscInvocation {
+    /// Each argument the `Fsc` task passed, in order, as it wrote it: the
+    /// lines of the response file fsc reads, before fsc splits any argument
+    /// at a line break of its own.
+    pub args: Vec<String>,
+    /// The response file the task hands fsc, as it wrote it: [`Self::args`]
+    /// one per line, with `--refout:` and `--refonly` among them, and each
+    /// `\` as written (the items behind `args` turn it into `/` off Windows).
+    pub response_file: String,
+    /// The file of the task assembly whose `Fsc` ran.
+    pub task_assembly: String,
+    /// The task's `ToolPath`, `ToolExe` and `DotnetFscCompilerPath` as it was
+    /// handed them: what chooses the program fsc's arguments go to.
+    pub compiler: std::collections::BTreeMap<String, String>,
 }
 
 /// The `globals` field of an oracle request. An *empty* set sends `null` rather

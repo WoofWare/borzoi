@@ -84,6 +84,8 @@
 use std::collections::HashMap;
 
 use borzoi_cst::language_version::LanguageVersion;
+use borzoi_msbuild::fsc::TARGET_GRAPH_SUFFIX;
+pub use borzoi_msbuild::fsc::{COMPILER_ENVIRONMENT, COMPILER_SELECTORS};
 use borzoi_msbuild::{InexactUnset, ParsedProject, PropertyRead, SdkVersion, UntrustedCause};
 
 /// One SDK's F# compiler, as far as `<LangVersion>` goes. See the module docs.
@@ -205,49 +207,6 @@ impl SdkLanguageFacts {
         }
     }
 }
-
-/// The properties the F# SDK reads in choosing the compiler a build runs:
-/// which F# props and targets the SDK imports, which assembly's `Fsc` task
-/// runs, and the tool path, executable and compiler path that task is handed.
-/// Inside the SDK only its own F# files write any of them (`sdk_language_diff`
-/// derives the set from each installed SDK's files and fails on a name missing
-/// here).
-pub const COMPILER_SELECTORS: &[&str] = &[
-    "DotnetFscCompilerPath",
-    "DisableAutoSetFscCompilerPath",
-    "FscToolPath",
-    "FscToolExe",
-    "DOTNET_HOST_PATH",
-    "FSharp_Shim_Present",
-    "FSharpPreferNetFrameworkTools",
-    "FSharpPreferAnyCpuTools",
-    "FSharpPrefer64BitTools",
-    "Fsc_Dotnet_ToolPath",
-    "Fsc_Dotnet_ToolExe",
-    "Fsc_Dotnet_DotnetFscCompilerPath",
-    "Fsc_NetFramework_ToolPath",
-    "Fsc_NetFramework_AnyCpu_ToolExe",
-    "Fsc_NetFramework_PlatformSpecific_ToolExe",
-    "FSharpBuildAssemblyFile",
-    "UseBundledFSharpTargets",
-    "FSharpPropsShim",
-    "FSharpTargetsShim",
-    // Gates the import of `$(FSharpTargetsShim)`.
-    "IsCrossTargetingBuild",
-    "SkipCompilerExecution",
-];
-
-/// The environment variables the SDK's `Fsc` task reads itself in locating its
-/// compiler when it is handed no compiler path (`FSHARP_COMPILER_BIN` names
-/// the directory instead of the task's own). `sdk_language_diff` reads every
-/// variable-shaped string in each installed SDK's `FSharp.Build.dll` and fails
-/// on one neither here nor known to choose something else.
-pub const COMPILER_ENVIRONMENT: &[&str] = &["FSHARP_COMPILER_BIN"];
-
-/// The suffix of the properties a target's `DependsOnTargets` reads by
-/// convention (`BuildDependsOn`, `CoreCompileDependsOn`, …): a write of one
-/// reshapes which targets run.
-const TARGET_GRAPH_SUFFIX: &str = "dependson";
 
 /// The target that runs the `Fsc` task, and the task.
 const COMPILE_TARGET: &str = "CoreCompile";

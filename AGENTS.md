@@ -139,7 +139,7 @@ This is a Cargo workspace with ten members:
   (`OutDir`/`OutputPath`/`DefineConstants` are untrusted under every global set
   on a real SDK project), which makes such a dimension a coverage investment,
   not a soundness fix.
-  Three ops execute rather than evaluate. `targetItems` runs one target on an
+  Four ops execute rather than evaluate. `targetItems` runs one target on an
   evaluation and reads back an item list: `fsproj_compile_order_generative_diff.rs`
   runs F#'s `FSharpSourceCodeCompileOrder` (its text lifted from the installed
   SDK into a synthetic SDK) and holds the compile order we commit to
@@ -175,6 +175,19 @@ This is a Cargo workspace with ten members:
   `fsproj_generic_items_generative_diff` holds the generic item tables the
   probe reads, metadata included, to the `itemsMeta` op on generated
   projects.
+  `fscArgs` reports what fsc is really handed: it restores, runs a real
+  `Build`'s targets through `Compile` with the compiler's run skipped, and
+  returns the `Fsc` task's arguments and the response file it writes (read
+  off the command line it logs, since its reported items unescape `%XX` and
+  turn `\` into `/`). Use it rather than re-deriving an fsc input from
+  evaluated values: every hand re-derivation leaked in review.
+  `fsc_args_oracle_calibration` holds it to real compiling builds (the
+  arguments `-getItem` reports and the file fsc writes).
+  `fsproj_assembly_name_generative_diff` holds `fsc::compiled_assembly_name`
+  (the name FCS gives the compiled assembly, which friend assemblies'
+  `InternalsVisibleTo` is matched against) certain-implies-exact to it, over
+  every route a review found the name moving by; `fsc_sdk_inputs` holds the
+  derivation's lists of SDK facts to each installed SDK's files.
   The workload locator SDKs (`sdk_resolver/workloads.rs`) have their own
   test-only oracle, `tools/workload-oracle`, which loads each installed SDK's
   workload resolver by reflection (on that SDK's runtime, so SDK 11's
