@@ -378,8 +378,11 @@ enum Walk {
     /// ([`throws_whatever`]) settles for no further.
     Certainty,
     /// To the first operand MSBuild may throw on: a caller that only asks
-    /// whether it may throw ([`may_throw`]) need go no further.
-    Possibility,
+    /// whether it may throw ([`may_throw`]) need go no further. Nor need it
+    /// evaluate an operand that cannot throw and gates no later one that can
+    /// (`later` says whether any operand after this subtree, in the chains
+    /// around it, can throw).
+    Possibility { later: bool },
 }
 
 /// Whether MSBuild throws evaluating `source` whatever the properties
@@ -415,7 +418,15 @@ pub fn may_throw(
 ) -> bool {
     match parse_condition(source) {
         Ok(Some(expr)) => {
-            judge_expr(&expr, props, fs, uncertain, Walk::Possibility).throws != Throws::Never
+            judge_expr(
+                &expr,
+                props,
+                fs,
+                uncertain,
+                Walk::Possibility { later: false },
+            )
+            .throws
+                != Throws::Never
         }
         Ok(None) | Err(Reject::Unmodelled) => false,
         Err(Reject::Illegal) => true,
@@ -457,6 +468,14 @@ fn judge_expr(
                 };
                 return Judgement::of(None, throws, false);
             }
+            // One that reads an uncertain name it does not name, we neither
+            // evaluate nor decide past: it may throw, as the walk would have
+            // found had the name been named.
+            let mut implicit = Vec::new();
+            leaf_implicit_references(expr, &mut implicit);
+            if implicit.iter().any(|name| uncertain(name)) {
+                return Judgement::of(None, Throws::Maybe, true);
+            }
             // The undefined names are the caller's to report from its own
             // `evaluate`; this evaluation only judges.
             let mut undefined = Vec::new();
@@ -490,7 +509,19 @@ fn judge_chain(
     let mut reached_for_certain = true;
     let mut unknown = false;
     let mut unevaluated = false;
-    for operand in operands {
+    for (index, operand) in operands.iter().enumerate() {
+        let walk = match walk {
+            Walk::Possibility { later } => {
+                let later = later || operands[index + 1..].iter().any(may_throw_somewhere);
+                if !later && !may_throw_somewhere(operand) {
+                    // Nothing from here on can throw, nor be reached by
+                    // anything that can.
+                    return Judgement::of(None, throws, unevaluated);
+                }
+                Walk::Possibility { later }
+            }
+            other => other,
+        };
         let judged = judge_expr(operand, props, fs, uncertain, walk);
         unevaluated |= judged.unevaluated;
         if walk == Walk::Decide && unevaluated {
@@ -504,7 +535,7 @@ fn judge_chain(
             };
         }
         throws = throws.max(judged.throws);
-        if walk == Walk::Possibility && throws != Throws::Never {
+        if matches!(walk, Walk::Possibility { .. }) && throws != Throws::Never {
             return Judgement::of(None, throws, unevaluated);
         }
         match judged.value {
@@ -535,6 +566,19 @@ fn judge_chain(
 /// MSBuild expands one the substituted text forms, from one value or across
 /// adjacent references (`$(U)$(V)` with `@` and `(I)x`), and may throw on it,
 /// so there the claim holds only of values that form none.
+/// Whether any leaf of `expr` is of a kind that can throw on some value
+/// ([`leaf_may_throw_on_some_value`]); on certain values too, since a leaf
+/// throws on those only when its kind can throw on some.
+fn may_throw_somewhere(expr: &BoolExpr) -> bool {
+    match expr {
+        BoolExpr::Not(inner) => may_throw_somewhere(inner),
+        BoolExpr::And(operands) | BoolExpr::Or(operands) => {
+            operands.iter().any(may_throw_somewhere)
+        }
+        leaf => leaf_may_throw_on_some_value(leaf),
+    }
+}
+
 fn leaf_may_throw_on_some_value(expr: &BoolExpr) -> bool {
     let scalar = |scalar: &ScalarExpr| match scalar {
         ScalarExpr::Bare(_) => false,
@@ -686,42 +730,57 @@ fn scalar_reads_toolset_version(scalar: &ScalarExpr) -> bool {
     }
 }
 
-/// The properties `raw` reads: its `$(…)` references, and the one an intrinsic
-/// reads with no reference (`AreFeaturesEnabled` reads
-/// `MSBuildDisableFeaturesFromVersion`).
-fn raw_references(raw: &str, out: &mut Vec<String>) {
+/// The properties `raw` names in `$(…)` references.
+fn explicit_references(raw: &str, out: &mut Vec<String>) {
     out.extend(super::properties::property_references(raw).map(str::to_string));
-    // A call, however it is spaced (the property-expression parser allows
-    // whitespace before the arguments, and within `$( … )`).
+}
+
+/// The property an intrinsic `raw` calls reads with no reference to it: a
+/// property expression whose root is `[MSBuild]::AreFeaturesEnabled`, however
+/// it is spaced (the property-expression parser allows whitespace within
+/// `$( … )` and before the arguments), reads
+/// `MSBuildDisableFeaturesFromVersion`.
+fn implicit_references(raw: &str, out: &mut Vec<String>) {
     let squeezed: String = raw
         .chars()
         .filter(|c| !c.is_whitespace())
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    if squeezed.contains("[msbuild]::arefeaturesenabled(") && squeezed.contains("$(") {
+    if squeezed.contains("$([msbuild]::arefeaturesenabled(") {
         out.push("MSBuildDisableFeaturesFromVersion".to_owned());
     }
 }
 
 /// Every property a leaf of the condition tree mentions, in any operand.
 fn leaf_references(expr: &BoolExpr, out: &mut Vec<String>) {
+    leaf_names(expr, out, explicit_references);
+}
+
+/// Every property a leaf of the condition tree reads without naming it
+/// ([`implicit_references`]).
+fn leaf_implicit_references(expr: &BoolExpr, out: &mut Vec<String>) {
+    leaf_names(expr, out, implicit_references);
+}
+
+/// The names `read` finds in each operand of a leaf of the condition tree.
+fn leaf_names(expr: &BoolExpr, out: &mut Vec<String>, read: fn(&str, &mut Vec<String>)) {
     let scalar = |scalar: &ScalarExpr, out: &mut Vec<String>| match scalar {
         ScalarExpr::Bare(_) => {}
         ScalarExpr::String(raw)
         | ScalarExpr::Property(raw)
-        | ScalarExpr::SystemVersionPart { arg: raw, .. } => raw_references(raw, out),
+        | ScalarExpr::SystemVersionPart { arg: raw, .. } => read(raw, out),
     };
     match expr {
         BoolExpr::True | BoolExpr::False => {}
-        BoolExpr::Not(inner) => leaf_references(inner, out),
+        BoolExpr::Not(inner) => leaf_names(inner, out, read),
         BoolExpr::And(operands) | BoolExpr::Or(operands) => {
             for operand in operands {
-                leaf_references(operand, out);
+                leaf_names(operand, out, read);
             }
         }
         BoolExpr::Exists(raw)
         | BoolExpr::HasTrailingSlash(raw)
-        | BoolExpr::MsbuildVersionFunction(raw) => raw_references(raw, out),
+        | BoolExpr::MsbuildVersionFunction(raw) => read(raw, out),
         BoolExpr::CoerceBool(value) => scalar(value, out),
         BoolExpr::Compare { lhs, rhs, .. } => {
             scalar(lhs, out);
@@ -2263,17 +2322,29 @@ mod tests {
             &uncertain,
         );
         assert_ne!(judged.throws, Throws::Certainly, "{judged:?}");
+        // Nor is anything decided past it: it may throw before the operand
+        // that would decide (`'bad'` is no version).
+        assert_eq!(
+            decide_without(
+                "$([MSBuild]::AreFeaturesEnabled('bad')) And false",
+                &props,
+                None,
+                &uncertain
+            ),
+            Decision::Unsupported
+        );
         // A spaced call reads it too; a literal that only spells the name
         // reads nothing.
         let mut references = Vec::new();
-        raw_references(
+        implicit_references(
             "$([MSBuild]::AreFeaturesEnabled ('99.99'))",
             &mut references,
         );
         assert_eq!(references, ["MSBuildDisableFeaturesFromVersion"]);
         let mut references = Vec::new();
-        raw_references("AreFeaturesEnabled", &mut references);
-        raw_references("[MSBuild]::AreFeaturesEnabled('1')", &mut references);
+        implicit_references("AreFeaturesEnabled", &mut references);
+        implicit_references("[MSBuild]::AreFeaturesEnabled('1')", &mut references);
+        implicit_references("$(A)[MSBuild]::AreFeaturesEnabled(x)", &mut references);
         assert!(references.is_empty(), "{references:?}");
     }
 
