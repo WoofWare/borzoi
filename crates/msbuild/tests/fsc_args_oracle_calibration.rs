@@ -27,7 +27,13 @@
 //! compiler arguments set ahead of the response file (in
 //! `DotnetFscCompilerPath`), a launcher that wraps the compiler, and a
 //! compile that prints neither banner nor diagnostic each leave the driver
-//! unable to answer.
+//! unable to answer, as does a project that reads the instrumentation off
+//! the process's command line and compiles something else for it, or fails
+//! only without it, which the driver's comparison with a plain build
+//! catches; so do a FIFO among the outputs and a copy of the SDK's F# task
+//! assembly and compiler, which match each other but not the SDK running
+//! the build. Each unanswered fixture
+//! pins the reason, so one cannot pass on another's.
 
 mod common;
 
@@ -50,10 +56,11 @@ enum Expect {
     Compiles,
     /// Nothing built: the `dotnet` host refuses the build.
     NoBuild,
-    /// No answer: no fsc run of the project's left evidence (the build
-    /// failed first), or one ran on arguments the response file does not
-    /// hold.
-    Unanswered,
+    /// No answer, for the reason the first message gives, of which this is
+    /// a part: no fsc run of the project's left evidence (the build failed
+    /// first), one ran on arguments the response file does not hold, or the
+    /// build reacted to being observed.
+    Unanswered(&'static str),
 }
 
 struct Fixture {
@@ -94,6 +101,7 @@ const BROKEN_LIB: &[(&str, &str)] = &[
 
 fn fixtures() -> Vec<Fixture> {
     use Expect::{Compiles, NoBuild, Unanswered};
+    const NO_FSC: &str = "without starting Fsc for the project";
     let props = |name, body, compiles_to| Fixture {
         name,
         body,
@@ -197,7 +205,7 @@ fn fixtures() -> Vec<Fixture> {
             )
         },
         Fixture {
-            expect: Unanswered,
+            expect: Unanswered(NO_FSC),
             ..props(
                 "a target that fails every build",
                 "<Target Name=\"Fail\" BeforeTargets=\"CoreCompile\"><Error Text=\"no\" /></Target>",
@@ -206,7 +214,7 @@ fn fixtures() -> Vec<Fixture> {
         },
         Fixture {
             files: BROKEN_LIB,
-            expect: Unanswered,
+            expect: Unanswered(NO_FSC),
             ..props(
                 "a C# project reference that does not compile",
                 "<ItemGroup><ProjectReference Include=\"Broken/Broken.csproj\" /></ItemGroup>",
@@ -222,7 +230,7 @@ fn fixtures() -> Vec<Fixture> {
             ..props("a global.json no installed SDK satisfies", "", "")
         },
         Fixture {
-            expect: Unanswered,
+            expect: Unanswered("left no sign fsc ran"),
             ..props(
                 "a compile that prints no banner and no diagnostic",
                 "<PropertyGroup><OtherFlags>--nologo</OtherFlags></PropertyGroup>",
@@ -234,7 +242,7 @@ fn fixtures() -> Vec<Fixture> {
                 "wrap.sh",
                 "#!/bin/sh\nexec dotnet \"$@\" --define:WRAPPED\n",
             )],
-            expect: Unanswered,
+            expect: Unanswered("launched something other than the SDK's compiler"),
             ..props(
                 "a launcher that wraps the compiler",
                 "<PropertyGroup><FscToolPath>$(MSBuildProjectDirectory)</FscToolPath>\
@@ -243,11 +251,51 @@ fn fixtures() -> Vec<Fixture> {
             )
         },
         Fixture {
-            expect: Unanswered,
+            expect: Unanswered("could not be read"),
             ..props(
                 "compiler arguments ahead of the response file",
                 "<PropertyGroup><DotnetFscCompilerPath>\"$(MSBuildBinPath)/FSharp/fsc.dll\" \
                  --define:EXTRACLI</DotnetFscCompilerPath></PropertyGroup>",
+                "",
+            )
+        },
+        Fixture {
+            expect: Unanswered("wrote other files than the plain build"),
+            ..props(
+                "a project that reads the instrumentation off the command line",
+                "<PropertyGroup Condition=\"$([System.Environment]::CommandLine.Contains('FscArgsLogger'))\">\
+                 <AssemblyName>Observed</AssemblyName></PropertyGroup>",
+                "",
+            )
+        },
+        Fixture {
+            expect: Unanswered("and the plain build failed"),
+            ..props(
+                "a check that fails only the build nothing observes",
+                "<Target Name=\"Unobserved\" AfterTargets=\"Build\"><Error Text=\"plain\" \
+                 Condition=\"!$([System.Environment]::CommandLine.Contains('FscArgsLogger'))\" />\
+                 </Target>",
+                "",
+            )
+        },
+        Fixture {
+            expect: Unanswered("not a regular file"),
+            ..props(
+                "a FIFO among the build's outputs",
+                "<Target Name=\"Pipe\" AfterTargets=\"Build\">\
+                 <Exec Command=\"mkfifo obj/pipe\" /></Target>",
+                "",
+            )
+        },
+        Fixture {
+            expect: Unanswered("launched something other than the SDK's compiler"),
+            ..props(
+                "a copy of the SDK's F# task assembly and compiler",
+                "<PropertyGroup><FSharpBuildAssemblyFile>$(MSBuildProjectDirectory)/fs/FSharp.Build.dll\
+                 </FSharpBuildAssemblyFile><DotnetFscCompilerPath>\"$(MSBuildProjectDirectory)/fs/fsc.dll\"\
+                 </DotnetFscCompilerPath></PropertyGroup>\
+                 <Target Name=\"CopyFSharp\" BeforeTargets=\"BeforeBuild\" Condition=\"!Exists('fs')\">\
+                 <Exec Command=\"cp -R &quot;$(MSBuildToolsPath)/FSharp&quot; fs\" /></Target>",
                 "",
             )
         },
@@ -452,7 +500,8 @@ fn fsc_args_reads_what_real_builds_hand_fsc() {
                 failures.extend(check_build(fixture, &dir, &control, &build))
             }
             (Expect::NoBuild, Err(FscArgsDecline::NoBuild(_))) => {}
-            (Expect::Unanswered, Err(FscArgsDecline::Unanswered(_))) => {}
+            (Expect::Unanswered(why), Err(FscArgsDecline::Unanswered(messages)))
+                if messages.first().is_some_and(|first| first.contains(why)) => {}
             (expect, answer) => failures.push(format!(
                 "`{}`: expected {expect:?}, got {answer:?}",
                 fixture.name

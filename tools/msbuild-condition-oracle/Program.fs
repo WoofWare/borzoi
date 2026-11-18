@@ -886,7 +886,11 @@ let private responseFileOf (run: FscRun) : Result<string, string> =
 ///
 /// That `Fsc` started is MSBuild's account; that fsc ran is fsc's own: its
 /// banner or diagnostics in the task's context. The report also carries the
-/// build process's `DOTNET_HOST_PATH`, which the driver holds the launch to.
+/// build process's `DOTNET_HOST_PATH` and the directory of the MSBuild
+/// running it (its SDK's), which the driver holds the launch to, and every
+/// project the build started, with its global properties and build
+/// submission (`-restore` is a submission of its own, ahead of the build's),
+/// which the driver holds to the tree whose written files it compares.
 ///
 /// A real build, not an imitation of one: the restore, the targets, the
 /// project references and the compiler are the CLI's own, so what it reports
@@ -896,6 +900,10 @@ type FscArgsLogger() =
     let errors = ResizeArray<string>()
     let projects = Collections.Generic.Dictionary<int, string * Collections.Generic.IDictionary<string, string>>()
     let runs = Collections.Generic.Dictionary<struct (int * int * int * int), FscRun>()
+    let started =
+        ResizeArray<{| project: string
+                       globals: Collections.Generic.IDictionary<string, string>
+                       submission: int |}>()
     let order = ResizeArray<struct (int * int * int * int)>()
     let mutable succeeded = false
     let mutable verbosity = Microsoft.Build.Framework.LoggerVerbosity.Normal
@@ -920,7 +928,8 @@ type FscArgsLogger() =
                     | null -> Collections.Generic.Dictionary<string, string>() :> Collections.Generic.IDictionary<_, _>
                     | globals -> globals
 
-                projects[e.BuildEventContext.ProjectContextId] <- (e.ProjectFile, globals))
+                projects[e.BuildEventContext.ProjectContextId] <- (e.ProjectFile, globals)
+                started.Add {| project = e.ProjectFile; globals = globals; submission = e.BuildEventContext.SubmissionId |})
 
             source.TaskStarted.Add(fun e ->
                 if isFsc e.TaskName then
@@ -1011,6 +1020,9 @@ type FscArgsLogger() =
                         {| succeeded = succeeded
                            errors = List.ofSeq errors
                            dotnetHostPath = Environment.GetEnvironmentVariable "DOTNET_HOST_PATH"
+                           msbuildDirectory =
+                            Path.GetDirectoryName typeof<Microsoft.Build.Framework.ILogger>.Assembly.Location
+                           projects = List.ofSeq started
                            invocations = invocations |}
                 )
 

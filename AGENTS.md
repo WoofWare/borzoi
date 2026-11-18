@@ -185,6 +185,12 @@ This is a Cargo workspace with ten members:
   left unbuilt, the compiler skipped) differed from the CLI in each of
   those, in review after review. Use it rather than re-deriving an fsc input
   from evaluated values: every hand re-derivation leaked too.
+  A project can see the logger on the process's command line, so each
+  answer is also checked against a plain build of the same tree, which must
+  write the same files byte for byte. What that check cannot see is a build
+  that reacts to the logger yet writes the same bytes, such as an unused
+  `--define`; a consumer of `defines` should know that. The call owns the
+  project's directory while it runs.
   `fsc_args_oracle_calibration` holds the reading to real compiling builds
   (the arguments `-getItem` reports, and the file fsc writes).
   The workload locator SDKs (`sdk_resolver/workloads.rs`) have their own

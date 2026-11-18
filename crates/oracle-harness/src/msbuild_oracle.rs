@@ -15,10 +15,30 @@
 //! says it cannot answer rather than forcing one; the fixtures it serves are
 //! built fresh.
 //!
-//! The guarantee is for builds that do not look for the instrumentation:
-//! the loggers set no property, but a project can read the process's command
-//! line (`$([System.Environment]::CommandLine)`) and see them there. No
-//! observation of a build is invisible to a build that looks for it.
+//! No observation of a build is invisible to a build that looks for it: the
+//! loggers set no property, but a project can read the process's command
+//! line (`$([System.Environment]::CommandLine)`). So every answer is checked
+//! against a plain build of the same tree, with the caller's globals and
+//! environment and no other switch. The instrumented build runs first; the
+//! files it added under the project's directory are recorded and removed, and
+//! the plain build must then add the same files, byte for byte (but for
+//! ResolveAssemblyReference's state cache, `*.AssemblyReference.cache`, which
+//! records its references' times: measured, two plain builds of one tree
+//! differ in that file alone). Among them must be the output and reference
+//! assembly that each reported invocation's `-o:` and `--refout:` name. A
+//! build that rewrites or removes a file that was there before it, or starts
+//! a project outside the directory, writes where the check cannot compare,
+//! and is not answered either.
+//!
+//! So a build that reacts to the instrumentation by compiling something else
+//! is not answered. What remains is a build that reacts and still writes the
+//! same bytes everywhere: its reported arguments may differ from the plain
+//! build's (a `--define` the source never tests, say), but only in ways that
+//! change nothing a build of it writes. That is the residual: what is
+//! reported is exactly what the instrumented build handed fsc, and equivalent
+//! to the plain build's in everything fsc writes. A build that is not
+//! deterministic fails the comparison, which is sound. Each call builds twice,
+//! and leaves the tree as the plain build left it.
 //!
 //! The tool is built once (marker-gated, with the marker and fingerprint
 //! `borzoi-msbuild`'s tests use, so the two never rebuild over each other).
@@ -214,13 +234,18 @@ pub enum FscArgsDecline {
     /// failed first, the project was up to date, or a replaced `CoreCompile`
     /// compiles some other way), or an invocation launched something other
     /// than the SDK's compiler, left no sign fsc ran, or ran on a command
-    /// line the driver cannot read. With the build's errors.
+    /// line the driver cannot read; or the plain build of the tree wrote
+    /// other files than the instrumented one, or either wrote where the
+    /// comparison cannot see. With the build's errors.
     Unanswered(Vec<String>),
 }
 
 /// What fsc is handed for the project at `project` (on disk) in a real
 /// `dotnet msbuild -restore -t:Build` under the global properties `globals`,
-/// in [`build_environment`] plus `env`. The project is built by the path
+/// in [`build_environment`] plus `env`. The call owns the project's directory
+/// while it runs: it removes whatever appears there between the two builds,
+/// so nothing else may write there (the callers' trees are fixtures they laid
+/// out in directories of their own). The project is built by the path
 /// given, made absolute and lexically normal but not resolved through links
 /// (MSBuild names the project after the path it is handed). A global's value may not hold `;`,
 /// `,` or `"`, which the command line would split or strip.
@@ -234,42 +259,231 @@ pub fn fsc_args(
             .unwrap_or_else(|e| panic!("absolute path of {}: {e}", project.display())),
     );
     let dir = project.parent().expect("a project file has a directory");
-    let scratch = ScratchDir::new();
-    let out = scratch.0.join("fsc-args.json");
-    let logger = apphost().with_extension("dll");
-
-    let mut cmd = Command::new("dotnet");
-    cmd.current_dir(dir)
-        .args([
-            "msbuild",
-            "-nologo",
-            "-nodeReuse:false",
-            "-restore",
-            "-t:Build",
-        ])
-        .arg(format!(
-            "-logger:MsBuildConditionOracle.Program+FscArgsLogger,{};{}",
-            logger.display(),
-            out.display()
-        ))
-        // A diagnostic file log makes MSBuild log every task's inputs, which
-        // is how the logger learns the `Fsc` task's compiler parameters; it
-        // sets nothing the build can read (`MSBUILDLOGTASKINPUTS` and `-bl`
-        // each set a property). It goes to the call's scratch directory.
-        .arg(format!(
-            "-flp:v=diag;logfile={}",
-            scratch.0.join("build.log").display()
-        ));
     for (name, value) in globals {
         assert!(
             !value.contains([';', ',', '"']),
             "global {name}={value:?} cannot be passed on the command line verbatim"
         );
-        cmd.arg(format!("-p:{name}={value}"));
     }
-    cmd.arg(&project).env_clear();
-    cmd.envs(build_environment());
-    cmd.envs(env.iter().map(|(name, value)| (name, value)));
+    let before = Tree::scan(dir);
+    let build = instrumented_build(&project, globals, env)?;
+
+    // The observer check: the same tree built again with no instrumentation
+    // at all must write what the instrumented build wrote, byte for byte. A
+    // build that reacts to the instrumentation (it can read the process's
+    // command line) then writes something else, and is not answered.
+    let instrumented = before
+        .written(dir)
+        .map_err(|why| FscArgsDecline::Unanswered(vec![why]))?;
+    before.revert(dir);
+    let plain_succeeded = plain_build(&project, globals, env);
+    let plain = before
+        .written(dir)
+        .map_err(|why| FscArgsDecline::Unanswered(vec![why]))?;
+    if let Some(difference) = first_difference(&instrumented, &plain) {
+        return Err(FscArgsDecline::Unanswered(vec![format!(
+            "the instrumented build wrote other files than the plain build: {difference}"
+        )]));
+    }
+    if plain_succeeded != build.succeeded {
+        return Err(FscArgsDecline::Unanswered(vec![format!(
+            "the instrumented build {} and the plain build {}",
+            if build.succeeded {
+                "succeeded"
+            } else {
+                "failed"
+            },
+            if plain_succeeded {
+                "succeeded"
+            } else {
+                "failed"
+            },
+        )]));
+    }
+    // What fsc wrote, by the instrumented run's own reading, is what the
+    // plain build wrote too.
+    for invocation in &build.invocations {
+        let args = invocation.arguments().map_err(|e| {
+            FscArgsDecline::Unanswered(vec![format!("an Fsc response file fsc rejects: {e:?}")])
+        })?;
+        let refout = args
+            .options
+            .iter()
+            .filter(|option| option.name == "refout")
+            .map(|option| option.argument.clone());
+        for path in args.output.into_iter().chain(refout) {
+            let path = lexically_normal(&dir.join(path));
+            if !plain.contains_key(&path) {
+                return Err(FscArgsDecline::Unanswered(vec![format!(
+                    "the plain build wrote no {}, which the instrumented build's fsc names",
+                    path.display()
+                )]));
+            }
+        }
+    }
+    Ok(build)
+}
+
+/// The files a build writes whose bytes differ between two builds of one
+/// tree, so the observer check leaves them out: ResolveAssemblyReference's
+/// state cache records its references' modification times. Measured: two
+/// plain builds of a project with a project reference, a documentation file
+/// and an executable output differ in this file alone.
+fn nondeterministic(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".AssemblyReference.cache"))
+}
+
+/// The first way two builds' written files differ, but for those
+/// [`nondeterministic`] leaves out, or `None`.
+fn first_difference(
+    a: &BTreeMap<PathBuf, Vec<u8>>,
+    b: &BTreeMap<PathBuf, Vec<u8>>,
+) -> Option<String> {
+    let keys: std::collections::BTreeSet<&PathBuf> = a
+        .keys()
+        .chain(b.keys())
+        .filter(|path| !nondeterministic(path))
+        .collect();
+    keys.into_iter()
+        .find_map(|path| match (a.get(path), b.get(path)) {
+            (Some(x), Some(y)) if x == y => None,
+            (Some(_), Some(_)) => Some(format!("{} differs", path.display())),
+            (Some(_), None) => Some(format!(
+                "only the instrumented build wrote {}",
+                path.display()
+            )),
+            (None, _) => Some(format!("only the plain build wrote {}", path.display())),
+        })
+}
+
+/// A directory tree's entries, as they stand: every entry but a directory
+/// (links are not followed) with whether it is a regular file, its length and
+/// its modification time, by which a later scan sees it rewritten; and the
+/// directories.
+struct Tree {
+    files: BTreeMap<PathBuf, Stamp>,
+    dirs: std::collections::BTreeSet<PathBuf>,
+}
+
+/// What [`Tree`] records of an entry.
+#[derive(PartialEq, Eq)]
+struct Stamp {
+    regular: bool,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl Tree {
+    fn scan(root: &Path) -> Tree {
+        let mut tree = Tree {
+            files: BTreeMap::new(),
+            dirs: std::collections::BTreeSet::new(),
+        };
+        tree.walk(root);
+        tree
+    }
+
+    fn walk(&mut self, dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                self.dirs.insert(path.clone());
+                self.walk(&path);
+            } else {
+                let stamp = Stamp {
+                    regular: meta.is_file(),
+                    len: meta.len(),
+                    modified: meta.modified().ok(),
+                };
+                self.files.insert(path, stamp);
+            }
+        }
+    }
+
+    /// The files under `root` a build wrote since this scan, with their
+    /// bytes; `Err` when it rewrote or removed one that was here, which
+    /// [`Self::revert`] cannot put back, or added anything but a regular file
+    /// (a link or a FIFO, which reading could follow or wait on), or one
+    /// cannot be read.
+    fn written(&self, root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+        let now = Tree::scan(root);
+        for (path, stamp) in &self.files {
+            if now.files.get(path) != Some(stamp) {
+                return Err(format!(
+                    "the build rewrote or removed {}, which was there before it",
+                    path.display()
+                ));
+            }
+        }
+        now.files
+            .iter()
+            .filter(|(path, _)| !self.files.contains_key(*path))
+            .map(|(path, stamp)| {
+                if !stamp.regular {
+                    return Err(format!(
+                        "the build left {}, not a regular file",
+                        path.display()
+                    ));
+                }
+                std::fs::read(path)
+                    .map(|bytes| (path.clone(), bytes))
+                    .map_err(|e| format!("reading {}: {e}", path.display()))
+            })
+            .collect()
+    }
+
+    /// Put `root` back as this scan found it: remove every file and directory
+    /// a build added since.
+    fn revert(&self, root: &Path) {
+        let now = Tree::scan(root);
+        for path in now.files.keys().filter(|p| !self.files.contains_key(*p)) {
+            let _ = std::fs::remove_file(path);
+        }
+        for dir in now.dirs.iter().rev().filter(|d| !self.dirs.contains(*d)) {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+/// [`fsc_args`]'s instrumented build: the CLI's, with `FscArgsLogger` and a
+/// diagnostic file log, and the logger's report read.
+fn instrumented_build(
+    project: &Path,
+    globals: &[(String, String)],
+    env: &[(String, String)],
+) -> Result<FscBuild, FscArgsDecline> {
+    let scratch = ScratchDir::new();
+    let out = scratch.0.join("fsc-args.json");
+    let logger = apphost().with_extension("dll");
+    // MSBuild splits a logger switch at `,` and `;`, quoted or not.
+    assert!(
+        !logger.to_string_lossy().contains([',', ';']),
+        "MSBuild cannot load the logger from {}, whose path holds a `,` or `;`",
+        logger.display()
+    );
+
+    let mut cmd = build_command(project, globals, env);
+    cmd.arg(format!(
+        "-logger:MsBuildConditionOracle.Program+FscArgsLogger,{};{}",
+        logger.display(),
+        out.display()
+    ))
+    // A diagnostic file log makes MSBuild log every task's inputs, which is
+    // how the logger learns the `Fsc` task's compiler parameters; it sets
+    // nothing the build can read (`MSBUILDLOGTASKINPUTS` and `-bl` each set a
+    // property). It goes to the call's scratch directory.
+    .arg(format!(
+        "-flp:v=diag;logfile={}",
+        scratch.0.join("build.log").display()
+    ));
     let output = BoundedCommand::new(cmd)
         .timeout(FSC_ARGS_TIMEOUT)
         .run()
@@ -281,9 +495,16 @@ pub fn fsc_args(
         String::from_utf8_lossy(&output.stderr)
     );
     match json {
-        Ok(json) => parse_logger_output(&project, &json),
-        // MSBuild's own command-line errors (`MSB1xxx`: a switch it rejects,
-        // a logger it cannot load) are this driver's fault, and loud.
+        Ok(json) => parse_logger_output(project, &json),
+        // The MSBuild the project's SDK selection runs cannot load the
+        // logger (an SDK older than the runtime the oracle targets).
+        Err(_) if report.contains("error MSB1021") => {
+            Err(FscArgsDecline::Unanswered(vec![format!(
+                "the build's MSBuild could not load the logger:\n{report}"
+            )]))
+        }
+        // MSBuild's other command-line errors (`MSB1xxx`: a switch it
+        // rejects) are this driver's fault, and loud.
         Err(e) if report.contains("error MSB1") || output.status.success() => panic!(
             "dotnet msbuild of {} wrote no fsc arguments ({e}):\n{report}",
             project.display()
@@ -300,15 +521,62 @@ pub fn fsc_args(
     }
 }
 
-/// Whether `invocation` launched the SDK's own compiler: its `ToolPath` and
-/// `ToolExe` name the build's `dotnet` host (`host`, the build process's
-/// `DOTNET_HOST_PATH`), and its `DotnetFscCompilerPath` is the `fsc.dll`
-/// beside the task assembly that ran, each compared as canonical paths.
-fn sdk_launch(invocation: &FscInvocation, host: Option<&Path>) -> bool {
-    let canonical = |path: &Path| std::fs::canonicalize(path).ok();
+/// [`fsc_args`]'s plain build: the CLI's, with no switch beyond the caller's
+/// globals, and nothing read from it but whether it succeeded and the files
+/// it writes.
+fn plain_build(project: &Path, globals: &[(String, String)], env: &[(String, String)]) -> bool {
+    BoundedCommand::new(build_command(project, globals, env))
+        .timeout(FSC_ARGS_TIMEOUT)
+        .run()
+        .unwrap_or_else(|e| panic!("dotnet msbuild of {}: {e}", project.display()))
+        .status
+        .success()
+}
+
+/// `dotnet msbuild -restore -t:Build` of `project` under `globals`, in its
+/// directory, in [`build_environment`] plus `env`.
+fn build_command(
+    project: &Path,
+    globals: &[(String, String)],
+    env: &[(String, String)],
+) -> Command {
+    let mut cmd = Command::new("dotnet");
+    cmd.current_dir(project.parent().expect("a project file has a directory"))
+        .args([
+            "msbuild",
+            "-nologo",
+            "-nodeReuse:false",
+            "-restore",
+            "-t:Build",
+        ]);
+    for (name, value) in globals {
+        cmd.arg(format!("-p:{name}={value}"));
+    }
+    cmd.arg(project).env_clear();
+    cmd.envs(build_environment());
+    cmd.envs(env.iter().map(|(name, value)| (name, value)));
+    cmd
+}
+
+/// Whether `invocation` launched the running SDK's own compiler: its
+/// `ToolPath` and `ToolExe` name the build's `dotnet` host (`host`, the build
+/// process's `DOTNET_HOST_PATH`), and the task assembly that ran and its
+/// `DotnetFscCompilerPath` are `FSharp/FSharp.Build.dll` and `FSharp/fsc.dll`
+/// under the directory of the MSBuild running the build (`msbuild`, the SDK's
+/// own), each compared as canonical paths. A project can choose both the
+/// task assembly and the compiler, so neither is held to the other. Each
+/// path must be absolute: a relative one is resolved by the process that
+/// reads it, whose directory is not this one.
+fn sdk_launch(invocation: &FscInvocation, host: Option<&Path>, msbuild: Option<&Path>) -> bool {
+    let canonical = |path: &Path| {
+        path.is_absolute()
+            .then(|| std::fs::canonicalize(path).ok())
+            .flatten()
+    };
     let compiler = |name: &str| invocation.compiler.get(name).map(String::as_str);
-    let (Some(host), Some(tool_path), Some(tool_exe), Some(fsc)) = (
+    let (Some(host), Some(msbuild), Some(tool_path), Some(tool_exe), Some(fsc)) = (
         host,
+        msbuild,
         compiler("ToolPath"),
         compiler("ToolExe"),
         compiler("DotnetFscCompilerPath")
@@ -316,15 +584,18 @@ fn sdk_launch(invocation: &FscInvocation, host: Option<&Path>) -> bool {
     ) else {
         return false;
     };
-    let Some(fsharp) = Path::new(&invocation.task_assembly).parent() else {
-        return false;
-    };
-    let launcher = canonical(&Path::new(tool_path).join(tool_exe));
-    let sdk_fsc = canonical(&fsharp.join("fsc.dll"));
-    launcher.is_some()
-        && launcher == canonical(host)
-        && sdk_fsc.is_some()
-        && sdk_fsc == canonical(Path::new(fsc))
+    let same = |a: Option<PathBuf>, b: Option<PathBuf>| a.is_some() && a == b;
+    let fsharp = msbuild.join("FSharp");
+    same(
+        canonical(&Path::new(tool_path).join(tool_exe)),
+        canonical(host),
+    ) && same(
+        canonical(Path::new(&invocation.task_assembly)),
+        canonical(&fsharp.join("FSharp.Build.dll")),
+    ) && same(
+        canonical(Path::new(fsc)),
+        canonical(&fsharp.join("fsc.dll")),
+    )
 }
 
 /// What the `dotnet` host prints when no installed SDK satisfies the
@@ -398,11 +669,42 @@ fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDe
         .collect();
     let succeeded = value["succeeded"].as_bool() == Some(true);
     let host = value["dotnetHostPath"].as_str().map(PathBuf::from);
+    let msbuild = value["msbuildDirectory"].as_str().map(PathBuf::from);
     let unanswered = |why: String| {
         let mut all = vec![why];
         all.extend(errors.iter().cloned());
         Err(FscArgsDecline::Unanswered(all))
     };
+    // The observer check compares what the build wrote under the project's
+    // directory; a project built outside it writes where the check does not
+    // look, and the plain build would then find its outputs already there.
+    //
+    // `-restore` runs as a build submission of its own, whose first project is
+    // started with `MSBuildIsRestoring` set; it starts the SDK's `NuGet.targets`,
+    // and writes nothing but each project's restore outputs, in its `obj`.
+    let tree = project.parent().expect("a project file has a directory");
+    let started = value["projects"]
+        .as_array()
+        .expect("FscArgsLogger writes the projects it saw start");
+    let mut restore_submissions = std::collections::BTreeMap::new();
+    for entry in started {
+        restore_submissions
+            .entry(entry["submission"].as_i64())
+            .or_insert_with(|| entry["globals"].get("MSBuildIsRestoring").is_some());
+    }
+    for entry in started {
+        if restore_submissions[&entry["submission"].as_i64()] {
+            continue;
+        }
+        let started = lexically_normal(Path::new(entry["project"].as_str().unwrap_or_default()));
+        if !started.starts_with(tree) {
+            return unanswered(format!(
+                "the build started {}, outside {}",
+                started.display(),
+                tree.display()
+            ));
+        }
+    }
     let mut invocations = Vec::new();
     for run in value["invocations"]
         .as_array()
@@ -429,7 +731,7 @@ fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDe
         // The arguments are what the `Fsc` task handed its launcher; they
         // are fsc's only when the launcher is the build's `dotnet` running
         // its SDK's `fsc.dll`, and not some program that may pass on more.
-        if !sdk_launch(&invocation, host.as_deref()) {
+        if !sdk_launch(&invocation, host.as_deref(), msbuild.as_deref()) {
             return unanswered(format!(
                 "Fsc launched something other than the SDK's compiler: {:?}",
                 invocation.compiler
