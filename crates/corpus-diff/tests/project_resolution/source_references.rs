@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use borzoi_corpus_diff::ProjectGraphOracle;
+use borzoi_corpus_diff::{FcsInvokeError, ProjectGraphOracle};
 use borzoi_oracle_harness::project_graph::{
     FixtureFile, FixtureProject, GraphProject, GraphReference, GraphRequest, GraphResponse,
     PlainName, ProjectGraphFixture, build_fixtures,
@@ -563,4 +563,48 @@ fn same_named_projects_of_two_fixtures_build_together() {
     build_fixtures(&[first.fsproj(&name("Lib")), second.fsproj(&name("Lib"))]);
     assert!(first.output_dll(&name("Lib")).is_file());
     assert!(second.output_dll(&name("Lib")).is_file());
+}
+
+/// A referenced type provider assembly is refused. FCS hands a dependant no
+/// in-memory signature for a project whose assembly carries
+/// `TypeProviderAssemblyAttribute` and reads its output DLL from disk instead,
+/// so with the library unbuilt the source check would bind the consumer's
+/// `id` to FSharp.Core's with no diagnostic, where the built DLL binds the
+/// library's.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn a_referenced_type_provider_assembly_is_refused() {
+    let fixture = ProjectGraphFixture::materialise(vec![
+        FixtureProject {
+            name: name("Provider"),
+            files: files(vec![(
+                "Lib.fs".into(),
+                "namespace Provided\n\n\
+                 [<AutoOpen>]\nmodule Exports =\n    let id (x: int) = x + 1\n\n\
+                 module Attributes =\n    \
+                 [<assembly: Microsoft.FSharp.Core.CompilerServices.TypeProviderAssembly>]\n    \
+                 do ()\n"
+                    .into(),
+            )]),
+            project_refs: Vec::new(),
+            defines: Vec::new(),
+        },
+        FixtureProject {
+            name: name("Bee"),
+            files: files(vec![(
+                "Use.fs".into(),
+                "module Use\n\nopen Provided\n\nlet y = id 1\n".into(),
+            )]),
+            project_refs: vec![name("Provider")],
+            defines: Vec::new(),
+        },
+    ])
+    .expect("a graph");
+    match ProjectGraphOracle::default().check(&fixture.source_request(&name("Bee"))) {
+        Err(FcsInvokeError::Refused(message)) => assert!(
+            message.contains("type provider"),
+            "refused for another reason: {message}"
+        ),
+        other => panic!("a type provider reference must be refused: {other:#?}"),
+    }
 }

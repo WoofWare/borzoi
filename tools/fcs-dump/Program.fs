@@ -6597,7 +6597,14 @@ let private readGraphProject (e: JsonElement) : GraphProject =
     // check what it says.
     if String.Equals(assemblyName, "FSharp.Core", StringComparison.OrdinalIgnoreCase) then
         failwithf "project %s: FCS does not reference a project named FSharp.Core from source" id
-    let paths = strArray "paths" |> Array.map Path.GetFullPath
+    let paths =
+        strArray "paths"
+        |> Array.map (fun path ->
+            // A relative path would resolve against the oracle's own
+            // working directory, which is nothing the caller chose.
+            if not (Path.IsPathFullyQualified path) then
+                failwithf "project %s: source path %s is not absolute" id path
+            Path.GetFullPath path)
     if Array.isEmpty paths then
         failwithf "project %s has no paths" id
     let references =
@@ -6625,7 +6632,7 @@ let private readGraphProject (e: JsonElement) : GraphProject =
     let isVersion (v: string) =
         let v = v.Trim()
         let digits (s: string) = s <> "" && s |> Seq.forall Char.IsAsciiDigit
-        match v with
+        match v.ToLowerInvariant() with
         | "latest" | "latestmajor" | "preview" | "default" -> true
         | _ ->
             match v.Split('.') with
@@ -6695,6 +6702,29 @@ let private readGraphRequest (root: JsonElement) =
         match root.TryGetProperty("check") with
         | true, v when v.ValueKind = JsonValueKind.String -> Option.ofObj (v.GetString())
         | _ -> None
+    // The whole reference relation, not only `check`'s closure: a request
+    // describes one graph, and a malformed one is refused whatever is checked.
+    for p in projects do
+        for r in p.References do
+            match r with
+            | Project id ->
+                match byId.TryGetValue id with
+                | true, q when q.Target = "module" ->
+                    failwithf "project %s references %s, a module, which is no assembly" p.Id id
+                | true, _ -> ()
+                | _ -> failwithf "project %s references unknown project %s" p.Id id
+            | Dll _ -> ()
+    let finished = System.Collections.Generic.HashSet<string>()
+    let rec visit (onPath: Set<string>) (p: GraphProject) =
+        if onPath.Contains p.Id then
+            failwithf "project reference cycle through %s" p.Id
+        if finished.Add p.Id then
+            for r in p.References do
+                match r with
+                | Project id -> visit (onPath.Add p.Id) byId.[id]
+                | Dll _ -> ()
+    for p in projects do
+        visit Set.empty p
     match checkId with
     | Some id when byId.ContainsKey id -> byId, byId.[id]
     | other -> failwithf "check names no project of the request: %A" other
@@ -6773,28 +6803,54 @@ let private graphOptions
     built, order
 
 /// One `uses-project-graph-batch` request's response.
+/// Whether FCS hands a dependant `results`' project as no in-memory signature
+/// at all: a project whose assembly carries `TypeProviderAssemblyAttribute`
+/// yields `ProjectAssemblyDataResult.Unavailable true`
+/// (`IncrementalBuild.fs`, beside `CreatesGeneratedProvidedTypes`), and
+/// `TcImports` then reads the project's output DLL from disk instead
+/// (`CompilerImports.fs`, `OpenILBinaryModule`). The attribute is
+/// classified as FCS classifies it, by the resolved type.
+let private readFromDisk (results: FSharpCheckProjectResults) : bool =
+    let named =
+        try
+            results.AssemblySignature.Attributes
+            |> Seq.exists (fun a ->
+                try
+                    a.AttributeType.FullName = "Microsoft.FSharp.Core.CompilerServices.TypeProviderAssemblyAttribute"
+                with _ ->
+                    false)
+        with _ ->
+            false
+    named
+
 let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
     let byId, check = readGraphRequest root
     let built, order = graphOptions checker byId check
-    let files = checkProjectFiles checker built.[check.Id] check.Paths
-    // A whole-project check finds what no file's check reports (FS0240, a
-    // signature with no implementation).
-    let projectDiagnostics (opts: FSharpProjectOptions) =
-        let results =
-            checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-uses-project-graph")
-            |> Async.RunSynchronously
-        results.Diagnostics |> Array.map projectDiagnostic
+    let projectResults (opts: FSharpProjectOptions) =
+        checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-uses-project-graph")
+        |> Async.RunSynchronously
+    // A reference FCS reads from disk is no reference from source: with no
+    // DLL there, the dependant would be checked without it and the answer
+    // would look clean. Refuse it before checking anything.
     let referenced =
         order
         |> Seq.filter (fun p -> p.Id <> check.Id)
         |> Seq.map (fun p ->
+            let results = projectResults built.[p.Id]
+            if readFromDisk results then
+                failwithf
+                    "project %s is a type provider assembly, which FCS reads from its output DLL rather than from source"
+                    p.Id
             {| Id = p.Id
                AssemblyName = p.AssemblyName
                OutputPath = graphOutputPath p
-               Diagnostics = projectDiagnostics built.[p.Id] |})
+               // A whole-project check finds what no file's check reports
+               // (FS0240, a signature with no implementation).
+               Diagnostics = results.Diagnostics |> Array.map projectDiagnostic |})
         |> Seq.toArray
+    let files = checkProjectFiles checker built.[check.Id] check.Paths
     {| Files = files
-       Diagnostics = projectDiagnostics built.[check.Id]
+       Diagnostics = (projectResults built.[check.Id]).Diagnostics |> Array.map projectDiagnostic
        Referenced = referenced |}
 
 /// `uses-project-graph-batch`: check one project of a project *graph*, each of
@@ -6823,7 +6879,9 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
 /// the entry's place among the `dll` entries' (FCS resolves a name two
 /// references declare by their order). A project referencing a `module`
 /// target is refused, as fsc refuses a netmodule reference, and so is a pin
-/// below F# 8, which this oracle cannot check at. A
+/// below F# 8, which this oracle cannot check at, and a referenced type
+/// provider assembly, which FCS reads from its DLL rather than from source
+/// ([`readFromDisk`]). A
 /// project's options are built once per request, so a project several others
 /// reference is one referenced project.
 ///
