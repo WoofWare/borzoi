@@ -421,7 +421,11 @@ fn sweep(
                 &[],
                 &[],
             ) else {
-                continue;
+                panic!(
+                    "MSBuild rejects a generated project under G={g}: the generator writes \
+                     only projects it evaluates\n{}\n--- hidden.props ---\n{}",
+                    case.project, case.hidden
+                );
             };
             let extra: HashMap<String, String> = globals.iter().cloned().collect();
             let served = parse_fsproj_with_imports(
@@ -444,6 +448,17 @@ fn sweep(
                 &probe,
             )
             .expect("well-formed");
+            // The hidden import stays unseen, so the gate names, bound only
+            // before it, are never committed: a walk that sees the hidden
+            // file would grade no stale gate at all.
+            for gate in GATES {
+                assert!(
+                    committed(&reads.properties[*gate]).is_none(),
+                    "the walk commits ${gate} under G={g}, so it saw the hidden import and \
+                     this case grades no stale gate\n{}",
+                    case.project
+                );
+            }
             for name in READ {
                 let real = theirs["properties"][*name].as_str().map(str::to_owned);
                 theirs_by_name.entry(name).or_default().insert(real.clone());

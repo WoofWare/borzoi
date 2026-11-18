@@ -2846,6 +2846,9 @@ impl<'r> State<'r> {
                 self.lookup.restore_trust(&name, trust);
             }
         }
+        // Each name once, though several alternatives may write it.
+        let mut seen = HashSet::new();
+        written.retain(|name| seen.insert(name.to_ascii_lowercase()));
         written
     }
 
@@ -2864,9 +2867,14 @@ impl<'r> State<'r> {
         written: &mut Vec<String>,
         undo: &mut HashMap<String, Option<Trust>>,
     ) {
+        // A name is marked once per branch: a second mark changes nothing.
         let mut mark = |state: &mut Self, name: String| {
-            undo.entry(name.to_ascii_lowercase())
-                .or_insert_with(|| state.lookup.entry_trust(&name));
+            let std::collections::hash_map::Entry::Vacant(slot) =
+                undo.entry(name.to_ascii_lowercase())
+            else {
+                return;
+            };
+            slot.insert(state.lookup.entry_trust(&name));
             state.mark_skipped_write_stale(&name, cause);
             written.push(name);
         };
