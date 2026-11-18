@@ -6306,13 +6306,28 @@ let private lineDirective =
         System.Text.RegularExpressions.RegexOptions.Multiline
     )
 
+/// Whether a match of [`lineDirective`] whose line holds `prefix` before it is
+/// surely in a line comment: a `//` precedes it, and nothing before it on the
+/// line (`"`, `(*`, `*)`, a double-backtick identifier) could make that `//`
+/// part of a string, a block comment or an identifier. A line that starts
+/// inside a string or a block comment and reaches the match without closing
+/// it holds no directive there either.
+let private inLineComment (prefix: string) : bool =
+    prefix.Contains "//"
+    && not ([ "\""; "(*"; "*)"; "``" ] |> List.exists prefix.Contains)
+
 /// Whether `text` may hold a line directive (`#line 7 "f.fs"`, `# 7`): text
 /// that matches fsc's directive token ([`lineDirective`]), wherever it starts on
-/// its line, since FCS honours a directive after other text. The lexer that
-/// knows which match is a directive does not report one, so this reads the
-/// text and over-approximates: a directive in a comment, a string or an
-/// inactive `#if` branch matches too, which costs only a decline.
-let private mayHoldLineDirective (text: string) : bool = lineDirective.IsMatch text
+/// its line, since FCS honours a directive after other text, unless it is
+/// surely in a line comment ([`inLineComment`]). The lexer that knows which
+/// match is a directive does not report one, so this reads the text and
+/// over-approximates: a directive in a block comment, a string or an inactive
+/// `#if` branch matches too, which costs only a decline.
+let private mayHoldLineDirective (text: string) : bool =
+    lineDirective.Matches text
+    |> Seq.exists (fun m ->
+        let lineStart = text.LastIndexOf('\n', max 0 (m.Index - 1)) + 1
+        not (inLineComment (text.Substring(lineStart, m.Index - lineStart))))
 
 /// The hash directives fsc acts on in a source (`ProcessMetaCommandsFromInput`):
 /// in a script, those at the top of the file and at the top of each module
@@ -6435,10 +6450,11 @@ let private projectChecker () =
 /// file system, or by an ignorable character such as U+00AD) would give one
 /// file's uses for both and none for the other.
 let private refuseConflatedSources (paths: string[]) =
-    for i in 0 .. paths.Length - 1 do
-        for j in i + 1 .. paths.Length - 1 do
-            if String.Equals(paths[i], paths[j], StringComparison.CurrentCultureIgnoreCase) then
-                failwithf "%s and %s are one file to FCS" paths[i] paths[j]
+    let seen = System.Collections.Generic.Dictionary<string, string>(StringComparer.CurrentCultureIgnoreCase)
+    for path in paths do
+        match seen.TryGetValue path with
+        | true, first -> failwithf "%s and %s are one file to FCS" first path
+        | false, _ -> seen[path] <- path
 
 /// The whole-project check of `projOpts` by a [`projectChecker`], of its
 /// sources as they are when the request starts, refused where it cannot

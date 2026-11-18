@@ -251,6 +251,27 @@ fn sources_fcs_takes_for_one_file_are_refused() {
     }
 }
 
+/// Text in a line comment that reads like a line directive (`F# 5` at the end
+/// of the line) is not one, and the project is checked.
+#[test]
+fn a_directive_like_line_comment_is_checked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    write(
+        &a,
+        "module A\n// used in (+) and (-) since F# 5\n/// needs F# 8\nlet x = 1\n",
+    );
+    for oracle in ORACLES {
+        let mut child = resident(oracle);
+        let answer = check(&mut child, oracle, &[&a]);
+        assert_eq!(
+            error_numbers(record(&answer, "A.fs")),
+            Vec::<i64>::new(),
+            "{oracle}: {answer}"
+        );
+    }
+}
+
 /// A resident oracle reads the sources as they are now: a file rewritten
 /// with its modification time put back is answered from its new text.
 #[test]
