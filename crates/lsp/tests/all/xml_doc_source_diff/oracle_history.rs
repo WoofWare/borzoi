@@ -6,14 +6,15 @@
 //! each of a set of earlier requests gets byte for byte the answer a fresh
 //! child gives it.
 //!
-//! The earlier requests are the ways a project's location can move script
-//! resolution: an `.fsx` whose `#r` names a DLL beside it, a project under a
-//! `global.json`, and a plain project. The probe names a type in that DLL, so
-//! it resolves only where the reference leaked: a fresh child reports it
-//! unbound. That `#r` is the row that discriminates on every host. The pin
-//! names an SDK no machine has, and FCS then falls back to the newest one,
-//! so the `global.json` row moves the answer only where that differs from
-//! the SDK the probe's own directory selects.
+//! The earlier requests are a project that references a DLL (and is checked
+//! against it: a type from it resolves), and the ways a project's location
+//! can move script resolution: a project under a `global.json`, and a plain
+//! project. The probe names a type in that DLL, so it resolves only where the
+//! reference leaked: a fresh child reports it unbound. The referencing
+//! project is the row that discriminates on every host. The pin names an SDK
+//! no machine has, and FCS then falls back to the newest one, so the
+//! `global.json` row moves the answer only where that differs from the SDK
+//! the probe's own directory selects.
 
 use std::path::{Path, PathBuf};
 
@@ -24,10 +25,10 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).expect("write file");
 }
 
-fn request(paths: &[&Path]) -> String {
+fn request(paths: &[&Path], refs: &[&Path]) -> String {
     serde_json::json!({
         "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-        "refs": [],
+        "refs": refs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
     })
     .to_string()
 }
@@ -38,12 +39,10 @@ fn an_answer_does_not_depend_on_earlier_requests() {
     let root = root.path();
     let dll = ensure_fsharp_compiler_service_dll();
 
-    let hash_r = root.join("hash_r");
-    std::fs::create_dir_all(&hash_r).expect("create hash_r");
-    std::fs::copy(&dll, hash_r.join("FSharp.Compiler.Service.dll")).expect("copy dll");
+    let referencing = root.join("referencing/A.fs");
     write(
-        &hash_r.join("A.fsx"),
-        "#r \"FSharp.Compiler.Service.dll\"\nlet a = 1\n",
+        &referencing,
+        "module A\nlet a = FSharp.Compiler.Text.Range.Zero\n",
     );
     let pinned = root.join("pinned");
     write(
@@ -59,7 +58,7 @@ fn an_answer_does_not_depend_on_earlier_requests() {
         &probe,
         "module B\n/// Doc.\nlet z = FSharp.Compiler.Text.Range.Zero\n",
     );
-    let probe_request = request(&[&probe]);
+    let probe_request = request(&[&probe], &[]);
 
     let fresh = fcs_dump_batch_child("xmldoc-batch").request(&probe_request);
     assert!(
@@ -67,15 +66,23 @@ fn an_answer_does_not_depend_on_earlier_requests() {
         "a fresh child must report the probe's type unbound, or the leak is unobservable: {fresh}"
     );
 
-    let earlier: [(&str, PathBuf); 3] = [
-        ("an .fsx with a relative #r", hash_r.join("A.fsx")),
-        ("a project under a global.json", pinned.join("A.fs")),
-        ("a plain project", plain),
+    let earlier: [(&str, PathBuf, Vec<&Path>); 3] = [
+        (
+            "a project referencing the DLL",
+            referencing,
+            vec![dll.as_path()],
+        ),
+        ("a project under a global.json", pinned.join("A.fs"), vec![]),
+        ("a plain project", plain, vec![]),
     ];
     let mut child = fcs_dump_batch_child("xmldoc-batch");
     let mut failures = Vec::new();
-    for (label, path) in &earlier {
-        let _ = child.request(&request(&[path]));
+    for (label, path, refs) in &earlier {
+        let answer = child.request(&request(&[path], refs));
+        assert!(
+            !answer.contains("\"BatchError\"") && !answer.contains("\"ErrorNumber\":39"),
+            "{label} must check, its references resolving: {answer}"
+        );
         let after = child.request(&probe_request);
         if after != fresh {
             failures.push(format!("after {label}:\n  got   {after}\n  fresh {fresh}"));

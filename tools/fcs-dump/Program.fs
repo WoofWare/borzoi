@@ -6297,14 +6297,22 @@ type private CheckedFiles(paths: string[]) =
 /// (`FSharpProjectOptions.Stamp`).
 let mutable private projectCheckRequests = 0L
 
-/// Whether `text` may hold a line directive (`#line 7 "f.fs"`, `# 7`): a `#`
-/// anywhere, followed by optional blanks and then `line` or a digit. FCS
-/// honours a directive after other text on its line, and the lexer that
-/// knows which `#` is a directive does not report one, so this reads the
-/// text and over-approximates: a mention in a comment, a string or an
+/// fsc's line-directive token (`lex.fsl`): `#` and optional blanks, or `#line`
+/// and blanks, then a line number, then an optional quoted file name, then
+/// the end of the line.
+let private lineDirective =
+    System.Text.RegularExpressions.Regex(
+        "(#[ \t]*|#line[ \t]+)\\p{Nd}+[ \t]*(@?\"[^\r\n\"]+\")?[ \t]*\r?$",
+        System.Text.RegularExpressions.RegexOptions.Multiline
+    )
+
+/// Whether `text` may hold a line directive (`#line 7 "f.fs"`, `# 7`): text
+/// that matches fsc's directive token ([`lineDirective`]), wherever it starts on
+/// its line, since FCS honours a directive after other text. The lexer that
+/// knows which match is a directive does not report one, so this reads the
+/// text and over-approximates: a directive in a comment, a string or an
 /// inactive `#if` branch matches too, which costs only a decline.
-let private mayHoldLineDirective (text: string) : bool =
-    System.Text.RegularExpressions.Regex.IsMatch(text, @"#[ \t]*(line|[0-9])")
+let private mayHoldLineDirective (text: string) : bool = lineDirective.IsMatch text
 
 /// The hash directives fsc acts on in a source (`ProcessMetaCommandsFromInput`):
 /// in a script, those at the top of the file and at the top of each module

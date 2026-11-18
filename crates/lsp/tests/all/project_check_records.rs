@@ -17,12 +17,28 @@
 //!   FCS's project check does not report, so the oracles refuse it.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde_json::Value;
 
 use crate::common::{ensure_fsharp_compiler_service_dll, fcs_dump_batch_child, host_fs};
 
 const ORACLES: [&str; 2] = ["uses-project-batch", "xmldoc-batch"];
+
+/// The resident child of `oracle`, one per oracle for the whole group, held
+/// for a test's whole sequence of requests.
+fn resident(oracle: &'static str) -> MutexGuard<'static, borzoi_oracle_harness::BatchChild> {
+    static CHILDREN: [OnceLock<Mutex<borzoi_oracle_harness::BatchChild>>; 2] =
+        [OnceLock::new(), OnceLock::new()];
+    let i = ORACLES
+        .iter()
+        .position(|o| *o == oracle)
+        .expect("a project-check oracle");
+    CHILDREN[i]
+        .get_or_init(|| Mutex::new(fcs_dump_batch_child(oracle)))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn write(path: &Path, text: &str) {
     std::fs::write(path, text).expect("write fixture");
@@ -121,7 +137,7 @@ fn a_line_directive_is_refused() {
     );
     write(&b, "module B\nlet y = 1\n");
     for oracle in ORACLES {
-        let mut child = fcs_dump_batch_child(oracle);
+        let mut child = resident(oracle);
         match ask(&mut child, oracle, &[&a, &b]) {
             Err(why) if why.contains("line directive") => {}
             other => panic!("{oracle}: a line directive must be refused: {other:?}"),
@@ -145,7 +161,7 @@ fn a_line_directive_after_other_text_is_refused() {
     );
     write(&b, "module B\nlet y = 1\n");
     for oracle in ORACLES {
-        let mut child = fcs_dump_batch_child(oracle);
+        let mut child = resident(oracle);
         match ask(&mut child, oracle, &[&a, &b]) {
             Err(why) if why.contains("line directive") => {}
             other => panic!("{oracle}: a line directive must be refused: {other:?}"),
@@ -165,7 +181,7 @@ fn an_unreadable_reference_is_refused() {
     let not_an_assembly = dir.path().join("NotAnAssembly.dll");
     write(&not_an_assembly, "not an assembly");
     for oracle in ORACLES {
-        let mut child = fcs_dump_batch_child(oracle);
+        let mut child = resident(oracle);
         for reference in [&missing, &not_an_assembly] {
             match ask_with_refs(&mut child, oracle, &[&a], &[reference]) {
                 Err(why) if why.contains("reference") => {}
@@ -182,7 +198,7 @@ fn a_rewrite_that_keeps_the_modification_time_is_read() {
     let dir = tempfile::tempdir().expect("temp dir");
     let a = dir.path().join("A.fs");
     for oracle in ORACLES {
-        let mut child = fcs_dump_batch_child(oracle);
+        let mut child = resident(oracle);
         write(&a, "module A\nlet before = 1\n");
         let stamp = host_fs::metadata(&a)
             .and_then(|m| m.modified())
@@ -218,7 +234,7 @@ fn an_active_source_reference_is_refused() {
         ),
     );
     for oracle in ORACLES {
-        let mut child = fcs_dump_batch_child(oracle);
+        let mut child = resident(oracle);
         match ask(&mut child, oracle, &[&script]) {
             Err(why) if why.contains("#r") => {}
             other => panic!("{oracle}: an active #r must be refused: {other:?}"),
@@ -237,12 +253,17 @@ fn a_reference_in_a_nested_module_is_checked() {
         "module Inner =\n    #r \"Missing.dll\"\n    let x = 1\n",
     );
     for oracle in ORACLES {
-        let mut child = fcs_dump_batch_child(oracle);
+        let mut child = resident(oracle);
         let answer = check(&mut child, oracle, &[&script]);
         assert_eq!(
             error_numbers(record(&answer, "A.fsx")),
             Vec::<i64>::new(),
             "{oracle}: {answer}"
+        );
+        assert_eq!(
+            error_numbers(&answer),
+            Vec::<i64>::new(),
+            "{oracle}: no error in no file either: {answer}"
         );
     }
 }
@@ -262,7 +283,7 @@ fn a_reference_under_editing_is_not_read() {
         ),
     );
     for oracle in ORACLES {
-        let mut child = fcs_dump_batch_child(oracle);
+        let mut child = resident(oracle);
         let answer = check(&mut child, oracle, &[&script]);
         assert!(
             error_numbers(record(&answer, "A.fsx")).contains(&39),
