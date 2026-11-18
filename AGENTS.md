@@ -189,8 +189,9 @@ This is a Cargo workspace with ten members:
   answer is also checked against a plain build of the same tree, which must
   write the same files byte for byte. What that check cannot see is a build
   that reacts to the logger yet writes the same bytes, such as an unused
-  `--define`; a consumer of `defines` should know that. The call owns the
-  project's directory while it runs.
+  `--define`; a consumer of `defines` should know that. The caller names the
+  tree root (the project and every project its build starts lie under it),
+  and the call owns it while it runs.
   `fsc_args_oracle_calibration` holds the reading to real compiling builds
   (the arguments `-getItem` reports, and the file fsc writes).
   The workload locator SDKs (`sdk_resolver/workloads.rs`) have their own

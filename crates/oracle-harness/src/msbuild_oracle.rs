@@ -20,14 +20,16 @@
 //! line (`$([System.Environment]::CommandLine)`). So every answer is checked
 //! against a plain build of the same tree, with the caller's globals and
 //! environment and no other switch. The instrumented build runs first; the
-//! files it added under the project's directory are recorded and removed, and
-//! the plain build must then add the same files, byte for byte (but for
+//! files it added under the tree root the caller names (the directory
+//! holding the project and its references, which the call owns while it
+//! runs) are recorded and removed, and the plain build must then add the
+//! same files, byte for byte (but for
 //! ResolveAssemblyReference's state cache, `*.AssemblyReference.cache`, which
 //! records its references' times: measured, two plain builds of one tree
 //! differ in that file alone). Among them must be the output and reference
 //! assembly that each reported invocation's `-o:` and `--refout:` name. A
 //! build that rewrites or removes a file that was there before it, or starts
-//! a project outside the directory, writes where the check cannot compare,
+//! a project outside the tree root, writes where the check cannot compare,
 //! and is not answered either.
 //!
 //! So a build that reacts to the instrumentation by compiling something else
@@ -240,23 +242,56 @@ pub enum FscArgsDecline {
     Unanswered(Vec<String>),
 }
 
-/// What fsc is handed for the project at `project` (on disk) in a real
-/// `dotnet msbuild -restore -t:Build` under the global properties `globals`,
-/// in [`build_environment`] plus `env`. The call owns the project's directory
-/// while it runs: it removes whatever appears there between the two builds,
-/// so nothing else may write there (the callers' trees are fixtures they laid
-/// out in directories of their own). The project is built by the path
-/// given, made absolute and lexically normal but not resolved through links
-/// (MSBuild names the project after the path it is handed). A global's value may not hold `;`,
-/// `,` or `"`, which the command line would split or strip.
-pub fn fsc_args(
-    project: &Path,
-    globals: &[(String, String)],
-    env: &[(String, String)],
-) -> Result<FscBuild, FscArgsDecline> {
-    let project = lexically_normal(
-        &std::path::absolute(project)
-            .unwrap_or_else(|e| panic!("absolute path of {}: {e}", project.display())),
+/// One [`fsc_args`] call: which project to build, under what, and the tree
+/// the call owns while it runs.
+#[derive(Debug, Clone, Copy)]
+pub struct FscArgsRequest<'a> {
+    /// The directory the build's files live in: the project and every project
+    /// its build starts (its project references) must lie under it, and it is
+    /// what the comparison with a plain build covers. **The call owns it while
+    /// it runs**: it removes whatever appears under it between the two builds,
+    /// so nothing else may write there (the callers' trees are fixtures they
+    /// laid out in directories of their own, one per call).
+    pub tree_root: &'a Path,
+    /// The project file to build, under [`Self::tree_root`]. It is built by
+    /// the path given, made absolute and lexically normal but not resolved
+    /// through links (MSBuild names the project after the path it is handed).
+    pub project: &'a Path,
+    /// Global properties for the build. A value may not hold `;`, `,` or `"`,
+    /// which the command line would split or strip.
+    pub globals: &'a [(String, String)],
+    /// Environment variables for the build, over [`build_environment`].
+    pub env: &'a [(String, String)],
+}
+
+/// What fsc is handed for `request`'s project in a real `dotnet msbuild
+/// -restore -t:Build` under its global properties, in [`build_environment`]
+/// plus its environment, checked against a plain build of its tree (see the
+/// module documentation).
+///
+/// # Panics
+///
+/// If the project is not under the tree root, or a global's value holds `;`,
+/// `,` or `"`.
+pub fn fsc_args(request: &FscArgsRequest) -> Result<FscBuild, FscArgsDecline> {
+    let FscArgsRequest {
+        tree_root,
+        project,
+        globals,
+        env,
+    } = *request;
+    let absolute = |path: &Path| {
+        lexically_normal(
+            &std::path::absolute(path)
+                .unwrap_or_else(|e| panic!("absolute path of {}: {e}", path.display())),
+        )
+    };
+    let (root, project) = (absolute(tree_root), absolute(project));
+    assert!(
+        project.starts_with(&root),
+        "the project {} is not under the tree root {}",
+        project.display(),
+        root.display()
     );
     let dir = project.parent().expect("a project file has a directory");
     for (name, value) in globals {
@@ -265,20 +300,20 @@ pub fn fsc_args(
             "global {name}={value:?} cannot be passed on the command line verbatim"
         );
     }
-    let before = Tree::scan(dir);
-    let build = instrumented_build(&project, globals, env)?;
+    let before = Tree::scan(&root);
+    let build = instrumented_build(&root, &project, globals, env)?;
 
     // The observer check: the same tree built again with no instrumentation
     // at all must write what the instrumented build wrote, byte for byte. A
     // build that reacts to the instrumentation (it can read the process's
     // command line) then writes something else, and is not answered.
     let instrumented = before
-        .written(dir)
+        .written(&root)
         .map_err(|why| FscArgsDecline::Unanswered(vec![why]))?;
-    before.revert(dir);
+    before.revert(&root);
     let plain_succeeded = plain_build(&project, globals, env);
     let plain = before
-        .written(dir)
+        .written(&root)
         .map_err(|why| FscArgsDecline::Unanswered(vec![why]))?;
     if let Some(difference) = first_difference(&instrumented, &plain) {
         return Err(FscArgsDecline::Unanswered(vec![format!(
@@ -456,6 +491,7 @@ impl Tree {
 /// [`fsc_args`]'s instrumented build: the CLI's, with `FscArgsLogger` and a
 /// diagnostic file log, and the logger's report read.
 fn instrumented_build(
+    root: &Path,
     project: &Path,
     globals: &[(String, String)],
     env: &[(String, String)],
@@ -495,7 +531,7 @@ fn instrumented_build(
         String::from_utf8_lossy(&output.stderr)
     );
     match json {
-        Ok(json) => parse_logger_output(project, &json),
+        Ok(json) => parse_logger_output(root, project, &json),
         // The MSBuild the project's SDK selection runs cannot load the
         // logger (an SDK older than the runtime the oracle targets).
         Err(_) if report.contains("error MSB1021") => {
@@ -650,7 +686,11 @@ impl Drop for ScratchDir {
 }
 
 /// [`fsc_args`]'s reading of what `FscArgsLogger` wrote for `project`.
-fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDecline> {
+fn parse_logger_output(
+    tree: &Path,
+    project: &Path,
+    json: &str,
+) -> Result<FscBuild, FscArgsDecline> {
     let value: serde_json::Value = serde_json::from_str(json).expect("FscArgsLogger writes JSON");
     let strings = |v: &serde_json::Value| -> BTreeMap<String, String> {
         v.as_object()
@@ -675,14 +715,13 @@ fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDe
         all.extend(errors.iter().cloned());
         Err(FscArgsDecline::Unanswered(all))
     };
-    // The observer check compares what the build wrote under the project's
-    // directory; a project built outside it writes where the check does not
-    // look, and the plain build would then find its outputs already there.
+    // The observer check compares what the build wrote under the tree root;
+    // a project built outside it writes where the check does not look, and
+    // the plain build would then find its outputs already there.
     //
     // `-restore` runs as a build submission of its own, whose first project is
     // started with `MSBuildIsRestoring` set; it starts the SDK's `NuGet.targets`,
     // and writes nothing but each project's restore outputs, in its `obj`.
-    let tree = project.parent().expect("a project file has a directory");
     let started = value["projects"]
         .as_array()
         .expect("FscArgsLogger writes the projects it saw start");
@@ -765,7 +804,7 @@ fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDe
 
 #[cfg(test)]
 mod tests {
-    use super::{fsc_args, scratch_dir};
+    use super::{FscArgsRequest, fsc_args, scratch_dir};
     use std::collections::BTreeSet;
 
     #[test]
@@ -811,7 +850,17 @@ mod tests {
         let answers: Vec<_> = std::thread::scope(|scope| {
             let handles: Vec<_> = projects
                 .iter()
-                .map(|project| scope.spawn(move || fsc_args(project, &[], &[])))
+                .map(|project| {
+                    let tree_root = project.parent().unwrap();
+                    scope.spawn(move || {
+                        fsc_args(&FscArgsRequest {
+                            tree_root,
+                            project,
+                            globals: &[],
+                            env: &[],
+                        })
+                    })
+                })
                 .collect();
             handles
                 .into_iter()

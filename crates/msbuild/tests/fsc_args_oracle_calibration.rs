@@ -46,7 +46,7 @@ use borzoi_msbuild::test_support::unescape;
 use borzoi_oracle_harness::BoundedCommand;
 use borzoi_oracle_harness::fsc_args::assembly_name_of;
 use borzoi_oracle_harness::msbuild_oracle::{
-    FscArgsDecline, FscBuild, build_environment, fsc_args,
+    FscArgsDecline, FscArgsRequest, FscBuild, build_environment, fsc_args,
 };
 
 /// What `fsc_args` must report for a fixture.
@@ -69,7 +69,13 @@ struct Fixture {
     body: &'static str,
     /// Further Compile includes, before `A.fs`.
     compile: &'static [&'static str],
-    /// Further files beside the project, as `(relative path, contents)`.
+    /// The project's directory, under the fixture's directory: `Demo.fsproj`
+    /// and `A.fs` are written there.
+    project_dir: &'static str,
+    /// The tree root `fsc_args` is handed, under the fixture's directory.
+    tree_root: &'static str,
+    /// Further files, under the fixture's directory, as `(relative path,
+    /// contents)`.
     files: &'static [(&'static str, &'static str)],
     /// Global properties for the build.
     globals: &'static [(&'static str, &'static str)],
@@ -106,6 +112,8 @@ fn fixtures() -> Vec<Fixture> {
         name,
         body,
         compile: &[],
+        project_dir: "",
+        tree_root: "",
         files: &[],
         globals: &[],
         compiles_to,
@@ -260,6 +268,26 @@ fn fixtures() -> Vec<Fixture> {
             )
         },
         Fixture {
+            project_dir: "App",
+            files: LIB,
+            ..props(
+                "a project reference to a sibling under the tree root",
+                "<ItemGroup><ProjectReference Include=\"../Lib/Lib.fsproj\" /></ItemGroup>",
+                "Demo",
+            )
+        },
+        Fixture {
+            project_dir: "App",
+            tree_root: "App",
+            files: LIB,
+            expect: Unanswered("outside"),
+            ..props(
+                "a project reference outside the tree root",
+                "<ItemGroup><ProjectReference Include=\"../Lib/Lib.fsproj\" /></ItemGroup>",
+                "",
+            )
+        },
+        Fixture {
             expect: Unanswered("wrote other files than the plain build"),
             ..props(
                 "a project that reads the instrumentation off the command line",
@@ -384,6 +412,8 @@ fn spelled_as_items(line: &str) -> String {
 /// (in `control`, a second copy of the fixture) could write anything.
 fn check_build(fixture: &Fixture, dir: &Path, control: &Path, build: &FscBuild) -> Vec<String> {
     let mut failures = Vec::new();
+    // fsc runs in the project's directory, which its relative paths are from.
+    let project_dir = dir.join(fixture.project_dir);
     let [invocation] = build.invocations.as_slice() else {
         return vec![format!(
             "`{}`: {} Fsc invocations",
@@ -393,7 +423,7 @@ fn check_build(fixture: &Fixture, dir: &Path, control: &Path, build: &FscBuild) 
     };
     match invocation.arguments().map(|args| args.output) {
         Ok(Some(path)) => {
-            if !dir.join(&path).host_is_file() {
+            if !project_dir.join(&path).host_is_file() {
                 failures.push(format!("`{}`: fsc wrote no {path:?}", fixture.name));
             }
             if assembly_name_of(&path) != fixture.compiles_to {
@@ -418,7 +448,7 @@ fn check_build(fixture: &Fixture, dir: &Path, control: &Path, build: &FscBuild) 
         })
         .unwrap_or_default();
     match refout.as_slice() {
-        [path] if dir.join(path).host_is_file() => {}
+        [path] if project_dir.join(path).host_is_file() => {}
         other => failures.push(format!(
             "`{}`: the reference assembly fsc wrote is not the one --refout names: {other:?}",
             fixture.name
@@ -426,10 +456,13 @@ fn check_build(fixture: &Fixture, dir: &Path, control: &Path, build: &FscBuild) 
     }
     let (graded_dir, control_dir) = (dir.display().to_string(), control.display().to_string());
     let reported = comparable(
-        reported_arguments(&control.join("Demo.fsproj"), fixture.globals)
-            .join("\n")
-            .split('\n')
-            .map(|line| line.replace(&control_dir, &graded_dir)),
+        reported_arguments(
+            &control.join(fixture.project_dir).join("Demo.fsproj"),
+            fixture.globals,
+        )
+        .join("\n")
+        .split('\n')
+        .map(|line| line.replace(&control_dir, &graded_dir)),
     );
     let read = comparable(invocation.response_file.split('\n').map(spelled_as_items));
     if read != reported {
@@ -446,7 +479,9 @@ fn check_build(fixture: &Fixture, dir: &Path, control: &Path, build: &FscBuild) 
 
 /// Write `fixture`'s files under `dir`; the project file's path.
 fn lay_out(fixture: &Fixture, dir: &Path) -> std::path::PathBuf {
-    let project = dir.join("Demo.fsproj");
+    let project_dir = dir.join(fixture.project_dir);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let project = project_dir.join("Demo.fsproj");
     let compile: String = fixture
         .compile
         .iter()
@@ -463,7 +498,7 @@ fn lay_out(fixture: &Fixture, dir: &Path) -> std::path::PathBuf {
         ),
     )
     .unwrap();
-    std::fs::write(dir.join("A.fs"), "module A\nlet x = 1\n").unwrap();
+    std::fs::write(project_dir.join("A.fs"), "module A\nlet x = 1\n").unwrap();
     for (name, contents) in fixture.files {
         let file = dir.join(name);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -495,7 +530,13 @@ fn fsc_args_reads_what_real_builds_hand_fsc() {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        match (fixture.expect, fsc_args(&project, &globals, &[])) {
+        let request = FscArgsRequest {
+            tree_root: &dir.join(fixture.tree_root),
+            project: &project,
+            globals: &globals,
+            env: &[],
+        };
+        match (fixture.expect, fsc_args(&request)) {
             (Expect::Compiles, Ok(build)) => {
                 failures.extend(check_build(fixture, &dir, &control, &build))
             }
