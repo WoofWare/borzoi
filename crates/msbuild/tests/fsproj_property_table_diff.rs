@@ -670,33 +670,54 @@ fn a_project_path_holding_a_backslash_is_refused() {
     }
 }
 
-/// MSBuild takes the project's full path before it reads a backslash as a
-/// separator, so a backslash in a segment a `..` takes away is no backslash at
-/// all: `dir/a\b/../Demo.fsproj` is `dir/Demo.fsproj`. Every path reader must
-/// commit there, both ways.
+/// Where a `..` follows a backslash in the project's path, which file MSBuild
+/// loads depends on the host: the in-process API takes the full path first
+/// (`dir/a\b/../Demo.fsproj` is `dir/Demo.fsproj`), and `dotnet msbuild`
+/// rewrites the backslash first (`dir/a/Demo.fsproj`). Both readings are
+/// pinned here, and the walk refuses the path, as it refuses any backslash.
 #[cfg(unix)]
 #[test]
-fn a_backslash_a_parent_segment_removes_is_no_backslash() {
+fn a_backslash_before_a_parent_segment_is_read_two_ways_and_refused() {
     let mut oracle = Oracle::spawn();
     let tmp = TempDir::new().unwrap();
     let root = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
     let dir = root.join("proj");
     std::fs::create_dir_all(dir.join("a\\b")).unwrap();
-    let xml = path_reader_xml();
-    std::fs::write(dir.join("Demo.fsproj"), &xml).unwrap();
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    let doc = |which: &str| {
+        format!(
+            "<Project>\n  <PropertyGroup>\n    <Which>{which}</Which>\n  </PropertyGroup>\n</Project>\n"
+        )
+    };
+    std::fs::write(dir.join("Demo.fsproj"), doc("full path first")).unwrap();
+    std::fs::write(dir.join("a/Demo.fsproj"), doc("rewrite first")).unwrap();
     let at = dir.join("a\\b/../Demo.fsproj");
-    let names: Vec<String> = PATH_READERS
-        .iter()
-        .map(|(name, _)| (*name).to_string())
-        .collect();
-    let pure = check_names_at_project(&mut oracle, &xml, &names, Some(&at));
-    assert_eq!(pure, names, "{}", at.display());
-    let followed = check_imports_at_project(&mut oracle, &xml, &names, &at);
-    assert_eq!(followed, names, "{}", at.display());
+
+    let api = oracle.evaluated(&at, &[], &["Which"], &[], &[]);
+    assert_eq!(api["properties"]["Which"], "full path first");
+
+    let mut cmd = std::process::Command::new("dotnet");
+    cmd.args(["msbuild", "-nologo", "-getProperty:Which"])
+        .arg(&at);
+    common::scrub_oracle_env(&mut cmd);
+    let out = borzoi_oracle_harness::BoundedCommand::new(cmd)
+        .timeout(borzoi_oracle_harness::default_timeout())
+        .run_ok("dotnet msbuild -getProperty:Which");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "rewrite first");
+
+    let refused = parse_fsproj(&doc("buffer"), &at, &HashMap::new(), &HashMap::new());
+    assert!(
+        matches!(
+            refused,
+            Err(borzoi_msbuild::ParseError::BackslashInProjectPath(_))
+        ),
+        "{refused:?}"
+    );
 }
 
 /// A project path whose full path names no file (the root, or one ending in a
 /// separator) is refused: MSBuild loads no project from it.
+#[cfg(unix)]
 #[test]
 fn a_project_path_naming_no_file_is_refused() {
     for at in [

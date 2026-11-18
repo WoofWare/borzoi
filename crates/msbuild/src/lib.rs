@@ -1158,12 +1158,15 @@ pub enum ParseError {
     /// from its path with every backslash read as a separator, so it
     /// evaluates the file the rewritten path names, which is not the text the
     /// caller handed over, or refuses the project (MSB4025) where that path
-    /// names no file.
+    /// names no file. Where a `..` follows the backslash, which file even
+    /// depends on the host: `dotnet build` rewrites the backslash before it
+    /// resolves the `..` (`a\b/../p.proj` is `a/p.proj`), the in-process API
+    /// after (`p.proj`).
     BackslashInProjectPath(PathBuf),
-    /// `project_path` names no file: its full path is the file-system root
-    /// (`/work/..`), or it ends in a separator, or it holds a NUL, which .NET
-    /// refuses before it resolves any `..`. MSBuild loads no project from
-    /// any of them.
+    /// `project_path` names no file: it holds a NUL, which .NET refuses
+    /// before it resolves any `..`, or (on a Unix host) its full path is the
+    /// file-system root (`/work/..`) or it ends in a separator. MSBuild loads
+    /// no project from any of them.
     ProjectPathNamesNoFile(PathBuf),
     /// `extra_properties` contained a key that names an MSBuild
     /// reserved property (any spelling, under MSBuild's case-insensitive
@@ -1617,19 +1620,19 @@ fn validate_inputs(
         ));
     }
     let full_path = project_full_path(project_path);
-    if full_path.file_name().is_none()
-        || spelt.last() == Some(&b'/')
-        || (cfg!(windows) && spelt.last() == Some(&b'\\'))
-    {
+    // Windows' path rules are not modelled (`project_full_path`), so there no
+    // spelling is claimed to name no file.
+    if cfg!(unix) && (full_path.file_name().is_none() || spelt.last() == Some(&b'/')) {
         return Err(ParseError::ProjectPathNamesNoFile(
             project_path.to_path_buf(),
         ));
     }
-    // On Unix MSBuild reads every `\` of the full path it loads a project from
-    // as `/` (`FileUtilities.FixFilePath`, after `GetFullPath`, so a `..` may
-    // first take a backslash-bearing segment away), and so loads some other
-    // file, or none.
-    if cfg!(unix) && full_path.as_os_str().as_encoded_bytes().contains(&b'\\') {
+    // On Unix MSBuild reads every `\` of the path it loads a project from as
+    // `/` (`FileUtilities.FixFilePath`), and so loads some other file, or
+    // none. Checked on the path as spelt: `dotnet build` rewrites before it
+    // resolves a `..`, the in-process API after, so a `..` that takes a
+    // backslash-bearing segment away still leaves the file host-dependent.
+    if cfg!(unix) && spelt.contains(&b'\\') {
         return Err(ParseError::BackslashInProjectPath(
             project_path.to_path_buf(),
         ));

@@ -420,7 +420,8 @@ fn check_with(oracle: &mut Oracle, fixture: &Fixture, with_resolver: bool) -> Ou
 /// makes of such an item, its path must keep the NUL: a `..` collapsed past
 /// the NUL-bearing segment would name a real file MSBuild never names. Each
 /// real file here is named once, by a glob, so a second item naming it is
-/// such a collapse.
+/// such a collapse, and the glob's match must survive its NUL-bearing
+/// sibling.
 #[cfg(unix)]
 #[test]
 fn a_nul_bearing_item_path_names_no_real_file() {
@@ -451,10 +452,14 @@ fn a_nul_bearing_item_path_names_no_real_file() {
             .iter()
             .chain(&parsed.project_references)
             .collect();
+        // Without a resolver the globs decline, and nothing names a real
+        // file; with one, each glob's own match does, once.
+        let want = usize::from(glob.is_some());
         for real in [root.join("a.fs"), root.join("refs/Good.fsproj")] {
-            assert!(
-                items.iter().filter(|item| item.include == real).count() <= 1,
-                "{} named twice (resolver: {}): {items:#?}",
+            assert_eq!(
+                items.iter().filter(|item| item.include == real).count(),
+                want,
+                "{} (resolver: {}): {items:#?}",
                 real.display(),
                 glob.is_some()
             );
