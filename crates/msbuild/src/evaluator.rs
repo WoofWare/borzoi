@@ -2821,19 +2821,6 @@ impl<'r> State<'r> {
         );
     }
 
-    /// [`Self::mark_skipped_write_stale`] for every property MSBuild may write
-    /// in one of `branches` ([`Self::skipped_branch_writes`]).
-    fn mark_skipped_branches_stale(
-        &mut self,
-        branches: &[Node<'_, '_>],
-        current_file_dir: &Path,
-        cause: &properties::trust::StaleCause,
-    ) {
-        for name in self.skipped_branch_writes(branches, current_file_dir, cause) {
-            self.mark_skipped_write_stale(&name, cause);
-        }
-    }
-
     /// Every property MSBuild may write in one of `branches`, alternatives of
     /// which it takes at most one (the `<When>`s and `<Otherwise>` of a
     /// `<Choose>` it may take instead of the walk's). Each is judged from the
@@ -2847,7 +2834,7 @@ impl<'r> State<'r> {
     ) -> Vec<String> {
         let mut written = Vec::new();
         for branch in branches {
-            let mut undo = Vec::new();
+            let mut undo = HashMap::new();
             self.mark_skipped_branch_stale(
                 *branch,
                 current_file_dir,
@@ -2855,8 +2842,8 @@ impl<'r> State<'r> {
                 &mut written,
                 &mut undo,
             );
-            for (name, snapshot) in undo.into_iter().rev() {
-                self.lookup.restore_entry(&name, snapshot);
+            for (name, trust) in undo {
+                self.lookup.restore_trust(&name, trust);
             }
         }
         written
@@ -2864,7 +2851,8 @@ impl<'r> State<'r> {
 
     /// [`Self::mark_skipped_write_stale`] for every property `branch` (a
     /// `<When>` or `<Otherwise>`) may write, in order, recording each in
-    /// `written` and what it replaced in `undo`: all but those a gate decided
+    /// `written`, and each name's trust before its first mark in `undo`
+    /// (`None` where it had no entry): all but those a gate decided
     /// from certain inputs rules out, the write's own or its group's
     /// (`current_file_dir` resolving the group's `Exists`), and those in a
     /// nested `<Choose>`'s branches MSBuild cannot take.
@@ -2874,10 +2862,11 @@ impl<'r> State<'r> {
         current_file_dir: &Path,
         cause: &properties::trust::StaleCause,
         written: &mut Vec<String>,
-        undo: &mut Vec<(String, properties::EntrySnapshot)>,
+        undo: &mut HashMap<String, Option<Trust>>,
     ) {
         let mut mark = |state: &mut Self, name: String| {
-            undo.push((name.clone(), state.lookup.entry_snapshot(&name)));
+            undo.entry(name.to_ascii_lowercase())
+                .or_insert_with(|| state.lookup.entry_trust(&name));
             state.mark_skipped_write_stale(&name, cause);
             written.push(name);
         };
@@ -4038,20 +4027,31 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
         // Branches from the first unpinnable gate on may or may not run in
         // a real build. (Branches before it were cleanly false — MSBuild
         // skips those too, so leaving them untouched is exact.)
+        // The branches before the undecided gate, from the first the walk
+        // decided on a stale value, may be the one MSBuild takes: judged
+        // from the state before the `<Choose>`, as the later ones are, and
+        // marked with them.
+        let before_undecided = match (first_unsure, choice_stale.clone()) {
+            (Some(first), Some(cause)) => {
+                let branches: Vec<Node<'_, '_>> = whens[first..from]
+                    .iter()
+                    .copied()
+                    .filter(|branch| !state.ruled_out(*branch, &exists_dir))
+                    .collect();
+                let written = state.skipped_branch_writes(&branches, current_file_dir, &cause);
+                Some((written, cause))
+            }
+            _ => None,
+        };
         let mut items = item_pass::UndecidedChooseItems::default();
         for branch in whens[from..].iter().copied().chain(otherwise) {
             scan_undecided_choose_branch(branch, unpinned_root.as_ref(), state, &mut items);
         }
         items.apply(node.range(), state);
-        // The branches before the undecided gate, from the first the walk
-        // decided on a stale value, may be the one MSBuild takes.
-        if let (Some(first), Some(cause)) = (first_unsure, choice_stale.clone()) {
-            let before_undecided: Vec<Node<'_, '_>> = whens[first..from]
-                .iter()
-                .copied()
-                .filter(|branch| !state.ruled_out(*branch, &exists_dir))
-                .collect();
-            state.mark_skipped_branches_stale(&before_undecided, current_file_dir, &cause);
+        if let Some((written, cause)) = before_undecided {
+            for name in written {
+                state.mark_skipped_write_stale(&name, &cause);
+            }
         }
         // MSBuild may choose any of those branches, and evaluate the gates
         // after this one.

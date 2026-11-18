@@ -352,12 +352,12 @@ fn case(rng: &mut SplitMix64) -> Case {
     }
 }
 
-/// What the walk commits for `name`, if anything: a value, or the empty
-/// string of a name it holds undefined in the real build too.
-fn committed(read: &PropertyRead) -> Option<&str> {
+/// What the walk commits for `name`, if anything: a value, or that the name
+/// is undefined in the real build too (`Some(None)`).
+fn committed(read: &PropertyRead) -> Option<Option<&str>> {
     match read {
-        PropertyRead::Value(value) => Some(value),
-        PropertyRead::Unset => Some(""),
+        PropertyRead::Value(value) => Some(Some(value)),
+        PropertyRead::Unset => Some(None),
         PropertyRead::UnsetInexact(_) | PropertyRead::Untrusted(_) => None,
     }
 }
@@ -408,11 +408,19 @@ fn sweep(
             std::fs::write(dir.join(name), side).unwrap();
         }
         census.cases += 1;
-        let mut theirs_by_name: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+        let mut theirs_by_name: BTreeMap<&str, BTreeSet<Option<String>>> = BTreeMap::new();
         let mut ours_by_name: BTreeSet<&str> = BTreeSet::new();
         for g in GLOBALS {
-            let globals = vec![("G".to_owned(), (*g).to_owned())];
-            let Some(theirs) = oracle.project(&case.project, &names, Some(&path), &globals) else {
+            let globals = [("G".to_owned(), (*g).to_owned())];
+            // The evaluated table, which tells an undefined name (`null`)
+            // from one defined empty.
+            let Some(theirs) = oracle.try_evaluated(
+                &path,
+                &[("G", std::ffi::OsString::from(*g))],
+                READ,
+                &[],
+                &[],
+            ) else {
                 continue;
             };
             let extra: HashMap<String, String> = globals.iter().cloned().collect();
@@ -437,7 +445,7 @@ fn sweep(
             )
             .expect("well-formed");
             for name in READ {
-                let real = theirs.get(*name).cloned().unwrap_or_default();
+                let real = theirs["properties"][*name].as_str().map(str::to_owned);
                 theirs_by_name.entry(name).or_default().insert(real.clone());
                 for (how, read) in [
                     ("served", served.property(name)),
@@ -446,7 +454,7 @@ fn sweep(
                     if let Some(ours) = committed(&read) {
                         census.commits += 1;
                         ours_by_name.insert(name);
-                        if ours != real {
+                        if ours != real.as_deref() {
                             let sides: Vec<String> = case
                                 .sides
                                 .iter()
@@ -706,9 +714,11 @@ fn check_exact(
         None,
     )
     .expect("well-formed");
+    // The `project` table reads an undefined name as empty, so the walk's
+    // `Unset` is graded as the empty string here.
     for name in names {
         let real = theirs.get(name).map(String::as_str).unwrap_or_default();
-        if let Some(ours) = committed(&served.property(name))
+        if let Some(ours) = committed(&served.property(name)).map(Option::unwrap_or_default)
             && ours != real
         {
             failures.push(format!(

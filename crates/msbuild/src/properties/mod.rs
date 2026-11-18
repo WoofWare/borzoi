@@ -112,9 +112,6 @@ pub struct PropertyMap {
     fresh: Vec<String>,
 }
 
-/// One name's entry as [`PropertyMap::entry_snapshot`] recorded it.
-pub(crate) struct EntrySnapshot(Option<Entry>);
-
 /// A value read from a [`PropertyMap`]. The field is private: a reader says it
 /// is leaving the entry's trust ([`PropertyMap::trust`]) behind
 /// ([`Held::ignoring_trust`]), the way a value leaves the escaped domain only
@@ -358,20 +355,28 @@ impl PropertyMap {
         }
     }
 
-    /// What the table holds for `key`, to put back with
-    /// [`Self::restore_entry`]: an undo log's record.
-    pub(crate) fn entry_snapshot(&self, key: &str) -> EntrySnapshot {
-        EntrySnapshot(self.inner.get(&key.to_ascii_lowercase()).cloned())
+    /// The trust of `key`'s entry, `None` where it has none: what
+    /// [`Self::restore_trust`] puts back after verdicts that leave every value
+    /// alone.
+    pub(crate) fn entry_trust(&self, key: &str) -> Option<Trust> {
+        self.inner
+            .get(&key.to_ascii_lowercase())
+            .map(|entry| entry.trust.clone())
     }
 
-    /// Put back what [`Self::entry_snapshot`] recorded for `key`. A name it
+    /// Put back what [`Self::entry_trust`] recorded for `key`, across verdicts
+    /// that left its value alone and its entry, if any, in place. A name it
     /// leaves in [`Self::fresh`] only goes stale at the next latch, as every
     /// bound name does.
-    pub(crate) fn restore_entry(&mut self, key: &str, snapshot: EntrySnapshot) {
+    pub(crate) fn restore_trust(&mut self, key: &str, trust: Option<Trust>) {
         let lower = key.to_ascii_lowercase();
-        match snapshot.0 {
-            Some(entry) => {
-                self.inner.insert(lower, entry);
+        match trust {
+            Some(trust) => {
+                let entry = self
+                    .inner
+                    .get_mut(&lower)
+                    .expect("a verdict removes no entry it marks uncertain");
+                entry.trust = trust;
             }
             None => {
                 self.inner.remove(&lower);
