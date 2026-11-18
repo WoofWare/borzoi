@@ -407,8 +407,8 @@ fn judging_a_long_condition_chain_is_linear() {
     );
     let start = std::time::Instant::now();
     let p = parse_fsproj(
-        &src,
-        Path::new("/repo/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
@@ -436,8 +436,8 @@ fn judging_an_operand_of_many_references_is_linear() {
     );
     let start = std::time::Instant::now();
     let p = parse_fsproj(
-        &src,
-        Path::new("/repo/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
