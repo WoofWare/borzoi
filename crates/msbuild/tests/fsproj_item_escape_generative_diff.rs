@@ -300,6 +300,26 @@ impl Fixture {
     }
 }
 
+/// A path as the comparison reads it: as written on a Unix host, and off Unix
+/// with `.` and `..` collapsed and separators unified, which the crate keeps
+/// as joined there.
+fn comparable(path: &str) -> String {
+    if cfg!(unix) {
+        return path.to_string();
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for seg in path.split(['/', '\\']) {
+        match seg {
+            "." => {}
+            ".." if out.len() > 1 => {
+                out.pop();
+            }
+            _ => out.push(seg),
+        }
+    }
+    out.join("/")
+}
+
 /// What one seam made of a fixture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -372,14 +392,19 @@ fn check_with(oracle: &mut Oracle, fixture: &Fixture, with_resolver: bool) -> Ou
 
     // MSBuild's `FullPath` is the item's lexical full path (`sub/../ab.fs` is
     // `ab.fs`, `sub//c.fs` is `sub/c.fs`), and so is the include we commit.
+    // On a Windows host, whose `GetFullPath` the crate does not model, the
+    // include is the joined path, so both sides are compared collapsed there.
     let ours: Vec<String> = parsed
         .items
         .iter()
-        .map(|i| i.include.to_string_lossy().into_owned())
+        .map(|i| comparable(&i.include.to_string_lossy()))
         .collect();
     let theirs: Vec<String> = oracle
         .items(&xml, &proj, "Compile", &[])
-        .expect("MSBuild evaluates these documents");
+        .expect("MSBuild evaluates these documents")
+        .iter()
+        .map(|p| comparable(p))
+        .collect();
 
     assert_eq!(
         ours,
@@ -396,6 +421,7 @@ fn check_with(oracle: &mut Oracle, fixture: &Fixture, with_resolver: bool) -> Ou
 /// the NUL-bearing segment would name a real file MSBuild never names. Each
 /// real file here is named once, by a glob, so a second item naming it is
 /// such a collapse.
+#[cfg(unix)]
 #[test]
 fn a_nul_bearing_item_path_names_no_real_file() {
     let dir = tempfile::TempDir::new().expect("tempdir");

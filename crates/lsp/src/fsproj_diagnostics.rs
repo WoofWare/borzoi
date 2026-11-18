@@ -190,14 +190,22 @@ fn buffer_diagnostics_observed(
             diags
         }
         Err(ParseError::Xml(e)) => vec![lsp_error_at_origin(format!("malformed XML: {e}"))],
-        // `parse_fsproj_with_imports` rejects only five other inputs:
+        // On Unix a project path holding a `\` (a file name the URL may well
+        // carry) is one the walk cannot evaluate as MSBuild does: MSBuild
+        // loads the file the path names with each `\` read as `/`, and builds
+        // it if it exists. That is no build failure, so a warning.
+        Err(e @ ParseError::BackslashInProjectPath(_)) => {
+            let mut warning = lsp_error_at_origin(format!("fsproj not evaluated: {e}"));
+            warning.severity = Some(DiagnosticSeverity::WARNING);
+            vec![warning]
+        }
+        // `parse_fsproj_with_imports` rejects only four other inputs:
         // a relative `project_path` (we always pass a rooted one from
-        // the LSP URL), one whose full path names no file (the root, or
-        // a trailing separator), on Unix a `project_path` holding a `\` (a file
-        // name the URL may well carry: MSBuild would load another file,
-        // or none), a reserved or invalid name in `extra_properties`,
-        // and case-insensitive duplicate `extra_properties` keys (we pass
-        // an empty map). Each is surfaced as an error at the document head.
+        // the LSP URL), one whose full path names no file (the root, a
+        // trailing separator, or a NUL), a reserved or invalid name in
+        // `extra_properties`, and case-insensitive duplicate
+        // `extra_properties` keys (we pass an empty map). Each is surfaced
+        // as an error at the document head.
         Err(other) => vec![lsp_error_at_origin(format!("fsproj parse failed: {other}"))],
     }
 }
@@ -1821,6 +1829,22 @@ mod tests {
         );
         // Span covers the <Import> element on line 1 (zero-indexed).
         assert_eq!(d.range.start.line, 1);
+    }
+
+    #[test]
+    fn a_project_path_holding_a_backslash_is_a_warning() {
+        // MSBuild loads `proj/App.fsproj` for `proj\App.fsproj` where that
+        // file exists, and builds it: the walk cannot evaluate the buffer as
+        // MSBuild would, which is no build failure.
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("proj\\App.fsproj");
+        let env = env_with(|e| e.dotnet_root = Some(tmp.path().join("dotnet")));
+        let diags = diagnostics_for("<Project />", &project, &env, &default_extras());
+        if cfg!(unix) {
+            assert_eq!(diags.len(), 1, "{diags:#?}");
+            assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
+            assert!(diags[0].message.contains("backslash"), "{diags:#?}");
+        }
     }
 
     #[test]

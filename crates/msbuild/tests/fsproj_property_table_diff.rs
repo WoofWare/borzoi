@@ -474,13 +474,16 @@ fn check_imports_at_project(
         Err(borzoi_msbuild::ParseError::Xml(_)) => return Vec::new(),
         Err(_) => None,
     };
-    let ours: Vec<(String, String)> = parsed
+    // A committed read is a value or an exact "unset", which MSBuild reads
+    // back as "".
+    let ours: Vec<(String, Option<String>)> = parsed
         .iter()
         .flat_map(|parsed| {
-            names
-                .iter()
-                .filter(|n| parsed.property(n).untrusted_cause().is_none())
-                .filter_map(|n| parsed.properties.get(n).map(|v| (n.clone(), v.clone())))
+            names.iter().filter_map(|n| match parsed.property(n) {
+                PropertyRead::Value(v) => Some((n.clone(), Some(v.to_string()))),
+                PropertyRead::Unset => Some((n.clone(), None)),
+                PropertyRead::UnsetInexact(_) | PropertyRead::Untrusted(_) => None,
+            })
         })
         .collect();
     let Some(theirs) = oracle.project(xml, names, Some(at), &[]) else {
@@ -503,8 +506,8 @@ fn check_imports_at_project(
     }
     for (name, our_value) in &ours {
         assert_eq!(
-            Some(our_value),
-            theirs.get(name),
+            Some(our_value.as_deref().unwrap_or("")),
+            theirs.get(name).map(String::as_str),
             "certain-implies-exact violated for ${{{name}}} at {}\n--- xml ---\n{xml}",
             at.display()
         );
