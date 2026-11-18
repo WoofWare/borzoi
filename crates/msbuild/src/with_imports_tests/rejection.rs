@@ -587,6 +587,31 @@ fn an_illegal_condition_msbuild_evaluates_is_rejected() {
 }
 
 #[test]
+fn an_operand_msbuild_never_reaches_is_no_cause_to_withdraw() {
+    // MSBuild stops at the operand that decides the condition, so it never
+    // reads `X`, which the walk is not certain of, in any of these.
+    for position in [
+        "<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>",
+        "<PropertyGroup Condition=\"{c}\"><R>x</R></PropertyGroup>",
+        "<ImportGroup Condition=\"{c}\"><Import Project=\"nope.props\" /></ImportGroup>",
+        "<Import Project=\"nope.props\" Condition=\"{c}\" />",
+        "<ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
+        "<Choose><When Condition=\"{c}\" /></Choose>",
+    ] {
+        for c in ["false And $(X) &gt; 2", "!(true Or $(X) &gt; 2)"] {
+            let body = format!(
+                "<PropertyGroup><X>1</X><X Condition=\"{UNDECIDED_TRUE}\">abc</X></PropertyGroup>{}",
+                position.replace("{c}", c)
+            );
+            for parsed in both_walkers(&format!("  {body}")) {
+                assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+            }
+        }
+    }
+}
+
+#[test]
 fn an_illegal_condition_msbuild_never_evaluates_is_not_rejected() {
     for body in [
         "<PropertyGroup><R Condition=\"false and 1 &lt; abc\">x</R></PropertyGroup>",
@@ -644,6 +669,61 @@ fn an_illegal_condition_msbuild_may_not_evaluate_may_be_rejected() {
     ] {
         for parsed in both_walkers(&format!("  {body}")) {
             assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// An illegal operand MSBuild reaches through operands of certain value
+/// rejects the project for certain, whatever a later operand it never reaches
+/// reads; reached only past an operand the walk is not certain of, which may
+/// decide the condition first, it may.
+#[test]
+fn an_illegal_condition_is_certain_as_far_as_its_reach() {
+    let prefix =
+        format!("<PropertyGroup><X>1</X><X Condition=\"{UNDECIDED_TRUE}\">abc</X></PropertyGroup>");
+    for c in [
+        "1 &lt; abc Or '$(X)' == 'x'",
+        "'a' == 'a' And 1 &lt; abc And $(X) &gt; 2",
+    ] {
+        let body = format!("{prefix}<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_rejected(&parsed, &["Before", "After"]);
+        }
+    }
+    for c in [
+        "'$(X)' == 'abc' Or 1 &lt; abc",
+        "'$(X)' == '1' And 1 &lt; abc",
+    ] {
+        let body = format!("{prefix}<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>");
+        for parsed in both_walkers(&format!("  {body}")) {
+            assert_withdrawn(&parsed, &["Before", "After"]);
+        }
+    }
+}
+
+/// A comparison MSBuild reaches, left to right, before a later operand decides
+/// the condition, on a value the walk holds legal but is not certain of
+/// (`1`, which MSBuild overwrites with `abc`): MSBuild rejects the project. The
+/// walk does not yet judge a condition legal on the values it holds (#1009),
+/// so it withdraws nothing. Pinned, in every position a condition takes that
+/// raises no other doubt, so that judging them shows here.
+#[test]
+fn a_condition_legal_on_the_values_the_walk_holds_is_not_yet_judged() {
+    for position in [
+        "<PropertyGroup><R Condition=\"{c}\">x</R></PropertyGroup>",
+        "<PropertyGroup Condition=\"{c}\"><R>x</R></PropertyGroup>",
+        "<ItemGroup Condition=\"{c}\"><I Include=\"x\" /></ItemGroup>",
+        "<ItemGroup><I Include=\"x\" Condition=\"{c}\" /></ItemGroup>",
+        "<Choose><When Condition=\"{c}\" /></Choose>",
+    ] {
+        for c in ["$(X) &gt; 2 And false", "$(X) &gt; 2 Or true"] {
+            let body = format!(
+                "<PropertyGroup><X>1</X><X Condition=\"{UNDECIDED_TRUE}\">abc</X></PropertyGroup>{}",
+                position.replace("{c}", c)
+            );
+            for parsed in both_walkers(&format!("  {body}")) {
+                assert_eq!(parsed.rejection, None, "{body}: {:#?}", parsed.diagnostics);
+            }
         }
     }
 }

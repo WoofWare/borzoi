@@ -22,6 +22,7 @@
 
 mod common;
 
+use borzoi_msbuild::test_support::{Outcome, PropertyMap, Throws, evaluate, judge};
 use common::case_axis::{CaseContext, gen_case_comparison, respell_case, respell_keys};
 use common::{
     Oracle, SplitMix64, Verdict, breaks_inside_quote, check_certain_implies_exact, gen_bool_expr,
@@ -1055,6 +1056,188 @@ fn whitespace_variant_sweep_soak() {
     let mut rng = SplitMix64(seed);
     let census = whitespace_variant_sweep(&mut oracle, &mut rng, cases);
     eprintln!("whitespace-variant soak: {census:?}");
+}
+
+// ---------------------------------------------------------------------------
+// `judge`: a condition MSBuild evaluates with some values unknown.
+// ---------------------------------------------------------------------------
+
+/// The values an uncertain property is graded under: undefined, empty, a
+/// number, a word, and a boolean, which between them take every branch of
+/// MSBuild's comparison dispatch and boolean coercion.
+const JUDGE_VALUES: &[Option<&str>] = &[None, Some(""), Some("1"), Some("abc"), Some("true")];
+const JUDGE_CERTAIN: &[&str] = &["A", "B"];
+const JUDGE_UNCERTAIN: &[&str] = &["U", "V"];
+
+fn judge_operand(rng: &mut SplitMix64) -> String {
+    let names: Vec<&str> = JUDGE_CERTAIN
+        .iter()
+        .chain(JUDGE_UNCERTAIN)
+        .copied()
+        .collect();
+    let name = *rng.pick(&names);
+    match rng.below(7) {
+        0 => format!("'{}'", rng.pick(&["", "1", "2.0", "abc", "true", "x"])),
+        1 => format!("'$({name})'"),
+        2 => format!("$({name})"),
+        3 => format!("'x$({name})'"),
+        // Property functions, which may throw on their receiver.
+        4 => format!("'$({name}.Substring(1))'"),
+        5 => format!("'$({name}.Trim())'"),
+        _ => format!("'$({name}.Length)'"),
+    }
+}
+
+fn judge_condition(rng: &mut SplitMix64, depth: u32) -> String {
+    if depth == 0 || rng.below(3) == 0 {
+        return match rng.below(6) {
+            0 => rng.pick(&["true", "false"]).to_string(),
+            1 => judge_operand(rng),
+            _ => format!(
+                "{} {} {}",
+                judge_operand(rng),
+                rng.pick(&["==", "!=", "<", ">=", ">"]),
+                judge_operand(rng)
+            ),
+        };
+    }
+    match rng.below(3) {
+        0 => format!("!({})", judge_condition(rng, depth - 1)),
+        n => {
+            let connective = if n == 1 { " And " } else { " Or " };
+            let operands: Vec<String> = (0..2 + rng.below(2))
+                .map(|_| judge_condition(rng, depth - 1))
+                .collect();
+            format!("({})", operands.join(connective))
+        }
+    }
+}
+
+fn property_map<'a>(pairs: impl IntoIterator<Item = &'a (String, String)>) -> PropertyMap {
+    let mut map = PropertyMap::new();
+    for (name, value) in pairs {
+        map.insert(name.as_str(), value.as_str());
+    }
+    map
+}
+
+#[derive(Debug, Default)]
+struct JudgeCensus {
+    cases: usize,
+    /// Conditions judged to have one value though they read an uncertain
+    /// property, and MSBuild gave it somewhere.
+    committed_despite_uncertain: usize,
+    /// Conditions judged to throw on some values, where MSBuild threw on
+    /// some and not others.
+    maybe_both_ways: usize,
+    /// Conditions that read an uncertain property and were judged unable to
+    /// throw.
+    never_despite_uncertain: usize,
+    /// Conditions judged to throw whatever the uncertain values.
+    certainly: usize,
+}
+
+/// [`judge`] graded against MSBuild under every assignment of the uncertain
+/// pair from [`JUDGE_VALUES`]: its value is MSBuild's wherever MSBuild gives
+/// one (certain-implies-exact); it never claims MSBuild cannot throw where an
+/// assignment makes it throw, outside a part we do not model (which claims
+/// nothing); and it claims MSBuild throws for certain only where every
+/// assignment does.
+fn judge_sweep(oracle: &mut Oracle, rng: &mut SplitMix64, cases: usize) -> JudgeCensus {
+    let mut census = JudgeCensus::default();
+    let uncertain = |name: &str| JUDGE_UNCERTAIN.iter().any(|u| u.eq_ignore_ascii_case(name));
+    for _ in 0..cases {
+        let condition = judge_condition(rng, 3);
+        let certain: Vec<(String, String)> = JUDGE_CERTAIN
+            .iter()
+            .filter_map(|name| {
+                rng.pick(JUDGE_VALUES)
+                    .map(|v| (name.to_string(), v.to_string()))
+            })
+            .collect();
+        // The values the walk holds for the uncertain names, which a sound
+        // judgement never reads.
+        let held: Vec<(String, String)> = JUDGE_UNCERTAIN
+            .iter()
+            .filter_map(|name| {
+                rng.pick(JUDGE_VALUES)
+                    .map(|v| (name.to_string(), v.to_string()))
+            })
+            .collect();
+        let held_map = property_map(certain.iter().chain(&held));
+        let judged = judge(&condition, &held_map, &uncertain);
+        census.cases += 1;
+        let reads_uncertain = JUDGE_UNCERTAIN
+            .iter()
+            .any(|name| condition.contains(&format!("$({name}")));
+        let (mut threw, mut held_value) = (false, false);
+        for u in JUDGE_VALUES {
+            for v in JUDGE_VALUES {
+                let mut props = certain.clone();
+                props.extend(u.map(|u| ("U".to_string(), u.to_string())));
+                props.extend(v.map(|v| ("V".to_string(), v.to_string())));
+                let ours = evaluate(&condition, &property_map(&props)).outcome;
+                match oracle.eval(&condition, &props) {
+                    Some(value) => {
+                        held_value = true;
+                        assert!(
+                            judged.value.is_none_or(|judged| judged == value),
+                            "{condition}: judged {judged:?}, MSBuild gives {value} under {props:?}"
+                        );
+                        assert_ne!(
+                            judged.throws,
+                            Throws::Certainly,
+                            "{condition}: MSBuild gives {value} under {props:?}"
+                        );
+                    }
+                    None => {
+                        threw = true;
+                        if ours != Outcome::Unsupported {
+                            assert_ne!(
+                                judged.throws,
+                                Throws::Never,
+                                "{condition}: MSBuild throws under {props:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        census.committed_despite_uncertain +=
+            usize::from(reads_uncertain && judged.value.is_some() && held_value);
+        census.maybe_both_ways +=
+            usize::from(judged.throws == Throws::Maybe && threw && held_value);
+        census.never_despite_uncertain +=
+            usize::from(reads_uncertain && judged.throws == Throws::Never && held_value);
+        census.certainly += usize::from(judged.throws == Throws::Certainly);
+    }
+    census
+}
+
+/// [`judge_sweep`] at a fixed seed.
+#[test]
+fn judge_sweep_fixed_seed() {
+    let mut oracle = Oracle::spawn();
+    let mut rng = SplitMix64(0x0009_0d0e_5eed);
+    let census = judge_sweep(&mut oracle, &mut rng, 400);
+    eprintln!("judge sweep: {census:?}");
+    // Anti-vacuity: each verdict meets conditions that read an uncertain
+    // property, MSBuild both throwing and not.
+    assert!(census.committed_despite_uncertain >= 20, "{census:?}");
+    assert!(census.maybe_both_ways >= 20, "{census:?}");
+    assert!(census.never_despite_uncertain >= 20, "{census:?}");
+    assert!(census.certainly >= 5, "{census:?}");
+}
+
+/// Fresh-seed twin of [`judge_sweep_fixed_seed`].
+#[test]
+#[ignore = "fresh-seed soak; run it when touching condition.rs"]
+fn judge_sweep_soak() {
+    let (seed, cases) = soak_parameters("condition judge", 5_000);
+    let mut oracle = Oracle::spawn();
+    let mut rng = SplitMix64(seed);
+    let census = judge_sweep(&mut oracle, &mut rng, cases);
+    eprintln!("judge soak: {census:?}");
 }
 
 // ---------------------------------------------------------------------------

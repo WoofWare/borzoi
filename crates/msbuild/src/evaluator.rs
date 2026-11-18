@@ -4623,9 +4623,16 @@ fn evaluate_condition_with_exemptions(
     // project with it. The item pass judges its conditions group by group
     // instead ([`rejection::judge_deferred`]): MSBuild evaluates some the walk
     // does not.
-    if eval.outcome == condition::Outcome::Illegal && !state.in_item_pass {
+    if !state.in_item_pass {
         let reached = rejection::reach_is_certain(state);
-        rejection::illegal_condition_at(state, cond, reached, node.range());
+        rejection::judge_condition_rejection(
+            state,
+            cond,
+            eval.outcome,
+            current_file_dir,
+            reached,
+            node.range(),
+        );
     }
     match eval.outcome {
         condition::Outcome::True => CondGate::Run,
