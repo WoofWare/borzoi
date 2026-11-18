@@ -350,17 +350,20 @@ impl GraphRequest {
 
 /// Whether `lang_version` is a spelling the oracle passes to `--langversion:`
 /// as a version: a word naming one (`latest`, `latestmajor`, `preview`,
-/// `default`) or a number (`10`, `10.0`). Anything else, `?` (which FCS takes
-/// as a request for help, ending the oracle's process) among it, is refused.
+/// `default`, in any case, as FCS reads them) or a number (`10`, `10.0`).
+/// Anything else, `?` (which FCS takes as a request for help, ending the
+/// oracle's process) among it, is refused.
 fn is_lang_version(lang_version: &str) -> bool {
     let v = lang_version.trim();
-    matches!(v, "latest" | "latestmajor" | "preview" | "default")
-        || match v.split_once('.') {
-            Some((major, minor)) => [major, minor]
-                .iter()
-                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
-            None => !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()),
-        }
+    matches!(
+        v.to_ascii_lowercase().as_str(),
+        "latest" | "latestmajor" | "preview" | "default"
+    ) || match v.split_once('.') {
+        Some((major, minor)) => [major, minor]
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
+        None => !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()),
+    }
 }
 
 /// Whether a `<LangVersion>` spelling names a numbered version below
@@ -1116,7 +1119,16 @@ mod tests {
                 "{bad:?}"
             );
         }
-        for at_or_above in ["8.0", "8", "10.0", "latest", "preview", "default"] {
+        for at_or_above in [
+            "8.0",
+            "8",
+            "10.0",
+            "latest",
+            "preview",
+            "default",
+            "LatestMajor",
+            "Preview",
+        ] {
             assert!(
                 GraphRequest::new(vec![pinned(at_or_above)], name("a")).is_ok(),
                 "{at_or_above}"
