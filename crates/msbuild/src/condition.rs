@@ -344,6 +344,11 @@ impl Judgement {
 /// on to the false one) or a throw, and none of those disagrees with `false`.
 /// Leaves are judged one at a time, so a contradiction spread across leaves
 /// (`'$(U)' == 'a' And '$(U)' != 'a'`) is unknown. That only ever declines.
+///
+/// The walk calls [`decide_without`], [`throws_whatever`] and [`may_throw`],
+/// which answer one question each and walk no further than it needs; this,
+/// the whole judgement they are held to, is for tests.
+#[cfg(any(test, feature = "test-support"))]
 pub fn judge(
     source: &str,
     props: &PropertyMap,
@@ -362,6 +367,7 @@ pub fn judge(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Walk {
     /// To the operand that ends each chain, judging whether MSBuild throws.
+    #[cfg(any(test, feature = "test-support"))]
     Judge,
     /// To the first operand we cannot evaluate, past which nothing is
     /// decided ([`Judgement::unevaluated`]): a caller that only decides need
@@ -377,11 +383,11 @@ enum Walk {
 }
 
 /// Whether MSBuild throws evaluating `source` whatever the properties
-/// `uncertain` names hold: a [`Throws::Certainly`] of [`judge`]'s, found
+/// `uncertain` names hold: a [`Throws::Certainly`] of `judge`'s, found
 /// without evaluating (or probing the file system for) any operand past the
-/// first of unknown value. It may miss one [`judge`] finds past such an
+/// first of unknown value. It may miss one `judge` finds past such an
 /// operand whose chain a later operand decides anyway; it never claims one
-/// [`judge`] does not.
+/// `judge` does not.
 pub fn throws_whatever(
     source: &str,
     props: &PropertyMap,
@@ -398,7 +404,7 @@ pub fn throws_whatever(
 }
 
 /// Whether MSBuild may throw evaluating `source`, the properties `uncertain`
-/// names unknown: [`judge`]'s throw verdict other than [`Throws::Never`],
+/// names unknown: `judge`'s throw verdict other than [`Throws::Never`],
 /// found without evaluating (or probing the file system for) any operand past
 /// the first that may throw.
 pub fn may_throw(
@@ -416,7 +422,7 @@ pub fn may_throw(
     }
 }
 
-/// [`judge`] of a parsed condition, walked as `walk` says.
+/// `judge` of a parsed condition, walked as `walk` says.
 fn judge_expr(
     expr: &BoolExpr,
     props: &PropertyMap,
@@ -463,7 +469,7 @@ fn judge_expr(
     }
 }
 
-/// [`judge`] of an `And` chain (`absorbing` false) or an `Or` chain
+/// `judge` of an `And` chain (`absorbing` false) or an `Or` chain
 /// (`absorbing` true), operand by operand in MSBuild's order. An operand of
 /// unknown value may stop the chain, so every later one is reached only
 /// perhaps; one that may throw does not make a later one less certain, since a
@@ -587,7 +593,7 @@ pub enum Decision {
 }
 
 /// Decide a condition without trusting the properties `untrusted` names: the
-/// value of [`judge`], which holds wherever MSBuild does not throw. A throw on
+/// value of `judge`, which holds wherever MSBuild does not throw. A throw on
 /// an untrusted value is a project error, after which the real evaluation has
 /// no value to disagree with, so a committed value need not ask whether one is
 /// possible; the rejection judgement does ([`Judgement::throws`]). An operand
@@ -668,17 +674,15 @@ pub fn requires_exists(source: &str, is_the_exists: &dyn Fn(&str) -> bool) -> bo
     false
 }
 
-/// Whether `scalar` reads `MSBuildToolsVersion`, which MSBuild may compare
-/// otherwise than its text says.
+/// Whether `scalar` is exactly a `$(MSBuildToolsVersion)` reference, which
+/// MSBuild may compare otherwise than its text says. A string that only
+/// contains one compares as a string.
 fn scalar_reads_toolset_version(scalar: &ScalarExpr) -> bool {
     match scalar {
-        ScalarExpr::Bare(_) => false,
-        ScalarExpr::String(raw)
-        | ScalarExpr::Property(raw)
-        | ScalarExpr::SystemVersionPart { arg: raw, .. } => {
-            super::properties::property_references(raw)
-                .any(|name| name.eq_ignore_ascii_case("MSBuildToolsVersion"))
+        ScalarExpr::String(raw) | ScalarExpr::Property(raw) => {
+            raw.eq_ignore_ascii_case("$(MSBuildToolsVersion)")
         }
+        ScalarExpr::Bare(_) | ScalarExpr::SystemVersionPart { .. } => false,
     }
 }
 
@@ -687,7 +691,10 @@ fn scalar_reads_toolset_version(scalar: &ScalarExpr) -> bool {
 /// `MSBuildDisableFeaturesFromVersion`).
 fn raw_references(raw: &str, out: &mut Vec<String>) {
     out.extend(super::properties::property_references(raw).map(str::to_string));
-    if raw.to_ascii_lowercase().contains("arefeaturesenabled") {
+    if raw
+        .to_ascii_lowercase()
+        .contains("[msbuild]::arefeaturesenabled(")
+    {
         out.push("MSBuildDisableFeaturesFromVersion".to_owned());
     }
 }
@@ -1623,10 +1630,18 @@ fn eval_bool(
             // 10.0.401), though a literal `Current` compares as a string. Not
             // modelled for equality; the relational operators decline any
             // `Current` (`certainly_neither_number_nor_version`).
-            let toolset = scalar_reads_toolset_version(lhs) || scalar_reads_toolset_version(rhs);
+            let (lhs_toolset, rhs_toolset) = (
+                scalar_reads_toolset_version(lhs),
+                scalar_reads_toolset_version(rhs),
+            );
             let lhs = expand_scalar_for_condition(lhs, props, fs.map(|fs| fs.observer), undefined)?;
             let rhs = expand_scalar_for_condition(rhs, props, fs.map(|fs| fs.observer), undefined)?;
-            if toolset && matches!(op, CompareOp::Eq | CompareOp::Neq) {
+            let numeric = |value: &str| {
+                parse_msbuild_number(value).is_some() || parse_system_version(value).is_ok()
+            };
+            if matches!(op, CompareOp::Eq | CompareOp::Neq)
+                && ((lhs_toolset && numeric(&rhs)) || (rhs_toolset && numeric(&lhs)))
+            {
                 return Err(Reject::Unmodelled);
             }
             if !matches!(op, CompareOp::Eq | CompareOp::Neq) {
@@ -2210,6 +2225,15 @@ mod tests {
     fn only_a_toolset_version_reference_declines_equality() {
         let props = props(&[("MSBuildToolsVersion", "Current")]);
         assert_eq!(evaluate("'Current' != '17'", &props), Outcome::True);
+        // Only an operand that is exactly the reference, beside a number.
+        assert_eq!(
+            evaluate("'build/$(MSBuildToolsVersion)' == 'build/Current'", &props),
+            Outcome::True
+        );
+        assert_eq!(
+            evaluate("'$(MSBuildToolsVersion)' == 'Current'", &props),
+            Outcome::True
+        );
         assert_eq!(
             evaluate("'$(MSBuildToolsVersion)' != '18'", &props),
             Outcome::Unsupported
@@ -2229,6 +2253,10 @@ mod tests {
             &uncertain,
         );
         assert_ne!(judged.throws, Throws::Certainly, "{judged:?}");
+        // A literal that only spells the name reads nothing.
+        let mut references = Vec::new();
+        raw_references("AreFeaturesEnabled", &mut references);
+        assert!(references.is_empty(), "{references:?}");
     }
 
     /// Only a whole NaN spelling is declined: a word that contains `nan`
@@ -4449,7 +4477,7 @@ mod decide_without_props {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(2048))]
 
-        /// [`judge`] held to [`evaluate`] under every assignment of the
+        /// `judge` held to [`evaluate`] under every assignment of the
         /// untrusted pair: its value is evaluation's wherever evaluation
         /// gives a boolean; it never says MSBuild cannot throw where an
         /// assignment makes evaluation throw; and it says MSBuild throws
@@ -4527,7 +4555,7 @@ mod decide_without_props {
             if judged.throws == Throws::Maybe && threw && held {
                 MAYBE_THROWS_BOTH_WAYS.fetch_add(1, Ordering::Relaxed);
             }
-            if judged.throws == Throws::Never && reached_untrusted.get() && held {
+            if judged.throws == Throws::Never && !judged.unevaluated && reached_untrusted.get() && held {
                 NEVER_THROWS_DESPITE_UNTRUSTED.fetch_add(1, Ordering::Relaxed);
             }
         }

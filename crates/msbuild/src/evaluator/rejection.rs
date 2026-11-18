@@ -230,7 +230,7 @@ pub(super) fn import_failure_certainty(
 /// rejection is certain where MSBuild throws whatever the names the walk is
 /// not certain of hold ([`directory_build::is_certain`], the stale channel
 /// included): MSBuild evaluates the condition left to right and stops at the
-/// operand that decides it ([`condition::judge`]), so a throw on certain
+/// operand that decides it ([`condition::throws_whatever`]), so a throw on certain
 /// values that MSBuild reaches through operands of certain value is certain,
 /// whatever an operand it never reaches reads.
 ///

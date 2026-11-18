@@ -1213,8 +1213,9 @@ fn judge_sweep(oracle: &mut Oracle, rng: &mut SplitMix64, cases: usize) -> Judge
             usize::from(reads_uncertain && judged.value.is_some() && held_value);
         census.maybe_both_ways +=
             usize::from(judged.throws == Throws::Maybe && threw && held_value);
-        census.never_despite_uncertain +=
-            usize::from(reads_uncertain && judged.throws == Throws::Never && held_value);
+        census.never_despite_uncertain += usize::from(
+            reads_uncertain && judged.throws == Throws::Never && !judged.unevaluated && held_value,
+        );
         census.certainly += usize::from(judged.throws == Throws::Certainly);
     }
     census
