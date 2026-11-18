@@ -24,6 +24,12 @@ use super::escaping::Escaped;
 /// work of building one.
 pub(crate) const MAX_CANDIDATES: usize = 16;
 
+/// The longest candidate, in bytes of escaped text, a name keeps before it
+/// holds [`Candidates::Anything`]. A value that splices a name twice doubles
+/// its candidates' length while their count stays put, so the count alone
+/// bounds neither the memory nor the work.
+pub(crate) const MAX_CANDIDATE_BYTES: usize = 4096;
+
 /// One candidate value: escaped text, and how MSBuild stored it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Candidate {
@@ -88,6 +94,7 @@ impl Candidates {
     }
 
     /// The candidates, unless they are [`Candidates::Anything`].
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn values(&self) -> Option<&BTreeSet<Candidate>> {
         match self {
             Candidates::Anything => None,

@@ -3798,6 +3798,11 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                                 state.mark_skipped_write_stale(child.tag_name().name(), &cause);
                             }
                         }
+                    } else if !gate_certain {
+                        // Undecided for another reason the walk raises no
+                        // diagnostic for: what the group writes, the real build
+                        // may hold ([`candidates`]).
+                        state.widen_group_candidates(node);
                     }
                     state.define_context = prev;
                     state.package_context = prev_pkg;
@@ -4134,6 +4139,16 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             for name in written {
                 state.mark_skipped_write_stale(&name, &cause);
             }
+        } else if let Some(first) = first_unsure {
+            // The branches before the undecided gate, from the first the walk
+            // did not decide from certain inputs for a reason that leaves no
+            // mark, may be the one MSBuild takes ([`candidates`]); the later
+            // ones' marks widened theirs.
+            for branch in &whens[first..from] {
+                if !state.ruled_out(*branch, &exists_dir) {
+                    state.widen_branch_candidates(*branch);
+                }
+            }
         }
         // MSBuild may choose any of those branches, and evaluate the gates
         // after this one.
@@ -4180,6 +4195,14 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
             }
         }
     };
+    // From the first gate the walk did not decide from certain inputs for a
+    // reason that leaves no mark, MSBuild may take another branch than the
+    // walk's: what each writes, the real build may hold ([`candidates`]).
+    if let (Some(first), None) = (first_unsure, &choice_stale) {
+        for branch in state.choose_branches_from(node, first, Some(walked)) {
+            state.widen_branch_candidates(branch);
+        }
+    }
     let Some(branch) = chosen.map(|(_, when)| when).or(otherwise) else {
         // Every gate cleanly false and no <Otherwise>: an exact no-op, but
         // for the branches MSBuild may take instead.
@@ -4415,10 +4438,11 @@ fn walk_property_child_inner(
                     .sdk_package()
                     .is_some()
             });
-    // Asked of the values the gate reads before its evaluation, and only of a
-    // gate that reads a stale one: nothing else needs it.
+    // Whether the gate is decided from certain inputs, asked of the values it
+    // reads before its evaluation, and only of a gate that reads a value the
+    // walk is not sure of: nothing else needs it.
     let own_gate_decided = attribute(node, "Condition").is_none_or(|condition| {
-        state.trust_for_raw(&condition).stale().is_none()
+        state.trust_for_raw(&condition).is_certain()
             || directory_build::decided_from_certain_inputs(state, &condition, &entry_dir)
     });
     let diagnostics_before_condition = state.diagnostics.len();
@@ -4458,20 +4482,17 @@ fn walk_property_child_inner(
                 UnpinnedOutcome::Keep
             };
             // A gate decided on a stale value may hold in the real build.
-            let stale = match state.stale_gate_cause(node, own_gate_decided) {
+            let stale_gate = state.stale_gate_cause(node, own_gate_decided);
+            let stale = match stale_gate.clone() {
                 Some(cause) if state.skipped_write_needs_mark(&name) => StaleOutcome::Set(cause),
                 _ => StaleOutcome::Keep,
             };
-            // Its own gate decided, the write cannot run: the name holds what it
-            // held. Undecided, it may: the name may hold either.
-            let candidates = own_condition_maybe_wrong.then(|| {
-                let before = state.candidates_of(&name);
-                let value = collect_element_text(node)
-                    .map_or(properties::candidates::Candidates::Anything, |raw| {
-                        state.value_candidates(&raw, None)
-                    });
-                before.union(value)
-            });
+            // Its own gate decided from certain inputs, the write cannot run:
+            // the name holds what it held. A gate that raised a diagnostic, or
+            // is undecided for a reason that leaves no stale mark, may let it
+            // run: the name may hold either ([`candidates`]).
+            let widened = (own_condition_maybe_wrong || (!own_gate_decided && stale_gate.is_none()))
+                .then(|| state.widened_candidates(node));
             let kept = state.lookup.recorded_candidates(&name).cloned();
             state.apply_property_provenance(
                 &name,
@@ -4484,8 +4505,9 @@ fn walk_property_child_inner(
                     stale,
                 },
             );
-            if let Some(candidates) = candidates.or(kept) {
-                state.lookup.record_candidates(&name, candidates);
+            match widened.or(kept) {
+                Some(candidates) => state.lookup.record_candidates(&name, candidates),
+                None => state.lookup.forget_candidates(&name),
             }
             return;
         }
@@ -4497,12 +4519,7 @@ fn walk_property_child_inner(
                 None => UnpinnedOutcome::Keep,
             };
             // The write may run: the name may hold either.
-            let candidates = state.candidates_of(&name).union(
-                collect_element_text(node)
-                    .map_or(properties::candidates::Candidates::Anything, |raw| {
-                        state.value_candidates(&raw, None)
-                    }),
-            );
+            let candidates = state.widened_candidates(node);
             state.apply_property_provenance(
                 &name,
                 PropertyProvenance {
@@ -4723,16 +4740,16 @@ fn walk_property_child_inner(
         stale: StaleOutcome::after_write(stale_by, write_condition_maybe_wrong),
     };
     let (value, carried) = expansion.value.into_parts();
-    let before = state.candidates_of(&name);
-    let value_candidates = state.value_candidates(
-        &raw,
-        Some(&properties::candidates::Candidate::new(
-            &value,
-            properties::Origin::Expansion,
-        )),
-    );
+    // A gate not decided from certain inputs may skip the write in the real
+    // build, which keeps what the name held; a value read from names the walk
+    // is not certain of may be another there ([`candidates`]). Both are
+    // computed before the write, which may read the name itself.
+    let doubted = write_condition_maybe_wrong || !own_gate_decided || state.inside_doubted_gate();
+    let before = doubted.then(|| state.candidates_of(&name));
+    let value_candidates = (!state.reads_only_certain(&raw)).then(|| state.value_candidates(&raw));
+    let carried_certain = carried.is_certain();
     state.write_property(&name, value, provenance);
-    state.record_write_candidates(&name, before, value_candidates, write_condition_maybe_wrong);
+    state.record_write_candidates(&name, before, value_candidates, carried_certain);
     // The verdict above is computed from the value's text (the reference
     // scan) and the write's gate; the value itself carries the trust of what
     // its expansion actually read. The stored trust must hold everything the
@@ -5609,12 +5626,7 @@ fn mark_property_group_children_provenance(
             continue;
         }
         // The write may run: the name may hold either.
-        let candidates = state.candidates_of(name).union(
-            collect_element_text(child)
-                .map_or(properties::candidates::Candidates::Anything, |raw| {
-                    state.value_candidates(&raw, None)
-                }),
-        );
+        let candidates = state.widened_candidates(child);
         state.apply_property_provenance(
             name,
             PropertyProvenance {

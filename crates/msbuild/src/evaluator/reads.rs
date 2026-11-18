@@ -26,6 +26,7 @@ pub use super::property_reads::{InexactUnset, PropertyRead};
 use super::{EvaluatedItem, HelperMetadataUncertainty, HelperMetadataUncertaintyKind};
 use super::{State, item_key};
 use crate::PackageReferenceUncertaintyCauseKind;
+use crate::properties;
 
 /// The names a [`ReadProbe`]'s caller wants read at the end of the walk.
 #[derive(Debug, Clone, Default)]
@@ -46,7 +47,7 @@ pub struct ReadProbe {
 pub struct EvaluationReads {
     pub properties: BTreeMap<String, PropertyRead>,
     /// The values each probed property may hold in the real build at the end
-    /// of the walk, unescaped ([`super::candidates`]); `None` where it may
+    /// of the walk, unescaped (its *candidates*, #1009); `None` where it may
     /// hold any.
     pub candidates: BTreeMap<String, Option<BTreeSet<String>>>,
     pub items: BTreeMap<String, ItemRead>,
@@ -132,6 +133,15 @@ impl State<'_> {
             .properties
             .iter()
             .map(|name| {
+                // The current file's names hold the file's while the walk
+                // expands it, and nothing once it has finished: what the
+                // walk holds at its end is no claim about what MSBuild does.
+                if properties::THIS_FILE_NAMES
+                    .iter()
+                    .any(|this| this.eq_ignore_ascii_case(name))
+                {
+                    return (name.clone(), None);
+                }
                 let values = self.candidates_of(name).values().map(|values| {
                     values
                         .iter()

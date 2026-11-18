@@ -86,10 +86,6 @@ struct Entry {
     value: Option<Escaped>,
     trust: Trust,
     origin: Origin,
-    /// The values the real build may hold here, recorded by a write the walk
-    /// could not decide ([`candidates`]); `None` where none was recorded since
-    /// the name was last bound.
-    candidates: Option<Candidates>,
 }
 
 /// How MSBuild stored a value, which decides whether its backslashes have met
@@ -116,6 +112,11 @@ pub struct PropertyMap {
     /// each latch's work to what changed since the last, rather than the
     /// whole table.
     fresh: Vec<String>,
+    /// Lowercase names' candidates ([`candidates`]), recorded by the walk where
+    /// it can bound what the real build holds and it may not be what the walk
+    /// does. A binding of the name drops its record, and so does
+    /// [`Self::go_stale`]; each record's name is in [`Self::fresh`].
+    candidates: HashMap<String, Candidates>,
 }
 
 /// A value read from a [`PropertyMap`]. The field is private: a reader says it
@@ -170,6 +171,7 @@ impl PropertyMap {
         Self {
             inner: HashMap::new(),
             fresh: Vec::new(),
+            candidates: HashMap::new(),
         }
     }
 
@@ -222,6 +224,7 @@ impl PropertyMap {
         let key = key.into();
         let lower = key.to_ascii_lowercase();
         self.fresh.push(lower.clone());
+        self.candidates.remove(&lower);
         match self.inner.entry(lower) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
                 let entry = slot.get_mut();
@@ -230,7 +233,6 @@ impl PropertyMap {
                 }
                 entry.value = Some(value);
                 entry.origin = origin;
-                entry.candidates = None;
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(Entry {
@@ -238,7 +240,6 @@ impl PropertyMap {
                     value: Some(value),
                     trust: Trust::CERTAIN,
                     origin,
-                    candidates: None,
                 });
             }
         }
@@ -279,7 +280,6 @@ impl PropertyMap {
                         value: None,
                         trust,
                         origin: Origin::Seed,
-                        candidates: None,
                     });
                 }
             }
@@ -292,12 +292,12 @@ impl PropertyMap {
     /// substitutions resolve to the stale value rather than emit Undefined.
     pub(crate) fn unbind(&mut self, key: &str) {
         let lower = key.to_ascii_lowercase();
+        self.candidates.remove(&lower);
         if let std::collections::hash_map::Entry::Occupied(mut slot) = self.inner.entry(lower) {
             if slot.get().trust.is_certain() {
                 slot.remove();
             } else {
                 slot.get_mut().value = None;
-                slot.get_mut().candidates = None;
             }
         }
     }
@@ -356,6 +356,9 @@ impl PropertyMap {
         protected: &std::collections::HashSet<String>,
     ) {
         for lower in std::mem::take(&mut self.fresh) {
+            // The content just passed may have written any name, so no record
+            // bounds what it holds now.
+            self.candidates.remove(&lower);
             if let Some(entry) = self.inner.get_mut(&lower)
                 && entry.value.is_some()
                 && !protected.contains(&lower)
@@ -363,11 +366,10 @@ impl PropertyMap {
                 entry.trust.go_stale(cause);
             }
         }
-        // The content just passed may have written any name, bound or not, so
-        // no recorded candidates bound what it holds now.
-        for entry in self.inner.values_mut() {
-            entry.candidates = None;
-        }
+        debug_assert!(
+            self.candidates.is_empty(),
+            "every record's name is fresh until the next latch"
+        );
     }
 
     /// The value bound to `key` as a candidate: its text and origin.
@@ -376,22 +378,22 @@ impl PropertyMap {
         Some(Candidate::new(entry.value.as_ref()?, entry.origin))
     }
 
-    /// The candidates a write the walk could not decide recorded for `key`
-    /// since it was last bound ([`Self::record_candidates`]).
+    /// The candidates recorded for `key` since it was last bound or the walk
+    /// last passed content it could not see ([`Self::record_candidates`]).
     pub(crate) fn recorded_candidates(&self, key: &str) -> Option<&Candidates> {
-        self.inner
-            .get(&key.to_ascii_lowercase())?
-            .candidates
-            .as_ref()
+        self.candidates.get(&key.to_ascii_lowercase())
     }
 
-    /// Record the values the real build may hold for `key` now, on the entry
-    /// the write that leaves it in doubt made or kept. A name with no entry
-    /// is one the walk is certain of, which needs none.
+    /// Record the values the real build may hold for `key` now.
     pub(crate) fn record_candidates(&mut self, key: &str, candidates: Candidates) {
-        if let Some(entry) = self.inner.get_mut(&key.to_ascii_lowercase()) {
-            entry.candidates = Some(candidates);
-        }
+        let lower = key.to_ascii_lowercase();
+        self.fresh.push(lower.clone());
+        self.candidates.insert(lower, candidates);
+    }
+
+    /// Drop `key`'s record, leaving what it may hold to its trust.
+    pub(crate) fn forget_candidates(&mut self, key: &str) {
+        self.candidates.remove(&key.to_ascii_lowercase());
     }
 
     /// A table holding only `bindings`, each name bound to its candidate (an
@@ -533,6 +535,16 @@ pub fn well_known(project_path: &Path) -> PropertyMap {
     }
     map
 }
+
+/// The names [`this_file_seeds`] binds, in its order.
+pub(crate) const THIS_FILE_NAMES: [&str; 6] = [
+    "MSBuildThisFile",
+    "MSBuildThisFileDirectory",
+    "MSBuildThisFileDirectoryNoRoot",
+    "MSBuildThisFileFullPath",
+    "MSBuildThisFileName",
+    "MSBuildThisFileExtension",
+];
 
 /// The `MSBuildThisFile*` reserved properties for the file at `path`, which
 /// MSBuild binds to whichever file is being walked: the project's own body,
@@ -2429,6 +2441,7 @@ mod tests {
         assert_eq!(with_trailing_separator("/a".into()), "/a/");
         assert_eq!(with_trailing_separator_always("".into()), "/");
         let seeds = this_file_seeds(std::path::Path::new("/Imp.props"));
+        assert_eq!(seeds.each_ref().map(|(name, _)| *name), THIS_FILE_NAMES);
         let get = |k| {
             seeds
                 .iter()
