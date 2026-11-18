@@ -367,6 +367,31 @@ enum Walk {
     /// decided ([`Judgement::unevaluated`]): a caller that only decides need
     /// not evaluate, nor probe the file system for, the operands after it.
     Decide,
+    /// To the first operand of unknown value: a caller that only asks whether
+    /// MSBuild throws whatever the uncertain values hold
+    /// ([`throws_whatever`]) settles for no further.
+    Certainty,
+}
+
+/// Whether MSBuild throws evaluating `source` whatever the properties
+/// `uncertain` names hold: a [`Throws::Certainly`] of [`judge`]'s, found
+/// without evaluating (or probing the file system for) any operand past the
+/// first of unknown value. It may miss one [`judge`] finds past such an
+/// operand whose chain a later operand decides anyway; it never claims one
+/// [`judge`] does not.
+pub fn throws_whatever(
+    source: &str,
+    props: &PropertyMap,
+    fs: Option<Probes<'_>>,
+    uncertain: &dyn Fn(&str) -> bool,
+) -> bool {
+    match parse_condition(source) {
+        Ok(Some(expr)) => {
+            judge_expr(&expr, props, fs, uncertain, Walk::Certainty).throws == Throws::Certainly
+        }
+        Ok(None) | Err(Reject::Unmodelled) => false,
+        Err(Reject::Illegal) => true,
+    }
 }
 
 /// [`judge`] of a parsed condition, walked as `walk` says.
@@ -456,6 +481,9 @@ fn judge_chain(
                 return Judgement::of(Some(absorbing), throws, unevaluated);
             }
             Some(_) => {}
+            None if walk == Walk::Certainty => {
+                return Judgement::of(None, throws.max(Throws::Maybe), unevaluated);
+            }
             None => {
                 unknown = true;
                 reached_for_certain = false;
@@ -1817,19 +1845,24 @@ fn compare_equality_values(lhs: &str, rhs: &str) -> Result<bool, ()> {
         // The empty string is no number, version or boolean.
         return Ok(lhs.is_empty() && rhs.is_empty());
     }
-    // MSBuild reads a NaN spelling as a number (.NET's `double.TryParse`
-    // matches the symbol whatever the number style), and NaN equals nothing,
-    // itself included: `'NaN' == 'NaN'` is false. It reads a number followed
-    // by NULs as that number: `'1' == '1%00'` is true. (Both probed,
-    // msbuild-condition-oracle, SDK 10.0.401.) Neither is modelled.
-    if is_nan_spelling(lhs) || is_nan_spelling(rhs) || lhs.contains('\0') || rhs.contains('\0') {
+    let (lhs_number, rhs_number) = (equality_number(lhs)?, equality_number(rhs)?);
+    if let (Some(lhs), Some(rhs)) = (lhs_number, rhs_number) {
+        // NaN equals nothing, itself included.
+        return Ok(lhs == rhs);
+    }
+    // MSBuild compares `$(MSBuildToolsVersion)`, which expands to `Current`, as
+    // Visual Studio's version where the other side is a number or version
+    // (`'$(MSBuildToolsVersion)' != '18'` is false on SDK 10.0.401), and a
+    // literal `Current` as a string. The value cannot tell the two apart.
+    let numeric =
+        |value: &str, number: Option<f64>| number.is_some() || parse_system_version(value).is_ok();
+    if (lhs == "Current" && numeric(rhs, rhs_number))
+        || (rhs == "Current" && numeric(lhs, lhs_number))
+    {
         return Err(());
     }
     if lhs == rhs {
         return Ok(true);
-    }
-    if let (Some(lhs), Some(rhs)) = (parse_msbuild_number(lhs), parse_msbuild_number(rhs)) {
-        return Ok(lhs == rhs);
     }
     if let (Some(lhs), Some(rhs)) = (parse_msbuild_bool(lhs), parse_msbuild_bool(rhs)) {
         return Ok(lhs == rhs);
@@ -1847,11 +1880,24 @@ fn compare_equality_values(lhs: &str, rhs: &str) -> Result<bool, ()> {
     }
 }
 
-/// Whether .NET may parse `value` as NaN: the symbol `NaN` in any case, with
-/// a sign and whitespace about it. Generous, so that it never misses one.
-fn is_nan_spelling(value: &str) -> bool {
-    let unsigned = value.trim().trim_start_matches(['+', '-']).trim();
-    unsigned.eq_ignore_ascii_case("nan")
+/// The number MSBuild's equality reads `value` as, if any; `Err` where we do
+/// not know whether it reads one. Beyond [`parse_msbuild_number`], it reads a
+/// NaN spelling (`NaN` in any case, a sign before it, spaces about it) as NaN,
+/// since .NET matches the symbol whatever the number style, and a number
+/// followed by NULs as that number: `'NaN' == 'NaN'` is false, and
+/// `'1' == '1%00'` true (both probed, msbuild-condition-oracle, SDK 10.0.401).
+/// Any other spelling of NaN, or a NUL elsewhere, is not modelled.
+fn equality_number(value: &str) -> Result<Option<f64>, ()> {
+    let core = value.trim_matches(' ');
+    let unsigned = core.strip_prefix(['+', '-']).unwrap_or(core);
+    if unsigned.eq_ignore_ascii_case("nan") {
+        return Ok(Some(f64::NAN));
+    }
+    let digits = value.trim_end_matches('\0');
+    if digits.contains('\0') || value.to_ascii_lowercase().contains("nan") {
+        return Err(());
+    }
+    Ok(parse_msbuild_number(digits))
 }
 
 /// A numeric condition operand, mirroring
@@ -1919,12 +1965,22 @@ fn parse_system_version(value: &str) -> Result<[i64; 4], ()> {
     }
     let mut version = [-1, -1, -1, -1];
     for (idx, part) in parts.into_iter().enumerate() {
+        // `int.TryParse(NumberStyles.Integer)`: ASCII whitespace about it, one
+        // optional sign, ASCII digits; a negative component fails, so `-0` is
+        // one and `-1` is not (as `certainly_not_a_version` reads it).
         let part = part.trim_matches(|c: char| c.is_ascii_whitespace());
-        let part = part.strip_prefix('+').unwrap_or(part);
-        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+        let (negative, digits) = match part.strip_prefix('-') {
+            Some(digits) => (true, digits),
+            None => (false, part.strip_prefix('+').unwrap_or(part)),
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
             return Err(());
         }
-        version[idx] = part.parse::<i32>().map(i64::from).map_err(|_| ())?;
+        let component = digits.parse::<i32>().map(i64::from).map_err(|_| ())?;
+        if negative && component != 0 {
+            return Err(());
+        }
+        version[idx] = component;
     }
     Ok(version)
 }
@@ -4315,8 +4371,22 @@ mod decide_without_props {
             v in value_choice(),
         ) {
             let base = map(&[("A", a), ("B", b), ("U", u), ("V", v)]);
-            let judged = judge(&source, &base, None, &is_untrusted);
+            // Whether the judgement asked about an untrusted name it reached.
+            let reached_untrusted = std::cell::Cell::new(false);
+            let judged = judge(&source, &base, None, &|name: &str| {
+                let is = is_untrusted(name);
+                reached_untrusted.set(reached_untrusted.get() || is);
+                is
+            });
             JUDGED.fetch_add(1, Ordering::Relaxed);
+            // The certainty-only walk claims a certain throw only where the
+            // full judgement does.
+            prop_assert!(
+                !throws_whatever(&source, &base, None, &is_untrusted)
+                    || judged.throws == Throws::Certainly,
+                "{}",
+                source
+            );
             let (mut threw, mut held) = (false, false);
             for u in std::iter::once(None).chain(VALUES.iter().copied().map(Some)) {
                 for v in std::iter::once(None).chain(VALUES.iter().copied().map(Some)) {
@@ -4355,11 +4425,10 @@ mod decide_without_props {
                     }
                 }
             }
-            let mentions_untrusted = UNTRUSTED.iter().any(|u| source.contains(&format!("$({u}")));
             if judged.throws == Throws::Maybe && threw && held {
                 MAYBE_THROWS_BOTH_WAYS.fetch_add(1, Ordering::Relaxed);
             }
-            if judged.throws == Throws::Never && mentions_untrusted && held {
+            if judged.throws == Throws::Never && reached_untrusted.get() && held {
                 NEVER_THROWS_DESPITE_UNTRUSTED.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -4380,7 +4449,7 @@ mod decide_without_props {
             "only {maybe} of {cases} cases may throw both ways"
         );
         assert!(
-            never * 20 >= cases,
+            never * 40 >= cases,
             "only {never} of {cases} cases read an untrusted property and cannot throw"
         );
     }

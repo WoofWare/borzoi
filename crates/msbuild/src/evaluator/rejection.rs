@@ -234,6 +234,11 @@ pub(super) fn import_failure_certainty(
 /// values that MSBuild reaches through operands of certain value is certain,
 /// whatever an operand it never reaches reads.
 ///
+/// One whose evaluation stopped at an operand we cannot evaluate
+/// ([`condition::Outcome::Unsupported`]) is a Possible site where, on the
+/// values the walk holds, that operand may let MSBuild reach one it throws
+/// on.
+///
 /// A condition legal on the values the walk holds is no site, though one it
 /// reaches may throw on another value of a name the walk is not certain of
 /// ([`condition::Throws::Maybe`]): judging that withdraws every project the
@@ -247,21 +252,39 @@ pub(super) fn judge_condition_rejection(
     reached: bool,
     span: Range<usize>,
 ) {
-    if outcome != condition::Outcome::Illegal {
-        return;
+    let observer = state.observer;
+    let exists = |path: &str| condition_exists(observer, path, exists_dir);
+    let probes = state.follow_imports.then_some(condition::Probes {
+        exists: &exists,
+        observer,
+    });
+    match outcome {
+        condition::Outcome::True | condition::Outcome::False => return,
+        condition::Outcome::Unsupported => {
+            // Evaluation stopped at an operand we cannot evaluate, which may
+            // return a value that lets MSBuild reach one it throws on with
+            // the values the walk holds. Judged without the file system, so
+            // that it probes nothing the verdict needs no answer from: an
+            // operand that probes is then one more of unknown value.
+            let held = condition::judge(condition, &state.lookup, None, &|_| false);
+            if held.throws != condition::Throws::Never {
+                state.note_rejection(
+                    RejectionCertainty::Possible,
+                    RejectionCause::IllegalCondition {
+                        condition: condition.to_owned(),
+                    },
+                    span,
+                );
+            }
+            return;
+        }
+        condition::Outcome::Illegal => {}
     }
     // Reached only perhaps, it is Possible however its operands stand, and
     // judging them would only probe the file system for nothing.
     let certainly = reached && {
-        let observer = state.observer;
-        let exists = |path: &str| condition_exists(observer, path, exists_dir);
-        let probes = state.follow_imports.then_some(condition::Probes {
-            exists: &exists,
-            observer,
-        });
         let uncertain = |name: &str| !directory_build::is_certain(state, name);
-        condition::judge(condition, &state.lookup, probes, &uncertain).throws
-            == condition::Throws::Certainly
+        condition::throws_whatever(condition, &state.lookup, probes, &uncertain)
     };
     let certainty = certain_if(certainly);
     state.note_rejection(

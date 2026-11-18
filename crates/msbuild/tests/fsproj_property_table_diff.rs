@@ -1716,8 +1716,12 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         "$(Word) &gt; 1",
         "$(Word)",
         "$(Maybe) &gt; 1",
-        // A NaN spelling is no empty string, so MSBuild reaches the error.
+        // A NaN spelling is no empty string, nor the word `abc`, so MSBuild
+        // reaches the error.
         "'NaN' != '' And 1 &lt; abc",
+        "'NaN' != 'abc' And 1 &lt; abc",
+        // MSBuild may reach the error past an operand the walk cannot evaluate.
+        "$([System.String]::Unknown()) == '' And 1 &lt; abc",
     ];
     // Ill typed exactly where `Exists` resolves against the project's
     // directory, which holds `flag`, or exactly where it resolves against the
@@ -1736,6 +1740,8 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         // number, so MSBuild stops before the illegal operand.
         "'NaN' == 'NaN' And 1 &lt; abc And '$(Shaky)' == ''",
         "'1%00' != '1' And 1 &lt; abc And '$(Shaky)' == ''",
+        "'$(MSBuildToolsVersion)' != '18' And 1 &lt; abc And '$(Shaky)' == ''",
+        "'-0.1' &lt; '0.0.0' And 1 &lt; abc And '$(Shaky)' == ''",
     ];
     // MSBuild evaluates a condition left to right and stops at the operand
     // that decides it. The first throws on a certain operand before one the
@@ -1755,6 +1761,10 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         "false Or ($(Shaky) &gt; 2 And 'a' == 'b')",
         "!($(Shaky) &gt; 2) Or true",
         "$(Maybe.Substring(5)) == ''",
+        // `MSBuildToolsVersion` (`Current`, which MSBuild reads as Visual
+        // Studio's version beside a number) is a toolset value the walk is not
+        // certain of; it holds it unset, which makes the first operand false.
+        "'$(MSBuildToolsVersion)' == '18' And 1 &lt; abc",
     ];
     // ... and each of these stops before it, so MSBuild never reads it.
     let stops_before_uncertain = [

@@ -688,6 +688,13 @@ fn an_operand_past_the_one_that_settles_the_question_is_not_probed() {
             "<PropertyGroup><U>1</U><U Condition=\"{UNDECIDED_TRUE}\">true</U></PropertyGroup>\
              <PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><R Condition=\"$(U) And Exists('tail')\">x</R></PropertyGroup>"
         ),
+        // Reached for certain, throwing on the value the walk holds (unset)
+        // but not certainly on MSBuild's: whether it throws for certain is
+        // settled at `U`.
+        format!(
+            "<PropertyGroup><U Condition=\"{UNDECIDED_TRUE}\">true</U></PropertyGroup>\
+             <UsingTask TaskName=\"X\" AssemblyFile=\"y.dll\" Condition=\"$(U) And Exists('tail')\" />"
+        ),
     ] {
         let tmp = TempDir::new().unwrap();
         let project_path = project(&tmp, &format!("  {body}"), &[]);

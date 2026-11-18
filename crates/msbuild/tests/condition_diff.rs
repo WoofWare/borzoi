@@ -100,10 +100,10 @@ fn illegal_corners() -> Vec<Case> {
         ("'1.2.3.4.5' < 2", props(&[]), Verdict::Illegal),
         ("'1.2.2147483648' > 2", props(&[]), Verdict::Illegal),
         ("1 < 0xg", props(&[]), Verdict::Illegal),
-        // …and the near misses .NET does read: `-0` is a version component
-        // (one we do not model, so no claim), whitespace pads one, and a
-        // dotted operand that is no version may still be a number.
-        ("'1.-0' < 2", props(&[]), Verdict::Unsupported),
+        // …and the near misses .NET does read: `-0` is a version component,
+        // whitespace pads one, and a dotted operand that is no version may
+        // still be a number.
+        ("'1.-0' < 2", props(&[]), Verdict::True),
         ("' 1 . 2 ' < 2", props(&[]), Verdict::True),
         ("'1.' < 2", props(&[]), Verdict::True),
         // `double.TryParse` takes the NaN symbol in any case (a number every
@@ -1165,11 +1165,16 @@ fn judge_sweep(oracle: &mut Oracle, rng: &mut SplitMix64, cases: usize) -> Judge
             })
             .collect();
         let held_map = property_map(certain.iter().chain(&held));
-        let judged = judge(&condition, &held_map, &uncertain);
+        // Whether the judgement asked about an uncertain name it reached: an
+        // operand it never reached does not count.
+        let reached_uncertain = std::cell::Cell::new(false);
+        let judged = judge(&condition, &held_map, &|name: &str| {
+            let is = uncertain(name);
+            reached_uncertain.set(reached_uncertain.get() || is);
+            is
+        });
         census.cases += 1;
-        let reads_uncertain = JUDGE_UNCERTAIN
-            .iter()
-            .any(|name| condition.contains(&format!("$({name}")));
+        let reads_uncertain = reached_uncertain.get();
         let (mut threw, mut held_value) = (false, false);
         for u in JUDGE_VALUES {
             for v in JUDGE_VALUES {
@@ -1224,9 +1229,9 @@ fn judge_sweep_fixed_seed() {
     eprintln!("judge sweep: {census:?}");
     // Anti-vacuity: each verdict meets conditions that read an uncertain
     // property, MSBuild both throwing and not.
-    assert!(census.committed_despite_uncertain >= 20, "{census:?}");
+    assert!(census.committed_despite_uncertain >= 10, "{census:?}");
     assert!(census.maybe_both_ways >= 20, "{census:?}");
-    assert!(census.never_despite_uncertain >= 20, "{census:?}");
+    assert!(census.never_despite_uncertain >= 10, "{census:?}");
     assert!(census.certainly >= 5, "{census:?}");
 }
 
@@ -1288,6 +1293,24 @@ fn comparisons_of_edge_spellings_are_certain_implies_exact() {
         "abc",
         "1,000",
         "1_000",
+        "-0.1",
+        "+0.1",
+        "-0.0",
+        "0.0.0",
+        "1.-0",
+        "1.-1",
+        " 1.2",
+        "1.2 ",
+        "1. 2",
+        "01.2",
+        "2147483648.0",
+        "1.2%00",
+        "+-1",
+        "- NaN",
+        "NaN%00",
+        "Current",
+        "18",
+        "18.0",
     ];
     let mut oracle = Oracle::spawn();
     let mut committed = 0usize;
