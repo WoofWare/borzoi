@@ -799,10 +799,11 @@ fn sdk_import_project_paths_outside_the_domain_never_commit_wrongly() {
 }
 
 /// An SDK root holding a character MSBuild re-parses in the combined import
-/// path (`;` splits, `*`/`?` glob, `%XX` decodes): we decline or agree.
+/// path (`;` splits, `*`/`?` glob, `%XX` decodes, and on Unix a `\` reads as
+/// a separator): we decline or agree.
 #[test]
 fn sdk_roots_msbuild_would_reparse_never_commit_wrongly() {
-    for parent in ["a;b", "st*r", "q?", "x%41"] {
+    for parent in ["a;b", "st*r", "q?", "x%41", "back\\slash"] {
         let layout = Layout::under(parent);
         for import in ["E.props", "../targets/T.props", "../../../../E.props"] {
             let import = import.to_string();

@@ -6313,10 +6313,14 @@ fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
 }
 
 /// Whether MSBuild re-parses `root` in an import path, and so names something
-/// other than the directory: it holds a `$(`, `;`, `*`, `?` or `%`.
+/// other than the directory: it holds a `$(`, `;`, `*`, `?` or `%`, or on a
+/// Unix host a `\`, which MSBuild reads as a separator (before a `..` in the
+/// import resolves, from the command line, and after, in process).
 fn sdk_root_is_reparsed(root: &Path) -> bool {
     let root_text = root.to_string_lossy();
-    root_text.contains(['%', ';', '*', '?']) || root_text.contains("$(")
+    root_text.contains(['%', ';', '*', '?'])
+        || root_text.contains("$(")
+        || (cfg!(unix) && root_text.contains('\\'))
 }
 
 /// The file an SDK import names: `root` joined with `under_root`, made absolute

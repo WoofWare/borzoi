@@ -30,14 +30,18 @@
 mod common;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
 use borzoi_msbuild::{PropertyRead, RejectionCertainty, parse_fsproj};
+#[cfg(unix)]
+use common::path_spelling;
 use common::{
     CONTROLLED_PROPERTY_NAMES, Oracle, SplitMix64, breaks_inside_quote, gen_bool_expr, gen_props,
-    path_spelling, respell_whitespace,
+    respell_whitespace,
 };
 use tempfile::TempDir;
 
@@ -361,6 +365,7 @@ fn reserved_path_properties_are_exact_or_declined() {
 /// `MSBuildProject*` names and the `MSBuildThisFile*` names, each read back
 /// through a capture (MSBuild computes the second family in the expander, and
 /// a seed is no write), and values composed from them.
+#[cfg(unix)]
 const PATH_READERS: &[(&str, &str)] = &[
     ("ProjFull", "$(MSBuildProjectFullPath)"),
     ("ProjDir", "$(MSBuildProjectDirectory)"),
@@ -383,12 +388,14 @@ const PATH_READERS: &[(&str, &str)] = &[
 
 /// Names [`path_reader_xml`] writes under a condition probing the file
 /// system, which only an evaluation that reads it can decide.
+#[cfg(unix)]
 const PATH_PROBES: &[&str] = &["FoundRelative", "FoundRooted"];
 
 /// A document reading every [`PATH_READERS`] entry, and writing each
 /// [`PATH_PROBES`] name under a condition that probes for the project file
 /// itself: by a path relative to the project, and by one under
 /// `$(MSBuildProjectDirectory)`.
+#[cfg(unix)]
 fn path_reader_xml() -> String {
     let mut xml = String::from("<Project>\n  <PropertyGroup>\n");
     for (name, body) in PATH_READERS {
@@ -456,6 +463,7 @@ fn reserved_path_properties_are_exact_under_every_project_spelling() {
 
 /// [`check_names_at_project`] through [`parse_fsproj_with_imports`], which
 /// follows the document's imports, with no SDK or glob resolver.
+#[cfg(unix)]
 fn check_imports_at_project(
     oracle: &mut Oracle,
     xml: &str,

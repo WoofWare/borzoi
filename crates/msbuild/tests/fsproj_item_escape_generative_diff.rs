@@ -542,6 +542,7 @@ fn hand_picked_corners() {
         // An item's full path collapses `.`, `..` and runs of `/` lexically,
         // and keeps a trailing separator.
         corner("plain.fs", "sub//c.fs;./sub/./c.fs;sub/Deep/../c.fs", None),
+        #[cfg(unix)]
         corner("plain.fs", "sub/;sub//;sub/.;sub/..;sub/x/../", None),
         // A filename part of `*.*` is every file, extensionless ones too,
         // decoded from escapes as well as live…

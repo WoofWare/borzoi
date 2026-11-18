@@ -1619,14 +1619,6 @@ fn validate_inputs(
             project_path.to_path_buf(),
         ));
     }
-    let full_path = project_full_path(project_path);
-    // Windows' path rules are not modelled (`project_full_path`), so there no
-    // spelling is claimed to name no file.
-    if cfg!(unix) && (full_path.file_name().is_none() || spelt.last() == Some(&b'/')) {
-        return Err(ParseError::ProjectPathNamesNoFile(
-            project_path.to_path_buf(),
-        ));
-    }
     // On Unix MSBuild reads every `\` of the path it loads a project from as
     // `/` (`FileUtilities.FixFilePath`), and so loads some other file, or
     // none. Checked on the path as spelt: `dotnet build` rewrites before it
@@ -1634,6 +1626,16 @@ fn validate_inputs(
     // backslash-bearing segment away still leaves the file host-dependent.
     if cfg!(unix) && spelt.contains(&b'\\') {
         return Err(ParseError::BackslashInProjectPath(
+            project_path.to_path_buf(),
+        ));
+    }
+    // Checked after the backslash, which `dotnet msbuild` rewrites before it
+    // resolves a `..`, so a spelling holding one may collapse to the root yet
+    // name a file. Windows' path rules are not modelled
+    // (`project_full_path`), so there no spelling is claimed to name no file.
+    let full_path = project_full_path(project_path);
+    if cfg!(unix) && (full_path.file_name().is_none() || spelt.last() == Some(&b'/')) {
+        return Err(ParseError::ProjectPathNamesNoFile(
             project_path.to_path_buf(),
         ));
     }
