@@ -513,17 +513,6 @@ This is a Cargo workspace with ten members:
   its pinned name. Later stages' source-surface-equals-DLL oracles rest on
   that equality.
   `BORZOI_SOURCE_REF_CASES` and `BORZOI_SOURCE_REF_SEED` widen the run.
-  `not_built_census` (`not_built.rs`, run by `tools/not-built-census.sh`) is
-  the report-only measurement beside it: every project of the pinned
-  corpus's repositories whose evaluated compile graph holds an F# project,
-  loaded through the LSP with its references unbuilt (`NotBuilt`) and graded
-  against the graph oracle, and each reference's reasons it could not be read
-  from source counted. It grades only a positive domain: the graph is the env
-  fold's own (`SemanticState::compile_graph_for_project`), and a dependent any
-  of whose request inputs is untrusted (assembly name, output kind, language
-  version, Compile set, defines, a reference's TFM) is reported ungraded with
-  its reason. A grade over an FCS check with errors is kept apart from the
-  clean totals.
 
 Workspace-level files (`tools/`, `docs/`, `flake.nix`) sit at
 the repo root. The LSP is the only crate with a binary, so `cargo run` from the

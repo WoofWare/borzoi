@@ -388,50 +388,6 @@ fn the_generated_graphs_cover_every_declaration_kind() {
     );
 }
 
-/// The not-built census: every project under `BORZOI_NOT_BUILT_ROOT`
-/// (restored checkouts, nothing built), each a dependent or not by its
-/// evaluated compile graph, every dependent put through the LSP's runtime
-/// path and graded against FCS with every F# reference passed from source.
-/// Prints the measurement and asserts nothing about it;
-/// `tools/not-built-census.sh` materialises the checkouts and runs it.
-#[test]
-#[ignore = "a hand-run measurement; set BORZOI_NOT_BUILT_ROOT (tools/not-built-census.sh)"]
-fn not_built_census() {
-    use borzoi_corpus_diff::not_built::{measure_not_built, render_not_built_totals};
-    let root = std::env::var_os("BORZOI_NOT_BUILT_ROOT")
-        .expect("BORZOI_NOT_BUILT_ROOT names the directory of restored checkouts to measure");
-    let mut projects = Vec::new();
-    let mut pending = vec![std::path::PathBuf::from(root)];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("read a census directory") {
-            let path = entry.expect("read a census directory entry").path();
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if path.is_dir() {
-                if !matches!(name.as_ref(), ".git" | "bin" | "obj") {
-                    pending.push(path);
-                }
-            } else if name.ends_with(".fsproj") {
-                projects.push(path);
-            }
-        }
-    }
-    projects.sort();
-    assert!(
-        !projects.is_empty(),
-        "no .fsproj under BORZOI_NOT_BUILT_ROOT"
-    );
-    let mut oracle = ProjectGraphOracle::default();
-    let reports: Vec<_> = projects
-        .iter()
-        .map(|p| {
-            let report = measure_not_built(p, &mut oracle);
-            println!("{report}");
-            report
-        })
-        .collect();
-    println!("{}", render_not_built_totals(&reports));
-}
-
 /// A referenced project is checked as the library its build makes, so a file
 /// a library's build rejects (top-level code with no module or namespace,
 /// FS0222) is an error from source too, rather than an executable's implicit
