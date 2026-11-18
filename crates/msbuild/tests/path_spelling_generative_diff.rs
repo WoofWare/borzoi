@@ -103,6 +103,8 @@ const IMPORTS: &[(&str, &str)] = &[
     ("glob-dir-link", "links/*.props"),
     // `dl/dangling.props` is a dangling link, which matches and fails.
     ("glob-dangling", "dl/*.props"),
+    // MSBuild collapses the `..` away, leaving `x/`, a directory (MSB4019).
+    ("glob-dotdot-trailing", "x/*/../"),
 ];
 
 /// The imports the walk models, which must commit when ungated.
@@ -239,11 +241,26 @@ impl Case {
     /// commit the body's last write, whatever gates its imports: each file it
     /// may import loads. An SDK import is modelled when the root holds no
     /// `\`, or when the import is absolute and so takes no part of the root.
-    fn must_commit(&self) -> bool {
+    ///
+    /// Behind a gate the walk cannot decide, a wildcard import is declined, so
+    /// it must commit only ungated. An absolute SDK import names the case's
+    /// own directory, so it must commit only where that path is spelt from
+    /// the alphabet the walk joins under an SDK root.
+    fn must_commit(&self, case_dir: &Path) -> bool {
+        let sdk_alphabet = case_dir
+            .to_string_lossy()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-+/".contains(c));
         CLEAN_PROJECT.contains(&self.project_class())
-            && self.imports.iter().all(|(import, _)| match import {
-                Import::Plain(i) => CLEAN_IMPORTS.contains(&IMPORTS[*i].0),
-                Import::Sdk(i) => !self.backslash_sdk || SDK_IMPORTS[*i].0 == "sdk-absolute",
+            && self.imports.iter().all(|(import, gate)| match import {
+                Import::Plain(i) => {
+                    CLEAN_IMPORTS.contains(&IMPORTS[*i].0)
+                        && (*gate == Gate::None || !IMPORTS[*i].1.contains('*'))
+                }
+                Import::Sdk(i) => match SDK_IMPORTS[*i].0 {
+                    "sdk-absolute" => sdk_alphabet,
+                    _ => !self.backslash_sdk,
+                },
                 Import::Pair(i) => CLEAN_PAIRS.contains(&PAIRS[*i].0),
             })
     }
@@ -536,8 +553,9 @@ fn evaluate(shared: &mut Shared, case: &Case) -> Outcome {
                     ));
                 }
             }
-            outcome.checked_must_commit |= case.must_commit();
-            if case.must_commit() && !committed.iter().any(|(name, _)| *name == "After") {
+            let must_commit = case.must_commit(&case_dir);
+            outcome.checked_must_commit |= must_commit;
+            if must_commit && !committed.iter().any(|(name, _)| *name == "After") {
                 outcome.findings.push(format!(
                     "a modelled case did not commit After: {:?} (diagnostics {:?})",
                     ours.properties["After"], parsed.diagnostics

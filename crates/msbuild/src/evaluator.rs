@@ -6384,6 +6384,8 @@ fn follow_wildcard_import(
             }
         }
         WildcardImport::Unmodelled => {
+            // What MSBuild imports here, it may fail to load.
+            note_undecided_wildcard(normalised, span.clone(), state);
             // Push the diagnostic too, not just the uncertainty: silently
             // returning would leave `is_partial` false with imports dropped.
             state.push(
@@ -6402,6 +6404,7 @@ fn follow_wildcard_import(
             );
         }
         WildcardImport::Unlisted { dir, message } => {
+            note_undecided_wildcard(normalised, span.clone(), state);
             // Unreadable directory is NOT zero matches — files may well
             // be there, and the dropped imports could have carried
             // anything. Diagnostic + uncertainty, same as the wildcard-
@@ -6423,11 +6426,24 @@ fn follow_wildcard_import(
     }
 }
 
+/// Record that MSBuild may reject the project over a wildcard import of
+/// `normalised` the walk took but could not expand: what it matches may not
+/// load.
+fn note_undecided_wildcard(normalised: &str, span: Range<usize>, state: &mut State<'_>) {
+    state.note_rejection(
+        crate::RejectionCertainty::Possible,
+        crate::RejectionCause::Import {
+            project: normalised.to_string(),
+            gate_undecided: false,
+            why: crate::UnloadableImport::PathUndecided,
+        },
+        span,
+    );
+}
+
 /// What a wildcard import of `normalised` (a path with each `\` read as
 /// `/`) from `current_file_dir` names: the one reading of a wildcard import,
-/// shared by the walk ([`follow_wildcard_import`]) and by the judgement of
-/// one it skipped under a gate it could not decide
-/// (`rejection::may_load_nothing`), so the two cannot differ.
+/// as the walk ([`follow_wildcard_import`]) takes it.
 pub(super) enum WildcardImport {
     /// The files MSBuild loads, in the order it loads them.
     Matches(Vec<PathBuf>),
@@ -6458,8 +6474,23 @@ pub(super) fn wildcard_import(
     current_file_dir: &Path,
     observer: &observed::Observer,
 ) -> WildcardImport {
-    if normalised.ends_with('/') {
-        return WildcardImport::Matches(Vec::new());
+    if let Some(spelt) = normalised.strip_suffix('/') {
+        // A wildcard file part spelt as a directory matches nothing. Any other
+        // shape ending in a separator, one whose `.` or `..` MSBuild collapses
+        // first (`x/*/../` is the directory `x/`), is not modelled.
+        let spelt = spelt.trim_end_matches('/');
+        let plain_wildcard = spelt
+            .rsplit('/')
+            .next()
+            .is_some_and(|last| last.contains(['*', '?']))
+            && !spelt
+                .split('/')
+                .any(|segment| segment == "." || segment == "..");
+        return if plain_wildcard {
+            WildcardImport::Matches(Vec::new())
+        } else {
+            WildcardImport::Unmodelled
+        };
     }
     let path = current_file_dir.join(normalised);
     let file_pattern = path
@@ -6497,6 +6528,9 @@ pub(super) fn wildcard_import(
     let mut matches: Vec<PathBuf> = entries
         .into_iter()
         .filter_map(Result::ok)
+        // The name first, so only a link the pattern names has its target
+        // asked about (and enters the read set).
+        .filter(|entry| wildcard_matches(&file_pattern, &entry.name.to_string_lossy()))
         .filter(|entry| match entry.kind {
             Ok(EntryKind::Dir) | Err(_) => false,
             // A link is a match unless its target is a directory; a dangling
@@ -6504,7 +6538,6 @@ pub(super) fn wildcard_import(
             Ok(EntryKind::Symlink) => observed::kind(observer, &entry.path) != Ok(EntryKind::Dir),
             Ok(EntryKind::File | EntryKind::Other) => true,
         })
-        .filter(|entry| wildcard_matches(&file_pattern, &entry.name.to_string_lossy()))
         .map(|entry| entry.path)
         .collect();
     // MSBuild consumes wildcard matches in ordinal-ignore-case order

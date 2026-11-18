@@ -685,14 +685,14 @@ pub(super) fn undecided_import_group(
     // earlier one MSBuild would have made. Only an import MSBuild makes
     // whenever it takes the group, one with no condition of its own, makes a
     // later one a duplicate: one under a condition of its own may not be made
-    // at all, so what it would import is judged on its own branch, and a later
-    // import of the same file is judged as though it were the first.
+    // at all, so it is judged against no earlier import, and what it would
+    // import makes no later one a duplicate.
     let mut seen = HashSet::new();
     for child in node.children().filter(|c| c.has_tag_name("Import")) {
         if attribute(child, "Condition").is_none() {
             undecided_import_within(child, current_file_dir, &mut seen, state);
         } else {
-            undecided_import_within(child, current_file_dir, &mut seen.clone(), state);
+            undecided_import_within(child, current_file_dir, &mut HashSet::new(), state);
         }
     }
 }
@@ -780,8 +780,11 @@ fn may_load_nothing(
     }
     value.split_list().find_map(|segment| {
         let relative = segment.unescape().replace('\\', "/");
+        // A wildcard MSBuild may expand is not judged: what it matches, and
+        // whether each match loads, the walk declines to settle under a gate
+        // it could not decide.
         if segment.is_filespec_wildcard() {
-            return wildcard_may_load_nothing(&relative, current_file_dir, seen, state);
+            return Some(UnloadableImport::PathUndecided);
         }
         // `GetFullPath` keeps a trailing separator, and a path ending in one
         // names a directory, which MSBuild never imports (MSB4019); the
@@ -792,35 +795,6 @@ fn may_load_nothing(
         let path = current_file_dir.join(relative);
         load_failure(state, &path, seen).map(UnloadableImport::Failed)
     })
-}
-
-/// [`may_load_nothing`] for a wildcard segment, `relative` with its `\` read as
-/// `/`: the files the walk would import for it ([`super::wildcard_import`]),
-/// each of which MSBuild loads, so one that does not load fails the project.
-/// On Unix MSBuild loads a match with each `\` of its name read as `/`, which
-/// names a file the walk does not; and a shape the walk does not expand, or a
-/// directory it cannot list, may hold anything.
-fn wildcard_may_load_nothing(
-    relative: &str,
-    current_file_dir: &Path,
-    seen: &mut HashSet<String>,
-    state: &State<'_>,
-) -> Option<UnloadableImport> {
-    match super::wildcard_import(relative, true, current_file_dir, state.observer) {
-        super::WildcardImport::Matches(matches) => matches.iter().find_map(|path| {
-            let name = path
-                .file_name()
-                .map(|n| n.as_encoded_bytes())
-                .unwrap_or_default();
-            if cfg!(unix) && name.contains(&b'\\') {
-                return Some(UnloadableImport::PathUndecided);
-            }
-            load_failure(state, path, seen).map(UnloadableImport::Failed)
-        }),
-        super::WildcardImport::Unmodelled | super::WildcardImport::Unlisted { .. } => {
-            Some(UnloadableImport::PathUndecided)
-        }
-    }
 }
 
 /// Whether the walk cannot compute `project`: it reads a name not

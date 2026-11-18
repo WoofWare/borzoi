@@ -370,6 +370,11 @@ fn check(oracle: &mut Oracle, xml: &str, gated: bool, tally: &mut Tally) {
         let read = &reads.items[item_type];
         let mut names: Vec<String> = METADATA.iter().map(|n| (*n).to_owned()).collect();
         names.push("Label".to_owned());
+        // The path item's metadatum is asked of MSBuild whether or not the
+        // walk holds it, so a value the walk drops is graded too.
+        if item_type == PATH_ITEM {
+            names.push("Dir".to_owned());
+        }
         for row in read.items.iter().flatten() {
             names.extend(row.metadata.keys().cloned());
         }

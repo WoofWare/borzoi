@@ -140,16 +140,18 @@ fn an_undecided_import_of_a_file_that_loads_is_not_rejected() {
 }
 
 #[test]
-fn an_undecided_import_of_a_wildcard_is_not_rejected() {
-    // A wildcard that matches nothing imports nothing, silently.
+fn an_undecided_import_of_a_wildcard_may_be_rejected() {
+    // Under a gate the walk cannot decide, it does not settle what a wildcard
+    // matches, nor whether each match loads (matching by UTF-16 unit, a match
+    // a link names, a spelling MSBuild collapses), so even one matching nothing
+    // may be rejected.
     let tmp = TempDir::new().unwrap();
     let project_path = project(
         &tmp,
         &format!("  <Import Project=\"none/*.props\" Condition=\"{UNDECIDED_TRUE}\" />"),
         &[],
     );
-    let parsed = parse_file(&project_path);
-    assert_eq!(parsed.rejection, None, "{:#?}", parsed.diagnostics);
+    assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
 }
 
 #[test]
