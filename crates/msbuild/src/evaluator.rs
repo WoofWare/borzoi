@@ -2805,9 +2805,12 @@ impl<'r> State<'r> {
 
     /// Mark `name` stale under `cause`: the walk skipped a write to it on a
     /// stale gate, which the real build may have run. A name the frame
-    /// protects is one the real build's write would leave alone.
+    /// protects is one the real build's write would leave alone, and one the
+    /// walk holds unbound needs no mark ([`Self::skipped_write_needs_mark`]).
     fn mark_skipped_write_stale(&mut self, name: &str, cause: &properties::trust::StaleCause) {
-        if self.protected.contains(&name.to_ascii_lowercase()) {
+        if self.protected.contains(&name.to_ascii_lowercase())
+            || !self.skipped_write_needs_mark(name)
+        {
             return;
         }
         self.apply_property_provenance(
@@ -2819,6 +2822,19 @@ impl<'r> State<'r> {
                 stale: StaleOutcome::Set(cause.clone()),
             },
         );
+    }
+
+    /// Whether a write to `name` the walk skipped on a stale gate leaves a
+    /// value the walk would otherwise commit. One the walk holds unbound reads
+    /// as an inexact unset already: a stale gate exists only once the walk has
+    /// passed content it could not see, after which no undefined read is exact
+    /// ([`Self::undefined_read_is_exact`]).
+    fn skipped_write_needs_mark(&self, name: &str) -> bool {
+        debug_assert!(
+            self.walk_opaque.is_some(),
+            "a stale gate exists only after a latch"
+        );
+        self.lookup.is_bound(name)
     }
 
     /// Every property MSBuild may write in one of `branches`, alternatives of
@@ -4385,8 +4401,8 @@ fn walk_property_child_inner(
             };
             // A gate decided on a stale value may hold in the real build.
             let stale = match state.stale_gate_cause(node, own_gate_decided) {
-                Some(cause) => StaleOutcome::Set(cause),
-                None => StaleOutcome::Keep,
+                Some(cause) if state.skipped_write_needs_mark(&name) => StaleOutcome::Set(cause),
+                _ => StaleOutcome::Keep,
             };
             state.apply_property_provenance(
                 &name,
