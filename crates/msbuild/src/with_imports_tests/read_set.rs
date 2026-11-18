@@ -528,8 +528,8 @@ fn sweep_symlinked_exists(target_exists: bool) {
     let project = write_at(&root, "proj/Demo.fsproj", source);
     let evaluate = || {
         parse_fsproj_with_imports(
-            source,
-            &project,
+            &crate::ProjectFile::buffer(&project, source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
             None,
@@ -815,8 +815,8 @@ fn the_sweep_writes_only_under_its_root() {
     let project = write_at(&root, "Demo.fsproj", source);
     let evaluate = || {
         parse_fsproj_with_imports(
-            source,
-            &project,
+            &crate::ProjectFile::buffer(&project, source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
             None,
@@ -880,8 +880,8 @@ fn the_sweep_keeps_permissions() {
     let project = write_at(&root, "proj/Demo.fsproj", source);
     let evaluate = || {
         parse_fsproj_with_imports(
-            source,
-            &project,
+            &crate::ProjectFile::buffer(&project, source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
             None,

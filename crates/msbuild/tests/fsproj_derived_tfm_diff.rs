@@ -418,8 +418,8 @@ fn evaluate_both(
 
     let extra: HashMap<String, String> = globals.iter().cloned().collect();
     let parsed = parse_fsproj_with_imports(
-        &xml,
-        &project_path,
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+            .expect("a project path spelt as its full path"),
         &extra,
         &common::oracle_environment(),
         with_sdk.then_some(&resolver as &borzoi_msbuild::SdkResolver<'_>),

@@ -176,8 +176,8 @@ fn evaluate(
 ) -> (Option<String>, Option<String>) {
     std::fs::write(project_path, xml).expect("write project");
     let parsed = parse_fsproj_with_imports(
-        xml,
-        project_path,
+        &borzoi_msbuild::ProjectFile::buffer(project_path, xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,

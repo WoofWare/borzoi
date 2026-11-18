@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use borzoi_msbuild::observed::host_fs;
 use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
-use common::{Oracle, SplitMix64};
+use common::{Oracle, SplitMix64, path_spelling};
 
 /// `PackageReference` and `FrameworkReference` are captured by the dependency
 /// capture, not the generic tables; `PackageReference` collapses `Update` onto
@@ -306,24 +306,55 @@ struct Tally {
     rows: usize,
     spelled: usize,
     spelled_apart: usize,
+    /// Clean [`PATH_ITEM`] lists, by the project path's spelling.
+    path_items_clean: BTreeMap<String, usize>,
+}
+
+/// An item type every project declares last, from the project's own path, so
+/// the project-path spelling axis reaches an identity and a metadatum.
+const PATH_ITEM: &str = "Spelt";
+
+/// `xml` with a [`PATH_ITEM`] whose identity is `$(MSBuildProjectFullPath)` and
+/// whose metadatum `Dir` is `$(MSBuildProjectDirectory)`, declared last.
+fn with_path_item(xml: &str) -> String {
+    let at = xml.rfind("</Project>").expect("a project closes");
+    format!(
+        "{}  <ItemGroup>\n    <{PATH_ITEM} Include=\"$(MSBuildProjectFullPath)\" \
+         Dir=\"$(MSBuildProjectDirectory)\" />\n  </ItemGroup>\n{}",
+        &xml[..at],
+        &xml[at..]
+    )
 }
 
 /// Evaluate `xml` both ways and hold every clean list to MSBuild's.
+///
+/// Both sides are handed the project's path spelt one of the ways MSBuild
+/// reads as the same file, the case's number choosing which.
 fn check(oracle: &mut Oracle, xml: &str, gated: bool, tally: &mut Tally) {
     tally.cases += 1;
+    let xml = &with_path_item(xml);
     let dir = tempfile::tempdir().unwrap();
-    let path = host_fs::canonicalize(dir.path()).unwrap().join("p.fsproj");
+    let path = host_fs::canonicalize(dir.path())
+        .unwrap()
+        .join("proj/p.fsproj");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, xml).unwrap();
     std::fs::write(path.with_file_name("items.props"), IMPORTED).unwrap();
+    let spelling = path_spelling::SPELLINGS[tally.cases % path_spelling::SPELLINGS.len()];
+    let path = path_spelling::respell(&path, spelling);
     let probe = ReadProbe {
         properties: Vec::new(),
-        item_types: ITEM_TYPES.iter().map(|t| (*t).to_owned()).collect(),
+        item_types: ITEM_TYPES
+            .iter()
+            .chain([&PATH_ITEM])
+            .map(|t| (*t).to_owned())
+            .collect(),
         targets: Vec::new(),
         execute: None,
     };
     let (_, reads) = parse_fsproj_reads(
-        xml,
-        &path,
+        &borzoi_msbuild::ProjectFile::read(&path, &borzoi_msbuild::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -332,13 +363,18 @@ fn check(oracle: &mut Oracle, xml: &str, gated: bool, tally: &mut Tally) {
         &probe,
     )
     .unwrap();
-    for item_type in ITEM_TYPES {
+    for item_type in ITEM_TYPES.into_iter().chain([PATH_ITEM]) {
         // Every name the generator writes, the structural `Label` among them,
         // and every name our table holds: a name we hold that MSBuild does not
         // must read as "" there.
         let read = &reads.items[item_type];
         let mut names: Vec<String> = METADATA.iter().map(|n| (*n).to_owned()).collect();
         names.push("Label".to_owned());
+        // The path item's metadatum is asked of MSBuild whether or not the
+        // walk holds it, so a value the walk drops is graded too.
+        if item_type == PATH_ITEM {
+            names.push("Dir".to_owned());
+        }
         for row in read.items.iter().flatten() {
             names.extend(row.metadata.keys().cloned());
         }
@@ -355,6 +391,12 @@ fn check(oracle: &mut Oracle, xml: &str, gated: bool, tally: &mut Tally) {
             continue;
         }
         tally.clean += 1;
+        if item_type == PATH_ITEM {
+            *tally
+                .path_items_clean
+                .entry(format!("{spelling:?}"))
+                .or_default() += 1;
+        }
         tally.clean_with_gated += usize::from(gated);
         *tally.clean_by_type.entry(item_type).or_default() += 1;
         let rows = read.items.as_deref().unwrap_or_default();
@@ -447,6 +489,18 @@ fn most_lists_are_clean() {
         tally.clean_with_gated > 0,
         "no clean list was checked in a project writing the untrusted property"
     );
+    // The project-path axis reaches an identity under every spelling.
+    for spelling in path_spelling::SPELLINGS {
+        let clean = tally
+            .path_items_clean
+            .get(&format!("{spelling:?}"))
+            .copied()
+            .unwrap_or_default();
+        assert!(
+            clean >= 10,
+            "only {clean} exact {PATH_ITEM} lists under {spelling:?}"
+        );
+    }
     assert!(
         tally.spelled * 2 > tally.rows && tally.spelled_apart > 0,
         "the escaped spelling went unclaimed: {} of {} clean rows, {} apart",
@@ -517,8 +571,8 @@ fn a_body_with_line_ends_or_references_is_compared() {
             execute: None,
         };
         let (_, reads) = parse_fsproj_reads(
-            &xml,
-            &path,
+            &borzoi_msbuild::ProjectFile::buffer(&path, &xml)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &common::oracle_environment(),
             None,

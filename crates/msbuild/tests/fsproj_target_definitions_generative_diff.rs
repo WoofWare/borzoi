@@ -134,8 +134,8 @@ fn check(oracle: &mut Oracle, files: &[(&str, String)], tally: &mut Tally) {
         ..ReadProbe::default()
     };
     let (_, ours) = parse_fsproj_reads(
-        &files[0].1,
-        &path,
+        &borzoi_msbuild::ProjectFile::buffer(&path, &files[0].1)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,

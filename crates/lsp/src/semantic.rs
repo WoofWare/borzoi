@@ -4762,7 +4762,16 @@ impl std::hash::Hash for ProjectId {
 impl ProjectId {
     pub fn new(path: &Path) -> Self {
         let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-        let path = lexically_normalize(&absolute);
+        // On Unix a `\` in the spelling makes the file MSBuild loads depend on
+        // the host (`dotnet msbuild` reads it as `/` before resolving a `..`,
+        // the API after), so such a spelling is kept as it is, where the
+        // project's read refuses it ([`borzoi_msbuild::ProjectFileError::Backslash`]),
+        // rather than collapsed onto another project's identity.
+        let path = if cfg!(unix) && absolute.as_os_str().as_encoded_bytes().contains(&b'\\') {
+            absolute
+        } else {
+            lexically_normalize(&absolute)
+        };
         ProjectId {
             identity: crate::paths::path_dedup_key(&path),
             path,
@@ -4844,6 +4853,19 @@ mod tests {
                 ProjectId::new(&a).identity() == ProjectId::new(&b).identity()
             );
         }
+    }
+
+    /// On Unix a backslash spelling is not collapsed onto another project's
+    /// identity, so its evaluation reads it as spelt and refuses it.
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_spelling_is_not_collapsed_onto_another_project() {
+        let spelt = Path::new("/w/a\\b/../App.fsproj");
+        assert_ne!(
+            ProjectId::new(spelt),
+            ProjectId::new(Path::new("/w/App.fsproj"))
+        );
+        assert_eq!(ProjectId::new(spelt).as_path(), spelt);
     }
 
     /// A project reached through a symlinked directory is not the project at

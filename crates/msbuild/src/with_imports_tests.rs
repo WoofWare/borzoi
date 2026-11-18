@@ -114,16 +114,16 @@ impl Through<'_> {
     ) -> Result<ParsedProject, ParseError> {
         match self {
             Through::Reference => parse_fsproj_with_imports_asking_every_time(
-                source,
-                project_path,
+                &crate::ProjectFile::buffer(project_path, source)
+                    .expect("a project path spelt as its full path"),
                 extra_properties,
                 environment,
                 sdk_resolver,
                 glob_resolver,
             ),
             Through::Reusing(documents) => parse_fsproj_with_imports_reusing(
-                source,
-                project_path,
+                &crate::ProjectFile::buffer(project_path, source)
+                    .expect("a project path spelt as its full path"),
                 extra_properties,
                 environment,
                 sdk_resolver,

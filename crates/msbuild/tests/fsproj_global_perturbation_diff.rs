@@ -636,8 +636,8 @@ fn evaluate_both(
     // point the LSP itself calls, and half the routes above run through an
     // `<Import>`.
     let served = parse_fsproj_with_imports(
-        xml,
-        &project_path,
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+            .expect("a project path spelt as its full path"),
         &extra,
         &common::oracle_environment(),
         sdk_resolver,
@@ -651,8 +651,8 @@ fn evaluate_both(
     let mut theirs = Vec::new();
     for startup in startups.iter_mut() {
         let (parsed, _) = parse_fsproj_reads(
-            xml,
-            &project_path,
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+                .expect("a project path spelt as its full path"),
             &extra,
             &common::oracle_environment(),
             sdk_resolver,
@@ -1240,8 +1240,8 @@ fn compile_items_are_exact_or_declined_under_every_global_set() {
         for globals in &sets {
             let extra: HashMap<String, String> = globals.iter().cloned().collect();
             let parsed = parse_fsproj_with_imports(
-                xml,
-                &project_path,
+                &borzoi_msbuild::ProjectFile::buffer(&project_path, *xml)
+                    .expect("a project path spelt as its full path"),
                 &extra,
                 &common::oracle_environment(),
                 None,
@@ -1276,8 +1276,8 @@ fn compile_items_are_exact_or_declined_under_every_global_set() {
                     );
                 }
                 let (parsed, _) = parse_fsproj_reads(
-                    xml,
-                    &project_path,
+                    &borzoi_msbuild::ProjectFile::buffer(&project_path, *xml)
+                        .expect("a project path spelt as its full path"),
                     &extra,
                     &common::oracle_environment(),
                     None,
@@ -1603,8 +1603,8 @@ fn unset_reads_in_import_gates_are_exact_or_declined() {
 
                     for globals in &sets {
                         let parsed = parse_fsproj_with_imports(
-                            &xml,
-                            &project_path,
+                            &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                                .expect("a project path spelt as its full path"),
                             &globals.iter().cloned().collect(),
                             &common::oracle_environment(),
                             None,

@@ -406,8 +406,8 @@ mod tests {
             execute: None,
         };
         let walked = crate::parse_fsproj_probed(
-            &source,
-            &path,
+            &crate::ProjectFile::buffer(&path, &source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
             None,
@@ -715,8 +715,8 @@ mod target_tests {
             ..ReadProbe::default()
         };
         let walked = crate::parse_fsproj_probed(
-            &source,
-            &path,
+            &crate::ProjectFile::buffer(&path, &source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
             None,
@@ -813,8 +813,8 @@ mod import_point_target_tests {
             ..ReadProbe::default()
         };
         let walked = crate::parse_fsproj_probed(
-            source,
-            &project,
+            &crate::ProjectFile::buffer(&project, source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
             Some(&resolver),

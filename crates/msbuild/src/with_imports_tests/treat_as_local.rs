@@ -150,8 +150,8 @@ fn imported_treat_as_local_unprotects_empty_gate_global_and_imports() {
         }
     };
     let result = parse_fsproj_with_imports(
-        &crate::observed::host_fs::read_to_string(&project_path).unwrap(),
-        &canon_project,
+        &crate::ProjectFile::read(&canon_project, &crate::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &extras,
         &HashMap::new(),
         Some(&resolver),

@@ -181,8 +181,8 @@ fn assert_captures_match(xml: &str, extras: &[(&str, &str)]) {
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect();
     let parsed = parse_fsproj_with_imports(
-        xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
         &props,
         &common::oracle_environment(),
         None,
@@ -243,8 +243,8 @@ fn assert_cpm_items_match(xml: &str, extras: &[(&str, &str)]) {
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect();
     let parsed = parse_fsproj_with_imports(
-        xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
         &props,
         &common::oracle_environment(),
         None,
@@ -324,8 +324,8 @@ fn assert_sdk_captures_match(xml: &str, extras: &[(&str, &str)]) {
         )
     };
     let parsed = parse_fsproj_with_imports(
-        xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
         &props,
         &common::oracle_environment(),
         Some(&resolver),
@@ -432,8 +432,8 @@ fn sdk_style_netcoreapp_fsharp_property_functions_leave_no_cause() {
         )
     };
     let parsed = parse_fsproj_with_imports(
-        xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
         &Default::default(),
         &common::oracle_environment(),
         Some(&resolver),
@@ -516,8 +516,8 @@ fn sdk_style_netcoreapp_workflow_gate_no_longer_cascades() {
         )
     };
     let parsed = parse_fsproj_with_imports(
-        xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
         &Default::default(),
         &common::oracle_environment(),
         Some(&resolver),
@@ -587,8 +587,8 @@ fn sdk_style_netcoreapp_fsharp_path_property_default_is_inert() {
         )
     };
     let parsed = parse_fsproj_with_imports(
-        xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
         &Default::default(),
         &common::oracle_environment(),
         Some(&resolver),
@@ -1184,8 +1184,8 @@ fn eval_cpm_fixture_both_ways(
         )
     };
     let parsed = parse_fsproj_with_imports(
-        project_xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, project_xml)
+            .expect("a project path spelt as its full path"),
         &std::collections::HashMap::new(),
         &common::oracle_environment(),
         Some(&resolver),

@@ -36,8 +36,9 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
-use std::path::Path;
 
+use borzoi_msbuild::ProjectFile;
+use borzoi_msbuild::observed::Observer;
 use borzoi_msbuild::test_support::{PropertyRead, ReadProbe, parse_fsproj_reads};
 use common::{Oracle, SplitMix64, parse_fsproj_with_imports, soak_parameters};
 use tempfile::TempDir;
@@ -407,6 +408,7 @@ fn sweep(
         for (name, side) in PATH_SIDES {
             std::fs::write(dir.join(name), side).unwrap();
         }
+        let project = ProjectFile::read(&path, &Observer::new()).expect("the project reads back");
         census.cases += 1;
         let mut theirs_by_name: BTreeMap<&str, BTreeSet<Option<String>>> = BTreeMap::new();
         let mut ours_by_name: BTreeSet<&str> = BTreeSet::new();
@@ -429,8 +431,7 @@ fn sweep(
             };
             let extra: HashMap<String, String> = globals.iter().cloned().collect();
             let served = parse_fsproj_with_imports(
-                &case.project,
-                &path,
+                &project,
                 &extra,
                 &common::oracle_environment(),
                 None,
@@ -438,8 +439,7 @@ fn sweep(
             )
             .expect("well-formed");
             let (_, reads) = parse_fsproj_reads(
-                &case.project,
-                &path,
+                &project,
                 &extra,
                 &common::oracle_environment(),
                 None,
@@ -702,17 +702,15 @@ fn issue_1037_shapes_are_exact_or_declined() {
                     );
                 }
             }
-            failures.extend(check_exact(
-                &project, &path, &globals, &theirs, &names, label,
-            ));
+            let file = ProjectFile::read(&path, &Observer::new()).expect("the project reads back");
+            failures.extend(check_exact(&file, &globals, &theirs, &names, label));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 fn check_exact(
-    project: &str,
-    path: &Path,
+    project: &ProjectFile,
     globals: &[(String, String)],
     theirs: &HashMap<String, String>,
     names: &[String],
@@ -720,15 +718,9 @@ fn check_exact(
 ) -> Vec<String> {
     let mut failures = Vec::new();
     let extra: HashMap<String, String> = globals.iter().cloned().collect();
-    let served = parse_fsproj_with_imports(
-        project,
-        path,
-        &extra,
-        &common::oracle_environment(),
-        None,
-        None,
-    )
-    .expect("well-formed");
+    let served =
+        parse_fsproj_with_imports(project, &extra, &common::oracle_environment(), None, None)
+            .expect("well-formed");
     // The `project` table reads an undefined name as empty, so the walk's
     // `Unset` is graded as the empty string here.
     for name in names {

@@ -57,7 +57,7 @@ use std::path::{Component, Path, PathBuf};
 
 use borzoi_cst::language_version::LanguageVersion;
 use borzoi_msbuild::{
-    GlobResolver, ParsedProject, ResolvedItem, SdkResolution, SdkResolver, SdkVersion,
+    GlobResolver, ParsedProject, ProjectFile, ResolvedItem, SdkResolution, SdkResolver, SdkVersion,
     parse_fsproj_with_imports_reusing, target_frameworks,
 };
 
@@ -2954,19 +2954,18 @@ fn evaluate_project(
 ) -> Evaluation {
     let _span =
         tracing::info_span!("evaluate_project", project = %project_path.display()).entered();
-    // The reads that prepare the evaluation: the project's text, and SDK
-    // discovery's `global.json` walk and `dotnet` probes.
+    // The reads that prepare the evaluation: the project's text, read at the
+    // project's full path (MSBuild's), and SDK discovery's `global.json` walk
+    // and `dotnet` probes.
     let preparation = Observer::new();
-    let source = msbuild_observed::read_to_string(&preparation, project_path)
-        .map(crate::disk_text::without_bom);
-    let Ok(source) = source else {
+    let Ok(project) = ProjectFile::read(project_path, &preparation) else {
         return Evaluation {
             evaluated: None,
             reads: preparation.finish().0,
             immutable: ImmutableRoots::default(),
         };
     };
-    let disc = SdkDiscovery::for_project(project_path, env, &preparation)
+    let disc = SdkDiscovery::for_project(project.path(), env, &preparation)
         .inspect_err(|err| {
             crate::log_warn!(
                 "SDK discovery failed; evaluating without resolver",
@@ -2981,8 +2980,7 @@ fn evaluate_project(
     let reads = preparation.finish().0;
     let extras = build_properties(extra_build_properties);
     let Some(parsed) = parse_with_optional_sdk(
-        &source,
-        project_path,
+        &project,
         &extras,
         &env.build_environment,
         disc.as_ref(),
@@ -3004,8 +3002,7 @@ fn evaluate_project(
     let pass1_untrusted = tfm_policy::tfm_untrusted(&parsed);
     let served = select_target_framework(
         parsed,
-        &source,
-        project_path,
+        &project,
         &extras,
         &env.build_environment,
         disc.as_ref(),
@@ -3106,8 +3103,7 @@ struct ServedEvaluation {
 #[allow(clippy::too_many_arguments)]
 fn select_target_framework(
     pass1: ParsedProject,
-    source: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extras: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     disc: Option<&SdkDiscovery>,
@@ -3163,15 +3159,7 @@ fn select_target_framework(
     let mut seeded = extras.clone();
     tfm_policy::seed_target_framework_global(&mut seeded, seed);
     let seed = seed.to_string();
-    match parse_with_optional_sdk(
-        source,
-        project_path,
-        &seeded,
-        environment,
-        disc,
-        evaluated,
-        documents,
-    ) {
+    match parse_with_optional_sdk(project, &seeded, environment, disc, evaluated, documents) {
         Some(pass2) => match tfm_policy::reseed_outcome(&pass2) {
             tfm_policy::ReseedOutcome::AsSeeded => ServedEvaluation {
                 pass2_reads: Some(pass2.read_set.clone()),
@@ -3277,8 +3265,7 @@ fn contains_property_case_insensitive(properties: &HashMap<String, String>, name
 /// keeps the closure's borrow of `disc` bounded by the call itself,
 /// avoiding the need to box a `dyn Fn`.
 fn parse_with_optional_sdk(
-    source: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extras: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     disc: Option<&SdkDiscovery>,
@@ -3295,8 +3282,7 @@ fn parse_with_optional_sdk(
         Some(d) => {
             let resolver: &SdkResolver<'_> = &|name, observer| d.resolve(name, observer);
             parse_fsproj_with_imports_reusing(
-                source,
-                project_path,
+                project,
                 extras,
                 environment,
                 Some(resolver),
@@ -3306,8 +3292,7 @@ fn parse_with_optional_sdk(
             .ok()
         }
         None => parse_fsproj_with_imports_reusing(
-            source,
-            project_path,
+            project,
             extras,
             environment,
             None,
@@ -7679,8 +7664,8 @@ mod tests {
             let parsed = match evaluation.evaluated {
                 Some(evaluated) => evaluated.parsed,
                 None => borzoi_msbuild::parse_fsproj(
-                    "<Project />",
-                    project,
+                    &borzoi_msbuild::ProjectFile::buffer(project, "<Project />")
+                        .expect("a project path spelt as its full path"),
                     &HashMap::new(),
                     &HashMap::new(),
                 )
@@ -8047,8 +8032,8 @@ mod tests {
             match evaluated {
                 Some(evaluated) => evaluated.parsed,
                 None => borzoi_msbuild::parse_fsproj(
-                    "<Project />",
-                    project,
+                    &borzoi_msbuild::ProjectFile::buffer(project, "<Project />")
+                        .expect("a project path spelt as its full path"),
                     &HashMap::new(),
                     &HashMap::new(),
                 )

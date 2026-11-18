@@ -22,8 +22,8 @@ fn started_in(
     startup_directory: Option<&Path>,
 ) -> ParsedProject {
     crate::parse_fsproj_probed(
-        source,
-        project,
+        &crate::ProjectFile::buffer(project, source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         environment,
         None,

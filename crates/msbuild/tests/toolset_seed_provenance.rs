@@ -75,8 +75,8 @@ fn parse_at_with_real_sdk(body: &str, project_path: &std::path::Path) -> ParsedP
         )
     };
     parse_fsproj_with_imports(
-        body,
-        project_path,
+        &borzoi_msbuild::ProjectFile::buffer(project_path, body)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         Some(&resolver as &borzoi_msbuild::SdkResolver<'_>),

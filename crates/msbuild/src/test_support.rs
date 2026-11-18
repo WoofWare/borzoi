@@ -170,8 +170,7 @@ pub use crate::evaluator::reads::{
 /// nobody launched, as the public entry points do, and leaves the name unset.
 #[allow(clippy::too_many_arguments)]
 pub fn parse_fsproj_reads(
-    source: &str,
-    project_path: &std::path::Path,
+    project: &crate::ProjectFile,
     extra_properties: &std::collections::HashMap<String, String>,
     environment: &std::collections::HashMap<String, String>,
     sdk_resolver: Option<&crate::SdkResolver<'_>>,
@@ -180,8 +179,7 @@ pub fn parse_fsproj_reads(
     probe: &ReadProbe,
 ) -> Result<(crate::ParsedProject, EvaluationReads), crate::ParseError> {
     let walked = crate::parse_fsproj_probed(
-        source,
-        project_path,
+        project,
         extra_properties,
         environment,
         sdk_resolver,

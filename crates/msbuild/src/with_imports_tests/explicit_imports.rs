@@ -543,8 +543,8 @@ fn project_reference_in_imported_file_lands_in_bucket() {
     assert_eq!(
         paths_of(&result.project_references),
         vec![
-            dir.join("../body/Body.csproj"),
-            dir.join("../imported/Imported.csproj"),
+            dir.parent().unwrap().join("body/Body.csproj"),
+            dir.parent().unwrap().join("imported/Imported.csproj"),
         ],
     );
     assert!(result.items.is_empty());

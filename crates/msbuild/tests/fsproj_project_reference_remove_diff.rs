@@ -449,8 +449,8 @@ fn check(oracle: &mut Oracle, blocks: &[Block], with_resolver: bool) -> Outcome 
 
     let resolver: &GlobResolver<'_> = &glob_resolver::resolve;
     let parsed: ParsedProject = parse_fsproj_with_imports(
-        &xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -780,8 +780,8 @@ fn the_non_existent_idiom_commits_on_the_real_sdk() {
     };
     let resolver: &GlobResolver<'_> = &glob_resolver::resolve;
     let parsed = parse_fsproj_with_imports(
-        xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         Some(&sdk as &SdkResolver<'_>),

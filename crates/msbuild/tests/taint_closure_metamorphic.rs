@@ -564,8 +564,8 @@ fn check_every_wrap(
 
 fn pure_evaluate(text: &str) -> ParsedProject {
     parse_fsproj(
-        text,
-        Path::new("/metamorphic/Demo.fsproj"),
+        &borzoi_msbuild::ProjectFile::buffer(Path::new("/metamorphic/Demo.fsproj"), text)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
@@ -642,8 +642,8 @@ impl DirectoryBuildFixture {
             }
         };
         parse_fsproj_with_imports(
-            &text,
-            &self.project,
+            &borzoi_msbuild::ProjectFile::buffer(&self.project, &text)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
             Some(&resolver),
@@ -876,8 +876,8 @@ impl OpacityFixture {
             }
         };
         parse_fsproj_with_imports(
-            body,
-            &self.inner.project,
+            &borzoi_msbuild::ProjectFile::buffer(&self.inner.project, body)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
             Some(&resolver),

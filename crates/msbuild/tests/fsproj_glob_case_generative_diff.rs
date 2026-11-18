@@ -363,8 +363,8 @@ fn check(oracles: &mut [Oracle; 2], fixture: &Fixture) -> Outcome {
 
     let resolver: &borzoi_msbuild::GlobResolver<'_> = &glob_resolver::resolve;
     let parsed = parse_fsproj_with_imports(
-        &xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::read(&proj, &borzoi_msbuild::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,

@@ -25,6 +25,7 @@
 pub mod case_axis;
 #[cfg(unix)]
 pub mod odd_entry;
+pub mod path_spelling;
 pub mod sdk_chain;
 
 use borzoi_msbuild::observed::host_fs::HostPath;
@@ -56,16 +57,14 @@ thread_local! {
 /// each differential and generated sweep holds the reused evaluation to the
 /// reference on every case it evaluates.
 pub fn parse_fsproj_with_imports(
-    source: &str,
-    project_path: &Path,
+    project: &borzoi_msbuild::ProjectFile,
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     sdk_resolver: Option<&SdkResolver<'_>>,
     glob_resolver: Option<&GlobResolver<'_>>,
 ) -> Result<ParsedProject, ParseError> {
     let reference = borzoi_msbuild::parse_fsproj_with_imports_asking_every_time(
-        source,
-        project_path,
+        project,
         extra_properties,
         environment,
         sdk_resolver,
@@ -73,8 +72,7 @@ pub fn parse_fsproj_with_imports(
     );
     let reused = DOCUMENTS.with(|documents| {
         borzoi_msbuild::parse_fsproj_with_imports_reusing(
-            source,
-            project_path,
+            project,
             extra_properties,
             environment,
             sdk_resolver,

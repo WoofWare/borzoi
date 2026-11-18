@@ -140,8 +140,8 @@ fn visual_studio_version_on_a_real_sdk_project_is_exact_or_declined() {
         )
     };
     let ours = parse_fsproj_with_imports(
-        body,
-        &path,
+        &borzoi_msbuild::ProjectFile::buffer(&path, body)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         Some(&resolver as &borzoi_msbuild::SdkResolver<'_>),
@@ -241,8 +241,8 @@ fn predefined_names_without_an_sdk_are_exact_or_declined() {
             "{label}: MSBuild reads {theirs:?}, so the name is not predefined here"
         );
         let ours = common::parse_fsproj_with_imports(
-            &body,
-            &path,
+            &borzoi_msbuild::ProjectFile::buffer(&path, &body)
+                .expect("a project path spelt as its full path"),
             &std::collections::HashMap::new(),
             &common::oracle_environment(),
             None,

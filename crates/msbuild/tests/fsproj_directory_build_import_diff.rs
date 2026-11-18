@@ -317,8 +317,8 @@ fn evaluate(
         )
     };
     let parsed = parse_fsproj_with_imports(
-        PROJECT,
-        &project_path,
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, PROJECT)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         Some(&resolver as &borzoi_msbuild::SdkResolver<'_>),
@@ -382,8 +382,8 @@ fn evaluate_gate(oracle: &mut Oracle, dir: &Path, value: &str) -> (Option<String
     let mut extras = HashMap::new();
     extras.insert("ImportDirectoryBuildProps".to_string(), value.to_string());
     let parsed = parse_fsproj_with_imports(
-        GATE_PROJECT,
-        &project_path,
+        &borzoi_msbuild::ProjectFile::buffer(&project_path, GATE_PROJECT)
+            .expect("a project path spelt as its full path"),
         &extras,
         &common::oracle_environment(),
         Some(&resolver as &borzoi_msbuild::SdkResolver<'_>),

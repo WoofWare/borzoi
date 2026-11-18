@@ -809,8 +809,8 @@ fn end_to_end_resolver_splices_sdk_imports() {
     let canon_project = host_fs::canonicalize(&project_path).unwrap();
     let canon_proj_dir = canon_project.parent().unwrap();
     let result = parse_fsproj_with_imports(
-        &host_fs::read_to_string(&project_path).unwrap(),
-        &canon_project,
+        &crate::ProjectFile::read(&canon_project, &crate::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &HashMap::new(),
         Some(&resolver),
@@ -869,8 +869,8 @@ fn end_to_end_resolver_splices_variant_sdk() {
     let canon_project = host_fs::canonicalize(&project_path).unwrap();
     let canon_proj_dir = canon_project.parent().unwrap();
     let result = parse_fsproj_with_imports(
-        &host_fs::read_to_string(&project_path).unwrap(),
-        &canon_project,
+        &crate::ProjectFile::read(&canon_project, &crate::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &HashMap::new(),
         Some(&resolver),
@@ -916,8 +916,8 @@ fn end_to_end_resolver_missing_sdk_yields_sdk_not_found() {
     };
     let canon_project = host_fs::canonicalize(&project_path).unwrap();
     let result = parse_fsproj_with_imports(
-        &host_fs::read_to_string(&project_path).unwrap(),
-        &canon_project,
+        &crate::ProjectFile::read(&canon_project, &crate::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &HashMap::new(),
         Some(&resolver),
@@ -1050,8 +1050,8 @@ fn end_to_end_resolver_version_not_satisfied_surfaces_in_diagnostic() {
     };
     let canon_project = host_fs::canonicalize(&project_path).unwrap();
     let result = parse_fsproj_with_imports(
-        &host_fs::read_to_string(&project_path).unwrap(),
-        &canon_project,
+        &crate::ProjectFile::read(&canon_project, &crate::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &HashMap::new(),
         Some(&resolver),
@@ -1664,8 +1664,8 @@ fn end_to_end_per_import_pin_resolves_from_nuget() {
     let canon_project = host_fs::canonicalize(&project_path).unwrap();
     let canon_proj_dir = canon_project.parent().unwrap();
     let result = parse_fsproj_with_imports(
-        &host_fs::read_to_string(&project_path).unwrap(),
-        &canon_project,
+        &crate::ProjectFile::read(&canon_project, &crate::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &HashMap::new(),
         Some(&resolver),

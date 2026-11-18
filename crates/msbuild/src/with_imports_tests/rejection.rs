@@ -140,16 +140,18 @@ fn an_undecided_import_of_a_file_that_loads_is_not_rejected() {
 }
 
 #[test]
-fn an_undecided_import_of_a_wildcard_is_not_rejected() {
-    // A wildcard that matches nothing imports nothing, silently.
+fn an_undecided_import_of_a_wildcard_may_be_rejected() {
+    // Under a gate the walk cannot decide, it does not settle what a wildcard
+    // matches, nor whether each match loads (matching by UTF-16 unit, a match
+    // a link names, a spelling MSBuild collapses), so even one matching nothing
+    // may be rejected.
     let tmp = TempDir::new().unwrap();
     let project_path = project(
         &tmp,
         &format!("  <Import Project=\"none/*.props\" Condition=\"{UNDECIDED_TRUE}\" />"),
         &[],
     );
-    let parsed = parse_file(&project_path);
-    assert_eq!(parsed.rejection, None, "{:#?}", parsed.diagnostics);
+    assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
 }
 
 #[test]
@@ -535,7 +537,13 @@ fn both_walkers(body: &str) -> [ParsedProject; 2] {
     let tmp = TempDir::new().unwrap();
     let project_path = project(&tmp, body, &[]);
     let text = host_fs::read_to_string(&project_path).unwrap();
-    let pure = parse_fsproj(&text, &project_path, &HashMap::new(), &HashMap::new()).unwrap();
+    let pure = parse_fsproj(
+        &crate::ProjectFile::buffer(&project_path, &text)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .unwrap();
     [parse_file(&project_path), pure]
 }
 
@@ -814,7 +822,13 @@ fn an_illegal_condition_after_content_the_walk_did_not_see_may_be_rejected() {
         &[("proj/there.props", "<Project />")],
     );
     let text = host_fs::read_to_string(&project_path).unwrap();
-    let pure = parse_fsproj(&text, &project_path, &HashMap::new(), &HashMap::new()).unwrap();
+    let pure = parse_fsproj(
+        &crate::ProjectFile::buffer(&project_path, &text)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .unwrap();
     assert_withdrawn(&pure, &["Before", "After"]);
     assert_rejected(&parse_file(&project_path), &["Before", "After"]);
 }
@@ -888,6 +902,37 @@ fn metadata_evaluated_item_by_item_is_not_claimed() {
             parsed.rejection.map(|r| r.certainty),
             Some(RejectionCertainty::Certain)
         );
+    }
+}
+
+#[test]
+fn an_import_a_group_may_not_make_does_not_make_a_later_one_a_duplicate() {
+    // In a group MSBuild takes, the first import's own condition is false, so
+    // MSBuild never imports `cs/a.props`, and the second, `CS/a.props`, is no
+    // duplicate: where names are case-sensitive it is another file, which is
+    // malformed. The first import's own condition is undecidable, so it
+    // cannot make the second one a duplicate. Each import's spelling is tried
+    // plain and as a wildcard. A case-insensitive file system cannot hold the
+    // two files, and makes no claim.
+    for first in ["cs/a.props", "cs/*.props"] {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("proj/cs")).unwrap();
+        if crate::observed::host_fs::symlink_metadata(tmp.path().join("proj/CS")).is_ok() {
+            return;
+        }
+        let project_path = project(
+            &tmp,
+            &format!(
+                "  <ImportGroup Condition=\"{UNDECIDED_TRUE}\">\n    <Import Project=\"{first}\" \
+                 Condition=\"$([System.String]::IsNullOrWhiteSpace('x'))\" />\n    \
+                 <Import Project=\"CS/a.props\" />\n  </ImportGroup>"
+            ),
+            &[
+                ("proj/cs/a.props", "<Project />"),
+                ("proj/CS/a.props", "<Project"),
+            ],
+        );
+        assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
     }
 }
 

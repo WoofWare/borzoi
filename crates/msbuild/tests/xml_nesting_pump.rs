@@ -110,8 +110,8 @@ fn corpus_projects() -> Vec<String> {
 /// Evaluate `text` as the project, returning its evaluated `Inner`, if any.
 fn evaluate_as_project(text: String) -> Option<String> {
     parse_fsproj(
-        &text,
-        Path::new("/nonexistent/Pumped.fsproj"),
+        &borzoi_msbuild::ProjectFile::buffer(Path::new("/nonexistent/Pumped.fsproj"), &text)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
@@ -127,10 +127,17 @@ fn evaluate_as_import(dir: PathBuf, text: String) -> Option<String> {
     std::fs::write(&props, text).expect("write the pumped import");
     let project = dir.join("Host.fsproj");
     let host = r#"<Project><Import Project="Pumped.props" /></Project>"#;
-    parse_fsproj_with_imports(host, &project, &HashMap::new(), &HashMap::new(), None, None)
-        .ok()?
-        .properties
-        .remove("Inner")
+    parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&project, host)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+        None,
+        None,
+    )
+    .ok()?
+    .properties
+    .remove("Inner")
 }
 
 /// The ceiling that bounds the recursion through `<Choose>` only helps if the

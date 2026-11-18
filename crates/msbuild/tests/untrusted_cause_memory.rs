@@ -56,8 +56,8 @@ fn evaluate(source: &str) -> (ParsedProject, usize) {
     let base = alloc_limit::live_bytes();
     alloc_limit::reset_peak();
     let parsed = borzoi_msbuild::parse_fsproj_with_imports(
-        source,
-        &project,
+        &borzoi_msbuild::ProjectFile::buffer(&project, source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
         None,

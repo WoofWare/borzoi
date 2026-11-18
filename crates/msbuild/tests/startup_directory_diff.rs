@@ -237,8 +237,8 @@ fn ours(project: &Path, startup_directory: Option<&Path>) -> Ours {
         ..ReadProbe::default()
     };
     let (parsed, reads) = parse_fsproj_reads(
-        &source,
-        project,
+        &borzoi_msbuild::ProjectFile::buffer(project, &source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,

@@ -333,9 +333,22 @@ fn check(world: &mut World, point: &Point) -> (bool, bool) {
         .collect();
     let extra: HashMap<String, String> = point.globals.iter().cloned().collect();
     let env = world.our_environment();
-    let with_imports =
-        parse_fsproj_with_imports(&point.xml, &point.project, &extra, &env, None, None).ok();
-    let pure = parse_fsproj(&point.xml, &point.project, &extra, &env).ok();
+    let with_imports = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&point.project, &point.xml)
+            .expect("a project path spelt as its full path"),
+        &extra,
+        &env,
+        None,
+        None,
+    )
+    .ok();
+    let pure = parse_fsproj(
+        &borzoi_msbuild::ProjectFile::buffer(&point.project, &point.xml)
+            .expect("a project path spelt as its full path"),
+        &extra,
+        &env,
+    )
+    .ok();
     let moved = theirs[0] != theirs[1];
     let own_backslash = point.xml.contains('\\');
     let mut served_committed = false;

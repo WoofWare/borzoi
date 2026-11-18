@@ -225,8 +225,8 @@ fn ours(project: &Path, xml: &str, seam: Seam) -> Result<Vec<PathBuf>, String> {
     };
     let glob: &GlobResolver<'_> = &glob_resolver::resolve;
     let parsed = parse_fsproj_with_imports(
-        xml,
-        project,
+        &borzoi_msbuild::ProjectFile::buffer(project, xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         Some(&sdk as &SdkResolver<'_>),

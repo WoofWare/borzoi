@@ -76,8 +76,8 @@ fn lexical(path: &Path) -> String {
 fn ours(project: &Path, xml: &str) -> Result<Vec<String>, String> {
     let glob: &GlobResolver<'_> = &glob_resolver::resolve;
     let parsed = parse_fsproj_with_imports(
-        xml,
-        project,
+        &borzoi_msbuild::ProjectFile::buffer(project, xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,

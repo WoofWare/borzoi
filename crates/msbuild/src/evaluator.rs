@@ -419,8 +419,47 @@ struct OrderedResolvedItem {
     row: Option<EvaluatedItem>,
 }
 
+/// The walk's items as the caller receives them, each [`ResolvedItem::include`]
+/// MSBuild's `FullPath` of it: the lexical full path, so `sub/../a.fs` is
+/// `a.fs` and `sub//a.fs` is `sub/a.fs` beside the project. The walk keeps
+/// each spelling as written until here, since MSBuild compares some spellings
+/// as written (`crate::glob::compares_unnormalised`).
 fn into_resolved_items(items: Vec<OrderedResolvedItem>) -> Vec<ResolvedItem> {
-    items.into_iter().map(|ordered| ordered.item).collect()
+    items
+        .into_iter()
+        .map(|ordered| ResolvedItem {
+            include: item_full_path(&ordered.item.include),
+            ..ordered.item
+        })
+        .collect()
+}
+
+/// `Path.GetFullPath` of a rooted item path on a Unix host, trailing separator
+/// kept: the file matcher's [`crate::glob::file_matcher::full_path`]. A path
+/// that is not UTF-8 is collapsed by components, its trailing separator
+/// restored. Windows' rule (drive-relative paths, verbatim prefixes, a `:`
+/// inside a segment) is not modelled, so there the path is kept as joined.
+///
+/// A path holding a NUL (a decoded `%00`) has no full path in MSBuild
+/// (`GetFullPath` throws), and is kept as joined too: collapsing a `..` past
+/// its NUL-bearing segment would name a real file MSBuild never names.
+fn item_full_path(path: &Path) -> PathBuf {
+    if !cfg!(unix) || path.as_os_str().as_encoded_bytes().contains(&0) {
+        return path.to_path_buf();
+    }
+    if let Some(text) = path.to_str()
+        && text.starts_with('/')
+    {
+        return PathBuf::from(crate::glob::file_matcher::full_path(text));
+    }
+    let full = normalise(path);
+    if path.as_os_str().as_encoded_bytes().last() == Some(&b'/') && full.parent().is_some() {
+        let mut text = full.into_os_string();
+        text.push("/");
+        PathBuf::from(text)
+    } else {
+        full
+    }
 }
 
 /// Examine the project root's `Sdk` attribute and decide whether the
@@ -741,8 +780,23 @@ fn canonicalise_or_normalise(observer: &Observer, path: &Path) -> PathBuf {
 /// fold would be a wrong commit in one direction or the other. Pairs that
 /// only a Unicode fold would equate land in the second tier
 /// ([`import_dedup_fuzzy_key`]) and *decline* instead of guessing.
+///
+/// A trailing separator stays in the key, as it stays in MSBuild's full path:
+/// `E.props/` names a directory, which MSBuild fails to import (MSB4019) even
+/// after it imported `E.props`.
 fn import_dedup_key(path: &Path) -> String {
-    normalise(path).to_string_lossy().to_ascii_uppercase()
+    import_key_text(path).to_ascii_uppercase()
+}
+
+/// The text both duplicate keys fold: `path` collapsed, a trailing separator
+/// kept.
+fn import_key_text(path: &Path) -> String {
+    let mut text = normalise(path).to_string_lossy().into_owned();
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.last() == Some(&b'/') || (cfg!(windows) && bytes.last() == Some(&b'\\')) {
+        text.push('/');
+    }
+    text
 }
 
 /// Second tier: the char-wise full Unicode uppercase of the same
@@ -757,8 +811,7 @@ fn import_dedup_key(path: &Path) -> String {
 /// first-tier hit means MSBuild's verdict is unknowable from here — the
 /// caller declines rather than committing a skip *or* a second walk.
 fn import_dedup_fuzzy_key(path: &Path) -> String {
-    normalise(path)
-        .to_string_lossy()
+    import_key_text(path)
         .chars()
         .flat_map(char::to_uppercase)
         .collect()
@@ -5876,8 +5929,9 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             // MSBuild imports `Path.Combine(root, Project)` as an escaped
             // import expression, so the root is re-parsed too: a `$(` expands,
             // a `;` splits it into a list, `*`/`?` glob and `%XX` decodes. A
-            // root holding one names something else to MSBuild; decline.
-            if sdk_root_is_reparsed(root) {
+            // root holding one names something else to MSBuild; decline. A
+            // `Project` written rooted takes the root's place.
+            if !sdk_project_written_rooted(project_attr_raw) && sdk_root_is_reparsed(root) {
                 state.push(
                     DiagnosticKind::UnsupportedConstruct {
                         element: format!(
@@ -6266,18 +6320,30 @@ pub(super) fn unix_adjustment_rewrites(escaped: &str, observer: &Observer) -> bo
 /// `raw` is written rooted, and otherwise the expansion with its leading
 /// separators dropped.
 fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
-    if raw.replace('\\', "/").starts_with('/') {
+    if sdk_project_written_rooted(raw) {
         relative
     } else {
         relative.trim_start_matches('/')
     }
 }
 
+/// Whether an SDK import's `Project`, written as `raw`, is rooted as written,
+/// so `Path.Combine(root, Project)` drops the root: no character of the root
+/// reaches MSBuild's import expression, and [`sdk_root_is_reparsed`] has
+/// nothing to say about it.
+fn sdk_project_written_rooted(raw: &str) -> bool {
+    raw.replace('\\', "/").starts_with('/')
+}
+
 /// Whether MSBuild re-parses `root` in an import path, and so names something
-/// other than the directory: it holds a `$(`, `;`, `*`, `?` or `%`.
+/// other than the directory: it holds a `$(`, `;`, `*`, `?` or `%`, or on a
+/// Unix host a `\`, which MSBuild reads as a separator (before a `..` in the
+/// import resolves, from the command line, and after, in process).
 fn sdk_root_is_reparsed(root: &Path) -> bool {
     let root_text = root.to_string_lossy();
-    root_text.contains(['%', ';', '*', '?']) || root_text.contains("$(")
+    root_text.contains(['%', ';', '*', '?'])
+        || root_text.contains("$(")
+        || (cfg!(unix) && root_text.contains('\\'))
 }
 
 /// The file an SDK import names: `root` joined with `under_root`, made absolute
@@ -6311,6 +6377,109 @@ fn follow_wildcard_import(
     span: Range<usize>,
     state: &mut State<'_>,
 ) {
+    match wildcard_import(normalised, collapse, current_file_dir, state.observer) {
+        WildcardImport::Matches(matches) => {
+            for matched in matches {
+                walk_import_file(&matched, span.clone(), collapse, state);
+            }
+        }
+        WildcardImport::Unmodelled => {
+            // What MSBuild imports here, it may fail to load.
+            note_undecided_wildcard(normalised, span.clone(), state);
+            // Push the diagnostic too, not just the uncertainty: silently
+            // returning would leave `is_partial` false with imports dropped.
+            state.push(
+                DiagnosticKind::UnsupportedConstruct {
+                    element: format!(
+                        "Import Project={normalised:?} (wildcard directory component)"
+                    ),
+                },
+                span.clone(),
+            );
+            state.mark_structural_skip(
+                StructuralCompileItemUncertainty::ImportProjectUnresolved {
+                    project: normalised.to_string(),
+                },
+                span,
+            );
+        }
+        WildcardImport::Unlisted { dir, message } => {
+            note_undecided_wildcard(normalised, span.clone(), state);
+            // Unreadable directory is NOT zero matches — files may well
+            // be there, and the dropped imports could have carried
+            // anything. Diagnostic + uncertainty, same as the wildcard-
+            // directory arm above.
+            state.push(
+                DiagnosticKind::ImportFailed {
+                    path: dir,
+                    reason: ImportFailReason::Io { message },
+                },
+                span.clone(),
+            );
+            state.mark_structural_skip(
+                StructuralCompileItemUncertainty::ImportProjectUnresolved {
+                    project: normalised.to_string(),
+                },
+                span,
+            );
+        }
+    }
+}
+
+/// Record that MSBuild may reject the project over a wildcard import of
+/// `normalised` the walk took but could not expand: what it matches may not
+/// load.
+fn note_undecided_wildcard(normalised: &str, span: Range<usize>, state: &mut State<'_>) {
+    state.note_rejection(
+        crate::RejectionCertainty::Possible,
+        crate::RejectionCause::Import {
+            project: normalised.to_string(),
+            gate_undecided: false,
+            why: crate::UnloadableImport::PathUndecided,
+        },
+        span,
+    );
+}
+
+/// What a wildcard import of `normalised` (a path with each `\` read as
+/// `/`) from `current_file_dir` names: the one reading of a wildcard import,
+/// as the walk ([`follow_wildcard_import`]) takes it.
+pub(super) enum WildcardImport {
+    /// The files MSBuild loads, in the order it loads them.
+    Matches(Vec<PathBuf>),
+    /// A wildcard in the directory part, no file part, or a spelling ending
+    /// in a separator: a shape the walk does not expand.
+    Unmodelled,
+    /// The directory could not be listed.
+    Unlisted { dir: PathBuf, message: String },
+}
+
+/// [`WildcardImport`] of `normalised`. Pinned against `dotnet msbuild`
+/// 10.0.401:
+///
+/// - a spelling whose directory part names a file (or nothing) matches
+///   nothing; one ending in a separator is not modelled;
+/// - a match is any entry whose target is not a directory: a directory, or
+///   a link to one, is no match, while a dangling link is one (and fails to
+///   load), as is a link to a file;
+/// - matching is case-insensitive, and matches load in ordinal-ignore-case
+///   order (`a.props` before `B.props`).
+///
+/// With `collapse`, the directory is collapsed as text before it is listed,
+/// as MSBuild collapses the fixed part of a wildcard path, so the files
+/// listed are the ones beside a symlink's text, not its target's.
+pub(super) fn wildcard_import(
+    normalised: &str,
+    collapse: bool,
+    current_file_dir: &Path,
+    observer: &observed::Observer,
+) -> WildcardImport {
+    // A wildcard spelt as a directory matches nothing when MSBuild reads it
+    // as a file spec at all; which spellings it refuses instead (a decoded
+    // NUL, a run of stars, a `..` it collapses first) is not modelled.
+    if normalised.ends_with('/') {
+        return WildcardImport::Unmodelled;
+    }
     let path = current_file_dir.join(normalised);
     let file_pattern = path
         .file_name()
@@ -6322,64 +6491,41 @@ fn follow_wildcard_import(
     } else {
         import_open_path(written_dir, collapse)
     };
-    let dir = dir.as_path();
     if dir.to_string_lossy().contains(['*', '?']) || file_pattern.is_empty() {
-        // Push the diagnostic too, not just the uncertainty: silently
-        // returning would leave `is_partial` false with imports dropped.
-        state.push(
-            DiagnosticKind::UnsupportedConstruct {
-                element: format!("Import Project={normalised:?} (wildcard directory component)"),
-            },
-            span.clone(),
-        );
-        state.mark_structural_skip(
-            StructuralCompileItemUncertainty::ImportProjectUnresolved {
-                project: normalised.to_string(),
-            },
-            span,
-        );
-        return;
+        return WildcardImport::Unmodelled;
     }
-    let entries = match observed::read_dir(state.observer, dir) {
+    let entries = match observed::read_dir(observer, &dir) {
         Ok(entries) => entries,
+        // A missing directory, or a file where a directory was named, is
+        // zero matches: MSBuild-silent.
         Err(e)
             if matches!(
                 e.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            // Missing directory (or a file where a directory was named)
-            // ≡ zero matches: MSBuild-silent.
-            return;
+            return WildcardImport::Matches(Vec::new());
         }
         Err(e) => {
-            // Unreadable directory is NOT zero matches — files may well
-            // be there, and the dropped imports could have carried
-            // anything. Diagnostic + uncertainty, same as the wildcard-
-            // directory arm above.
-            state.push(
-                DiagnosticKind::ImportFailed {
-                    path: dir.to_path_buf(),
-                    reason: ImportFailReason::Io {
-                        message: e.to_string(),
-                    },
-                },
-                span.clone(),
-            );
-            state.mark_structural_skip(
-                StructuralCompileItemUncertainty::ImportProjectUnresolved {
-                    project: normalised.to_string(),
-                },
-                span,
-            );
-            return;
+            return WildcardImport::Unlisted {
+                dir,
+                message: e.to_string(),
+            };
         }
     };
     let mut matches: Vec<PathBuf> = entries
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|entry| entry.kind.as_ref().is_ok_and(|&k| k != EntryKind::Dir))
+        // The name first, so only a link the pattern names has its target
+        // asked about (and enters the read set).
         .filter(|entry| wildcard_matches(&file_pattern, &entry.name.to_string_lossy()))
+        .filter(|entry| match entry.kind {
+            Ok(EntryKind::Dir) | Err(_) => false,
+            // A link is a match unless its target is a directory; a dangling
+            // one is (and fails to load).
+            Ok(EntryKind::Symlink) => observed::kind(observer, &entry.path) != Ok(EntryKind::Dir),
+            Ok(EntryKind::File | EntryKind::Other) => true,
+        })
         .map(|entry| entry.path)
         .collect();
     // MSBuild consumes wildcard matches in ordinal-ignore-case order
@@ -6395,9 +6541,7 @@ fn follow_wildcard_import(
         };
         key(a).cmp(&key(b)).then_with(|| a.cmp(b))
     });
-    for matched in matches {
-        walk_import_file(&matched, span.clone(), collapse, state);
-    }
+    WildcardImport::Matches(matches)
 }
 
 /// Match `pattern` (with `*` = any run, `?` = any single char) against
@@ -6593,6 +6737,40 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
     // does.
     let collapsed = import_open_path(path, collapse);
     let path = collapsed.as_path();
+    // On Unix MSBuild loads an imported file with every `\` of its path read
+    // as `/` (`FileUtilities.FixFilePath`), and refuses the project where
+    // that names no file. A `\` that reaches here came from a name a wildcard
+    // matched, or from an SDK's directory: the file the walk would open is
+    // not the one MSBuild opens, so decline. MSBuild may name no file there
+    // and refuse the project, so nothing after this commits either.
+    if cfg!(unix) && path.as_os_str().as_encoded_bytes().contains(&b'\\') {
+        state.note_rejection(
+            crate::RejectionCertainty::Possible,
+            crate::RejectionCause::Import {
+                project: path.display().to_string(),
+                gate_undecided: false,
+                why: crate::UnloadableImport::PathUndecided,
+            },
+            span.clone(),
+        );
+        state.push(
+            DiagnosticKind::UnsupportedConstruct {
+                element: format!(
+                    "Import of {} (a `\\` in the path, which MSBuild reads as a separator \
+                     on this host)",
+                    path.display()
+                ),
+            },
+            span.clone(),
+        );
+        state.mark_structural_skip(
+            StructuralCompileItemUncertainty::ImportProjectUnresolved {
+                project: path.display().to_string(),
+            },
+            span,
+        );
+        return;
+    }
     // MSBuild's duplicate-import skip: an import that resolves to an
     // already-imported path (same lexically-normalised, case-insensitive
     // spelling — see [`import_dedup_key`]) is ignored with a warning

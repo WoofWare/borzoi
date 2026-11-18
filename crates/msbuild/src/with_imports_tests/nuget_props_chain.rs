@@ -671,8 +671,8 @@ fn global_toolset_property_is_not_clobbered_by_seeding() {
     let resolver = canonical_sdk_resolver(sdk);
     let resolver = |name: &str, _: &crate::observed::Observer| resolver(name);
     let result = parse_fsproj_with_imports(
-        &source,
-        &canon_project,
+        &crate::ProjectFile::buffer(&canon_project, &source)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
         Some(&resolver),

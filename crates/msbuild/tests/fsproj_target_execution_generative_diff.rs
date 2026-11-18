@@ -391,8 +391,8 @@ fn check(oracle: &mut Oracle, xml: &str, tally: &mut Tally) {
         ..ReadProbe::default()
     };
     let (_, reads) = parse_fsproj_reads(
-        xml,
-        &path,
+        &borzoi_msbuild::ProjectFile::buffer(&path, xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -542,8 +542,8 @@ fn an_empty_request_declines() {
         ..ReadProbe::default()
     };
     let (_, reads) = parse_fsproj_reads(
-        xml,
-        &path,
+        &borzoi_msbuild::ProjectFile::buffer(&path, xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,

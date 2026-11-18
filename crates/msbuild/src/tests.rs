@@ -9,8 +9,8 @@ use super::{
 
 fn parse(source: &str) -> ParsedProject {
     parse_fsproj(
-        source,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
@@ -20,12 +20,23 @@ fn parse(source: &str) -> ParsedProject {
 /// [`parse`] with a caller-supplied environment snapshot.
 fn parse_with_environment(source: &str, environment: &HashMap<String, String>) -> ParsedProject {
     parse_fsproj(
-        source,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         environment,
     )
     .expect("well-formed XML parses")
+}
+
+/// The [`ResolvedItem::include`] of an item whose joined path is `joined`:
+/// its lexical full path on a Unix host, and the joined path as it stands
+/// elsewhere.
+fn item_path(joined: &str) -> PathBuf {
+    if cfg!(unix) {
+        crate::imports::normalise(Path::new(joined))
+    } else {
+        PathBuf::from(joined)
+    }
 }
 
 fn paths(items: &[ResolvedItem]) -> Vec<&Path> {
@@ -355,8 +366,8 @@ fn compile_update_compile_order_scales_with_items_and_targets() {
     ));
     let start = std::time::Instant::now();
     let p = parse_fsproj(
-        &src,
-        Path::new("/repo/José/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/José/Demo.fsproj"), &src)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
@@ -396,8 +407,8 @@ fn judging_a_long_condition_chain_is_linear() {
     );
     let start = std::time::Instant::now();
     let p = parse_fsproj(
-        &src,
-        Path::new("/repo/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
@@ -425,8 +436,8 @@ fn judging_an_operand_of_many_references_is_linear() {
     );
     let start = std::time::Instant::now();
     let p = parse_fsproj(
-        &src,
-        Path::new("/repo/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
@@ -1705,8 +1716,11 @@ fn span_covers_the_compile_element() {
 #[test]
 fn malformed_xml_returns_error() {
     let err = parse_fsproj(
-        "<Project><ItemGroup><Compile Include=\"A.fs\" /></Project>",
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(
+            Path::new("/repo/proj/Demo.fsproj"),
+            "<Project><ItemGroup><Compile Include=\"A.fs\" /></Project>",
+        )
+        .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
@@ -1891,8 +1905,8 @@ fn import_group_condition_false_skips_nested_imports() {
     let mut extras = std::collections::HashMap::new();
     extras.insert("Configuration".to_string(), "Debug".to_string());
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -1987,30 +2001,30 @@ fn relative_project_path_is_rejected() {
     // items, refuse the input — real callers (LSP, build tools) always
     // have a rooted path on hand. We check `has_root` rather than
     // `is_absolute` so rooted-but-not-drive-qualified Windows paths
-    // (`/foo`) are still accepted; see `parse_fsproj`.
-    let err = parse_fsproj(
-        "<Project><ItemGroup><Compile Include=\"A.fs\" /></ItemGroup></Project>",
+    // (`/foo`) are still accepted; see `ProjectFile`.
+    let err = crate::ProjectFile::buffer(
         Path::new("proj/Demo.fsproj"),
-        &HashMap::new(),
-        &HashMap::new(),
+        "<Project><ItemGroup><Compile Include=\"A.fs\" /></ItemGroup></Project>",
     )
-    .expect_err("relative project_path should be rejected");
+    .expect_err("relative project path should be rejected");
+    assert!(
+        matches!(err, crate::ProjectFileError::Relative(_)),
+        "{err:?}"
+    );
     let s = err.to_string();
     assert!(
-        s.contains("project_path") && s.contains("rooted"),
+        s.contains("project path") && s.contains("rooted"),
         "got {s}"
     );
     // The bare-filename case has no parent at all — same rejection,
     // because there's no directory we could resolve relative includes
     // against in any consistent way.
-    let err2 = parse_fsproj(
-        "<Project/>",
-        Path::new("Demo.fsproj"),
-        &HashMap::new(),
-        &HashMap::new(),
-    )
-    .expect_err("bare-filename project_path should be rejected");
-    assert!(err2.to_string().contains("rooted"));
+    let err2 = crate::ProjectFile::buffer(Path::new("Demo.fsproj"), "<Project/>")
+        .expect_err("bare-filename project path should be rejected");
+    assert!(
+        matches!(err2, crate::ProjectFileError::Relative(_)),
+        "{err2:?}"
+    );
 }
 
 // -- Phase 2: property substitution -----------------------------------
@@ -2021,8 +2035,8 @@ fn parse_with(source: &str, extras: &[(&str, &str)]) -> ParsedProject {
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect();
     parse_fsproj(
-        source,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), source)
+            .expect("a project path spelt as its full path"),
         &map,
         &HashMap::new(),
     )
@@ -2300,8 +2314,8 @@ fn reserved_toolset_property_in_extras_is_rejected() {
         let mut extras = HashMap::new();
         extras.insert(name.to_string(), "hijack".to_string());
         let err = parse_fsproj(
-            "<Project/>",
-            Path::new("/repo/Demo.fsproj"),
+            &crate::ProjectFile::buffer(Path::new("/repo/Demo.fsproj"), "<Project/>")
+                .expect("a project path spelt as its full path"),
             &extras,
             &HashMap::new(),
         )
@@ -2322,8 +2336,8 @@ fn startup_directory_in_extras_is_rejected() {
     for name in ["MSBuildStartupDirectory", "msbuildstartupdirectory"] {
         let extras = HashMap::from([(name.to_string(), "/x".to_string())]);
         let err = parse_fsproj(
-            "<Project/>",
-            Path::new("/repo/Demo.fsproj"),
+            &crate::ProjectFile::buffer(Path::new("/repo/Demo.fsproj"), "<Project/>")
+                .expect("a project path spelt as its full path"),
             &extras,
             &HashMap::new(),
         )
@@ -2348,8 +2362,8 @@ fn every_reserved_name_in_extras_is_rejected_in_any_case() {
         ] {
             let extras = HashMap::from([(name.clone(), "x".to_string())]);
             let err = parse_fsproj(
-                "<Project/>",
-                Path::new("/repo/Demo.fsproj"),
+                &crate::ProjectFile::buffer(Path::new("/repo/Demo.fsproj"), "<Project/>")
+                    .expect("a project path spelt as its full path"),
                 &extras,
                 &HashMap::new(),
             )
@@ -2377,8 +2391,8 @@ fn an_invalid_property_name_in_extras_is_rejected() {
     ] {
         let extras = HashMap::from([(name.to_string(), "x".to_string())]);
         let err = parse_fsproj(
-            "<Project/>",
-            Path::new("/repo/Demo.fsproj"),
+            &crate::ProjectFile::buffer(Path::new("/repo/Demo.fsproj"), "<Project/>")
+                .expect("a project path spelt as its full path"),
             &extras,
             &HashMap::new(),
         )
@@ -2536,7 +2550,7 @@ fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
         let p = parse(&src);
         assert_eq!(
             paths(&p.project_references),
-            [Path::new("/repo/proj/../Lib/Lib.fsproj")],
+            [item_path("/repo/proj/../Lib/Lib.fsproj").as_path()],
             "{src:?}"
         );
         assert_eq!(
@@ -2679,7 +2693,7 @@ fn metadata_with_inexact_property_declines_but_keeps_the_item() {
     let p = parse(src);
     assert_eq!(
         paths(&p.project_references),
-        [Path::new("/repo/proj/../Lib/Lib.fsproj")]
+        [item_path("/repo/proj/../Lib/Lib.fsproj").as_path()]
     );
     assert_eq!(
         p.project_references[0].exclude_assets,
@@ -3234,8 +3248,8 @@ fn extras_with_reserved_name_are_rejected() {
     let mut extras = HashMap::new();
     extras.insert("MSBuildProjectName".to_string(), "Bad".to_string());
     let err = parse_fsproj(
-        "<Project/>",
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), "<Project/>")
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3254,8 +3268,8 @@ fn extras_with_reserved_name_case_insensitive_rejected() {
     let mut extras = HashMap::new();
     extras.insert("msbuildprojectname".to_string(), "Bad".to_string());
     let err = parse_fsproj(
-        "<Project/>",
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), "<Project/>")
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3276,8 +3290,8 @@ fn extras_with_case_variant_duplicate_keys_are_rejected() {
     extras.insert("Configuration".to_string(), "Debug".to_string());
     extras.insert("configuration".to_string(), "Release".to_string());
     let err = parse_fsproj(
-        "<Project/>",
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), "<Project/>")
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3301,8 +3315,8 @@ fn extras_with_exact_same_key_is_not_a_duplicate() {
     let mut extras = HashMap::new();
     extras.insert("Configuration".to_string(), "Debug".to_string());
     parse_fsproj(
-        "<Project/>",
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), "<Project/>")
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3320,8 +3334,8 @@ fn extras_duplicate_rejection_is_order_independent() {
         extras.insert("Configuration".to_string(), "Debug".to_string());
         extras.insert("CONFIGURATION".to_string(), "Release".to_string());
         let err = parse_fsproj(
-            "<Project/>",
-            Path::new("/repo/proj/Demo.fsproj"),
+            &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), "<Project/>")
+                .expect("a project path spelt as its full path"),
             &extras,
             &HashMap::new(),
         )
@@ -3487,8 +3501,8 @@ fn treat_as_local_property_lets_project_override_extras() {
         .into_iter()
         .collect();
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3516,8 +3530,8 @@ fn treat_as_local_property_does_not_apply_when_name_omitted() {
         .into_iter()
         .collect();
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3562,8 +3576,8 @@ fn treat_as_local_property_name_not_written_stays_out_of_properties() {
         .into_iter()
         .collect();
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3591,8 +3605,8 @@ fn treat_as_local_property_list_uses_case_insensitive_match() {
         .into_iter()
         .collect();
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3610,8 +3624,8 @@ fn rooted_but_not_drive_qualified_project_path_is_accepted() {
     // so accepting `has_root() == true` is sufficient and doesn't
     // break the test fixtures (or real Windows callers).
     parse_fsproj(
-        "<Project/>",
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), "<Project/>")
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )
@@ -3717,8 +3731,8 @@ fn treat_as_local_property_records_project_casing_not_extras_casing() {
         .into_iter()
         .collect();
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3759,8 +3773,8 @@ fn property_group_condition_over_protected_only_writes_does_not_mark_partial() {
         .into_iter()
         .collect();
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3788,8 +3802,8 @@ fn property_group_condition_evaluable_false_skips_unprotected_writes_too() {
         .into_iter()
         .collect();
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3858,8 +3872,8 @@ fn metadata_attribute_with_metadata_reference_is_diagnosed_and_declined() {
         .into_iter()
         .collect();
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -3950,7 +3964,7 @@ fn project_reference_lands_in_project_references_bucket() {
     assert_eq!(p.project_references[0].kind, ItemKind::ProjectReference);
     assert_eq!(
         p.project_references[0].include,
-        PathBuf::from("/repo/proj/../lib/Lib.csproj"),
+        item_path("/repo/proj/../lib/Lib.csproj"),
     );
     assert!(p.diagnostics.is_empty());
 }
@@ -4140,7 +4154,10 @@ fn a_literal_project_reference_remove_is_applied() {
     let p = parse(src);
     assert!(!p.project_references_uncertain, "{:?}", p.diagnostics);
     assert_eq!(p.project_references.len(), 1);
-    assert!(p.project_references[0].include.ends_with("../C/C.fsproj"));
+    assert_eq!(
+        p.project_references[0].include,
+        item_path("/repo/proj/../C/C.fsproj")
+    );
 
     // `->Exists()` needs the filesystem, which the pure surface never touches.
     let src = r#"<Project>
@@ -4838,8 +4855,8 @@ fn untrusted_import_gate_marks_the_reference_list_uncertain() {
         );
         std::fs::write(&fsproj, &source).unwrap();
         let p = super::parse_fsproj_with_imports(
-            &source,
-            &fsproj,
+            &crate::ProjectFile::buffer(&fsproj, &source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
             None,
@@ -5176,7 +5193,10 @@ fn project_reference_and_compile_coexist_in_same_itemgroup() {
         .iter()
         .map(|i| i.include.as_path())
         .collect();
-    assert_eq!(pr_paths, [Path::new("/repo/proj/../Other/Other.fsproj")],);
+    assert_eq!(
+        pr_paths,
+        [item_path("/repo/proj/../Other/Other.fsproj").as_path()],
+    );
 }
 
 #[test]
@@ -5192,7 +5212,7 @@ fn project_reference_substitutes_msbuild_thisfiledirectory() {
     // separators but keeps `..` components literal.
     assert_eq!(
         p.project_references[0].include,
-        PathBuf::from("/repo/proj/../lib/Lib.csproj"),
+        item_path("/repo/proj/../lib/Lib.csproj"),
     );
     assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
 }
@@ -5213,8 +5233,8 @@ fn project_reference_with_semicolon_list_splits_into_multiple_items() {
     assert_eq!(
         pr_paths,
         [
-            Path::new("/repo/proj/../A/A.csproj"),
-            Path::new("/repo/proj/../B/B.csproj"),
+            item_path("/repo/proj/../A/A.csproj").as_path(),
+            item_path("/repo/proj/../B/B.csproj").as_path(),
         ],
     );
 }
@@ -5229,7 +5249,7 @@ fn project_reference_backslashes_are_normalised() {
     let p = parse(src);
     assert_eq!(
         p.project_references[0].include,
-        PathBuf::from("/repo/proj/../lib/Lib.csproj"),
+        item_path("/repo/proj/../lib/Lib.csproj"),
     );
 }
 
@@ -5250,8 +5270,8 @@ fn project_reference_obeys_condition_gating() {
     let mut extras = HashMap::new();
     extras.insert("X".to_string(), "no".to_string());
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     )
@@ -5261,7 +5281,10 @@ fn project_reference_obeys_condition_gating() {
         .iter()
         .map(|i| i.include.as_path())
         .collect();
-    assert_eq!(pr_paths, [Path::new("/repo/proj/../always/Always.csproj")]);
+    assert_eq!(
+        pr_paths,
+        [item_path("/repo/proj/../always/Always.csproj").as_path()]
+    );
     assert!(p.diagnostics.is_empty());
 }
 
@@ -5340,7 +5363,7 @@ fn build_mixed_fsproj(kinds: &[bool]) -> (String, Vec<PathBuf>, Vec<PathBuf>) {
             xml.push_str(&format!(
                 "    <ProjectReference Include=\"../p{i}/P{i}.csproj\" />\n"
             ));
-            pr_paths.push(PathBuf::from(format!("/repo/proj/../p{i}/P{i}.csproj")));
+            pr_paths.push(item_path(&format!("/repo/proj/../p{i}/P{i}.csproj")));
         }
     }
     xml.push_str("  </ItemGroup>\n</Project>\n");
@@ -6699,12 +6722,15 @@ fn global_property_beats_environment_variable() {
     let env = HashMap::from([("Both".to_string(), "from-env".to_string())]);
     let extras = HashMap::from([("Both".to_string(), "from-global".to_string())]);
     let p = parse_fsproj(
-        r#"<Project>
+        &crate::ProjectFile::buffer(
+            Path::new("/repo/proj/Demo.fsproj"),
+            r#"<Project>
   <PropertyGroup>
     <R>$(Both)</R>
   </PropertyGroup>
 </Project>"#,
-        Path::new("/repo/proj/Demo.fsproj"),
+        )
+        .expect("a project path spelt as its full path"),
         &extras,
         &env,
     )
@@ -7704,8 +7730,8 @@ fn maybe_skipped_write_to_global_property_leaves_package_metadata_certain() {
   <ItemGroup><PackageReference Include="Foo" Version="$(PkgVersion)"/></ItemGroup>
 </Project>"#;
     let p = parse_fsproj(
-        src,
-        Path::new("/repo/proj/Demo.fsproj"),
+        &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), src)
+            .expect("a project path spelt as its full path"),
         &HashMap::from([("PkgVersion".to_string(), "1.0".to_string())]),
         &HashMap::new(),
     )

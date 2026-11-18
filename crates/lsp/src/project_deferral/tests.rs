@@ -21,8 +21,11 @@ use std::path::{Path, PathBuf};
 /// the "nothing deferred" baseline is one the evaluator actually emits.
 fn certain_project() -> ParsedProject {
     let parsed = borzoi_msbuild::parse_fsproj(
-        r#"<Project><ItemGroup><Compile Include="A.fs" /></ItemGroup></Project>"#,
-        Path::new("/w/Demo.fsproj"),
+        &borzoi_msbuild::ProjectFile::buffer(
+            Path::new("/w/Demo.fsproj"),
+            r#"<Project><ItemGroup><Compile Include="A.fs" /></ItemGroup></Project>"#,
+        )
+        .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )

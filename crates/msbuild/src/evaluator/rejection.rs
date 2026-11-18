@@ -106,7 +106,7 @@ use super::observed::{self, EntryKind};
 use super::{
     SdkResolution, State, condition, condition_exists, directory_build, import_dedup_key, loader,
     properties, sdk_import_path, sdk_project_in_alphabet, sdk_project_under_root,
-    sdk_root_is_reparsed,
+    sdk_project_written_rooted, sdk_root_is_reparsed,
 };
 
 impl State<'_> {
@@ -682,10 +682,18 @@ pub(super) fn undecided_import_group(
         return;
     }
     // The group's imports run in order, so a later one may be a duplicate of an
-    // earlier one MSBuild would have made.
+    // earlier one MSBuild would have made. Only an import MSBuild makes
+    // whenever it takes the group, one with no condition of its own, makes a
+    // later one a duplicate: one under a condition of its own may not be made
+    // at all, so it is judged against no earlier import, and what it would
+    // import makes no later one a duplicate.
     let mut seen = HashSet::new();
     for child in node.children().filter(|c| c.has_tag_name("Import")) {
-        undecided_import_within(child, current_file_dir, &mut seen, state);
+        if attribute(child, "Condition").is_none() {
+            undecided_import_within(child, current_file_dir, &mut seen, state);
+        } else {
+            undecided_import_within(child, current_file_dir, &mut HashSet::new(), state);
+        }
     }
 }
 
@@ -770,13 +778,23 @@ fn may_load_nothing(
     if value.as_escaped().trim().is_empty() && !value.as_escaped().contains(';') {
         return Some(UnloadableImport::NoPath);
     }
-    value
-        .split_list()
-        .filter(|segment| !segment.is_filespec_wildcard())
-        .find_map(|segment| {
-            let path = current_file_dir.join(segment.unescape().replace('\\', "/"));
-            load_failure(state, &path, seen).map(UnloadableImport::Failed)
-        })
+    value.split_list().find_map(|segment| {
+        let relative = segment.unescape().replace('\\', "/");
+        // A wildcard MSBuild may expand is not judged: what it matches, and
+        // whether each match loads, the walk declines to settle under a gate
+        // it could not decide.
+        if segment.is_filespec_wildcard() {
+            return Some(UnloadableImport::PathUndecided);
+        }
+        // `GetFullPath` keeps a trailing separator, and a path ending in one
+        // names a directory, which MSBuild never imports (MSB4019); the
+        // collapse in `load_failure` would drop it.
+        if relative.ends_with('/') {
+            return Some(UnloadableImport::Failed(ImportFailReason::NotFound));
+        }
+        let path = current_file_dir.join(relative);
+        load_failure(state, &path, seen).map(UnloadableImport::Failed)
+    })
 }
 
 /// Whether the walk cannot compute `project`: it reads a name not
@@ -820,6 +838,14 @@ fn sdk_import_may_load_nothing(
     }
     let under_root = sdk_project_under_root(project, &relative);
     let roots: Vec<PathBuf> = match resolution {
+        // The SDK's own two files sit under its root, which MSBuild may read
+        // as another directory.
+        SdkResolution::Single(paths)
+            if matches!(relative.as_str(), "Sdk.props" | "Sdk.targets")
+                && sdk_root_is_reparsed(&paths.root) =>
+        {
+            return Some(UnloadableImport::PathUndecided);
+        }
         SdkResolution::Single(paths) => match relative.as_str() {
             "Sdk.props" => {
                 return load_failure(state, &paths.props, seen).map(UnloadableImport::Failed);
@@ -832,7 +858,7 @@ fn sdk_import_may_load_nothing(
         SdkResolution::Roots(roots) => roots,
     };
     roots.iter().find_map(|root| {
-        if sdk_root_is_reparsed(root) {
+        if !sdk_project_written_rooted(project) && sdk_root_is_reparsed(root) {
             return Some(UnloadableImport::PathUndecided);
         }
         match sdk_import_path(root, under_root) {
