@@ -16,6 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use borzoi_oracle_harness::fcs_position::LineIndex;
+use borzoi_oracle_harness::project_graph::{
+    CompileRequest, CompileResponse, GraphRequest, GraphResponse, parse_response,
+};
 use borzoi_oracle_harness::{BatchChild, BatchFailure};
 use borzoi_spawn::{BoundedCommand, ChildFailure};
 
@@ -826,7 +829,13 @@ impl UsesProjectOracle {
 /// than none: a healthy but large project would be killed and recorded as
 /// skipped, quietly shrinking the corpus the diff claims to cover.
 fn spawn_uses_project_batch() -> Result<BatchChild, FcsInvokeError> {
-    let built = fcs_dump_command("uses-project-batch")?;
+    spawn_project_batch("uses-project-batch")
+}
+
+/// [`spawn_uses_project_batch`] for any of `fcs-dump`'s whole-project batch
+/// subcommands.
+fn spawn_project_batch(subcommand: &str) -> Result<BatchChild, FcsInvokeError> {
+    let built = fcs_dump_command(subcommand)?;
     assert!(
         built.get_envs().next().is_none() && built.get_current_dir().is_none(),
         "a respawn rebuilds the command from its program and arguments alone"
@@ -839,10 +848,63 @@ fn spawn_uses_project_batch() -> Result<BatchChild, FcsInvokeError> {
             cmd.args(&args);
             cmd
         }),
-        "fcs-dump uses-project-batch",
+        format!("fcs-dump {subcommand}"),
         PROJECT_TIMEOUT,
         1,
     ))
+}
+
+/// The resident project-graph oracle, `fcs-dump uses-project-graph-batch`
+/// (`borzoi_oracle_harness::project_graph`): a `check` of a [`GraphRequest`],
+/// and a `compile` of one project with FCS's own compiler. Spawned on the
+/// first request, as [`UsesProjectOracle`] is.
+#[derive(Default)]
+pub struct ProjectGraphOracle {
+    child: Option<BatchChild>,
+}
+
+impl ProjectGraphOracle {
+    /// FCS's answer to `request`.
+    pub fn check(&mut self, request: &GraphRequest) -> Result<GraphResponse, FcsInvokeError> {
+        self.check_json(&request.to_json_line())
+    }
+
+    /// FCS's answer to a request given as raw JSON, so a test can put the
+    /// oracle's own parser to a request the typed builder would not make.
+    /// Refused unsent unless it is one non-blank line: the child pairs answers
+    /// with requests by line, so anything else would draw none or several.
+    pub fn check_json(&mut self, line: &str) -> Result<GraphResponse, FcsInvokeError> {
+        if line.trim().is_empty() || line.contains(['\n', '\r']) {
+            return Err(FcsInvokeError::Refused(
+                "a raw request must be one non-blank line".to_owned(),
+            ));
+        }
+        // Only a check: a raw `compile` would write a DLL. Malformed JSON is
+        // still sent, for the oracle's own parser to refuse.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line)
+            && value.get("op").and_then(serde_json::Value::as_str) != Some("check")
+        {
+            return Err(FcsInvokeError::Refused(
+                "a raw request must be a check".to_owned(),
+            ));
+        }
+        let response = self.round_trip(line)?;
+        parse_response(&response).map_err(FcsInvokeError::Refused)
+    }
+
+    /// FCS's compiler's answer to a `compile` request.
+    pub fn compile(&mut self, request: &CompileRequest) -> Result<CompileResponse, FcsInvokeError> {
+        let response = self.round_trip(request.as_line())?;
+        parse_response(&response).map_err(FcsInvokeError::Refused)
+    }
+
+    fn round_trip(&mut self, line: &str) -> Result<String, FcsInvokeError> {
+        if self.child.is_none() {
+            self.child = Some(spawn_project_batch("uses-project-graph-batch")?);
+        }
+        let child = self.child.as_mut().expect("spawned above");
+        child.try_request(line).map_err(FcsInvokeError::Oracle)
+    }
 }
 
 /// The message of a `{"BatchError": …}` response: the oracle caught an
@@ -894,8 +956,8 @@ impl fmt::Display for FcsInvokeError {
                 )
             }
             Self::Harness(e) => write!(f, "fcs-dump did not answer: {e}"),
-            Self::Oracle(e) => write!(f, "fcs-dump uses-project-batch did not answer: {e}"),
-            Self::Refused(message) => write!(f, "fcs-dump uses-project-batch failed: {message}"),
+            Self::Oracle(e) => write!(f, "the resident fcs-dump did not answer: {e}"),
+            Self::Refused(message) => write!(f, "the resident fcs-dump refused: {message}"),
         }
     }
 }
