@@ -4,8 +4,9 @@
 //! fresh and passed as the DLL its build compiles against.
 //!
 //! Both requests hand FCS one argument list, each project's own (read off a
-//! design-time build), and differ only in whether a project reference's
-//! `-r:` is registered as a project. A fresh DLL's signature is the same CCU
+//! real build of it, which builds the reference DLLs too), and differ only in
+//! whether a project reference's `-r:` is registered as a project, which each
+//! case holds ([`only_substitution`]). A fresh DLL's signature is the same CCU
 //! signature the source reference exports (`tcsCcuSig`, pickled), so the two
 //! readings can differ only where FCS's IDE path and its compiler path read
 //! a project differently: its assembly-level attributes (`AutoOpen`,
@@ -15,14 +16,11 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 use borzoi_corpus_diff::{FcsInvokeError, ProjectGraphOracle};
-use borzoi_oracle_harness::msbuild_oracle::Oracle;
 use borzoi_oracle_harness::project_graph::{
-    FIXTURE_CONFIGURATION, FixtureArgs, FixtureFile, FixtureProject, GraphProject, GraphRequest,
-    GraphResponse, PlainName, ProjectGraphFixture, ProjectRef, build_fixtures,
-    fixture_msbuild_oracle,
+    FixtureArgs, FixtureFile, FixtureProject, GraphProject, GraphRequest, GraphResponse, PlainName,
+    ProjectGraphFixture, ProjectRef, only_substitution,
 };
 use serde_json::Value;
 
@@ -46,17 +44,6 @@ fn project(n: &str, sources: Vec<(String, String)>, refs: &[&str]) -> FixturePro
         project_refs: refs.iter().map(|r| name(r)).collect(),
         ..FixtureProject::new(name(n), files(sources))
     }
-}
-
-/// The one `msbuild-condition-oracle` child this test binary reads fixture
-/// arguments through.
-fn msbuild() -> &'static Mutex<Oracle> {
-    static ORACLE: OnceLock<Mutex<Oracle>> = OnceLock::new();
-    ORACLE.get_or_init(|| Mutex::new(fixture_msbuild_oracle()))
-}
-
-fn args_of(fixture: &ProjectGraphFixture) -> FixtureArgs {
-    fixture.fsc_args(&mut msbuild().lock().unwrap_or_else(|p| p.into_inner()))
 }
 
 /// The uses of every checked file in `response`.
@@ -128,22 +115,22 @@ fn friend_fixture() -> ProjectGraphFixture {
 
 /// The must-bind-internal cell. A friend's use of an internal binds only when
 /// the consumer's assembly name, which its `-o:` argument sets, is the one
-/// the library's `InternalsVisibleTo` names. It also pins that the reference
-/// passed from source names no file on disk: the oracle needs no build.
+/// the library's `InternalsVisibleTo` names. It also pins that a reference
+/// passed from source needs no file on disk: its DLL is deleted first.
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
 fn a_friend_binds_an_internal_only_under_its_assembly_name() {
     let fixture = friend_fixture();
-    let args = args_of(&fixture);
+    let args = fixture.fsc_args(&name("Bee"));
     let mut oracle = ProjectGraphOracle::default();
     let request = fixture.source_request(&args, &name("Bee"));
     let [ProjectRef { reference, .. }] = request.projects()[1].project_refs.as_slice() else {
         panic!("Bee references Ay: {request:#?}")
     };
-    assert!(
-        !Path::new(reference).exists(),
-        "a source reference names no file: {reference}"
-    );
+    // Bee's build built the reference; FCS reads it from source, so the file
+    // is not needed.
+    std::fs::remove_file(reference).expect("remove the built reference");
+    assert!(!Path::new(reference).exists());
 
     let friend = oracle.check(&request).expect("the graph oracle answers");
     assert_eq!(errors(&friend), Vec::<&Value>::new(), "{friend:#?}");
@@ -184,85 +171,6 @@ fn a_friend_binds_an_internal_only_under_its_assembly_name() {
         "a non-friend's use of the internal, and only it, is an error: {stranger:#?}"
     );
     assert!(binds(&stranger, "Alpha.Visible.shown", "Ay"));
-}
-
-/// What a fixture project's real build hands fsc, read off the build itself
-/// (`ProvideCommandLineArgs`, `-getItem:FscCommandLineArgs`).
-fn built_fsc_args(fsproj: &Path) -> Vec<String> {
-    let out = tempfile::NamedTempFile::new().expect("a result file");
-    let mut cmd = std::process::Command::new("dotnet");
-    cmd.args(["msbuild", "-restore", "-t:Build", "-nologo", "-v:q"])
-        .arg(format!("-p:Configuration={FIXTURE_CONFIGURATION}"))
-        .arg("-p:ProvideCommandLineArgs=true")
-        .arg("-getItem:FscCommandLineArgs")
-        .arg(format!("-getResultOutputFile:{}", out.path().display()))
-        .arg(fsproj);
-    borzoi_spawn::BoundedCommand::new(cmd)
-        .timeout(std::time::Duration::from_secs(1800))
-        .run_ok("dotnet build a fixture project for its fsc arguments");
-    let result: Value =
-        serde_json::from_str(&std::fs::read_to_string(out.path()).expect("read the result"))
-            .expect("the result is JSON");
-    result["Items"]["FscCommandLineArgs"]
-        .as_array()
-        .expect("FscCommandLineArgs items")
-        .iter()
-        .map(|i| i["Identity"].as_str().expect("an item identity").to_owned())
-        .collect()
-}
-
-/// The arguments a fixture's requests carry are the ones its build hands
-/// fsc: each project of the friend fixture, built for real, passes exactly
-/// the argument list the design-time build reports, references first to
-/// last. The differential below compares FCS on these, so a gap here would
-/// grade FCS against a build that never happens.
-#[test]
-#[ignore = "builds fixtures; use --ignored for oracle smoke"]
-fn fixture_arguments_are_the_builds() {
-    let fixture = friend_fixture();
-    let globals = [("Configuration".to_owned(), FIXTURE_CONFIGURATION.to_owned())];
-    for p in fixture.projects() {
-        let fsproj = fixture.fsproj(&p.name);
-        let reported = msbuild()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .fsc_args(&fsproj, &globals)
-            .unwrap_or_else(|e| panic!("no arguments for {}: {e:?}", p.name));
-        // The design-time build runs the `dotnet` its oracle resolves and the
-        // build the one on `PATH`; each spells the SDK's packs under its own
-        // root, so a reference is compared by the file it names.
-        let same_file = |a: &str| -> String {
-            match a.strip_prefix("-r:") {
-                Some(path) => format!(
-                    "-r:{}",
-                    std::fs::canonicalize(path)
-                        .map_or_else(|_| path.to_owned(), |c| c.display().to_string())
-                ),
-                None => a.to_owned(),
-            }
-        };
-        let built: Vec<String> = built_fsc_args(&fsproj)
-            .iter()
-            .map(|a| same_file(a))
-            .collect();
-        let reported: Vec<String> = reported.args.iter().map(|a| same_file(a)).collect();
-        let differing: Vec<String> = (0..built.len().max(reported.len()))
-            .filter(|&i| built.get(i) != reported.get(i))
-            .map(|i| {
-                format!(
-                    "#{i}: built {:?}, reported {:?}",
-                    built.get(i),
-                    reported.get(i)
-                )
-            })
-            .collect();
-        assert!(
-            differing.is_empty(),
-            "{}'s build and its design-time build hand fsc different arguments:\n{}",
-            p.name,
-            differing.join("\n")
-        );
-    }
 }
 
 /// The default run's seed, fixed so it is the same run everywhere.
@@ -369,8 +277,8 @@ fn answer_diff(source: &GraphResponse, dll: &GraphResponse) -> Vec<String> {
 /// D1 of the source-references review: on generated fixtures, FCS with the
 /// library as an `FSharpReference` answers exactly what it answers with the
 /// library built fresh and referenced as the DLL its build compiles against,
-/// every consumer record and diagnostic compared. Every library is built by
-/// one `dotnet build`.
+/// every consumer record and diagnostic compared, the two requests differing
+/// only by that substitution.
 ///
 /// Each case must also commit its anchor (a public value every library
 /// declares) on both sides, so a case that silently grades nothing fails.
@@ -392,19 +300,14 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
         })
         .collect();
     let fixtures: Vec<ProjectGraphFixture> = cases.iter().map(case_fixture).collect();
-    let args: Vec<FixtureArgs> = fixtures.iter().map(args_of).collect();
-    build_fixtures(
-        &cases
-            .iter()
-            .zip(&fixtures)
-            .flat_map(|(c, f)| {
-                f.closure(&name(&c.consumer))
-                    .into_iter()
-                    .map(|p| f.fsproj(&p.name))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>(),
-    );
+    // One real build per project: each gives the project's fsc arguments
+    // and builds the DLLs they reference. One at a time: `fsc_args` names its
+    // scratch directory by process and clock, which concurrent calls share.
+    let args: Vec<FixtureArgs> = cases
+        .iter()
+        .zip(&fixtures)
+        .map(|(c, f)| f.fsc_args(&name(&c.consumer)))
+        .collect();
 
     let mut oracle = ProjectGraphOracle::default();
     let mut failures = Vec::new();
@@ -413,11 +316,18 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
     for (((case, fixture), args), &(seed, i)) in cases.iter().zip(&fixtures).zip(&args).zip(&seeds)
     {
         let consumer = name(&case.consumer);
+        let (source_request, dll_request) = (
+            fixture.source_request(args, &consumer),
+            fixture.dll_request(args, &consumer),
+        );
+        if let Err(why) = only_substitution(&source_request, &dll_request) {
+            panic!("case {i}: the requests differ beyond the substitution: {why}");
+        }
         let source = oracle
-            .check(&fixture.source_request(args, &consumer))
+            .check(&source_request)
             .unwrap_or_else(|e| panic!("case {i}: the source check failed: {e}"));
         let dll = oracle
-            .check(&fixture.dll_request(args, &consumer))
+            .check(&dll_request)
             .unwrap_or_else(|e| panic!("case {i}: the DLL check failed: {e}"));
         let mut problems = answer_diff(&source, &dll);
         for r in &source.referenced {
@@ -534,32 +444,27 @@ fn the_generated_graphs_cover_every_declaration_kind() {
     );
 }
 
-/// A referenced project is checked as the library its build makes, so a file
-/// a library's build rejects (top-level code with no module or namespace,
-/// FS0222) is an error from source too, rather than an executable's implicit
-/// module the consumer could bind into.
+/// A project is checked as the library its build makes, so a file a
+/// library's build rejects (top-level code with no module or namespace,
+/// FS0222) is an error to FCS too, rather than an executable's implicit
+/// module a consumer could bind into: the `--target:` of its own arguments
+/// reaches FCS.
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
-fn a_referenced_library_is_checked_as_a_library() {
-    let fixture = ProjectGraphFixture::materialise(vec![
-        project("Lib", vec![("Lib.fs".into(), "let x = 42\n".into())], &[]),
-        project(
-            "App",
-            vec![("Use.fs".into(), "module Use\n\nlet y = 1\n".into())],
-            &["Lib"],
-        ),
-    ])
+fn a_library_is_checked_as_a_library() {
+    let fixture = ProjectGraphFixture::materialise(vec![project(
+        "Lib",
+        vec![("Lib.fs".into(), "let x = 42\n".into())],
+        &[],
+    )])
     .expect("a graph");
-    let args = args_of(&fixture);
+    let args = fixture.fsc_args(&name("Lib"));
     let answer = ProjectGraphOracle::default()
-        .check(&fixture.source_request(&args, &name("App")))
+        .check(&fixture.source_request(&args, &name("Lib")))
         .expect("the graph oracle answers");
-    let [library] = answer.referenced.as_slice() else {
-        panic!("one referenced project: {:#?}", answer.referenced)
-    };
     assert!(
-        library.errors().any(|e| e["ErrorNumber"] == 222),
-        "a library's top-level code is FS0222 from source as in its build: {library:#?}"
+        answer.errors().any(|e| e["ErrorNumber"] == 222),
+        "a library's top-level code is FS0222 to FCS as to its build: {answer:#?}"
     );
 }
 
@@ -593,8 +498,7 @@ fn a_reference_from_source_keeps_its_place_in_the_order() {
         ),
     ])
     .expect("a graph");
-    let args = args_of(&fixture);
-    build_fixtures(&[fixture.fsproj(&name("Ay")), fixture.fsproj(&name("Zed"))]);
+    let args = fixture.fsc_args(&name("Bee"));
 
     let bee = name("Bee");
     let source = fixture.source_request(&args, &bee);
@@ -639,33 +543,6 @@ fn a_reference_from_source_keeps_its_place_in_the_order() {
     }
 }
 
-/// Fixtures are built together however their projects are named: two
-/// fixtures each holding a project `Lib` build in one `build_fixtures` call.
-#[test]
-#[ignore = "builds fixtures; use --ignored for oracle smoke"]
-fn same_named_projects_of_two_fixtures_build_together() {
-    let fixture = || {
-        ProjectGraphFixture::materialise(vec![project(
-            "Lib",
-            vec![("Lib.fs".into(), "module Lib\n\nlet x = 1\n".into())],
-            &[],
-        )])
-        .expect("a graph")
-    };
-    let (first, second) = (fixture(), fixture());
-    build_fixtures(&[first.fsproj(&name("Lib")), second.fsproj(&name("Lib"))]);
-    for f in [&first, &second] {
-        assert!(
-            f.dir(&name("Lib"))
-                .join("bin")
-                .join(FIXTURE_CONFIGURATION)
-                .join("net10.0")
-                .join("Lib.dll")
-                .is_file()
-        );
-    }
-}
-
 /// Whether `result` is the oracle refusing a reference it would read from
 /// disk.
 fn refused_as_read_from_disk(result: &Result<GraphResponse, FcsInvokeError>) -> bool {
@@ -705,7 +582,7 @@ fn a_referenced_type_provider_assembly_is_refused() {
         ),
     ])
     .expect("a graph");
-    let args = args_of(&fixture);
+    let args = fixture.fsc_args(&name("Bee"));
     let result = ProjectGraphOracle::default().check(&fixture.source_request(&args, &name("Bee")));
     assert!(
         refused_as_read_from_disk(&result),
@@ -758,7 +635,7 @@ fn a_reference_that_creates_generated_provided_types_is_refused() {
         r#"{"openapi":"3.0.0","info":{"title":"T","version":"1"},"paths":{"/pets":{"get":{"operationId":"listPets","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"string"}}}}}}}}}"#,
     )
     .expect("write the schema");
-    let args = args_of(&fixture);
+    let args = fixture.fsc_args(&name("Bee"));
     let result = ProjectGraphOracle::default().check(&fixture.source_request(&args, &name("Bee")));
     assert!(
         refused_as_read_from_disk(&result),
@@ -793,7 +670,7 @@ fn a_rewritten_reference_is_read_afresh_whatever_its_timestamp() {
             .unwrap_or_else(|| panic!("no typed use of Lib.x: {answer:#?}"))
             .to_owned()
     };
-    let args = args_of(&fixture);
+    let args = fixture.fsc_args(&name("App"));
     let request = fixture.source_request(&args, &name("App"));
     let mut oracle = ProjectGraphOracle::default();
     let before = type_of_x(&oracle.check(&request).expect("the graph oracle answers"));
@@ -827,7 +704,7 @@ fn a_rewritten_reference_is_read_afresh_whatever_its_timestamp() {
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
 fn the_graph_parser_refuses_everything_outside_its_domain() {
     let fixture = friend_fixture();
-    let args = args_of(&fixture);
+    let args = fixture.fsc_args(&name("Bee"));
     let valid: Value =
         serde_json::from_str(&fixture.source_request(&args, &name("Bee")).to_json_line())
             .expect("json");

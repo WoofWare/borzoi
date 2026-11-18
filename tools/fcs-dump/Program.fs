@@ -6941,7 +6941,7 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
 /// ```
 ///
 /// `args` is the project's own fsc argument list, what its build hands fsc
-/// (a design-time build's response file), and FCS is handed it as it stands
+/// (a real build's response file), and FCS is handed it as it stands
 /// but for the mappings [`parseGraphProject`] states. Re-deriving nothing
 /// keeps every compiler input the build's: references in the build's order,
 /// its FSharp.Core, defines, language version, target and output name. Each

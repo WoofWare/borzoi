@@ -6,7 +6,7 @@
 //! referenced project's sources and reads its signature from memory. That is
 //! the semantics borzoi resolves `<ProjectReference>`s against, so it is the
 //! oracle. A [`GraphRequest`] describes one such check: each project's own fsc
-//! arguments (what its build hands fsc, read off a design-time build by
+//! arguments (what its build hands fsc, read off a real build by
 //! [`msbuild_oracle`](crate::msbuild_oracle)), which of their `-r:` arguments
 //! are projects of the request, and the project whose files to report.
 //! `fcs-dump` parses the request, once and strictly, into the only value its
@@ -18,9 +18,11 @@
 //! says with each reference passed from source
 //! ([`ProjectGraphFixture::source_request`]), and what it says with each
 //! reference built and passed as the DLL its build compiles against
-//! ([`build_fixtures`], [`ProjectGraphFixture::dll_request`]). The two
-//! requests hand FCS one argument list and differ only in whether a project
-//! reference's `-r:` is registered as a project.
+//! ([`ProjectGraphFixture::dll_request`]). One real build of each project
+//! ([`ProjectGraphFixture::fsc_args`]) gives both: the arguments fsc was
+//! handed, and the reference DLLs they name. The two requests hand FCS one
+//! argument list and differ only in whether a project reference's `-r:` is
+//! registered as a project ([`only_substitution`]).
 //!
 //! This module knows the protocol and the layout. Spawning `fcs-dump` is the
 //! caller's: each crate already locates and builds it its own way.
@@ -28,13 +30,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::BoundedCommand;
-use crate::msbuild_oracle::Oracle;
+use crate::msbuild_oracle::{build_environment, fsc_args};
 
 /// The target framework every fixture project builds for.
 pub const FIXTURE_TFM: &str = "net10.0";
@@ -432,14 +431,6 @@ impl FixtureArgs {
     }
 }
 
-/// The `msbuild-condition-oracle` child fixtures read their fsc arguments
-/// through, in the oracle's scrubbed environment. Its requests pin each
-/// design-time build's restore to the feed this process restores from
-/// ([`crate::msbuild_oracle::restore_sources`]).
-pub fn fixture_msbuild_oracle() -> Oracle {
-    Oracle::spawn_in_dir_with_env(&std::env::temp_dir(), &[])
-}
-
 impl ProjectGraphFixture {
     /// Write `projects` to a fresh directory.
     pub fn materialise(projects: Vec<FixtureProject>) -> Result<Self, GraphError> {
@@ -565,25 +556,37 @@ impl ProjectGraphFixture {
         out
     }
 
-    /// Every project's fsc arguments, read off a design-time build of it
-    /// under [`FIXTURE_CONFIGURATION`] (`oracle` is
-    /// [`fixture_msbuild_oracle`]). Panics when the build reports none, or
-    /// says fsc may run on arguments it cannot report: such a fixture cannot
-    /// be graded.
-    pub fn fsc_args(&self, oracle: &mut Oracle) -> FixtureArgs {
+    /// The fsc arguments of `top` and every project in its
+    /// [`closure`](Self::closure), each read off a real build of it under
+    /// [`FIXTURE_CONFIGURATION`] ([`fsc_args`]), dependencies first, so the
+    /// reference DLLs each names are built too. Panics when a build hands fsc
+    /// nothing, or something the oracle cannot report, or a response file
+    /// fsc's reading refuses: such a fixture cannot be graded.
+    pub fn fsc_args(&self, top: &PlainName) -> FixtureArgs {
         let globals = [("Configuration".to_owned(), FIXTURE_CONFIGURATION.to_owned())];
+        let env = build_environment();
         FixtureArgs(
-            self.projects
-                .iter()
+            self.closure(top)
+                .into_iter()
+                .chain(std::iter::once(self.project(top)))
                 .map(|p| {
-                    let invocation = oracle
-                        .fsc_args(&self.fsproj(&p.name), &globals)
-                        .unwrap_or_else(|errors| {
+                    let build =
+                        fsc_args(&self.fsproj(&p.name), &globals, &env).unwrap_or_else(|decline| {
                             panic!(
-                                "no fsc arguments for fixture project {}: {errors:?}",
+                                "no fsc arguments for fixture project {}: {decline:?}",
                                 p.name
                             )
                         });
+                    let [invocation] = build.invocations.as_slice() else {
+                        panic!(
+                            "fixture project {} ran fsc {} times",
+                            p.name,
+                            build.invocations.len()
+                        )
+                    };
+                    if let Err(e) = invocation.arguments() {
+                        panic!("fixture project {}'s response file: {e:?}", p.name);
+                    }
                     let lines = invocation
                         .response_file
                         .lines()
@@ -642,8 +645,8 @@ impl ProjectGraphFixture {
     }
 
     /// Check `check` alone, with its arguments as they stand: every project
-    /// reference is then the DLL [`build_fixtures`] built for it, at the
-    /// path the build compiles against. Panics if one is missing.
+    /// reference is then the DLL its build compiled against, at that path.
+    /// Panics if one is missing.
     pub fn dll_request(&self, args: &FixtureArgs, check: &PlainName) -> GraphRequest {
         for q in self.closure(check) {
             let dll = self.reference_to(args, check, &q.name);
@@ -718,40 +721,44 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Budget for one [`build_fixtures`] build: a cold one restores packages for
-/// every project it builds. It is there to stop a build stalled on a NuGet
-/// lock a sibling worktree holds, not to police a slow one.
-const BUILD_TIMEOUT: Duration = Duration::from_secs(1800);
-
-/// Build `fsprojs` (each a fixture project's [`ProjectGraphFixture::fsproj`])
-/// under [`FIXTURE_CONFIGURATION`] with one `dotnet build` of a solution
-/// listing them all, so MSBuild builds them in one process and in parallel.
-/// Each sits in a solution folder of its own, so projects of different
-/// fixtures may share a name. Panics, with the build's output, if it fails.
-pub fn build_fixtures(fsprojs: &[PathBuf]) {
-    let dir = tempfile::Builder::new()
-        .prefix("borzoi-project-graph-build-")
-        .tempdir()
-        .expect("create a solution directory");
-    let solution = dir.path().join("fixtures.slnx");
-    let entries: String = fsprojs
+/// Whether `source` and `dll` (a [`ProjectGraphFixture::source_request`]
+/// and [`ProjectGraphFixture::dll_request`] of one check) differ only in the
+/// substitution of each project reference: the checked project's arguments
+/// alike, the DLL request registering no project, and the source request
+/// registering each project reference at one `-r:` argument of those
+/// arguments, with every project it registers a project of the request.
+/// What the differential compares FCS across, held rather than assumed.
+pub fn only_substitution(source: &GraphRequest, dll: &GraphRequest) -> Result<(), String> {
+    let checked = |r: &GraphRequest| {
+        r.projects()
+            .iter()
+            .find(|p| &p.id == r.check())
+            .cloned()
+            .expect("a request holds its checked project")
+    };
+    let (s, d) = (checked(source), checked(dll));
+    if source.check() != dll.check() {
+        return Err("the two requests check different projects".to_owned());
+    }
+    if s.args != d.args || s.project_file != d.project_file {
+        return Err("the checked project's arguments differ".to_owned());
+    }
+    if dll.projects().len() != 1 || !d.project_refs.is_empty() {
+        return Err("the DLL request registers a project".to_owned());
+    }
+    let registered: BTreeSet<&str> = s
+        .project_refs
         .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            format!(
-                "  <Folder Name=\"/p{i}/\">\n    <Project Path=\"{}\" />\n  </Folder>\n",
-                xml_escape(&p.display().to_string())
-            )
-        })
+        .map(|r| r.reference.as_str())
         .collect();
-    std::fs::write(&solution, format!("<Solution>\n{entries}</Solution>\n"))
-        .expect("write the fixture solution");
-    let mut cmd = Command::new("dotnet");
-    cmd.args(["build", "-c", FIXTURE_CONFIGURATION, "--nologo", "-v:q"])
-        .arg(&solution);
-    BoundedCommand::new(cmd)
-        .timeout(BUILD_TIMEOUT)
-        .run_ok("dotnet build the project-graph fixtures");
+    if registered.len() != s.project_refs.len() {
+        return Err("one -r: is registered twice".to_owned());
+    }
+    let ids: BTreeSet<&PlainName> = source.projects().iter().map(|p| &p.id).collect();
+    if s.project_refs.iter().any(|r| !ids.contains(&r.project)) {
+        return Err("a registered project is not in the request".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -961,8 +968,8 @@ mod tests {
     }
 
     /// A source request passes each project's own arguments, and registers
-    /// the `-r:` of every project in its closure; a DLL request registers
-    /// none.
+    /// the `-r:` of every project in its closure; the DLL request of the same
+    /// check differs from it by that substitution and nothing else.
     #[test]
     fn a_source_request_registers_each_closure_reference() {
         let fixture = lib_and_app();
@@ -993,10 +1000,30 @@ mod tests {
             source.projects()[1].project_refs,
             [ProjectRef {
                 project: name("Lib"),
-                reference: lib_ref
+                reference: lib_ref.clone()
             }]
         );
         assert!(source.projects()[0].project_refs.is_empty());
+
+        // The DLL request needs the built reference on disk.
+        std::fs::create_dir_all(Path::new(&lib_ref).parent().expect("a directory")).expect("mkdir");
+        std::fs::write(&lib_ref, b"").expect("write a stand-in DLL");
+        let dll = fixture.dll_request(&args, &name("App"));
+        assert_eq!(only_substitution(&source, &dll), Ok(()));
+        let other = with_checked_args(&dll, vec!["-o:obj/App.dll".to_owned()]);
+        assert!(only_substitution(&source, &other).is_err());
+    }
+
+    fn with_checked_args(r: &GraphRequest, args: Vec<String>) -> GraphRequest {
+        let projects = r
+            .projects()
+            .iter()
+            .map(|p| GraphProject {
+                args: args.clone(),
+                ..p.clone()
+            })
+            .collect();
+        GraphRequest::new(projects, r.check().clone()).expect("a graph")
     }
 
     /// C → B → A gives C both, as its build references both.

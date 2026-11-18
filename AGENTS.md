@@ -333,9 +333,8 @@ This is a Cargo workspace with ten members:
   multi-project fixture layout every graph differential shares — one
   directory per project with its sources and a buildable `.fsproj` whose SDK
   `AssemblyInfo.fs`/`AssemblyAttributes.fs` generation is off, its fsc
-  arguments read off a design-time build (`ProjectGraphFixture::fsc_args`),
-  built fresh by `build_fixtures` (one `dotnet build` of a solution of them
-  all).
+  arguments read off a real build of each, which builds the reference DLLs
+  they name too (`ProjectGraphFixture::fsc_args`).
 - `crates/print/` — `borzoi-print`. An owned F# syntax tree a program builds
   (`tree`, with validated names in `names`), and a *reference* printer that
   writes it as source: every expression, pattern and type parenthesised, every
@@ -516,7 +515,7 @@ This is a Cargo workspace with ten members:
   `FSharpReferencedProject.FSharpReference`, which is how an IDE references
   an F# project and the semantics borzoi resolves project references
   against. A request carries each project's **own fsc arguments**, read off
-  a design-time build (`borzoi_oracle_harness::msbuild_oracle`'s `fscArgs`),
+  a real build (`borzoi_oracle_harness::msbuild_oracle::fsc_args`),
   and FCS is handed them as they stand: references in the build's order,
   its FSharp.Core and framework, defines, language version, target and
   `-o:` name, re-deriving none of it. A request registers which `-r:`
@@ -539,9 +538,10 @@ This is a Cargo workspace with ten members:
   library from source must equal those with the library built fresh and
   referenced as the DLL its build compiles against, and a friend's use of an
   internal must bind only under its `-o:` name.
-  `fixture_arguments_are_the_builds` holds the design-time arguments to a
-  real build's, and `the_graph_parser_refuses_everything_outside_its_domain`
-  holds the parser to its domain. Later stages' source-surface-equals-DLL
+  The two requests are held to differ by that substitution alone
+  (`only_substitution`), and
+  `the_graph_parser_refuses_everything_outside_its_domain` holds the parser
+  to its domain. Later stages' source-surface-equals-DLL
   oracles rest on that equality.
   `BORZOI_SOURCE_REF_CASES` and `BORZOI_SOURCE_REF_SEED` widen the run.
 
