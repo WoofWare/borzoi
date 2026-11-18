@@ -832,16 +832,20 @@ impl ProjectGraphOracle {
     /// FCS's answer to `request`: the checked project's `uses-project` records
     /// and whole-project diagnostics, and the projects it referenced.
     pub fn check(&mut self, request: &GraphRequest) -> Result<GraphResponse, FcsInvokeError> {
+        self.check_json(&request.to_json_line())
+    }
+
+    /// [`Self::check`] for a request line as given, whatever it holds: what
+    /// a test of the oracle's own request parser puts to it.
+    pub fn check_json(&mut self, line: &str) -> Result<GraphResponse, FcsInvokeError> {
         if self.child.is_none() {
             self.child = Some(spawn_project_batch("uses-project-graph-batch")?);
         }
         let child = self.child.as_mut().expect("spawned above");
-        let line = child
-            .try_request(&request.to_json_line())
-            .map_err(FcsInvokeError::Oracle)?;
-        match batch_error(&line) {
+        let response = child.try_request(line).map_err(FcsInvokeError::Oracle)?;
+        match batch_error(&response) {
             Some(message) => Err(FcsInvokeError::Refused(message)),
-            None => parse_graph_response(&line).map_err(FcsInvokeError::Refused),
+            None => parse_graph_response(&response).map_err(FcsInvokeError::Refused),
         }
     }
 }

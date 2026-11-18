@@ -5,15 +5,22 @@
 //! project as an `FSharpReferencedProject.FSharpReference`: it type-checks the
 //! referenced project's sources and reads its signature from memory. That is
 //! the semantics borzoi resolves `<ProjectReference>`s against, so it is the
-//! oracle. A [`GraphRequest`] describes one such check: a set of projects, the
-//! references between them, and the one whose files to report.
+//! oracle. A [`GraphRequest`] describes one such check: each project's own fsc
+//! arguments (what its build hands fsc, read off a design-time build by
+//! [`msbuild_oracle`](crate::msbuild_oracle)), which of their `-r:` arguments
+//! are projects of the request, and the project whose files to report.
+//! `fcs-dump` parses the request, once and strictly, into the only value its
+//! checking code reads, and re-derives none of the compiler's inputs.
 //!
 //! A [`ProjectGraphFixture`] is a set of F# projects written to a fresh
 //! directory, one subdirectory per project with its sources and a buildable
 //! `.fsproj`. It answers both questions a graph differential asks: what FCS
-//! says with each reference passed from source ([`ProjectGraphFixture::source_request`]),
-//! and what it says with each reference built and passed as a DLL
-//! ([`build_fixtures`], [`ProjectGraphFixture::dll_request`]).
+//! says with each reference passed from source
+//! ([`ProjectGraphFixture::source_request`]), and what it says with each
+//! reference built and passed as the DLL its build compiles against
+//! ([`build_fixtures`], [`ProjectGraphFixture::dll_request`]). The two
+//! requests hand FCS one argument list and differ only in whether a project
+//! reference's `-r:` is registered as a project.
 //!
 //! This module knows the protocol and the layout. Spawning `fcs-dump` is the
 //! caller's: each crate already locates and builds it its own way.
@@ -27,26 +34,23 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::BoundedCommand;
+use crate::msbuild_oracle::Oracle;
 
-/// The target framework every fixture project builds for: the runtime
-/// `fcs-dump` itself runs on, so the SDK references its script resolution
-/// picks are the ones a fixture build compiles against.
+/// The target framework every fixture project builds for.
 pub const FIXTURE_TFM: &str = "net10.0";
 
-/// The language version every fixture project builds at and the oracle checks
-/// it at. Pinned on both sides: left to themselves the fixture build takes its
-/// SDK compiler's default and the oracle its own, newer one's.
+/// The language version every fixture project builds at. A project's own
+/// arguments must name one: left unnamed, the build checks at its compiler's
+/// default and FCS at its own, newer one's, so the oracle refuses the
+/// request.
 pub const FIXTURE_LANG_VERSION: &str = "10.0";
 
-/// The FSharp.Core every fixture project builds against: the one `fcs-dump`
-/// ships and checks against (`tools/fcs-dump/fcs-dump.fsproj`), so a fixture
-/// build cannot reject a binding the oracle accepts for want of an API.
-pub const FIXTURE_FSHARP_CORE: &str = "11.0.101";
+/// The configuration fixtures are built and read under.
+pub const FIXTURE_CONFIGURATION: &str = "Release";
 
-/// A name `fcs-dump` accepts as a project id or an assembly name: a non-empty
-/// run of ASCII letters, digits, `.`, `_` and `-`, other than `.` and `..`, so
-/// it names one ordinary file or directory without escaping, and an assembly
-/// name is a simple name rather than a path or a display name.
+/// A name `fcs-dump` accepts as a project id: a non-empty run of ASCII
+/// letters, digits, `.`, `_` and `-`, other than `.` and `..`, so it names
+/// one ordinary file or directory without escaping.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PlainName(String);
 
@@ -80,170 +84,87 @@ impl fmt::Display for PlainName {
 /// One project of a [`GraphRequest`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphProject {
-    /// What other projects' [`GraphReference::Project`] entries name it by.
+    /// What other projects' [`ProjectRef`]s name it by.
     pub id: PlainName,
-    /// The assembly FCS checks it as, through `-o:`. Never derived: without
-    /// it FCS names the assembly after the project's last source file, and no
-    /// `InternalsVisibleTo` naming the real assembly would match.
-    pub assembly_name: PlainName,
     /// Its project file, absolute: FCS's `ProjectFileName`, whose directory
-    /// project-relative inputs (a type provider's sample file) resolve from.
+    /// relative arguments and project-relative inputs (a type provider's
+    /// sample file) resolve from, as in the build.
     pub project_file: PathBuf,
-    /// Its source files, absolute, in Compile order.
-    pub paths: Vec<PathBuf>,
-    /// What it references, in compile order: assemblies on disk and projects
-    /// of the same request passed from source. FCS resolves a name two
-    /// references declare by their order, so a project passed from source
-    /// must keep the place its DLL would have.
-    pub references: Vec<GraphReference>,
-    /// Its `#if` symbols.
-    pub defines: Vec<String>,
-    /// Its pinned `<LangVersion>`, if any.
-    pub lang_version: Option<String>,
-    /// Whether [`references`](Self::references) are the whole reference set,
-    /// so the running SDK's framework is not added (`uses-project-batch`'s
-    /// `exclusiveRefs`).
-    pub exclusive_refs: bool,
-    /// What its build produces: FCS's `--target:`.
-    pub target: OutputKind,
+    /// Its fsc arguments, one response-file line each, as its build hands
+    /// them to fsc (`FscInvocation::response_file`). `fcs-dump` passes them
+    /// to FCS as they stand, but for the mappings it states, and refuses a
+    /// list outside the domain it reads as fsc does.
+    pub args: Vec<String>,
+    /// The `-r:` arguments of [`args`](Self::args) that are projects of the
+    /// same request, passed from source.
+    pub project_refs: Vec<ProjectRef>,
 }
 
-/// One entry of a [`GraphProject`]'s ordered references.
+/// One `-r:` argument of a [`GraphProject`] registered as another project of
+/// the request: FCS is handed that project as an `FSharpReference` whose
+/// output file is exactly the argument, in the argument's place.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GraphReference {
-    /// An assembly on disk, absolute.
-    Dll(PathBuf),
-    /// A project of the same request, passed from source.
-    Project(PlainName),
-}
-
-impl GraphProject {
-    /// The projects it references from source, in order.
-    pub fn project_refs(&self) -> impl Iterator<Item = &PlainName> {
-        self.references.iter().filter_map(|r| match r {
-            GraphReference::Project(id) => Some(id),
-            GraphReference::Dll(_) => None,
-        })
-    }
-
-    fn dlls(&self) -> impl Iterator<Item = &PathBuf> {
-        self.references.iter().filter_map(|r| match r {
-            GraphReference::Dll(path) => Some(path),
-            GraphReference::Project(_) => None,
-        })
-    }
-}
-
-/// What a project's build produces, as `fsc`'s `--target:` names it. Always
-/// passed: FCS left to itself checks a project as an executable, which
-/// accepts what a library's build rejects (FS0222, top-level code in a
-/// library's last file).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OutputKind {
-    Library,
-    Exe,
-    WinExe,
-    Module,
-}
-
-impl OutputKind {
-    fn as_target(self) -> &'static str {
-        match self {
-            OutputKind::Library => "library",
-            OutputKind::Exe => "exe",
-            OutputKind::WinExe => "winexe",
-            OutputKind::Module => "module",
-        }
-    }
+pub struct ProjectRef {
+    pub project: PlainName,
+    /// The `-r:` argument, exactly as in the project's arguments.
+    pub reference: String,
 }
 
 /// Why a [`GraphRequest`] or a [`ProjectGraphFixture`] is not a graph
-/// `fcs-dump` checks as described.
+/// `fcs-dump` checks as described. The shape of the graph only: `fcs-dump`
+/// is the one judge of the arguments themselves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphError {
-    /// A project id or assembly name that is not a [`PlainName`].
+    /// A project id that is not a [`PlainName`].
     NotPlain(String),
-    /// FCS's background compiler drops a project reference whose output is
-    /// named like FSharp.Core and needs the DLL on disk instead.
-    FSharpCoreName(PlainName),
     DuplicateId(PlainName),
-    /// Two projects with one assembly name (compared ignoring case, as the
-    /// runtime compares simple names).
-    DuplicateAssemblyName(PlainName),
+    /// Two projects with one project file.
+    DuplicateProjectFile(PathBuf),
     UnknownReference {
         from: PlainName,
         to: PlainName,
+    },
+    /// A [`ProjectRef`] whose reference is not one `-r:` argument of its
+    /// project.
+    ReferenceNotInArgs {
+        from: PlainName,
+        reference: String,
     },
     /// A reference cycle through this project.
     Cycle(PlainName),
     /// The project to check is not one of the request's.
     UnknownCheck(PlainName),
-    NoPaths(PlainName),
-    /// A source or reference path that is not absolute.
+    /// A project file that is not absolute.
     RelativePath(PathBuf),
     /// A path that is not UTF-8, which the JSON wire cannot carry unchanged.
     NotUtf8(PathBuf),
-    /// Two projects with one project file.
-    DuplicateProjectFile(PathBuf),
-    /// A fixture source name that is not a relative path inside its project
-    /// directory.
+    /// A fixture project with no source.
+    NoSources(PlainName),
+    /// A fixture source name that is not a `/`-separated path of plain names.
     UncontainedFile(String),
-    /// A project that references a `module` target from source: fsc refuses
-    /// a netmodule as an assembly reference (FS0192).
-    ModuleReference {
-        from: PlainName,
-        to: PlainName,
-    },
-    /// A project whose language version is not a version's spelling.
-    NotALangVersion(PlainName),
-    /// A project pinned below [`crate::FCS_SUPPORT_FLOOR`]: the current FCS
-    /// no longer behaves as the older compilers did, and the graph oracle
-    /// has no legacy twin.
-    BelowSupportFloor(PlainName),
 }
 
 impl fmt::Display for GraphError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             GraphError::NotPlain(s) => write!(f, "{s:?} is not a plain name"),
-            GraphError::FSharpCoreName(id) => {
-                write!(
-                    f,
-                    "project {id} is named FSharp.Core, which FCS reads only from disk"
-                )
-            }
             GraphError::DuplicateId(id) => write!(f, "two projects have the id {id}"),
-            GraphError::DuplicateAssemblyName(n) => write!(f, "two projects are named {n}"),
-            GraphError::UnknownReference { from, to } => {
-                write!(f, "project {from} references unknown project {to}")
-            }
-            GraphError::Cycle(id) => write!(f, "project reference cycle through {id}"),
-            GraphError::UnknownCheck(id) => write!(f, "no project {id} to check"),
-            GraphError::NoPaths(id) => write!(f, "project {id} has no source files"),
-            GraphError::RelativePath(p) => write!(f, "{} is not absolute", p.display()),
-            GraphError::NotUtf8(p) => write!(f, "{} is not UTF-8", p.display()),
             GraphError::DuplicateProjectFile(p) => {
                 write!(f, "two projects have the project file {}", p.display())
             }
-            GraphError::ModuleReference { from, to } => {
-                write!(
-                    f,
-                    "project {from} references {to}, a module, which is no assembly"
-                )
+            GraphError::UnknownReference { from, to } => {
+                write!(f, "project {from} references unknown project {to}")
             }
-            GraphError::NotALangVersion(id) => {
-                write!(
-                    f,
-                    "project {id} is pinned to something that is not a language version"
-                )
+            GraphError::ReferenceNotInArgs { from, reference } => {
+                write!(f, "project {from} has no single -r:{reference} argument")
             }
-            GraphError::BelowSupportFloor(id) => write!(
-                f,
-                "project {id} is pinned below F# {}, which the graph oracle cannot check at",
-                crate::FCS_SUPPORT_FLOOR
-            ),
+            GraphError::Cycle(id) => write!(f, "project reference cycle through {id}"),
+            GraphError::UnknownCheck(id) => write!(f, "no project {id} to check"),
+            GraphError::RelativePath(p) => write!(f, "{} is not absolute", p.display()),
+            GraphError::NotUtf8(p) => write!(f, "{} is not UTF-8", p.display()),
+            GraphError::NoSources(id) => write!(f, "project {id} has no source files"),
             GraphError::UncontainedFile(n) => {
-                write!(f, "{n:?} is not a relative path inside its project")
+                write!(f, "{n:?} is not a relative path of plain names")
             }
         }
     }
@@ -252,82 +173,60 @@ impl fmt::Display for GraphError {
 impl std::error::Error for GraphError {}
 
 /// A request for `fcs-dump uses-project-graph-batch`: check
-/// [`check`](Self::check)'s files, with every project it reaches through
-/// `project_refs` passed from source. Built only through [`GraphRequest::new`],
-/// which refuses every graph the oracle would refuse, so a request that
-/// reaches the oracle is one it checks as described.
+/// [`check`](Self::check)'s files, with every project it reaches through its
+/// [`ProjectRef`]s passed from source. Built only through
+/// [`GraphRequest::new`], which refuses a graph that is not one; `fcs-dump`
+/// then refuses arguments outside its domain.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphRequest {
     projects: Vec<GraphProject>,
     check: PlainName,
 }
 
+/// The `-r:` arguments of `args`, in order.
+fn references_in(args: &[String]) -> impl Iterator<Item = &str> {
+    args.iter().filter_map(|line| {
+        line.strip_prefix("-r:")
+            .or_else(|| line.strip_prefix("--reference:"))
+    })
+}
+
 impl GraphRequest {
     pub fn new(projects: Vec<GraphProject>, check: PlainName) -> Result<Self, GraphError> {
         let mut by_id = BTreeMap::new();
-        let mut names = BTreeSet::new();
         let mut project_files = BTreeSet::new();
         for p in &projects {
-            if p.assembly_name.as_str().eq_ignore_ascii_case("FSharp.Core") {
-                return Err(GraphError::FSharpCoreName(p.id.clone()));
+            if !p.project_file.is_absolute() {
+                return Err(GraphError::RelativePath(p.project_file.clone()));
             }
-            if p.paths.is_empty() {
-                return Err(GraphError::NoPaths(p.id.clone()));
-            }
-            let all_paths: Vec<&PathBuf> = std::iter::once(&p.project_file)
-                .chain(&p.paths)
-                .chain(p.dlls())
-                .collect();
-            if let Some(relative) = all_paths.iter().find(|q| !q.is_absolute()) {
-                return Err(GraphError::RelativePath((*relative).clone()));
-            }
-            // The wire is JSON text: a path that is not UTF-8 would reach the
-            // oracle as some other path.
-            if let Some(lossy) = all_paths.iter().find(|q| q.to_str().is_none()) {
-                return Err(GraphError::NotUtf8((*lossy).clone()));
+            if p.project_file.to_str().is_none() {
+                return Err(GraphError::NotUtf8(p.project_file.clone()));
             }
             if by_id.insert(p.id.clone(), p).is_some() {
                 return Err(GraphError::DuplicateId(p.id.clone()));
-            }
-            if !names.insert(p.assembly_name.as_str().to_ascii_lowercase()) {
-                return Err(GraphError::DuplicateAssemblyName(p.assembly_name.clone()));
             }
             if !project_files.insert(&p.project_file) {
                 return Err(GraphError::DuplicateProjectFile(p.project_file.clone()));
             }
         }
         for p in &projects {
-            if let Some(to) = p.project_refs().find(|r| !by_id.contains_key(*r)) {
-                return Err(GraphError::UnknownReference {
-                    from: p.id.clone(),
-                    to: to.clone(),
-                });
-            }
-            if let Some(to) = p
-                .project_refs()
-                .find(|r| by_id[*r].target == OutputKind::Module)
-            {
-                return Err(GraphError::ModuleReference {
-                    from: p.id.clone(),
-                    to: to.clone(),
-                });
+            for r in &p.project_refs {
+                if !by_id.contains_key(&r.project) {
+                    return Err(GraphError::UnknownReference {
+                        from: p.id.clone(),
+                        to: r.project.clone(),
+                    });
+                }
+                if references_in(&p.args).filter(|a| *a == r.reference).count() != 1 {
+                    return Err(GraphError::ReferenceNotInArgs {
+                        from: p.id.clone(),
+                        reference: r.reference.clone(),
+                    });
+                }
             }
         }
         if let Some(id) = first_cycle(&projects) {
             return Err(GraphError::Cycle(id));
-        }
-        if let Some(p) = projects.iter().find(|p| {
-            p.lang_version
-                .as_deref()
-                .is_some_and(|v| !is_lang_version(v))
-        }) {
-            return Err(GraphError::NotALangVersion(p.id.clone()));
-        }
-        if let Some(p) = projects
-            .iter()
-            .find(|p| p.lang_version.as_deref().is_some_and(below_support_floor))
-        {
-            return Err(GraphError::BelowSupportFloor(p.id.clone()));
         }
         if !by_id.contains_key(&check) {
             return Err(GraphError::UnknownCheck(check));
@@ -345,63 +244,22 @@ impl GraphRequest {
 
     /// The request as the one JSON line the oracle reads.
     pub fn to_json_line(&self) -> String {
-        let path_strings = |paths: &[PathBuf]| -> Vec<String> {
-            paths.iter().map(|p| p.display().to_string()).collect()
-        };
         let projects: Vec<Value> = self
             .projects
             .iter()
             .map(|p| {
                 serde_json::json!({
                     "id": p.id.as_str(),
-                    "assemblyName": p.assembly_name.as_str(),
-                    "projectFile": p.project_file.display().to_string(),
-                    "target": p.target.as_target(),
-                    "paths": path_strings(&p.paths),
-                    "references": p.references.iter().map(|r| match r {
-                        GraphReference::Dll(path) => serde_json::json!({ "dll": path.display().to_string() }),
-                        GraphReference::Project(id) => serde_json::json!({ "project": id.as_str() }),
-                    }).collect::<Vec<_>>(),
-                    // `--define:` with nothing after it is not a symbol.
-                    "defines": p.defines.iter().filter(|d| !d.trim().is_empty()).collect::<Vec<_>>(),
-                    "langversion": p.lang_version,
-                    "exclusiveRefs": p.exclusive_refs,
+                    "projectFile": p.project_file.to_str().expect("checked UTF-8"),
+                    "args": p.args,
+                    "projectRefs": p.project_refs.iter().map(|r| serde_json::json!({
+                        "project": r.project.as_str(),
+                        "reference": r.reference,
+                    })).collect::<Vec<_>>(),
                 })
             })
             .collect();
         serde_json::json!({ "projects": projects, "check": self.check.as_str() }).to_string()
-    }
-}
-
-/// Whether `lang_version` is a spelling the oracle passes to `--langversion:`
-/// as a version: a word naming one (`latest`, `latestmajor`, `preview`,
-/// `default`, in any case, as FCS reads them) or a number (`10`, `10.0`).
-/// Anything else, `?` (which FCS takes as a request for help, ending the
-/// oracle's process) among it, is refused.
-fn is_lang_version(lang_version: &str) -> bool {
-    let v = lang_version.trim();
-    matches!(
-        v.to_ascii_lowercase().as_str(),
-        "latest" | "latestmajor" | "preview" | "default"
-    ) || match v.split_once('.') {
-        Some((major, minor)) => [major, minor]
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
-        None => !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()),
-    }
-}
-
-/// Whether a `<LangVersion>` spelling names a numbered version below
-/// [`crate::FCS_SUPPORT_FLOOR`]. A word (`latest`, `preview`, `default`)
-/// names the current compiler's, never below it.
-fn below_support_floor(lang_version: &str) -> bool {
-    let number = |s: &str| -> Option<(u32, u32)> {
-        let (major, minor) = s.trim().split_once('.').unwrap_or((s.trim(), "0"));
-        Some((major.parse().ok()?, minor.parse().ok()?))
-    };
-    match (number(lang_version), number(crate::FCS_SUPPORT_FLOOR)) {
-        (Some(v), Some(floor)) => v < floor,
-        _ => false,
     }
 }
 
@@ -424,8 +282,8 @@ fn first_cycle(projects: &[GraphProject]) -> Option<PlainName> {
             None => {}
         }
         marks.insert(id, Mark::Open);
-        for r in by_id[id].project_refs() {
-            if let Some(cycle) = visit(r, by_id, marks) {
+        for r in &by_id[id].project_refs {
+            if let Some(cycle) = visit(&r.project, by_id, marks) {
                 return Some(cycle);
             }
         }
@@ -444,10 +302,10 @@ fn first_cycle(projects: &[GraphProject]) -> Option<PlainName> {
 pub struct ReferencedProject {
     #[serde(rename = "Id")]
     pub id: String,
+    /// The file stem of its `-o:` argument: the assembly name fsc gives it.
     #[serde(rename = "AssemblyName")]
     pub assembly_name: String,
-    /// The `-o:` the oracle named it by. Never written: a test may hold that it
-    /// does not exist.
+    /// Its `-o:` argument, made absolute.
     #[serde(rename = "OutputPath")]
     pub output_path: PathBuf,
     /// Its whole-project diagnostics, as `uses-project` renders a file's.
@@ -523,30 +381,63 @@ pub struct FixtureProject {
     /// Compile order.
     pub files: Vec<FixtureFile>,
     pub project_refs: Vec<PlainName>,
-    /// `#if` symbols, beyond what the SDK defines for a build. A source
-    /// that tests an SDK symbol (`NET`, `RELEASE`) reads differently built
-    /// and checked from source, since only the build defines it.
+    /// `#if` symbols beyond the SDK's.
     pub defines: Vec<String>,
+    /// Assemblies on disk it references (`<Reference>` with a `HintPath`),
+    /// absolute.
+    pub assembly_refs: Vec<PathBuf>,
+}
+
+impl FixtureProject {
+    /// A project with these sources, and no references or defines.
+    pub fn new(name: PlainName, files: Vec<FixtureFile>) -> Self {
+        FixtureProject {
+            name,
+            files,
+            project_refs: Vec::new(),
+            defines: Vec::new(),
+            assembly_refs: Vec::new(),
+        }
+    }
 }
 
 /// A set of F# projects in a fresh directory: `<root>/<name>/<name>.fsproj`
 /// beside the project's sources. Removed when dropped.
 ///
-/// Each `.fsproj` builds the project exactly as the oracle checks it from
-/// source: its Compile items and nothing else. The SDK's generated
-/// `AssemblyInfo.fs` (which declares namespace `FSharp` and the
-/// `InternalsVisibleTo` items) and its `AssemblyAttributes.fs` (the
-/// `TargetFrameworkAttribute`) are turned off, so a built DLL and a source
-/// reference declare the same entities and the same assembly attributes.
+/// The SDK's generated `AssemblyInfo.fs` (which declares namespace `FSharp`
+/// and the `InternalsVisibleTo` items) and `AssemblyAttributes.fs` (the
+/// `TargetFrameworkAttribute`) are turned off, so a fixture declares only
+/// what its sources do.
 #[derive(Debug)]
 pub struct ProjectGraphFixture {
     /// Owns the directory.
     _dir: tempfile::TempDir,
-    /// The directory's canonical path: what both the build and the oracle are
-    /// given, so the ranges a built DLL's signature carries name the same
-    /// files the oracle's source reference does.
+    /// The directory's canonical path, which the build and the oracle are
+    /// both given.
     root: PathBuf,
     projects: Vec<FixtureProject>,
+}
+
+/// Each fixture project's fsc arguments, as its build hands them to fsc:
+/// one response-file line each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureArgs(BTreeMap<PlainName, Vec<String>>);
+
+impl FixtureArgs {
+    /// The arguments of the project named `name`.
+    pub fn of(&self, name: &PlainName) -> &[String] {
+        self.0
+            .get(name)
+            .unwrap_or_else(|| panic!("no fsc arguments for {name}"))
+    }
+}
+
+/// The `msbuild-condition-oracle` child fixtures read their fsc arguments
+/// through, in the oracle's scrubbed environment. Its requests pin each
+/// design-time build's restore to the feed this process restores from
+/// ([`crate::msbuild_oracle::restore_sources`]).
+pub fn fixture_msbuild_oracle() -> Oracle {
+    Oracle::spawn_in_dir_with_env(&std::env::temp_dir(), &[])
 }
 
 impl ProjectGraphFixture {
@@ -558,24 +449,25 @@ impl ProjectGraphFixture {
             .iter()
             .map(|p| GraphProject {
                 id: p.name.clone(),
-                assembly_name: p.name.clone(),
                 project_file: PathBuf::from("/").join(format!("{}.fsproj", p.name)),
-                paths: vec![PathBuf::from("/").join(p.name.as_str())],
-                references: p
+                args: p
                     .project_refs
                     .iter()
-                    .cloned()
-                    .map(GraphReference::Project)
+                    .map(|r| format!("-r:/{r}.dll"))
                     .collect(),
-                defines: Vec::new(),
-                lang_version: None,
-                exclusive_refs: false,
-                target: OutputKind::Library,
+                project_refs: p
+                    .project_refs
+                    .iter()
+                    .map(|r| ProjectRef {
+                        project: r.clone(),
+                        reference: format!("/{r}.dll"),
+                    })
+                    .collect(),
             })
             .collect();
         for p in &projects {
             if p.files.is_empty() {
-                return Err(GraphError::NoPaths(p.name.clone()));
+                return Err(GraphError::NoSources(p.name.clone()));
             }
             if let Some(f) = p.files.iter().find(|f| !is_contained(&f.name)) {
                 return Err(GraphError::UncontainedFile(f.name.clone()));
@@ -647,22 +539,9 @@ impl ProjectGraphFixture {
             .collect()
     }
 
-    /// Where [`build_fixtures`] puts `name`'s assembly.
-    pub fn output_dll(&self, name: &PlainName) -> PathBuf {
-        self.dir(name)
-            .join("bin")
-            .join("Release")
-            .join(FIXTURE_TFM)
-            .join(format!("{name}.dll"))
-    }
-
     /// Every project `name` reaches through its references, in dependency
     /// order (a project after everything it references), `name` excluded.
-    ///
-    /// Both request forms pass references in this order, so they differ only
-    /// in how each reference is read. It need not be the order the SDK hands
-    /// fsc, which matters only where two references declare one name; reading
-    /// the build's own order is the design-time-build work of #1005.
+    /// The SDK hands a build each of these, transitive ones included.
     pub fn closure(&self, name: &PlainName) -> Vec<&FixtureProject> {
         fn visit<'a>(
             fixture: &'a ProjectGraphFixture,
@@ -686,62 +565,96 @@ impl ProjectGraphFixture {
         out
     }
 
-    fn graph_project(&self, p: &FixtureProject, references: Vec<GraphReference>) -> GraphProject {
-        GraphProject {
-            id: p.name.clone(),
-            assembly_name: p.name.clone(),
-            project_file: self.fsproj(&p.name),
-            paths: self.paths(&p.name),
-            references,
-            defines: p.defines.clone(),
-            lang_version: Some(FIXTURE_LANG_VERSION.to_owned()),
-            exclusive_refs: false,
-            target: OutputKind::Library,
+    /// Every project's fsc arguments, read off a design-time build of it
+    /// under [`FIXTURE_CONFIGURATION`] (`oracle` is
+    /// [`fixture_msbuild_oracle`]). Panics when the build reports none, or
+    /// says fsc may run on arguments it cannot report: such a fixture cannot
+    /// be graded.
+    pub fn fsc_args(&self, oracle: &mut Oracle) -> FixtureArgs {
+        let globals = [("Configuration".to_owned(), FIXTURE_CONFIGURATION.to_owned())];
+        FixtureArgs(
+            self.projects
+                .iter()
+                .map(|p| {
+                    let invocation = oracle
+                        .fsc_args(&self.fsproj(&p.name), &globals)
+                        .unwrap_or_else(|errors| {
+                            panic!(
+                                "no fsc arguments for fixture project {}: {errors:?}",
+                                p.name
+                            )
+                        });
+                    let lines = invocation
+                        .response_file
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    (p.name.clone(), lines)
+                })
+                .collect(),
+        )
+    }
+
+    /// The `-r:` argument in `p`'s arguments that is project `q`: the one
+    /// whose file lies in `q`'s directory and is named after `q`. Panics
+    /// unless exactly one is.
+    fn reference_to(&self, args: &FixtureArgs, p: &PlainName, q: &PlainName) -> String {
+        let dir = format!("{}/", self.dir(q).display());
+        let found: Vec<&str> = references_in(args.of(p))
+            .filter(|r| {
+                r.starts_with(&dir)
+                    && Path::new(r).file_stem().and_then(|s| s.to_str()) == Some(q.as_str())
+            })
+            .collect();
+        match found.as_slice() {
+            [one] => (*one).to_owned(),
+            other => panic!(
+                "{p}'s arguments reference {q} {} times: {other:?}",
+                other.len()
+            ),
         }
     }
 
-    /// Check `check` with every project it reaches passed from source, each
-    /// checked with its own defines.
-    ///
-    /// Each project references its whole [`closure`](Self::closure), not just
-    /// the projects it names: the SDK hands a build every transitive project
-    /// reference (as [`Self::dll_request`] hands the DLLs), and FCS does not
-    /// infer one from a referenced project's own `FSharpReference`s, so a
-    /// project naming only its direct references would fail with FS0074
-    /// where its build succeeds.
-    pub fn source_request(&self, check: &PlainName) -> GraphRequest {
+    /// Check `check` with every project it reaches passed from source: each
+    /// project's own arguments, with the `-r:` of every project in its
+    /// [`closure`](Self::closure) registered as that project.
+    pub fn source_request(&self, args: &FixtureArgs, check: &PlainName) -> GraphRequest {
         let projects = self
             .closure(check)
             .into_iter()
             .chain(std::iter::once(self.project(check)))
-            .map(|p| {
-                let reached = self
+            .map(|p| GraphProject {
+                id: p.name.clone(),
+                project_file: self.fsproj(&p.name),
+                args: args.of(&p.name).to_vec(),
+                project_refs: self
                     .closure(&p.name)
                     .into_iter()
-                    .map(|q| GraphReference::Project(q.name.clone()))
-                    .collect();
-                self.graph_project(p, reached)
+                    .map(|q| ProjectRef {
+                        project: q.name.clone(),
+                        reference: self.reference_to(args, &p.name, &q.name),
+                    })
+                    .collect(),
             })
             .collect();
         GraphRequest::new(projects, check.clone()).expect("a materialised fixture is a graph")
     }
 
-    /// Check `check` alone, with every project it reaches passed as the DLL
-    /// [`build_fixtures`] built for it, in the order
-    /// [`source_request`](Self::source_request) passes them from source, so
-    /// the two requests differ in how each reference is read and in nothing
-    /// else. Panics if one is missing.
-    pub fn dll_request(&self, check: &PlainName) -> GraphRequest {
-        let references = self
-            .closure(check)
-            .into_iter()
-            .map(|p| {
-                let dll = self.output_dll(&p.name);
-                assert!(dll.is_file(), "{} was not built", dll.display());
-                GraphReference::Dll(dll)
-            })
-            .collect();
-        let project = self.graph_project(self.project(check), references);
+    /// Check `check` alone, with its arguments as they stand: every project
+    /// reference is then the DLL [`build_fixtures`] built for it, at the
+    /// path the build compiles against. Panics if one is missing.
+    pub fn dll_request(&self, args: &FixtureArgs, check: &PlainName) -> GraphRequest {
+        for q in self.closure(check) {
+            let dll = self.reference_to(args, check, &q.name);
+            assert!(Path::new(&dll).is_file(), "{dll} was not built");
+        }
+        let project = GraphProject {
+            id: check.clone(),
+            project_file: self.fsproj(check),
+            args: args.of(check).to_vec(),
+            project_refs: Vec::new(),
+        };
         GraphRequest::new(vec![project], check.clone()).expect("one project is a graph")
     }
 }
@@ -766,6 +679,10 @@ fn fsproj_text(p: &FixtureProject) -> String {
         .project_refs
         .iter()
         .map(|r| format!("    <ProjectReference Include=\"../{r}/{r}.fsproj\" />\n"))
+        .chain(p.assembly_refs.iter().map(|path| {
+            let path = xml_escape(&path.display().to_string());
+            format!("    <Reference Include=\"{path}\"><HintPath>{path}</HintPath></Reference>\n")
+        }))
         .collect();
     let defines: String = p
         .defines
@@ -778,22 +695,12 @@ fn fsproj_text(p: &FixtureProject) -> String {
     <TargetFramework>{FIXTURE_TFM}</TargetFramework>
     <AssemblyName>{name}</AssemblyName>
     <LangVersion>{FIXTURE_LANG_VERSION}</LangVersion>
-    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <DefineConstants>$(DefineConstants){defines}</DefineConstants>
-    <Deterministic>true</Deterministic>
-    <DeterministicSourcePaths>false</DeterministicSourcePaths>
-    <ContinuousIntegrationBuild>false</ContinuousIntegrationBuild>
-    <PathMap></PathMap>
-    <DebugType>none</DebugType>
-    <DebugSymbols>false</DebugSymbols>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>
-  <ItemGroup>
-    <PackageReference Include="FSharp.Core" Version="{FIXTURE_FSHARP_CORE}" />
-  </ItemGroup>
   <ItemGroup>
 {compile}  </ItemGroup>
   <ItemGroup>
@@ -817,10 +724,10 @@ fn xml_escape(s: &str) -> String {
 const BUILD_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Build `fsprojs` (each a fixture project's [`ProjectGraphFixture::fsproj`])
-/// with one `dotnet build` of a solution listing them all, so MSBuild builds
-/// them in one process and in parallel. Each sits in a solution folder of its
-/// own, so projects of different fixtures may share a name. Panics, with the
-/// build's output, if it fails.
+/// under [`FIXTURE_CONFIGURATION`] with one `dotnet build` of a solution
+/// listing them all, so MSBuild builds them in one process and in parallel.
+/// Each sits in a solution folder of its own, so projects of different
+/// fixtures may share a name. Panics, with the build's output, if it fails.
 pub fn build_fixtures(fsprojs: &[PathBuf]) {
     let dir = tempfile::Builder::new()
         .prefix("borzoi-project-graph-build-")
@@ -840,7 +747,7 @@ pub fn build_fixtures(fsprojs: &[PathBuf]) {
     std::fs::write(&solution, format!("<Solution>\n{entries}</Solution>\n"))
         .expect("write the fixture solution");
     let mut cmd = Command::new("dotnet");
-    cmd.args(["build", "-c", "Release", "--nologo", "-v:q"])
+    cmd.args(["build", "-c", FIXTURE_CONFIGURATION, "--nologo", "-v:q"])
         .arg(&solution);
     BoundedCommand::new(cmd)
         .timeout(BUILD_TIMEOUT)
@@ -859,17 +766,15 @@ mod tests {
     fn project(id: &str, refs: &[&str]) -> GraphProject {
         GraphProject {
             id: name(id),
-            assembly_name: name(&format!("Asm{id}")),
-            project_file: PathBuf::from(format!("/src/{id}.fsproj")),
-            paths: vec![PathBuf::from(format!("/src/{id}.fs"))],
-            references: refs
+            project_file: PathBuf::from(format!("/src/{id}/{id}.fsproj")),
+            args: refs.iter().map(|r| format!("-r:/out/{r}.dll")).collect(),
+            project_refs: refs
                 .iter()
-                .map(|r| GraphReference::Project(name(r)))
+                .map(|r| ProjectRef {
+                    project: name(r),
+                    reference: format!("/out/{r}.dll"),
+                })
                 .collect(),
-            defines: Vec::new(),
-            lang_version: None,
-            exclusive_refs: false,
-            target: OutputKind::Library,
         }
     }
 
@@ -893,22 +798,17 @@ mod tests {
         let json: Value = serde_json::from_str(&r.to_json_line()).expect("json");
         assert_eq!(json["check"], "b");
         assert_eq!(
-            json["projects"][1]["references"],
-            serde_json::json!([{ "project": "a" }])
+            json["projects"][1]["projectRefs"],
+            serde_json::json!([{ "project": "a", "reference": "/out/a.dll" }])
         );
-        assert_eq!(json["projects"][1]["assemblyName"], "Asmb");
+        assert_eq!(
+            json["projects"][1]["args"],
+            serde_json::json!(["-r:/out/a.dll"])
+        );
     }
 
     #[test]
-    fn a_request_refuses_what_the_oracle_would() {
-        let fsharp_core = GraphProject {
-            assembly_name: name("FSharp.Core"),
-            ..project("a", &[])
-        };
-        assert_eq!(
-            GraphRequest::new(vec![fsharp_core], name("a")),
-            Err(GraphError::FSharpCoreName(name("a")))
-        );
+    fn a_request_refuses_a_malformed_graph() {
         assert_eq!(
             GraphRequest::new(vec![project("a", &["z"])], name("a")),
             Err(GraphError::UnknownReference {
@@ -920,21 +820,50 @@ mod tests {
             GraphRequest::new(vec![project("a", &[])], name("z")),
             Err(GraphError::UnknownCheck(name("z")))
         );
-        let twin = GraphProject {
-            id: name("b"),
-            ..project("a", &[])
+        let elsewhere = GraphProject {
+            project_file: PathBuf::from("/src/a/a.fsproj"),
+            ..project("b", &[])
         };
         assert_eq!(
-            GraphRequest::new(vec![project("a", &[]), twin], name("a")),
-            Err(GraphError::DuplicateAssemblyName(name("Asma")))
+            GraphRequest::new(vec![project("a", &[]), elsewhere], name("a")),
+            Err(GraphError::DuplicateProjectFile(PathBuf::from(
+                "/src/a/a.fsproj"
+            )))
         );
         let relative = GraphProject {
-            paths: vec![PathBuf::from("a.fs")],
+            project_file: PathBuf::from("a.fsproj"),
             ..project("a", &[])
         };
         assert_eq!(
             GraphRequest::new(vec![relative], name("a")),
-            Err(GraphError::RelativePath(PathBuf::from("a.fs")))
+            Err(GraphError::RelativePath(PathBuf::from("a.fsproj")))
+        );
+        // A project reference must name one of the project's own `-r:`s.
+        let unargued = GraphProject {
+            args: Vec::new(),
+            ..project("b", &["a"])
+        };
+        assert_eq!(
+            GraphRequest::new(vec![project("a", &[]), unargued], name("b")),
+            Err(GraphError::ReferenceNotInArgs {
+                from: name("b"),
+                reference: "/out/a.dll".to_owned()
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_request_refuses_a_path_json_cannot_carry() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = PathBuf::from(std::ffi::OsStr::from_bytes(b"/src/\xff.fsproj"));
+        let p = GraphProject {
+            project_file: bad.clone(),
+            ..project("a", &[])
+        };
+        assert_eq!(
+            GraphRequest::new(vec![p], name("a")),
+            Err(GraphError::NotUtf8(bad))
         );
     }
 
@@ -965,8 +894,10 @@ mod tests {
             n in 1usize..6,
             raw in proptest::collection::vec((0usize..6, 0usize..6), 0..10),
         ) {
-            let edges: Vec<(usize, usize)> =
+            let mut edges: Vec<(usize, usize)> =
                 raw.into_iter().map(|(a, b)| (a % n, b % n)).collect();
+            edges.sort();
+            edges.dedup();
             let projects: Vec<GraphProject> = (0..n)
                 .map(|i| {
                     let refs: Vec<String> = edges
@@ -986,81 +917,110 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_fixture_lays_out_buildable_projects_and_both_requests() {
-        let fixture = ProjectGraphFixture::materialise(vec![
+    fn lib_and_app() -> ProjectGraphFixture {
+        ProjectGraphFixture::materialise(vec![
             FixtureProject {
-                name: name("Lib"),
-                files: vec![FixtureFile {
-                    name: "Lib.fs".into(),
-                    text: "module Lib\nlet x = 1\n".into(),
-                }],
-                project_refs: Vec::new(),
                 defines: vec!["LIB_ONLY".into()],
+                ..FixtureProject::new(
+                    name("Lib"),
+                    vec![FixtureFile {
+                        name: "Lib.fs".into(),
+                        text: "module Lib\nlet x = 1\n".into(),
+                    }],
+                )
             },
             FixtureProject {
-                name: name("App"),
-                files: vec![FixtureFile {
-                    name: "Program.fs".into(),
-                    text: "module Program\nlet y = Lib.x\n".into(),
-                }],
                 project_refs: vec![name("Lib")],
-                defines: Vec::new(),
+                assembly_refs: vec![PathBuf::from("/opt/Extra.dll")],
+                ..FixtureProject::new(
+                    name("App"),
+                    vec![FixtureFile {
+                        name: "Program.fs".into(),
+                        text: "module Program\nlet y = Lib.x\n".into(),
+                    }],
+                )
             },
         ])
-        .expect("a graph");
-        let app = fixture.fsproj(&name("App"));
-        let text = std::fs::read_to_string(&app).expect("read the .fsproj");
-        assert!(text.contains(r#"<ProjectReference Include="../Lib/Lib.fsproj" />"#));
-        assert!(text.contains("<GenerateAssemblyInfo>false</GenerateAssemblyInfo>"));
-        let lib = std::fs::read_to_string(fixture.fsproj(&name("Lib"))).expect("read");
-        assert!(lib.contains("<DefineConstants>$(DefineConstants);LIB_ONLY</DefineConstants>"));
-
-        let source = fixture.source_request(&name("App"));
-        let ids: Vec<&str> = source.projects().iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["Lib", "App"]);
-        assert_eq!(source.projects()[0].defines, ["LIB_ONLY"]);
-        assert_eq!(
-            source.projects()[1].references,
-            [GraphReference::Project(name("Lib"))]
-        );
-        assert_eq!(
-            source.projects()[1].lang_version.as_deref(),
-            Some(FIXTURE_LANG_VERSION)
-        );
-        assert!(source.projects()[1].paths[0].starts_with(fixture.root()));
+        .expect("a graph")
     }
 
-    /// A source request references each project's whole closure, as its
-    /// build does: C → B → A gives C both.
     #[test]
-    fn a_source_request_references_the_transitive_closure() {
+    fn a_fixture_lays_out_buildable_projects() {
+        let fixture = lib_and_app();
+        let app = std::fs::read_to_string(fixture.fsproj(&name("App"))).expect("read");
+        assert!(app.contains(r#"<ProjectReference Include="../Lib/Lib.fsproj" />"#));
+        assert!(app.contains(
+            r#"<Reference Include="/opt/Extra.dll"><HintPath>/opt/Extra.dll</HintPath></Reference>"#
+        ));
+        assert!(app.contains("<GenerateAssemblyInfo>false</GenerateAssemblyInfo>"));
+        assert!(app.contains(&format!(
+            "<LangVersion>{FIXTURE_LANG_VERSION}</LangVersion>"
+        )));
+        let lib = std::fs::read_to_string(fixture.fsproj(&name("Lib"))).expect("read");
+        assert!(lib.contains("<DefineConstants>$(DefineConstants);LIB_ONLY</DefineConstants>"));
+    }
+
+    /// A source request passes each project's own arguments, and registers
+    /// the `-r:` of every project in its closure; a DLL request registers
+    /// none.
+    #[test]
+    fn a_source_request_registers_each_closure_reference() {
+        let fixture = lib_and_app();
+        let lib_ref = format!(
+            "{}/obj/Release/net10.0/ref/Lib.dll",
+            fixture.dir(&name("Lib")).display()
+        );
+        let args = FixtureArgs(BTreeMap::from([
+            (
+                name("Lib"),
+                vec!["-o:obj/Lib.dll".to_owned(), "Lib.fs".to_owned()],
+            ),
+            (
+                name("App"),
+                vec![
+                    "-o:obj/App.dll".to_owned(),
+                    "-r:/opt/Extra.dll".to_owned(),
+                    format!("-r:{lib_ref}"),
+                    "Program.fs".to_owned(),
+                ],
+            ),
+        ]));
+        let source = fixture.source_request(&args, &name("App"));
+        let ids: Vec<&str> = source.projects().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["Lib", "App"]);
+        assert_eq!(source.projects()[1].args, args.of(&name("App")));
+        assert_eq!(
+            source.projects()[1].project_refs,
+            [ProjectRef {
+                project: name("Lib"),
+                reference: lib_ref
+            }]
+        );
+        assert!(source.projects()[0].project_refs.is_empty());
+    }
+
+    /// C → B → A gives C both, as its build references both.
+    #[test]
+    fn a_closure_is_transitive() {
         let p = |n: &str, refs: &[&str]| FixtureProject {
-            name: name(n),
-            files: vec![FixtureFile {
-                name: format!("{n}.fs"),
-                text: format!("module {n}\n"),
-            }],
             project_refs: refs.iter().map(|r| name(r)).collect(),
-            defines: Vec::new(),
+            ..FixtureProject::new(
+                name(n),
+                vec![FixtureFile {
+                    name: format!("{n}.fs"),
+                    text: format!("module {n}\n"),
+                }],
+            )
         };
         let fixture =
             ProjectGraphFixture::materialise(vec![p("A", &[]), p("B", &["A"]), p("C", &["B"])])
                 .expect("a graph");
-        let request = fixture.source_request(&name("C"));
-        let refs: BTreeMap<&str, Vec<&str>> = request
-            .projects()
-            .iter()
-            .map(|g| {
-                (
-                    g.id.as_str(),
-                    g.project_refs().map(PlainName::as_str).collect(),
-                )
-            })
+        let names: Vec<&str> = fixture
+            .closure(&name("C"))
+            .into_iter()
+            .map(|q| q.name.as_str())
             .collect();
-        assert_eq!(refs["C"], ["A", "B"]);
-        assert_eq!(refs["B"], ["A"]);
-        assert_eq!(refs["A"], Vec::<&str>::new());
+        assert_eq!(names, ["A", "B"]);
     }
 
     #[test]
@@ -1079,15 +1039,13 @@ mod tests {
             "a b.fs",
             "a//b.fs",
         ] {
-            let p = FixtureProject {
-                name: name("A"),
-                files: vec![FixtureFile {
+            let p = FixtureProject::new(
+                name("A"),
+                vec![FixtureFile {
                     name: bad.into(),
                     text: String::new(),
                 }],
-                project_refs: Vec::new(),
-                defines: Vec::new(),
-            };
+            );
             assert_eq!(
                 ProjectGraphFixture::materialise(vec![p]).map(|_| ()),
                 Err(GraphError::UncontainedFile(bad.into())),
@@ -1096,100 +1054,15 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_request_refuses_a_path_json_cannot_carry() {
-        use std::os::unix::ffi::OsStrExt;
-        let bad = PathBuf::from(std::ffi::OsStr::from_bytes(b"/src/\xff.fs"));
-        let p = GraphProject {
-            paths: vec![bad.clone()],
-            ..project("a", &[])
-        };
-        assert_eq!(
-            GraphRequest::new(vec![p], name("a")),
-            Err(GraphError::NotUtf8(bad))
-        );
-    }
-
-    #[test]
-    fn a_request_refuses_a_reference_to_a_module() {
-        let module = GraphProject {
-            target: OutputKind::Module,
-            ..project("m", &[])
-        };
-        assert_eq!(
-            GraphRequest::new(vec![module, project("a", &["m"])], name("a")),
-            Err(GraphError::ModuleReference {
-                from: name("a"),
-                to: name("m")
-            })
-        );
-    }
-
-    /// The fixtures' FSharp.Core is the one `fcs-dump` references.
-    #[test]
-    fn fixtures_build_against_the_oracles_fsharp_core() {
-        let fsproj = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fcs-dump/fcs-dump.fsproj"),
-        )
-        .expect("read tools/fcs-dump/fcs-dump.fsproj");
-        let pin = format!(
-            r#"<PackageReference Include="FSharp.Core" Version="{FIXTURE_FSHARP_CORE}" />"#
-        );
-        assert!(
-            fsproj.contains(&pin),
-            "tools/fcs-dump/fcs-dump.fsproj no longer pins FSharp.Core {FIXTURE_FSHARP_CORE}; move FIXTURE_FSHARP_CORE with it"
-        );
-    }
-
-    #[test]
-    fn a_request_refuses_a_version_below_the_support_floor() {
-        let pinned = |v: &str| GraphProject {
-            lang_version: Some(v.to_owned()),
-            ..project("a", &[])
-        };
-        for below in ["7.0", "7", "4.6", "5.0"] {
-            assert_eq!(
-                GraphRequest::new(vec![pinned(below)], name("a")),
-                Err(GraphError::BelowSupportFloor(name("a"))),
-                "{below}"
-            );
-        }
-        for bad in ["?", "", "10.", ".5", "10.0.1", "--help", "ten"] {
-            assert_eq!(
-                GraphRequest::new(vec![pinned(bad)], name("a")),
-                Err(GraphError::NotALangVersion(name("a"))),
-                "{bad:?}"
-            );
-        }
-        for at_or_above in [
-            "8.0",
-            "8",
-            "10.0",
-            "latest",
-            "preview",
-            "default",
-            "LatestMajor",
-            "Preview",
-        ] {
-            assert!(
-                GraphRequest::new(vec![pinned(at_or_above)], name("a")).is_ok(),
-                "{at_or_above}"
-            );
-        }
-    }
-
     #[test]
     fn a_fixture_writes_a_nested_source() {
-        let fixture = ProjectGraphFixture::materialise(vec![FixtureProject {
-            name: name("A"),
-            files: vec![FixtureFile {
+        let fixture = ProjectGraphFixture::materialise(vec![FixtureProject::new(
+            name("A"),
+            vec![FixtureFile {
                 name: "src/Lib.fs".into(),
                 text: "module Lib\n".into(),
             }],
-            project_refs: Vec::new(),
-            defines: Vec::new(),
-        }])
+        )])
         .expect("a graph");
         assert!(fixture.paths(&name("A"))[0].is_file());
     }
@@ -1197,13 +1070,14 @@ mod tests {
     #[test]
     fn a_fixture_refuses_a_cycle_before_writing() {
         let p = |n: &str, r: &str| FixtureProject {
-            name: name(n),
-            files: vec![FixtureFile {
-                name: "A.fs".into(),
-                text: String::new(),
-            }],
             project_refs: vec![name(r)],
-            defines: Vec::new(),
+            ..FixtureProject::new(
+                name(n),
+                vec![FixtureFile {
+                    name: "A.fs".into(),
+                    text: String::new(),
+                }],
+            )
         };
         assert!(matches!(
             ProjectGraphFixture::materialise(vec![p("A", "B"), p("B", "A")]),

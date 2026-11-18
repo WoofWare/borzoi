@@ -6296,10 +6296,6 @@ let private scriptOptionsBatch () =
 /// `System.IO.FileSystem`, and the differential recorded a divergence for a
 /// resolution both sides had right. A caller whose refs merely *supplement* the
 /// SDK's (the fixture harnesses) must leave it off.
-///
-/// Kept apart from [`checkProjectFiles`] so the project-graph oracle
-/// ([`usesProjectGraphBatchCore`]) can add an output name and project
-/// references to the options before checking.
 let private projectOptionsOf
     (checker: FSharpChecker)
     (paths: string[])
@@ -6356,7 +6352,8 @@ let private projectOptionsOf
         UseScriptResolutionRules = false }
 
 /// Check each of `paths` in `projOpts` and project its `{ Path, Diagnostics,
-/// Uses }` record: [`usesProjectFiles`]'s second half.
+/// Uses }` record: [`usesProjectFiles`]'s second half, and how the
+/// project-graph oracle ([`usesProjectGraphBatchCore`]) checks its project.
 let private checkProjectFiles (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (paths: string[]) =
     paths
     |> Array.map (fun absolute ->
@@ -6529,292 +6526,309 @@ let private usesProjectBatch () =
     | None -> ()
 
 /// One project of a `uses-project-graph-batch` request.
-/// One entry of a graph project's ordered references: an assembly on disk, or
-/// a project of the same request passed from source.
-type private GraphReference =
-    | Dll of path: string
-    | Project of id: string
-
+/// One project of a validated graph request: the build's own fsc arguments,
+/// as [`parseGraphRequest`] read them, and the references in them that are
+/// projects of the same request.
 type private GraphProject =
     { Id: string
-      AssemblyName: string
-      /// The project file: FCS's `ProjectFileName`, whose directory is the one
-      /// project-relative inputs (a type provider's sample file) resolve from.
+      /// FCS's `ProjectFileName`: its directory is the one relative inputs
+      /// (a type provider's sample file) resolve from, as in the build.
       ProjectFile: string
-      Paths: string[]
-      /// In compile order: FCS resolves a name two references declare by
-      /// their order, so a project passed from source keeps its DLL's place.
-      References: GraphReference[]
-      ExclusiveRefs: bool
-      DefineArgs: string[]
-      LangVersionArgs: string[]
-      /// `--target:` — what the project's build produces.
-      Target: string }
+      /// The file stem of the `-o:` argument: the name fsc gives the
+      /// assembly, which `InternalsVisibleTo` is matched against.
+      AssemblyName: string
+      /// The `-o:` argument, made absolute against the project directory.
+      OutputPath: string
+      /// The `--target:` argument.
+      Target: string
+      /// The source lines, in order, made absolute against the project
+      /// directory: FCS's `SourceFiles`.
+      Sources: string[]
+      /// Every other line, in order, as fsc reads it, but for the mappings
+      /// [`parseGraphProject`] states: FCS's `OtherOptions`.
+      Switches: string[]
+      /// Each `-r:` argument that names a project of the request, and the
+      /// project: FCS is handed that project as an `FSharpReference` whose
+      /// output file is exactly the argument, which is how it binds the two.
+      ProjectRefs: (string * string)[] }
 
-/// Whether `s` is a non-empty run of ASCII letters, digits, `.`, `_` and `-`:
-/// what a graph request's project ids and assembly names must be, so that
-/// either can name a file without escaping and an assembly name is a simple
-/// name rather than a path or a display name.
+/// A request [`parseGraphRequest`] accepted: every project's arguments in
+/// the domain, the reference relation over known, non-module projects and
+/// acyclic, ids, project files and assembly names unique. `Order` is `Check`
+/// and every project it reaches, each after the projects it references. The
+/// checking code reads only this, so none of it re-validates.
+type private ValidGraph =
+    { ById: Map<string, GraphProject>
+      Order: GraphProject list
+      Check: GraphProject }
+
+/// The properties of JSON object `e`, refusing a value that is not an object,
+/// a property not in `allowed` and a property given twice: an unknown or
+/// repeated field is a request for something the parser does not do.
+let private strictObject (where: string) (allowed: string list) (e: JsonElement) =
+    if e.ValueKind <> JsonValueKind.Object then
+        failwithf "%s: expected an object" where
+    let seen = System.Collections.Generic.Dictionary<string, JsonElement>()
+    for p in e.EnumerateObject() do
+        if not (List.contains p.Name allowed) then
+            failwithf "%s: unknown field %s" where p.Name
+        if not (seen.TryAdd(p.Name, p.Value)) then
+            failwithf "%s: field %s given twice" where p.Name
+    seen
+
+let private strictString (where: string) (e: JsonElement) : string =
+    match e.ValueKind with
+    | JsonValueKind.String -> Option.ofObj (e.GetString()) |> Option.defaultValue ""
+    | _ -> failwithf "%s: expected a string" where
+
+let private strictArray (where: string) (e: JsonElement) : JsonElement list =
+    match e.ValueKind with
+    | JsonValueKind.Array -> e.EnumerateArray() |> Seq.toList
+    | _ -> failwithf "%s: expected an array" where
+
+let private required (where: string) (name: string) (fields: System.Collections.Generic.Dictionary<string, JsonElement>) =
+    match fields.TryGetValue name with
+    | true, v -> v
+    | _ -> failwithf "%s: missing field %s" where name
+
+/// Whether `s` is a non-empty run of ASCII letters, digits, `.`, `_` and `-`,
+/// other than `.` and `..`: a project id, or an assembly name that is a
+/// simple name rather than a path or a display name.
 let private isPlainName (s: string) =
     s <> ""
     && s <> "."
     && s <> ".."
     && s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '.' || c = '_' || c = '-')
 
-/// Read one project object of a graph request.
-let private readGraphProject (e: JsonElement) : GraphProject =
-    // A field present with the wrong JSON kind is refused, never read as
-    // absent: a mistyped option would otherwise check other compiler inputs.
-    let str (name: string) =
-        match e.TryGetProperty(name) with
-        | true, v when v.ValueKind = JsonValueKind.String -> Option.ofObj (v.GetString())
-        | true, v when v.ValueKind = JsonValueKind.Null -> None
-        | true, _ -> failwithf "%s: expected a string" name
-        | _ -> None
-    let strArray (name: string) : string[] =
-        match e.TryGetProperty(name) with
-        | true, arr when arr.ValueKind = JsonValueKind.Array ->
-            arr.EnumerateArray()
-            |> Seq.map (fun x ->
-                match Option.ofObj (x.GetString()) with
-                | Some s -> s
-                | None -> failwithf "%s: expected an array of strings" name)
-            |> Seq.toArray
-        | true, v when v.ValueKind = JsonValueKind.Null -> [||]
-        | true, _ -> failwithf "%s: expected an array" name
-        | _ -> [||]
-    let id =
-        match str "id" with
-        | Some id when isPlainName id -> id
-        | other -> failwithf "project id must be a plain name, got %A" other
-    // Required, never derived: FCS names an assembly after its `-o:`, and
-    // without one after the project's last source file, so a defaulted name
-    // would silently break every `InternalsVisibleTo` match the graph grades.
-    let assemblyName =
-        match str "assemblyName" with
-        | Some n when isPlainName n -> n
-        | other -> failwithf "project %s: assemblyName must be a plain simple name, got %A" id other
+/// The switch names a project's arguments may carry beyond the ones
+/// [`parseGraphProject`] reads itself, each passed to FCS as fsc reads it.
+/// An allow-list: a switch outside it may change what fsc builds in a way
+/// FCS does not see, or make FCS do something else (`--help`), so it is
+/// refused rather than passed on.
+let private passedSwitches =
+    set [ "--debug"; "--noframework"; "--define"; "--optimize"; "--warn"; "--warnaserror"
+          "--nowarn"; "--warnon"; "--fullpaths"; "--flaterrors"; "--highentropyva"
+          "--targetprofile"; "--nocopyfsharpcore"; "--deterministic"; "--simpleresolution"
+          "--checked"; "--crossoptimize"; "--tailcalls"; "--platform"; "--doc"; "--nologo"
+          "--utf8output"; "--checknulls"; "--realsig"; "--embed"; "--sourcelink"; "--pathmap"
+          "--publicsign"; "--keyfile"; "--delaysign"; "--nowin32manifest"; "--strict-indentation"
+          "-r"; "--reference" ]
+
+/// A switch line's name: up to its `:` argument, or without its `+`/`-`
+/// toggle.
+let private switchName (line: string) =
+    match line.IndexOf ':' with
+    | -1 -> line.TrimEnd('+', '-')
+    | i -> line.Substring(0, i)
+
+/// Parse one project of a graph request.
+///
+/// `args` is the build's own fsc argument list, one response-file line each
+/// (what fsc reads), and is passed to FCS as it stands but for these
+/// mappings, each because FCS needs a different spelling of the same input:
+/// - a source line (one not starting `-`, ending `.fs` or `.fsi`) goes to
+///   `SourceFiles`, made absolute against the project directory as fsc
+///   resolves it;
+/// - `-o:` is made absolute the same way, and names the assembly;
+/// - `--refout:` and `--refonly` are dropped: they say what fsc writes, and
+///   FCS writes nothing.
+///
+/// Refused, so the request is in a domain whose meaning is the build's:
+/// - a line that is empty, padded, holds `\` or `%` (the response file keeps
+///   MSBuild's spellings, which fsc and FCS need not read alike) or starts
+///   `@` or `#`;
+/// - a switch outside [`passedSwitches`];
+/// - no `-o:`, `--target:` or `--langversion:`, or more than one;
+/// - a `--target:` outside `library`, `exe`, `winexe`, `module`;
+/// - a `--langversion:` that is not a version number of F# 8 or later. A
+///   word (`latest`, `preview`, `default`) names the checking compiler's
+///   version, which need not be the build's, and below F# 8 the current FCS
+///   no longer behaves as those compilers did;
+/// - an assembly named FSharp.Core, which FCS reads only from disk;
+/// - a relative `-r:`.
+let private parseGraphProject (e: JsonElement) : GraphProject =
+    let fields = strictObject "project" [ "id"; "projectFile"; "args"; "projectRefs" ] e
+    let id = strictString "id" (required "project" "id" fields)
+    if not (isPlainName id) then
+        failwithf "project id %A is not a plain name" id
+    let where = sprintf "project %s" id
+    let projectFile = strictString (where + " projectFile") (required where "projectFile" fields)
+    if not (Path.IsPathFullyQualified projectFile) then
+        failwithf "%s: projectFile %s is not absolute" where projectFile
+    let projectFile = Path.GetFullPath projectFile
+    let dir = Option.ofObj (Path.GetDirectoryName projectFile) |> Option.defaultValue "/"
+    let args =
+        strictArray (where + " args") (required where "args" fields)
+        |> List.map (strictString (where + " args"))
+    for line in args do
+        if line = "" || line.Trim() <> line || line.Contains '\\' || line.Contains '%'
+           || line.StartsWith "@" || line.StartsWith "#" then
+            failwithf "%s: argument %A is outside the domain the oracle reads as fsc does" where line
+    let isSource (line: string) = not (line.StartsWith "-")
+    let sources =
+        args
+        |> List.filter isSource
+        |> List.map (fun line ->
+            if not (line.EndsWith ".fs" || line.EndsWith ".fsi") then
+                failwithf "%s: source %s is not a .fs or .fsi file" where line
+            Path.GetFullPath(Path.Combine(dir, line)))
+    if List.isEmpty sources then
+        failwithf "%s has no source files" where
+    let switches = args |> List.filter (isSource >> not)
+    let single (name: string) =
+        match switches |> List.filter (fun l -> switchName l = name) with
+        | [ line ] -> line.Substring(name.Length + 1)
+        | [] -> failwithf "%s: no %s argument" where name
+        | _ -> failwithf "%s: more than one %s argument" where name
+    let outputPath =
+        let outputs = switches |> List.filter (fun l -> switchName l = "-o" || switchName l = "--out")
+        match outputs with
+        | [ line ] -> Path.GetFullPath(Path.Combine(dir, line.Substring(line.IndexOf ':' + 1)))
+        | _ -> failwithf "%s: expected one -o: argument" where
+    let assemblyName = Path.GetFileNameWithoutExtension outputPath |> Option.ofObj |> Option.defaultValue ""
+    if not (isPlainName assemblyName) then
+        failwithf "%s: assembly name %A is not a plain name" where assemblyName
     // FCS's background compiler drops a project reference whose output is
     // named like FSharp.Core and needs the DLL on disk instead
-    // (`BackgroundCompiler.getProjectReferences`), so such a graph would not
-    // check what it says.
+    // (`BackgroundCompiler.getProjectReferences`).
     if String.Equals(assemblyName, "FSharp.Core", StringComparison.OrdinalIgnoreCase) then
-        failwithf "project %s: FCS does not reference a project named FSharp.Core from source" id
-    let paths =
-        strArray "paths"
-        |> Array.map (fun path ->
-            // A relative path would resolve against the oracle's own
-            // working directory, which is nothing the caller chose.
-            if not (Path.IsPathFullyQualified path) then
-                failwithf "project %s: source path %s is not absolute" id path
-            Path.GetFullPath path)
-    if Array.isEmpty paths then
-        failwithf "project %s has no paths" id
-    let projectFile =
-        match str "projectFile" with
-        | Some f when Path.IsPathFullyQualified f -> Path.GetFullPath f
-        | other -> failwithf "project %s: projectFile must be an absolute path, got %A" id other
-    let references =
-        match e.TryGetProperty("references") with
-        | true, arr when arr.ValueKind = JsonValueKind.Array ->
-            arr.EnumerateArray()
-            |> Seq.map (fun r ->
-                match r.TryGetProperty("dll"), r.TryGetProperty("project") with
-                | (true, d), (false, _) when d.ValueKind = JsonValueKind.String ->
-                    let path = Option.ofObj (d.GetString()) |> Option.defaultValue ""
-                    // `refArg` refuses a relative path; keep only the path.
-                    Dll((refArg "references" path).Substring 3)
-                | (false, _), (true, q) when q.ValueKind = JsonValueKind.String ->
-                    Project(Option.ofObj (q.GetString()) |> Option.defaultValue "")
-                | _ -> failwithf "project %s: a reference is {dll} or {project}" id)
-            |> Seq.toArray
-        | true, v when v.ValueKind = JsonValueKind.Null -> [||]
-        | true, _ -> failwithf "project %s: references must be an array" id
-        | _ -> [||]
-    // The current FCS no longer behaves as compilers below F# 8 did, and
-    // this oracle has no legacy twin, so it refuses to check at one.
-    let langVersion = str "langversion"
-    // Only a version's spelling: anything else, `?` among it, FCS may read
-    // as another switch (`--langversion:?` prints help and ends the process).
-    let isVersion (v: string) =
-        let v = v.Trim()
-        let digits (s: string) = s <> "" && s |> Seq.forall Char.IsAsciiDigit
-        match v.ToLowerInvariant() with
-        | "latest" | "latestmajor" | "preview" | "default" -> true
-        | _ ->
-            match v.Split('.') with
-            | [| major |] -> digits major
-            | [| major; minor |] -> digits major && digits minor
-            | _ -> false
-    match langVersion with
-    | Some v when not (isVersion v) ->
-        failwithf "project %s: langversion %A is not a language version" id v
-    | _ -> ()
-    let belowFloor =
-        match langVersion |> Option.map (fun v -> v.Trim().Split('.')) with
-        | Some parts when parts.Length >= 1 && parts.Length <= 2 ->
-            match Int32.TryParse parts.[0] with
-            | true, major -> major < 8
-            | _ -> false
+        failwithf "%s: FCS does not reference a project named FSharp.Core from source" where
+    let target = single "--target"
+    if not (List.contains target [ "library"; "exe"; "winexe"; "module" ]) then
+        failwithf "%s: --target:%s is not library, exe, winexe or module" where target
+    let langVersion = single "--langversion"
+    let isVersion =
+        match langVersion.Split('.') with
+        | [| major |]
+        | [| major; _ |] when major <> "" && major |> Seq.forall Char.IsAsciiDigit ->
+            let minorOk =
+                match langVersion.Split('.') with
+                | [| _; minor |] -> minor <> "" && minor |> Seq.forall Char.IsAsciiDigit
+                | _ -> true
+            minorOk && Int32.Parse major >= 8
         | _ -> false
-    if belowFloor then
-        failwithf "project %s: langversion %A is below the F# 8 the graph oracle can check at" id langVersion
+    if not isVersion then
+        failwithf "%s: --langversion:%s is not a version number of F# 8 or later" where langVersion
+    let passed =
+        switches
+        |> List.choose (fun line ->
+            match switchName line with
+            | "-o" | "--out" -> Some("-o:" + outputPath)
+            | "--target" | "--langversion" -> Some line
+            | "--refout" | "--refonly" -> None
+            | "-r" | "--reference" ->
+                let path = line.Substring(line.IndexOf ':' + 1)
+                if not (Path.IsPathFullyQualified path) then
+                    failwithf "%s: reference %s is not absolute" where path
+                Some line
+            | name when passedSwitches.Contains name -> Some line
+            | name -> failwithf "%s: switch %s is outside the ones the oracle passes on" where name)
+    let references =
+        switches
+        |> List.choose (fun line ->
+            match switchName line with
+            | "-r" | "--reference" -> Some(line.Substring(line.IndexOf ':' + 1))
+            | _ -> None)
+    let projectRefs =
+        match fields.TryGetValue "projectRefs" with
+        | true, v ->
+            strictArray (where + " projectRefs") v
+            |> List.map (fun r ->
+                let rf = strictObject (where + " projectRef") [ "project"; "reference" ] r
+                let project = strictString (where + " projectRef project") (required where "project" rf)
+                let reference = strictString (where + " projectRef reference") (required where "reference" rf)
+                match references |> List.filter ((=) reference) with
+                | [ _ ] -> reference, project
+                | _ ->
+                    failwithf "%s: project reference %s names no single -r: argument %s" where project reference)
+        | _ -> []
+    projectRefs
+    |> List.countBy fst
+    |> List.tryFind (fun (_, n) -> n > 1)
+    |> Option.iter (fun (r, _) -> failwithf "%s: reference %s is two projects" where r)
     { Id = id
-      AssemblyName = assemblyName
       ProjectFile = projectFile
-      Paths = paths
-      References = references
-      ExclusiveRefs =
-        (match e.TryGetProperty("exclusiveRefs") with
-         | true, v when v.ValueKind = JsonValueKind.True -> true
-         | true, v when v.ValueKind = JsonValueKind.False -> false
-         | true, _ -> failwith "exclusiveRefs: expected a boolean"
-         | _ -> false)
-      DefineArgs = strArray "defines" |> Array.map (fun d -> "--define:" + d.Trim())
-      LangVersionArgs = pinnedLangVersionArgs langVersion
-      // Required, never defaulted: without `--target:` FCS checks a project
-      // as an executable, which accepts what a library's build rejects
-      // (FS0222, top-level code in a library's last file).
-      Target =
-        match str "target" with
-        | Some ("library" | "exe" | "winexe" | "module" as t) -> t
-        | other -> failwithf "project %s: target must be library, exe, winexe or module, got %A" id other }
+      AssemblyName = assemblyName
+      OutputPath = outputPath
+      Target = target
+      Sources = List.toArray sources
+      Switches = List.toArray passed
+      ProjectRefs = List.toArray projectRefs }
 
-/// The output path a graph project is named by: its `-o:`, and the string its
-/// dependants' `-r:` and `FSharpReference` carry. It is never written, and
-/// nothing reads it: FCS resolves a `-r:` that names a project reference
-/// without touching the disk (`TcConfig.TryResolveLibWithDirectories`), so
-/// the directory need not exist. It is per project id, beside the project
-/// file, so two projects of one request never share it.
-let private graphOutputPath (p: GraphProject) : string =
-    let dir = Option.ofObj (Path.GetDirectoryName p.ProjectFile) |> Option.defaultValue "."
-    Path.Combine(dir, "fcs-dump-graph-out", p.Id, p.AssemblyName + ".dll")
-
-/// A graph request's projects by id, and the one to check. Refuses a
-/// duplicate id or assembly name, and a `check` naming no project.
-let private readGraphRequest (root: JsonElement) =
+/// Parse a whole graph request into the [`ValidGraph`] the checking code
+/// receives: [`parseGraphProject`] for each project, then the graph, checked
+/// once: ids, project files and assembly names unique, each project reference
+/// naming a project of the request that is not a `module` (fsc refuses a
+/// netmodule as an assembly reference, FS0192), no cycle, and `check` one of
+/// the projects.
+let private parseGraphRequest (root: JsonElement) : ValidGraph =
+    let fields = strictObject "request" [ "projects"; "check" ] root
     let projects =
-        match root.TryGetProperty("projects") with
-        | true, arr when arr.ValueKind = JsonValueKind.Array ->
-            arr.EnumerateArray() |> Seq.map readGraphProject |> Seq.toArray
-        | _ -> failwith "no projects in request"
-    let byId = System.Collections.Generic.Dictionary<string, GraphProject>()
+        strictArray "projects" (required "request" "projects" fields) |> List.map parseGraphProject
+    let check = strictString "check" (required "request" "check" fields)
+    let unique (what: string) (key: GraphProject -> string) =
+        projects
+        |> List.countBy key
+        |> List.tryFind (fun (_, n) -> n > 1)
+        |> Option.iter (fun (k, _) -> failwithf "two projects have the %s %s" what k)
+    unique "id" (fun p -> p.Id)
+    unique "project file" (fun p -> p.ProjectFile)
+    unique "assembly name" (fun p -> p.AssemblyName.ToLowerInvariant())
+    let byId = projects |> List.map (fun p -> p.Id, p) |> Map.ofList
     for p in projects do
-        if not (byId.TryAdd(p.Id, p)) then
-            failwithf "duplicate project id %s" p.Id
-    projects
-    |> Array.countBy (fun p -> p.AssemblyName.ToLowerInvariant())
-    |> Array.tryFind (fun (_, n) -> n > 1)
-    |> Option.iter (fun (name, _) -> failwithf "two projects are named %s" name)
-    projects
-    |> Array.countBy (fun p -> p.ProjectFile)
-    |> Array.tryFind (fun (_, n) -> n > 1)
-    |> Option.iter (fun (file, _) -> failwithf "two projects have the project file %s" file)
-    let checkId =
-        match root.TryGetProperty("check") with
-        | true, v when v.ValueKind = JsonValueKind.String -> Option.ofObj (v.GetString())
-        | _ -> None
-    // The whole reference relation, not only `check`'s closure: a request
-    // describes one graph, and a malformed one is refused whatever is checked.
-    for p in projects do
-        for r in p.References do
-            match r with
-            | Project id ->
-                match byId.TryGetValue id with
-                | true, q when q.Target = "module" ->
-                    failwithf "project %s references %s, a module, which is no assembly" p.Id id
-                | true, _ -> ()
-                | _ -> failwithf "project %s references unknown project %s" p.Id id
-            | Dll _ -> ()
+        for _, id in p.ProjectRefs do
+            match Map.tryFind id byId with
+            | None -> failwithf "project %s references unknown project %s" p.Id id
+            | Some q when q.Target = "module" ->
+                failwithf "project %s references %s, a module, which is no assembly" p.Id id
+            | Some _ -> ()
+    // Depth first over the whole relation: a cycle anywhere is refused,
+    // whatever is checked.
     let finished = System.Collections.Generic.HashSet<string>()
     let rec visit (onPath: Set<string>) (p: GraphProject) =
         if onPath.Contains p.Id then
             failwithf "project reference cycle through %s" p.Id
         if finished.Add p.Id then
-            for r in p.References do
-                match r with
-                | Project id -> visit (onPath.Add p.Id) byId.[id]
-                | Dll _ -> ()
+            for _, id in p.ProjectRefs do
+                visit (onPath.Add p.Id) byId.[id]
     for p in projects do
         visit Set.empty p
-    match checkId with
-    | Some id when byId.ContainsKey id -> byId, byId.[id]
-    | other -> failwithf "check names no project of the request: %A" other
-
-/// `p`'s options in the graph, given its project references' (`referenced`:
-/// each one's output path and options): [`projectOptionsOf`]'s with every
-/// reference's `-r:` in `p`'s order (a project's naming its output path),
-/// plus `-o:`, `--target:` and an `FSharpReference` per project reference.
-let private graphProjectOptions
-    (checker: FSharpChecker)
-    (stamp: int64)
-    (p: GraphProject)
-    (outputOf: string -> string)
-    (referenced: (string * FSharpProjectOptions)[])
-    : FSharpProjectOptions =
-    let refArgs =
-        p.References
-        |> Array.map (function
-            | Dll path -> "-r:" + path
-            | Project id -> "-r:" + outputOf id)
-    let baseOpts =
-        projectOptionsOf checker p.Paths refArgs p.ExclusiveRefs p.DefineArgs p.LangVersionArgs
-    let isOutput (o: string) =
-        o.StartsWith "-o:" || o.StartsWith "--out:" || o.StartsWith "/out:"
-        || o.StartsWith "--target:" || o.StartsWith "/target:" || o = "-a"
-    { baseOpts with
-        ProjectFileName = p.ProjectFile
-        Stamp = Some stamp
-        OtherOptions =
-            Array.concat
-                [ baseOpts.OtherOptions |> Array.filter (isOutput >> not)
-                  [| "-o:" + graphOutputPath p; "--target:" + p.Target |] ]
-        ReferencedProjects =
-            referenced
-            |> Array.map (fun (out, opts) -> FSharpReferencedProject.FSharpReference(out, opts)) }
-
-/// Options for `check` and every project it reaches, built depth first:
-/// each project's options by id, and the projects in dependency order.
-let private graphOptions
-    (checker: FSharpChecker)
-    (byId: System.Collections.Generic.Dictionary<string, GraphProject>)
-    (check: GraphProject)
-    (stamp: int64)
-    =
-    let built = System.Collections.Generic.Dictionary<string, FSharpProjectOptions>()
+    let checkedProject =
+        match Map.tryFind check byId with
+        | Some p -> p
+        | None -> failwithf "check names no project of the request: %s" check
+    // `check` and what it reaches, each after what it references.
     let order = ResizeArray<GraphProject>()
-    let inProgress = System.Collections.Generic.HashSet<string>()
-    let rec optionsOf (p: GraphProject) : FSharpProjectOptions =
-        match built.TryGetValue p.Id with
-        | true, opts -> opts
-        | _ ->
-            if not (inProgress.Add p.Id) then
-                failwithf "project reference cycle through %s" p.Id
-            let lookup id =
-                match byId.TryGetValue id with
-                | true, r -> r
-                | _ -> failwithf "project %s references unknown project %s" p.Id id
-            let referenced =
-                p.References
-                |> Array.choose (function
-                    | Project id -> Some id
-                    | Dll _ -> None)
-                |> Array.distinct
-                |> Array.map (fun id ->
-                    let r = lookup id
-                    // fsc refuses a netmodule as an assembly reference
-                    // (FS0192), so an in-memory signature must not stand in
-                    // for one.
-                    if r.Target = "module" then
-                        failwithf "project %s references %s, a module, which is no assembly" p.Id id
-                    graphOutputPath r, optionsOf r)
-            let opts = graphProjectOptions checker stamp p (lookup >> graphOutputPath) referenced
-            inProgress.Remove p.Id |> ignore
-            built.[p.Id] <- opts
+    let placed = System.Collections.Generic.HashSet<string>()
+    let rec place (p: GraphProject) =
+        if placed.Add p.Id then
+            for _, id in p.ProjectRefs do
+                place byId.[id]
             order.Add p
-            opts
-    optionsOf check |> ignore
-    built, order
+    place checkedProject
+    { ById = byId; Order = List.ofSeq order; Check = checkedProject }
+
+/// FCS options for every project of `graph` that `Check` reaches, each with
+/// its project references as `FSharpReference`s, every record carrying
+/// `stamp` (see [`nextGraphStamp`]).
+let private graphOptions (graph: ValidGraph) (stamp: int64) =
+    let built = System.Collections.Generic.Dictionary<string, FSharpProjectOptions>()
+    for p in graph.Order do
+        built.[p.Id] <-
+            { ProjectFileName = p.ProjectFile
+              ProjectId = None
+              SourceFiles = p.Sources
+              OtherOptions = p.Switches
+              ReferencedProjects =
+                p.ProjectRefs
+                |> Array.map (fun (reference, id) -> FSharpReferencedProject.FSharpReference(reference, built.[id]))
+              IsIncompleteTypeCheckEnvironment = false
+              UseScriptResolutionRules = false
+              LoadTime = DateTime(2000, 1, 1)
+              UnresolvedReferences = None
+              OriginalLoadReferences = []
+              Stamp = Some stamp }
+    built
 
 /// FCS's own verdict on whether a dependant gets `opts`' project from source:
 /// `Ok true` when its assembly data is `ProjectAssemblyDataResult.Available`
@@ -6879,37 +6893,36 @@ let private nextGraphStamp =
 
 /// One `uses-project-graph-batch` request's response.
 let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
-    let byId, check = readGraphRequest root
-    let built, order = graphOptions checker byId check (nextGraphStamp ())
+    let graph = parseGraphRequest root
+    let built = graphOptions graph (nextGraphStamp ())
+    let referenced = graph.Order |> List.filter (fun p -> p.Id <> graph.Check.Id)
     let projectResults (opts: FSharpProjectOptions) =
         checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-uses-project-graph")
         |> Async.RunSynchronously
     // A reference FCS reads from disk is no reference from source: with no
     // DLL there the dependant is checked without it and the answer looks
     // clean. Refuse unless FCS itself says it reads each one from source.
-    for p in order do
-        if p.Id <> check.Id then
-            match assemblyDataAvailable checker built.[p.Id] (graphOutputPath p) with
-            | Ok true -> ()
-            | Ok false ->
-                failwithf
-                    "project %s: FCS reads it from its output DLL rather than from source (a type provider assembly, or one that creates generated provided types)"
-                    p.Id
-            | Error why -> failwithf "project %s: cannot tell whether FCS reads it from source: %s" p.Id why
+    for p in referenced do
+        match assemblyDataAvailable checker built.[p.Id] p.OutputPath with
+        | Ok true -> ()
+        | Ok false ->
+            failwithf
+                "project %s: FCS reads it from its output DLL rather than from source (a type provider assembly, or one that creates generated provided types)"
+                p.Id
+        | Error why -> failwithf "project %s: cannot tell whether FCS reads it from source: %s" p.Id why
     let referenced =
-        order
-        |> Seq.filter (fun p -> p.Id <> check.Id)
-        |> Seq.map (fun p ->
+        referenced
+        |> List.map (fun p ->
             {| Id = p.Id
                AssemblyName = p.AssemblyName
-               OutputPath = graphOutputPath p
+               OutputPath = p.OutputPath
                // A whole-project check finds what no file's check reports
                // (FS0240, a signature with no implementation).
                Diagnostics = (projectResults built.[p.Id]).Diagnostics |> Array.map projectDiagnostic |})
-        |> Seq.toArray
-    let files = checkProjectFiles checker built.[check.Id] check.Paths
+        |> List.toArray
+    let files = checkProjectFiles checker built.[graph.Check.Id] graph.Check.Sources
     {| Files = files
-       Diagnostics = (projectResults built.[check.Id]).Diagnostics |> Array.map projectDiagnostic
+       Diagnostics = (projectResults built.[graph.Check.Id]).Diagnostics |> Array.map projectDiagnostic
        Referenced = referenced |}
 
 /// `uses-project-graph-batch`: check one project of a project *graph*, each of
@@ -6921,38 +6934,32 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
 /// One JSON request per stdin line:
 ///
 /// ```text
-/// { "projects": [ { "id", "assemblyName", "target": library|exe|winexe|module,
-///                   "projectFile": <abs .fsproj>, "paths": [<abs .fs/.fsi>…],
-///                   "references": [ {"dll": <abs .dll>} | {"project": <id>} … ],
-///                   "defines": [<sym>…], "langversion": <token|null>,
-///                   "exclusiveRefs": <bool> } … ],
+/// { "projects": [ { "id", "projectFile": <abs .fsproj>,
+///                   "args": [<fsc response-file line>…],
+///                   "projectRefs": [ {"project": <id>, "reference": <a -r: argument>} … ] } … ],
 ///   "check": <id> }
 /// ```
 ///
-/// Each project is checked as [`usesProjectFiles`] checks one, with three
-/// additions: `-o:<graphOutputPath>`, which names its assembly
-/// `assemblyName` (FCS otherwise names it after its last source file, and no
-/// `InternalsVisibleTo` would ever match); `--target:`, so a library is
-/// checked as one; and, per `project` entry of `references`, an
-/// `FSharpReference` carrying that project's output path, whose `-r:` takes
-/// the entry's place among the `dll` entries' (FCS resolves a name two
-/// references declare by their order). A project referencing a `module`
-/// target is refused, as fsc refuses a netmodule reference, and so is a pin
-/// below F# 8, which this oracle cannot check at, and any reference FCS
-/// itself would read from its DLL rather than from source
-/// ([`assemblyDataAvailable`]). Every options record of a request carries a
-/// stamp of its own, so no request reuses another's checked signature. A
-/// project's options are built once per request, so a project several others
-/// reference is one referenced project.
+/// `args` is the project's own fsc argument list, what its build hands fsc
+/// (a design-time build's response file), and FCS is handed it as it stands
+/// but for the mappings [`parseGraphProject`] states. Re-deriving nothing
+/// keeps every compiler input the build's: references in the build's order,
+/// its FSharp.Core, defines, language version, target and output name. Each
+/// `projectRefs` entry registers one `-r:` argument as a project of the
+/// request, which FCS is then handed from source, in that argument's place.
+/// [`parseGraphRequest`] refuses anything outside the domain whose meaning
+/// is the build's; a reference FCS itself would read from its DLL rather
+/// than from source is refused too ([`assemblyDataAvailable`]); and every
+/// options record carries a stamp of its own, so no request reuses another's
+/// checked signature.
 ///
 /// The response is the `uses-project` payload for `check`'s files, plus
 /// `Diagnostics`, `check`'s whole-project diagnostics (which include what no
 /// file's check reports, such as a signature with no implementation), and
-/// `Referenced`: every project `check` reaches through `projectRefs`, in
-/// dependency order, with its output path and its whole-project diagnostics
-/// (FCS exports a recovered signature for a project with errors, so a caller
-/// grading against it needs to know). A malformed request, an unknown or
-/// cyclic reference, or a duplicate id or assembly name is a `BatchError`.
+/// `Referenced`: every project `check` reaches, in dependency order, with
+/// its `-o:` path and its whole-project diagnostics (FCS exports a recovered
+/// signature for a project with errors, so a caller grading against it needs
+/// to know). Anything refused is a `BatchError`.
 let private usesProjectGraphBatchCore () =
     let checker = FSharpChecker.Create()
     let compact = buildOptionsCompact ()
@@ -9054,7 +9061,7 @@ let private usage () =
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
     eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files} response/line"
-    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,assemblyName,target,projectFile,paths,references:[{dll}|{project}],defines,langversion,exclusiveRefs}],check}, F# project refs as FSharpReference; one compact {Files,Diagnostics,Referenced} response/line"
+    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,projectFile,args:[fsc response-file line],projectRefs:[{project,reference}]}],check}, F# project refs as FSharpReference; one compact {Files,Diagnostics,Referenced} response/line"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
     eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files} response/line"
     2

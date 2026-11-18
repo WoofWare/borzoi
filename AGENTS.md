@@ -332,9 +332,10 @@ This is a Cargo workspace with ten members:
   oracle (`uses-project-graph-batch`, below), and `ProjectGraphFixture`, the
   multi-project fixture layout every graph differential shares — one
   directory per project with its sources and a buildable `.fsproj` whose SDK
-  `AssemblyInfo.fs`/`AssemblyAttributes.fs` generation is off, so a project
-  built fresh (`build_fixtures`, one `dotnet build` of a solution of them all)
-  and the same project referenced from source declare the same entities.
+  `AssemblyInfo.fs`/`AssemblyAttributes.fs` generation is off, its fsc
+  arguments read off a design-time build (`ProjectGraphFixture::fsc_args`),
+  built fresh by `build_fixtures` (one `dotnet build` of a solution of them
+  all).
 - `crates/print/` — `borzoi-print`. An owned F# syntax tree a program builds
   (`tree`, with validated names in `names`), and a *reference* printer that
   writes it as source: every expression, pattern and type parenthesised, every
@@ -514,25 +515,34 @@ This is a Cargo workspace with ten members:
   `<ProjectReference>` passed from source as an
   `FSharpReferencedProject.FSharpReference`, which is how an IDE references
   an F# project and the semantics borzoi resolves project references
-  against. A project-reference `-r:` names no file, so nothing is built; every
-  project's assembly name is pinned with `-o:`, because FCS otherwise names
-  it after its last source file and no `InternalsVisibleTo` would match, and
-  its output kind with `--target:`, because FCS otherwise checks a library as
-  an executable and accepts what its build rejects. Each project must be
-  handed the references its build compiles against, transitive ones
-  included (FCS does not infer them from a referenced project's own), as one
-  ordered list of DLLs and projects: FCS resolves a name two references
-  declare by their order, so a project from source keeps its DLL's place.
-  Fixture builds pin the oracle's language version and FSharp.Core. The
+  against. A request carries each project's **own fsc arguments**, read off
+  a design-time build (`borzoi_oracle_harness::msbuild_oracle`'s `fscArgs`),
+  and FCS is handed them as they stand: references in the build's order,
+  its FSharp.Core and framework, defines, language version, target and
+  `-o:` name, re-deriving none of it. A request registers which `-r:`
+  arguments are projects of the request, and FCS gets those from source in
+  their place; a project-reference `-r:` names no file, so nothing is built.
+  `fcs-dump` parses the request once, strictly, into the only value its
+  checking code reads: an unknown, repeated or mistyped field, a relative
+  path, an argument outside the domain it reads as fsc does (an MSBuild
+  spelling, a switch off its allow-list, a language version that is not a
+  number of F# 8 or later), and a malformed graph are each refused. It also
+  refuses a reference FCS itself would read from its DLL rather than from
+  source (a type provider assembly, a project that creates generated
+  provided types), reading FCS's own decision, and gives each request fresh
+  stamps, so no request is answered from another's checked signature. The
   oracle is held to itself in `tests/project_resolution/source_references.rs`:
   on generated graphs (every declaration kind a library exports, `.fsi`
   hiding, `internal` with and without `InternalsVisibleTo`, assembly-level
   `AutoOpen`, names colliding with FSharp.Core and the BCL, a library reached
   through a middle project), the consumer's records and diagnostics with the
   library from source must equal those with the library built fresh and
-  referenced as a DLL, and a friend's use of an internal must bind only under
-  its pinned name. Later stages' source-surface-equals-DLL oracles rest on
-  that equality.
+  referenced as the DLL its build compiles against, and a friend's use of an
+  internal must bind only under its `-o:` name.
+  `fixture_arguments_are_the_builds` holds the design-time arguments to a
+  real build's, and `the_graph_parser_refuses_everything_outside_its_domain`
+  holds the parser to its domain. Later stages' source-surface-equals-DLL
+  oracles rest on that equality.
   `BORZOI_SOURCE_REF_CASES` and `BORZOI_SOURCE_REF_SEED` widen the run.
 
 Workspace-level files (`tools/`, `docs/`, `flake.nix`) sit at
