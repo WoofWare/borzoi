@@ -288,8 +288,8 @@ fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Throws {
     /// It throws on no value of the properties the caller is not certain of
-    /// (in an item's condition, on none without an item or metadata
-    /// expression; see [`leaf_may_throw_on_some_value`]). A part of the
+    /// (in an item's condition, on none whose substitution forms no item or
+    /// metadata expression; see [`leaf_may_throw_on_some_value`]). A part of the
     /// condition outside the grammar we model, reached on certain values,
     /// claims nothing either way, as for [`Outcome::Unsupported`]
     /// ([`Judgement::unevaluated`]).
@@ -455,10 +455,11 @@ fn judge_chain(
 /// `HasTrailingSlash` (on more than one item), a version function (on a value
 /// that is no version), and any operand that calls a property function, which
 /// may throw on its receiver or arguments. A string comparison of plain
-/// references, and `Exists` of them, throw on no value without an item or
-/// metadata expression (`@(`, `%(`); in an item's condition MSBuild expands
-/// one a property's value holds, and may throw on it, so there the claim
-/// holds only of values without one.
+/// references, and `Exists` of them, throw on no value whose substitution
+/// forms no item or metadata expression (`@(`, `%(`). In an item's condition
+/// MSBuild expands one the substituted text forms, from one value or across
+/// adjacent references (`$(U)$(V)` with `@` and `(I)x`), and may throw on it,
+/// so there the claim holds only of values that form none.
 fn leaf_may_throw_on_some_value(expr: &BoolExpr) -> bool {
     let scalar = |scalar: &ScalarExpr| match scalar {
         ScalarExpr::Bare(_) => false,
@@ -489,9 +490,11 @@ fn plain_references_only(raw: &str) -> bool {
     let mut rest = raw;
     while let Some(at) = rest.find("$(") {
         let after = &rest[at + 2..];
-        let name_len = after.bytes().take_while(|&b| is_ident_continue(b)).count();
-        let starts_well = after.bytes().next().is_some_and(is_ident_start);
-        if !starts_well || after.as_bytes().get(name_len) != Some(&b')') {
+        let name_len = after
+            .bytes()
+            .take_while(|&b| super::properties::is_name_byte(b))
+            .count();
+        if name_len == 0 || after.as_bytes().get(name_len) != Some(&b')') {
             return false;
         }
         rest = &after[name_len + 1..];
@@ -1794,6 +1797,13 @@ fn compare_version_and_number(version: &[i64; 4], number: f64) -> std::cmp::Orde
 /// ordinal case-insensitive string equality. Unlike the relational operators,
 /// equality never compares versions: `'01.0.0' == '1.0.0'` is false.
 fn compare_equality_values(lhs: &str, rhs: &str) -> Result<bool, ()> {
+    // MSBuild reads a NaN spelling as a number (.NET's `double.TryParse`
+    // matches the symbol whatever the number style), and NaN equals nothing,
+    // itself included: `'NaN' == 'NaN'` is false (probed, msbuild-condition-
+    // oracle, SDK 10.0.401, with any case, a sign, and padding). Not modelled.
+    if is_nan_spelling(lhs) || is_nan_spelling(rhs) {
+        return Err(());
+    }
     if lhs == rhs {
         return Ok(true);
     }
@@ -1818,6 +1828,13 @@ fn compare_equality_values(lhs: &str, rhs: &str) -> Result<bool, ()> {
     } else {
         Err(())
     }
+}
+
+/// Whether .NET may parse `value` as NaN: the symbol `NaN` in any case, with
+/// a sign and whitespace about it. Generous, so that it never misses one.
+fn is_nan_spelling(value: &str) -> bool {
+    let unsigned = value.trim().trim_start_matches(['+', '-']).trim();
+    unsigned.eq_ignore_ascii_case("nan")
 }
 
 /// A numeric condition operand, mirroring

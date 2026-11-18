@@ -1725,6 +1725,8 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         "'a' == 'b'",
         "false and 1 &lt; abc",
         UNDECIDED_TRUE,
+        // NaN equals nothing, so MSBuild stops before the illegal operand.
+        "'NaN' == 'NaN' And 1 &lt; abc And '$(Shaky)' == ''",
     ];
     // MSBuild evaluates a condition left to right and stops at the operand
     // that decides it. The first throws on a certain operand before one the

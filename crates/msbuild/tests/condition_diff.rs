@@ -22,7 +22,7 @@
 
 mod common;
 
-use borzoi_msbuild::test_support::{Outcome, PropertyMap, Throws, evaluate, judge};
+use borzoi_msbuild::test_support::{PropertyMap, Throws, judge};
 use common::case_axis::{CaseContext, gen_case_comparison, respell_case, respell_keys};
 use common::{
     Oracle, SplitMix64, Verdict, breaks_inside_quote, check_certain_implies_exact, gen_bool_expr,
@@ -1176,7 +1176,6 @@ fn judge_sweep(oracle: &mut Oracle, rng: &mut SplitMix64, cases: usize) -> Judge
                 let mut props = certain.clone();
                 props.extend(u.map(|u| ("U".to_string(), u.to_string())));
                 props.extend(v.map(|v| ("V".to_string(), v.to_string())));
-                let ours = evaluate(&condition, &property_map(&props)).outcome;
                 match oracle.eval(&condition, &props) {
                     Some(value) => {
                         held_value = true;
@@ -1192,7 +1191,9 @@ fn judge_sweep(oracle: &mut Oracle, rng: &mut SplitMix64, cases: usize) -> Judge
                     }
                     None => {
                         threw = true;
-                        if ours != Outcome::Unsupported {
+                        // A part we cannot evaluate on certain values claims
+                        // nothing; every other verdict is a claim.
+                        if !judged.unevaluated {
                             assert_ne!(
                                 judged.throws,
                                 Throws::Never,
@@ -1238,6 +1239,41 @@ fn judge_sweep_soak() {
     let mut rng = SplitMix64(seed);
     let census = judge_sweep(&mut oracle, &mut rng, cases);
     eprintln!("judge soak: {census:?}");
+}
+
+/// MSBuild reads a NaN spelling as a number, and NaN equals nothing, itself
+/// included; it orders against nothing either, without throwing. Each
+/// spelling, beside itself, another NaN, a number and a word, held to
+/// certain-implies-exact.
+#[test]
+fn nan_operands_are_never_committed_wrongly() {
+    let mut oracle = Oracle::spawn();
+    for spelling in [
+        "NaN",
+        "nan",
+        "NAN",
+        "-NaN",
+        "+NaN",
+        " NaN",
+        "NaN ",
+        "\u{a0}NaN",
+    ] {
+        for other in [spelling, "NaN", "1", "abc", ""] {
+            for op in ["==", "!=", "<", ">="] {
+                let condition = format!("'{spelling}' {op} '{other}'");
+                check_certain_implies_exact(&mut oracle, &condition, &[]);
+            }
+        }
+    }
+    // A throw past a NaN comparison is reached only if that comparison is
+    // true, which MSBuild never makes it.
+    let uncertain = |name: &str| name == "U";
+    let judged = judge(
+        "'NaN' == 'NaN' And 1 < abc And '$(U)' == ''",
+        &PropertyMap::new(),
+        &uncertain,
+    );
+    assert_ne!(judged.throws, Throws::Certainly, "{judged:?}");
 }
 
 // ---------------------------------------------------------------------------
