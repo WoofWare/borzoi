@@ -287,10 +287,12 @@ fn parse_modelled(source: &str) -> Result<Option<BoolExpr>, ()> {
 /// Whether MSBuild may throw evaluating a condition ([`Judgement::throws`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Throws {
-    /// It throws on no value of the properties the caller is not certain of.
-    /// A part of the condition outside the grammar we model, reached on
-    /// certain values, claims nothing either way, as for
-    /// [`Outcome::Unsupported`].
+    /// It throws on no value of the properties the caller is not certain of
+    /// (in an item's condition, on none without an item or metadata
+    /// expression; see [`leaf_may_throw_on_some_value`]). A part of the
+    /// condition outside the grammar we model, reached on certain values,
+    /// claims nothing either way, as for [`Outcome::Unsupported`]
+    /// ([`Judgement::unevaluated`]).
     Never,
     /// It throws on some value of those properties, and perhaps not on others.
     Maybe,
@@ -307,11 +309,19 @@ pub struct Judgement {
     pub value: Option<bool>,
     /// Whether MSBuild may throw evaluating it.
     pub throws: Throws,
+    /// Whether an operand MSBuild may reach, on certain values, is one we
+    /// cannot evaluate: outside the grammar we model, or one MSBuild throws
+    /// on. A value beside it holds only where that operand returns.
+    pub unevaluated: bool,
 }
 
 impl Judgement {
-    const fn of(value: Option<bool>, throws: Throws) -> Self {
-        Judgement { value, throws }
+    const fn of(value: Option<bool>, throws: Throws, unevaluated: bool) -> Self {
+        Judgement {
+            value,
+            throws,
+            unevaluated,
+        }
     }
 }
 
@@ -342,9 +352,9 @@ pub fn judge(
 ) -> Judgement {
     match parse_condition(source) {
         Ok(Some(expr)) => judge_expr(&expr, props, fs, uncertain),
-        Ok(None) => Judgement::of(Some(true), Throws::Never),
-        Err(Reject::Illegal) => Judgement::of(None, Throws::Certainly),
-        Err(Reject::Unmodelled) => Judgement::of(None, Throws::Never),
+        Ok(None) => Judgement::of(Some(true), Throws::Never, false),
+        Err(Reject::Illegal) => Judgement::of(None, Throws::Certainly, true),
+        Err(Reject::Unmodelled) => Judgement::of(None, Throws::Never, true),
     }
 }
 
@@ -358,7 +368,10 @@ fn judge_expr(
     match expr {
         BoolExpr::Not(inner) => {
             let judged = judge_expr(inner, props, fs, uncertain);
-            Judgement::of(judged.value.map(|value| !value), judged.throws)
+            Judgement {
+                value: judged.value.map(|value| !value),
+                ..judged
+            }
         }
         BoolExpr::And(operands) => judge_chain(operands, false, props, fs, uncertain),
         BoolExpr::Or(operands) => judge_chain(operands, true, props, fs, uncertain),
@@ -377,15 +390,15 @@ fn judge_expr(
                 } else {
                     Throws::Never
                 };
-                return Judgement::of(None, throws);
+                return Judgement::of(None, throws, false);
             }
             // The undefined names are the caller's to report from its own
             // `evaluate`; this evaluation only judges.
             let mut undefined = Vec::new();
             match eval_bool(expr, props, fs, &mut undefined) {
-                Ok(value) => Judgement::of(Some(value), Throws::Never),
-                Err(Reject::Illegal) => Judgement::of(None, Throws::Certainly),
-                Err(Reject::Unmodelled) => Judgement::of(None, Throws::Never),
+                Ok(value) => Judgement::of(Some(value), Throws::Never, false),
+                Err(Reject::Illegal) => Judgement::of(None, Throws::Certainly, true),
+                Err(Reject::Unmodelled) => Judgement::of(None, Throws::Never, true),
             }
         }
     }
@@ -396,7 +409,10 @@ fn judge_expr(
 /// unknown value may stop the chain, so every later one is reached only
 /// perhaps; one that may throw does not make a later one less certain, since a
 /// throw at either rejects the project. An operand holding the absorbing value
-/// ends the chain.
+/// ends the chain, and so does one that throws whatever the uncertain values
+/// hold: past an operand of unknown value, the chain then either stopped with
+/// the absorbing value or throws. No operand after the one that ends it is
+/// judged, so none is evaluated (an `Exists` probes the file system).
 fn judge_chain(
     operands: &[BoolExpr],
     absorbing: bool,
@@ -407,19 +423,22 @@ fn judge_chain(
     let mut throws = Throws::Never;
     let mut reached_for_certain = true;
     let mut unknown = false;
+    let mut unevaluated = false;
     for operand in operands {
         let judged = judge_expr(operand, props, fs, uncertain);
-        let reached = if reached_for_certain {
-            judged.throws
-        } else {
-            judged.throws.min(Throws::Maybe)
-        };
-        throws = throws.max(reached);
-        if throws == Throws::Certainly {
-            return Judgement::of(None, Throws::Certainly);
+        unevaluated |= judged.unevaluated;
+        if judged.throws == Throws::Certainly {
+            return if reached_for_certain {
+                Judgement::of(None, Throws::Certainly, unevaluated)
+            } else {
+                Judgement::of(Some(absorbing), Throws::Maybe, unevaluated)
+            };
         }
+        throws = throws.max(judged.throws);
         match judged.value {
-            Some(value) if value == absorbing => return Judgement::of(Some(absorbing), throws),
+            Some(value) if value == absorbing => {
+                return Judgement::of(Some(absorbing), throws, unevaluated);
+            }
             Some(_) => {}
             None => {
                 unknown = true;
@@ -427,7 +446,7 @@ fn judge_chain(
             }
         }
     }
-    Judgement::of((!unknown).then_some(!absorbing), throws)
+    Judgement::of((!unknown).then_some(!absorbing), throws, unevaluated)
 }
 
 /// Whether the leaf `expr` may throw on some value of a property it mentions:
@@ -436,7 +455,10 @@ fn judge_chain(
 /// `HasTrailingSlash` (on more than one item), a version function (on a value
 /// that is no version), and any operand that calls a property function, which
 /// may throw on its receiver or arguments. A string comparison of plain
-/// references, and `Exists` of them, throw on no value.
+/// references, and `Exists` of them, throw on no value without an item or
+/// metadata expression (`@(`, `%(`); in an item's condition MSBuild expands
+/// one a property's value holds, and may throw on it, so there the claim
+/// holds only of values without one.
 fn leaf_may_throw_on_some_value(expr: &BoolExpr) -> bool {
     let scalar = |scalar: &ScalarExpr| match scalar {
         ScalarExpr::Bare(_) => false,
@@ -485,18 +507,21 @@ pub enum Decision {
     /// makes MSBuild reject the condition (a project error, after which the
     /// real evaluation has no value to disagree with).
     Decided(bool),
-    /// Some value of an untrusted property may change the outcome, or the
-    /// outcome rests on a part of the condition we do not model.
+    /// Some value of an untrusted property may change the outcome.
     Depends,
-    /// The condition is outside the grammar (see [`Outcome::Unsupported`]).
+    /// The condition is outside the grammar, or a part of it the untrusted
+    /// properties do not reach is (see [`Outcome::Unsupported`]).
     Unsupported,
 }
 
 /// Decide a condition without trusting the properties `untrusted` names: the
-/// value of [`judge`], which holds wherever MSBuild does not throw. A throw is
-/// a project error, after which the real evaluation has no value to disagree
-/// with, so a committed value need not ask whether one is possible; the
-/// rejection judgement does ([`Judgement::throws`]).
+/// value of [`judge`], which holds wherever MSBuild does not throw. A throw on
+/// an untrusted value is a project error, after which the real evaluation has
+/// no value to disagree with, so a committed value need not ask whether one is
+/// possible; the rejection judgement does ([`Judgement::throws`]). An operand
+/// on trusted values we cannot evaluate, which MSBuild may reach, decides
+/// nothing ([`Judgement::unevaluated`]): what it does, MSBuild may do instead
+/// of returning the value.
 pub fn decide_without(
     source: &str,
     props: &PropertyMap,
@@ -508,9 +533,14 @@ pub fn decide_without(
         Ok(None) => return Decision::Decided(true),
         Err(_) => return Decision::Unsupported,
     };
-    match judge_expr(&expr, props, fs, untrusted).value {
-        Some(value) => Decision::Decided(value),
-        None => Decision::Depends,
+    match judge_expr(&expr, props, fs, untrusted) {
+        Judgement {
+            unevaluated: true, ..
+        } => Decision::Unsupported,
+        Judgement {
+            value: Some(value), ..
+        } => Decision::Decided(value),
+        Judgement { value: None, .. } => Decision::Depends,
     }
 }
 
@@ -538,7 +568,8 @@ pub fn decided_conjunctwise(
             BoolExpr::And(operands) => pending.extend(operands),
             BoolExpr::Exists(arg) if fs.is_some() && is_the_exists(arg) => {}
             other => {
-                if judge_expr(other, props, fs, untrusted).value.is_none() {
+                let judged = judge_expr(other, props, fs, untrusted);
+                if judged.value.is_none() || judged.unevaluated {
                     return false;
                 }
             }
@@ -1982,6 +2013,51 @@ mod tests {
                 Throws::Certainly
             );
         }
+    }
+
+    /// An operand on trusted values we cannot evaluate, which MSBuild reaches
+    /// before the one that would decide the condition, decides nothing: it may
+    /// throw (`'abc'.Substring(5)`, MSB4184) where the condition would be false.
+    #[test]
+    fn an_unevaluated_operand_before_the_deciding_one_decides_nothing() {
+        let mut props = PropertyMap::new();
+        props.insert("P", "abc");
+        let never = |_: &str| false;
+        assert_eq!(
+            decide_without("'$(P.Substring(5))' == '' And false", &props, None, &never),
+            Decision::Unsupported
+        );
+        assert!(!decided_conjunctwise(
+            "$([System.String]::IsNullOrWhiteSpace('')) Or true",
+            &props,
+            None,
+            &never,
+            &|_| false
+        ));
+        // Reached after the deciding operand, it is never evaluated.
+        assert_eq!(
+            decide_without("false And '$(P.Substring(5))' == ''", &props, None, &never),
+            Decision::Decided(false)
+        );
+    }
+
+    /// An operand that throws whatever the uncertain values hold ends the
+    /// chain: past one of unknown value, the chain stopped with the absorbing
+    /// value or throws, and nothing after it is reached.
+    #[test]
+    fn a_certain_throw_past_an_unknown_operand_ends_the_chain() {
+        let uncertain = |name: &str| name.eq_ignore_ascii_case("U");
+        let judged = judge(
+            "'$(U)' == 'x' And 1 < abc And Exists('tail')",
+            &PropertyMap::new(),
+            None,
+            &uncertain,
+        );
+        assert_eq!(judged.value, Some(false));
+        assert_eq!(judged.throws, Throws::Maybe);
+        // The throwing operand is one we cannot evaluate to a boolean, so the
+        // value holds only where it is not reached, and decides nothing.
+        assert!(judged.unevaluated);
     }
 
     #[test]
@@ -4164,10 +4240,7 @@ mod decide_without_props {
             }
         }
 
-        /// With nothing untrusted, deciding is evaluating, where evaluation
-        /// gives a boolean; where MSBuild throws, nothing is decided. (An
-        /// unmodelled operand evaluation stops at may yet be followed by
-        /// one that decides the condition whatever it holds.)
+        /// With nothing untrusted, deciding is evaluating.
         #[test]
         fn nothing_untrusted_is_plain_evaluation(
             source in condition(),
@@ -4178,17 +4251,12 @@ mod decide_without_props {
         ) {
             let props = map(&[("A", a), ("B", b), ("U", u), ("V", v)]);
             let decision = decide_without(&source, &props, None, &|_| false);
-            match evaluate(&source, &props).outcome {
-                Outcome::True => prop_assert_eq!(decision, Decision::Decided(true), "{}", source),
-                Outcome::False => {
-                    prop_assert_eq!(decision, Decision::Decided(false), "{}", source)
-                }
-                Outcome::Illegal => prop_assert!(
-                    !matches!(decision, Decision::Decided(_)),
-                    "{source}: {decision:?}"
-                ),
-                Outcome::Unsupported => {}
-            }
+            let expected = match evaluate(&source, &props).outcome {
+                Outcome::True => Decision::Decided(true),
+                Outcome::False => Decision::Decided(false),
+                Outcome::Illegal | Outcome::Unsupported => Decision::Unsupported,
+            };
+            prop_assert_eq!(decision, expected, "{}", source);
         }
     }
 
