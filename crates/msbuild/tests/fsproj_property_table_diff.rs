@@ -1757,18 +1757,26 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
     // `Shaky` (`1`, no boolean) and on MSBuild's.
     let reaches_uncertain = ["1 &lt; abc Or $(Maybe) == 'x'", "$(Shaky) Or true"];
     // Each of these reaches `Shaky` (`1`, then `abc` under a gate the walk
-    // cannot decide, so the walk holds a legal value it is not sure of) or
-    // `Maybe` where it throws on MSBuild's value, however a later operand
-    // decides. MSBuild rejects the project; the walk does not yet judge a
-    // condition legal on the values it holds (#1009), so it commits. Pinned
-    // where nothing else is in doubt, so that judging them shows here.
-    let not_yet_judged = [
+    // cannot decide, so the walk holds a legal value it is not sure of) where
+    // it throws on MSBuild's value, however a later operand decides. MSBuild
+    // rejects the project; the walk does not yet judge a condition legal on
+    // the values it holds (#1009), so it commits. Pinned where nothing else is
+    // in doubt, so that judging them shows here.
+    let legal_on_held_values = [
         "$(Shaky) &gt; 2 And false",
         "$(Shaky) &gt; 2 Or true",
         "false Or ($(Shaky) &gt; 2 And 'a' == 'b')",
         "!($(Shaky) &gt; 2) Or true",
-        "$(Maybe.Substring(5)) == ''",
     ];
+    // A property function MSBuild throws on, held (`Maybe` unset) and real
+    // (`abc`) alike, which the walk does not model: an operand it cannot
+    // evaluate claims nothing, so it commits. Pinned likewise.
+    let unmodelled_throwing_call = ["$(Maybe.Substring(5)) == ''"];
+    let not_yet_judged: Vec<&str> = legal_on_held_values
+        .iter()
+        .chain(&unmodelled_throwing_call)
+        .copied()
+        .collect();
     // ... and each of these stops before it, so MSBuild never reads it.
     let stops_before_uncertain = [
         "false And $(Shaky) &gt; 2",
@@ -1999,7 +2007,7 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
                         assert_eq!(
                             parsed.rejection,
                             None,
-                            "a condition legal on the values the walk holds is judged now: \
+                            "a condition the walk does not yet judge is judged now: \
                              update the pin (#1009)\n{}",
                             describe()
                         );

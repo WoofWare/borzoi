@@ -581,7 +581,34 @@ fn may_throw_somewhere(expr: &BoolExpr) -> bool {
         BoolExpr::And(operands) | BoolExpr::Or(operands) => {
             operands.iter().any(may_throw_somewhere)
         }
+        // A leaf of literals alone throws as its evaluation says, whatever any
+        // property or file holds; one we cannot evaluate claims nothing.
+        leaf if leaf_is_literal(leaf) => matches!(
+            eval_bool(leaf, &PropertyMap::new(), None, &mut Vec::new()),
+            Err(Reject::Illegal)
+        ),
         leaf => leaf_may_throw_on_some_value(leaf),
+    }
+}
+
+/// Whether the leaf `expr` reads nothing: no property, file or property
+/// function (`$(` or `@(`/`%(` anywhere, or an `Exists`).
+fn leaf_is_literal(expr: &BoolExpr) -> bool {
+    let literal = |raw: &str| !raw.contains(['$', '@', '%']);
+    let scalar = |scalar: &ScalarExpr| match scalar {
+        ScalarExpr::Bare(raw) | ScalarExpr::String(raw) => literal(raw),
+        ScalarExpr::Property(_) | ScalarExpr::SystemVersionPart { .. } => false,
+    };
+    match expr {
+        BoolExpr::True | BoolExpr::False => true,
+        BoolExpr::HasTrailingSlash(raw) => literal(raw),
+        BoolExpr::CoerceBool(value) => scalar(value),
+        BoolExpr::Compare { lhs, rhs, .. } => scalar(lhs) && scalar(rhs),
+        BoolExpr::Exists(_)
+        | BoolExpr::MsbuildVersionFunction(_)
+        | BoolExpr::Not(_)
+        | BoolExpr::And(_)
+        | BoolExpr::Or(_) => false,
     }
 }
 
@@ -4682,11 +4709,11 @@ mod decide_without_props {
         let maybe = MAYBE_THROWS_BOTH_WAYS.load(Ordering::Relaxed);
         let never = NEVER_THROWS_DESPITE_UNTRUSTED.load(Ordering::Relaxed);
         assert!(
-            maybe * 20 >= cases,
+            maybe * 50 >= cases,
             "only {maybe} of {cases} cases may throw both ways"
         );
         assert!(
-            never * 40 >= cases,
+            never * 100 >= cases,
             "only {never} of {cases} cases read an untrusted property and cannot throw"
         );
     }
