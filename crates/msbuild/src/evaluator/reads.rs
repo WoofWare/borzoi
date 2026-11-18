@@ -14,7 +14,7 @@
 //! with their taint. The probe changes nothing about the walk, so the
 //! [`crate::ParsedProject`] beside it is the one the unprobed walk returns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -45,6 +45,10 @@ pub struct ReadProbe {
 #[derive(Debug, Clone, Default)]
 pub struct EvaluationReads {
     pub properties: BTreeMap<String, PropertyRead>,
+    /// The values each probed property may hold in the real build at the end
+    /// of the walk, unescaped ([`super::candidates`]); `None` where it may
+    /// hold any.
+    pub candidates: BTreeMap<String, Option<BTreeSet<String>>>,
     pub items: BTreeMap<String, ItemRead>,
     pub targets: BTreeMap<String, TargetRead>,
     /// The run [`ReadProbe::execute`] asked for, if it asked.
@@ -124,6 +128,19 @@ impl State<'_> {
             .iter()
             .map(|name| (name.clone(), self.read_property(name)))
             .collect();
+        let candidates = probe
+            .properties
+            .iter()
+            .map(|name| {
+                let values = self.candidates_of(name).values().map(|values| {
+                    values
+                        .iter()
+                        .map(|candidate| candidate.value().unescape())
+                        .collect()
+                });
+                (name.clone(), values)
+            })
+            .collect();
         // MSBuild may reject the project, and then has no item, target or run
         // to compare with (`ParsedProject::rejection`).
         let rejected = self.rejection.is_some();
@@ -152,6 +169,7 @@ impl State<'_> {
         });
         EvaluationReads {
             properties,
+            candidates,
             items,
             targets,
             execution,

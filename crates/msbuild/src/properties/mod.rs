@@ -25,12 +25,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+pub(crate) mod candidates;
 pub(crate) mod escaping;
 mod expr;
 pub(crate) use expr::is_name_byte;
 pub(crate) mod path_fixup;
 pub(crate) mod trust;
 
+use candidates::{Candidate, Candidates};
 use escaping::Escaped;
 use trust::{ResolvedProvenance, Trust};
 
@@ -84,13 +86,17 @@ struct Entry {
     value: Option<Escaped>,
     trust: Trust,
     origin: Origin,
+    /// The values the real build may hold here, recorded by a write the walk
+    /// could not decide ([`candidates`]); `None` where none was recorded since
+    /// the name was last bound.
+    candidates: Option<Candidates>,
 }
 
 /// How MSBuild stored a value, which decides whether its backslashes have met
 /// the Unix path adjustment ([`path_fixup`]) yet: every expansion adjusts each
 /// piece it splices, but a value bound without one keeps its `\` until it is
 /// read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Origin {
     /// Bound as given: a reserved, toolset, environment or global name, the
     /// `MSBuildThisFile*` frame, a task's output. MSBuild stores the text
@@ -224,6 +230,7 @@ impl PropertyMap {
                 }
                 entry.value = Some(value);
                 entry.origin = origin;
+                entry.candidates = None;
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(Entry {
@@ -231,6 +238,7 @@ impl PropertyMap {
                     value: Some(value),
                     trust: Trust::CERTAIN,
                     origin,
+                    candidates: None,
                 });
             }
         }
@@ -271,6 +279,7 @@ impl PropertyMap {
                         value: None,
                         trust,
                         origin: Origin::Seed,
+                        candidates: None,
                     });
                 }
             }
@@ -288,6 +297,7 @@ impl PropertyMap {
                 slot.remove();
             } else {
                 slot.get_mut().value = None;
+                slot.get_mut().candidates = None;
             }
         }
     }
@@ -353,6 +363,47 @@ impl PropertyMap {
                 entry.trust.go_stale(cause);
             }
         }
+        // The content just passed may have written any name, bound or not, so
+        // no recorded candidates bound what it holds now.
+        for entry in self.inner.values_mut() {
+            entry.candidates = None;
+        }
+    }
+
+    /// The value bound to `key` as a candidate: its text and origin.
+    pub(crate) fn held_candidate(&self, key: &str) -> Option<Candidate> {
+        let entry = self.inner.get(&key.to_ascii_lowercase())?;
+        Some(Candidate::new(entry.value.as_ref()?, entry.origin))
+    }
+
+    /// The candidates a write the walk could not decide recorded for `key`
+    /// since it was last bound ([`Self::record_candidates`]).
+    pub(crate) fn recorded_candidates(&self, key: &str) -> Option<&Candidates> {
+        self.inner
+            .get(&key.to_ascii_lowercase())?
+            .candidates
+            .as_ref()
+    }
+
+    /// Record the values the real build may hold for `key` now, on the entry
+    /// the write that leaves it in doubt made or kept. A name with no entry
+    /// is one the walk is certain of, which needs none.
+    pub(crate) fn record_candidates(&mut self, key: &str, candidates: Candidates) {
+        if let Some(entry) = self.inner.get_mut(&key.to_ascii_lowercase()) {
+            entry.candidates = Some(candidates);
+        }
+    }
+
+    /// A table holding only `bindings`, each name bound to its candidate (an
+    /// undefined name's is the empty string, which a plain reference to it
+    /// expands to): what an expansion of text that splices only those names
+    /// produces from those values ([`candidates`]).
+    pub(crate) fn of_candidates(bindings: &[(&str, &Candidate)]) -> PropertyMap {
+        let mut table = PropertyMap::new();
+        for (name, candidate) in bindings {
+            table.bind((*name).to_owned(), candidate.value(), candidate.origin);
+        }
+        table
     }
 
     /// The trust of `key`'s entry, `None` where it has none: what

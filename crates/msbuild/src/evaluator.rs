@@ -84,6 +84,7 @@ use super::{
     SdkPaths, SdkResolution, SdkResolveError, SdkResolver,
 };
 
+mod candidates;
 mod directory_build;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod executor;
@@ -2764,6 +2765,10 @@ impl<'r> State<'r> {
         self.directory_build.note_write(name);
         let resolved = self.resolve_provenance(provenance);
         self.lookup.apply_provenance(name, resolved);
+        // A verdict without a value leaves no candidates the walk can name; a
+        // caller that can name them records them after ([`candidates`]).
+        self.lookup
+            .record_candidates(name, properties::candidates::Candidates::Anything);
     }
 
     /// Store an evaluated write's value and its verdict together, so a value
@@ -4457,6 +4462,17 @@ fn walk_property_child_inner(
                 Some(cause) if state.skipped_write_needs_mark(&name) => StaleOutcome::Set(cause),
                 _ => StaleOutcome::Keep,
             };
+            // Its own gate decided, the write cannot run: the name holds what it
+            // held. Undecided, it may: the name may hold either.
+            let candidates = own_condition_maybe_wrong.then(|| {
+                let before = state.candidates_of(&name);
+                let value = collect_element_text(node)
+                    .map_or(properties::candidates::Candidates::Anything, |raw| {
+                        state.value_candidates(&raw, None)
+                    });
+                before.union(value)
+            });
+            let kept = state.lookup.recorded_candidates(&name).cloned();
             state.apply_property_provenance(
                 &name,
                 PropertyProvenance {
@@ -4468,6 +4484,9 @@ fn walk_property_child_inner(
                     stale,
                 },
             );
+            if let Some(candidates) = candidates.or(kept) {
+                state.lookup.record_candidates(&name, candidates);
+            }
             return;
         }
         CondGate::Unsupported => {
@@ -4477,6 +4496,13 @@ fn walk_property_child_inner(
                 }
                 None => UnpinnedOutcome::Keep,
             };
+            // The write may run: the name may hold either.
+            let candidates = state.candidates_of(&name).union(
+                collect_element_text(node)
+                    .map_or(properties::candidates::Candidates::Anything, |raw| {
+                        state.value_candidates(&raw, None)
+                    }),
+            );
             state.apply_property_provenance(
                 &name,
                 PropertyProvenance {
@@ -4486,6 +4512,7 @@ fn walk_property_child_inner(
                     stale: StaleOutcome::Keep,
                 },
             );
+            state.lookup.record_candidates(&name, candidates);
             emit_unsupported_condition(node, state);
             return;
         }
@@ -4696,7 +4723,16 @@ fn walk_property_child_inner(
         stale: StaleOutcome::after_write(stale_by, write_condition_maybe_wrong),
     };
     let (value, carried) = expansion.value.into_parts();
+    let before = state.candidates_of(&name);
+    let value_candidates = state.value_candidates(
+        &raw,
+        Some(&properties::candidates::Candidate::new(
+            &value,
+            properties::Origin::Expansion,
+        )),
+    );
     state.write_property(&name, value, provenance);
+    state.record_write_candidates(&name, before, value_candidates, write_condition_maybe_wrong);
     // The verdict above is computed from the value's text (the reference
     // scan) and the write's gate; the value itself carries the trust of what
     // its expansion actually read. The stored trust must hold everything the
@@ -5572,6 +5608,13 @@ fn mark_property_group_children_provenance(
         if state.protected.contains(&name.to_ascii_lowercase()) {
             continue;
         }
+        // The write may run: the name may hold either.
+        let candidates = state.candidates_of(name).union(
+            collect_element_text(child)
+                .map_or(properties::candidates::Candidates::Anything, |raw| {
+                    state.value_candidates(&raw, None)
+                }),
+        );
         state.apply_property_provenance(
             name,
             PropertyProvenance {
@@ -5586,6 +5629,7 @@ fn mark_property_group_children_provenance(
                 stale: StaleOutcome::Keep,
             },
         );
+        state.lookup.record_candidates(name, candidates);
     }
 }
 
