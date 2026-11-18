@@ -409,6 +409,7 @@ fn path_reader_xml() -> String {
 /// spelling is a wrong commit. Each name must commit under every spelling (the
 /// file-system probes only where the evaluation reads the file system), so a
 /// decline cannot pass this vacuously.
+#[cfg(unix)]
 #[test]
 fn reserved_path_properties_are_exact_under_every_project_spelling() {
     let mut oracle = Oracle::spawn();
@@ -518,6 +519,7 @@ fn check_imports_at_project(
 /// fixup turns into a separator (`sub\i.props` and the escaped `sub%5Ci.props`
 /// both import `sub/i.props`). A file listed twice under two spellings is
 /// imported once.
+#[cfg(unix)]
 #[test]
 fn import_spellings_are_read_as_msbuild_normalises_them() {
     let mut oracle = Oracle::spawn();
@@ -694,7 +696,13 @@ fn a_backslash_a_parent_segment_removes_is_no_backslash() {
 /// separator) is refused: MSBuild loads no project from it.
 #[test]
 fn a_project_path_naming_no_file_is_refused() {
-    for at in ["/work/..", "/work/./..", "/work/Demo.fsproj/", "/"] {
+    for at in [
+        "/work/..",
+        "/work/./..",
+        "/work/Demo.fsproj/",
+        "/",
+        "/work/bad\0/../Demo.fsproj",
+    ] {
         let refused = parse_fsproj(
             "<Project />",
             Path::new(at),

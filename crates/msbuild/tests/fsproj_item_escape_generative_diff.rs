@@ -419,6 +419,42 @@ fn an_item_path_holding_a_nul_is_declined() {
     }
 }
 
+/// Beside a NUL-bearing literal, the resolver's other matches are kept: the
+/// list is marked uncertain (it is missing the declined item) rather than
+/// emptied, for a Compile set and a reference list alike.
+#[test]
+fn a_nul_beside_a_glob_keeps_the_glob_and_marks_the_list_uncertain() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
+    std::fs::write(root.join("a.fs"), "module A\n").unwrap();
+    std::fs::create_dir_all(root.join("refs")).unwrap();
+    std::fs::write(root.join("refs/Good.fsproj"), "<Project />").unwrap();
+    let xml = "<Project>\n  <ItemGroup>\n    <Compile Include=\"*.fs;bad%00\" />\n    \
+               <ProjectReference Include=\"refs/*.fsproj;bad%00\" />\n  </ItemGroup>\n</Project>\n";
+    let proj = root.join("Demo.fsproj");
+    std::fs::write(&proj, xml).unwrap();
+    let resolver: &borzoi_msbuild::GlobResolver<'_> = &glob_resolver::resolve;
+    let parsed = parse_fsproj_with_imports(
+        xml,
+        &proj,
+        &HashMap::new(),
+        &common::oracle_environment(),
+        None,
+        Some(resolver),
+    )
+    .expect("well-formed XML parses");
+    let includes = |items: &[borzoi_msbuild::ResolvedItem]| -> Vec<std::path::PathBuf> {
+        items.iter().map(|i| i.include.clone()).collect()
+    };
+    assert_eq!(includes(&parsed.items), [root.join("a.fs")]);
+    assert!(parsed.items_uncertain);
+    assert_eq!(
+        includes(&parsed.project_references),
+        [root.join("refs/Good.fsproj")]
+    );
+    assert!(parsed.project_references_uncertain);
+}
+
 /// Hand-picked corners: one per finding the three review rounds turned up, and
 /// one per reading of an escaped wildcard MSBuild's source distinguishes
 /// (`ItemSpec.BuildItemFragments`, `EngineFileUtilities.IsValidExclude`,

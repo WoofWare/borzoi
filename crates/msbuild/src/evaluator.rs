@@ -434,45 +434,28 @@ fn into_resolved_items(items: Vec<OrderedResolvedItem>) -> Vec<ResolvedItem> {
         .collect()
 }
 
-/// `Path.GetFullPath` of a rooted item path, trailing separator kept: the file
-/// matcher's [`crate::glob::file_matcher::full_path`] on a Unix host.
-/// Elsewhere (and for a path that is not UTF-8) the components are joined as
-/// text, never pushed one by one, since a pushed `a:stream` would read as a
-/// drive.
+/// `Path.GetFullPath` of a rooted item path on a Unix host, trailing separator
+/// kept: the file matcher's [`crate::glob::file_matcher::full_path`]. A path
+/// that is not UTF-8 is collapsed by components, its trailing separator
+/// restored. Windows' rule (drive-relative paths, verbatim prefixes, a `:`
+/// inside a segment) is not modelled, so there the path is kept as joined.
 fn item_full_path(path: &Path) -> PathBuf {
-    #[cfg(unix)]
+    if !cfg!(unix) {
+        return path.to_path_buf();
+    }
     if let Some(text) = path.to_str()
         && text.starts_with('/')
     {
         return PathBuf::from(crate::glob::file_matcher::full_path(text));
     }
-    use std::path::Component;
-    let mut head = std::ffi::OsString::new();
-    let mut segments: Vec<&std::ffi::OsStr> = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => head.push(prefix.as_os_str()),
-            Component::RootDir => head.push(std::path::MAIN_SEPARATOR_STR),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                segments.pop();
-            }
-            Component::Normal(segment) => segments.push(segment),
-        }
+    let full = normalise(path);
+    if path.as_os_str().as_encoded_bytes().last() == Some(&b'/') && full.parent().is_some() {
+        let mut text = full.into_os_string();
+        text.push("/");
+        PathBuf::from(text)
+    } else {
+        full
     }
-    let mut full = head;
-    for (i, segment) in segments.iter().enumerate() {
-        if i > 0 {
-            full.push(std::path::MAIN_SEPARATOR_STR);
-        }
-        full.push(segment);
-    }
-    let bytes = path.as_os_str().as_encoded_bytes();
-    let trailing = bytes.last() == Some(&b'/') || (cfg!(windows) && bytes.last() == Some(&b'\\'));
-    if trailing && !segments.is_empty() {
-        full.push(std::path::MAIN_SEPARATOR_STR);
-    }
-    PathBuf::from(full)
 }
 
 /// Examine the project root's `Sdk` attribute and decide whether the

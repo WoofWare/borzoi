@@ -302,7 +302,9 @@ pub struct ResolvedItem {
     /// read as forward slashes, then `.` segments dropped, runs of
     /// separators collapsed and each `..` taking the segment before it,
     /// lexically (no filesystem touch, so no symlink is resolved). A
-    /// trailing separator is kept.
+    /// trailing separator is kept. That is the rule on a Unix host; on
+    /// Windows, whose `GetFullPath` this crate does not model, the joined
+    /// path is kept as it is.
     pub include: PathBuf,
     /// `ReferenceOutputAssembly` metadata (attribute or child element),
     /// `$(...)`-expanded, kept raw. Only populated for
@@ -1158,9 +1160,10 @@ pub enum ParseError {
     /// caller handed over, or refuses the project (MSB4025) where that path
     /// names no file.
     BackslashInProjectPath(PathBuf),
-    /// `project_path`'s full path names no file: it is the file-system root
-    /// (`/work/..`), or it ends in a separator. MSBuild loads no project
-    /// from either.
+    /// `project_path` names no file: its full path is the file-system root
+    /// (`/work/..`), or it ends in a separator, or it holds a NUL, which .NET
+    /// refuses before it resolves any `..`. MSBuild loads no project from
+    /// any of them.
     ProjectPathNamesNoFile(PathBuf),
     /// `extra_properties` contained a key that names an MSBuild
     /// reserved property (any spelling, under MSBuild's case-insensitive
@@ -1209,8 +1212,8 @@ impl fmt::Display for ParseError {
             ParseError::ProjectPathNamesNoFile(p) => {
                 write!(
                     f,
-                    "project_path {} names no file: its full path is the root, or ends in a \
-                     separator",
+                    "project_path {} names no file: its full path is the root, it ends in a \
+                     separator, or it holds a NUL",
                     p.display()
                 )
             }
@@ -1590,7 +1593,8 @@ fn parse_fsproj_observed(
 /// the walk derives from the project's path (the reserved `MSBuildProject*`
 /// and `MSBuildThisFile*` names, relative imports, `Exists` probes, item
 /// paths, the duplicate-import key) starts from that path, so a caller's
-/// `dir//p.fsproj` or `dir/x/../p.fsproj` evaluates as `dir/p.fsproj`.
+/// `dir//p.fsproj` or `dir/x/../p.fsproj` evaluates as `dir/p.fsproj` (on a
+/// Unix host: [`project_full_path`]).
 fn validate_inputs(
     project_path: &Path,
     extra_properties: &HashMap<String, String>,
@@ -1606,8 +1610,13 @@ fn validate_inputs(
     if !project_path.has_root() {
         return Err(ParseError::RelativeProjectPath(project_path.to_path_buf()));
     }
-    let full_path = imports::normalise(project_path);
     let spelt = project_path.as_os_str().as_encoded_bytes();
+    if spelt.contains(&0) {
+        return Err(ParseError::ProjectPathNamesNoFile(
+            project_path.to_path_buf(),
+        ));
+    }
+    let full_path = project_full_path(project_path);
     if full_path.file_name().is_none()
         || spelt.last() == Some(&b'/')
         || (cfg!(windows) && spelt.last() == Some(&b'\\'))
@@ -1663,6 +1672,18 @@ fn validate_inputs(
         }
     }
     Ok(full_path)
+}
+
+/// The project's path as MSBuild takes it ([`validate_inputs`]). The lexical
+/// rule is `Path.GetFullPath`'s on a Unix host; Windows' (drive-relative
+/// paths, verbatim `\\?\` prefixes, a `:` inside a segment) is not modelled,
+/// so there the path is taken as the caller spells it.
+fn project_full_path(project_path: &Path) -> PathBuf {
+    if cfg!(unix) {
+        imports::normalise(project_path)
+    } else {
+        project_path.to_path_buf()
+    }
 }
 
 #[cfg(test)]
