@@ -780,8 +780,23 @@ fn canonicalise_or_normalise(observer: &Observer, path: &Path) -> PathBuf {
 /// fold would be a wrong commit in one direction or the other. Pairs that
 /// only a Unicode fold would equate land in the second tier
 /// ([`import_dedup_fuzzy_key`]) and *decline* instead of guessing.
+///
+/// A trailing separator stays in the key, as it stays in MSBuild's full path:
+/// `E.props/` names a directory, which MSBuild fails to import (MSB4019) even
+/// after it imported `E.props`.
 fn import_dedup_key(path: &Path) -> String {
-    normalise(path).to_string_lossy().to_ascii_uppercase()
+    import_key_text(path).to_ascii_uppercase()
+}
+
+/// The text both duplicate keys fold: `path` collapsed, a trailing separator
+/// kept.
+fn import_key_text(path: &Path) -> String {
+    let mut text = normalise(path).to_string_lossy().into_owned();
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.last() == Some(&b'/') || (cfg!(windows) && bytes.last() == Some(&b'\\')) {
+        text.push('/');
+    }
+    text
 }
 
 /// Second tier: the char-wise full Unicode uppercase of the same
@@ -796,8 +811,7 @@ fn import_dedup_key(path: &Path) -> String {
 /// first-tier hit means MSBuild's verdict is unknowable from here — the
 /// caller declines rather than committing a skip *or* a second walk.
 fn import_dedup_fuzzy_key(path: &Path) -> String {
-    normalise(path)
-        .to_string_lossy()
+    import_key_text(path)
         .chars()
         .flat_map(char::to_uppercase)
         .collect()
@@ -6674,22 +6688,6 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
         state.mark_structural_skip(
             StructuralCompileItemUncertainty::ImportProjectUnresolved {
                 project: path.display().to_string(),
-            },
-            span,
-        );
-        return;
-    }
-    // A path ending in a separator names a directory, which MSBuild never
-    // imports (MSB4019), even when the file without the separator was
-    // imported already: its duplicate key keeps the separator, which the
-    // walk's key, collapsed, would drop.
-    if matches!(path.as_os_str().as_encoded_bytes().last(), Some(b'/'))
-        || (cfg!(windows) && path.as_os_str().as_encoded_bytes().last() == Some(&b'\\'))
-    {
-        state.push(
-            DiagnosticKind::ImportFailed {
-                path: path.to_path_buf(),
-                reason: ImportFailReason::NotFound,
             },
             span,
         );

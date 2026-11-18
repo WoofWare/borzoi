@@ -26,7 +26,10 @@ use std::path::{Path, PathBuf};
 
 use crate::observed;
 
-/// A project file's full path and its text. See the [module docs](self).
+/// A project file's full path and its text, paired so that the text is the
+/// file's at that path: [`ProjectFile::read`] reads it there, and
+/// [`ProjectFile::buffer`] takes a caller's text only for a path spelt as its
+/// own full path.
 #[derive(Debug, Clone)]
 pub struct ProjectFile {
     path: PathBuf,
