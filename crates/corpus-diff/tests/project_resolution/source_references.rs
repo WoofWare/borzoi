@@ -332,12 +332,30 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
                     case.library
                 ));
             }
-            // FS0074: a type reached through the middle project lives in an
-            // assembly the consumer was not handed.
-            if errors(answer).iter().any(|e| e["ErrorNumber"] == 74) {
-                problems.push(format!(
-                    "the {side} answer misses a transitive reference (FS0074)"
-                ));
+            // The value reached through the middle project, whose type lives
+            // in the library, must bind into the middle project with no error
+            // on its line: a missing transitive reference is FS0074 there.
+            if let Some(middle) = &case.middle {
+                let line = consumer_files(case)[0]
+                    .1
+                    .lines()
+                    .position(|l| l.starts_with("let throughMiddle"))
+                    .expect("a middle case uses its middle project")
+                    + 1;
+                if !binds(answer, &format!("{middle}.token"), middle) {
+                    problems.push(format!(
+                        "the {side} answer does not bind `{middle}.token` into {middle}"
+                    ));
+                }
+                let on_line = errors(answer)
+                    .into_iter()
+                    .filter(|e| e["Range"]["Start"]["Line"].as_u64() == Some(line as u64))
+                    .count();
+                if on_line > 0 {
+                    problems.push(format!(
+                        "the {side} answer has {on_line} error(s) on the line through {middle}"
+                    ));
+                }
             }
         }
         if !problems.is_empty() {

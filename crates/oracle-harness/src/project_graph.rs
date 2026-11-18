@@ -205,6 +205,8 @@ pub enum GraphError {
         from: PlainName,
         to: PlainName,
     },
+    /// A project whose language version is not a version's spelling.
+    NotALangVersion(PlainName),
     /// A project pinned below [`crate::FCS_SUPPORT_FLOOR`]: the current FCS
     /// no longer behaves as the older compilers did, and the graph oracle
     /// has no legacy twin.
@@ -234,6 +236,12 @@ impl fmt::Display for GraphError {
                 write!(
                     f,
                     "project {from} references {to}, a module, which is no assembly"
+                )
+            }
+            GraphError::NotALangVersion(id) => {
+                write!(
+                    f,
+                    "project {id} is pinned to something that is not a language version"
                 )
             }
             GraphError::BelowSupportFloor(id) => write!(
@@ -302,6 +310,13 @@ impl GraphRequest {
         if let Some(id) = first_cycle(&projects) {
             return Err(GraphError::Cycle(id));
         }
+        if let Some(p) = projects.iter().find(|p| {
+            p.lang_version
+                .as_deref()
+                .is_some_and(|v| !is_lang_version(v))
+        }) {
+            return Err(GraphError::NotALangVersion(p.id.clone()));
+        }
         if let Some(p) = projects
             .iter()
             .find(|p| p.lang_version.as_deref().is_some_and(below_support_floor))
@@ -349,6 +364,21 @@ impl GraphRequest {
             .collect();
         serde_json::json!({ "projects": projects, "check": self.check.as_str() }).to_string()
     }
+}
+
+/// Whether `lang_version` is a spelling the oracle passes to `--langversion:`
+/// as a version: a word naming one (`latest`, `latestmajor`, `preview`,
+/// `default`) or a number (`10`, `10.0`). Anything else, `?` (which FCS takes
+/// as a request for help, ending the oracle's process) among it, is refused.
+fn is_lang_version(lang_version: &str) -> bool {
+    let v = lang_version.trim();
+    matches!(v, "latest" | "latestmajor" | "preview" | "default")
+        || match v.split_once('.') {
+            Some((major, minor)) => [major, minor]
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
+            None => !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()),
+        }
 }
 
 /// Whether a `<LangVersion>` spelling names a numbered version below
@@ -704,17 +734,13 @@ impl ProjectGraphFixture {
     }
 }
 
-/// Whether `name` is a relative path whose every component is an ordinary
-/// name, so joining it to a project directory stays inside it, and which an
-/// MSBuild item spec reads as that one path (no `;` list separator, `%`
-/// escape, `$`/`@` expression, quote or wildcard).
+/// Whether `name` is a `/`-separated relative path of [`PlainName`]s: a
+/// positive domain every reader spells alike, so joining it to a project
+/// directory stays inside it, and MSBuild reads the `Compile` item as the
+/// file written (no list separator, escape, expression, wildcard,
+/// backslash or whitespace for it to read differently).
 fn is_contained(name: &str) -> bool {
-    let path = Path::new(name);
-    !name.is_empty()
-        && !name.contains([';', '%', '$', '@', '\'', '*', '?'])
-        && path
-            .components()
-            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    !name.is_empty() && name.split('/').all(|c| PlainName::new(c).is_ok())
 }
 
 /// The `.fsproj` for `p`. See [`ProjectGraphFixture`] for what it turns off.
@@ -1033,6 +1059,10 @@ mod tests {
             "a%3Bb.fs",
             "$(X).fs",
             "*.fs",
+            "..\\Outside.fs",
+            "  Foo.fs  ",
+            "a b.fs",
+            "a//b.fs",
         ] {
             let p = FixtureProject {
                 name: name("A"),
@@ -1114,6 +1144,13 @@ mod tests {
                 GraphRequest::new(vec![pinned(below)], name("a")),
                 Err(GraphError::BelowSupportFloor(name("a"))),
                 "{below}"
+            );
+        }
+        for bad in ["?", "", "10.", ".5", "10.0.1", "--help", "ten"] {
+            assert_eq!(
+                GraphRequest::new(vec![pinned(bad)], name("a")),
+                Err(GraphError::NotALangVersion(name("a"))),
+                "{bad:?}"
             );
         }
         for at_or_above in ["8.0", "8", "10.0", "latest", "preview", "default"] {
