@@ -72,6 +72,19 @@ pub trait Version:
 
     /// `while!` in a computation expression (F# 8).
     type WhileBang: Gate;
+
+    /// A list's expression statement yielded without `yield` (F# 4.7). Below
+    /// it, a list body is a literal unless something in it yields, and FCS's
+    /// checker reads a parenthesised statement in a comprehension as
+    /// ambiguous.
+    type ImplicitYield: Gate;
+
+    /// `try … with` in a list, array or sequence comprehension (F# 8). Only
+    /// FCS's checker refuses it below F# 8.
+    type TryWithInSeqExpression: Gate;
+
+    /// `use! _ = e` (F# 10). Only FCS's checker refuses it below F# 10.
+    type UseBangBindingValueDiscard: Gate;
 }
 
 macro_rules! versions {
@@ -99,26 +112,46 @@ macro_rules! versions {
 
 versions! {
     /// F# 4.6, the oldest version `borzoi-cst` parses.
-    V4_6: available [] unavailable [AccessorFunctionShorthand, AndBang, WhileBang];
+    V4_6:
+        available []
+        unavailable [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard];
     /// F# 4.7.
-    V4_7: available [] unavailable [AccessorFunctionShorthand, AndBang, WhileBang];
+    V4_7:
+        available [ImplicitYield]
+        unavailable [AccessorFunctionShorthand, AndBang, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard];
     /// F# 5.0.
-    V5_0: available [AndBang] unavailable [AccessorFunctionShorthand, WhileBang];
+    V5_0:
+        available [AndBang, ImplicitYield]
+        unavailable [AccessorFunctionShorthand, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard];
     /// F# 6.0.
-    V6_0: available [AndBang] unavailable [AccessorFunctionShorthand, WhileBang];
+    V6_0:
+        available [AndBang, ImplicitYield]
+        unavailable [AccessorFunctionShorthand, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard];
     /// F# 7.0.
-    V7_0: available [AndBang] unavailable [AccessorFunctionShorthand, WhileBang];
+    V7_0:
+        available [AndBang, ImplicitYield]
+        unavailable [AccessorFunctionShorthand, WhileBang, TryWithInSeqExpression, UseBangBindingValueDiscard];
     /// F# 8.0.
-    V8_0: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
+    V8_0:
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression]
+        unavailable [UseBangBindingValueDiscard];
     /// F# 9.0.
-    V9_0: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
+    V9_0:
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression]
+        unavailable [UseBangBindingValueDiscard];
     /// F# 10.0.
-    V10_0: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
+    V10_0:
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard]
+        unavailable [];
     /// F# 11.0, what a project without `<LangVersion>` gets
     /// ([`LanguageVersion::DEFAULT`]).
-    V11_0: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
+    V11_0:
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard]
+        unavailable [];
     /// `<LangVersion>preview</LangVersion>`.
-    Preview: available [AccessorFunctionShorthand, AndBang, WhileBang] unavailable [];
+    Preview:
+        available [AccessorFunctionShorthand, AndBang, WhileBang, ImplicitYield, TryWithInSeqExpression, UseBangBindingValueDiscard]
+        unavailable [];
 }
 
 /// The version a project without `<LangVersion>` gets.

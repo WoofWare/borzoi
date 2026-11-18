@@ -15,7 +15,7 @@ buildtools/fslex/Lexing.fsi	signature file
 buildtools/fslex/Parsing.fs	kept=15 dropped=8
 buildtools/fslex/Parsing.fsi	signature file
 buildtools/fslex/fslex.fs	kept=20 dropped=0
-buildtools/fslex/fslexast.fs	kept=42 dropped=10
+buildtools/fslex/fslexast.fs	kept=41 dropped=11
 buildtools/fslex/fslexdriver.fs	kept=19 dropped=4
 buildtools/fslex/fslexlex.fs	kept=15 dropped=4
 buildtools/fslex/fslexpars.fs	kept=27 dropped=1
@@ -143,7 +143,7 @@ src/Compiler/Checking/OverloadResolutionCache.fs	kept=20 dropped=2
 src/Compiler/Checking/OverloadResolutionCache.fsi	signature file
 src/Compiler/Checking/OverloadResolutionRules.fs	kept=28 dropped=25
 src/Compiler/Checking/OverloadResolutionRules.fsi	signature file
-src/Compiler/Checking/PatternMatchCompilation.fs	kept=81 dropped=6
+src/Compiler/Checking/PatternMatchCompilation.fs	kept=80 dropped=7
 src/Compiler/Checking/PatternMatchCompilation.fsi	signature file
 src/Compiler/Checking/PostInferenceChecks.fs	kept=72 dropped=26
 src/Compiler/Checking/PostInferenceChecks.fsi	signature file
@@ -226,7 +226,7 @@ src/Compiler/Driver/XmlDocFileWriter.fs	kept=9 dropped=1
 src/Compiler/Driver/XmlDocFileWriter.fsi	signature file
 src/Compiler/Driver/fsc.fs	kept=50 dropped=13
 src/Compiler/Driver/fsc.fsi	signature file
-src/Compiler/FSCompCheck.fsx	kept=1 dropped=2
+src/Compiler/FSCompCheck.fsx	kept=0 dropped=3
 src/Compiler/Facilities/AsyncMemoize.fs	kept=9 dropped=7
 src/Compiler/Facilities/AsyncMemoize.fsi	signature file
 src/Compiler/Facilities/BuildGraph.fs	kept=4 dropped=1
@@ -649,8 +649,8 @@ tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/dumpAllCommandLineOptio
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/dumpAllCommandLineOptions/dummy.fsx	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/dumpAllCommandLineOptions/dumpAllCommandLineOptions.fs	kept=5 dropped=0
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/flaterrors.fs	kept=7 dropped=1
-tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/flaterrors/E_MultiLine01.fs	kept=1 dropped=0
-tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/flaterrors/E_MultiLine02.fs	kept=1 dropped=0
+tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/flaterrors/E_MultiLine01.fs	kept=0 dropped=1
+tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/flaterrors/E_MultiLine02.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/flaterrors/E_MultiLine03.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/flaterrors/E_MultiLine04.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/CompilerOptions/fsc/gccerrors/gccerrors.fs	kept=4 dropped=0
@@ -878,7 +878,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttr
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_AttributeApplication02.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_AttributeApplication03.fs	kept=1 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_AttributeApplication04.fs	kept=1 dropped=2
-tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_AttributeApplication05.fs	kept=1 dropped=1
+tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_AttributeApplication05.fs	kept=0 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_AttributeApplication06.fs	kept=0 dropped=2
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_AttributeApplication07.fs	kept=4 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/BasicGrammarElements/CustomAttributes/Basic/E_AttributeTargetSpecifications.fs	kept=1 dropped=1
@@ -1502,7 +1502,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/Que
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_BadGroupValBy02.fs	kept=1 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_CustomOperatorAsIllegalIdentifier01.fs	kept=3 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_FirstOrDefaultWithNulls01.fs	kept=3 dropped=0
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_FunctionAsTopLevelLet01.fs	kept=3 dropped=0
+tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_FunctionAsTopLevelLet01.fs	kept=2 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_FunctionAsTopLevelLet02.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_FunctionWithinTopLevelLet01.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_MatchInQuery01.fs	kept=1 dropped=0
@@ -1510,7 +1510,7 @@ tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/Que
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_MismatchedConditionalBranches01.fs	kept=2 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_MismatchedConditionalBranches02.fs	kept=2 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_Sequential01.fs	kept=3 dropped=1
-tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_WhereRequiresParens01.fs	kept=2 dropped=0
+tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_WhereRequiresParens01.fs	kept=1 dropped=1
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_WhitespaceErrors01.fs	kept=3 dropped=0
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_WhitespaceErrors02.fs	parse errors
 tests/FSharp.Compiler.ComponentTests/Conformance/Expressions/DataExpressions/QueryExpressions/E_WhitespaceErrors03.fs	kept=2 dropped=2
@@ -3111,7 +3111,7 @@ tests/FSharp.Compiler.ComponentTests/EmittedIL/MethodImplAttribute/MethodImplAtt
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/AbstractClass.fs	kept=1 dropped=1
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/AnonRecd.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/ArgumentNamesInClosures01.fs	kept=1 dropped=2
-tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/CodeGenRenamings01.fs	kept=24 dropped=0
+tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/CodeGenRenamings01.fs	kept=23 dropped=1
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/CustomAttributeGenericParameter01.fs	kept=1 dropped=1
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/Decimal01.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/EmittedIL/Misc/EntryPoint01.fs	kept=2 dropped=0
@@ -3556,9 +3556,9 @@ tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync/RuntimeTasksAsyncDisp
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsyncEdgeCaseTests.fs	kept=10 dropped=1
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsyncSequenceTests.fs	kept=5 dropped=0
 tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsyncTests.fs	kept=9 dropped=0
-tests/FSharp.Compiler.ComponentTests/Language/SequenceExpressions/E_SequenceExpressions01.fs	kept=11 dropped=27
+tests/FSharp.Compiler.ComponentTests/Language/SequenceExpressions/E_SequenceExpressions01.fs	kept=2 dropped=36
 tests/FSharp.Compiler.ComponentTests/Language/SequenceExpressions/SequenceExpressionTests.fs	kept=37 dropped=7
-tests/FSharp.Compiler.ComponentTests/Language/SequenceExpressions/SequenceExpressions01.fs	kept=37 dropped=1
+tests/FSharp.Compiler.ComponentTests/Language/SequenceExpressions/SequenceExpressions01.fs	kept=2 dropped=36
 tests/FSharp.Compiler.ComponentTests/Language/StateMachineTests.fs	kept=21 dropped=0
 tests/FSharp.Compiler.ComponentTests/Language/StaticClassTests.fs	kept=29 dropped=0
 tests/FSharp.Compiler.ComponentTests/Language/UseBindingDisposalTests.fs	kept=9 dropped=0
@@ -3659,8 +3659,8 @@ tests/FSharp.Compiler.ComponentTests/TypeChecks/Shadowing/ShadowWithTypeExtensio
 tests/FSharp.Compiler.ComponentTests/TypeChecks/Shadowing/ShadowingAndStillOkWithChainedCalls.fsx	kept=6 dropped=2
 tests/FSharp.Compiler.ComponentTests/TypeChecks/TyparNameTests.fs	kept=5 dropped=5
 tests/FSharp.Compiler.ComponentTests/TypeChecks/TypeRelations.fs	kept=4 dropped=0
-tests/FSharp.Compiler.ComponentTests/resources/tests/CompilerOptions/fsc/flaterrors/E_MultiLine01.fs	kept=1 dropped=0
-tests/FSharp.Compiler.ComponentTests/resources/tests/CompilerOptions/fsc/flaterrors/E_MultiLine02.fs	kept=1 dropped=0
+tests/FSharp.Compiler.ComponentTests/resources/tests/CompilerOptions/fsc/flaterrors/E_MultiLine01.fs	kept=0 dropped=1
+tests/FSharp.Compiler.ComponentTests/resources/tests/CompilerOptions/fsc/flaterrors/E_MultiLine02.fs	kept=0 dropped=1
 tests/FSharp.Compiler.ComponentTests/resources/tests/CompilerOptions/fsc/flaterrors/E_MultiLine03.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/CompilerOptions/fsc/flaterrors/E_MultiLine04.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/CompilerOptions/fsc/optimize/E_optimizeOMinus.fs	kept=1 dropped=0
@@ -3955,7 +3955,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/Printing/UnitsO
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/Printing/UnitsOfMeasuresGenericSignature01.fsx	kept=2 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/Printing/UnitsOfMeasuresGenericSignature02.fsx	kept=2 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/Printing/VariantTypes01.fs	kept=2 dropped=0
-tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/Printing/WidthForAFormatter.fs	kept=1 dropped=1
+tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/Printing/WidthForAFormatter.fs	kept=0 dropped=2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/Printing/array2D.blit_01.fsx	kept=3 dropped=1
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/Printing/array2D_01.fsx	kept=3 dropped=2
 tests/FSharp.Compiler.ComponentTests/resources/tests/Conformance/Printing/array2D_01b.fsx	kept=3 dropped=2
@@ -4195,7 +4195,7 @@ tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/ReturnBan
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/ReturnBangNonAsync_TryFinally.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/ReturnBangNonAsync_TryWith.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/ReturnBangNonAsync_While.fs	kept=1 dropped=0
-tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/UseBindingWrongForm01.fs	kept=2 dropped=0
+tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/UseBindingWrongForm01.fs	kept=1 dropped=1
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/UsingReturnInAWhileLoop.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/Diagnostics/async/UsingReturnInIfThenElse.fs	kept=1 dropped=0
 tests/FSharp.Compiler.ComponentTests/resources/tests/InteractiveSession/Misc/Array2D01.fs	kept=2 dropped=5
@@ -4519,7 +4519,7 @@ tests/FSharp.Core.UnitTests/FSharp.Core/OperatorsModule1.fs	kept=3 dropped=1
 tests/FSharp.Core.UnitTests/FSharp.Core/OperatorsModule2.fs	kept=6 dropped=3
 tests/FSharp.Core.UnitTests/FSharp.Core/OperatorsModuleChecked.fs	kept=4 dropped=1
 tests/FSharp.Core.UnitTests/FSharp.Core/OperatorsModuleDynamic.fs	kept=25 dropped=53
-tests/FSharp.Core.UnitTests/FSharp.Core/PrimTypes.fs	kept=38 dropped=10
+tests/FSharp.Core.UnitTests/FSharp.Core/PrimTypes.fs	kept=27 dropped=21
 tests/FSharp.Core.UnitTests/FSharp.Core/RecordTypes.fs	parse errors
 tests/FSharp.Core.UnitTests/FSharp.Core/RefStructs.fs	kept=0 dropped=0
 tests/FSharp.Core.UnitTests/FSharp.Core/XmlDocumentationValidation.fs	kept=8 dropped=3
@@ -4527,7 +4527,7 @@ tests/FSharp.Core.UnitTests/Interop/CSharpCollectionExpressions.fs	kept=0 droppe
 tests/FSharp.Core.UnitTests/LibraryTestFx.fs	kept=7 dropped=16
 tests/FSharp.Core.UnitTests/StructTuples.fs	kept=0 dropped=0
 tests/FSharp.Core.UnitTests/SurfaceArea.fs	kept=4 dropped=1
-tests/FSharp.Core.UnitTests/TestFrameworkHelpers.fs	kept=13 dropped=6
+tests/FSharp.Core.UnitTests/TestFrameworkHelpers.fs	kept=12 dropped=7
 tests/FSharp.Test.Utilities/Assert.fs	kept=7 dropped=9
 tests/FSharp.Test.Utilities/Compiler.fs	kept=238 dropped=77
 tests/FSharp.Test.Utilities/CompilerAssert.fs	kept=39 dropped=18
@@ -4691,7 +4691,7 @@ tests/fsharp/core/anon/test.fsx	kept=17 dropped=11
 tests/fsharp/core/apporder/test.fsx	kept=197 dropped=18
 tests/fsharp/core/array-no-dot-warnings/test-langversion-8.0.fsx	kept=9 dropped=4
 tests/fsharp/core/array-no-dot-warnings/test-langversion-default.fsx	kept=9 dropped=4
-tests/fsharp/core/array-no-dot/test.fsx	kept=25 dropped=99
+tests/fsharp/core/array-no-dot/test.fsx	kept=24 dropped=100
 tests/fsharp/core/array/test.fsx	kept=227 dropped=69
 tests/fsharp/core/asyncStackTraces/test.fsx	kept=19 dropped=6
 tests/fsharp/core/attributes/test.fsx	kept=124 dropped=153
@@ -4701,8 +4701,8 @@ tests/fsharp/core/auto-widen/5.0/test.fsx	kept=107 dropped=29
 tests/fsharp/core/auto-widen/minimal/test.fsx	kept=3 dropped=2
 tests/fsharp/core/auto-widen/preview-default-warns/test.fsx	kept=117 dropped=35
 tests/fsharp/core/auto-widen/preview/test.fsx	kept=135 dropped=39
-tests/fsharp/core/comprehensions-hw/test.fsx	kept=155 dropped=89
-tests/fsharp/core/comprehensions/test.fsx	kept=466 dropped=48
+tests/fsharp/core/comprehensions-hw/test.fsx	kept=135 dropped=109
+tests/fsharp/core/comprehensions/test.fsx	kept=409 dropped=105
 tests/fsharp/core/control/test.fsx	kept=99 dropped=32
 tests/fsharp/core/controlChamenos/test.fsx	kept=21 dropped=1
 tests/fsharp/core/controlMailbox/test.fsx	kept=27 dropped=6
@@ -5227,7 +5227,7 @@ tests/fsharp/typecheck/sigs/neg19.fs	kept=0 dropped=3
 tests/fsharp/typecheck/sigs/neg20.fs	kept=71 dropped=109
 tests/fsharp/typecheck/sigs/neg21.fs	kept=2 dropped=15
 tests/fsharp/typecheck/sigs/neg23.fs	kept=15 dropped=19
-tests/fsharp/typecheck/sigs/neg24.fs	kept=81 dropped=9
+tests/fsharp/typecheck/sigs/neg24.fs	kept=80 dropped=10
 tests/fsharp/typecheck/sigs/neg25.fs	parse errors
 tests/fsharp/typecheck/sigs/neg26.fs	kept=0 dropped=12
 tests/fsharp/typecheck/sigs/neg27.fs	parse errors
@@ -6306,7 +6306,7 @@ tests/service/data/SyntaxTree/SynType/Typed LetBang AndBang 17.fs	kept=1 dropped
 tests/service/data/SyntaxTree/SynType/Typed LetBang AndBang 18.fs	parse errors
 tests/service/data/SyntaxTree/SynType/Typed LetBang AndBang 19.fs	kept=1 dropped=0
 tests/service/data/SyntaxTree/SynType/Typed UseBang 01.fs	kept=1 dropped=0
-tests/service/data/SyntaxTree/SynType/Typed UseBang 02.fs	kept=1 dropped=0
+tests/service/data/SyntaxTree/SynType/Typed UseBang 02.fs	kept=0 dropped=1
 tests/service/data/SyntaxTree/SynType/Typed UseBang 03.fs	parse errors
 tests/service/data/SyntaxTree/SynType/Typed UseBang 04.fs	parse errors
 tests/service/data/SyntaxTree/SynType/Typed UseBang 05.fs	parse errors
@@ -6499,7 +6499,7 @@ vsintegration/ItemTemplates/SignatureFile/Template/File.fsi	signature file
 vsintegration/ProjectTemplates/ConsoleProject/Template/Program.fs	kept=2 dropped=0
 vsintegration/ProjectTemplates/LibraryProject/Template/Library1.fs	parse errors
 vsintegration/ProjectTemplates/LibraryProject/Template/Script.fsx	parse errors
-vsintegration/ProjectTemplates/TutorialProject/Template/Tutorial.fsx	kept=158 dropped=18
+vsintegration/ProjectTemplates/TutorialProject/Template/Tutorial.fsx	kept=157 dropped=19
 vsintegration/src/FSharp.Editor/AutomaticCompletion/BraceCompletionSessionProvider.fs	kept=31 dropped=11
 vsintegration/src/FSharp.Editor/AutomaticCompletion/BraceCompletionSessionProvider.fsi	signature file
 vsintegration/src/FSharp.Editor/Build/SetGlobalPropertiesForSdkProjects.fs	kept=8 dropped=1

@@ -82,8 +82,9 @@ borzoi-cst = { path = ".", features = [
     "unstable-preview",
 ] }
 borzoi-oracle-harness.workspace = true
-# The printer the `print_roundtrip` oracle grades against FCS.
-borzoi-print.workspace = true
+# The printer the `print_roundtrip` oracle grades against FCS, with the
+# unchecked constructors that let it show F# refuses what the tree refuses.
+borzoi-print = { workspace = true, features = ["test-support"] }
 # The feature table's parser, so `tests/all/language_features.rs` reads
 # `language-features.tsv` exactly as the generator does.
 borzoi-astgen.workspace = true

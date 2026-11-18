@@ -4,5 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
+[features]
+# Constructors that skip the tree's checks, so an oracle can print what a
+# check refuses and show that F# refuses it too. Not for building trees.
+test-support = []
+
 [dependencies]
 borzoi-cst.workspace = true

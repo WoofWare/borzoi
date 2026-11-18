@@ -11,9 +11,13 @@
 //! tree targets as a parameter ([`crate::version`]), so a tree holds only what
 //! its version has.
 
+use std::fmt::Debug;
+use std::hash::Hash;
+use std::marker::PhantomData;
+
 use crate::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use crate::vec::{Vec1, Vec2};
-use crate::version::Version;
+use crate::version::{Available, Gate, Unavailable, Version};
 
 /// An implementation file (`.fs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +137,49 @@ pub enum LetBindings<V: Version> {
     NonRec(Box<Binding<V>>),
     /// `let rec … and …`
     Rec(Vec1<Binding<V>>),
+}
+
+/// A `let` group in an expression or a computation expression's body. F#
+/// refuses an access modifier there (FS0646), attributes (FS0824), a mutable
+/// binding in a recursive group (FS0874) and an inline one (FS0829), an
+/// inline binding that is not a function (FS0832) and a recursive pattern
+/// (FS3521), so [`LocalBindings::new`] refuses a group with any of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalBindings<V: Version>(LetBindings<V>);
+
+impl<V: Version> LocalBindings<V> {
+    /// `bindings` as a local group, or `bindings` back if F# refuses it in an
+    /// expression.
+    pub fn new(bindings: LetBindings<V>) -> Result<Self, Box<LetBindings<V>>> {
+        let is_rec = matches!(bindings, LetBindings::Rec(_));
+        let local = |b: &Binding<V>| {
+            let head_ok = match &b.head {
+                BindingHead::Name {
+                    access, is_mutable, ..
+                } => access.is_none() && !b.is_inline && !(*is_mutable && is_rec),
+                BindingHead::Function { access, .. } => access.is_none(),
+                BindingHead::Pattern(_) => !b.is_inline && !is_rec,
+            };
+            b.attributes.is_empty() && head_ok
+        };
+        let all = match &bindings {
+            LetBindings::NonRec(b) => local(b),
+            LetBindings::Rec(bs) => bs.as_slice().iter().all(local),
+        };
+        if all {
+            Ok(LocalBindings(bindings))
+        } else {
+            Err(Box::new(bindings))
+        }
+    }
+
+    pub fn bindings(&self) -> &LetBindings<V> {
+        &self.0
+    }
+
+    pub fn into_bindings(self) -> LetBindings<V> {
+        self.0
+    }
 }
 
 /// One binding of a `let` group.
@@ -302,12 +349,10 @@ pub enum Expr<V: Version> {
     },
     /// `a, b`
     Tuple(Vec2<Expr<V>>),
-    /// `[]`, or `[ body ]`: `[a; b]` is the body of two expression
-    /// statements ([`Comp::exprs`]), and `[ for x in xs -> f x ]` a
-    /// comprehension; F# parses the two alike.
-    List(Option<Box<Comp<V>>>),
+    /// `[]`, or `[ body ]`.
+    List(Option<Box<ListBody<V>>>),
     /// `[||]`, or `[| body |]`, as [`Expr::List`].
-    Array(Option<Box<Comp<V>>>),
+    Array(Option<Box<ListBody<V>>>),
     /// `{ A = a }` or `{ r with A = a }`
     Record {
         copy: Option<Box<Expr<V>>>,
@@ -343,7 +388,7 @@ pub enum Expr<V: Version> {
     },
     /// `let … in e`
     LetIn {
-        bindings: LetBindings<V>,
+        bindings: LocalBindings<V>,
         body: Box<Expr<V>>,
     },
     /// `a; b`
@@ -416,8 +461,170 @@ pub enum Expr<V: Version> {
     /// `builder { body }`, a computation expression.
     Computation {
         builder: Box<Expr<V>>,
-        body: Box<Comp<V>>,
+        body: Box<Comp<V, InBuilder>>,
     },
+}
+
+/// Where a computation expression's body sits, as a type: in a builder's
+/// braces ([`InBuilder`]) or in a list's or array's brackets
+/// ([`InCollection`]). F#'s checker translates the two by different rules: a
+/// list's body is a sequence expression, which has no `let!` or `return`
+/// and, before F# 8, no `try … with`. Each such statement carries a field of
+/// the context's gate type, as a version-gated construct carries its
+/// version's ([`crate::version`]), so a list cannot hold one.
+///
+/// `seq { … }` is a sequence expression too, but only because `seq` names
+/// FSharp.Core's function, which the tree cannot see: a
+/// [`Expr::Computation`] is checked as a builder's, so its builder must not
+/// be `seq`.
+pub trait Context:
+    sealed::Sealed + Debug + Clone + Copy + PartialEq + Eq + Hash + Send + Sync + 'static
+{
+    /// What only a builder translates: `let!`, `use!`, `do!`, `match!`,
+    /// `while!`, `return` and `return!`.
+    type Bang: Gate;
+
+    /// `try … with` as a statement.
+    type TryWith<V: Version>: Gate;
+
+    /// An expression statement printed in parentheses
+    /// ([`needs_parentheses`]): a builder's checker refuses it ("this
+    /// construct is ambiguous"), and a list's does in a comprehension before
+    /// implicit yields.
+    type ParenExpr<V: Version>: Gate;
+
+    /// Whether the body is in braces, where F# reads a first statement
+    /// `a = b` as a record's field.
+    const BRACED: bool;
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A builder's body, `builder { … }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InBuilder {}
+
+/// A list's or array's body, `[ … ]` or `[| … |]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InCollection {}
+
+impl sealed::Sealed for InBuilder {}
+impl Context for InBuilder {
+    type Bang = Available;
+    type TryWith<V: Version> = Available;
+    type ParenExpr<V: Version> = Unavailable;
+    const BRACED: bool = true;
+}
+
+impl sealed::Sealed for InCollection {}
+impl Context for InCollection {
+    type Bang = Unavailable;
+    type TryWith<V: Version> = V::TryWithInSeqExpression;
+    type ParenExpr<V: Version> = V::ImplicitYield;
+    const BRACED: bool = false;
+}
+
+/// A list's or array's contents. F# reads a body as a literal's elements
+/// exactly when each statement is an expression other than a bare `do` (its
+/// `SimpleSemicolonSequence`), and as a comprehension otherwise; the two can
+/// mean different things (`[(do ())]` is `[()]`, `[do ()]` is `[]`), so
+/// they are different values here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListBody<V: Version> {
+    /// `[a; b]`: a literal's elements, each printed in parentheses.
+    Elements(Vec1<Expr<V>>),
+    /// `[a .. b]`. F# has a range only as a whole list body and as a
+    /// `for … in` loop's source; it is not an expression or a statement.
+    Range(Range<V>),
+    /// A comprehension.
+    Comp(ListComp<V>),
+}
+
+/// A comprehension: a list's statements, which F# must not read as a
+/// literal's elements ([`ListComp::new`]). Before implicit yields (F# 4.7)
+/// F#'s checker reads an `if` that yields nothing among expression
+/// statements as a literal's element too, and refuses it (FS0035), so such a
+/// body has no spelling there; in parentheses the `if` is an element of
+/// [`ListBody::Elements`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListComp<V: Version>(Comp<V, InCollection>);
+
+impl<V: Version> ListComp<V> {
+    /// `comp` as a comprehension, or `comp` back if F# at `V` would read it
+    /// as a literal's elements.
+    pub fn new(comp: Comp<V, InCollection>) -> Result<Self, Box<Comp<V, InCollection>>> {
+        if is_literal_shaped(&comp) {
+            return Err(Box::new(comp));
+        }
+        Ok(ListComp(comp))
+    }
+
+    /// `comp` as a comprehension, unchecked, so an oracle can print a body
+    /// [`ListComp::new`] refuses and show that F# refuses it too.
+    #[cfg(feature = "test-support")]
+    pub fn unchecked(comp: Comp<V, InCollection>) -> Self {
+        ListComp(comp)
+    }
+
+    pub fn comp(&self) -> &Comp<V, InCollection> {
+        &self.0
+    }
+
+    pub fn into_comp(self) -> Comp<V, InCollection> {
+        self.0
+    }
+}
+
+/// Whether F# at `V` reads `comp`, printed, as a literal's elements: no
+/// binding, and every statement an expression other than a bare `do` or,
+/// before implicit yields, an `if` that yields nothing (FCS's
+/// `IsSimpleSemicolonSequenceElement`).
+fn is_literal_shaped<V: Version>(comp: &Comp<V, InCollection>) -> bool {
+    let deprecated_if = V::ImplicitYield::WITNESS.is_none();
+    let simple = |s: &Stmt<V, InCollection>| match s {
+        Stmt::Expr(e) => !matches!(e.expr(), Expr::Do(_)),
+        Stmt::IfThenElse { .. } => deprecated_if && yield_free_stmt(s),
+        _ => false,
+    };
+    comp.init
+        .iter()
+        .all(|item| matches!(item, CompItem::Stmt(s) if simple(s)))
+        && simple(&comp.last)
+}
+
+/// Whether `comp` has no `yield`, as F# before implicit yields reckoned it
+/// (its `YieldFree`, the only version that asks), which counts `yield!` and a
+/// bare `do` as yielding.
+fn yield_free<V: Version, K: Context>(comp: &Comp<V, K>) -> bool {
+    comp.init.iter().all(|item| match item {
+        CompItem::Stmt(s) => yield_free_stmt(s),
+        _ => true,
+    }) && yield_free_stmt(&comp.last)
+}
+
+fn yield_free_stmt<V: Version, K: Context>(s: &Stmt<V, K>) -> bool {
+    let clauses = |cs: &Vec1<CompClause<V, K>>| cs.as_slice().iter().all(|c| yield_free(&c.body));
+    match s {
+        Stmt::Yield(_) | Stmt::YieldFrom(_) => false,
+        Stmt::Expr(e) => !matches!(e.expr(), Expr::Do(_)),
+        Stmt::DoBang { .. } | Stmt::Return { .. } | Stmt::ReturnFrom { .. } => true,
+        Stmt::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => yield_free(then_branch) && else_branch.as_deref().is_none_or(yield_free),
+        Stmt::Match { clauses: cs, .. } | Stmt::MatchBang { clauses: cs, .. } => clauses(cs),
+        Stmt::While { body, .. }
+        | Stmt::WhileBang { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::ForEach { body, .. }
+        | Stmt::TryFinally { body, .. } => yield_free(body),
+        Stmt::TryWith {
+            body, clauses: cs, ..
+        } => yield_free(body) && clauses(cs),
+    }
 }
 
 /// A computation expression's body: statements and bindings one after
@@ -430,31 +637,17 @@ pub enum Expr<V: Version> {
 /// ambiguous"), so the printer writes statements bare, one per line, and keeps
 /// only their operands in parentheses.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Comp<V: Version> {
+pub struct Comp<V: Version, K: Context> {
     /// What comes before the last statement.
-    pub init: Vec<CompItem<V>>,
-    pub last: Stmt<V>,
+    pub init: Vec<CompItem<V, K>>,
+    pub last: Stmt<V, K>,
 }
 
-impl<V: Version> Comp<V> {
+impl<V: Version, K: Context> Comp<V, K> {
     /// A body of one statement.
-    pub fn stmt(last: Stmt<V>) -> Self {
+    pub fn stmt(last: Stmt<V, K>) -> Self {
         Comp {
             init: Vec::new(),
-            last,
-        }
-    }
-
-    /// `a; b; …`: each item an expression statement, as a list literal's
-    /// elements are.
-    pub fn exprs(items: crate::vec::Vec1<Expr<V>>) -> Self {
-        let mut items = items.into_vec();
-        let last = Stmt::Expr(items.pop().expect("non-empty"));
-        Comp {
-            init: items
-                .into_iter()
-                .map(|e| CompItem::Stmt(Stmt::Expr(e)))
-                .collect(),
             last,
         }
     }
@@ -462,30 +655,50 @@ impl<V: Version> Comp<V> {
 
 /// A statement or binding of a [`Comp`] before its last statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompItem<V: Version> {
-    Stmt(Stmt<V>),
+pub enum CompItem<V: Version, K: Context> {
+    Stmt(Stmt<V, K>),
     /// `let …`
-    Let(LetBindings<V>),
-    /// `use p = e`
-    Use(Binding<V>),
-    /// `let! p = e` or `use! p = e`, and any `and! q = f`.
-    Bang(BangBinding<V>),
+    Let(LocalBindings<V>),
+    /// `use x = e`
+    Use(UseBinding<V>),
+    /// `let! p = e`, and any `and! q = f`.
+    LetBang(LetBang<V, K>),
+    /// `use! x = e`
+    UseBang(UseBang<V, K>),
 }
 
-/// `let! p = e` or `use! p = e`, and any `and! q = f`.
+/// `use x = e` or `use _ = e`. In a computation expression F# takes the
+/// discard at every version; F# 6 added it to `use … in` expressions, which
+/// the tree does not have.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BangBinding<V: Version> {
-    pub kind: BangKind,
+pub struct UseBinding<V: Version> {
+    pub name: UseName<Available>,
+    pub value: Expr<V>,
+}
+
+/// What a `use` or `use!` binds: a name, or nothing, where the version has
+/// the discard (`gate`). F# takes no other pattern there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UseName<G: Gate> {
+    Named(ValueName),
+    Discard(G),
+}
+
+/// `let! p = e`, and any `and! q = f`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LetBang<V: Version, K: Context> {
+    pub gate: K::Bang,
     pub pat: Pat,
     pub value: Expr<V>,
     pub ands: Vec<AndBang<V>>,
 }
 
-/// Whether a bang binding is `let!` or `use!`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BangKind {
-    Let,
-    Use,
+/// `use! x = e` or `use! _ = e`. F# takes no `and!` after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseBang<V: Version, K: Context> {
+    pub gate: K::Bang,
+    pub name: UseName<V::UseBangBindingValueDiscard>,
+    pub value: Expr<V>,
 }
 
 /// `and! p = e`.
@@ -496,17 +709,97 @@ pub struct AndBang<V: Version> {
     pub value: Expr<V>,
 }
 
+/// An expression statement's expression. One that bare F# would not read as
+/// an expression statement ([`needs_parentheses`]) is printed in
+/// parentheses, which only some contexts and versions accept
+/// ([`Context::ParenExpr`]); [`StmtExpr::new`] refuses it elsewhere. An
+/// `if`, `match`, `let`, `try`, loop or sequence written as the statement
+/// instead (an `if` statement of expression statements) means the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StmtExpr<V: Version, K: Context> {
+    expr: Expr<V>,
+    context: PhantomData<K>,
+}
+
+impl<V: Version, K: Context> StmtExpr<V, K> {
+    /// `expr` as a statement, or `expr` back if it needs parentheses and `K`
+    /// at `V` refuses them.
+    pub fn new(expr: Expr<V>) -> Result<Self, Expr<V>> {
+        if needs_parentheses::<V, K>(&expr) && K::ParenExpr::<V>::WITNESS.is_none() {
+            return Err(expr);
+        }
+        Ok(StmtExpr {
+            expr,
+            context: PhantomData,
+        })
+    }
+
+    pub fn expr(&self) -> &Expr<V> {
+        &self.expr
+    }
+
+    pub fn into_expr(self) -> Expr<V> {
+        self.expr
+    }
+}
+
+/// Whether `e`, as an expression statement in a body of context `K`, needs
+/// parentheses. Bare, F# would read an `if`, `match`, `let`, `try`, loop or
+/// sequence as a statement of its own, refuse a type annotation `e : t` and
+/// `( * )` (a parenthesised wildcard to F#), and, first in a builder's
+/// braces, read `a = b` as a record's field (a builder takes no such
+/// statement anywhere).
+pub fn needs_parentheses<V: Version, K: Context>(e: &Expr<V>) -> bool {
+    match e {
+        Expr::IfThenElse { .. }
+        | Expr::Match { .. }
+        | Expr::LetIn { .. }
+        | Expr::Sequential(..)
+        | Expr::TryWith { .. }
+        | Expr::TryFinally { .. }
+        | Expr::While { .. }
+        | Expr::For { .. }
+        | Expr::ForEach { .. }
+        | Expr::Typed { .. } => true,
+        Expr::Infix { op, .. } => K::BRACED && op.operator().as_str() == "=",
+        // Printed `( * )`, which F# reads as a parenthesised wildcard.
+        Expr::OpValue(op) => op.as_str() == "*",
+        Expr::Const(_)
+        | Expr::Null
+        | Expr::Name(_)
+        | Expr::App { .. }
+        | Expr::MethodApp { .. }
+        | Expr::Tuple(_)
+        | Expr::List(_)
+        | Expr::Array(_)
+        | Expr::Record { .. }
+        | Expr::FieldGet { .. }
+        | Expr::Set { .. }
+        | Expr::Lambda { .. }
+        | Expr::Function(_)
+        | Expr::TypeTest { .. }
+        | Expr::Upcast { .. }
+        | Expr::Downcast { .. }
+        | Expr::Cons { .. }
+        | Expr::Lazy(_)
+        | Expr::Assert(_)
+        | Expr::Do(_)
+        | Expr::DotLambda { .. }
+        | Expr::Computation { .. } => false,
+    }
+}
+
 /// A statement of a computation expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Stmt<V: Version> {
+pub enum Stmt<V: Version, K: Context> {
     /// An expression: a value the builder combines, or an implicit yield.
-    Expr(Expr<V>),
+    Expr(StmtExpr<V, K>),
     /// `do! e`
-    DoBang(Expr<V>),
+    DoBang { gate: K::Bang, expr: Expr<V> },
     /// `return e`
-    Return(Expr<V>),
+    Return { gate: K::Bang, expr: Expr<V> },
     /// `return! e`
-    ReturnFrom(Expr<V>),
+    ReturnFrom { gate: K::Bang, expr: Expr<V> },
     /// `yield e`
     Yield(Expr<V>),
     /// `yield! e`
@@ -514,26 +807,31 @@ pub enum Stmt<V: Version> {
     /// `if c then a [else b]`
     IfThenElse {
         cond: Expr<V>,
-        then_branch: Box<Comp<V>>,
-        else_branch: Option<Box<Comp<V>>>,
+        then_branch: Box<Comp<V, K>>,
+        else_branch: Option<Box<Comp<V, K>>>,
     },
     /// `match e with | p -> c …`
     Match {
         scrutinee: Expr<V>,
-        clauses: Vec1<CompClause<V>>,
+        clauses: Vec1<CompClause<V, K>>,
     },
     /// `match! e with | p -> c …`
     MatchBang {
+        gate: K::Bang,
         scrutinee: Expr<V>,
-        clauses: Vec1<CompClause<V>>,
+        clauses: Vec1<CompClause<V, K>>,
     },
     /// `while c do b done`
-    While { cond: Expr<V>, body: Box<Comp<V>> },
+    While {
+        cond: Expr<V>,
+        body: Box<Comp<V, K>>,
+    },
     /// `while! c do b done`
     WhileBang {
         gate: V::WhileBang,
+        bang: K::Bang,
         cond: Expr<V>,
-        body: Box<Comp<V>>,
+        body: Box<Comp<V, K>>,
     },
     /// `for i = a to b do c done`
     For {
@@ -541,24 +839,23 @@ pub enum Stmt<V: Version> {
         from: Expr<V>,
         direction: ForDirection,
         to: Expr<V>,
-        body: Box<Comp<V>>,
+        body: Box<Comp<V, K>>,
     },
     /// `for p in e do c done`
     ForEach {
         pat: Pat,
         source: ForSource<V>,
-        body: Box<Comp<V>>,
+        body: Box<Comp<V, K>>,
     },
-    /// `a .. b` or `a .. step .. b`
-    Range(Range<V>),
     /// `try c with | p -> c …`
     TryWith {
-        body: Box<Comp<V>>,
-        clauses: Vec1<CompClause<V>>,
+        gate: K::TryWith<V>,
+        body: Box<Comp<V, K>>,
+        clauses: Vec1<CompClause<V, K>>,
     },
     /// `try c finally e`
     TryFinally {
-        body: Box<Comp<V>>,
+        body: Box<Comp<V, K>>,
         finally: Expr<V>,
     },
 }
@@ -570,9 +867,8 @@ pub enum ForSource<V: Version> {
     Range(Range<V>),
 }
 
-/// `from .. to`, or `from .. step .. to`. F# has a range only as a
-/// computation expression's (or list's) statement and as a `for … in` loop's
-/// source; it is not an expression.
+/// `from .. to`, or `from .. step .. to`: a whole list body
+/// ([`ListBody::Range`]) or a `for … in` loop's source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Range<V: Version> {
     pub from: Expr<V>,
@@ -582,10 +878,10 @@ pub struct Range<V: Version> {
 
 /// `| pat [when guard] -> body` in a computation expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompClause<V: Version> {
+pub struct CompClause<V: Version, K: Context> {
     pub pat: Pat,
     pub guard: Option<Expr<V>>,
-    pub body: Comp<V>,
+    pub body: Comp<V, K>,
 }
 
 /// Which way a `for … to/downto` loop counts.

@@ -22,7 +22,12 @@
 //!
 //! What "parses back to that tree" covers is the parse, not type checking.
 //! Where F#'s checker reads syntax more finely than the parse tree records,
-//! the tree models the finer reading. An argument list is one: `M(a, b)`
+//! the tree models the finer reading, and where the checker refuses what
+//! parses, the types refuse it too. A computation expression's body is one:
+//! a list's body is a sequence expression, with no `let!` or `return`, so a
+//! body's types take the context it sits in ([`tree::Context`]), and FCS's
+//! checker grades an exhaustive table of statements nested in each other at
+//! every version. An argument list is another: `M(a, b)`
 //! passes two arguments where `M((a, b))` passes one tuple, and `M(x = 1)`
 //! names an argument where `M((x = 1))` passes a `bool`, so the tree tells an
 //! [`tree::Expr::App`] to one value from an [`tree::Expr::MethodApp`] to an

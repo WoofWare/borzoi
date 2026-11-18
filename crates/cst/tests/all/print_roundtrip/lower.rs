@@ -19,11 +19,11 @@
 
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
-    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, BangBinding, BangKind, Binding,
-    BindingHead, Comp, CompClause, CompItem, Const, Expr, Float32, Float64, ForDirection,
-    ForSource, ImplFile, LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace,
-    NamespaceName, NestedModule, Pat, Range, RecordField, Stmt, Type, TypeDefn, TypeRepr,
-    UnionCase, UnionField,
+    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, Binding, BindingHead, Comp,
+    CompClause, CompItem, Const, Context, Expr, Float32, Float64, ForDirection, ForSource,
+    ImplFile, LetBang, LetBindings, ListBody, ListComp, LocalBindings, MatchClause, ModuleDecl,
+    NamedModule, Namespace, NamespaceName, NestedModule, Pat, Range, RecordField, Stmt, StmtExpr,
+    Type, TypeDefn, TypeRepr, UnionCase, UnionField, UseBang, UseBinding, UseName,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -593,7 +593,7 @@ fn expr<V: Version>(e: &NormalisedExpr) -> L<Expr<V>> {
             }
         }
         N::ArrayOrListComputed { is_array, inner } => {
-            let body = Some(Box::new(comp(inner)?));
+            let body = Some(Box::new(list_body(inner)?));
             if *is_array {
                 Expr::Array(body)
             } else {
@@ -621,7 +621,7 @@ fn expr<V: Version>(e: &NormalisedExpr) -> L<Expr<V>> {
             bindings,
             body,
         } => Expr::LetIn {
-            bindings: let_bindings(*is_rec, bindings)?,
+            bindings: local_bindings(*is_rec, bindings)?,
             body: b(body)?,
         },
         N::LongIdentSet { long_dot_id, value } => Expr::Set {
@@ -745,7 +745,7 @@ fn args<V: Version>(elements: &[NormalisedExpr]) -> L<Args<V>> {
 /// flat, each binding scoping over what follows it. A binding before the end
 /// of a sequence scopes over less than the rest of the block, which the tree
 /// cannot say.
-fn comp<V: Version>(e: &NormalisedExpr) -> L<Comp<V>> {
+fn comp<V: Version, K: Context>(e: &NormalisedExpr) -> L<Comp<V, K>> {
     use NormalisedExpr as N;
     let mut init = Vec::new();
     let mut e = e;
@@ -779,16 +779,110 @@ fn comp<V: Version>(e: &NormalisedExpr) -> L<Comp<V>> {
     }
 }
 
+/// A `let` group in an expression or a computation expression.
+fn local_bindings<V: Version>(is_rec: bool, bindings: &[NormalisedBinding]) -> L<LocalBindings<V>> {
+    LocalBindings::new(let_bindings(is_rec, bindings)?)
+        .map_err(|_| Decline("local binding with access or attributes"))
+}
+
+/// A list's or array's body: a whole range, a literal's elements, or a
+/// comprehension. F# reads a body as elements exactly when each of its
+/// statements is simple ([`is_list_element`]).
+fn list_body<V: Version>(e: &NormalisedExpr) -> L<ListBody<V>> {
+    let items = match e {
+        NormalisedExpr::IndexRange { .. } => return Ok(ListBody::Range(range(e)?)),
+        NormalisedExpr::Sequential(items) => items.as_slice(),
+        other => std::slice::from_ref(other),
+    };
+    if items.iter().all(is_list_element) {
+        let elements = items.iter().map(expr).collect::<L<Vec<_>>>()?;
+        return Ok(ListBody::Elements(
+            Vec1::from_vec(elements).ok_or(Decline("list: no elements"))?,
+        ));
+    }
+    Ok(ListBody::Comp(ListComp::new(comp(e)?).map_err(|_| {
+        Decline("list: a literal with an `if` before implicit yields")
+    })?))
+}
+
+/// Whether F# reads `e`, a list body's statement, as a literal's element
+/// (FCS's `IsSimpleSemicolonSequenceElement` from F# 4.7, which accepts no
+/// `if`).
+fn is_list_element(e: &NormalisedExpr) -> bool {
+    use NormalisedExpr as N;
+    !matches!(
+        e,
+        N::IfThenElse { .. }
+            | N::TryWith { .. }
+            | N::Match { .. }
+            | N::For { .. }
+            | N::ForEach { .. }
+            | N::TryFinally { .. }
+            | N::YieldOrReturn { .. }
+            | N::LetOrUse { .. }
+            | N::Do(_)
+            | N::MatchBang { .. }
+            | N::While { .. }
+            | N::WhileBang { .. }
+    )
+}
+
+/// `K`'s gate for a builder's own statements, or a decline.
+fn bang<K: Context>() -> L<K::Bang> {
+    K::Bang::WITNESS.ok_or(Decline("comp: builder statement in a list"))
+}
+
+/// What a `use` or `use!` binds, where `G` gates the discard.
+fn use_name<G: Gate>(b: &NormalisedBinding) -> L<UseName<G>> {
+    use NormalisedPat as P;
+    if !b.attributes.is_empty() || b.is_mutable || b.is_inline || b.access.is_some() {
+        return decline("comp: use binding with modifiers");
+    }
+    let mut p = &b.pat;
+    while let P::Paren(inner) = p {
+        p = inner;
+    }
+    Ok(match p {
+        P::Wildcard => {
+            UseName::Discard(G::WITNESS.ok_or(Decline("comp: use discard before its version"))?)
+        }
+        P::Named(name) => UseName::Named(value_name(name)?),
+        P::LongIdent {
+            head,
+            typars,
+            args: NormalisedArgPats::Pats(args),
+        } if typars.is_empty() && args.is_empty() => match head.as_slice() {
+            [name] => UseName::Named(value_name(name)?),
+            _ => return decline("comp: use binding of a dotted name"),
+        },
+        _ => return decline("comp: use binding of a pattern"),
+    })
+}
+
 /// A computation expression's binding group.
-fn comp_binding<V: Version>(is_rec: bool, bindings: &[NormalisedBinding]) -> L<CompItem<V>> {
+fn comp_binding<V: Version, Ctx: Context>(
+    is_rec: bool,
+    bindings: &[NormalisedBinding],
+) -> L<CompItem<V, Ctx>> {
     use NormalisedLeadingKeyword as K;
     let [first, others @ ..] = bindings else {
         return decline("comp: binding group without bindings");
     };
+    if first.self_id.is_some() {
+        return decline("comp: binding self identifier");
+    }
     Ok(match first.leading_keyword {
-        K::Let | K::LetRec => CompItem::Let(let_bindings(is_rec, bindings)?),
-        K::Use if !is_rec && others.is_empty() => CompItem::Use(binding_body(first)?),
-        K::LetBang | K::UseBang => {
+        K::Let | K::LetRec => CompItem::Let(local_bindings(is_rec, bindings)?),
+        K::Use if !is_rec && others.is_empty() => CompItem::Use(UseBinding {
+            name: use_name(first)?,
+            value: expr(&first.expr)?,
+        }),
+        K::UseBang if !is_rec && others.is_empty() => CompItem::UseBang(UseBang {
+            gate: bang::<Ctx>()?,
+            name: use_name(first)?,
+            value: expr(&first.expr)?,
+        }),
+        K::LetBang => {
             let simple = |b: &NormalisedBinding| {
                 b.attributes.is_empty()
                     && !b.is_mutable
@@ -813,12 +907,8 @@ fn comp_binding<V: Version>(is_rec: bool, bindings: &[NormalisedBinding]) -> L<C
                     })
                 })
                 .collect::<L<Vec<_>>>()?;
-            CompItem::Bang(BangBinding {
-                kind: if first.leading_keyword == K::LetBang {
-                    BangKind::Let
-                } else {
-                    BangKind::Use
-                },
+            CompItem::LetBang(LetBang {
+                gate: bang::<Ctx>()?,
                 pat: pat(&first.pat)?,
                 value: expr(&first.expr)?,
                 ands,
@@ -829,8 +919,8 @@ fn comp_binding<V: Version>(is_rec: bool, bindings: &[NormalisedBinding]) -> L<C
 }
 
 /// A computation expression's statement. A parenthesised one is an
-/// expression: F#'s checker refuses a parenthesised control construct.
-fn stmt<V: Version>(e: &NormalisedExpr) -> L<Stmt<V>> {
+/// expression, which `K` may refuse ([`StmtExpr`]).
+fn stmt<V: Version, K: Context>(e: &NormalisedExpr) -> L<Stmt<V, K>> {
     use NormalisedExpr as N;
     let c = |e: &NormalisedExpr| comp(e).map(Box::new);
     Ok(match e {
@@ -839,12 +929,21 @@ fn stmt<V: Version>(e: &NormalisedExpr) -> L<Stmt<V>> {
             match (flags, from) {
                 ((true, false), false) => Stmt::Yield(inner),
                 ((true, false), true) => Stmt::YieldFrom(inner),
-                ((false, true), false) => Stmt::Return(inner),
-                ((false, true), true) => Stmt::ReturnFrom(inner),
+                ((false, true), false) => Stmt::Return {
+                    gate: bang::<K>()?,
+                    expr: inner,
+                },
+                ((false, true), true) => Stmt::ReturnFrom {
+                    gate: bang::<K>()?,
+                    expr: inner,
+                },
                 _ => return decline("comp: yield or return flags"),
             }
         }
-        N::DoBang(e) => Stmt::DoBang(expr(e)?),
+        N::DoBang(e) => Stmt::DoBang {
+            gate: bang::<K>()?,
+            expr: expr(e)?,
+        },
         N::IfThenElse {
             condition,
             then_branch,
@@ -859,6 +958,7 @@ fn stmt<V: Version>(e: &NormalisedExpr) -> L<Stmt<V>> {
             clauses: vec1(clauses, comp_clause)?,
         },
         N::MatchBang { scrutinee, clauses } => Stmt::MatchBang {
+            gate: bang::<K>()?,
             scrutinee: expr(scrutinee)?,
             clauses: vec1(clauses, comp_clause)?,
         },
@@ -868,6 +968,7 @@ fn stmt<V: Version>(e: &NormalisedExpr) -> L<Stmt<V>> {
         },
         N::WhileBang { cond, body } => Stmt::WhileBang {
             gate: V::WhileBang::WITNESS.ok_or(Decline("comp: while! before its version"))?,
+            bang: bang::<K>()?,
             cond: expr(cond)?,
             body: c(body)?,
         },
@@ -897,8 +998,10 @@ fn stmt<V: Version>(e: &NormalisedExpr) -> L<Stmt<V>> {
             source: for_source(enum_expr)?,
             body: c(body)?,
         },
-        N::IndexRange { .. } => Stmt::Range(range(e)?),
+        N::IndexRange { .. } => return decline("comp: range as a statement"),
         N::TryWith { body, clauses } => Stmt::TryWith {
+            gate: K::TryWith::<V>::WITNESS
+                .ok_or(Decline("comp: try/with in a list before its version"))?,
             body: c(body)?,
             clauses: vec1(clauses, comp_clause)?,
         },
@@ -909,7 +1012,10 @@ fn stmt<V: Version>(e: &NormalisedExpr) -> L<Stmt<V>> {
         N::LetOrUse { .. } | N::Sequential(_) => {
             return decline("comp: block where a statement belongs");
         }
-        other => Stmt::Expr(expr(other)?),
+        other => Stmt::Expr(
+            StmtExpr::new(expr(other)?)
+                .map_err(|_| Decline("comp: statement-shaped expression in parentheses"))?,
+        ),
     })
 }
 
@@ -948,7 +1054,7 @@ fn range<V: Version>(e: &NormalisedExpr) -> L<Range<V>> {
     })
 }
 
-fn comp_clause<V: Version>(cl: &NormalisedMatchClause) -> L<CompClause<V>> {
+fn comp_clause<V: Version, K: Context>(cl: &NormalisedMatchClause) -> L<CompClause<V, K>> {
     Ok(CompClause {
         pat: pat(&cl.pat)?,
         guard: cl.when.as_deref().map(expr).transpose()?,
