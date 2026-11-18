@@ -263,10 +263,10 @@ pub(super) fn judge_condition_rejection(
         condition::Outcome::Unsupported => {
             // Evaluation stopped at an operand we cannot evaluate, which may
             // return a value that lets MSBuild reach one it throws on with
-            // the values the walk holds. Judged without the file system, so
-            // that it probes nothing the verdict needs no answer from: an
-            // operand that probes is then one more of unknown value.
-            let held = condition::judge(condition, &state.lookup, None, &|_| false);
+            // the values the walk holds. What an operand past it reads from
+            // the file system may decide whether it throws, so the judgement
+            // probes as the evaluation would have.
+            let held = condition::judge(condition, &state.lookup, probes, &|_| false);
             if held.throws != condition::Throws::Never {
                 state.note_rejection(
                     RejectionCertainty::Possible,

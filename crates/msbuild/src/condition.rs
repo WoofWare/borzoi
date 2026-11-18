@@ -1893,8 +1893,13 @@ fn equality_number(value: &str) -> Result<Option<f64>, ()> {
     if unsigned.eq_ignore_ascii_case("nan") {
         return Ok(Some(f64::NAN));
     }
+    // Another spelling that is NaN but for whitespace, signs and NULs.
+    let loose: String = value
+        .chars()
+        .filter(|&c| !c.is_whitespace() && !matches!(c, '\0' | '+' | '-'))
+        .collect();
     let digits = value.trim_end_matches('\0');
-    if digits.contains('\0') || value.to_ascii_lowercase().contains("nan") {
+    if digits.contains('\0') || loose.eq_ignore_ascii_case("nan") {
         return Err(());
     }
     Ok(parse_msbuild_number(digits))
@@ -2148,6 +2153,17 @@ mod tests {
         // The throwing operand is one we cannot evaluate to a boolean, so the
         // value holds only where it is not reached, and decides nothing.
         assert!(judged.unevaluated);
+    }
+
+    /// Only a whole NaN spelling is declined: a word that contains `nan`
+    /// compares as a string.
+    #[test]
+    fn a_word_containing_nan_compares_as_a_string() {
+        let props = PropertyMap::new();
+        assert_eq!(evaluate("'Finance' == 'Finance'", &props), Outcome::True);
+        assert_eq!(evaluate("'Finance' == 'finance'", &props), Outcome::True);
+        assert_eq!(evaluate("'banana' != 'Finance'", &props), Outcome::True);
+        assert_eq!(evaluate("'- n a n' == 'x'", &props), Outcome::Unsupported);
     }
 
     #[test]

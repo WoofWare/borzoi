@@ -1720,8 +1720,10 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         // reaches the error.
         "'NaN' != '' And 1 &lt; abc",
         "'NaN' != 'abc' And 1 &lt; abc",
-        // MSBuild may reach the error past an operand the walk cannot evaluate.
+        // MSBuild may reach the error past an operand the walk cannot evaluate,
+        // in the second on what a probe of the file system returns.
         "$([System.String]::Unknown()) == '' And 1 &lt; abc",
+        "'Current' != '18' And $([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildProjectDirectory)', 'flag')) &gt; 1",
     ];
     // Ill typed exactly where `Exists` resolves against the project's
     // directory, which holds `flag`, or exactly where it resolves against the

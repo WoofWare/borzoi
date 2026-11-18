@@ -681,9 +681,14 @@ fn an_illegal_condition_msbuild_may_not_evaluate_may_be_rejected() {
 #[test]
 fn an_operand_past_the_one_that_settles_the_question_is_not_probed() {
     for body in [
-        "<PropertyGroup><P>abc</P></PropertyGroup>\
-         <PropertyGroup Condition=\"'$(P.Substring(5))' == '' And Exists('tail')\"><R>x</R></PropertyGroup>"
-            .to_owned(),
+        // The walk's evaluation stops at `U` (`x`, true); deciding the gate
+        // without trusting `U` goes on, and stops at the operand it cannot
+        // evaluate.
+        format!(
+            "<PropertyGroup><P>abc</P><U>x</U><U Condition=\"{UNDECIDED_TRUE}\">y</U></PropertyGroup>\
+             <PropertyGroup Condition=\"'$(U)' == 'x' Or ('$(P.Substring(5))' == '' And Exists('tail'))\">\
+             <R>x</R></PropertyGroup>"
+        ),
         format!(
             "<PropertyGroup><U>1</U><U Condition=\"{UNDECIDED_TRUE}\">true</U></PropertyGroup>\
              <PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><R Condition=\"$(U) And Exists('tail')\">x</R></PropertyGroup>"
