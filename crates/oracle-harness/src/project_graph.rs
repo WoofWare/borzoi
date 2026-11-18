@@ -430,17 +430,65 @@ pub struct ProjectGraphFixture {
     projects: Vec<FixtureProject>,
 }
 
-/// Each fixture project's fsc arguments, as its build hands them to fsc:
-/// one response-file line each.
+/// Each fixture project's fsc arguments, as its build hands them to fsc
+/// (one response-file line each), and whether that build succeeded.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FixtureArgs(BTreeMap<PlainName, Vec<String>>);
+pub struct FixtureArgs {
+    args: BTreeMap<PlainName, Vec<String>>,
+    succeeded: BTreeMap<PlainName, bool>,
+}
 
 impl FixtureArgs {
     /// The arguments of the project named `name`.
     pub fn of(&self, name: &PlainName) -> &[String] {
-        self.0
+        self.args
             .get(name)
             .unwrap_or_else(|| panic!("no fsc arguments for {name}"))
+    }
+
+    /// Whether the build of the project named `name` succeeded.
+    pub fn succeeded(&self, name: &PlainName) -> bool {
+        *self
+            .succeeded
+            .get(name)
+            .unwrap_or_else(|| panic!("no build of {name}"))
+    }
+
+    /// Whether `response`, the oracle's answer to a request checking
+    /// `check`, agrees with the builds on which projects have errors: FCS
+    /// reports an error in a project exactly when fsc failed its build.
+    ///
+    /// The oracle's domain is the arguments FCS reads as fsc does, and that
+    /// claim rests on reading both compilers' sources; this holds it to the
+    /// compiler itself on every graded request. A project FCS rejects and
+    /// fsc built (a source-level `AssemblyKeyFile` FCS resolves against its
+    /// own directory), or one fsc rejects and FCS checks cleanly (a switch
+    /// combination fsc refuses), is read apart from its build, and an answer
+    /// over it grades nothing.
+    pub fn errors_agree(&self, response: &GraphResponse, check: &PlainName) -> Result<(), String> {
+        let verdicts = response
+            .referenced
+            .iter()
+            .map(|r| (r.id.clone(), r.errors().next().is_some()))
+            .chain(std::iter::once((
+                check.as_str().to_owned(),
+                response.errors().next().is_some(),
+            )));
+        let disagreements: Vec<String> = verdicts
+            .filter_map(|(id, fcs_errors)| {
+                let name = PlainName::new(&id).ok()?;
+                let built = self.succeeded(&name);
+                (built == fcs_errors).then(|| match built {
+                    true => format!("{id}: fsc built it, FCS reports errors"),
+                    false => format!("{id}: fsc failed it, FCS reports no error"),
+                })
+            })
+            .collect();
+        if disagreements.is_empty() {
+            Ok(())
+        } else {
+            Err(disagreements.join("; "))
+        }
     }
 }
 
@@ -574,45 +622,50 @@ impl ProjectGraphFixture {
     /// [`FIXTURE_CONFIGURATION`] ([`fsc_args`]), dependencies first, so the
     /// reference DLLs each names are built too. Panics when a build hands fsc
     /// nothing, or something the oracle cannot report, or a response file
-    /// fsc's reading refuses: such a fixture cannot be graded.
+    /// fsc's reading refuses: such a fixture cannot be graded. A build that
+    /// ran fsc and failed is recorded ([`FixtureArgs::succeeded`]), not
+    /// refused.
     pub fn fsc_args(&self, top: &PlainName) -> FixtureArgs {
         let globals = [("Configuration".to_owned(), FIXTURE_CONFIGURATION.to_owned())];
         let env = build_environment();
-        FixtureArgs(
-            self.closure(top)
-                .into_iter()
-                .chain(std::iter::once(self.project(top)))
-                .map(|p| {
-                    let build =
-                        fsc_args(&self.fsproj(&p.name), &globals, &env).unwrap_or_else(|decline| {
-                            panic!(
-                                "no fsc arguments for fixture project {}: {decline:?}",
-                                p.name
-                            )
-                        });
-                    let [invocation] = build.invocations.as_slice() else {
+        let builds: Vec<(PlainName, Vec<String>, bool)> = self
+            .closure(top)
+            .into_iter()
+            .chain(std::iter::once(self.project(top)))
+            .map(|p| {
+                let build =
+                    fsc_args(&self.fsproj(&p.name), &globals, &env).unwrap_or_else(|decline| {
                         panic!(
-                            "fixture project {} ran fsc {} times",
-                            p.name,
-                            build.invocations.len()
+                            "no fsc arguments for fixture project {}: {decline:?}",
+                            p.name
                         )
-                    };
-                    let parsed = invocation.arguments().unwrap_or_else(|e| {
-                        panic!("fixture project {}'s response file: {e:?}", p.name)
                     });
-                    let lines = response_file_lines(&invocation.response_file);
-                    // The lines must be the arguments fsc reads, as the
-                    // build's own reader parses them.
-                    assert_eq!(
-                        FscArguments::parse_arguments(&lines).as_ref(),
-                        Ok(&parsed),
-                        "fixture project {}: the response file's lines are not what fsc reads",
-                        p.name
-                    );
-                    (p.name.clone(), lines)
-                })
-                .collect(),
-        )
+                let [invocation] = build.invocations.as_slice() else {
+                    panic!(
+                        "fixture project {} ran fsc {} times",
+                        p.name,
+                        build.invocations.len()
+                    )
+                };
+                let parsed = invocation.arguments().unwrap_or_else(|e| {
+                    panic!("fixture project {}'s response file: {e:?}", p.name)
+                });
+                let lines = response_file_lines(&invocation.response_file);
+                // The lines must be the arguments fsc reads, as the
+                // build's own reader parses them.
+                assert_eq!(
+                    FscArguments::parse_arguments(&lines).as_ref(),
+                    Ok(&parsed),
+                    "fixture project {}: the response file's lines are not what fsc reads",
+                    p.name
+                );
+                (p.name.clone(), lines, build.succeeded)
+            })
+            .collect();
+        FixtureArgs {
+            succeeded: builds.iter().map(|(n, _, ok)| (n.clone(), *ok)).collect(),
+            args: builds.into_iter().map(|(n, lines, _)| (n, lines)).collect(),
+        }
     }
 
     /// The `-r:` argument in `p`'s arguments that is project `q`: the one
@@ -738,13 +791,30 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Whether `source` and `dll` (a [`ProjectGraphFixture::source_request`]
-/// and [`ProjectGraphFixture::dll_request`] of one check) differ only in the
-/// substitution of each project reference: the checked project's arguments
-/// alike, the DLL request registering no project, and the source request
-/// registering each project reference at one `-r:` argument of those
-/// arguments, with every project it registers a project of the request.
-/// What the differential compares FCS across, held rather than assumed.
-pub fn only_substitution(source: &GraphRequest, dll: &GraphRequest) -> Result<(), String> {
+/// and [`ProjectGraphFixture::dll_request`] of one check of `fixture`)
+/// differ only in the substitution of each project reference: the checked
+/// project's arguments alike, the DLL request registering no project, and
+/// the source request registering, for each of its projects, exactly the
+/// projects of that project's [`closure`](ProjectGraphFixture::closure) in
+/// the fixture, each at one `-r:` argument. The expected registrations come
+/// from the fixture, not the request, so a request that registers too few
+/// fails here rather than letting both sides read one DLL. What the
+/// differential compares FCS across, held rather than assumed.
+pub fn only_substitution(
+    fixture: &ProjectGraphFixture,
+    source: &GraphRequest,
+    dll: &GraphRequest,
+) -> Result<(), String> {
+    for p in source.projects() {
+        let want: BTreeSet<&PlainName> = fixture.closure(&p.id).iter().map(|q| &q.name).collect();
+        let got: BTreeSet<&PlainName> = p.project_refs.iter().map(|r| &r.project).collect();
+        if want != got {
+            return Err(format!(
+                "{} registers {got:?}, but its closure is {want:?}",
+                p.id
+            ));
+        }
+    }
     let checked = |r: &GraphRequest| {
         r.projects()
             .iter()
@@ -1015,21 +1085,24 @@ mod tests {
             "{}/obj/Release/net10.0/ref/Lib.dll",
             fixture.dir(&name("Lib")).display()
         );
-        let args = FixtureArgs(BTreeMap::from([
-            (
-                name("Lib"),
-                vec!["-o:obj/Lib.dll".to_owned(), "Lib.fs".to_owned()],
-            ),
-            (
-                name("App"),
-                vec![
-                    "-o:obj/App.dll".to_owned(),
-                    "-r:/opt/Extra.dll".to_owned(),
-                    format!("-r:{lib_ref}"),
-                    "Program.fs".to_owned(),
-                ],
-            ),
-        ]));
+        let args = FixtureArgs {
+            args: BTreeMap::from([
+                (
+                    name("Lib"),
+                    vec!["-o:obj/Lib.dll".to_owned(), "Lib.fs".to_owned()],
+                ),
+                (
+                    name("App"),
+                    vec![
+                        "-o:obj/App.dll".to_owned(),
+                        "-r:/opt/Extra.dll".to_owned(),
+                        format!("-r:{lib_ref}"),
+                        "Program.fs".to_owned(),
+                    ],
+                ),
+            ]),
+            succeeded: BTreeMap::from([(name("Lib"), true), (name("App"), true)]),
+        };
         let source = fixture.source_request(&args, &name("App"));
         let ids: Vec<&str> = source.projects().iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["Lib", "App"]);
@@ -1047,9 +1120,69 @@ mod tests {
         std::fs::create_dir_all(Path::new(&lib_ref).parent().expect("a directory")).expect("mkdir");
         std::fs::write(&lib_ref, b"").expect("write a stand-in DLL");
         let dll = fixture.dll_request(&args, &name("App"));
-        assert_eq!(only_substitution(&source, &dll), Ok(()));
+        assert_eq!(only_substitution(&fixture, &source, &dll), Ok(()));
         let other = with_checked_args(&dll, vec!["-o:obj/App.dll".to_owned()]);
-        assert!(only_substitution(&source, &other).is_err());
+        assert!(only_substitution(&fixture, &source, &other).is_err());
+        // A source request that registers too few fails, though every
+        // registration it makes is sound.
+        let unregistered = GraphRequest::new(
+            source
+                .projects()
+                .iter()
+                .map(|p| GraphProject {
+                    project_refs: Vec::new(),
+                    ..p.clone()
+                })
+                .collect(),
+            name("App"),
+        )
+        .expect("a graph");
+        assert!(only_substitution(&fixture, &unregistered, &dll).is_err());
+    }
+
+    /// The build agreement: errors in FCS's answer exactly where fsc failed
+    /// a build, project by project.
+    #[test]
+    fn errors_agree_exactly_where_the_builds_failed() {
+        let error = serde_json::json!([{ "Severity": "Error" }]);
+        let response = |lib_errors: bool, app_errors: bool| GraphResponse {
+            files: Vec::new(),
+            diagnostics: if app_errors {
+                error.as_array().expect("array").clone()
+            } else {
+                Vec::new()
+            },
+            referenced: vec![ReferencedProject {
+                id: "Lib".to_owned(),
+                assembly_name: "Lib".to_owned(),
+                output_path: PathBuf::from("/src/Lib/obj/Lib.dll"),
+                diagnostics: if lib_errors {
+                    error.as_array().expect("array").clone()
+                } else {
+                    Vec::new()
+                },
+            }],
+        };
+        for lib_built in [false, true] {
+            for app_built in [false, true] {
+                let args = FixtureArgs {
+                    args: BTreeMap::new(),
+                    succeeded: BTreeMap::from([(name("Lib"), lib_built), (name("App"), app_built)]),
+                };
+                for lib_errors in [false, true] {
+                    for app_errors in [false, true] {
+                        let agrees = args
+                            .errors_agree(&response(lib_errors, app_errors), &name("App"))
+                            .is_ok();
+                        assert_eq!(
+                            agrees,
+                            lib_built != lib_errors && app_built != app_errors,
+                            "built {lib_built}/{app_built}, errors {lib_errors}/{app_errors}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn with_checked_args(r: &GraphRequest, args: Vec<String>) -> GraphRequest {

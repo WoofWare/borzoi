@@ -6665,7 +6665,7 @@ let private passedSwitches: (string * SwitchValue) list =
       "--nowarn", Warnings
       "--warnon", Warnings
       "--warnaserror", Either(Toggle, ToggledWarnings)
-      "--platform", OneOf [ "x86"; "x64"; "Itanium"; "arm"; "arm64"; "anycpu32bitpreferred"; "anycpu" ]
+      "--platform", OneOf [ "x86"; "x64"; "Itanium"; "arm"; "arm64"; "anycpu" ]
       "--targetprofile", OneOf [ "netcore"; "netstandard"; "mscorlib" ] ]
 
 /// Whether `line` is a passed switch whose value is in its grammar.
@@ -6702,7 +6702,9 @@ let private isPassedSwitch (line: string) =
 ///   version, which need not be the build's, and below F# 8 the current FCS
 ///   no longer behaves as those compilers did;
 /// - an assembly named FSharp.Core, which FCS reads only from disk;
-/// - a relative `-r:`.
+/// - a relative `-r:`, and anything but exactly one `-r:` naming
+///   `FSharp.Core.dll`;
+/// - two source arguments naming one file.
 let private parseGraphProject (e: JsonElement) : GraphProject =
     let fields = strictObject "project" [ "id"; "projectFile"; "args"; "projectRefs" ] e
     let id = strictString "id" (required "project" "id" fields)
@@ -6733,6 +6735,12 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
             Path.GetFullPath(Path.Combine(dir, line)))
     if List.isEmpty sources then
         failwithf "%s has no source files" where
+    // fsc tells source arguments apart before resolving them (`Dup.fs` and
+    // `./Dup.fs` are two files to it, FS0239), and FCS only after.
+    sources
+    |> List.countBy (fun file -> file)
+    |> List.tryFind (fun (_, n) -> n > 1)
+    |> Option.iter (fun (f, _) -> failwithf "%s: two source arguments are the file %s" where f)
     let switches = args |> List.filter (isSource >> not)
     /// The values of the lines starting `prefix` (a switch name and its `:`).
     let valuesOf (prefix: string) =
@@ -6775,6 +6783,11 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
     for path in references do
         if not (Path.IsPathFullyQualified path) then
             failwithf "%s: reference %s is not absolute" where path
+    // With none, fsc reads the FSharp.Core beside the build's compiler and
+    // FCS the one beside fcs-dump, which need not be the same.
+    match references |> List.filter (fun r -> Path.GetFileName r = "FSharp.Core.dll") with
+    | [ _ ] -> ()
+    | _ -> failwithf "%s: expected exactly one -r: naming FSharp.Core.dll" where
     let passed =
         switches
         |> List.choose (fun line ->

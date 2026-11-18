@@ -528,9 +528,13 @@ This is a Cargo workspace with ten members:
   path, an argument outside the domain it reads as fsc does (an MSBuild
   spelling, a control character, a switch off its allow-list or a value
   outside that switch's grammar, any path-valued switch but `-o:`, `-r:` and
-  `--refout:`, a language version that is not a number of F# 8 or later), a
+  `--refout:`, a language version that is not a number of F# 8 or later, an
+  FSharp.Core left implicit, two source arguments naming one file), a
   project reference registered by a file the producer's `-o:` does not name,
-  and a malformed graph are each refused. It also refuses a reference FCS
+  and a malformed graph are each refused. That domain is argued from both
+  compilers' sources, so every graded answer is also held to the compiler
+  itself (`FixtureArgs::errors_agree`): FCS must find errors in exactly the
+  projects whose real build failed. It also refuses a reference FCS
   itself would read from its DLL rather than from source (a type provider
   assembly, a project that creates generated provided types), reading FCS's
   own decision, and clears FCS's caches (`InvalidateAll`) before each
@@ -543,7 +547,8 @@ This is a Cargo workspace with ten members:
   library from source must equal those with the library built fresh and
   referenced as the DLL its build compiles against, and a friend's use of an
   internal must bind only under its `-o:` name.
-  The two requests are held to differ by that substitution alone
+  The two requests are held to differ by that substitution alone, with every
+  project's registrations exactly its closure in the fixture
   (`only_substitution`), the source check runs with every registered DLL
   moved aside (so a reference read from disk instead finds nothing), and
   `the_graph_parser_refuses_everything_outside_its_domain` holds the parser

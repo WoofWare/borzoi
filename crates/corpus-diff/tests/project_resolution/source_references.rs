@@ -340,7 +340,7 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
             fixture.source_request(args, &consumer),
             fixture.dll_request(args, &consumer),
         );
-        if let Err(why) = only_substitution(&source_request, &dll_request) {
+        if let Err(why) = only_substitution(fixture, &source_request, &dll_request) {
             panic!("case {i}: the requests differ beyond the substitution: {why}");
         }
         let source = with_registered_references_hidden(&source_request, || {
@@ -352,10 +352,14 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
             .check(&dll_request)
             .unwrap_or_else(|e| panic!("case {i}: the DLL check failed: {e}"));
         let mut problems = answer_diff(&source, &dll);
-        for r in &source.referenced {
-            // It built cleanly, so a source check that finds errors in it reads
-            // it differently from the compiler.
-            problems.extend(r.errors().map(|e| format!("{} from source: {e}", r.id)));
+        // Each side must find errors exactly where fsc failed a build, or it
+        // reads some project apart from the compiler.
+        for (side, answer) in [("source", &source), ("DLL", &dll)] {
+            if let Err(why) = args.errors_agree(answer, &consumer) {
+                problems.push(format!(
+                    "the {side} answer disagrees with the builds: {why}"
+                ));
+            }
         }
         let anchor = format!("{}.anchor", anchor_module(case));
         for (side, answer) in [("source", &source), ("DLL", &dll)] {
@@ -488,6 +492,8 @@ fn a_library_is_checked_as_a_library() {
         answer.errors().any(|e| e["ErrorNumber"] == 222),
         "a library's top-level code is FS0222 to FCS as to its build: {answer:#?}"
     );
+    assert!(!args.succeeded(&name("Lib")), "fsc fails the build");
+    assert_eq!(args.errors_agree(&answer, &name("Lib")), Ok(()));
 }
 
 /// Two references that declare one name: FCS takes the later one, so a
@@ -944,19 +950,52 @@ fn the_graph_parser_refuses_everything_outside_its_domain() {
         (
             "cycle",
             edit(&|v| {
-                let bee_ref = v["projects"][1]["projectRefs"][0]["reference"].clone();
+                // A reverse edge naming Bee's own output file, so only the
+                // cycle is wrong with it.
+                let bee_out = v["projects"][1]["args"]
+                    .as_array()
+                    .expect("args")
+                    .iter()
+                    .find_map(|l| l.as_str()?.strip_prefix("-o:"))
+                    .expect("Bee's -o:")
+                    .to_owned();
+                let bee_file = v["projects"][1]["projectFile"].as_str().expect("file");
+                let bee_ref = format!(
+                    "{}/{bee_out}",
+                    Path::new(bee_file).parent().expect("dir").display()
+                );
                 v["projects"][0]["args"]
                     .as_array_mut()
                     .expect("args")
-                    .push(Value::String(format!(
-                        "-r:{}",
-                        bee_ref.as_str().expect("ref")
-                    )));
+                    .push(Value::String(format!("-r:{bee_ref}")));
                 v["projects"][0]["projectRefs"] =
                     serde_json::json!([{ "project": "Bee", "reference": bee_ref }]);
             }),
         ),
+        (
+            "no FSharp.Core reference",
+            map_bee_args(&|a: Vec<Value>| {
+                a.into_iter()
+                    .filter(|l| !l.as_str().is_some_and(|s| s.ends_with("/FSharp.Core.dll")))
+                    .collect()
+            }),
+        ),
+        ("one source twice", add_line("./Use.fs")),
+        (
+            "a platform fsc refuses for a library",
+            add_line("--platform:anycpu32bitpreferred"),
+        ),
     ];
+    // The cycle case is refused for its cycle, not for something else.
+    let cycle = &refused
+        .iter()
+        .find(|(what, _)| *what == "cycle")
+        .expect("a cycle case")
+        .1;
+    match ProjectGraphOracle::default().check_json(cycle) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("cycle") => {}
+        other => panic!("the cycle must be refused as a cycle: {other:?}"),
+    }
     // Inside the domain: other spellings each grammar admits.
     let admitted: Vec<String> = [
         "--nowarn:FS0025,3370;44",
