@@ -39,7 +39,7 @@ use borzoi::project_deferral::FoldOutcome;
 use borzoi::project_graph::{NodeTfm, ProjectGraph, ProjectKind};
 use borzoi::semantic::{ProjectId, SemanticState};
 use borzoi::workspace::{ServedTfm, Workspace};
-use borzoi_msbuild::{ItemMetadataValue, ParsedProject};
+use borzoi_msbuild::{ItemMetadataValue, ParsedProject, PropertyRead};
 use borzoi_oracle_harness::project_graph::{
     GraphProject, GraphRequest, OutputKind, PlainName, parse_graph_response,
 };
@@ -154,11 +154,20 @@ fn trusted(
             }
         },
     };
-    let output_type = parsed.properties.get("OutputType").map(String::as_str);
-    let target = OutputKind::from_output_type(output_type);
-    if target.is_none() {
-        why.push(format!("output type {output_type:?} fsc would not take"));
-    }
+    let target = match parsed.property("OutputType") {
+        PropertyRead::Value(v) => {
+            let kind = OutputKind::from_output_type(Some(&v));
+            if kind.is_none() {
+                why.push(format!("output type {v:?} fsc would not take"));
+            }
+            kind
+        }
+        PropertyRead::Unset => Some(OutputKind::Library),
+        other => {
+            why.push(format!("untrusted output type ({other:?})"));
+            None
+        }
+    };
     let selection = workspace.lang_version_selection(project);
     if selection.refusal.is_some() {
         why.push("its compiler refuses its language version".to_owned());
@@ -311,13 +320,21 @@ fn reference_entry(
         return (record, None);
     };
     let dotnet_root = workspace.dotnet_root_for_project(a);
-    let (refs, _) =
+    let (refs, retryable) =
         semantic.env_reference_dlls_for_project(a, dotnet_root.as_deref(), &served, workspace);
+    // An empty set would leave FCS checking the project against the running
+    // SDK's framework rather than its own.
+    if refs.is_empty() || retryable {
+        record
+            .unreadable
+            .push("no stable resolved reference set".to_owned());
+        return (record, None);
+    }
     let entry = GraphProject {
         id: shared.name.clone(),
         assembly_name: shared.name,
         paths: parses.paths,
-        exclusive_refs: !refs.is_empty(),
+        exclusive_refs: true,
         refs,
         defines: parsed.define_constants.clone(),
         lang_version: Some(shared.lang_version),
@@ -432,6 +449,26 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
             referenced,
         );
     }
+    if loaded.fcs_extra_refs.is_empty() {
+        return ungraded("no resolved reference set".to_owned(), referenced);
+    }
+    // A file two projects of the graph both compile names one declaration
+    // site for two assemblies, which the comparison cannot tell apart.
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let shared = graph
+        .iter()
+        .flat_map(|p| p.paths.iter())
+        .chain(loaded.parses.paths.iter())
+        .find(|p| !seen.insert(path_key(p)));
+    if let Some(shared) = shared {
+        return ungraded(
+            format!(
+                "{} is compiled by two projects of its graph",
+                shared.display()
+            ),
+            referenced,
+        );
+    }
     graph.push(GraphProject {
         id: b.name.clone(),
         assembly_name: b.name.clone(),
@@ -439,7 +476,7 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
         refs: loaded.fcs_extra_refs.clone(),
         defines: loaded.define_constants.clone(),
         lang_version: Some(b.lang_version),
-        exclusive_refs: !loaded.fcs_extra_refs.is_empty(),
+        exclusive_refs: true,
         project_refs: b_closure
             .iter()
             .filter_map(|p| ids.get(p).cloned())
@@ -483,6 +520,7 @@ pub fn measure_not_built(project: &Path, oracle: &mut ProjectGraphOracle) -> Not
         .collect();
     let cross_project = cross_project_uses(&loaded, &comparison, &fcs, &names);
     let recovered = !comparison.fcs_error_files.is_empty()
+        || response.errors().next().is_some()
         || referenced.iter().any(|r| r.fcs_errors != Some(0));
     let grade = Grade {
         wrong: render_wrong(&comparison),

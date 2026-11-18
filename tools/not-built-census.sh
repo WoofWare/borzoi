@@ -23,7 +23,7 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-cache="${BORZOI_PROJECT_CORPUS_CACHE:-$HOME/.cache/borzoi/project-corpus}/v2/project-corpus"
+cache="${BORZOI_PROJECT_CORPUS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/borzoi/project-corpus}/v2/project-corpus"
 parent="${1:-${TMPDIR:-/tmp}}"
 mkdir -p "$parent"
 work="$(mktemp -d "$parent/not-built-census.XXXXXX")"
