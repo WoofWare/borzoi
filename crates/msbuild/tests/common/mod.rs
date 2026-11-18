@@ -33,8 +33,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::Duration;
 
+use borzoi_oracle_harness::msbuild_oracle;
+pub use borzoi_oracle_harness::msbuild_oracle::FscInvocation;
 use borzoi_oracle_harness::{BatchChild, BoundedCommand, default_timeout};
 
 use borzoi_msbuild::test_support::{Outcome, PropertyMap, evaluate, substitute};
@@ -97,15 +98,6 @@ pub fn parse_fsproj_with_imports(
     }
 }
 
-/// Budget for the one `dotnet build` this harness runs (the condition oracle).
-///
-/// A cold build restores packages and runs a compiler, which is legitimately
-/// minutes, so the bound sits far above the harness's per-request default: it is
-/// there to stop a build that has *stalled* — blocked on a NuGet lock held by a
-/// concurrent run in a sibling worktree, say — from hanging the suite forever,
-/// not to police a slow one.
-const BUILD_TIMEOUT: Duration = Duration::from_secs(1800);
-
 /// Root of the F# corpus the differential tests walk, taken from the
 /// `BORZOI_CORPUS` environment variable.
 ///
@@ -135,123 +127,17 @@ pub fn corpus_root() -> PathBuf {
 // tools/msbuild-condition-oracle harness
 // ============================================================================
 
-/// The workspace root, two `..` jumps above this crate's manifest dir;
-/// `tools/msbuild-condition-oracle` lives there.
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/ parent")
-        .parent()
-        .expect("workspace root parent")
-        .to_path_buf()
-}
-
-fn oracle_project_dir() -> PathBuf {
-    workspace_root()
-        .join("tools")
-        .join("msbuild-condition-oracle")
-}
-
-/// Build `tools/msbuild-condition-oracle` (unless
-/// `BORZOI_MSBUILD_CONDITION_ORACLE` points at a prebuilt binary) and
-/// return the apphost path. Same content-bearing-marker scheme as the
-/// fcs-dump / nuget-oracle harnesses, and for the same reasons: a marker file
-/// whose *contents* fingerprint the tool's sources, so branch-switching can
-/// never leave a stale oracle answering for the wrong sources, while
-/// `cargo test`'s serial test binaries skip the `dotnet build` after the first
-/// has run it.
+/// Build `tools/msbuild-condition-oracle` once and return its apphost
+/// ([`msbuild_oracle::apphost`], shared with the crates that drive the
+/// `fscArgs` op).
 fn ensure_oracle_built() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
-    BUILT
-        .get_or_init(|| {
-            if let Some(bin) = std::env::var_os("BORZOI_MSBUILD_CONDITION_ORACLE") {
-                return PathBuf::from(bin);
-            }
-            let project = oracle_project_dir();
-            let bin = project.join("bin");
-            let apphost = bin
-                .join("Release")
-                .join("net10.0")
-                .join("msbuild-condition-oracle");
-            let marker = bin.join(".msbuild-condition-oracle-built");
-            let want = format!("{:016x}", oracle_source_fingerprint(&project));
-
-            let fresh = apphost.host_exists()
-                && borzoi_msbuild::observed::host_fs::read_to_string(&marker)
-                    .map(|recorded| recorded.trim() == want)
-                    .unwrap_or(false);
-            if !fresh {
-                let mut cmd = Command::new("dotnet");
-                cmd.args(["build", "-c", "Release", "--nologo"])
-                    .arg(&project);
-                BoundedCommand::new(cmd)
-                    .timeout(BUILD_TIMEOUT)
-                    .run_ok("dotnet build msbuild-condition-oracle");
-                assert!(
-                    apphost.host_exists(),
-                    "dotnet build msbuild-condition-oracle produced no apphost at {apphost:?}"
-                );
-                write_marker_atomically(&marker, &want);
-            }
-            apphost
-        })
-        .as_path()
+    msbuild_oracle::apphost()
 }
 
 /// The oracle's managed assembly, which also holds the `ConeLogger` that
 /// `dotnet msbuild -logger:` can load.
 pub fn oracle_assembly() -> PathBuf {
     ensure_oracle_built().with_extension("dll")
-}
-
-/// Hash the inputs whose change should force a rebuild: the tool's sources
-/// and the flake lock (which pins the SDK and thus the MSBuild the oracle
-/// loads via MSBuildLocator).
-fn oracle_source_fingerprint(project: &Path) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut sources: Vec<PathBuf> = borzoi_msbuild::observed::host_fs::read_dir(project)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|s| s.to_str()),
-                Some("fs" | "fsproj")
-            )
-        })
-        .collect();
-    sources.sort();
-    sources.push(workspace_root().join("flake.lock"));
-
-    let mut h = DefaultHasher::new();
-    for p in &sources {
-        // File name first so a rename can't alias two contents to one hash.
-        p.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .hash(&mut h);
-        borzoi_msbuild::observed::host_fs::read(p)
-            .unwrap_or_default()
-            .hash(&mut h);
-    }
-    h.finish()
-}
-
-/// Write `contents` to `marker` atomically (temp + rename), best-effort.
-fn write_marker_atomically(marker: &Path, contents: &str) {
-    let Some(dir) = marker.parent() else {
-        return;
-    };
-    let tmp = dir.join(format!(
-        ".msbuild-condition-oracle-built.tmp-{}",
-        std::process::id()
-    ));
-    if std::fs::write(&tmp, contents).is_ok() && std::fs::rename(&tmp, marker).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
 }
 
 /// Strip the oracle child's environment down to what the dotnet host needs,
@@ -723,40 +609,8 @@ impl Oracle {
         path: &Path,
         globals: &[(String, String)],
     ) -> Result<FscInvocation, Vec<String>> {
-        let resp = self.request(&serde_json::json!({
-            "op": "fscArgs",
-            "path": path.to_str().expect("UTF-8 project path"),
-            "globals": globals_object(globals),
-        }));
-        let strings = |value: &serde_json::Value, what: &str| -> Vec<String> {
-            value
-                .as_array()
-                .unwrap_or_else(|| panic!("oracle fscArgs response carries a `{what}` array"))
-                .iter()
-                .map(|v| v.as_str().expect("each entry is a string").to_string())
-                .collect()
-        };
-        if resp["ok"].as_bool() != Some(true) {
-            return Err(strings(&resp["errors"], "errors"));
-        }
-        let compiler = resp["compiler"]
-            .as_object()
-            .expect("oracle fscArgs response carries a `compiler` object")
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-            .collect();
-        Ok(FscInvocation {
-            args: strings(&resp["args"], "args"),
-            response_file: resp["responseFile"]
-                .as_str()
-                .expect("oracle fscArgs response carries the response file")
-                .to_string(),
-            task_assembly: resp["taskAssembly"]
-                .as_str()
-                .expect("oracle fscArgs response names the task assembly")
-                .to_string(),
-            compiler,
-        })
+        let resp = self.request(&msbuild_oracle::fsc_args_request(path, globals));
+        msbuild_oracle::parse_fsc_args_response(&resp)
     }
 
     /// The `items` op enriched for dependency items, where `FullPath` is
@@ -1037,24 +891,6 @@ pub fn workload_env_from_process() -> (Option<PathBuf>, bool) {
         || std::env::var_os("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS").is_some()
         || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some();
     (user_dotnet_root, overrides_present)
-}
-
-/// One compile as the oracle's `fscArgs` op reports it.
-#[derive(Debug, Clone)]
-pub struct FscInvocation {
-    /// Each argument the `Fsc` task passed, in order, as it wrote it: the
-    /// lines of the response file fsc reads, before fsc splits any argument
-    /// at a line break of its own.
-    pub args: Vec<String>,
-    /// The response file the task hands fsc, as it wrote it: [`Self::args`]
-    /// one per line, with `--refout:` and `--refonly` among them, and each
-    /// `\` as written (the items behind `args` turn it into `/` off Windows).
-    pub response_file: String,
-    /// The file of the task assembly whose `Fsc` ran.
-    pub task_assembly: String,
-    /// The task's `ToolPath`, `ToolExe` and `DotnetFscCompilerPath` as it was
-    /// handed them: what chooses the program fsc's arguments go to.
-    pub compiler: std::collections::BTreeMap<String, String>,
 }
 
 /// The `globals` field of an oracle request. An *empty* set sends `null` rather

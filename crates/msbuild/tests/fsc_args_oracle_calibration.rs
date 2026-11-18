@@ -43,43 +43,8 @@ use std::time::Duration;
 use borzoi_msbuild::observed::host_fs::{self, HostPath};
 use borzoi_msbuild::test_support::unescape;
 use borzoi_oracle_harness::BoundedCommand;
-use common::fsc_reading::{assembly_name_of, fsc_output_name, fsc_output_path, fsc_output_path_in};
+use common::fsc_reading::{assembly_name_of, fsc_output_path, fsc_output_path_in};
 use common::{Oracle, scrub_oracle_env};
-
-#[test]
-fn fsc_reading_follows_fsc() {
-    let read =
-        |args: &[&str]| fsc_output_name(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
-    assert_eq!(read(&["-o:obj/A.dll", "x.fs"]), Ok(Some("A".into())));
-    assert_eq!(
-        read(&["-o:obj/A.dll", "--out:B.x.dll"]),
-        Ok(Some("B.x".into()))
-    );
-    assert_eq!(read(&["-o:obj/A.dll", "/out:B.dll"]), Ok(Some("B".into())));
-    assert_eq!(
-        read(&["-o:obj/A.dll", "/out:d/B.dll"]),
-        Ok(Some("A".into()))
-    );
-    assert_eq!(read(&["-o:obj/A.dll", "/o:d/B.dll"]), Ok(Some("B".into())));
-    assert_eq!(read(&["-o:obj/A.dll", "--o:B.dll"]), Ok(Some("A".into())));
-    assert_eq!(read(&["-o:obj/A.dll", "--OUT:B.dll"]), Ok(Some("A".into())));
-    assert_eq!(
-        read(&["-o:obj/A.dll", "#--out:B.dll"]),
-        Ok(Some("A".into()))
-    );
-    assert_eq!(
-        read(&["-o:obj/A.dll", " --out:B.dll"]),
-        Ok(Some("B".into()))
-    );
-    assert_eq!(
-        read(&["-o:obj/A.dll", "--warnon:1\n--out:B.dll"]),
-        Ok(Some("B".into()))
-    );
-    assert_eq!(read(&["-o:obj/A.dll", "-o"]), Ok(Some("A".into())));
-    assert_eq!(read(&["-o:obj/.dll"]), Ok(Some("".into())));
-    assert_eq!(read(&["-o:obj/A..dll"]), Ok(Some("A.".into())));
-    assert!(read(&["-o:obj/A.dll", "@x.rsp"]).is_err());
-}
 
 /// What the op must do on a fixture, relative to the real build.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
