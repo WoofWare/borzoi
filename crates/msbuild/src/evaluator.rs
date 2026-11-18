@@ -6447,8 +6447,8 @@ fn note_undecided_wildcard(normalised: &str, span: Range<usize>, state: &mut Sta
 pub(super) enum WildcardImport {
     /// The files MSBuild loads, in the order it loads them.
     Matches(Vec<PathBuf>),
-    /// A wildcard in the directory part, or no file part: a shape the walk
-    /// does not expand.
+    /// A wildcard in the directory part, no file part, or a spelling ending
+    /// in a separator: a shape the walk does not expand.
     Unmodelled,
     /// The directory could not be listed.
     Unlisted { dir: PathBuf, message: String },
@@ -6457,8 +6457,8 @@ pub(super) enum WildcardImport {
 /// [`WildcardImport`] of `normalised`. Pinned against `dotnet msbuild`
 /// 10.0.401:
 ///
-/// - a spelling ending in a separator matches nothing, and neither does one
-///   whose directory part names a file (or nothing);
+/// - a spelling whose directory part names a file (or nothing) matches
+///   nothing; one ending in a separator is not modelled;
 /// - a match is any entry whose target is not a directory: a directory, or
 ///   a link to one, is no match, while a dangling link is one (and fails to
 ///   load), as is a link to a file;
@@ -6474,23 +6474,11 @@ pub(super) fn wildcard_import(
     current_file_dir: &Path,
     observer: &observed::Observer,
 ) -> WildcardImport {
-    if let Some(spelt) = normalised.strip_suffix('/') {
-        // A wildcard file part spelt as a directory matches nothing. Any other
-        // shape ending in a separator, one whose `.` or `..` MSBuild collapses
-        // first (`x/*/../` is the directory `x/`), is not modelled.
-        let spelt = spelt.trim_end_matches('/');
-        let plain_wildcard = spelt
-            .rsplit('/')
-            .next()
-            .is_some_and(|last| last.contains(['*', '?']))
-            && !spelt
-                .split('/')
-                .any(|segment| segment == "." || segment == "..");
-        return if plain_wildcard {
-            WildcardImport::Matches(Vec::new())
-        } else {
-            WildcardImport::Unmodelled
-        };
+    // A wildcard spelt as a directory matches nothing when MSBuild reads it
+    // as a file spec at all; which spellings it refuses instead (a decoded
+    // NUL, a run of stars, a `..` it collapses first) is not modelled.
+    if normalised.ends_with('/') {
+        return WildcardImport::Unmodelled;
     }
     let path = current_file_dir.join(normalised);
     let file_pattern = path

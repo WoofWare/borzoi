@@ -718,6 +718,25 @@ fn a_backslash_before_a_parent_segment_is_read_two_ways_and_refused() {
     );
 }
 
+/// MSBuild takes one byte-order mark before a project and refuses a second
+/// (MSB4025): pinned here, and `ProjectFile::read` does the same.
+#[test]
+fn a_second_byte_order_mark_refuses_the_project() {
+    let mut oracle = Oracle::spawn();
+    let tmp = TempDir::new().unwrap();
+    let root = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let body = "<Project><PropertyGroup><A>1</A></PropertyGroup></Project>";
+    for (name, boms, evaluates) in [("One.fsproj", 1, true), ("Two.fsproj", 2, false)] {
+        let path = root.join(name);
+        std::fs::write(&path, format!("{}{body}", "\u{feff}".repeat(boms))).unwrap();
+        let theirs = oracle.try_evaluated(&path, &[], &["A"], &[], &[]);
+        assert_eq!(theirs.is_some(), evaluates, "{name}: {theirs:?}");
+        let ours =
+            borzoi_msbuild::ProjectFile::read(&path, &borzoi_msbuild::observed::Observer::new());
+        assert_eq!(ours.is_ok(), evaluates, "{name}: {ours:?}");
+    }
+}
+
 /// A project path whose full path names no file (the root, or one ending in a
 /// separator) is refused: MSBuild loads no project from it.
 #[cfg(unix)]

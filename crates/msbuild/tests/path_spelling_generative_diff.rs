@@ -105,6 +105,10 @@ const IMPORTS: &[(&str, &str)] = &[
     ("glob-dangling", "dl/*.props"),
     // MSBuild collapses the `..` away, leaving `x/`, a directory (MSB4019).
     ("glob-dotdot-trailing", "x/*/../"),
+    // Wildcards spelt as directories that MSBuild refuses: a decoded NUL
+    // (MSB4102), and a run of stars it does not read as a file spec (MSB4019).
+    ("glob-nul-trailing", "bad%00/*.props/"),
+    ("glob-stars-trailing", "sub/***foo/"),
 ];
 
 /// The imports the walk models, which must commit when ungated.
@@ -119,7 +123,6 @@ const CLEAN_IMPORTS: &[&str] = &[
     "written-backslash",
     "glob",
     "glob-nothing",
-    "glob-trailing",
     "glob-under-file",
     "glob-dir-link",
 ];
@@ -157,6 +160,9 @@ const CLEAN_PAIRS: &[&str] = &["gated-then-ungated", "group-false-then-same"];
 /// An SDK import's `Project`: root-relative, or the absolute path of
 /// `<case>/abs.props` (`{case}`), which `Path.Combine` takes over the root.
 const SDK_IMPORTS: &[(&str, &str)] = &[
+    // The SDK's own `Sdk.props`: under the backslash root, the file the
+    // rewrite names is malformed.
+    ("sdk-props", "Sdk.props"),
     ("sdk-relative", "known.props"),
     ("sdk-dotdot", "../Sdk/known.props"),
     ("sdk-absolute", "{case}/abs.props"),
@@ -378,7 +384,12 @@ impl Shared {
             let sdk = root.join(sdks).join("S/Sdk");
             std::fs::create_dir_all(&sdk).expect("mkdir sdk");
             std::fs::write(sdk.join("known.props"), imported(marker)).expect("write");
-            std::fs::write(sdk.join("Sdk.props"), "<Project />").expect("write");
+            let props = if sdks == "Sd/ks" {
+                "<Project"
+            } else {
+                "<Project />"
+            };
+            std::fs::write(sdk.join("Sdk.props"), props).expect("write");
             std::fs::write(sdk.join("Sdk.targets"), "<Project />").expect("write");
         }
         let plain = Oracle::spawn_with_sdks_path(&root.join("Sdks"));

@@ -55,9 +55,10 @@ pub enum ProjectFileError {
     /// in-process API after (`p.proj`).
     Backslash(PathBuf),
     /// The path names no file: it holds a NUL, which .NET refuses before it
-    /// resolves any `..`, or (on a Unix host) its full path is the
-    /// file-system root (`/work/..`) or it ends in a separator. MSBuild loads
-    /// no project from any of them.
+    /// resolves any `..`, or is not UTF-8, which .NET decodes into another
+    /// name, or (on a Unix host) its full path is the file-system root
+    /// (`/work/..`) or it ends in a separator. MSBuild loads no project from
+    /// any of them, or none the bytes name.
     NamesNoFile(PathBuf),
     /// [`ProjectFile::buffer`] was handed a path not spelt as its own full
     /// path, which text may have been read through to name another file.
@@ -121,6 +122,17 @@ impl ProjectFile {
             Some(rest) => rest.to_string(),
             None => text,
         };
+        // MSBuild takes one byte-order mark and refuses a second (MSB4025),
+        // which the XML parser would otherwise take as the first.
+        if text.starts_with('\u{feff}') {
+            return Err(ProjectFileError::Unreadable {
+                path: full,
+                failure: observed::Failure::of(&std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "a second byte-order mark, which MSBuild refuses (MSB4025)",
+                )),
+            });
+        }
         Ok(Self { path: full, text })
     }
 
@@ -159,7 +171,9 @@ pub fn full_path(path: &Path) -> Result<PathBuf, ProjectFileError> {
         return Err(ProjectFileError::Relative(path.to_path_buf()));
     }
     let spelt = path.as_os_str().as_encoded_bytes();
-    if spelt.contains(&0) {
+    // .NET decodes a path that is not UTF-8 with replacement characters, so it
+    // names another file than the bytes do.
+    if spelt.contains(&0) || path.to_str().is_none() {
         return Err(ProjectFileError::NamesNoFile(path.to_path_buf()));
     }
     // Checked on the path as spelt: `dotnet msbuild` rewrites each `\` before
@@ -178,4 +192,45 @@ pub fn full_path(path: &Path) -> Result<PathBuf, ProjectFileError> {
         return Err(ProjectFileError::NamesNoFile(path.to_path_buf()));
     }
     Ok(full)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One byte-order mark is no part of the text; MSBuild refuses a second
+    /// (MSB4025, pinned in `fsproj_property_table_diff`), so the read does.
+    #[test]
+    fn a_read_takes_one_byte_order_mark() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = observed::host_fs::canonicalize(tmp.path()).unwrap();
+        let one = dir.join("One.fsproj");
+        let two = dir.join("Two.fsproj");
+        std::fs::write(&one, "\u{feff}<Project />").unwrap();
+        std::fs::write(&two, "\u{feff}\u{feff}<Project />").unwrap();
+        let observer = observed::Observer::new();
+        assert_eq!(
+            ProjectFile::read(&one, &observer).unwrap().text(),
+            "<Project />"
+        );
+        let refused = ProjectFile::read(&two, &observer);
+        assert!(
+            matches!(refused, Err(ProjectFileError::Unreadable { .. })),
+            "{refused:?}"
+        );
+    }
+
+    /// .NET decodes a path that is not UTF-8 with replacement characters, so
+    /// it names another file than the bytes do.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_names_no_file() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/w/\xff.fsproj"));
+        let refused = ProjectFile::buffer(path, "<Project />");
+        assert!(
+            matches!(refused, Err(ProjectFileError::NamesNoFile(_))),
+            "{refused:?}"
+        );
+    }
 }

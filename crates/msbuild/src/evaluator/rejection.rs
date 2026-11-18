@@ -838,6 +838,14 @@ fn sdk_import_may_load_nothing(
     }
     let under_root = sdk_project_under_root(project, &relative);
     let roots: Vec<PathBuf> = match resolution {
+        // The SDK's own two files sit under its root, which MSBuild may read
+        // as another directory.
+        SdkResolution::Single(paths)
+            if matches!(relative.as_str(), "Sdk.props" | "Sdk.targets")
+                && sdk_root_is_reparsed(&paths.root) =>
+        {
+            return Some(UnloadableImport::PathUndecided);
+        }
         SdkResolution::Single(paths) => match relative.as_str() {
             "Sdk.props" => {
                 return load_failure(state, &paths.props, seen).map(UnloadableImport::Failed);
