@@ -753,13 +753,15 @@ fn explicit_references(raw: &str, out: &mut Vec<String>) {
 /// `$( … )` and before the arguments), reads
 /// `MSBuildDisableFeaturesFromVersion`.
 fn implicit_references(raw: &str, out: &mut Vec<String>) {
+    const CALL: &str = "[msbuild]::arefeaturesenabled(";
+    // Compared lazily, so a reference that is no such call costs a character.
     let calls = raw.match_indices("$(").any(|(at, _)| {
-        let squeezed: String = raw[at + 2..]
+        let mut squeezed = raw[at + 2..]
             .chars()
             .filter(|c| !c.is_whitespace())
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
-        squeezed.starts_with("[msbuild]::arefeaturesenabled(")
+            .map(|c| c.to_ascii_lowercase());
+        CALL.chars()
+            .all(|expected| squeezed.next() == Some(expected))
     });
     if calls {
         out.push("MSBuildDisableFeaturesFromVersion".to_owned());

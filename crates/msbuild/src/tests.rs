@@ -410,6 +410,35 @@ fn judging_a_long_condition_chain_is_linear() {
     );
 }
 
+/// Looking for a property an operand reads without naming it costs a pass
+/// over the operand, not one per reference in it: an operand of thousands of
+/// references, in a condition judged past one the walk cannot evaluate,
+/// finishes at once.
+#[test]
+fn judging_an_operand_of_many_references_is_linear() {
+    const N: usize = 40_000;
+    let references = "$(P)".repeat(N);
+    let src = format!(
+        "<Project><PropertyGroup><P>p</P></PropertyGroup>\
+         <PropertyGroup Condition=\"$([System.String]::IsNullOrWhiteSpace('')) And \
+         '{references}' != '' And 1 &lt; abc\"><R>x</R></PropertyGroup></Project>"
+    );
+    let start = std::time::Instant::now();
+    let p = parse_fsproj(
+        &src,
+        Path::new("/repo/Demo.fsproj"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect("well-formed XML parses");
+    let elapsed = start.elapsed();
+    assert!(p.rejection.is_some());
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "an operand of {N} references took {elapsed:?}"
+    );
+}
+
 /// MSBuild compares a spelling it cannot normalise (`a:b.fs` — `:` is invalid
 /// in a Windows filename) *as written*, so `a:b.fs` and its rooted spelling
 /// are different items to an `Update`, though they name one file. The
