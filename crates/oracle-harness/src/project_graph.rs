@@ -329,21 +329,37 @@ pub struct ReferencedProject {
 impl ReferencedProject {
     /// Its error-severity diagnostics.
     pub fn errors(&self) -> impl Iterator<Item = &Value> {
-        self.diagnostics.iter().filter(|d| {
-            d.get("Severity")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s.eq_ignore_ascii_case("Error"))
-        })
+        errors_of(&self.diagnostics)
     }
+}
+
+impl GraphResponse {
+    /// The checked project's error-severity whole-project diagnostics.
+    pub fn errors(&self) -> impl Iterator<Item = &Value> {
+        errors_of(&self.diagnostics)
+    }
+}
+
+fn errors_of(diagnostics: &[Value]) -> impl Iterator<Item = &Value> {
+    diagnostics.iter().filter(|d| {
+        d.get("Severity")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.eq_ignore_ascii_case("Error"))
+    })
 }
 
 /// What `uses-project-graph-batch` answers: the `uses-project` records of the
 /// checked project's files, kept as JSON so that two answers can be compared
-/// whole, and the projects it referenced.
+/// whole, its whole-project diagnostics, and the projects it referenced.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 pub struct GraphResponse {
     #[serde(rename = "Files")]
     pub files: Vec<Value>,
+    /// The checked project's whole-project diagnostics: what its files'
+    /// checks report and what only a project check finds (FS0240, a
+    /// signature with no implementation).
+    #[serde(rename = "Diagnostics")]
+    pub diagnostics: Vec<Value>,
     #[serde(rename = "Referenced")]
     pub referenced: Vec<ReferencedProject>,
 }

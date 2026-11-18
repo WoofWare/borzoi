@@ -6703,19 +6703,25 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
     let byId, check = readGraphRequest root
     let built, order = graphOptions checker byId check
     let files = checkProjectFiles checker built.[check.Id] check.Paths
+    // A whole-project check finds what no file's check reports (FS0240, a
+    // signature with no implementation).
+    let projectDiagnostics (opts: FSharpProjectOptions) =
+        let results =
+            checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-uses-project-graph")
+            |> Async.RunSynchronously
+        results.Diagnostics |> Array.map projectDiagnostic
     let referenced =
         order
         |> Seq.filter (fun p -> p.Id <> check.Id)
         |> Seq.map (fun p ->
-            let results =
-                checker.ParseAndCheckProject(built.[p.Id], userOpName = "fcs-dump-uses-project-graph")
-                |> Async.RunSynchronously
             {| Id = p.Id
                AssemblyName = p.AssemblyName
                OutputPath = graphOutputPath p
-               Diagnostics = results.Diagnostics |> Array.map projectDiagnostic |})
+               Diagnostics = projectDiagnostics built.[p.Id] |})
         |> Seq.toArray
-    {| Files = files; Referenced = referenced |}
+    {| Files = files
+       Diagnostics = projectDiagnostics built.[check.Id]
+       Referenced = referenced |}
 
 /// `uses-project-graph-batch`: check one project of a project *graph*, each of
 /// its F# project references passed as `FSharpReferencedProject.FSharpReference`,
@@ -6744,6 +6750,8 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
 /// reference is one referenced project.
 ///
 /// The response is the `uses-project` payload for `check`'s files, plus
+/// `Diagnostics`, `check`'s whole-project diagnostics (which include what no
+/// file's check reports, such as a signature with no implementation), and
 /// `Referenced`: every project `check` reaches through `projectRefs`, in
 /// dependency order, with its output path and its whole-project diagnostics
 /// (FCS exports a recovered signature for a project with errors, so a caller
@@ -8850,7 +8858,7 @@ let private usage () =
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
     eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files} response/line"
-    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,assemblyName,target,paths,refs,defines,langversion,exclusiveRefs,projectRefs}],check}, F# project refs as FSharpReference; one compact {Files,Referenced} response/line"
+    eprintfn "  uses-project-graph-batch resident project-graph oracle: one JSON request/line {projects:[{id,assemblyName,target,paths,refs,defines,langversion,exclusiveRefs,projectRefs}],check}, F# project refs as FSharpReference; one compact {Files,Diagnostics,Referenced} response/line"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
     eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files} response/line"
     2

@@ -223,6 +223,12 @@ fn unmatched(xs: &[Value], ys: &[Value]) -> Vec<String> {
 /// What differs between the two answers' records, file by file.
 fn answer_diff(source: &GraphResponse, dll: &GraphResponse) -> Vec<String> {
     let mut out = Vec::new();
+    for x in unmatched(&source.diagnostics, &dll.diagnostics) {
+        out.push(format!("project Diagnostics only from source: {x}"));
+    }
+    for y in unmatched(&dll.diagnostics, &source.diagnostics) {
+        out.push(format!("project Diagnostics only with the DLL: {y}"));
+    }
     if source.files.len() != dll.files.len() {
         out.push(format!(
             "{} files from source, {} with the DLL",
