@@ -371,6 +371,9 @@ enum Walk {
     /// MSBuild throws whatever the uncertain values hold
     /// ([`throws_whatever`]) settles for no further.
     Certainty,
+    /// To the first operand MSBuild may throw on: a caller that only asks
+    /// whether it may throw ([`may_throw`]) need go no further.
+    Possibility,
 }
 
 /// Whether MSBuild throws evaluating `source` whatever the properties
@@ -388,6 +391,25 @@ pub fn throws_whatever(
     match parse_condition(source) {
         Ok(Some(expr)) => {
             judge_expr(&expr, props, fs, uncertain, Walk::Certainty).throws == Throws::Certainly
+        }
+        Ok(None) | Err(Reject::Unmodelled) => false,
+        Err(Reject::Illegal) => true,
+    }
+}
+
+/// Whether MSBuild may throw evaluating `source`, the properties `uncertain`
+/// names unknown: [`judge`]'s throw verdict other than [`Throws::Never`],
+/// found without evaluating (or probing the file system for) any operand past
+/// the first that may throw.
+pub fn may_throw(
+    source: &str,
+    props: &PropertyMap,
+    fs: Option<Probes<'_>>,
+    uncertain: &dyn Fn(&str) -> bool,
+) -> bool {
+    match parse_condition(source) {
+        Ok(Some(expr)) => {
+            judge_expr(&expr, props, fs, uncertain, Walk::Possibility).throws != Throws::Never
         }
         Ok(None) | Err(Reject::Unmodelled) => false,
         Err(Reject::Illegal) => true,
@@ -476,6 +498,9 @@ fn judge_chain(
             };
         }
         throws = throws.max(judged.throws);
+        if walk == Walk::Possibility && throws != Throws::Never {
+            return Judgement::of(None, throws, unevaluated);
+        }
         match judged.value {
             Some(value) if value == absorbing => {
                 return Judgement::of(Some(absorbing), throws, unevaluated);
@@ -643,15 +668,37 @@ pub fn requires_exists(source: &str, is_the_exists: &dyn Fn(&str) -> bool) -> bo
     false
 }
 
+/// Whether `scalar` reads `MSBuildToolsVersion`, which MSBuild may compare
+/// otherwise than its text says.
+fn scalar_reads_toolset_version(scalar: &ScalarExpr) -> bool {
+    match scalar {
+        ScalarExpr::Bare(_) => false,
+        ScalarExpr::String(raw)
+        | ScalarExpr::Property(raw)
+        | ScalarExpr::SystemVersionPart { arg: raw, .. } => {
+            super::properties::property_references(raw)
+                .any(|name| name.eq_ignore_ascii_case("MSBuildToolsVersion"))
+        }
+    }
+}
+
+/// The properties `raw` reads: its `$(…)` references, and the one an intrinsic
+/// reads with no reference (`AreFeaturesEnabled` reads
+/// `MSBuildDisableFeaturesFromVersion`).
+fn raw_references(raw: &str, out: &mut Vec<String>) {
+    out.extend(super::properties::property_references(raw).map(str::to_string));
+    if raw.to_ascii_lowercase().contains("arefeaturesenabled") {
+        out.push("MSBuildDisableFeaturesFromVersion".to_owned());
+    }
+}
+
 /// Every property a leaf of the condition tree mentions, in any operand.
 fn leaf_references(expr: &BoolExpr, out: &mut Vec<String>) {
     let scalar = |scalar: &ScalarExpr, out: &mut Vec<String>| match scalar {
         ScalarExpr::Bare(_) => {}
         ScalarExpr::String(raw)
         | ScalarExpr::Property(raw)
-        | ScalarExpr::SystemVersionPart { arg: raw, .. } => {
-            out.extend(super::properties::property_references(raw).map(str::to_string))
-        }
+        | ScalarExpr::SystemVersionPart { arg: raw, .. } => raw_references(raw, out),
     };
     match expr {
         BoolExpr::True | BoolExpr::False => {}
@@ -663,9 +710,7 @@ fn leaf_references(expr: &BoolExpr, out: &mut Vec<String>) {
         }
         BoolExpr::Exists(raw)
         | BoolExpr::HasTrailingSlash(raw)
-        | BoolExpr::MsbuildVersionFunction(raw) => {
-            out.extend(super::properties::property_references(raw).map(str::to_string))
-        }
+        | BoolExpr::MsbuildVersionFunction(raw) => raw_references(raw, out),
         BoolExpr::CoerceBool(value) => scalar(value, out),
         BoolExpr::Compare { lhs, rhs, .. } => {
             scalar(lhs, out);
@@ -1572,8 +1617,18 @@ fn eval_bool(
             })
         }
         BoolExpr::Compare { op, lhs, rhs } => {
+            // MSBuild compares a `$(MSBuildToolsVersion)` reference, which
+            // expands to `Current`, as Visual Studio's version beside a number
+            // or version (`'$(MSBuildToolsVersion)' != '18'` is false on SDK
+            // 10.0.401), though a literal `Current` compares as a string. Not
+            // modelled for equality; the relational operators decline any
+            // `Current` (`certainly_neither_number_nor_version`).
+            let toolset = scalar_reads_toolset_version(lhs) || scalar_reads_toolset_version(rhs);
             let lhs = expand_scalar_for_condition(lhs, props, fs.map(|fs| fs.observer), undefined)?;
             let rhs = expand_scalar_for_condition(rhs, props, fs.map(|fs| fs.observer), undefined)?;
+            if toolset && matches!(op, CompareOp::Eq | CompareOp::Neq) {
+                return Err(Reject::Unmodelled);
+            }
             if !matches!(op, CompareOp::Eq | CompareOp::Neq) {
                 let ordering = compare_relational_values(&lhs, &rhs).map_err(|()| {
                     // MSBuild throws when either side is neither a number nor
@@ -1850,17 +1905,6 @@ fn compare_equality_values(lhs: &str, rhs: &str) -> Result<bool, ()> {
         // NaN equals nothing, itself included.
         return Ok(lhs == rhs);
     }
-    // MSBuild compares `$(MSBuildToolsVersion)`, which expands to `Current`, as
-    // Visual Studio's version where the other side is a number or version
-    // (`'$(MSBuildToolsVersion)' != '18'` is false on SDK 10.0.401), and a
-    // literal `Current` as a string. The value cannot tell the two apart.
-    let numeric =
-        |value: &str, number: Option<f64>| number.is_some() || parse_system_version(value).is_ok();
-    if (lhs == "Current" && numeric(rhs, rhs_number))
-        || (rhs == "Current" && numeric(lhs, lhs_number))
-    {
-        return Err(());
-    }
     if lhs == rhs {
         return Ok(true);
     }
@@ -1894,12 +1938,16 @@ fn equality_number(value: &str) -> Result<Option<f64>, ()> {
         return Ok(Some(f64::NAN));
     }
     // Another spelling that is NaN but for whitespace, signs and NULs.
-    let loose: String = value
+    let mut loose = value
         .chars()
         .filter(|&c| !c.is_whitespace() && !matches!(c, '\0' | '+' | '-'))
-        .collect();
+        .map(|c| c.to_ascii_lowercase());
+    let loosely_nan = loose.next() == Some('n')
+        && loose.next() == Some('a')
+        && loose.next() == Some('n')
+        && loose.next().is_none();
     let digits = value.trim_end_matches('\0');
-    if digits.contains('\0') || loose.eq_ignore_ascii_case("nan") {
+    if digits.contains('\0') || loosely_nan {
         return Err(());
     }
     Ok(parse_msbuild_number(digits))
@@ -2153,6 +2201,34 @@ mod tests {
         // The throwing operand is one we cannot evaluate to a boolean, so the
         // value holds only where it is not reached, and decides nothing.
         assert!(judged.unevaluated);
+    }
+
+    /// A `$(MSBuildToolsVersion)` reference beside a number is declined, since
+    /// MSBuild reads its `Current` as Visual Studio's version; a literal
+    /// `Current` compares as a string.
+    #[test]
+    fn only_a_toolset_version_reference_declines_equality() {
+        let props = props(&[("MSBuildToolsVersion", "Current")]);
+        assert_eq!(evaluate("'Current' != '17'", &props), Outcome::True);
+        assert_eq!(
+            evaluate("'$(MSBuildToolsVersion)' != '18'", &props),
+            Outcome::Unsupported
+        );
+    }
+
+    /// `AreFeaturesEnabled` reads `MSBuildDisableFeaturesFromVersion` with no
+    /// reference to it, so a leaf calling it is uncertain where that name is.
+    #[test]
+    fn an_intrinsic_reads_its_implicit_property() {
+        let props = props(&[("MSBuildDisableFeaturesFromVersion", "999.999")]);
+        let uncertain = |name: &str| name.eq_ignore_ascii_case("MSBuildDisableFeaturesFromVersion");
+        let judged = judge(
+            "$([MSBuild]::AreFeaturesEnabled('99.99')) And 1 < abc",
+            &props,
+            None,
+            &uncertain,
+        );
+        assert_ne!(judged.throws, Throws::Certainly, "{judged:?}");
     }
 
     /// Only a whole NaN spelling is declined: a word that contains `nan`
@@ -4395,8 +4471,15 @@ mod decide_without_props {
                 is
             });
             JUDGED.fetch_add(1, Ordering::Relaxed);
-            // The certainty-only walk claims a certain throw only where the
+            // The possibility-only walk agrees with the full judgement, and
+            // the certainty-only walk claims a certain throw only where the
             // full judgement does.
+            prop_assert_eq!(
+                may_throw(&source, &base, None, &is_untrusted),
+                judged.throws != Throws::Never,
+                "{}",
+                source
+            );
             prop_assert!(
                 !throws_whatever(&source, &base, None, &is_untrusted)
                     || judged.throws == Throws::Certainly,

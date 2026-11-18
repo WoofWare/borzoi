@@ -1720,9 +1720,12 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         // reaches the error.
         "'NaN' != '' And 1 &lt; abc",
         "'NaN' != 'abc' And 1 &lt; abc",
-        // MSBuild may reach the error past an operand the walk cannot evaluate,
-        // in the second on what a probe of the file system returns.
+        // MSBuild may reach the error past an operand the walk cannot evaluate:
+        // an unknown function, a `$(MSBuildToolsVersion)` equality (MSBuild
+        // reads its `Current` as Visual Studio's version beside a number), or
+        // a comparison that reads the file system.
         "$([System.String]::Unknown()) == '' And 1 &lt; abc",
+        "'$(MSBuildToolsVersion)' == '18' And 1 &lt; abc",
         "'Current' != '18' And $([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildProjectDirectory)', 'flag')) &gt; 1",
     ];
     // Ill typed exactly where `Exists` resolves against the project's
@@ -1763,10 +1766,6 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
         "false Or ($(Shaky) &gt; 2 And 'a' == 'b')",
         "!($(Shaky) &gt; 2) Or true",
         "$(Maybe.Substring(5)) == ''",
-        // `MSBuildToolsVersion` (`Current`, which MSBuild reads as Visual
-        // Studio's version beside a number) is a toolset value the walk is not
-        // certain of; it holds it unset, which makes the first operand false.
-        "'$(MSBuildToolsVersion)' == '18' And 1 &lt; abc",
     ];
     // ... and each of these stops before it, so MSBuild never reads it.
     let stops_before_uncertain = [

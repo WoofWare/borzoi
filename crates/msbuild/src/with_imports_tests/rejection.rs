@@ -693,6 +693,11 @@ fn an_operand_past_the_one_that_settles_the_question_is_not_probed() {
             "<PropertyGroup><U>1</U><U Condition=\"{UNDECIDED_TRUE}\">true</U></PropertyGroup>\
              <PropertyGroup Condition=\"{UNDECIDED_TRUE}\"><R Condition=\"$(U) And Exists('tail')\">x</R></PropertyGroup>"
         ),
+        // Evaluation stops at an operand it cannot evaluate; whether MSBuild
+        // may throw is settled in the `Or`, before `Exists`.
+        "<PropertyGroup Condition=\"($([System.String]::IsNullOrWhiteSpace('')) Or 1 &lt; abc) \
+         And Exists('tail')\"><R>x</R></PropertyGroup>"
+            .to_owned(),
         // Reached for certain, throwing on the value the walk holds (unset)
         // but not certainly on MSBuild's: whether it throws for certain is
         // settled at `U`.

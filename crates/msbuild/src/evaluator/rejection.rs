@@ -266,8 +266,7 @@ pub(super) fn judge_condition_rejection(
             // the values the walk holds. What an operand past it reads from
             // the file system may decide whether it throws, so the judgement
             // probes as the evaluation would have.
-            let held = condition::judge(condition, &state.lookup, probes, &|_| false);
-            if held.throws != condition::Throws::Never {
+            if condition::may_throw(condition, &state.lookup, probes, &|_| false) {
                 state.note_rejection(
                     RejectionCertainty::Possible,
                     RejectionCause::IllegalCondition {
