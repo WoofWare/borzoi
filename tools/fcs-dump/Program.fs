@@ -6346,9 +6346,9 @@ let private sourceReferenceDirectives = set [ "r"; "reference"; "load"; "I"; "i"
 /// - a directive in [`sourceReferenceDirectives`] that fsc acts on
 ///   ([`processedHashDirectives`]), read from the check's own parse
 ///   (`parsed`), so one under `#if EDITING` is in no branch it parsed.
-let private refuseUndescribedSources (paths: string[]) (parsed: string -> ParsedInput) =
+let private refuseUndescribedSources (paths: string[]) (textOf: string -> string) (parsed: string -> ParsedInput) =
     for path in paths do
-        if mayHoldLineDirective (File.ReadAllText path) then
+        if mayHoldLineDirective (textOf path) then
             failwithf "%s may hold a line directive, which moves the ranges the project check reports to another place than the text" path
         match
             processedHashDirectives (parsed path)
@@ -6358,45 +6358,92 @@ let private refuseUndescribedSources (paths: string[]) (parsed: string -> Parsed
             failwithf "%s holds #%s, which names code the project check does not read" path ident
         | None -> ()
 
-/// Refuse a reference fsc would reject: one that is not a file, or not an
-/// assembly (FS0084). FCS's project check resolves its references without
-/// reporting these, so a project with one would otherwise look clean.
-let private refuseUnreadableReferences (projOpts: FSharpProjectOptions) =
-    for o in projOpts.OtherOptions do
-        match [ "-r:"; "/r:"; "--reference:" ] |> List.tryFind (fun prefix -> o.StartsWith prefix) with
-        | Some prefix ->
-            let path = o.Substring prefix.Length
-            if not (File.Exists path) then
-                failwithf "reference %s is not a file" path
-            try
-                System.Reflection.AssemblyName.GetAssemblyName path |> ignore
-            with ex ->
-                failwithf "reference %s is not an assembly: %s" path ex.Message
-        | None -> ()
+/// The references `projOpts` names (`-r:`), each refused if fsc would reject
+/// it: one that is not a file, or not an assembly (FS0084). FCS's project
+/// check resolves its references without reporting these, so a project with
+/// one would otherwise look clean.
+let private readableReferences (projOpts: FSharpProjectOptions) : string list =
+    [ for o in projOpts.OtherOptions do
+          match [ "-r:"; "/r:"; "--reference:" ] |> List.tryFind (fun prefix -> o.StartsWith prefix) with
+          | Some prefix ->
+              let path = o.Substring prefix.Length
+              if not (File.Exists path) then
+                  failwithf "reference %s is not a file" path
+              try
+                  System.Reflection.AssemblyName.GetAssemblyName path |> ignore
+              with ex ->
+                  failwithf "reference %s is not an assembly: %s" path ex.Message
+              yield path
+          | None -> () ]
 
-/// The whole-project check of `projOpts`, read from the sources as they are
-/// now, refused where it cannot describe them ([`refuseUnreadableReferences`],
-/// [`refuseUndescribedSources`]).
+/// The content digest of each reference a project-check request has read.
+let private referenceDigests = System.Collections.Generic.Dictionary<string, string>()
+
+/// Whether any of `references` holds other bytes than when a request last
+/// read it, recording what each holds now. FCS keeps an assembly it read by
+/// its path and modification time, process-wide, so a rewrite that keeps the
+/// time would be answered from the old assembly; the caller clears FCS's
+/// caches when this says so.
+let private referencesChanged (references: string list) : bool =
+    let mutable changed = false
+    for path in references do
+        let digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes path))
+        match referenceDigests.TryGetValue path with
+        | true, seen when seen = digest -> ()
+        | true, _ ->
+            changed <- true
+            referenceDigests[path] <- digest
+        | false, _ -> referenceDigests[path] <- digest
+    changed
+
+/// The text of each source of the project-check request in progress, read
+/// once when it starts ([`checkProjectNow`]). The project-check oracles'
+/// checker reads its sources from here and never from disk
+/// ([`projectChecker`]), so the text the oracle refuses or accepts is the text
+/// FCS checks, however the file changes meanwhile.
+let private requestSources = System.Collections.Generic.Dictionary<string, string>()
+
+/// The checker of the project-check oracles: it reads each source from
+/// [`requestSources`].
+let private projectChecker () =
+    FSharpChecker.Create(
+        documentSource =
+            DocumentSource.Custom(fun path ->
+                async {
+                    match requestSources.TryGetValue path with
+                    | true, text -> return Some(SourceText.ofString text)
+                    | false, _ -> return None
+                })
+    )
+
+/// The whole-project check of `projOpts` by a [`projectChecker`], of its
+/// sources as they are when the request starts, refused where it cannot
+/// describe them ([`readableReferences`], [`refuseUndescribedSources`]).
 ///
-/// FCS keeps a checked project by its options and reads its sources again
-/// only when a file's modification time moves, so a resident oracle asked
-/// about a file rewritten within one tick would answer from the old text. A
-/// stamp of its own gives each request a project FCS has not checked, and the
-/// check is dropped from FCS's caches once read (the returned release), so no
-/// request's answer depends on another's.
+/// No request's answer depends on another's. The sources are read afresh
+/// into [`requestSources`]; a reference whose bytes changed clears FCS's
+/// caches ([`referencesChanged`]); and a stamp of its own gives each request
+/// a project FCS has not checked, dropped from FCS's caches once read (the
+/// returned release).
 let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (userOpName: string) =
     let opts =
         { projOpts with
             Stamp = Some(System.Threading.Interlocked.Increment(&projectCheckRequests)) }
-    let release () = checker.ClearCache([ opts ])
-    refuseUnreadableReferences opts
+    let release () =
+        checker.ClearCache([ opts ])
+        requestSources.Clear()
+    if referencesChanged (readableReferences opts) then
+        checker.InvalidateAll()
+    requestSources.Clear()
+    for path in opts.SourceFiles do
+        requestSources[path] <- File.ReadAllText path
     try
         let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
         let parsed (path: string) =
             (checker.GetBackgroundParseResultsForFileInProject(path, opts, userOpName = userOpName)
              |> Async.RunSynchronously)
                 .ParseTree
-        refuseUndescribedSources opts.SourceFiles parsed
+        refuseUndescribedSources opts.SourceFiles (fun path -> requestSources[path]) parsed
         results, release
     with _ ->
         release ()
@@ -6602,7 +6649,7 @@ let private dumpUsesProject () =
         | Some _
         | None -> false
 
-    let checker = FSharpChecker.Create()
+    let checker = projectChecker ()
     let payload = usesProjectFiles checker paths (extraRefArgs ()) exclusiveRefs defineArgs langVersionArgs
     let json = JsonSerializer.Serialize(payload, buildOptions ())
     Console.Out.Write(json)
@@ -6623,7 +6670,7 @@ let private dumpUsesProject () =
 /// consumer is whitespace-insensitive). Per-request failures become
 /// `{ "BatchError": <msg> }`, exactly as in `file-batch`.
 let private usesProjectBatchCore () =
-    let checker = FSharpChecker.Create()
+    let checker = projectChecker ()
     let compact = buildOptionsCompact ()
 
     let respond (line: string) : string =
@@ -8637,7 +8684,7 @@ let private xmlDocProjectFiles
 /// file is a valid one-path request. A request-level failure is
 /// `{ "BatchError": <msg> }`.
 let private xmlDocBatchCore () =
-    let checker = FSharpChecker.Create()
+    let checker = projectChecker ()
     let compact = buildOptionsCompact ()
     let respond (line: string) : string =
         try

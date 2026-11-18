@@ -191,6 +191,44 @@ fn an_unreadable_reference_is_refused() {
     }
 }
 
+/// A resident oracle reads a reference as it is now: one rewritten in place
+/// with its modification time put back is read again, as a fresh child would
+/// read it.
+#[test]
+fn a_reference_rewritten_in_place_is_read() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    write(&a, "module A\nlet z = FSharp.Compiler.Text.Range.Zero\n");
+    let fcs = ensure_fsharp_compiler_service_dll();
+    let other = fcs
+        .parent()
+        .expect("the oracle's directory")
+        .join("FSharp.Core.dll");
+    let lib = dir.path().join("Lib.dll");
+    for oracle in ORACLES {
+        let mut child = resident(oracle);
+        std::fs::copy(&fcs, &lib).expect("copy the referenced assembly");
+        let stamp = host_fs::metadata(&lib)
+            .and_then(|m| m.modified())
+            .expect("modification time");
+        let first = ask_with_refs(&mut child, oracle, &[&a], &[&lib])
+            .unwrap_or_else(|err| panic!("{oracle} refused: {err}"));
+        assert_eq!(
+            error_numbers(record(&first, "A.fs")),
+            Vec::<i64>::new(),
+            "{oracle}: the type resolves in the reference: {first}"
+        );
+        std::fs::copy(&other, &lib).expect("rewrite the referenced assembly");
+        host_fs::set_modified(&lib, stamp).expect("restore the modification time");
+        let second = ask_with_refs(&mut child, oracle, &[&a], &[&lib])
+            .unwrap_or_else(|err| panic!("{oracle} refused: {err}"));
+        assert!(
+            error_numbers(record(&second, "A.fs")).contains(&39),
+            "{oracle}: the rewritten reference does not hold the type: {second}"
+        );
+    }
+}
+
 /// A resident oracle reads the sources as they are now: a file rewritten
 /// with its modification time put back is answered from its new text.
 #[test]

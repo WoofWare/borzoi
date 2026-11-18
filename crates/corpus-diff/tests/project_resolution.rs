@@ -3518,7 +3518,7 @@ fn record_contribution(
     let without: Vec<FileUses> = fcs
         .iter()
         .map(|f| FileUses {
-            in_no_file: std::sync::Arc::default(),
+            in_no_file: std::sync::Arc::clone(&f.in_no_file),
             path: f.path.clone(),
             diagnostics: f.diagnostics.clone(),
             uses: f
@@ -3591,6 +3591,13 @@ fn generated_qualifier_cursors_agree_with_the_project_use_stream() {
         assert_eq!(
             comparison.fcs_error_files,
             Vec::<FcsErrorFile>::new(),
+            "cell {}: the generated project should type-check; sources {:#?}",
+            cell.label,
+            cell.files
+        );
+        assert_eq!(
+            comparison.fcs_errors_in_no_file,
+            Vec::<FcsDiagnostic>::new(),
             "cell {}: the generated project should type-check; sources {:#?}",
             cell.label,
             cell.files
