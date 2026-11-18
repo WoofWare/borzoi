@@ -2821,16 +2821,42 @@ impl<'r> State<'r> {
         );
     }
 
+    /// [`Self::mark_skipped_write_stale`] for every property MSBuild may write
+    /// in one of `branches`, alternatives of which it takes at most one (the
+    /// `<When>`s and `<Otherwise>` of a `<Choose>` it may take instead of the
+    /// walk's). Each is judged from the state before any of them, in its own
+    /// order, and what any may write is marked once all are judged. Returns
+    /// the names marked.
+    fn mark_skipped_branches_stale(
+        &mut self,
+        branches: &[Node<'_, '_>],
+        current_file_dir: &Path,
+        cause: &properties::trust::StaleCause,
+    ) -> Vec<String> {
+        let mut written = Vec::new();
+        for branch in branches {
+            let before = self.lookup.clone();
+            self.mark_skipped_branch_stale(*branch, current_file_dir, cause, &mut written);
+            self.lookup = before;
+        }
+        for name in &written {
+            self.mark_skipped_write_stale(name, cause);
+        }
+        written
+    }
+
     /// [`Self::mark_skipped_write_stale`] for every property `branch` (a
-    /// `<When>` or `<Otherwise>`) may write, nested `<Choose>`s included: all
-    /// but those a gate decided from certain inputs rules out, the write's own
-    /// or its group's (`current_file_dir` resolving the group's `Exists`) or a
-    /// nested `<When>`'s.
+    /// `<When>` or `<Otherwise>`) may write, in order, recording each in
+    /// `written`: all but those a gate decided from certain inputs rules out,
+    /// the write's own or its group's (`current_file_dir` resolving the
+    /// group's `Exists`), and those in a nested `<Choose>`'s branches MSBuild
+    /// cannot take.
     fn mark_skipped_branch_stale(
         &mut self,
         branch: Node<'_, '_>,
         current_file_dir: &Path,
         cause: &properties::trust::StaleCause,
+        written: &mut Vec<String>,
     ) {
         for child in branch.children().filter(Node::is_element) {
             match child.tag_name().name() {
@@ -2840,21 +2866,68 @@ impl<'r> State<'r> {
                     }
                     for property in child.children().filter(Node::is_element) {
                         if property_child_could_write(property, self) {
-                            self.mark_skipped_write_stale(property.tag_name().name(), cause);
+                            let name = property.tag_name().name();
+                            self.mark_skipped_write_stale(name, cause);
+                            written.push(name.to_owned());
                         }
                     }
                 }
                 "Choose" => {
-                    let entry_dir = self.entry_project_dir.clone();
-                    for nested in child.children().filter(Node::is_element) {
-                        if !self.ruled_out(nested, &entry_dir) {
-                            self.mark_skipped_branch_stale(nested, current_file_dir, cause);
-                        }
-                    }
+                    let nested = self.choose_branches_from(child, 0, None);
+                    written.extend(self.mark_skipped_branches_stale(
+                        &nested,
+                        current_file_dir,
+                        cause,
+                    ));
                 }
                 _ => {}
             }
         }
+    }
+
+    /// The branches of `choose` MSBuild may take, from its `first` `<When>`
+    /// on, but `walked` (the walk's, by index; the `<Otherwise>` is index
+    /// `whens.len()`): each whose gate does not fail whatever the uncertain
+    /// names hold, up to the first whose gate holds whatever they hold, and
+    /// the `<Otherwise>` only if none does.
+    fn choose_branches_from<'a, 'input>(
+        &self,
+        choose: Node<'a, 'input>,
+        first: usize,
+        walked: Option<usize>,
+    ) -> Vec<Node<'a, 'input>> {
+        let entry_dir = self.entry_project_dir.clone();
+        let mut branches = Vec::new();
+        let whens = choose
+            .children()
+            .filter(|child| child.is_element() && child.tag_name().name() == "When");
+        let mut count = 0;
+        for (index, when) in whens.enumerate() {
+            count = index + 1;
+            if index < first {
+                continue;
+            }
+            let decision = attribute(when, "Condition").and_then(|condition| {
+                directory_build::decision_from_certain_inputs(self, &condition, &entry_dir)
+            });
+            if decision == Some(false) {
+                continue;
+            }
+            if walked != Some(index) {
+                branches.push(when);
+            }
+            if decision == Some(true) {
+                return branches;
+            }
+        }
+        if walked != Some(count) {
+            branches.extend(
+                choose
+                    .children()
+                    .find(|child| child.is_element() && child.tag_name().name() == "Otherwise"),
+            );
+        }
+        branches
     }
 
     /// Whether `node`'s gate is false whatever the names the walk is not
@@ -3722,12 +3795,16 @@ fn walk_top_level(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State
                     }
                     // The imports the walk did not see may run, unless each
                     // one's own gate fails whatever the uncertain names hold.
-                    let any_may_run = node
-                        .children()
-                        .filter(|child| child.is_element() && child.tag_name().name() == "Import")
-                        .any(|import| !state.ruled_out(import, current_file_dir));
-                    if let Some(cause) = stale_gate.filter(|_| any_may_run) {
-                        state.latch_walk_opaque((*cause).clone(), node.range());
+                    if let Some(cause) = stale_gate {
+                        let any_may_run = node
+                            .children()
+                            .filter(|child| {
+                                child.is_element() && child.tag_name().name() == "Import"
+                            })
+                            .any(|import| !state.ruled_out(import, current_file_dir));
+                        if any_may_run {
+                            state.latch_walk_opaque((*cause).clone(), node.range());
+                        }
                     }
                 }
                 CondGate::Unsupported => {
@@ -3952,11 +4029,13 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
         // The branches before the undecided gate, from the first the walk
         // decided on a stale value, may be the one MSBuild takes.
         if let (Some(first), Some(cause)) = (first_unsure, choice_stale.clone()) {
-            for branch in &whens[first..from] {
-                if !state.ruled_out(*branch, &exists_dir) {
-                    state.mark_skipped_branch_stale(*branch, current_file_dir, &cause);
-                }
-            }
+            let before_undecided: Vec<Node<'_, '_>> = whens[first..from]
+                .iter()
+                .copied()
+                .filter(|branch| !state.ruled_out(*branch, &exists_dir))
+                .collect();
+            let _marked =
+                state.mark_skipped_branches_stale(&before_undecided, current_file_dir, &cause);
         }
         // MSBuild may choose any of those branches, and evaluate the gates
         // after this one.
@@ -3987,29 +4066,8 @@ fn handle_choose(node: Node<'_, '_>, current_file_dir: &Path, state: &mut State<
     // build may hold. The branch the walk takes is walked under that gate's
     // staleness below.
     if let (Some(first), Some(cause)) = (first_unsure, choice_stale.clone()) {
-        let mut untaken: Vec<Node<'_, '_>> = Vec::new();
-        let mut otherwise_reachable = true;
-        for (index, when) in whens.iter().enumerate().skip(first) {
-            let decision = attribute(*when, "Condition").and_then(|condition| {
-                directory_build::decision_from_certain_inputs(state, &condition, &exists_dir)
-            });
-            if decision == Some(false) {
-                continue;
-            }
-            if index != walked {
-                untaken.push(*when);
-            }
-            if decision == Some(true) {
-                otherwise_reachable = false;
-                break;
-            }
-        }
-        if otherwise_reachable && chosen.is_some() {
-            untaken.extend(otherwise);
-        }
-        for branch in untaken {
-            state.mark_skipped_branch_stale(branch, current_file_dir, &cause);
-        }
+        let untaken = state.choose_branches_from(node, first, Some(walked));
+        let _marked = state.mark_skipped_branches_stale(&untaken, current_file_dir, &cause);
     }
     let Some(branch) = chosen.map(|(_, when)| when).or(otherwise) else {
         // Every gate cleanly false and no <Otherwise>: an exact no-op.
@@ -5359,14 +5417,19 @@ fn property_child_could_write(child: Node<'_, '_>, state: &State<'_>) -> bool {
     } else {
         condition::evaluate(cond, &state.lookup)
     };
-    // Ruled out only by a gate decided from certain inputs: a stale value may
-    // have been rewritten so that the gate holds (#1037). An undefined read
-    // the walk can prove is undefined in the real build too is certain there
-    // (C.2b), so a child gated on a provably-false `'$(NoSuch)' != ''` is
-    // ruled out.
+    // An undefined read the walk can prove is undefined in the real build too
+    // substitutes to exactly "" (C.2b), so a child gated on a provably-false
+    // `'$(NoSuch)' != ''` is ruled out. A gate that reads a stale value is
+    // ruled out only where the values the walk is certain of decide it: the
+    // stale one may have been rewritten so that it holds (#1037).
     let exists_dir = state.entry_project_dir.clone();
-    !(eval.outcome == condition::Outcome::False
-        && directory_build::decided_from_certain_inputs(state, cond, &exists_dir))
+    let ruled_out = eval.outcome == condition::Outcome::False
+        && state.condition_is_decided_exactly(cond, Some(&exists_dir), &|name| {
+            state.undefined_read_is_exact(name)
+        })
+        && (state.trust_for_raw(cond).stale().is_none()
+            || directory_build::decided_from_certain_inputs(state, cond, &exists_dir));
+    !ruled_out
 }
 
 /// Mark every unprotected, possibly-writing child of a maybe-run/maybe-skipped

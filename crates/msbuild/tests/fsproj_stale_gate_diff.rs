@@ -53,6 +53,7 @@ const READ: &[&str] = &[
     "RImport",
     "RImportGroup",
     "RUnsupported",
+    "Fresh",
     "Gate",
     "Flag",
     "G",
@@ -157,32 +158,7 @@ fn route(rng: &mut SplitMix64, route: Route, out: &mut String) {
             write_output(rng, name, out);
             out.push_str("</PropertyGroup>");
         }
-        Route::Choose => {
-            out.push_str("<Choose>");
-            for _ in 0..1 + rng.below(3) {
-                // Mostly stale gates; now and then one the walk cannot decide
-                // at all, or one decided on certain values either way.
-                let gate = match rng.below(6) {
-                    0 => format!(" Condition=\"{UNDECIDABLE}\""),
-                    1 => certain_gate(rng).to_owned(),
-                    _ => stale_gate(rng),
-                };
-                let group = if rng.below(4) == 0 {
-                    certain_gate(rng)
-                } else {
-                    ""
-                };
-                let _ = write!(out, "<When{gate}><PropertyGroup{group}>");
-                write_output(rng, name, out);
-                out.push_str("</PropertyGroup></When>");
-            }
-            if rng.below(2) == 0 {
-                out.push_str("<Otherwise><PropertyGroup>");
-                write_output(rng, name, out);
-                out.push_str("</PropertyGroup></Otherwise>");
-            }
-            out.push_str("</Choose>");
-        }
+        Route::Choose => choose(rng, name, 0, out),
         Route::Import => {
             let _ = write!(
                 out,
@@ -217,6 +193,54 @@ fn route(rng: &mut SplitMix64, route: Route, out: &mut String) {
     }
 }
 
+/// A `<Choose>` writing `name` in its branches, nesting one more inside a
+/// branch now and then.
+fn choose(rng: &mut SplitMix64, name: &str, depth: usize, out: &mut String) {
+    out.push_str("<Choose>");
+    for _ in 0..1 + rng.below(3) {
+        // Mostly stale gates; now and then one the walk cannot decide at all,
+        // or one decided on certain values either way.
+        let gate = match rng.below(6) {
+            0 => format!(" Condition=\"{UNDECIDABLE}\""),
+            1 => certain_gate(rng).to_owned(),
+            _ => stale_gate(rng),
+        };
+        let _ = write!(out, "<When{gate}>");
+        branch(rng, name, depth, out);
+        out.push_str("</When>");
+    }
+    if rng.below(2) == 0 {
+        out.push_str("<Otherwise>");
+        branch(rng, name, depth, out);
+        out.push_str("</Otherwise>");
+    }
+    out.push_str("</Choose>");
+}
+
+/// A `<Choose>` branch's body. Now and then it writes `Fresh` before a write
+/// gated on it, which only a branch taken whole can run: judged on the value
+/// from before the branch, the gate would rule the write out.
+fn branch(rng: &mut SplitMix64, name: &str, depth: usize, out: &mut String) {
+    let group = if rng.below(4) == 0 {
+        certain_gate(rng)
+    } else {
+        ""
+    };
+    let _ = write!(out, "<PropertyGroup{group}>");
+    if rng.below(3) == 0 {
+        let _ = write!(
+            out,
+            "<Fresh>yes</Fresh><{name} Condition=\"'$(Fresh)' == 'yes'\">enabled</{name}>"
+        );
+    } else {
+        write_output(rng, name, out);
+    }
+    out.push_str("</PropertyGroup>");
+    if depth == 0 && rng.below(4) == 0 {
+        choose(rng, name, depth + 1, out);
+    }
+}
+
 struct Case {
     project: String,
     hidden: String,
@@ -237,8 +261,9 @@ fn case(rng: &mut SplitMix64) -> Case {
         "<Import Project=\"hidden.props\" Condition=\"{UNDECIDABLE}\" />"
     );
     // The outputs bound after it are fresh, so the walk commits them unless a
-    // route below leaves them in doubt; the gate names stay stale.
-    project.push_str("<PropertyGroup>");
+    // route below leaves them in doubt; the gate names stay stale. So is
+    // `Fresh`, which only `<Choose>` branches write.
+    project.push_str("<PropertyGroup><Fresh>no</Fresh>");
     for route in ROUTES {
         if rng.below(4) != 0 {
             let name = route.output();
