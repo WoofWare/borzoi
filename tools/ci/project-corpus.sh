@@ -31,8 +31,9 @@ set -euo pipefail
 : "${GITHUB_ENV:?must be set}"
 
 plan() { # out
-  nix develop --command cargo build --locked -p borzoi-stats
-  "$GITHUB_WORKSPACE/target/debug/borzoi-stats" corpus \
+  # `cargo run`, not a path under `target/`: cargo knows where it put the
+  # binary, which CARGO_TARGET_DIR or a cargo config may have moved.
+  nix develop --command cargo run --locked --quiet -p borzoi-stats -- corpus \
     --pins nix/project-corpus.json --emit plan >"$1"
   cat "$1"
 }
