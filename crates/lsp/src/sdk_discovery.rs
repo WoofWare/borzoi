@@ -277,9 +277,12 @@ pub struct SdkDiscoveryEnv {
     /// True when any workload-resolution override variable is set
     /// (`DOTNETSDK_WORKLOAD_MANIFEST_ROOTS`,
     /// `DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS`,
-    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`). The in-house workload resolution
-    /// (the locators, and a workload pack named as an SDK) degrades rather
-    /// than model those redirections.
+    /// `DOTNETSDK_WORKLOAD_PACK_ROOTS`), or one that loads SDK resolvers from
+    /// another folder (`MSBUILDADDITIONALSDKRESOLVERSFOLDER_NET`,
+    /// `MSBUILDADDITIONALSDKRESOLVERSFOLDER`), which can stand in for the
+    /// workload resolver. The in-house workload resolution (the locators, and
+    /// any name the running SDK does not ship) degrades rather than model
+    /// those redirections.
     pub workload_overrides_present: bool,
     /// True when `MSBuildEnableWorkloadResolver` switches the workload
     /// resolver off ([`borzoi_msbuild::workloads::WorkloadEnvironment::resolver_switched_off`]).
@@ -400,7 +403,11 @@ impl SdkDiscoveryEnv {
             // true no-op and must not degrade resolution.
             workload_overrides_present: get("DOTNETSDK_WORKLOAD_MANIFEST_ROOTS").is_some()
                 || get("DOTNETSDK_WORKLOAD_MANIFEST_IGNORE_DEFAULT_ROOTS").is_some()
-                || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some(),
+                || non_empty("DOTNETSDK_WORKLOAD_PACK_ROOTS").is_some()
+                // `SdkResolverLoader` takes the first that is set at all
+                // (`??`), an empty value included.
+                || get("MSBUILDADDITIONALSDKRESOLVERSFOLDER_NET").is_some()
+                || get("MSBUILDADDITIONALSDKRESOLVERSFOLDER").is_some(),
             // `CachingWorkloadResolver` is off where
             // `MSBuildEnableWorkloadResolver` equals `false` as
             // `OrdinalIgnoreCase` compares (untrimmed), and on otherwise.

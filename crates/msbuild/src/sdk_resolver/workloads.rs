@@ -430,6 +430,13 @@ pub fn resolve_workload_pack(
     if env.resolver_switched_off {
         return Ok(WorkloadPackResolution::NotAPack);
     }
+    // `new WorkloadPackId(name)` throws on a name `IsNullOrWhiteSpace` finds
+    // blank; any name with no visible character declines.
+    if sdk_name.chars().all(char::is_whitespace) {
+        return Err(unsupported(
+            "a blank SDK name, which the workload resolver refuses",
+        ));
+    }
     let resolver = WorkloadResolver::create(dotnet_root, sdk_version_dir, env, observer)?;
     let packs = resolver.load_packs(observer)?;
     // `_packs` is keyed by `WorkloadPackId`, which compares as

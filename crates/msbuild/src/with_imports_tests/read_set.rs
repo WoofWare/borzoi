@@ -920,6 +920,11 @@ fn a_workload_pack_named_as_an_sdk_is_walked_soundly() {
                 "packs/Contoso.Pack/1.0.0/Sdk/Sdk.props",
                 "<Project><PropertyGroup><FromPack>yes</FromPack></PropertyGroup></Project>",
             );
+            write_at(
+                &dotnet,
+                "packs/Contoso.Pack/1.0.0/Sdk/Sdk.targets",
+                "<Project />",
+            );
         }
         let source =
             "<Project>\n  <Import Project=\"Sdk.props\" Sdk=\"contoso.pack\" />\n</Project>\n";

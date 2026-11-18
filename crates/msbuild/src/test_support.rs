@@ -188,23 +188,14 @@ pub fn parse_fsproj_reads(
 }
 
 /// Make `version_dir` (`{dotnet_root}/sdk/{version}`) an SDK the .NET host
-/// counts as installed: the directory, the `dotnet.dll` hostfxr requires
+/// counts as installed: the directory, and the `dotnet.dll` hostfxr requires
 /// in it before it will run or select it (see the SDK resolver's
-/// `host_sdk_versions`), and the manifest that registers the workload SDK
-/// resolver with its MSBuild, as every installed SDK ships it. Every fake
-/// dotnet root in the test suites lays its SDK version directories out
-/// through this, so a test that builds one models an install hostfxr would
-/// see.
+/// `host_sdk_versions`). Every fake dotnet root in the test suites lays its
+/// SDK version directories out through this, so a test that builds one
+/// models an install hostfxr would see.
 pub fn install_host_sdk_dir(version_dir: &std::path::Path) {
-    const RESOLVER: &str = "Microsoft.NET.Sdk.WorkloadMSBuildSdkResolver";
-    let resolver = version_dir.join("SdkResolvers").join(RESOLVER);
-    std::fs::create_dir_all(&resolver).expect("create the SDK version directory");
+    std::fs::create_dir_all(version_dir).expect("create the SDK version directory");
     std::fs::write(version_dir.join("dotnet.dll"), "").expect("write the SDK's dotnet.dll");
-    std::fs::write(
-        resolver.join(format!("{RESOLVER}.xml")),
-        format!("<SdkResolver><Path>..\\..\\{RESOLVER}.dll</Path></SdkResolver>"),
-    )
-    .expect("write the workload SDK resolver's manifest");
 }
 
 /// [`install_host_sdk_dir`] for the SDK version directory holding `sdk_root`,

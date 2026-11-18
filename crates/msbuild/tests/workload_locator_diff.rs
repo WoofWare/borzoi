@@ -3496,6 +3496,31 @@ fn planted_pack_lookups_resolve_as_planted() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A blank SDK name, which `WorkloadPackId` refuses before any lookup: each
+/// installed resolver throws, and we decline.
+#[cfg(unix)]
+#[test]
+fn a_blank_pack_name_throws_and_declines() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let dotnet_root = host_fs::canonicalize(dir.path()).unwrap().join("dotnet");
+    std::fs::create_dir_all(dotnet_root.join("sdk").join(HOST)).unwrap();
+    let env = WorkloadEnvironment {
+        user_dotnet_root: None,
+        overrides_present: false,
+        resolver_switched_off: false,
+        global_json: Default::default(),
+        process_architecture: None,
+    };
+    for sdk in graded_sdks() {
+        let mut oracle = Oracle::spawn_on(&sdk);
+        for name in ["", " ", "\t"] {
+            let theirs = theirs_pack(&mut oracle, name, &dotnet_root, HOST, None);
+            assert!(theirs.is_err(), "{}: {name:?}: {theirs:?}", sdk.display());
+            assert_eq!(ours_pack(name, &dotnet_root, HOST, &env), None, "{name:?}");
+        }
+    }
+}
+
 /// The literal SDK names the `<Import Sdk="…"/>` elements of every
 /// `WorkloadManifest.targets` under `root` name (a name spelled through a
 /// property is left out).
