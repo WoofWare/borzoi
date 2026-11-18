@@ -34,7 +34,7 @@ use borzoi_oracle_harness::corpus_key::{Positions, corpus_relative, sort_by_corp
 use borzoi_oracle_harness::manifest::{Manifest, UPDATE_ENV, check};
 use borzoi_oracle_harness::panic_silence::silence_panics_here;
 
-use super::harness::{census, check_paths, failures, manifest_item};
+use super::harness::{census, failures, manifest_item, try_check_paths};
 
 /// The sample the checked-in manifest describes: every `DEFAULT_STRIDE`th file.
 const DEFAULT_STRIDE: usize = 13;
@@ -111,7 +111,7 @@ fn source_docs_match_fcs_over_corpus() {
                     .spawn_scoped(scope, || {
                         let _silence = silence_panics_here();
                         catch_unwind(AssertUnwindSafe(|| {
-                            check_paths(std::slice::from_ref(path), vec![text.clone()], &[])
+                            try_check_paths(std::slice::from_ref(path), vec![text.clone()], &[])
                         }))
                     })
                     .expect("spawn the per-file checker")
@@ -119,7 +119,13 @@ fn source_docs_match_fcs_over_corpus() {
                     .expect("the per-file checker catches its own panics")
             });
             let (graded, fcs) = match outcome {
-                Ok(r) => r,
+                Ok(Ok(r)) => r,
+                // The oracle refuses a file its project check cannot describe
+                // (one that may hold a line directive, say).
+                Ok(Err(_)) => {
+                    manifest.push((key, "skipped fcs-refused".to_string()));
+                    continue;
+                }
                 Err(_) => {
                     manifest.push((key, "skipped panicked".to_string()));
                     continue;

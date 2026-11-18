@@ -376,6 +376,7 @@ fn a_sig_exposed_val_matches_an_oracle_declaring_it_in_the_fsi() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: use_path,
             diagnostics: Vec::new(),
             uses: vec![ProjectUse {
@@ -451,6 +452,7 @@ fn a_compiler_generated_value_is_skipped_rather_than_compared() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: path.clone(),
             diagnostics: Vec::new(),
             uses: vec![compared, generated],
@@ -829,6 +831,7 @@ fn an_unoracled_or_pattern_alias_is_not_a_reverse_divergence() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file.clone(),
             diagnostics: Vec::new(),
             uses: vec![
@@ -927,6 +930,7 @@ fn an_enclosing_synthetic_use_does_not_defeat_the_alias_exemption() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file.clone(),
             diagnostics: Vec::new(),
             uses: vec![
@@ -1015,6 +1019,7 @@ fn comparison_reports_skipped_oracle_categories() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file.clone(),
             diagnostics: Vec::new(),
             uses: vec![
@@ -1126,6 +1131,7 @@ fn comparison_matches_assembly_oracle_declarations() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file,
             diagnostics: Vec::new(),
             uses: vec![ProjectUse {
@@ -1188,6 +1194,7 @@ let value = 1
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file.clone(),
             diagnostics: Vec::new(),
             uses: vec![ProjectUse {
@@ -1274,6 +1281,7 @@ fn a_constructor_record_steps_aside_for_the_name_the_author_wrote() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file,
             diagnostics: Vec::new(),
             uses: vec![named, constructor],
@@ -1336,6 +1344,7 @@ fn an_ungradable_oracle_record_does_not_make_its_range_ambiguous() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file,
             diagnostics: Vec::new(),
             uses: vec![gradable, ungradable],
@@ -1401,6 +1410,7 @@ fn a_member_answer_inference_supplies_is_put_to_the_oracle() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file,
             diagnostics: Vec::new(),
             uses: vec![string_length_use(text_range(src, "Length"))],
@@ -1441,6 +1451,7 @@ fn a_member_answer_is_graded_against_the_oracle_span_it_ends() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file,
             diagnostics: Vec::new(),
             uses: vec![string_length_use(text_range(src, "s.Length"))],
@@ -1462,6 +1473,7 @@ fn a_wrong_member_answer_is_a_divergence() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file,
             diagnostics: Vec::new(),
             uses: vec![ProjectUse {
@@ -1491,6 +1503,7 @@ fn a_member_answer_the_oracle_is_silent_about_is_a_reverse_divergence() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file.clone(),
             diagnostics: Vec::new(),
             uses: Vec::new(),
@@ -1525,6 +1538,7 @@ fn a_member_entry_the_resolver_answers_over_is_not_reported_twice() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file.clone(),
             diagnostics: Vec::new(),
             uses: Vec::new(),
@@ -1553,6 +1567,7 @@ fn comparison_reports_wrong_assembly_resolution() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file,
             diagnostics: Vec::new(),
             uses: vec![ProjectUse {
@@ -1637,11 +1652,13 @@ fn a_qualifier_is_graded_at_the_answer_served_there() {
         &loaded,
         &[
             FileUses {
+                in_no_file: std::sync::Arc::default(),
                 path: a,
                 diagnostics: Vec::new(),
                 uses: Vec::new(),
             },
             FileUses {
+                in_no_file: std::sync::Arc::default(),
                 path: b,
                 diagnostics: Vec::new(),
                 uses: vec![
@@ -1812,11 +1829,13 @@ fn the_manifest_lists_each_verdict_and_every_non_match() {
         &loaded,
         &[
             FileUses {
+                in_no_file: std::sync::Arc::default(),
                 path: a.clone(),
                 diagnostics: Vec::new(),
                 uses: Vec::new(),
             },
             FileUses {
+                in_no_file: std::sync::Arc::default(),
                 path: b.clone(),
                 diagnostics: Vec::new(),
                 uses: vec![
@@ -1864,6 +1883,7 @@ fn the_manifest_lists_each_verdict_and_every_non_match() {
                         fcs_error(39, "not defined", 3, 4),
                     ],
                 }],
+                in_no_file: vec![fcs_error(708, "no Yield", 1, 0)],
             }),
         },
         ProjectRecord {
@@ -1875,8 +1895,9 @@ fn the_manifest_lists_each_verdict_and_every_non_match() {
     assert_eq!(
         manifest.entries(),
         [
-            "Erroring/Erroring.fsproj\tskipped fcs-errors files=1 errors=2",
+            "Erroring/Erroring.fsproj\tskipped fcs-errors files=1 errors=3",
             "Erroring/Erroring.fsproj E.fs:3:5 fcs-error\tFS0039 x2",
+            "Erroring/Erroring.fsproj fcs-error in no file\tFS0708",
             "Synthetic.fsproj\tcomparable assets=not_checked",
             "Synthetic.fsproj A.fs\tcompared records=0 definitions=0",
             // Our own binder, which the oracle (given nothing for `A.fs`) is
@@ -2110,6 +2131,7 @@ fn comparison_reports_reverse_only_project_resolution() {
     let comparison = compare(
         &loaded,
         &[FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: file.clone(),
             diagnostics: Vec::new(),
             uses: vec![
@@ -2197,24 +2219,27 @@ fn comparison_reports_reverse_only_project_resolution() {
 /// defined") named the missing project reference outright.
 #[test]
 fn an_oracle_error_skip_quotes_the_diagnostics() {
-    let reason = fcs_error_skip_reason(&[
-        FcsErrorFile {
-            path: PathBuf::from("/proj/Corelib.fs"),
-            errors: vec![
-                fcs_error(39, "The type 'DumpedAssembly' is not defined.", 10, 19),
-                fcs_error(39, "The type 'TypeInfo' is not defined.", 13, 10),
-            ],
-        },
-        FcsErrorFile {
-            path: PathBuf::from("/proj/CliType.fs"),
-            errors: vec![fcs_error(
-                72,
-                "Lookup on object of indeterminate type",
-                4,
-                2,
-            )],
-        },
-    ]);
+    let reason = fcs_error_skip_reason(
+        &[
+            FcsErrorFile {
+                path: PathBuf::from("/proj/Corelib.fs"),
+                errors: vec![
+                    fcs_error(39, "The type 'DumpedAssembly' is not defined.", 10, 19),
+                    fcs_error(39, "The type 'TypeInfo' is not defined.", 13, 10),
+                ],
+            },
+            FcsErrorFile {
+                path: PathBuf::from("/proj/CliType.fs"),
+                errors: vec![fcs_error(
+                    72,
+                    "Lookup on object of indeterminate type",
+                    4,
+                    2,
+                )],
+            },
+        ],
+        &[],
+    );
     assert!(
         reason.starts_with("2 files had FCS error diagnostics (3 errors): "),
         "the counts lead: {reason}"
@@ -2230,40 +2255,39 @@ fn an_oracle_error_skip_quotes_the_diagnostics() {
     );
 }
 
-/// An error the check reported in no file is in every file's record, and is
-/// counted and quoted once, for the project, never at a file's site.
+/// An error the check reported in no file is the project's, not any file's:
+/// every file sharing it is erroring, it is counted and quoted once, and it is
+/// quoted without a site.
 #[test]
 fn an_oracle_error_in_no_file_is_counted_once() {
-    let in_no_file = FcsDiagnostic {
-        in_no_file: true,
-        ..fcs_error(
-            708,
-            "This control construct may only be used if the computation expression builder defines a 'Yield' method",
-            1,
-            0,
-        )
+    let in_no_file: Arc<[FcsDiagnostic]> = Arc::from(vec![fcs_error(
+        708,
+        "This control construct may only be used if the computation expression builder defines a 'Yield' method",
+        1,
+        0,
+    )]);
+    let a = FileUses {
+        path: PathBuf::from("/proj/A.fs"),
+        diagnostics: Vec::new(),
+        uses: Vec::new(),
+        in_no_file: Arc::clone(&in_no_file),
     };
-    let files = [
-        FcsErrorFile {
-            path: PathBuf::from("/proj/A.fs"),
-            errors: vec![in_no_file.clone()],
-        },
-        FcsErrorFile {
-            path: PathBuf::from("/proj/B.fs"),
-            errors: vec![
-                fcs_error(39, "The type 'X' is not defined.", 3, 4),
-                in_no_file.clone(),
-            ],
-        },
-    ];
-    let reason = fcs_error_skip_reason(&files);
+    assert!(
+        a.has_error_diagnostics() && a.error_diagnostics().next().is_none(),
+        "a file with no error of its own is erroring through the project's"
+    );
+    let files = [FcsErrorFile {
+        path: PathBuf::from("/proj/B.fs"),
+        errors: vec![fcs_error(39, "The type 'X' is not defined.", 3, 4)],
+    }];
+    let reason = fcs_error_skip_reason(&files, &in_no_file);
     assert!(
         reason.starts_with("1 files had FCS error diagnostics (2 errors): "),
-        "the error in no file is counted once, and makes no file erroring: {reason}"
+        "the error in no file is counted once: {reason}"
     );
     assert_eq!(reason.matches("FS0708").count(), 1, "quoted once: {reason}");
     assert!(
-        reason.contains("(in no file) FS0708") && !reason.contains("A.fs:1:0"),
+        reason.contains("(in no file) FS0708") && !reason.contains("A.fs"),
         "quoted without a site: {reason}"
     );
     assert!(reason.contains("B.fs:3:4 FS0039"), "{reason}");
@@ -2280,7 +2304,7 @@ fn an_oracle_error_skip_bounds_what_it_quotes() {
             errors: vec![fcs_error(39, &format!("undefined thing {i}"), 1, 1)],
         })
         .collect();
-    let reason = fcs_error_skip_reason(&files);
+    let reason = fcs_error_skip_reason(&files, &[]);
     assert!(
         reason.starts_with("20 files had FCS error diagnostics (20 errors): "),
         "{reason}"
@@ -2306,7 +2330,6 @@ fn fcs_error(number: i32, message: &str, line: u32, col: u32) -> FcsDiagnostic {
             start: FcsPos { line, col },
             end: FcsPos { line, col },
         },
-        in_no_file: false,
     }
 }
 
@@ -2363,7 +2386,10 @@ fn uses_project_records_read_the_branch_the_build_compiled() {
         .zip(loaded.parses.texts.iter().cloned())
         .collect();
     let fcs = parse_project_uses(&json, &sources).expect("parse FCS uses");
-    let errors: Vec<_> = fcs.iter().flat_map(|f| f.error_diagnostics()).collect();
+    let errors: Vec<_> = fcs
+        .iter()
+        .flat_map(|f| f.error_diagnostics().chain(f.errors_in_no_file()))
+        .collect();
     assert!(
         errors.is_empty(),
         "no file record holds an error: {errors:?}"
@@ -3492,6 +3518,7 @@ fn record_contribution(
     let without: Vec<FileUses> = fcs
         .iter()
         .map(|f| FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: f.path.clone(),
             diagnostics: f.diagnostics.clone(),
             uses: f

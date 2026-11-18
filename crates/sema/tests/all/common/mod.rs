@@ -3375,8 +3375,9 @@ pub struct FileUses {
 struct ProjectUsesDump {
     #[serde(rename = "Files")]
     files: Vec<RawFileUses>,
-    /// What the check reported in no file.
-    #[serde(rename = "Diagnostics", default)]
+    /// What the check reported in no file. Required: an oracle that does not
+    /// say is not the project check, and could have dropped one.
+    #[serde(rename = "Diagnostics")]
     diagnostics: Vec<RawProjectDiagnostic>,
 }
 

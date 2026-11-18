@@ -422,10 +422,23 @@ fn project_resolution_matches_fcs() {
 
         // An error in no file is in every file's list: count it once.
         tally.oracle_errors += fu.errors.iter().filter(|e| i == 0 || !e.in_no_file).count();
-        if let Some(first) = fu.errors.first()
+        // A file's sample is one of its own errors; one in no file is sampled
+        // once, with no file.
+        let sample = fu
+            .errors
+            .iter()
+            .find(|e| !e.in_no_file)
+            .map(|e| (path.clone(), e))
+            .or_else(|| {
+                (i == 0)
+                    .then(|| fu.errors.iter().find(|e| e.in_no_file))
+                    .flatten()
+                    .map(|e| (PathBuf::from("(in no file)"), e))
+            });
+        if let Some((site, first)) = sample
             && tally.oracle_error_sites.len() < sample_limit()
         {
-            tally.oracle_error_sites.push((path.clone(), first.clone()));
+            tally.oracle_error_sites.push((site, first.clone()));
         }
 
         for u in &fu.uses {

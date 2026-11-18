@@ -1887,6 +1887,7 @@ mod tests {
             is_constructor: false,
         };
         let fcs = [FileUses {
+            in_no_file: std::sync::Arc::default(),
             path: path.clone(),
             diagnostics: Vec::new(),
             uses: vec![u.clone()],

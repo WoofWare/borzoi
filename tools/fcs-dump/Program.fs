@@ -6297,69 +6297,74 @@ type private CheckedFiles(paths: string[]) =
 /// (`FSharpProjectOptions.Stamp`).
 let mutable private projectCheckRequests = 0L
 
-/// Whether `text` may hold a line directive (`#line 7 "f.fs"`, `# 7`): a line
-/// whose first non-blank characters are `#`, optional blanks, then `line` or
-/// a digit. It may match where no directive is (an inactive `#if` branch, a
-/// multi-line string), which costs only a decline.
-let private mayHoldLineDirective (text: string) : bool =
-    text.Split('\n')
-    |> Array.exists (fun line ->
-        let t = line.TrimStart()
-        t.StartsWith "#"
-        && (let rest = t.Substring(1).TrimStart()
-            rest.StartsWith "line" || (rest.Length > 0 && Char.IsDigit rest[0])))
+/// The `#if` symbols fsc compiles `projOpts`'s sources under: `COMPILED`
+/// and each `--define`.
+let private buildDefines (projOpts: FSharpProjectOptions) : string list =
+    let defined =
+        projOpts.OtherOptions
+        |> Array.choose (fun o ->
+            [ "--define:"; "-d:"; "/define:"; "/d:" ]
+            |> List.tryFind (fun prefix -> o.StartsWith prefix)
+            |> Option.map (fun prefix -> o.Substring prefix.Length))
+        |> Array.toList
+    "COMPILED" :: defined
 
-/// The hash directives of a list of implementation declarations, nested
-/// modules' included.
-let rec private implHashDirectives (decls: SynModuleDecl list) : ParsedHashDirective list =
-    decls
-    |> List.collect (fun decl ->
-        match decl with
-        | SynModuleDecl.HashDirective(directive, _) -> [ directive ]
-        | SynModuleDecl.NestedModule(decls = inner) -> implHashDirectives inner
-        | _ -> [])
+/// Whether `text`, lexed as fsc lexes it under `defines`, holds a line
+/// directive (`#line 7 "f.fs"`, `# 7`) in a branch it compiles. FCS's own
+/// lexer says, so a directive anywhere on a line counts and one in a comment,
+/// a string or an inactive `#if` branch does not.
+let private holdsLineDirective (defines: string list) (text: string) : bool =
+    let mutable found = false
+    FSharpLexer.Tokenize(
+        SourceText.ofString text,
+        (fun token -> if token.Kind = FSharpTokenKind.HashLine then found <- true),
+        conditionalDefines = defines,
+        flags = enum<FSharpLexerFlags> 0
+    )
+    found
 
-/// The hash directives of a list of signature declarations, nested modules'
-/// included.
-let rec private sigHashDirectives (decls: SynModuleSigDecl list) : ParsedHashDirective list =
-    decls
-    |> List.collect (fun decl ->
-        match decl with
-        | SynModuleSigDecl.HashDirective(directive, _) -> [ directive ]
-        | SynModuleSigDecl.NestedModule(moduleDecls = inner) -> sigHashDirectives inner
-        | _ -> [])
-
-/// Every hash directive of a parsed source.
-let private hashDirectives (input: ParsedInput) : ParsedHashDirective list =
+/// The hash directives fsc acts on in a source (`ProcessMetaCommandsFromInput`):
+/// in a script, those at the top of the file and at the top of each module
+/// or namespace. One in a nested module is ignored (FS0236), and in a source
+/// that is not a script each is an error (FS0076) the check reports too.
+let private processedHashDirectives (input: ParsedInput) : ParsedHashDirective list =
+    let topLevel (SynModuleOrNamespace(decls = decls)) =
+        decls
+        |> List.choose (fun decl ->
+            match decl with
+            | SynModuleDecl.HashDirective(directive, _) -> Some directive
+            | _ -> None)
     match input with
-    | ParsedInput.ImplFile(ParsedImplFileInput(hashDirectives = top; contents = modules)) ->
-        top @ (modules |> List.collect (fun (SynModuleOrNamespace(decls = decls)) -> implHashDirectives decls))
-    | ParsedInput.SigFile(ParsedSigFileInput(hashDirectives = top; contents = modules)) ->
-        top
-        @ (modules |> List.collect (fun (SynModuleOrNamespaceSig(decls = decls)) -> sigHashDirectives decls))
+    | ParsedInput.ImplFile(ParsedImplFileInput(isScript = true; hashDirectives = top; contents = modules)) ->
+        top @ List.collect topLevel modules
+    | _ -> []
 
-/// The directives by which a source names other code to compile against:
-/// `#r` (`#reference`), `#load` and `#I`. FCS's project check reads the
+/// The directives by which a script names other code to compile against:
+/// `#r` (`#reference`), `#load`, `#I` and `#i`. FCS's project check reads the
 /// references and sources its options name and no others, so a project whose
 /// build reads one of these is outside what the check describes.
-let private sourceReferenceDirectives = set [ "r"; "reference"; "load"; "I" ]
+let private sourceReferenceDirectives = set [ "r"; "reference"; "load"; "I"; "i" ]
 
 /// Refuse a project whose meaning the project check cannot describe as fsc
-/// sees it, reading each source as the check parsed it (`parsed`):
+/// sees it:
 ///
-/// - a source that may hold a line directive. A `#line` changes where fsc
-///   reports a range and what `__SOURCE_FILE__` and `__LINE__` are, so the
-///   check must apply it, and then a record cannot say which file holds what
-///   it reports.
-/// - a directive in [`sourceReferenceDirectives`] in the build's branches.
-///   One under `#if EDITING` is in no branch the check parsed, and costs
-///   nothing.
-let private refuseUndescribedSources (paths: string[]) (parsed: string -> ParsedInput) =
+/// - a source holding a line directive in a branch the build compiles. A
+///   `#line` changes where fsc reports a range and what `__SOURCE_FILE__` and
+///   `__LINE__` are, so the check must apply it, and then a record cannot say
+///   which file holds what it reports.
+/// - a directive in [`sourceReferenceDirectives`] that fsc acts on
+///   ([`processedHashDirectives`]), read from the check's own parse
+///   (`parsed`), so one under `#if EDITING` is in no branch it parsed.
+let private refuseUndescribedSources
+    (defines: string list)
+    (paths: string[])
+    (parsed: string -> ParsedInput)
+    =
     for path in paths do
-        if mayHoldLineDirective (File.ReadAllText path) then
-            failwithf "%s may hold a line directive, which moves the ranges the project check reports to another place than the text" path
+        if holdsLineDirective defines (File.ReadAllText path) then
+            failwithf "%s holds a line directive, which moves the ranges the project check reports to another place than the text" path
         match
-            hashDirectives (parsed path)
+            processedHashDirectives (parsed path)
             |> List.tryFind (fun (ParsedHashDirective(ident, _, _)) -> sourceReferenceDirectives.Contains ident)
         with
         | Some(ParsedHashDirective(ident, _, _)) ->
@@ -6386,7 +6391,7 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
             (checker.GetBackgroundParseResultsForFileInProject(path, opts, userOpName = userOpName)
              |> Async.RunSynchronously)
                 .ParseTree
-        refuseUndescribedSources opts.SourceFiles parsed
+        refuseUndescribedSources (buildDefines opts) opts.SourceFiles parsed
         results, release
     with _ ->
         release ()

@@ -44,9 +44,10 @@ use crate::common::{LineIndex, fcs_dump_batch_child};
 struct OracleResponse {
     #[serde(rename = "Files")]
     files: Option<Vec<OracleFile>>,
-    /// What the check reported in no file.
-    #[serde(rename = "Diagnostics", default)]
-    diagnostics: Vec<OracleDiagnostic>,
+    /// What the check reported in no file: present beside `Files`, since an
+    /// oracle that does not say is not the project check.
+    #[serde(rename = "Diagnostics")]
+    diagnostics: Option<Vec<OracleDiagnostic>>,
     #[serde(rename = "BatchError")]
     batch_error: Option<String>,
 }
@@ -125,16 +126,9 @@ fn oracle() -> &'static Mutex<BatchChild> {
     ORACLE.get_or_init(|| Mutex::new(fcs_dump_batch_child("xmldoc-batch")))
 }
 
-/// Type-check `paths` (Compile order) as one project under `defines`, at
-/// [`LanguageVersion::DEFAULT`], the version our side parses the fixtures at.
-pub fn fcs_check(paths: &[PathBuf], defines: &[&str]) -> Vec<OracleFile> {
-    let lang = LanguageVersion::DEFAULT.to_string();
-    fcs_check_with(paths, defines, &[], false, Some(&lang))
-}
-
-/// [`fcs_check`] with a reference set: `refs` beside the SDK's own, or — when
-/// `exclusive` — as the whole set (`--noframework`), and a pinned
-/// `<LangVersion>`.
+/// Type-check `paths` (Compile order) as one project under `defines`, with a
+/// reference set: `refs` beside the SDK's own, or — when `exclusive` — as the
+/// whole set (`--noframework`), and a pinned `<LangVersion>`.
 pub fn fcs_check_with(
     paths: &[PathBuf],
     defines: &[&str],
@@ -142,6 +136,19 @@ pub fn fcs_check_with(
     exclusive: bool,
     lang_version: Option<&str>,
 ) -> Vec<OracleFile> {
+    fcs_check_or_refusal(paths, defines, refs, exclusive, lang_version)
+        .unwrap_or_else(|err| panic!("xmldoc-batch failed: {err}"))
+}
+
+/// [`fcs_check_with`], with the oracle's refusal (a project the project
+/// check cannot describe, such as one holding a line directive) as `Err`.
+pub fn fcs_check_or_refusal(
+    paths: &[PathBuf],
+    defines: &[&str],
+    refs: &[&std::path::Path],
+    exclusive: bool,
+    lang_version: Option<&str>,
+) -> Result<Vec<OracleFile>, String> {
     let request = serde_json::json!({
         "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "defines": defines,
@@ -157,19 +164,22 @@ pub fn fcs_check_with(
     let response: OracleResponse = serde_json::from_str(&line)
         .unwrap_or_else(|e| panic!("unparseable xmldoc-batch response ({e}): {line}"));
     if let Some(err) = response.batch_error {
-        panic!("xmldoc-batch failed: {err}");
+        return Err(err);
     }
     // A diagnostic in no file bears on every file, so every file's list holds
     // it, marked, and a count takes it once.
+    let in_no_file = response
+        .diagnostics
+        .expect("a project-check response says what it reported in no file");
     let mut files = response.files.expect("Files");
     for f in &mut files {
         f.diagnostics
-            .extend(response.diagnostics.iter().map(|d| OracleDiagnostic {
+            .extend(in_no_file.iter().map(|d| OracleDiagnostic {
                 in_no_file: true,
                 ..d.clone()
             }));
     }
-    files
+    Ok(files)
 }
 
 // ============================================================================
@@ -589,10 +599,21 @@ pub fn check_paths(
     texts: Vec<String>,
     defines: &[&str],
 ) -> (Vec<Graded>, Vec<OracleFile>) {
-    let fcs = fcs_check(paths, defines);
+    try_check_paths(paths, texts, defines)
+        .unwrap_or_else(|err| panic!("xmldoc-batch failed: {err}"))
+}
+
+/// [`check_paths`], with the oracle's refusal as `Err`.
+pub fn try_check_paths(
+    paths: &[PathBuf],
+    texts: Vec<String>,
+    defines: &[&str],
+) -> Result<(Vec<Graded>, Vec<OracleFile>), String> {
+    let lang = LanguageVersion::DEFAULT.to_string();
+    let fcs = fcs_check_or_refusal(paths, defines, &[], false, Some(&lang))?;
     assert_eq!(fcs.len(), paths.len(), "one oracle record per file");
     let ours = OurProject::new(paths, texts, defines);
-    (grade(&ours, &fcs), fcs)
+    Ok((grade(&ours, &fcs), fcs))
 }
 
 /// Render a failure for a panic message.

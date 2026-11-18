@@ -53,7 +53,7 @@
 //! `root:<path>` for a file outside it): two projects may compile one file, and
 //! each project's results for it are separate facts.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use borzoi_oracle_harness::corpus_key::{Positions, corpus_relative};
@@ -66,7 +66,7 @@ use crate::handler_diff::{
 };
 use crate::{
     AnswerSurface, Graded, ItemOutcome, LoadSkip, ProjectAssetsStatus, ProjectRecord, ProjectSkip,
-    ProjectVerdict, ServedDecline, SetAside, distinct_fcs_errors,
+    ProjectVerdict, ServedDecline, SetAside,
 };
 
 /// Why a run could not be rendered as a manifest.
@@ -250,18 +250,19 @@ pub fn project_corpus_manifest(
             }
             ProjectVerdict::Skipped(skip) => {
                 items.push((project.clone(), format!("skipped {}", skip_label(skip))));
-                if let ProjectSkip::FcsErrors { files } = skip {
-                    let (located, in_no_file) = distinct_fcs_errors(files);
-                    for (path, error) in located {
-                        let erroring = file_key(root, &record.project, &project, path)?;
-                        items.push((
-                            format!(
-                                "{erroring}:{}:{} fcs-error",
-                                error.range.start.line,
-                                error.range.start.col + 1
-                            ),
-                            format!("FS{:04}", error.error_number),
-                        ));
+                if let ProjectSkip::FcsErrors { files, in_no_file } = skip {
+                    for file in files {
+                        let erroring = file_key(root, &record.project, &project, &file.path)?;
+                        for error in &file.errors {
+                            items.push((
+                                format!(
+                                    "{erroring}:{}:{} fcs-error",
+                                    error.range.start.line,
+                                    error.range.start.col + 1
+                                ),
+                                format!("FS{:04}", error.error_number),
+                            ));
+                        }
                     }
                     for error in in_no_file {
                         items.push((
@@ -478,16 +479,11 @@ fn skip_label(skip: &ProjectSkip) -> String {
         .to_string(),
         ProjectSkip::FcsInvoke => "fcs-invoke-failed".to_string(),
         ProjectSkip::FcsParse => "fcs-output-unparseable".to_string(),
-        ProjectSkip::FcsErrors { files } => {
-            // An error in no file is counted once, and makes no file erroring.
-            let (located, in_no_file) = distinct_fcs_errors(files);
-            let erroring: BTreeSet<&Path> = located.iter().map(|(path, _)| *path).collect();
-            format!(
-                "fcs-errors files={} errors={}",
-                erroring.len(),
-                located.len() + in_no_file.len()
-            )
-        }
+        ProjectSkip::FcsErrors { files, in_no_file } => format!(
+            "fcs-errors files={} errors={}",
+            files.len(),
+            files.iter().map(|f| f.errors.len()).sum::<usize>() + in_no_file.len()
+        ),
     }
 }
 

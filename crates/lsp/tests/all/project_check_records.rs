@@ -117,6 +117,51 @@ fn a_line_directive_is_refused() {
     }
 }
 
+/// FCS honours a line directive after other text on its line, so that is
+/// refused too.
+#[test]
+fn a_line_directive_after_other_text_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    let b = dir.path().join("B.fs");
+    write(
+        &a,
+        &format!(
+            "module A\n(* comment *) #line 1 \"{}\"\nlet moved : int = \"\"\n",
+            b.display()
+        ),
+    );
+    write(&b, "module B\nlet y = 1\n");
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        match ask(&mut child, oracle, &[&a, &b]) {
+            Err(why) if why.contains("line directive") => {}
+            other => panic!("{oracle}: a line directive must be refused: {other:?}"),
+        }
+    }
+}
+
+/// A line directive in a branch the build does not compile, or in a comment,
+/// is none, and the project is checked.
+#[test]
+fn a_line_directive_the_build_does_not_read_is_checked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("A.fs");
+    write(
+        &a,
+        "module A\n#if EDITING\n#line 1 \"Elsewhere.fs\"\n#endif\n// #line 1 \"Elsewhere.fs\"\nlet x = 1\n",
+    );
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        let answer = check(&mut child, oracle, &[&a]);
+        assert_eq!(
+            error_numbers(record(&answer, "A.fs")),
+            Vec::<i64>::new(),
+            "{oracle}: {answer}"
+        );
+    }
+}
+
 /// A resident oracle reads the sources as they are now: a file rewritten
 /// with its modification time put back is answered from its new text.
 #[test]
@@ -165,6 +210,27 @@ fn an_active_source_reference_is_refused() {
             Err(why) if why.contains("#r") => {}
             other => panic!("{oracle}: an active #r must be refused: {other:?}"),
         }
+    }
+}
+
+/// fsc ignores a `#r` in a nested module (FS0236, a warning), so it names
+/// nothing the build reads and the project is checked.
+#[test]
+fn a_reference_in_a_nested_module_is_checked() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let script: PathBuf = dir.path().join("A.fsx");
+    write(
+        &script,
+        "module Inner =\n    #r \"Missing.dll\"\n    let x = 1\n",
+    );
+    for oracle in ORACLES {
+        let mut child = fcs_dump_batch_child(oracle);
+        let answer = check(&mut child, oracle, &[&script]);
+        assert_eq!(
+            error_numbers(record(&answer, "A.fsx")),
+            Vec::<i64>::new(),
+            "{oracle}: {answer}"
+        );
     }
 }
 

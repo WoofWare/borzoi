@@ -968,23 +968,40 @@ fn workspace_root() -> PathBuf {
 #[derive(Debug, Clone)]
 pub struct FileUses {
     pub path: PathBuf,
+    /// What the check reported in this file.
     pub diagnostics: Vec<FcsDiagnostic>,
     pub uses: Vec<ProjectUse>,
+    /// What the check reported in no file: an error FCS raises with no
+    /// location. One list, shared by every file of the project, since it bears
+    /// on every file.
+    pub in_no_file: Arc<[FcsDiagnostic]>,
 }
 
 impl FileUses {
+    /// Whether the file did not check cleanly: an error in it, or one in no
+    /// file.
     pub fn has_error_diagnostics(&self) -> bool {
-        self.error_diagnostics().next().is_some()
+        self.error_diagnostics().next().is_some() || self.errors_in_no_file().next().is_some()
     }
 
-    /// The file's error-severity diagnostics — the single definition of what
-    /// counts as an oracle error, so the predicate above and the skip reason's
-    /// quotes cannot disagree about which project is comparable.
+    /// The file's own error-severity diagnostics — the single definition of
+    /// what counts as an oracle error, so the predicate above and the skip
+    /// reason's quotes cannot disagree about which project is comparable.
     pub fn error_diagnostics(&self) -> impl Iterator<Item = &FcsDiagnostic> {
-        self.diagnostics
-            .iter()
-            .filter(|d| d.severity.eq_ignore_ascii_case("Error"))
+        errors(&self.diagnostics)
     }
+
+    /// The project's error-severity diagnostics in no file
+    /// ([`Self::in_no_file`]).
+    pub fn errors_in_no_file(&self) -> impl Iterator<Item = &FcsDiagnostic> {
+        errors(&self.in_no_file)
+    }
+}
+
+fn errors(diagnostics: &[FcsDiagnostic]) -> impl Iterator<Item = &FcsDiagnostic> {
+    diagnostics
+        .iter()
+        .filter(|d| d.severity.eq_ignore_ascii_case("Error"))
 }
 
 #[derive(Debug, Clone)]
@@ -1125,33 +1142,6 @@ pub struct FcsErrorFile {
     pub errors: Vec<FcsDiagnostic>,
 }
 
-/// An erroring project's errors, each once: every file's own, with the file,
-/// and those the check reported in no file ([`FcsDiagnostic::in_no_file`]),
-/// which every file's list holds, taken from the first file.
-pub fn distinct_fcs_errors(
-    error_files: &[FcsErrorFile],
-) -> (Vec<(&Path, &FcsDiagnostic)>, Vec<&FcsDiagnostic>) {
-    let located = error_files
-        .iter()
-        .flat_map(|f| {
-            f.errors
-                .iter()
-                .filter(|d| !d.in_no_file)
-                .map(|d| (f.path.as_path(), d))
-        })
-        .collect();
-    let in_no_file = error_files
-        .first()
-        .map(|f| f.errors.iter().filter(|d| d.in_no_file).collect())
-        .unwrap_or_default();
-    (located, in_no_file)
-}
-
-/// A file's errors that are its own: not those the check reported in no file.
-fn located_in(file: &FcsErrorFile) -> Vec<&FcsDiagnostic> {
-    file.errors.iter().filter(|d| !d.in_no_file).collect()
-}
-
 /// How many of an erroring project's diagnostics the skip reason quotes.
 /// Bounded because a project missing a reference errors on nearly every line
 /// (8473 diagnostics across 113 files, measured on `WoofWare.PawPrint`) and the
@@ -1168,21 +1158,20 @@ const QUOTED_FCS_MESSAGE_CHARS: usize = 110;
 ///
 /// One error is quoted per file before any file's second error, so a single
 /// pathological file cannot crowd out the diagnostic that names the cause. An
-/// error in no file is quoted first, once, since it may be the cause of the
-/// rest; it is counted once, though every file's record carries it.
-pub fn fcs_error_skip_reason(error_files: &[FcsErrorFile]) -> String {
-    let (located, in_no_file) = distinct_fcs_errors(error_files);
-    let total = located.len() + in_no_file.len();
+/// error in no file (`in_no_file`) is quoted first, since it may be the cause
+/// of the rest.
+pub fn fcs_error_skip_reason(error_files: &[FcsErrorFile], in_no_file: &[FcsDiagnostic]) -> String {
+    let total: usize = error_files.iter().map(|f| f.errors.len()).sum::<usize>() + in_no_file.len();
     let mut quotes: Vec<String> = in_no_file
         .iter()
         .take(QUOTED_FCS_ERRORS)
-        .map(|diag| quote_fcs_error_in_no_file(diag))
+        .map(quote_fcs_error_in_no_file)
         .collect();
     // Round-robin over files: rank 0 takes each file's first error, rank 1 its
     // second, and so on.
     let deepest = error_files
         .iter()
-        .map(|f| located_in(f).len())
+        .map(|f| f.errors.len())
         .max()
         .unwrap_or(0);
     'quoting: for rank in 0..deepest {
@@ -1190,17 +1179,14 @@ pub fn fcs_error_skip_reason(error_files: &[FcsErrorFile]) -> String {
             if quotes.len() == QUOTED_FCS_ERRORS {
                 break 'quoting;
             }
-            if let Some(diag) = located_in(file).get(rank) {
+            if let Some(diag) = file.errors.get(rank) {
                 quotes.push(quote_fcs_error(&file.path, diag));
             }
         }
     }
-    let files = error_files
-        .iter()
-        .filter(|f| !located_in(f).is_empty())
-        .count();
     let mut reason = format!(
-        "{files} files had FCS error diagnostics ({total} errors): {}",
+        "{} files had FCS error diagnostics ({total} errors): {}",
+        error_files.len(),
         quotes.join("; ")
     );
     let omitted = total.saturating_sub(quotes.len());
@@ -1246,12 +1232,6 @@ pub struct FcsDiagnostic {
     pub message: String,
     pub error_number: i32,
     pub range: FcsRange,
-    /// The check reported this in no source file: an error FCS raises with
-    /// no location. The oracle reports it once, for the project, and
-    /// [`parse_project_uses`] puts it in every file's list, so it makes every
-    /// file erroring; a count or a list of errors takes it once
-    /// ([`distinct_fcs_errors`]).
-    pub in_no_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1276,8 +1256,9 @@ pub struct FcsPos {
 struct ProjectUsesDump {
     #[serde(rename = "Files")]
     files: Vec<RawFileUses>,
-    /// What the check reported in no file.
-    #[serde(rename = "Diagnostics", default)]
+    /// What the check reported in no file. Required: an oracle that does not
+    /// say is not the project check, and could have dropped one.
+    #[serde(rename = "Diagnostics")]
     diagnostics: Vec<RawDiagnostic>,
 }
 
@@ -1304,13 +1285,12 @@ struct RawDiagnostic {
 }
 
 impl RawDiagnostic {
-    fn into_fcs(self, in_no_file: bool) -> FcsDiagnostic {
+    fn into_fcs(self) -> FcsDiagnostic {
         FcsDiagnostic {
             severity: self.severity,
             message: self.message,
             error_number: self.error_number,
             range: self.range,
-            in_no_file,
         }
     }
 }
@@ -1372,12 +1352,10 @@ pub fn parse_project_uses(
         by_path.get(&path_key(Path::new(fcs_path))).copied()
     };
 
-    // A diagnostic in no file bears on every file, so every file's list holds
-    // it, marked, and whatever counts or lists errors takes it once.
-    let in_no_file: Vec<FcsDiagnostic> = dump
+    let in_no_file: Arc<[FcsDiagnostic]> = dump
         .diagnostics
         .into_iter()
-        .map(|d| d.into_fcs(true))
+        .map(RawDiagnostic::into_fcs)
         .collect();
     dump.files
         .into_iter()
@@ -1388,8 +1366,7 @@ pub fn parse_project_uses(
             let diagnostics = f
                 .diagnostics
                 .into_iter()
-                .map(|d| d.into_fcs(false))
-                .chain(in_no_file.iter().cloned())
+                .map(RawDiagnostic::into_fcs)
                 .collect();
             let uses = f
                 .uses
@@ -1454,6 +1431,7 @@ pub fn parse_project_uses(
                 })
                 .collect::<Result<Vec<_>, ParseProjectUsesError>>()?;
             Ok(FileUses {
+                in_no_file: Arc::clone(&in_no_file),
                 path: path.to_path_buf(),
                 diagnostics,
                 uses,
@@ -1827,6 +1805,9 @@ pub struct Comparison {
     pub assembly_divergences: Vec<AssemblyDivergence>,
     pub reverse_divergences: Vec<ReverseDivergence>,
     pub fcs_error_files: Vec<FcsErrorFile>,
+    /// The errors the check reported in no file, once. Any of them sets the
+    /// project aside, as an erroring file does.
+    pub fcs_errors_in_no_file: Vec<FcsDiagnostic>,
     /// The project files the oracle reported on and the forward pass compared;
     /// [`Self::files_compared`] counts them.
     pub compared_files: Vec<ComparedFile>,
@@ -2622,7 +2603,11 @@ pub enum ProjectSkip {
     /// The oracle type-checked the project with errors, which **grades
     /// nothing**: an erroring file's records are FCS's recovery, not its
     /// answer, so the whole project is set aside.
-    FcsErrors { files: Vec<FcsErrorFile> },
+    FcsErrors {
+        files: Vec<FcsErrorFile>,
+        /// The errors the check reported in no file.
+        in_no_file: Vec<FcsDiagnostic>,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2834,11 +2819,15 @@ fn visit_project(
     let fcs = parse_project_uses(&json, &sources)
         .map_err(|err| (ProjectSkip::FcsParse, err.to_string()))?;
     let comparison = compare_project_uses(&loaded, &fcs);
-    if !comparison.fcs_error_files.is_empty() {
-        let reason = fcs_error_skip_reason(&comparison.fcs_error_files);
+    if !comparison.fcs_error_files.is_empty() || !comparison.fcs_errors_in_no_file.is_empty() {
+        let reason = fcs_error_skip_reason(
+            &comparison.fcs_error_files,
+            &comparison.fcs_errors_in_no_file,
+        );
         return Err((
             ProjectSkip::FcsErrors {
                 files: comparison.fcs_error_files,
+                in_no_file: comparison.fcs_errors_in_no_file,
             },
             reason,
         ));
@@ -2990,20 +2979,22 @@ fn perturbed_fcs(
                 respell(&mut decl.file);
             }
         }
-        // An error in no file is in every file's record; it is listed once.
         for error in file.error_diagnostics() {
-            if !error.in_no_file {
-                errors.push(PerturbedError::Located {
-                    file: file.path.clone(),
-                    line: error.range.start.line,
-                    col: error.range.start.col + 1,
-                    number: error.error_number,
-                });
-            } else if i == 0 {
-                errors.push(PerturbedError::InNoFile {
-                    number: error.error_number,
-                });
-            }
+            errors.push(PerturbedError::Located {
+                file: file.path.clone(),
+                line: error.range.start.line,
+                col: error.range.start.col + 1,
+                number: error.error_number,
+            });
+        }
+        // Every file shares the project's list; it is listed once.
+        if i == 0 {
+            errors.extend(
+                file.errors_in_no_file()
+                    .map(|error| PerturbedError::InNoFile {
+                        number: error.error_number,
+                    }),
+            );
         }
     }
     if errors.is_empty() {
@@ -4050,9 +4041,16 @@ pub fn compare_project_uses(loaded: &LoadedProject, fcs: &[FileUses]) -> Compari
         append_inference_demand_census(Path::new(&census), loaded);
     }
 
+    // Every file shares the project's errors in no file; they are taken once.
+    if let Some(first) = fcs.first() {
+        comparison.fcs_errors_in_no_file = first.errors_in_no_file().cloned().collect();
+    }
     for file_uses in fcs {
         let loaded_idx = index_by_path.get(&path_key(&file_uses.path)).copied();
         if file_uses.has_error_diagnostics() {
+            if file_uses.error_diagnostics().next().is_none() {
+                continue;
+            }
             comparison.fcs_error_files.push(FcsErrorFile {
                 // Our spelling of the path where we have one, so a manifest keys
                 // the file the same way whichever side named it.
@@ -6958,6 +6956,7 @@ mod tests {
                 covering_oracles: vec!["no oracle declaration".to_string()],
             }],
             fcs_error_files: Vec::new(),
+            fcs_errors_in_no_file: Vec::new(),
             compared_files: Vec::new(),
             ledger: Vec::new(),
         };
