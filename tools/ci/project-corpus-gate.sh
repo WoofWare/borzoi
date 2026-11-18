@@ -73,7 +73,7 @@ run_step() { # name
       # rather than the server (sibling projects sharing a file, a byte-order
       # mark on line 1, the attribute and qualifier matrices), and the
       # project-graph oracle held to itself (a reference from source against
-      # the same reference built fresh, on generated two-project graphs). They
+      # the same reference built fresh, on generated project graphs). They
       # are `#[ignore]`d only because they drive FCS, so every ignored test
       # runs except the two that take a project from the environment:
       # `project_corpus_resolution_diff` is the `resolution` step in a debug

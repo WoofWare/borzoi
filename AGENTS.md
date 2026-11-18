@@ -521,15 +521,20 @@ This is a Cargo workspace with ten members:
   `-o:` name, re-deriving none of it. A request registers which `-r:`
   arguments are projects of the request, and FCS gets those from source in
   their place; a project-reference `-r:` names no file, so nothing is built.
+  The fixture's argument lines are split as fsc splits a response file, and
+  held to the harness's own parse of it (`fsc_args::FscArguments`).
   `fcs-dump` parses the request once, strictly, into the only value its
   checking code reads: an unknown, repeated or mistyped field, a relative
   path, an argument outside the domain it reads as fsc does (an MSBuild
-  spelling, a switch off its allow-list, a language version that is not a
-  number of F# 8 or later), and a malformed graph are each refused. It also
-  refuses a reference FCS itself would read from its DLL rather than from
-  source (a type provider assembly, a project that creates generated
-  provided types), reading FCS's own decision, and gives each request fresh
-  stamps, so no request is answered from another's checked signature. The
+  spelling, a control character, a switch off its allow-list or a value
+  outside that switch's grammar, any path-valued switch but `-o:`, `-r:` and
+  `--refout:`, a language version that is not a number of F# 8 or later), a
+  project reference registered by a file the producer's `-o:` does not name,
+  and a malformed graph are each refused. It also refuses a reference FCS
+  itself would read from its DLL rather than from source (a type provider
+  assembly, a project that creates generated provided types), reading FCS's
+  own decision, and clears FCS's caches (`InvalidateAll`) before each
+  request, so none is answered from a source or DLL another request read. The
   oracle is held to itself in `tests/project_resolution/source_references.rs`:
   on generated graphs (every declaration kind a library exports, `.fsi`
   hiding, `internal` with and without `InternalsVisibleTo`, assembly-level
@@ -539,7 +544,8 @@ This is a Cargo workspace with ten members:
   referenced as the DLL its build compiles against, and a friend's use of an
   internal must bind only under its `-o:` name.
   The two requests are held to differ by that substitution alone
-  (`only_substitution`), and
+  (`only_substitution`), the source check runs with every registered DLL
+  moved aside (so a reference read from disk instead finds nothing), and
   `the_graph_parser_refuses_everything_outside_its_domain` holds the parser
   to its domain. Later stages' source-surface-equals-DLL
   oracles rest on that equality.
@@ -721,7 +727,8 @@ Two things the single binary made sharp, both handled in
 - **A resident oracle child cannot serve concurrent callers** — its requests and
   responses are matched positionally. One `BatchChild` behind a mutex serialises
   the whole crate's suite, so `cst` drives a pool of them. Note the cap is a
-  process-wide budget, not per-pool.
+  process-wide budget, not per-pool. For the same reason a request that is
+  blank or holds a line break is refused unsent (`BatchFailure::NotOneLine`).
 
 ## Comments
 

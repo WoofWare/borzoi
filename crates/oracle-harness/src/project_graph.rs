@@ -33,7 +33,20 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::fsc_args::FscArguments;
 use crate::msbuild_oracle::{build_environment, fsc_args};
+
+/// The argument lines of response file `text`, split as fsc reads it
+/// (`ResponseFile.parseFile`): at `\r\n`, `\r` or `\n`, blank lines and
+/// lines starting `#` dropped, the rest trimmed. A bare `\r` ends a line, so
+/// splitting at `\n` alone would join two arguments into one.
+pub fn response_file_lines(text: &str) -> Vec<String> {
+    text.split("\r\n")
+        .flat_map(|l| l.split(['\r', '\n']))
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .map(|l| l.trim().to_owned())
+        .collect()
+}
 
 /// The target framework every fixture project builds for.
 pub const FIXTURE_TFM: &str = "net10.0";
@@ -584,15 +597,18 @@ impl ProjectGraphFixture {
                             build.invocations.len()
                         )
                     };
-                    if let Err(e) = invocation.arguments() {
-                        panic!("fixture project {}'s response file: {e:?}", p.name);
-                    }
-                    let lines = invocation
-                        .response_file
-                        .lines()
-                        .filter(|l| !l.is_empty())
-                        .map(str::to_owned)
-                        .collect();
+                    let parsed = invocation.arguments().unwrap_or_else(|e| {
+                        panic!("fixture project {}'s response file: {e:?}", p.name)
+                    });
+                    let lines = response_file_lines(&invocation.response_file);
+                    // The lines must be the arguments fsc reads, as the
+                    // build's own reader parses them.
+                    assert_eq!(
+                        FscArguments::parse_arguments(&lines).as_ref(),
+                        Ok(&parsed),
+                        "fixture project {}: the response file's lines are not what fsc reads",
+                        p.name
+                    );
                     (p.name.clone(), lines)
                 })
                 .collect(),
@@ -895,6 +911,28 @@ mod tests {
     }
 
     proptest! {
+        /// A response file of argument lines, each ended by any of fsc's
+        /// three line breaks, with blank and `#` comment lines among them,
+        /// splits back into exactly those arguments, trimmed.
+        #[test]
+        fn a_response_file_splits_at_every_line_break_fsc_reads(
+            lines in proptest::collection::vec(
+                (
+                    "[a-zA-Z:+./-][ -~]{0,8}",
+                    prop_oneof![Just("\n"), Just("\r"), Just("\r\n")],
+                    prop_oneof![Just(""), Just("   \n"), Just("# note\r"), Just("\r\n")],
+                ),
+                0..8,
+            ),
+        ) {
+            let text: String = lines
+                .iter()
+                .map(|(arg, end, filler)| format!("{filler}{arg}{end}"))
+                .collect();
+            let want: Vec<String> = lines.iter().map(|(arg, _, _)| arg.trim().to_owned()).collect();
+            prop_assert_eq!(response_file_lines(&text), want);
+        }
+
         /// A request is refused for a cycle exactly when the graph has one.
         #[test]
         fn a_cycle_is_refused_exactly_when_there_is_one(

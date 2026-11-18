@@ -6600,26 +6600,78 @@ let private isPlainName (s: string) =
     && s <> ".."
     && s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '.' || c = '_' || c = '-')
 
-/// The switch names a project's arguments may carry beyond the ones
-/// [`parseGraphProject`] reads itself, each passed to FCS as fsc reads it.
-/// An allow-list: a switch outside it may change what fsc builds in a way
-/// FCS does not see, or make FCS do something else (`--help`), so it is
-/// refused rather than passed on.
-let private passedSwitches =
-    set [ "--debug"; "--noframework"; "--define"; "--optimize"; "--warn"; "--warnaserror"
-          "--nowarn"; "--warnon"; "--fullpaths"; "--flaterrors"; "--highentropyva"
-          "--targetprofile"; "--nocopyfsharpcore"; "--deterministic"; "--simpleresolution"
-          "--checked"; "--crossoptimize"; "--tailcalls"; "--platform"; "--doc"; "--nologo"
-          "--utf8output"; "--checknulls"; "--realsig"; "--embed"; "--sourcelink"; "--pathmap"
-          "--publicsign"; "--keyfile"; "--delaysign"; "--nowin32manifest"; "--strict-indentation"
-          "-r"; "--reference" ]
+/// What may follow a passed switch's name on its line. Each is a closed
+/// grammar whose every member fsc reads to the same effect as FCS does, so a
+/// switch's value, and not only its name, is inside the domain.
+type private SwitchValue =
+    /// Nothing: the line is the name.
+    | Bare
+    /// `+`, `-` or nothing (fsc's `OptionSwitch`).
+    | Toggle
+    /// `:` and one of these words.
+    | OneOf of string list
+    /// `:` and a conditional-compilation symbol: an ASCII letter or `_`, then
+    /// letters, digits and `_`.
+    | Symbol
+    /// `:` and warning numbers, each digits with or without an `FS` prefix,
+    /// separated by `,` or `;` (fsc's `OptionStringList` split).
+    | Warnings
+    /// A toggle, then `:` and warning numbers (`--warnaserror+:3239`).
+    | ToggledWarnings
+    /// Either grammar.
+    | Either of SwitchValue * SwitchValue
 
-/// A switch line's name: up to its `:` argument, or without its `+`/`-`
-/// toggle.
-let private switchName (line: string) =
-    match line.IndexOf ':' with
-    | -1 -> line.TrimEnd('+', '-')
-    | i -> line.Substring(0, i)
+let private isSymbol (s: string) =
+    s <> ""
+    && (Char.IsAsciiLetter s.[0] || s.[0] = '_')
+    && s |> Seq.forall (fun c -> Char.IsAsciiLetterOrDigit c || c = '_')
+
+let private isWarnings (s: string) =
+    s <> ""
+    && s.Split([| ','; ';' |])
+       |> Array.forall (fun w ->
+           let digits = if w.StartsWith "FS" then w.Substring 2 else w
+           digits <> "" && digits |> Seq.forall Char.IsAsciiDigit)
+
+let rec private valueMatches (rest: string) (grammar: SwitchValue) =
+    match grammar with
+    | Bare -> rest = ""
+    | Toggle -> rest = "" || rest = "+" || rest = "-"
+    | OneOf words -> rest.StartsWith ":" && List.contains (rest.Substring 1) words
+    | Symbol -> rest.StartsWith ":" && isSymbol (rest.Substring 1)
+    | Warnings -> rest.StartsWith ":" && isWarnings (rest.Substring 1)
+    | ToggledWarnings ->
+        let afterToggle = if rest.StartsWith "+" || rest.StartsWith "-" then rest.Substring 1 else rest
+        afterToggle.StartsWith ":" && isWarnings (afterToggle.Substring 1)
+    | Either(a, b) -> valueMatches rest a || valueMatches rest b
+
+/// The switches a project's arguments may carry beyond the ones
+/// [`parseGraphProject`] reads itself, each with the grammar its value must
+/// match, passed to FCS as fsc reads them. An allow-list, values included:
+/// a switch outside it may change what fsc builds in a way FCS does not see
+/// (a `--keyfile:` FCS would resolve against its own directory, giving the
+/// assembly another identity), or make FCS do something else (`--help`), so
+/// it is refused rather than passed on. No switch here takes a path.
+let private passedSwitches: (string * SwitchValue) list =
+    [ for name in [ "--noframework"; "--fullpaths"; "--flaterrors"; "--nocopyfsharpcore"; "--simpleresolution"
+                    "--nologo"; "--utf8output"; "--nowin32manifest" ] do
+          name, Bare
+      for name in [ "--optimize"; "--highentropyva"; "--deterministic"; "--checknulls"; "--realsig"
+                    "--crossoptimize"; "--tailcalls"; "--checked"; "--strict-indentation" ] do
+          name, Toggle
+      "--debug", Either(Toggle, OneOf [ "full"; "pdbonly"; "portable"; "embedded" ])
+      "--define", Symbol
+      "--warn", OneOf [ "0"; "1"; "2"; "3"; "4"; "5" ]
+      "--nowarn", Warnings
+      "--warnon", Warnings
+      "--warnaserror", Either(Toggle, ToggledWarnings)
+      "--platform", OneOf [ "x86"; "x64"; "Itanium"; "arm"; "arm64"; "anycpu32bitpreferred"; "anycpu" ]
+      "--targetprofile", OneOf [ "netcore"; "netstandard"; "mscorlib" ] ]
+
+/// Whether `line` is a passed switch whose value is in its grammar.
+let private isPassedSwitch (line: string) =
+    passedSwitches
+    |> List.exists (fun (name, grammar) -> line.StartsWith name && valueMatches (line.Substring name.Length) grammar)
 
 /// Parse one project of a graph request.
 ///
@@ -6630,15 +6682,20 @@ let private switchName (line: string) =
 ///   `SourceFiles`, made absolute against the project directory as fsc
 ///   resolves it;
 /// - `-o:` is made absolute the same way, and names the assembly;
-/// - `--refout:` and `--refonly` are dropped: they say what fsc writes, and
-///   FCS writes nothing.
+/// - `--refout:` is dropped: it says what fsc writes, and FCS writes nothing.
 ///
 /// Refused, so the request is in a domain whose meaning is the build's:
-/// - a line that is empty, padded, holds `\` or `%` (the response file keeps
-///   MSBuild's spellings, which fsc and FCS need not read alike) or starts
-///   `@` or `#`;
-/// - a switch outside [`passedSwitches`];
-/// - no `-o:`, `--target:` or `--langversion:`, or more than one;
+/// - a line that is empty, padded, holds a control character (fsc would
+///   split it into lines), `\` or `%` (the response file keeps MSBuild's
+///   spellings, which fsc and FCS need not read alike), `"` (fsc strips
+///   quotes from a source, and FCS's `SourceFiles` would keep them), starts
+///   `@` or `#`,
+///   or starts `/` with no other `/` (fsc reads it as a switch);
+/// - a switch outside [`passedSwitches`], or whose value is outside its
+///   grammar there; the other spellings of the switches read here (`--out:`,
+///   `--reference:`, `-a`), and `--refonly`;
+/// - no `-o:<path>`, `--target:` or `--langversion:`, or more than one; more
+///   than one `--refout:<path>`;
 /// - a `--target:` outside `library`, `exe`, `winexe`, `module`;
 /// - a `--langversion:` that is not a version number of F# 8 or later. A
 ///   word (`latest`, `preview`, `default`) names the checking compiler's
@@ -6661,8 +6718,10 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
         strictArray (where + " args") (required where "args" fields)
         |> List.map (strictString (where + " args"))
     for line in args do
-        if line = "" || line.Trim() <> line || line.Contains '\\' || line.Contains '%'
-           || line.StartsWith "@" || line.StartsWith "#" then
+        if line = "" || line.Trim() <> line || line |> Seq.exists Char.IsControl
+           || line.Contains '\\' || line.Contains '%' || line.Contains '"'
+           || line.StartsWith "@" || line.StartsWith "#"
+           || (line.StartsWith "/" && not (line.Substring(1).Contains '/')) then
             failwithf "%s: argument %A is outside the domain the oracle reads as fsc does" where line
     let isSource (line: string) = not (line.StartsWith "-")
     let sources =
@@ -6675,16 +6734,16 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
     if List.isEmpty sources then
         failwithf "%s has no source files" where
     let switches = args |> List.filter (isSource >> not)
-    let single (name: string) =
-        match switches |> List.filter (fun l -> switchName l = name) with
-        | [ line ] -> line.Substring(name.Length + 1)
-        | [] -> failwithf "%s: no %s argument" where name
-        | _ -> failwithf "%s: more than one %s argument" where name
-    let outputPath =
-        let outputs = switches |> List.filter (fun l -> switchName l = "-o" || switchName l = "--out")
-        match outputs with
-        | [ line ] -> Path.GetFullPath(Path.Combine(dir, line.Substring(line.IndexOf ':' + 1)))
-        | _ -> failwithf "%s: expected one -o: argument" where
+    /// The values of the lines starting `prefix` (a switch name and its `:`).
+    let valuesOf (prefix: string) =
+        switches |> List.filter (fun l -> l.StartsWith prefix) |> List.map (fun l -> l.Substring prefix.Length)
+    let single (prefix: string) =
+        match valuesOf prefix with
+        | [ value ] when value <> "" -> value
+        | [ _ ] -> failwithf "%s: %s with no value" where prefix
+        | [] -> failwithf "%s: no %s argument" where prefix
+        | _ -> failwithf "%s: more than one %s argument" where prefix
+    let outputPath = Path.GetFullPath(Path.Combine(dir, single "-o:"))
     let assemblyName = Path.GetFileNameWithoutExtension outputPath |> Option.ofObj |> Option.defaultValue ""
     if not (isPlainName assemblyName) then
         failwithf "%s: assembly name %A is not a plain name" where assemblyName
@@ -6693,10 +6752,10 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
     // (`BackgroundCompiler.getProjectReferences`).
     if String.Equals(assemblyName, "FSharp.Core", StringComparison.OrdinalIgnoreCase) then
         failwithf "%s: FCS does not reference a project named FSharp.Core from source" where
-    let target = single "--target"
+    let target = single "--target:"
     if not (List.contains target [ "library"; "exe"; "winexe"; "module" ]) then
         failwithf "%s: --target:%s is not library, exe, winexe or module" where target
-    let langVersion = single "--langversion"
+    let langVersion = single "--langversion:"
     let isVersion =
         match langVersion.Split('.') with
         | [| major |]
@@ -6709,26 +6768,22 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
         | _ -> false
     if not isVersion then
         failwithf "%s: --langversion:%s is not a version number of F# 8 or later" where langVersion
+    let refouts = valuesOf "--refout:"
+    if List.length refouts > 1 || List.contains "" refouts then
+        failwithf "%s: expected at most one --refout:<path>" where
+    let references = valuesOf "-r:"
+    for path in references do
+        if not (Path.IsPathFullyQualified path) then
+            failwithf "%s: reference %s is not absolute" where path
     let passed =
         switches
         |> List.choose (fun line ->
-            match switchName line with
-            | "-o" | "--out" -> Some("-o:" + outputPath)
-            | "--target" | "--langversion" -> Some line
-            | "--refout" | "--refonly" -> None
-            | "-r" | "--reference" ->
-                let path = line.Substring(line.IndexOf ':' + 1)
-                if not (Path.IsPathFullyQualified path) then
-                    failwithf "%s: reference %s is not absolute" where path
+            if line.StartsWith "-o:" then Some("-o:" + outputPath)
+            elif line.StartsWith "--target:" || line.StartsWith "--langversion:" || line.StartsWith "-r:" then
                 Some line
-            | name when passedSwitches.Contains name -> Some line
-            | name -> failwithf "%s: switch %s is outside the ones the oracle passes on" where name)
-    let references =
-        switches
-        |> List.choose (fun line ->
-            match switchName line with
-            | "-r" | "--reference" -> Some(line.Substring(line.IndexOf ':' + 1))
-            | _ -> None)
+            elif line.StartsWith "--refout:" then None
+            elif isPassedSwitch line then Some line
+            else failwithf "%s: switch %s is outside the ones the oracle passes on" where line)
     let projectRefs =
         match fields.TryGetValue "projectRefs" with
         | true, v ->
@@ -6759,8 +6814,8 @@ let private parseGraphProject (e: JsonElement) : GraphProject =
 /// receives: [`parseGraphProject`] for each project, then the graph, checked
 /// once: ids, project files and assembly names unique, each project reference
 /// naming a project of the request that is not a `module` (fsc refuses a
-/// netmodule as an assembly reference, FS0192), no cycle, and `check` one of
-/// the projects.
+/// netmodule as an assembly reference, FS0192) by a file of the name its
+/// `-o:` gives, no cycle, and `check` one of the projects.
 let private parseGraphRequest (root: JsonElement) : ValidGraph =
     let fields = strictObject "request" [ "projects"; "check" ] root
     let projects =
@@ -6776,11 +6831,18 @@ let private parseGraphRequest (root: JsonElement) : ValidGraph =
     unique "assembly name" (fun p -> p.AssemblyName.ToLowerInvariant())
     let byId = projects |> List.map (fun p -> p.Id, p) |> Map.ofList
     for p in projects do
-        for _, id in p.ProjectRefs do
+        for reference, id in p.ProjectRefs do
             match Map.tryFind id byId with
             | None -> failwithf "project %s references unknown project %s" p.Id id
             | Some q when q.Target = "module" ->
                 failwithf "project %s references %s, a module, which is no assembly" p.Id id
+            // FCS matches a `-r:` to its `FSharpReference` by the file named,
+            // and the assembly name it checks the referenced project under is
+            // that file's; the producer's `-o:` gives it another.
+            | Some q when Path.GetFileName reference <> Path.GetFileName q.OutputPath ->
+                failwithf
+                    "project %s registers %s as %s, whose output is %s: a reference is the producer's output file"
+                    p.Id reference id q.OutputPath
             | Some _ -> ()
     // Depth first over the whole relation: a cycle anywhere is refused,
     // whatever is checked.
@@ -6809,9 +6871,8 @@ let private parseGraphRequest (root: JsonElement) : ValidGraph =
     { ById = byId; Order = List.ofSeq order; Check = checkedProject }
 
 /// FCS options for every project of `graph` that `Check` reaches, each with
-/// its project references as `FSharpReference`s, every record carrying
-/// `stamp` (see [`nextGraphStamp`]).
-let private graphOptions (graph: ValidGraph) (stamp: int64) =
+/// its project references as `FSharpReference`s.
+let private graphOptions (graph: ValidGraph) =
     let built = System.Collections.Generic.Dictionary<string, FSharpProjectOptions>()
     for p in graph.Order do
         built.[p.Id] <-
@@ -6827,7 +6888,7 @@ let private graphOptions (graph: ValidGraph) (stamp: int64) =
               LoadTime = DateTime(2000, 1, 1)
               UnresolvedReferences = None
               OriginalLoadReferences = []
-              Stamp = Some stamp }
+              Stamp = None }
     built
 
 /// FCS's own verdict on whether a dependant gets `opts`' project from source:
@@ -6881,20 +6942,16 @@ let private assemblyDataAvailable
     with ex ->
         Error ex.Message
 
-/// The next request's stamp: every options record a request builds carries
-/// it, so FCS's caches, keyed by options, never hand one request a signature
-/// another request checked. A file rewritten with its timestamp unchanged is
-/// therefore read afresh.
-let private nextGraphStamp =
-    let mutable last = 0L
-    fun () ->
-        last <- last + 1L
-        last
-
 /// One `uses-project-graph-batch` request's response.
 let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
     let graph = parseGraphRequest root
-    let built = graphOptions graph (nextGraphStamp ())
+    // Stateless: nothing an earlier request read is reused. FCS's caches are
+    // keyed by options and by a file's path and timestamp (the background
+    // compiler's builders, and the process-wide assembly reader and imported
+    // CCU caches), so a source or DLL rewritten with its timestamp unchanged
+    // would otherwise be answered from what was read before.
+    checker.InvalidateAll()
+    let built = graphOptions graph
     let referenced = graph.Order |> List.filter (fun p -> p.Id <> graph.Check.Id)
     let projectResults (opts: FSharpProjectOptions) =
         checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-uses-project-graph")
@@ -6949,9 +7006,8 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
 /// request, which FCS is then handed from source, in that argument's place.
 /// [`parseGraphRequest`] refuses anything outside the domain whose meaning
 /// is the build's; a reference FCS itself would read from its DLL rather
-/// than from source is refused too ([`assemblyDataAvailable`]); and every
-/// options record carries a stamp of its own, so no request reuses another's
-/// checked signature.
+/// than from source is refused too ([`assemblyDataAvailable`]); and each
+/// request starts from FCS's caches cleared, so none reuses what another read.
 ///
 /// The response is the `uses-project` payload for `check`'s files, plus
 /// `Diagnostics`, `check`'s whole-project diagnostics (which include what no

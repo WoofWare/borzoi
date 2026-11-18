@@ -14,10 +14,12 @@
 //! disk anyway. Later stages hold borzoi's source-derived surface to the
 //! built DLL's, and that oracle rests on this equality.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use borzoi_corpus_diff::{FcsInvokeError, ProjectGraphOracle};
+use borzoi_oracle_harness::BatchFailure;
+use borzoi_oracle_harness::par_map::par_map;
 use borzoi_oracle_harness::project_graph::{
     FixtureArgs, FixtureFile, FixtureProject, GraphProject, GraphRequest, GraphResponse, PlainName,
     ProjectGraphFixture, ProjectRef, only_substitution,
@@ -65,6 +67,27 @@ fn errors(response: &GraphResponse) -> Vec<&Value> {
 
 fn binds(response: &GraphResponse, full_name: &str, assembly: &str) -> bool {
     uses(response).any(|u| u["FullName"] == full_name && u["Assembly"] == assembly)
+}
+
+/// `check()`, run with every file `request` registers as a project moved
+/// aside, then put back: a reference the oracle should read from source but
+/// reads from disk finds nothing there, so the answer cannot agree with the
+/// DLL's by reading the same file.
+fn with_registered_references_hidden<T>(request: &GraphRequest, check: impl FnOnce() -> T) -> T {
+    let registered: BTreeSet<&str> = request
+        .projects()
+        .iter()
+        .flat_map(|p| p.project_refs.iter().map(|r| r.reference.as_str()))
+        .collect();
+    let hidden = |r: &str| format!("{r}.hidden");
+    for r in &registered {
+        std::fs::rename(r, hidden(r)).unwrap_or_else(|e| panic!("hide {r}: {e}"));
+    }
+    let answer = check();
+    for r in &registered {
+        std::fs::rename(hidden(r), r).unwrap_or_else(|e| panic!("restore {r}: {e}"));
+    }
+    answer
 }
 
 /// `request` with each project's arguments mapped by `f`.
@@ -300,14 +323,11 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
         })
         .collect();
     let fixtures: Vec<ProjectGraphFixture> = cases.iter().map(case_fixture).collect();
-    // One real build per project: each gives the project's fsc arguments
-    // and builds the DLLs they reference. One at a time: `fsc_args` names its
-    // scratch directory by process and clock, which concurrent calls share.
-    let args: Vec<FixtureArgs> = cases
-        .iter()
-        .zip(&fixtures)
-        .map(|(c, f)| f.fsc_args(&name(&c.consumer)))
-        .collect();
+    // One real build per project, fixtures side by side: each gives the
+    // project's fsc arguments and builds the DLLs they reference.
+    let args: Vec<FixtureArgs> = par_map(fixtures.len(), |i| {
+        fixtures[i].fsc_args(&name(&cases[i].consumer))
+    });
 
     let mut oracle = ProjectGraphOracle::default();
     let mut failures = Vec::new();
@@ -323,9 +343,11 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
         if let Err(why) = only_substitution(&source_request, &dll_request) {
             panic!("case {i}: the requests differ beyond the substitution: {why}");
         }
-        let source = oracle
-            .check(&source_request)
-            .unwrap_or_else(|e| panic!("case {i}: the source check failed: {e}"));
+        let source = with_registered_references_hidden(&source_request, || {
+            oracle
+                .check(&source_request)
+                .unwrap_or_else(|e| panic!("case {i}: the source check failed: {e}"))
+        });
         let dll = oracle
             .check(&dll_request)
             .unwrap_or_else(|e| panic!("case {i}: the DLL check failed: {e}"));
@@ -643,10 +665,19 @@ fn a_reference_that_creates_generated_provided_types_is_refused() {
     );
 }
 
-/// The resident oracle never answers from a signature an earlier request
-/// checked: a referenced project's source rewritten with its timestamp put
-/// back is read afresh. Later incremental differentials put one graph to the
-/// oracle again after each edit.
+/// Puts `path`'s modification time back to `stamp`.
+fn set_modified(path: &Path, stamp: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(stamp))
+        .unwrap_or_else(|e| panic!("put {}'s timestamp back: {e}", path.display()));
+}
+
+/// The resident oracle never answers from anything an earlier request read:
+/// a referenced project's source, and a referenced DLL, each rewritten with
+/// its timestamp put back, are read afresh. Later incremental differentials
+/// put one graph to the oracle again after each edit.
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
 fn a_rewritten_reference_is_read_afresh_whatever_its_timestamp() {
@@ -670,36 +701,79 @@ fn a_rewritten_reference_is_read_afresh_whatever_its_timestamp() {
             .unwrap_or_else(|| panic!("no typed use of Lib.x: {answer:#?}"))
             .to_owned()
     };
+    // The same library with `x` a string, built in a tree of its own, whose
+    // reference DLL is copied over the first one's.
+    let rewritten = ProjectGraphFixture::materialise(vec![project(
+        "Lib",
+        vec![(
+            "Lib.fs".into(),
+            "module Lib\n\nlet x : string = \"\"\n".into(),
+        )],
+        &[],
+    )])
+    .expect("a graph");
     let args = fixture.fsc_args(&name("App"));
+    rewritten.fsc_args(&name("Lib"));
     let request = fixture.source_request(&args, &name("App"));
+    let dll_request = fixture.dll_request(&args, &name("App"));
     let mut oracle = ProjectGraphOracle::default();
-    let before = type_of_x(&oracle.check(&request).expect("the graph oracle answers"));
+    let mut check = |request: &GraphRequest| {
+        type_of_x(&oracle.check(request).expect("the graph oracle answers"))
+    };
+    let (before, before_dll) = (check(&request), check(&dll_request));
+    assert!(before.contains("Int32"), "{before}");
+    assert!(before_dll.contains("Int32"), "{before_dll}");
 
     let lib = fixture.paths(&name("Lib")).remove(0);
     let stamp = std::fs::metadata(&lib)
         .and_then(|m| m.modified())
         .expect("read the library's timestamp");
     std::fs::write(&lib, "module Lib\n\nlet x : string = \"\"\n").expect("rewrite the library");
-    std::fs::File::options()
-        .write(true)
-        .open(&lib)
-        .and_then(|f| f.set_modified(stamp))
-        .expect("put the library's timestamp back");
+    set_modified(&lib, stamp);
+    let after = check(&request);
+    assert!(
+        after.contains("String"),
+        "the source rewrite must be seen: {after}"
+    );
 
-    let after = type_of_x(&oracle.check(&request).expect("the graph oracle answers"));
-    assert_ne!(before, after, "the rewrite must be seen");
-    assert!(after.contains("String"), "{after}");
+    let [ProjectRef { reference, .. }] = request.projects()[1].project_refs.as_slice() else {
+        panic!("App references Lib: {request:#?}")
+    };
+    let reference = Path::new(reference);
+    let within = reference
+        .strip_prefix(fixture.dir(&name("Lib")))
+        .expect("the reference is Lib's");
+    let rewritten_dll = rewritten.dir(&name("Lib")).join(within);
+    assert!(
+        rewritten_dll.exists(),
+        "the rewritten build writes its reference at {}",
+        rewritten_dll.display()
+    );
+    let stamp = std::fs::metadata(reference)
+        .and_then(|m| m.modified())
+        .expect("read the reference's timestamp");
+    std::fs::copy(&rewritten_dll, reference).expect("rewrite the reference DLL");
+    set_modified(reference, stamp);
+    let after_dll = check(&dll_request);
+    assert!(
+        after_dll.contains("String"),
+        "the DLL rewrite must be seen: {after_dll}"
+    );
 }
 
 /// fcs-dump's request parser refuses, as one `BatchError` each, every
 /// request outside the domain it reads as fsc does: the JSON shape (unknown,
 /// repeated or mistyped fields), the paths (relative), the arguments
-/// (padded, MSBuild spellings, response-file directives, switches outside
-/// its allow-list, a target or language version outside its allow-list, a
-/// missing or repeated `-o:`/`--target:`/`--langversion:`) and the graph
-/// (an unknown, cyclic or module reference, a duplicate id). Each variant is
-/// the friend fixture's valid request with one thing changed, which the
-/// first case shows the oracle accepts.
+/// (padded, holding a line break, MSBuild spellings, response-file
+/// directives, slash switches, switches outside its allow-list or with a
+/// value outside their grammar, a target or language version outside its
+/// allow-list, a missing, empty or repeated `-o:`/`--target:`/
+/// `--langversion:`, the other spellings of the switches it reads) and the
+/// graph (an unknown, cyclic or module reference, one registered by a file
+/// the producer does not write, a duplicate id). Each variant is the friend
+/// fixture's valid request with one thing changed, which the first case shows
+/// the oracle accepts; other spellings inside each grammar are accepted; and
+/// a request that is not one line is never sent.
 #[test]
 #[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
 fn the_graph_parser_refuses_everything_outside_its_domain() {
@@ -804,6 +878,49 @@ fn the_graph_parser_refuses_everything_outside_its_domain() {
         ),
         ("relative reference", add_line("-r:lib/Extra.dll")),
         (
+            "--out: spelling",
+            replace_line("-o:", "--out:obj/Release/net10.0/Bee.dll"),
+        ),
+        ("-o: with no path", replace_line("-o:", "-o:")),
+        (
+            "--refout: with no path",
+            replace_line("--refout:", "--refout:"),
+        ),
+        ("two --refout:", add_line("--refout:obj/Other.dll")),
+        ("--refonly", add_line("--refonly")),
+        (
+            "--reference: spelling",
+            add_line("--reference:/abs/Extra.dll"),
+        ),
+        ("a path-valued switch", add_line("--keyfile:key.snk")),
+        ("a slash switch", add_line("/nologo")),
+        ("a quoted source", add_line("\"Extra.fs\"")),
+        (
+            "a line break inside an argument",
+            add_line("--define:FIRST\r--define:SECOND"),
+        ),
+        ("a define that is no symbol", add_line("--define:A=B")),
+        ("a warning level out of range", add_line("--warn:9")),
+        ("warnings that are no numbers", add_line("--nowarn:abc")),
+        ("a debug kind outside the list", add_line("--debug:weird")),
+        ("a toggle with junk after it", add_line("--optimize*")),
+        (
+            "a registered reference that is not the producer's output file",
+            edit(&|v| {
+                let old = v["projects"][1]["projectRefs"][0]["reference"]
+                    .as_str()
+                    .expect("ref")
+                    .to_owned();
+                let new = format!("{}NotAy.dll", old.strip_suffix("Ay.dll").expect("Ay.dll"));
+                for l in v["projects"][1]["args"].as_array_mut().expect("args") {
+                    if l.as_str() == Some(&format!("-r:{old}")) {
+                        *l = Value::String(format!("-r:{new}"));
+                    }
+                }
+                v["projects"][1]["projectRefs"][0]["reference"] = Value::String(new);
+            }),
+        ),
+        (
             "unknown project reference",
             edit(&|v| {
                 v["projects"][1]["projectRefs"][0]["project"] = Value::String("Nobody".into())
@@ -840,6 +957,22 @@ fn the_graph_parser_refuses_everything_outside_its_domain() {
             }),
         ),
     ];
+    // Inside the domain: other spellings each grammar admits.
+    let admitted: Vec<String> = [
+        "--nowarn:FS0025,3370;44",
+        "--warnon:3390",
+        "--warnaserror+",
+        "--warnaserror-:3239",
+        "--debug:full",
+        "--debug-",
+        "--checknulls+",
+        "--crossoptimize-",
+        "--platform:x64",
+        "--define:DEBUG_1",
+    ]
+    .into_iter()
+    .map(add_line)
+    .collect();
     let mut oracle = ProjectGraphOracle::default();
     assert!(
         oracle.check_json(&valid.to_string()).is_ok(),
@@ -854,4 +987,26 @@ fn the_graph_parser_refuses_everything_outside_its_domain() {
         accepted.is_empty(),
         "accepted outside the domain: {accepted:?}"
     );
+    let refused_inside: Vec<(&String, FcsInvokeError)> = admitted
+        .iter()
+        .filter_map(|line| oracle.check_json(line).err().map(|e| (line, e)))
+        .collect();
+    assert!(
+        refused_inside.is_empty(),
+        "refused inside the domain: {refused_inside:?}"
+    );
+    // The transport pairs answers with requests by line, so what is not one
+    // line is never sent.
+    for not_one_line in [
+        String::new(),
+        serde_json::to_string_pretty(&valid).expect("json"),
+    ] {
+        assert!(
+            matches!(
+                oracle.check_json(&not_one_line),
+                Err(FcsInvokeError::Oracle(BatchFailure::NotOneLine))
+            ),
+            "{not_one_line:?} must not be sent"
+        );
+    }
 }

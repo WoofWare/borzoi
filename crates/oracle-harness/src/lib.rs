@@ -95,6 +95,9 @@ pub enum BatchFailure {
     Stdin(std::io::Error),
     /// The oracle could not be started.
     Spawn(std::io::Error),
+    /// The request is blank or holds a line break, so it is not one request
+    /// line: it was not sent.
+    NotOneLine,
 }
 
 impl std::fmt::Display for BatchFailure {
@@ -111,6 +114,10 @@ impl std::fmt::Display for BatchFailure {
             }
             BatchFailure::Stdin(e) => write!(f, "writing the request to the oracle failed: {e}"),
             BatchFailure::Spawn(e) => write!(f, "starting the oracle failed: {e}"),
+            BatchFailure::NotOneLine => write!(
+                f,
+                "the request is blank or holds a line break, so it is not one request line"
+            ),
         }
     }
 }
@@ -290,7 +297,15 @@ impl BatchChild {
     /// [`request`](Self::request), with the failure of the last attempt
     /// returned rather than panicked on. The child that failed it is gone, so
     /// the next request is put to a fresh one.
+    ///
+    /// A request that is blank or holds `\n` or `\r` is refused with
+    /// [`BatchFailure::NotOneLine`] before anything is written: responses are
+    /// paired with requests by position, one line each, so it would draw no
+    /// answer or several, and every later request would get another's.
     pub fn try_request(&mut self, request: &str) -> Result<String, BatchFailure> {
+        if request.trim().is_empty() || request.contains(['\n', '\r']) {
+            return Err(BatchFailure::NotOneLine);
+        }
         let mut last = None;
         for _ in 0..self.attempts {
             if self.io.is_none() {
