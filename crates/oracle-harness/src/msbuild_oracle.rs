@@ -4,15 +4,21 @@
 //! each `Fsc` invocation's response file into an [`FscArguments`] at the
 //! boundary.
 //!
-//! It runs the build rather than imitating one, and adds nothing to it the
-//! build can read, only loggers: the restore, the targets, the project
-//! references, the global properties and the compiler are the CLI's own. The
-//! arguments are MSBuild's account of what the `Fsc` task handed fsc; that
-//! fsc ran on them is fsc's own account (its diagnostics, or the output it
-//! wrote), so an invocation that logged a command line and ran no compiler is
-//! not reported. A project already built is up to date, so its build runs no
-//! compiler, and the driver says it cannot answer rather than forcing one;
-//! the fixtures it serves are built fresh.
+//! It runs the build rather than imitating one, and adds nothing to it but
+//! loggers: the restore, the targets, the project references, the global
+//! properties and the compiler are the CLI's own. The arguments are MSBuild's
+//! account of what the `Fsc` task handed its launcher, so they are answered
+//! only when that launcher is the build's `dotnet` running its SDK's
+//! `fsc.dll`; that fsc ran on them is fsc's own account, its banner or a
+//! diagnostic in the task's context. Anything less is no answer. A project
+//! already built is up to date, so its build runs no compiler, and the driver
+//! says it cannot answer rather than forcing one; the fixtures it serves are
+//! built fresh.
+//!
+//! The guarantee is for builds that do not look for the instrumentation:
+//! the loggers set no property, but a project can read the process's command
+//! line (`$([System.Environment]::CommandLine)`) and see them there. No
+//! observation of a build is invisible to a build that looks for it.
 //!
 //! The tool is built once (marker-gated, with the marker and fingerprint
 //! `borzoi-msbuild`'s tests use, so the two never rebuild over each other).
@@ -54,7 +60,10 @@ pub fn apphost() -> &'static Path {
     BUILT
         .get_or_init(|| {
             if let Some(bin) = std::env::var_os("BORZOI_MSBUILD_CONDITION_ORACLE") {
-                return PathBuf::from(bin);
+                // Absolute here, since the builds run in other directories.
+                return std::path::absolute(PathBuf::from(&bin)).unwrap_or_else(|e| {
+                    panic!("absolute path of {}: {e}", PathBuf::from(&bin).display())
+                });
             }
             let project = workspace_root()
                 .join("tools")
@@ -190,10 +199,8 @@ pub struct FscBuild {
     pub succeeded: bool,
     /// Every `Fsc` invocation for the project itself that ran fsc, in the
     /// order they started: one per inner build (a single-targeted project
-    /// has one). That fsc ran is fsc's own evidence: it reported diagnostics,
-    /// or the output its arguments name was written during the build. An
-    /// invocation that logged its command line but ran no compiler (one told
-    /// to skip it, or one whose compiler could not start) is not here.
+    /// has one), each launched as the SDK launches its compiler and showing
+    /// fsc's own sign of having run (its banner or a diagnostic).
     pub invocations: Vec<FscInvocation>,
 }
 
@@ -203,10 +210,11 @@ pub enum FscArgsDecline {
     /// The `dotnet` host refused the build before MSBuild ran (no installed
     /// SDK satisfies the project's `global.json`), so fsc is handed nothing.
     NoBuild(Vec<String>),
-    /// No fsc run of the project's can be reported: the build ran none that
-    /// left evidence (it failed first, the project was up to date, or a
-    /// replaced `CoreCompile` compiles some other way), or one ran on
-    /// arguments the driver cannot read. With the build's errors.
+    /// No complete answer: the build started no `Fsc` for the project (it
+    /// failed first, the project was up to date, or a replaced `CoreCompile`
+    /// compiles some other way), or an invocation launched something other
+    /// than the SDK's compiler, left no sign fsc ran, or ran on a command
+    /// line the driver cannot read. With the build's errors.
     Unanswered(Vec<String>),
 }
 
@@ -262,7 +270,6 @@ pub fn fsc_args(
     cmd.arg(&project).env_clear();
     cmd.envs(build_environment());
     cmd.envs(env.iter().map(|(name, value)| (name, value)));
-    let started = std::time::SystemTime::now();
     let output = BoundedCommand::new(cmd)
         .timeout(FSC_ARGS_TIMEOUT)
         .run()
@@ -274,7 +281,7 @@ pub fn fsc_args(
         String::from_utf8_lossy(&output.stderr)
     );
     match json {
-        Ok(json) => parse_logger_output(&project, &json, started),
+        Ok(json) => parse_logger_output(&project, &json),
         // MSBuild's own command-line errors (`MSB1xxx`: a switch it rejects,
         // a logger it cannot load) are this driver's fault, and loud.
         Err(e) if report.contains("error MSB1") || output.status.success() => panic!(
@@ -293,6 +300,33 @@ pub fn fsc_args(
     }
 }
 
+/// Whether `invocation` launched the SDK's own compiler: its `ToolPath` and
+/// `ToolExe` name the build's `dotnet` host (`host`, the build process's
+/// `DOTNET_HOST_PATH`), and its `DotnetFscCompilerPath` is the `fsc.dll`
+/// beside the task assembly that ran, each compared as canonical paths.
+fn sdk_launch(invocation: &FscInvocation, host: Option<&Path>) -> bool {
+    let canonical = |path: &Path| std::fs::canonicalize(path).ok();
+    let compiler = |name: &str| invocation.compiler.get(name).map(String::as_str);
+    let (Some(host), Some(tool_path), Some(tool_exe), Some(fsc)) = (
+        host,
+        compiler("ToolPath"),
+        compiler("ToolExe"),
+        compiler("DotnetFscCompilerPath")
+            .and_then(|quoted| quoted.strip_prefix('"')?.strip_suffix('"')),
+    ) else {
+        return false;
+    };
+    let Some(fsharp) = Path::new(&invocation.task_assembly).parent() else {
+        return false;
+    };
+    let launcher = canonical(&Path::new(tool_path).join(tool_exe));
+    let sdk_fsc = canonical(&fsharp.join("fsc.dll"));
+    launcher.is_some()
+        && launcher == canonical(host)
+        && sdk_fsc.is_some()
+        && sdk_fsc == canonical(Path::new(fsc))
+}
+
 /// What the `dotnet` host prints when no installed SDK satisfies the
 /// project's `global.json`, which it does before MSBuild starts.
 const HOST_SDK_FAILURES: &[&str] = &[
@@ -302,7 +336,7 @@ const HOST_SDK_FAILURES: &[&str] = &[
 
 /// A directory of [`fsc_args`]'s own for one call, which no other call in
 /// any process shares: named for this process and a process-wide counter,
-/// and made with `create_dir`, which fails rather than adopt one that already
+/// and made (owner-only) without its parents, which fails rather than adopt one that already
 /// exists (left by an earlier process of the same id, say), in which case the
 /// next name is tried. Concurrent calls each write their logger's output into
 /// their own directory and remove only it.
@@ -316,7 +350,11 @@ fn scratch_dir() -> PathBuf {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        match std::fs::create_dir(&dir) {
+        // Owner-only from the start: the logs hold the caller's globals.
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&dir) {
             Ok(()) => return dir,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => panic!("create {}: {e}", dir.display()),
@@ -341,11 +379,7 @@ impl Drop for ScratchDir {
 }
 
 /// [`fsc_args`]'s reading of what `FscArgsLogger` wrote for `project`.
-fn parse_logger_output(
-    project: &Path,
-    json: &str,
-    started: std::time::SystemTime,
-) -> Result<FscBuild, FscArgsDecline> {
+fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDecline> {
     let value: serde_json::Value = serde_json::from_str(json).expect("FscArgsLogger writes JSON");
     let strings = |v: &serde_json::Value| -> BTreeMap<String, String> {
         v.as_object()
@@ -363,6 +397,12 @@ fn parse_logger_output(
         .map(|e| e.as_str().unwrap_or_default().to_string())
         .collect();
     let succeeded = value["succeeded"].as_bool() == Some(true);
+    let host = value["dotnetHostPath"].as_str().map(PathBuf::from);
+    let unanswered = |why: String| {
+        let mut all = vec![why];
+        all.extend(errors.iter().cloned());
+        Err(FscArgsDecline::Unanswered(all))
+    };
     let mut invocations = Vec::new();
     for run in value["invocations"]
         .as_array()
@@ -374,41 +414,45 @@ fn parse_logger_output(
         }
         // A command line that cannot be read may be one fsc ran on.
         let Some(response_file) = run["responseFile"].as_str() else {
-            return Err(FscArgsDecline::Unanswered(vec![format!(
+            return unanswered(format!(
                 "an Fsc command line could not be read: {}",
                 run["problem"]
-            )]));
+            ));
         };
-        let compiler_spoke = run["compilerDiagnostics"]
-            .as_array()
-            .is_some_and(|diagnostics| !diagnostics.is_empty());
-        // fsc writes its output relative to the project's directory.
-        let wrote_output = FscArguments::parse(response_file)
-            .ok()
-            .and_then(|args| args.output)
-            .and_then(|output| {
-                let path = project.parent()?.join(output);
-                std::fs::metadata(path).ok()?.modified().ok()
-            })
-            .is_some_and(|modified| modified >= started);
-        if !compiler_spoke && !wrote_output {
-            continue;
-        }
-        invocations.push(FscInvocation {
+        let invocation = FscInvocation {
             project: run_project,
             globals: strings(&run["globals"]),
             response_file: response_file.to_string(),
             task_assembly: run["taskAssembly"].as_str().unwrap_or_default().to_string(),
             compiler: strings(&run["compiler"]),
-        });
+        };
+        // The arguments are what the `Fsc` task handed its launcher; they
+        // are fsc's only when the launcher is the build's `dotnet` running
+        // its SDK's `fsc.dll`, and not some program that may pass on more.
+        if !sdk_launch(&invocation, host.as_deref()) {
+            return unanswered(format!(
+                "Fsc launched something other than the SDK's compiler: {:?}",
+                invocation.compiler
+            ));
+        }
+        // That fsc ran is fsc's own evidence, tied to this invocation: an
+        // invocation without it may have run silently or not at all, and
+        // either way the answer would be incomplete.
+        let fsc_spoke = run["compilerOutput"]
+            .as_array()
+            .is_some_and(|output| !output.is_empty());
+        if !fsc_spoke {
+            return unanswered(
+                "an Fsc invocation left no sign fsc ran (its banner or a diagnostic)".to_string(),
+            );
+        }
+        invocations.push(invocation);
     }
     if invocations.is_empty() {
-        let mut why = vec![format!(
-            "the build {} and left no evidence fsc ran for the project",
+        unanswered(format!(
+            "the build {} without starting Fsc for the project",
             if succeeded { "succeeded" } else { "failed" }
-        )];
-        why.extend(errors);
-        Err(FscArgsDecline::Unanswered(why))
+        ))
     } else {
         Ok(FscBuild {
             succeeded,

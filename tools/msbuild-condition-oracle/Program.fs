@@ -826,20 +826,27 @@ type private FscRun =
       Assembly: string
       Inputs: Collections.Generic.Dictionary<string, string>
       Messages: ResizeArray<string>
-      /// The diagnostics fsc itself reported (errors and warnings coded
-      /// `FS…`, raised in the task's context): evidence fsc ran, read its
-      /// arguments, and got as far as compiling.
-      CompilerDiagnostics: ResizeArray<string> }
+      /// What fsc itself said, in the task's context: its banner on standard
+      /// output (`Microsoft (R) F# Compiler …`, which `ToolTask` logs), and
+      /// its diagnostics (errors and warnings coded `FS…`). Evidence that fsc
+      /// ran, tied to this invocation.
+      CompilerOutput: ResizeArray<string> }
 
 /// The response file `run` handed fsc, read off the command line the task
 /// logged before running it (`ToolTask` logs
 /// `<tool path> <command-line commands> <response-file commands>`; `Fsc`'s
 /// tool path is `ToolPath` joined with `ToolExe`, and its command-line
 /// commands are its `DotnetFscCompilerPath`, verbatim), or why it cannot be.
-/// The command-line commands reach fsc as arguments of their own, ahead of
-/// the response file, so they must be the compiler's path alone: one quoted
-/// path, or none.
+///
+/// Only for the SDK's own launch, where all three are logged (a parameter
+/// whose logging a project suppresses is indistinguishable from an empty one)
+/// and `DotnetFscCompilerPath` is one quoted path, the compiler's: anything
+/// more would reach fsc as arguments of its own, ahead of the response file.
+/// The driver checks that the paths are the build's `dotnet` host and its
+/// SDK's `fsc.dll`.
 let private responseFileOf (run: FscRun) : Result<string, string> =
+    let logged = compilerParameters |> List.forall run.Inputs.ContainsKey
+
     let input name =
         match run.Inputs.TryGetValue name with
         | true, value -> value
@@ -849,25 +856,17 @@ let private responseFileOf (run: FscRun) : Result<string, string> =
     let compiler = input "DotnetFscCompilerPath"
 
     let pathAlone =
-        compiler = ""
-        || (compiler.Length >= 2
-            && compiler.StartsWith "\""
-            && compiler.EndsWith "\""
-            && not (compiler.Substring(1, compiler.Length - 2).Contains '"')
-            && not (compiler.StartsWith "\"@" || compiler.StartsWith "\"-"))
-        || not (
-            compiler.StartsWith '@'
-            || compiler.StartsWith '-'
-            || compiler |> Seq.exists (fun c -> Char.IsWhiteSpace c || c = '"')
-        )
+        compiler.Length >= 2
+        && compiler.StartsWith "\""
+        && compiler.EndsWith "\""
+        && not (compiler.Substring(1, compiler.Length - 2).Contains '"')
 
-    let prefix =
-        match compiler with
-        | "" -> tool + " "
-        | compiler -> tool + " " + compiler + " "
+    let prefix = tool + " " + compiler + " "
 
-    if not pathAlone then
-        Error $"DotnetFscCompilerPath holds more than the compiler's path: %s{compiler}"
+    if not logged then
+        Error $"the compiler's launch was not logged in full: %A{List.ofSeq run.Inputs.Keys}"
+    elif not pathAlone then
+        Error $"DotnetFscCompilerPath is not one quoted path: %s{compiler}"
     else
         match run.Messages |> Seq.filter (fun m -> m.StartsWith(prefix, StringComparison.Ordinal)) |> List.ofSeq with
         | [ message ] -> Ok(message.Substring prefix.Length)
@@ -885,9 +884,9 @@ let private responseFileOf (run: FscRun) : Result<string, string> =
 /// the build can read), the diagnostics fsc itself reported, and the response
 /// file it handed fsc (or why that could not be read).
 ///
-/// That `Fsc` started is MSBuild's account; that fsc ran is fsc's, which the
-/// driver reads from fsc's own evidence: the diagnostics here, or the output
-/// file the build wrote.
+/// That `Fsc` started is MSBuild's account; that fsc ran is fsc's own: its
+/// banner or diagnostics in the task's context. The report also carries the
+/// build process's `DOTNET_HOST_PATH`, which the driver holds the launch to.
 ///
 /// A real build, not an imitation of one: the restore, the targets, the
 /// project references and the compiler are the CLI's own, so what it reports
@@ -938,7 +937,7 @@ type FscArgsLogger() =
                           Assembly = e.TaskAssemblyLocation
                           Inputs = Collections.Generic.Dictionary<string, string>()
                           Messages = ResizeArray<string>()
-                          CompilerDiagnostics = ResizeArray<string>() }
+                          CompilerOutput = ResizeArray<string>() }
 
                     order.Add k)
 
@@ -962,7 +961,11 @@ type FscArgsLogger() =
                             | [ :? string as value ] -> value
                             | [ :? Microsoft.Build.Framework.ITaskItem as item ] -> item.ItemSpec
                             | items -> String.Join(";", items)
-                | Some run, e -> run.Messages.Add e.Message
+                | Some run, e ->
+                    run.Messages.Add e.Message
+
+                    if not (isNull e.Message) && e.Message.StartsWith("Microsoft (R) F# Compiler", StringComparison.Ordinal) then
+                        run.CompilerOutput.Add e.Message
                 | None, _ -> ())
 
             let compilerSpoke (context: Microsoft.Build.Framework.BuildEventContext) (code: string) message =
@@ -971,7 +974,7 @@ type FscArgsLogger() =
                 | context ->
                     match runs.TryGetValue(key context) with
                     | true, run when not (isNull code) && code.StartsWith("FS", StringComparison.Ordinal) ->
-                        run.CompilerDiagnostics.Add $"%s{code} %s{message}"
+                        run.CompilerOutput.Add $"%s{code} %s{message}"
                     | _ -> ()
 
             source.ErrorRaised.Add(fun e ->
@@ -998,7 +1001,7 @@ type FscArgsLogger() =
                            taskAssembly = run.Assembly
                            compiler = run.Inputs
                            responseFile = file
-                           compilerDiagnostics = List.ofSeq run.CompilerDiagnostics
+                           compilerOutput = List.ofSeq run.CompilerOutput
                            problem = problem |})
                     |> List.ofSeq
 
@@ -1007,6 +1010,7 @@ type FscArgsLogger() =
                     JsonSerializer.Serialize
                         {| succeeded = succeeded
                            errors = List.ofSeq errors
+                           dotnetHostPath = Environment.GetEnvironmentVariable "DOTNET_HOST_PATH"
                            invocations = invocations |}
                 )
 

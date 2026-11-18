@@ -61,6 +61,8 @@ pub enum FscArgsError {
     /// A positional argument naming an assembly (`Custom.dll`), which fsc
     /// rejects rather than compiling.
     PositionalAssembly(String),
+    /// A positional `.resx`, at which fsc stops (FS2023).
+    PositionalResource(String),
 }
 
 impl FscArguments {
@@ -83,8 +85,13 @@ impl FscArguments {
                 // (`FileSystemUtils.trimQuotes`), and takes a positional
                 // `.dll` for an assembly it rejects (FS2020), not a source.
                 let source = line.trim_matches([' ', '"']);
-                if source.to_ascii_lowercase().ends_with(".dll") {
+                let lower = source.to_ascii_lowercase();
+                if lower.ends_with(".dll") {
                     return Err(FscArgsError::PositionalAssembly(source.to_string()));
+                }
+                // fsc stops at a positional resource file (FS2023).
+                if lower.ends_with(".resx") {
+                    return Err(FscArgsError::PositionalResource(source.to_string()));
                 }
                 args.sources.push(source.to_string());
                 continue;
@@ -229,6 +236,7 @@ mod tests {
         let quoted = FscArguments::parse("-o:A.dll\n\"B.fs\"").unwrap();
         assert_eq!(quoted.sources, ["B.fs"]);
         assert!(FscArguments::parse("-o:A.dll\nCustom.DLL\nA.fs").is_err());
+        assert!(FscArguments::parse("-o:A.dll\nbogus.resx\n--out:B.dll").is_err());
         assert_eq!(args.options.len(), 7);
     }
 }

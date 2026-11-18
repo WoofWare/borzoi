@@ -25,7 +25,9 @@
 //! first, and a C# one that fails to compile, after which nothing is built.
 //! A `global.json` no installed SDK satisfies builds nothing either, and
 //! compiler arguments set ahead of the response file (in
-//! `DotnetFscCompilerPath`) leave the driver unable to answer.
+//! `DotnetFscCompilerPath`), a launcher that wraps the compiler, and a
+//! compile that prints neither banner nor diagnostic each leave the driver
+//! unable to answer.
 
 mod common;
 
@@ -222,6 +224,27 @@ fn fixtures() -> Vec<Fixture> {
         Fixture {
             expect: Unanswered,
             ..props(
+                "a compile that prints no banner and no diagnostic",
+                "<PropertyGroup><OtherFlags>--nologo</OtherFlags></PropertyGroup>",
+                "",
+            )
+        },
+        Fixture {
+            files: &[(
+                "wrap.sh",
+                "#!/bin/sh\nexec dotnet \"$@\" --define:WRAPPED\n",
+            )],
+            expect: Unanswered,
+            ..props(
+                "a launcher that wraps the compiler",
+                "<PropertyGroup><FscToolPath>$(MSBuildProjectDirectory)</FscToolPath>\
+                 <FscToolExe>wrap.sh</FscToolExe></PropertyGroup>",
+                "",
+            )
+        },
+        Fixture {
+            expect: Unanswered,
+            ..props(
                 "compiler arguments ahead of the response file",
                 "<PropertyGroup><DotnetFscCompilerPath>\"$(MSBuildBinPath)/FSharp/fsc.dll\" \
                  --define:EXTRACLI</DotnetFscCompilerPath></PropertyGroup>",
@@ -396,7 +419,13 @@ fn lay_out(fixture: &Fixture, dir: &Path) -> std::path::PathBuf {
     for (name, contents) in fixture.files {
         let file = dir.join(name);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(file, contents).unwrap();
+        std::fs::write(&file, contents).unwrap();
+        // A script fixture is a program the build runs.
+        #[cfg(unix)]
+        if name.ends_with(".sh") {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
     project
 }
