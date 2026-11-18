@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use borzoi_oracle_harness::fcs_position::LineIndex;
-use borzoi_oracle_harness::project_graph::{GraphRequest, GraphResponse, parse_graph_response};
+use borzoi_oracle_harness::project_graph::{
+    GraphRequest, GraphResponse, PlainName, parse_graph_response, parse_signature_response,
+};
 use borzoi_oracle_harness::{BatchChild, BatchFailure};
 use borzoi_spawn::{BoundedCommand, ChildFailure};
 
@@ -837,6 +839,28 @@ impl ProjectGraphOracle {
 
     /// [`Self::check`] for a request line as given, whatever it holds: what
     /// a test of the oracle's own request parser puts to it.
+    /// The F# signature FCS reads from the built DLL `dll`, under the
+    /// arguments of `request`'s project `project`
+    /// ([`GraphRequest::signature_request`]).
+    pub fn dll_signature(
+        &mut self,
+        request: &GraphRequest,
+        project: &PlainName,
+        dll: &Path,
+    ) -> Result<Vec<String>, FcsInvokeError> {
+        let line = request.signature_request(project, dll).ok_or_else(|| {
+            FcsInvokeError::Refused(format!(
+                "{project} is not in the request, or {dll:?} is not UTF-8"
+            ))
+        })?;
+        if self.child.is_none() {
+            self.child = Some(spawn_project_batch("uses-project-graph-batch")?);
+        }
+        let child = self.child.as_mut().expect("spawned above");
+        let response = child.try_request(&line).map_err(FcsInvokeError::Oracle)?;
+        parse_signature_response(&response).map_err(FcsInvokeError::Refused)
+    }
+
     pub fn check_json(&mut self, line: &str) -> Result<GraphResponse, FcsInvokeError> {
         if self.child.is_none() {
             self.child = Some(spawn_project_batch("uses-project-graph-batch")?);

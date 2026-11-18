@@ -534,7 +534,13 @@ This is a Cargo workspace with ten members:
   and a malformed graph are each refused. That domain is argued from both
   compilers' sources, so every graded answer is also held to the compiler
   itself (`FixtureArgs::errors_agree`): FCS must find errors in exactly the
-  projects whose real build failed. It also refuses a reference FCS
+  projects whose real build failed; and every project whose build succeeded,
+  the checked one included, must have the signature from source that FCS
+  reads from its built DLL (a `signatureOf` request). The module doc of
+  `borzoi_oracle_harness::project_graph` states this trust base: inputs,
+  errors and signatures are checked; FCS equalling fsc below the signature
+  on identical inputs is assumed. A source naming a signing key file
+  (`AssemblyKeyFile`, `AssemblyKeyName`) is refused. It also refuses a reference FCS
   itself would read from its DLL rather than from source (a type provider
   assembly, a project that creates generated provided types), reading FCS's
   own decision, and clears FCS's caches (`InvalidateAll`) before each

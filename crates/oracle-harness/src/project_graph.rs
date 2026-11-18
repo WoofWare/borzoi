@@ -24,6 +24,33 @@
 //! argument list and differ only in whether a project reference's `-r:` is
 //! registered as a project ([`only_substitution`]).
 //!
+//! # Trust base
+//!
+//! What a graded answer rests on, split into what is checked and what is
+//! assumed.
+//!
+//! Checked, on every graded request:
+//! - **Exact arguments.** FCS is handed each project's own fsc arguments, as
+//!   its real build wrote them; the lines are held to the harness's parse of
+//!   the response file, and `fcs-dump` refuses any argument outside a domain
+//!   whose every member it reads as fsc does (each passed switch with a
+//!   closed value grammar, no path-valued switch FCS would resolve elsewhere,
+//!   FSharp.Core explicit), and a source naming a signing key file.
+//! - **Error agreement.** FCS finds errors in exactly the projects whose real
+//!   build failed ([`FixtureArgs::errors_agree`]).
+//! - **Signature agreement.** Every project whose build succeeded, producers
+//!   and the checked project alike, has the F# signature FCS checked from
+//!   source that FCS reads from the DLL the build wrote
+//!   ([`GraphResponse::signature`], [`GraphRequest::signature_request`]),
+//!   item by item, kinds, names, arities and types; accessibility only as
+//!   public or not, which a friend's uses grade.
+//!
+//! Assumed: that FCS, handed identical inputs, checks them as fsc does below
+//! the signature: the meaning of a project's bodies, where both compilers
+//! succeed and agree on its exported surface. The two share the type
+//! checker, and every FCS differential in this repository rests on the same
+//! assumption; what is checked above is that the inputs are identical.
+//!
 //! This module knows the protocol and the layout. Spawning `fcs-dump` is the
 //! caller's: each crate already locates and builds it its own way.
 
@@ -256,22 +283,23 @@ impl GraphRequest {
 
     /// The request as the one JSON line the oracle reads.
     pub fn to_json_line(&self) -> String {
-        let projects: Vec<Value> = self
-            .projects
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "id": p.id.as_str(),
-                    "projectFile": p.project_file.to_str().expect("checked UTF-8"),
-                    "args": p.args,
-                    "projectRefs": p.project_refs.iter().map(|r| serde_json::json!({
-                        "project": r.project.as_str(),
-                        "reference": r.reference,
-                    })).collect::<Vec<_>>(),
-                })
-            })
-            .collect();
+        let projects: Vec<Value> = self.projects.iter().map(GraphProject::to_json).collect();
         serde_json::json!({ "projects": projects, "check": self.check.as_str() }).to_string()
+    }
+
+    /// The `signatureOf` request for the DLL at `dll`, read under the
+    /// arguments of this request's project `project`: what
+    /// [`GraphResponse::signature`] is compared with. `None` when `project`
+    /// is not one of the request's, or `dll` is not a UTF-8 path.
+    pub fn signature_request(&self, project: &PlainName, dll: &Path) -> Option<String> {
+        let p = self.projects.iter().find(|p| &p.id == project)?;
+        Some(
+            serde_json::json!({
+                "signatureOf": GraphProject { project_refs: Vec::new(), ..p.clone() }.to_json(),
+                "dll": dll.to_str()?,
+            })
+            .to_string(),
+        )
     }
 }
 
@@ -309,6 +337,20 @@ fn first_cycle(projects: &[GraphProject]) -> Option<PlainName> {
         .find_map(|p| visit(&p.id, &by_id, &mut marks))
 }
 
+impl GraphProject {
+    fn to_json(&self) -> Value {
+        serde_json::json!({
+            "id": self.id.as_str(),
+            "projectFile": self.project_file.to_str().expect("checked UTF-8"),
+            "args": self.args,
+            "projectRefs": self.project_refs.iter().map(|r| serde_json::json!({
+                "project": r.project.as_str(),
+                "reference": r.reference,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
 /// A referenced project's entry in a [`GraphResponse`].
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 pub struct ReferencedProject {
@@ -323,6 +365,10 @@ pub struct ReferencedProject {
     /// Its whole-project diagnostics, as `uses-project` renders a file's.
     #[serde(rename = "Diagnostics")]
     pub diagnostics: Vec<Value>,
+    /// Its F# signature as FCS checked it from source, one line per entity
+    /// and member (fcs-dump's `renderSignature`).
+    #[serde(rename = "Signature")]
+    pub signature: Vec<String>,
 }
 
 impl ReferencedProject {
@@ -359,8 +405,27 @@ pub struct GraphResponse {
     /// signature with no implementation).
     #[serde(rename = "Diagnostics")]
     pub diagnostics: Vec<Value>,
+    /// The checked project's F# signature as FCS checked it from source,
+    /// rendered as a `signatureOf` request renders one read from a DLL.
+    #[serde(rename = "Signature")]
+    pub signature: Vec<String>,
     #[serde(rename = "Referenced")]
     pub referenced: Vec<ReferencedProject>,
+}
+
+/// Parse a `signatureOf` response line: the signature's lines, or the
+/// oracle's refusal.
+pub fn parse_signature_response(line: &str) -> Result<Vec<String>, String> {
+    let value: Value =
+        serde_json::from_str(line).map_err(|e| format!("unreadable response ({e}): {line}"))?;
+    if let Some(message) = value.get("BatchError") {
+        return Err(message
+            .as_str()
+            .unwrap_or("<non-string BatchError>")
+            .to_owned());
+    }
+    serde_json::from_value(value["Signature"].clone())
+        .map_err(|e| format!("unexpected response shape ({e}): {line}"))
 }
 
 /// Parse one response line; a `BatchError` (the oracle refused the request)
@@ -1147,6 +1212,7 @@ mod tests {
         let error = serde_json::json!([{ "Severity": "Error" }]);
         let response = |lib_errors: bool, app_errors: bool| GraphResponse {
             files: Vec::new(),
+            signature: Vec::new(),
             diagnostics: if app_errors {
                 error.as_array().expect("array").clone()
             } else {
@@ -1156,6 +1222,7 @@ mod tests {
                 id: "Lib".to_owned(),
                 assembly_name: "Lib".to_owned(),
                 output_path: PathBuf::from("/src/Lib/obj/Lib.dll"),
+                signature: Vec::new(),
                 diagnostics: if lib_errors {
                     error.as_array().expect("array").clone()
                 } else {

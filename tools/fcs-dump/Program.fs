@@ -6955,9 +6955,78 @@ let private assemblyDataAvailable
     with ex ->
         Error ex.Message
 
+/// `public` or `nonpublic`. FCS reports an `internal` it read from a DLL
+/// as private to the reading assembly, so finer kinds would differ between
+/// a source and a DLL reading of one signature; who may see a non-public
+/// item is graded through a friend's uses instead.
+let private accessOf (a: FSharpAccessibility) =
+    if a.IsPublic then "public" else "nonpublic"
+
+let private formatSignatureType (t: FSharpType) =
+    try
+        t.Format(FSharpDisplayContext.Empty)
+    with ex ->
+        "<unformattable: " + ex.Message + ">"
+
+let rec private renderEntity (indent: string) (out: ResizeArray<string>) (e: FSharpEntity) =
+    let kind =
+        if e.IsNamespace then "namespace"
+        elif e.IsFSharpModule then "module"
+        elif e.IsFSharpAbbreviation then "abbrev " + formatSignatureType e.AbbreviatedType
+        elif e.IsFSharpUnion then "union"
+        elif e.IsFSharpRecord then "record"
+        elif e.IsFSharpExceptionDeclaration then "exception"
+        elif e.IsMeasure then "measure"
+        elif e.IsEnum then "enum"
+        elif e.IsDelegate then "delegate"
+        elif e.IsInterface then "interface"
+        elif e.IsValueType then "struct"
+        else "class"
+    out.Add(sprintf "%s%s %s %s`%d" indent kind (accessOf e.Accessibility) e.CompiledName e.GenericParameters.Count)
+    let inner = indent + "  "
+    if not e.IsFSharpAbbreviation then
+        if e.IsFSharpUnion then
+            for c in e.UnionCases do
+                let fields =
+                    c.Fields |> Seq.map (fun f -> f.Name + ":" + formatSignatureType f.FieldType) |> String.concat ", "
+                out.Add(sprintf "%scase %s %s (%s)" inner (accessOf c.Accessibility) c.Name fields)
+        for f in e.FSharpFields do
+            if not f.IsCompilerGenerated then
+                out.Add(sprintf "%sfield %s %s : %s" inner (accessOf f.Accessibility) f.Name (formatSignatureType f.FieldType))
+        for m in e.MembersFunctionsAndValues do
+            if not m.IsCompilerGenerated then
+                out.Add(sprintf "%sval %s %s : %s" inner (accessOf m.Accessibility) m.CompiledName (formatSignatureType m.FullType))
+        for n in e.NestedEntities do
+            renderEntity inner out n
+
+/// An assembly's F# signature as lines: every entity, nested, with its kind,
+/// accessibility, compiled name and arity, and every union case, field and
+/// value or member with its type. FCS gives the same shape for a project it
+/// checked from source (`AssemblySignature`) and for an assembly it read
+/// from a DLL (`FSharpAssembly.Contents`), so the two can be compared line
+/// for line.
+let private renderSignature (signature: FSharpAssemblySignature) : string[] =
+    let out = ResizeArray<string>()
+    for e in signature.Entities do
+        renderEntity "" out e
+    out.ToArray()
+
+/// Source attributes that name a file FCS would resolve against its own
+/// directory rather than the project's, as fsc does: a project carrying one
+/// is outside the oracle's domain. A textual match, so a mention in a
+/// comment declines too.
+let private signingAttributes = [ "AssemblyKeyFile"; "AssemblyKeyName" ]
+
 /// One `uses-project-graph-batch` request's response.
 let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
     let graph = parseGraphRequest root
+    for p in graph.Order do
+        for source in p.Sources do
+            let text = File.ReadAllText source
+            match signingAttributes |> List.tryFind (fun a -> text.Contains a) with
+            | Some attribute ->
+                failwithf "project %s: %s names %s, which FCS resolves apart from fsc" p.Id source attribute
+            | None -> ()
     // Stateless: nothing an earlier request read is reused. FCS's caches are
     // keyed by options and by a file's path and timestamp (the background
     // compiler's builders, and the process-wide assembly reader and imported
@@ -6983,17 +7052,65 @@ let private respondGraph (checker: FSharpChecker) (root: JsonElement) =
     let referenced =
         referenced
         |> List.map (fun p ->
+            let results = projectResults built.[p.Id]
             {| Id = p.Id
                AssemblyName = p.AssemblyName
                OutputPath = p.OutputPath
                // A whole-project check finds what no file's check reports
                // (FS0240, a signature with no implementation).
-               Diagnostics = (projectResults built.[p.Id]).Diagnostics |> Array.map projectDiagnostic |})
+               Diagnostics = results.Diagnostics |> Array.map projectDiagnostic
+               Signature = renderSignature results.AssemblySignature |})
         |> List.toArray
     let files = checkProjectFiles checker built.[graph.Check.Id] graph.Check.Sources
+    let checkedResults = projectResults built.[graph.Check.Id]
     {| Files = files
-       Diagnostics = (projectResults built.[graph.Check.Id]).Diagnostics |> Array.map projectDiagnostic
+       Diagnostics = checkedResults.Diagnostics |> Array.map projectDiagnostic
+       Signature = renderSignature checkedResults.AssemblySignature
        Referenced = referenced |}
+
+/// A `signatureOf` request's response: the F# signature FCS reads from the
+/// built DLL `dll`, rendered as [`renderSignature`] renders a project
+/// checked from source. FCS reads a DLL's signature only as a reference, so
+/// it checks a one-line probe project under `signatureOf`'s own arguments
+/// (its references, defines, language version) with `dll` referenced too.
+let private respondSignature (checker: FSharpChecker) (root: JsonElement) =
+    let fields = strictObject "request" [ "signatureOf"; "dll" ] root
+    let project = parseGraphProject (required "request" "signatureOf" fields)
+    let dll = strictString "dll" (required "request" "dll" fields)
+    if not (Path.IsPathFullyQualified dll) then
+        failwithf "dll %s is not absolute" dll
+    if not (File.Exists dll) then
+        failwithf "dll %s does not exist" dll
+    checker.InvalidateAll()
+    let dir = Path.Combine(Path.GetTempPath(), "fcs-dump-signature-" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory dir |> ignore
+    try
+        let probe = Path.Combine(dir, "SignatureProbe.fs")
+        File.WriteAllText(probe, "module SignatureProbe\n")
+        let switches =
+            project.Switches
+            |> Array.map (fun line ->
+                if line.StartsWith "-o:" then "-o:" + Path.Combine(dir, "SignatureProbe.dll") else line)
+        let opts =
+            { ProjectFileName = Path.Combine(dir, "SignatureProbe.fsproj")
+              ProjectId = None
+              SourceFiles = [| probe |]
+              OtherOptions = Array.append switches [| "-r:" + dll |]
+              ReferencedProjects = [||]
+              IsIncompleteTypeCheckEnvironment = false
+              UseScriptResolutionRules = false
+              LoadTime = DateTime(2000, 1, 1)
+              UnresolvedReferences = None
+              OriginalLoadReferences = []
+              Stamp = None }
+        let results =
+            checker.ParseAndCheckProject(opts, userOpName = "fcs-dump-signature")
+            |> Async.RunSynchronously
+        match results.ProjectContext.GetReferencedAssemblies() |> List.tryFind (fun a -> a.FileName = Some dll) with
+        | Some assembly -> {| Signature = renderSignature assembly.Contents |}
+        | None -> failwithf "FCS did not read %s as a reference" dll
+    finally
+        Directory.Delete(dir, true)
 
 /// `uses-project-graph-batch`: check one project of a project *graph*, each of
 /// its F# project references passed as `FSharpReferencedProject.FSharpReference`,
@@ -7036,7 +7153,10 @@ let private usesProjectGraphBatchCore () =
     let respond (line: string) : string =
         try
             use doc = JsonDocument.Parse(line: string)
-            JsonSerializer.Serialize(respondGraph checker doc.RootElement, compact)
+            let root = doc.RootElement
+            match root.ValueKind = JsonValueKind.Object && fst (root.TryGetProperty "signatureOf") with
+            | true -> JsonSerializer.Serialize(respondSignature checker root, compact)
+            | false -> JsonSerializer.Serialize(respondGraph checker root, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
 

@@ -90,6 +90,50 @@ fn with_registered_references_hidden<T>(request: &GraphRequest, check: impl FnOn
     answer
 }
 
+/// Where each project of `request` (the source request `answer` answers)
+/// has a signature FCS checked from source that is not, line for line, the
+/// one it reads from the DLL that project's build wrote. Producers and the
+/// checked project alike: a difference in meaning between FCS's check and
+/// the build that reaches any project's exported surface shows here.
+fn signature_disagreements(
+    oracle: &mut ProjectGraphOracle,
+    fixture: &ProjectGraphFixture,
+    args: &FixtureArgs,
+    request: &GraphRequest,
+    answer: &GraphResponse,
+) -> Vec<String> {
+    let from_source = std::iter::once((request.check().clone(), &answer.signature)).chain(
+        answer
+            .referenced
+            .iter()
+            .map(|r| (name(&r.id), &r.signature)),
+    );
+    let mut problems = Vec::new();
+    for (project, source) in from_source {
+        if source.is_empty() {
+            problems.push(format!("{project}'s signature is empty"));
+        }
+        // A failed build wrote no DLL; `errors_agree` holds that project.
+        if !args.succeeded(&project) {
+            continue;
+        }
+        let output = args
+            .of(&project)
+            .iter()
+            .find_map(|a| a.strip_prefix("-o:"))
+            .expect("a -o: argument");
+        let dll = fixture.dir(&project).join(output);
+        match oracle.dll_signature(request, &project, &dll) {
+            Ok(built) if &built == source => {}
+            Ok(built) => problems.push(format!(
+                "{project}'s signature from source differs from its built DLL's:\n  source: {source:#?}\n  DLL: {built:#?}"
+            )),
+            Err(e) => problems.push(format!("{project}'s built signature is unread: {e}")),
+        }
+    }
+    problems
+}
+
 /// `request` with each project's arguments mapped by `f`.
 fn with_args(request: &GraphRequest, f: impl Fn(&GraphProject) -> Vec<String>) -> GraphRequest {
     let projects: Vec<GraphProject> = request
@@ -333,6 +377,7 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
     let mut failures = Vec::new();
     let mut into_library: BTreeMap<String, usize> = BTreeMap::new();
     let mut consumer_errors = 0usize;
+    let mut consumers_built = 0usize;
     for (((case, fixture), args), &(seed, i)) in cases.iter().zip(&fixtures).zip(&args).zip(&seeds)
     {
         let consumer = name(&case.consumer);
@@ -361,6 +406,13 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
                 ));
             }
         }
+        problems.extend(signature_disagreements(
+            &mut oracle,
+            fixture,
+            args,
+            &source_request,
+            &source,
+        ));
         let anchor = format!("{}.anchor", anchor_module(case));
         for (side, answer) in [("source", &source), ("DLL", &dll)] {
             if !binds(answer, &anchor, &case.library) {
@@ -408,13 +460,14 @@ fn source_references_equal_fresh_dlls_on_generated_graphs() {
             ));
         }
         consumer_errors += errors(&source).len();
+        consumers_built += usize::from(args.succeeded(&consumer));
         for u in uses(&source).filter(|u| u["Assembly"] == case.library.as_str()) {
             let kind = u["SymbolKind"].as_str().unwrap_or("?").to_owned();
             *into_library.entry(kind).or_default() += 1;
         }
     }
     println!(
-        "source references vs fresh DLLs: {} cases, {} consumer errors, uses binding into the library by kind: {into_library:?}",
+        "source references vs fresh DLLs: {} cases, {consumers_built} consumers built (their signatures held to their DLLs), {} consumer errors, uses binding into the library by kind: {into_library:?}",
         cases.len(),
         consumer_errors
     );
@@ -494,6 +547,70 @@ fn a_library_is_checked_as_a_library() {
     );
     assert!(!args.succeeded(&name("Lib")), "fsc fails the build");
     assert_eq!(args.errors_agree(&answer, &name("Lib")), Ok(()));
+}
+
+/// The checked project's own exported surface is held to the DLL its build
+/// wrote, as every producer's is: here an export whose type the build's
+/// defines decide, which FCS reads apart from fsc, without an error either
+/// side, if any define fails to reach it.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn a_consumer_signature_is_its_built_dll_signature() {
+    let fixture = ProjectGraphFixture::materialise(vec![
+        project(
+            "Lib",
+            vec![("Lib.fs".into(), "module Lib\n\nlet x = 1\n".into())],
+            &[],
+        ),
+        project(
+            "App",
+            vec![(
+                "App.fs".into(),
+                "module App\n\n#if RELEASE\nlet exported = Lib.x\n#else\nlet exported = string Lib.x\n#endif\n"
+                    .into(),
+            )],
+            &["Lib"],
+        ),
+    ])
+    .expect("a graph");
+    let args = fixture.fsc_args(&name("App"));
+    let request = fixture.source_request(&args, &name("App"));
+    let mut oracle = ProjectGraphOracle::default();
+    let answer = oracle.check(&request).expect("the graph oracle answers");
+    assert_eq!(args.errors_agree(&answer, &name("App")), Ok(()));
+    let problems = signature_disagreements(&mut oracle, &fixture, &args, &request, &answer);
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert!(
+        answer
+            .signature
+            .iter()
+            .any(|l| l.contains("exported") && l.contains("int")),
+        "the Release build's export is an int: {:#?}",
+        answer.signature
+    );
+}
+
+/// A project whose source names a signing key file is refused: FCS resolves
+/// the file against its own directory, fsc against the project's, so the
+/// two can give the assembly different identities.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn a_source_signing_attribute_is_refused() {
+    let fixture = ProjectGraphFixture::materialise(vec![project(
+        "Lib",
+        vec![(
+            "Lib.fs".into(),
+            "module Lib\n\n[<assembly: System.Reflection.AssemblyKeyFileAttribute(\"key.snk\")>]\ndo ()\n\nlet x = 1\n"
+                .into(),
+        )],
+        &[],
+    )])
+    .expect("a graph");
+    let args = fixture.fsc_args(&name("Lib"));
+    match ProjectGraphOracle::default().check(&fixture.source_request(&args, &name("Lib"))) {
+        Err(FcsInvokeError::Refused(why)) if why.contains("AssemblyKeyFile") => {}
+        other => panic!("a signing attribute must be refused: {other:?}"),
+    }
 }
 
 /// Two references that declare one name: FCS takes the later one, so a
