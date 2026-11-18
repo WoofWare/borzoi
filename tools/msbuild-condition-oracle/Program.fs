@@ -101,39 +101,6 @@
 ///     and reads back every target that started, in order, and the properties
 ///     and items the build leaves. A₁.3c's executor is held to it.
 ///
-///   {"op":"fscArgs","path":s,"xml":s?,"globals":{..}?,"restoreSources":s?}
-///     -> {"ok":true,"args":[s, ..],"responseFile":s,"taskAssembly":s,
-///         "compiler":{"ToolPath":s,"ToolExe":s,"DotnetFscCompilerPath":s}}
-///      | {"ok":false,"errors":[s, ..]}          // no answer, and why
-///     What the F# compiler is handed for the project at `path` (with `xml`
-///     written there first, when given): it restores in-process as `-restore`
-///     does, then runs a real `Build`'s targets through `Compile` with
-///     `ProvideCommandLineArgs` and `SkipCompilerExecution` (fsc's arguments
-///     are computed, fsc is not run). `args` is the real `Fsc` task's
-///     `FscCommandLineArgs`, each as the task wrote it (the item's escaped
-///     spelling: its unescaped one would decode a `%41` fsc was handed).
-///     `responseFile` is the file the task hands fsc, read off the command
-///     line it logs: those arguments one per line, with `--refout:` and
-///     `--refonly` among them, and each `\` as written (the items turn it into
-///     `/` off Windows). fsc reads that file a line at a time, so it, not
-///     `args`, is what decides fsc's output. `taskAssembly` and `compiler` say
-///     which `Fsc` ran and which program its arguments go to.
-///     `restoreSources` sets `RestoreSources` on the restore's evaluation alone
-///     (as `-restoreProperty:` does), so a caller can pin the restore to a
-///     feed without changing the build's evaluation. `errors` leads with
-///     "MSBuild rejects the project", "the restore failed" or "the build
-///     failed" when MSBuild built nothing: a rejection or build failure of
-///     the op's run is confirmed by a real `Build` under the caller's globals
-///     alone, and becomes a refusal where that build runs `Fsc` after all,
-///     since the op's own settings then caused it. Any other decline means fsc may run
-///     on arguments the op cannot report: a `Build` or `CoreBuild` target
-///     other than the toolset's, a false `Build` condition, `Fsc` run other
-///     than once, a build that fails after `Fsc` ran, a build that rewrites
-///     its own target lists, a `ProjectReference` naming its own `Targets`
-///     (which `BuildProjectReferences=false` does not build), a logged
-///     command line that is not the reported arguments.
-///     `fsc_args_oracle_calibration` holds the op to real compiling builds.
-///
 ///   {"op":"targetItems","path":s,"target":s,"itemType":s,"globals":{..}?}
 ///     -> {"ok":true,"succeeded":b,"errors":[..],"items":[fullPath, ..]}
 ///      | {"ok":false}                           // MSBuild rejects the project
@@ -185,6 +152,10 @@
 ///     `bench` runs measured before the process goes quiet count that work and
 ///     run code the JIT has not yet optimised. A caller wanting MSBuild's
 ///     steady state waits on this between batches.
+///
+/// Not an op: `FscArgsLogger`, which `borzoi-oracle-harness`'s `fsc_args`
+/// driver loads into a real `dotnet msbuild -restore -t:Build` to record what
+/// each `Fsc` invocation hands fsc.
 ///
 /// The process takes one optional argument pair, `--msbuild-sdk <dir>`, which
 /// pins it to the MSBuild of the SDK installed at `<dir>` instead of the one
@@ -839,6 +810,161 @@ type ConeLogger() =
 
                 File.WriteAllText(parameters, JsonSerializer.Serialize cone)
 
+/// Whether a task MSBuild ran is the `Fsc` task: by name, bare or qualified
+/// with its namespace, in any case, as MSBuild looks tasks up.
+let private isFsc (name: string) =
+    name.Equals("Fsc", StringComparison.OrdinalIgnoreCase)
+    || name.EndsWith(".Fsc", StringComparison.OrdinalIgnoreCase)
+
+/// The `Fsc` task's parameters that choose the program it runs.
+let private compilerParameters = [ "ToolPath"; "ToolExe"; "DotnetFscCompilerPath" ]
+
+/// One `Fsc` invocation as [`FscArgsLogger`] sees it.
+type private FscRun =
+    { Project: string
+      Globals: Collections.Generic.IDictionary<string, string>
+      Assembly: string
+      Inputs: Collections.Generic.Dictionary<string, string>
+      Messages: ResizeArray<string> }
+
+/// The response file `run` handed fsc, read off the command line the task
+/// logged before running it (`ToolTask` logs
+/// `<tool path> <command-line commands> <response-file commands>`; `Fsc`'s
+/// tool path is `ToolPath` joined with `ToolExe`, and its command-line
+/// commands are its `DotnetFscCompilerPath`, verbatim), or why it cannot be.
+let private responseFileOf (run: FscRun) : Result<string, string> =
+    let input name =
+        match run.Inputs.TryGetValue name with
+        | true, value -> value
+        | _ -> ""
+
+    let tool = Path.Combine(input "ToolPath", input "ToolExe")
+
+    let prefix =
+        match input "DotnetFscCompilerPath" with
+        | "" -> tool + "  "
+        | compiler -> tool + " " + compiler + " "
+
+    match run.Messages |> Seq.filter (fun m -> m.StartsWith(prefix, StringComparison.Ordinal)) |> List.ofSeq with
+    | [ message ] -> Ok(message.Substring prefix.Length)
+    | [] -> Error $"Fsc logged no command line starting %s{prefix}"
+    | many -> Error $"Fsc logged %d{many.Length} command lines"
+
+/// Records every `Fsc` invocation of a real build, for the `fsc_args` driver
+/// in `borzoi-oracle-harness`, which loads it into `dotnet msbuild -restore
+/// -t:Build` (`-logger:MsBuildConditionOracle.Program+FscArgsLogger,<this
+/// assembly>;<file>`). When the build ends it writes to `<file>`, as JSON,
+/// whether the build succeeded, its errors, and for each invocation the
+/// project and global properties it ran under, the task assembly, the
+/// parameters choosing the program it runs (logged only under
+/// `MSBUILDLOGTASKINPUTS`), and the response file it handed fsc (or why that
+/// could not be read).
+///
+/// A real build, not an imitation of one: the restore, the targets, the
+/// project references and the compiler are the CLI's own, so what it reports
+/// is what fsc is handed, and an invocation that never happens is one a real
+/// build does not make.
+type FscArgsLogger() =
+    let errors = ResizeArray<string>()
+    let projects = Collections.Generic.Dictionary<int, string * Collections.Generic.IDictionary<string, string>>()
+    let runs = Collections.Generic.Dictionary<struct (int * int * int * int), FscRun>()
+    let order = ResizeArray<struct (int * int * int * int)>()
+    let mutable succeeded = false
+    let mutable verbosity = Microsoft.Build.Framework.LoggerVerbosity.Normal
+    let mutable parameters: string = null
+
+    let key (c: Microsoft.Build.Framework.BuildEventContext) =
+        struct (c.NodeId, c.ProjectContextId, c.TargetId, c.TaskId)
+
+    interface Microsoft.Build.Framework.ILogger with
+        member _.Verbosity
+            with get () = verbosity
+            and set v = verbosity <- v
+
+        member _.Parameters
+            with get () = parameters
+            and set v = parameters <- v
+
+        member _.Initialize(source: Microsoft.Build.Framework.IEventSource) =
+            source.ProjectStarted.Add(fun e ->
+                let globals =
+                    match e.GlobalProperties with
+                    | null -> Collections.Generic.Dictionary<string, string>() :> Collections.Generic.IDictionary<_, _>
+                    | globals -> globals
+
+                projects[e.BuildEventContext.ProjectContextId] <- (e.ProjectFile, globals))
+
+            source.TaskStarted.Add(fun e ->
+                if isFsc e.TaskName then
+                    let k = key e.BuildEventContext
+
+                    let project, globals =
+                        match projects.TryGetValue e.BuildEventContext.ProjectContextId with
+                        | true, found -> found
+                        | _ -> (e.ProjectFile, Collections.Generic.Dictionary<string, string>() :> _)
+
+                    runs[k] <-
+                        { Project = project
+                          Globals = globals
+                          Assembly = e.TaskAssemblyLocation
+                          Inputs = Collections.Generic.Dictionary<string, string>()
+                          Messages = ResizeArray<string>() }
+
+                    order.Add k)
+
+            source.MessageRaised.Add(fun e ->
+                let run =
+                    match e.BuildEventContext with
+                    | null -> None
+                    | context ->
+                        match runs.TryGetValue(key context) with
+                        | true, run -> Some run
+                        | _ -> None
+
+                match run, e with
+                | Some run, (:? Microsoft.Build.Framework.TaskParameterEventArgs as p) ->
+                    if
+                        p.Kind = Microsoft.Build.Framework.TaskParameterMessageKind.TaskInput
+                        && List.contains p.ItemType compilerParameters
+                    then
+                        run.Inputs[p.ItemType] <-
+                            match p.Items |> Seq.cast<obj> |> List.ofSeq with
+                            | [ :? string as value ] -> value
+                            | [ :? Microsoft.Build.Framework.ITaskItem as item ] -> item.ItemSpec
+                            | items -> String.Join(";", items)
+                | Some run, e -> run.Messages.Add e.Message
+                | None, _ -> ())
+
+            source.ErrorRaised.Add(fun e -> errors.Add $"%s{e.File}(%d{e.LineNumber}): %s{e.Code} %s{e.Message}")
+            source.BuildFinished.Add(fun e -> succeeded <- e.Succeeded)
+
+        member _.Shutdown() =
+            if not (String.IsNullOrEmpty parameters) then
+                let invocations =
+                    order
+                    |> Seq.map (fun k ->
+                        let run = runs[k]
+                        let file, problem =
+                            match responseFileOf run with
+                            | Ok file -> file, null
+                            | Error why -> null, why
+
+                        {| project = run.Project
+                           globals = run.Globals
+                           taskAssembly = run.Assembly
+                           compiler = run.Inputs
+                           responseFile = file
+                           problem = problem |})
+                    |> List.ofSeq
+
+                File.WriteAllText(
+                    parameters,
+                    JsonSerializer.Serialize
+                        {| succeeded = succeeded
+                           errors = List.ofSeq errors
+                           invocations = invocations |}
+                )
+
 /// Every assembly loaded while a `restoreCone` build ran, across the process's
 /// life, by path. Task assemblies load their dependencies lazily, as the code
 /// that needs them first runs, so this is the code the builds reached, beyond
@@ -1195,404 +1321,6 @@ let private respondRunTargets (root: JsonElement) : string =
     | Some answer -> JsonSerializer.Serialize answer
     | None -> JsonSerializer.Serialize {| ok = false |}
 
-/// The globals that make a build stop at computing fsc's command line.
-/// `SkipCompilerExecution` makes the `Fsc` task bind its parameters and report
-/// `FscCommandLineArgs` without compiling, so every argument is the task's own
-/// doing, not this tool's. `BuildProjectReferences=false` resolves references
-/// by asking for their target paths instead of building them: a referenced
-/// project's build cannot change this one's arguments, and globals propagate
-/// into it, where skipping the compiler would leave nothing to copy.
-/// Deliberately *not* `DesignTimeBuild`: that is a switch build logic can read,
-/// and every global that differs from a real build is a place the two could
-/// disagree.
-let private commandLineGlobals =
-    [ "ProvideCommandLineArgs", "true"
-      "SkipCompilerExecution", "true"
-      "BuildProjectReferences", "false" ]
-
-/// The targets a real `Build` runs up to and including `Compile`: the entries
-/// of `$(BuildDependsOn)` before `CoreBuild`, then those of
-/// `$(CoreBuildDependsOn)` through `Compile`. Read from the project itself, so
-/// an extended or rewritten list is honoured, and every `BeforeTargets` /
-/// `AfterTargets` hook on those targets runs as it would in a real build.
-/// Nothing after `Compile` can change what fsc was passed. `None` when either
-/// list lacks its anchor — a project whose build graph this tool does not
-/// recognise.
-let private buildTargetsThroughCompile (instance: ProjectInstance) : string list option =
-    let split (name: string) =
-        instance.GetPropertyValue(name).Split(';')
-        |> Array.map (fun t -> t.Trim())
-        |> Array.filter (fun t -> t <> "")
-        |> List.ofArray
-
-    let build = split "BuildDependsOn"
-    let coreBuild = split "CoreBuildDependsOn"
-
-    match List.tryFindIndex ((=) "CoreBuild") build, List.tryFindIndex ((=) "Compile") coreBuild with
-    | Some beforeCore, Some compile -> Some(List.take beforeCore build @ List.take (compile + 1) coreBuild)
-    | _ -> None
-
-/// Why the targets of [`buildTargetsThroughCompile`] may not be what a real
-/// `Build` runs, or `None` when they are: the `Build` and `CoreBuild` targets
-/// must be the toolset's own (defined in a file under `MSBuildToolsPath`),
-/// since a replaced one may run anything, and `Build`'s condition must hold,
-/// since a false one skips its dependencies.
-let private buildGraphDoubt (instance: ProjectInstance) : string option =
-    let tools =
-        Path.TrimEndingDirectorySeparator(instance.GetPropertyValue "MSBuildToolsPath")
-        + string Path.DirectorySeparatorChar
-
-    let own (name: string) =
-        match instance.Targets.TryGetValue name with
-        | true, target when target.FullPath.StartsWith(tools, StringComparison.Ordinal) -> Some target
-        | _ -> None
-
-    match own "Build", own "CoreBuild" with
-    | None, _ -> Some "the Build target is not the toolset's own"
-    | _, None -> Some "the CoreBuild target is not the toolset's own"
-    | Some build, Some _ when not (instance.EvaluateCondition build.Condition) ->
-        Some "the Build target's condition is false"
-    | Some _, Some _ -> None
-
-/// Whether a task MSBuild ran is the `Fsc` task: by name, bare or qualified
-/// with its namespace, in any case, as MSBuild looks tasks up.
-let private isFsc (name: string) =
-    name.Equals("Fsc", StringComparison.OrdinalIgnoreCase)
-    || name.EndsWith(".Fsc", StringComparison.OrdinalIgnoreCase)
-
-/// The `Fsc` task's parameters that choose the program it runs, as the
-/// `fscArgs` op reports them.
-let private compilerParameters = [ "ToolPath"; "ToolExe"; "DotnetFscCompilerPath" ]
-
-/// One `Fsc` invocation: the file of the task assembly that ran, the
-/// parameters of [`compilerParameters`] as it was handed them, and the
-/// messages it logged.
-type private FscRun =
-    { Assembly: string
-      Inputs: Collections.Generic.Dictionary<string, string>
-      Messages: ResizeArray<string> }
-
-/// Records each `Fsc` invocation of a build, and every error. A task's
-/// parameters are logged only when the build sets `LogTaskInputs`.
-type private FscLogger() =
-    let errors = ResizeArray<string>()
-    let runs = Collections.Generic.Dictionary<struct (int * int * int * int), FscRun>()
-    let order = ResizeArray<struct (int * int * int * int)>()
-
-    let key (c: Microsoft.Build.Framework.BuildEventContext) =
-        struct (c.NodeId, c.ProjectContextId, c.TargetId, c.TaskId)
-
-    member _.Errors = List.ofSeq errors
-    /// Each `Fsc` invocation, in the order they started.
-    member _.Runs = order |> Seq.map (fun k -> runs[k]) |> List.ofSeq
-
-    interface Microsoft.Build.Framework.ILogger with
-        member val Verbosity = Microsoft.Build.Framework.LoggerVerbosity.Normal with get, set
-        member val Parameters: string = null with get, set
-
-        member _.Initialize(source: Microsoft.Build.Framework.IEventSource) =
-            source.TaskStarted.Add(fun e ->
-                if isFsc e.TaskName then
-                    let k = key e.BuildEventContext
-
-                    runs[k] <-
-                        { Assembly = e.TaskAssemblyLocation
-                          Inputs = Collections.Generic.Dictionary<string, string>()
-                          Messages = ResizeArray<string>() }
-
-                    order.Add k)
-
-            source.MessageRaised.Add(fun e ->
-                let run =
-                    match e.BuildEventContext with
-                    | null -> None
-                    | context ->
-                        match runs.TryGetValue(key context) with
-                        | true, run -> Some run
-                        | _ -> None
-
-                match run, e with
-                | Some run, (:? Microsoft.Build.Framework.TaskParameterEventArgs as p) ->
-                    if
-                        p.Kind = Microsoft.Build.Framework.TaskParameterMessageKind.TaskInput
-                        && List.contains p.ItemType compilerParameters
-                    then
-                        run.Inputs[p.ItemType] <-
-                            match p.Items |> Seq.cast<obj> |> List.ofSeq with
-                            | [ :? string as value ] -> value
-                            | [ :? Microsoft.Build.Framework.ITaskItem as item ] -> item.ItemSpec
-                            | items -> String.Join(";", items)
-                | Some run, e -> run.Messages.Add e.Message
-                | None, _ -> ())
-
-            source.ErrorRaised.Add(fun e -> errors.Add $"%s{e.File}(%d{e.LineNumber}): %s{e.Code} %s{e.Message}")
-
-        member _.Shutdown() = ()
-
-/// What the `fscArgs` op reports of one compile.
-type private FscInvocation =
-    { Args: string list
-      ResponseFile: string
-      TaskAssembly: string
-      Compiler: Collections.Generic.IDictionary<string, string> }
-
-/// The response file `run` handed fsc, read off the command line the task
-/// logged before running it (`ToolTask` logs
-/// `<tool path> <command-line commands> <response-file commands>`): the
-/// tool path is `ToolPath` joined with `ToolExe`, and `Fsc`'s command-line
-/// commands are its `DotnetFscCompilerPath`, verbatim. `Error` when no
-/// message has that shape, or the file's lines are not the reported
-/// arguments' (`args`, the items `Fsc` built from them, which turn each `\`
-/// into `/` off Windows): those differ only by `--refout:` and `--refonly`,
-/// which the task writes to the file but not to its reported arguments.
-let private responseFileOf (run: FscRun) (args: string list) : Result<string, string> =
-    let input name =
-        match run.Inputs.TryGetValue name with
-        | true, value -> value
-        | _ -> ""
-
-    let tool = Path.Combine(input "ToolPath", input "ToolExe")
-
-    let prefix =
-        match input "DotnetFscCompilerPath" with
-        | "" -> tool + "  "
-        | compiler -> tool + " " + compiler + " "
-
-    match run.Messages |> Seq.filter (fun m -> m.StartsWith(prefix, StringComparison.Ordinal)) |> List.ofSeq with
-    | [ message ] ->
-        let file = message.Substring prefix.Length
-
-        let lines (text: string) =
-            text.Split('\n')
-            |> Array.filter (fun line -> not (line.StartsWith "--refout:" || line = "--refonly"))
-            |> List.ofArray
-
-        let fixedFile =
-            if Path.DirectorySeparatorChar = '\\' then
-                file
-            else
-                file.Replace('\\', '/')
-
-        if lines fixedFile = lines (String.Join("\n", args)) then
-            Ok file
-        else
-            Error $"the logged command line is not the reported arguments: %s{message}"
-    | [] -> Error $"Fsc logged no command line starting %s{prefix}"
-    | many -> Error $"Fsc logged %d{many.Length} command lines"
-
-/// The arguments the `Fsc` task passes fsc for the project at `path` (writing
-/// `xml` there first, when given), in order, or the reasons none can be
-/// reported. See the `fscArgs` op in the header.
-let private instrumentedFscArgs
-    (path: string)
-    (globals: Collections.Generic.IDictionary<string, string>)
-    (restoreSources: string option)
-    : Result<FscInvocation, string list> =
-    use collection = new ProjectCollection()
-
-    try
-        let logger = FscLogger()
-
-        // Restore first, as a real build (`dotnet build`, `msbuild -restore`)
-        // does: a package's `build/*.props` and `.targets` are imported only
-        // through the restore outputs. Like `-restore`, it runs in its own
-        // evaluation under a restore session id with package imports excluded,
-        // and the build then re-evaluates from scratch so it sees what the
-        // restore wrote.
-        let restored =
-            use restoreCollection = new ProjectCollection()
-            let restoreGlobals = Collections.Generic.Dictionary<string, string>(globals)
-            restoreGlobals["MSBuildRestoreSessionId"] <- Guid.NewGuid().ToString()
-            restoreGlobals["ExcludeRestorePackageImports"] <- "true"
-            // The restore's own sources (`-restoreProperty:RestoreSources=…`):
-            // set on the restore's evaluation alone, so the build's evaluation
-            // is the one a caller compares with its own.
-            restoreSources |> Option.iter (fun sources -> restoreGlobals["RestoreSources"] <- sources)
-
-            ProjectInstance(path, restoreGlobals, null, restoreCollection)
-                .Build([| "Restore" |], [ logger :> Microsoft.Build.Framework.ILogger ])
-
-        let buildGlobals = Collections.Generic.Dictionary<string, string>(globals)
-
-        for (name, value) in commandLineGlobals do
-            buildGlobals[name] <- value
-
-        let instance = ProjectInstance(path, buildGlobals, null, collection)
-        // `CoreCompile` is incremental: over a project that was already built,
-        // its outputs are up to date, the target is skipped, and `Fsc` never
-        // reports its arguments. An input that does not exist makes it out of
-        // date. Added to this project's instance only, so nothing propagates
-        // into referenced projects the way a global would.
-        instance.AddItem(
-            "CustomAdditionalCompileInputs",
-            Path.Combine(Path.GetTempPath(), "borzoi-fsc-args-" + Guid.NewGuid().ToString "N")
-        )
-        |> ignore
-
-        if not restored then
-            Error("the restore failed" :: logger.Errors)
-        else
-            match buildTargetsThroughCompile instance, buildGraphDoubt instance with
-            | None, _ ->
-                Error
-                    [ "$(BuildDependsOn) has no CoreBuild or $(CoreBuildDependsOn) has no Compile: "
-                      + "an unrecognised build graph" ]
-            | _, Some doubt -> Error [ doubt ]
-            // `BuildProjectReferences=false` resolves each reference by asking
-            // for its target path, not by building the targets the item names,
-            // whose outputs a real build would reference instead.
-            | Some _, None when
-                instance.GetItems "ProjectReference"
-                |> Seq.exists (fun item -> item.GetMetadataValue "Targets" <> "")
-                ->
-                Error [ "a ProjectReference names its own Targets, which the op does not build" ]
-            | Some targets, None ->
-                let parameters =
-                    BuildParameters(
-                        collection,
-                        Loggers = [ logger :> Microsoft.Build.Framework.ILogger ],
-                        MaxNodeCount = 1,
-                        EnableNodeReuse = false,
-                        LogTaskInputs = true
-                    )
-
-                let request =
-                    BuildRequestData(
-                        instance,
-                        Array.ofList targets,
-                        null,
-                        BuildRequestDataFlags.ProvideProjectStateAfterBuild
-                    )
-
-                let result = BuildManager.DefaultBuildManager.Build(parameters, request)
-                let after = result.ProjectStateAfterBuild
-
-                // A build that fails before `Fsc` runs compiles nothing; one
-                // that fails after may fail only because the compiler was not
-                // run (a hook reading its output), so says nothing either way.
-                if result.OverallResult <> BuildResultCode.Success && List.isEmpty logger.Runs then
-                    Error("the build failed" :: logger.Errors)
-                elif result.OverallResult <> BuildResultCode.Success then
-                    Error("the build failed after Fsc ran" :: logger.Errors)
-                // A target that rewrites either list while the build runs
-                // changes what a real `Build` executes after that point; the
-                // list above was read before any target ran.
-                elif buildTargetsThroughCompile after <> Some targets then
-                    Error [ "the build rewrote $(BuildDependsOn) or $(CoreBuildDependsOn) while running" ]
-                else
-                    match logger.Runs with
-                    | [ run ] ->
-                        // Each argument as the task wrote it: `Fsc` reports
-                        // them as items built from the raw text, which an
-                        // item's unescaped spelling (`EvaluatedInclude`) would
-                        // decode (`%41` reads back as `A`).
-                        let args =
-                            after.GetItems "FscCommandLineArgs"
-                            |> Seq.map (fun item -> (item :> Microsoft.Build.Framework.ITaskItem2).EvaluatedIncludeEscaped)
-                            |> List.ofSeq
-
-                        if List.isEmpty args then
-                            Error [ "Fsc ran outside this project, or reported no arguments" ]
-                        else
-                            match responseFileOf run args with
-                            | Ok file ->
-                                Ok
-                                    { Args = args
-                                      ResponseFile = file
-                                      TaskAssembly = run.Assembly
-                                      Compiler = run.Inputs }
-                            | Error why -> Error [ why ]
-                    | [] -> Error [ "Fsc never ran" ]
-                    | many -> Error [ $"Fsc ran %d{many.Length} times" ]
-    with :? InvalidProjectFileException as ex ->
-        Error [ "MSBuild rejects the project"; ex.Message ]
-
-/// The verdict of a real `Build` of the (restored) project at `path` under
-/// exactly the caller's `globals`: none of the op's own settings, project
-/// references built, the compiler run. `Error` with a leading "MSBuild
-/// rejects the project" or "the build failed" when it builds nothing (never
-/// starts `Fsc`), `Ok ()` when it starts `Fsc`.
-let private realBuild
-    (path: string)
-    (globals: Collections.Generic.IDictionary<string, string>)
-    : Result<unit, string list> =
-    use collection = new ProjectCollection()
-
-    try
-        let logger = FscLogger()
-        let instance = ProjectInstance(path, globals, null, collection)
-
-        let parameters =
-            BuildParameters(
-                collection,
-                Loggers = [ logger :> Microsoft.Build.Framework.ILogger ],
-                MaxNodeCount = 1,
-                EnableNodeReuse = false
-            )
-
-        let result =
-            BuildManager.DefaultBuildManager.Build(parameters, BuildRequestData(instance, [| "Build" |]))
-
-        if List.isEmpty logger.Runs && result.OverallResult <> BuildResultCode.Success then
-            Error("the build failed" :: logger.Errors)
-        else
-            Ok()
-    with :? InvalidProjectFileException as ex ->
-        Error [ "MSBuild rejects the project"; ex.Message ]
-
-/// [`instrumentedFscArgs`], with `xml` written to `path` first when given.
-///
-/// The op's run differs from a real build in what it sets
-/// ([`commandLineGlobals`]: references resolved without being built, the
-/// compiler not run), so its saying MSBuild built nothing is a claim about
-/// that run alone: a hook that reads a referenced project's output, or a
-/// condition on one of those properties, can fail it where a real build
-/// succeeds. The claim is therefore confirmed by a real `Build` under the
-/// caller's globals alone before it is reported; where the real build starts
-/// `Fsc` after all, the op refuses instead, as an answer it cannot give.
-let private evalFscArgs
-    (path: string)
-    (xml: string option)
-    (globals: Collections.Generic.IDictionary<string, string>)
-    (restoreSources: string option)
-    : Result<FscInvocation, string list> =
-    xml |> Option.iter (writeProject path)
-    let globals = globalTable globals
-
-    match instrumentedFscArgs path globals restoreSources with
-    | Error(head :: _ as errors) when head = "MSBuild rejects the project" || head = "the build failed" ->
-        match realBuild path globals with
-        | Error real -> Error real
-        | Ok() ->
-            Error(
-                "the op's own settings fail a build that runs Fsc without them: no answer"
-                :: errors
-            )
-    | answer -> answer
-
-let private respondFscArgs (root: JsonElement) : string =
-    let path = root.GetProperty("path").GetString()
-
-    let xml =
-        match root.TryGetProperty "xml" with
-        | true, x when x.ValueKind = JsonValueKind.String -> Some(x.GetString())
-        | _ -> None
-
-    let restoreSources =
-        match root.TryGetProperty "restoreSources" with
-        | true, s when s.ValueKind = JsonValueKind.String -> Some(s.GetString())
-        | _ -> None
-
-    match evalFscArgs path xml (readGlobals root) restoreSources with
-    | Ok invocation ->
-        JsonSerializer.Serialize
-            {| ok = true
-               args = invocation.Args
-               responseFile = invocation.ResponseFile
-               taskAssembly = invocation.TaskAssembly
-               compiler = invocation.Compiler |}
-    | Error errors -> JsonSerializer.Serialize {| ok = false; errors = errors |}
-
 /// `proc_pid_rusage`, macOS's per-process resource counters, the same call
 /// `crates/lsp/examples/eval_counts.rs` reads for our side, so the two
 /// processes' instruction counts are one kernel counter read the same way.
@@ -1927,7 +1655,6 @@ let main argv =
                     | "evaluated" -> respondEvaluated root
                     | "targetItems" -> respondTargetItems root
                     | "runTargets" -> respondRunTargets root
-                    | "fscArgs" -> respondFscArgs root
                     | "globalName" -> respondGlobalName root
                     | "reservedNames" -> respondReservedNames ()
                     | "bench" -> respondBench root

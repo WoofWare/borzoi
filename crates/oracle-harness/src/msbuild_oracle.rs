@@ -1,15 +1,21 @@
-//! A driver for `tools/msbuild-condition-oracle`'s `fscArgs` op, for crates
-//! other than `borzoi-msbuild` (whose own tests drive every op through
-//! `tests/common`): build the tool once (marker-gated, with the marker and
-//! fingerprint `borzoi-msbuild`'s tests use, so the two never rebuild over
-//! each other), drive it as a long-lived JSONL child, and parse the answer
-//! into an [`FscInvocation`] at the boundary.
+//! What the F# compiler is handed for a project, read off a **real build**:
+//! [`fsc_args`] runs `dotnet msbuild -restore -t:Build` on it with
+//! `tools/msbuild-condition-oracle`'s `FscArgsLogger` attached, and parses
+//! each `Fsc` invocation's response file into an [`FscArguments`] at the
+//! boundary.
 //!
-//! `fscArgs` restores the project, runs a real `Build`'s targets through
-//! `Compile` with the compiler's run skipped, and reports what the `Fsc` task
-//! hands fsc. See the op's entry in `tools/msbuild-condition-oracle/Program.fs`
-//! for what it declines; `borzoi-msbuild`'s `fsc_args_oracle_calibration`
-//! holds it to real compiling builds.
+//! It runs the build rather than imitating one: the restore, the targets,
+//! the project references and the compiler are the CLI's own, so what it
+//! reports is what fsc is handed, and "MSBuild built nothing" means the build
+//! never started `Fsc`. The one setting it adds is `NonExistentFile` (which
+//! design-time builds also set), naming a file that does not exist among
+//! `CoreCompile`'s outputs, so an already-built project compiles again rather
+//! than skipping the target.
+//!
+//! The tool is built once (marker-gated, with the marker and fingerprint
+//! `borzoi-msbuild`'s tests use, so the two never rebuild over each other).
+//! `borzoi-msbuild`'s `fsc_args_oracle_calibration` holds the reading to the
+//! files fsc writes and to the arguments MSBuild reports.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,12 +23,16 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use crate::BoundedCommand;
 use crate::fsc_args::{FscArgsError, FscArguments};
-use crate::{BatchChild, BoundedCommand, default_timeout};
 
-/// Budget for the one `dotnet build` this driver runs: far above a cold
-/// build, there to stop a stalled one.
+/// Budget for the one `dotnet build` of the tool: far above a cold build,
+/// there to stop a stalled one.
 const BUILD_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Budget for one real build of a project: a restore and a compile, with its
+/// references.
+const FSC_ARGS_TIMEOUT: Duration = Duration::from_secs(900);
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -113,30 +123,34 @@ pub fn source_fingerprint(project: &Path) -> u64 {
     h.finish()
 }
 
-/// The environment the oracle child runs under: the runtime essentials and
-/// the `DOTNET_*`/`NUGET_*` variables, nothing else, since MSBuild reads every
-/// variable as a property. An evaluation compared with the oracle's must see
-/// the same set.
-pub fn scrubbed_environment() -> Vec<(String, String)> {
-    std::env::vars()
+/// The environment [`fsc_args`]'s build runs under: the runtime essentials,
+/// the `DOTNET_*`/`NUGET_*` variables, `RestoreSources` (the devshell's
+/// offline feed, so the restore is hermetic), and `MSBUILDLOGTASKINPUTS`, so
+/// the task's parameters are logged; nothing else, since MSBuild reads every
+/// variable as a property. An evaluation compared with the build must see the
+/// same set.
+pub fn build_environment() -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(key, _)| {
-            matches!(key.as_str(), "PATH" | "HOME" | "TMPDIR")
+            matches!(key.as_str(), "PATH" | "HOME" | "TMPDIR" | "RestoreSources")
                 || key.starts_with("DOTNET_")
                 || key.starts_with("NUGET_")
         })
-        .collect()
+        .collect();
+    env.push(("MSBUILDLOGTASKINPUTS".into(), "1".into()));
+    env
 }
 
-/// One compile as the `fscArgs` op reports it.
+/// One `Fsc` invocation of the build.
 #[derive(Debug, Clone)]
 pub struct FscInvocation {
-    /// Each argument the `Fsc` task passed, in order, as it wrote it (the
-    /// items' escaped spelling).
-    pub args: Vec<String>,
-    /// The response file the task hands fsc, as it wrote it: [`Self::args`]
-    /// one per line, with `--refout:` and `--refonly` among them, and each
-    /// `\` as written (the items behind `args` turn it into `/` off Windows).
-    /// What fsc reads, so what [`Self::arguments`] parses.
+    /// The project file it ran for.
+    pub project: PathBuf,
+    /// The global properties that project instance was built under (a
+    /// multi-targeted project's inner builds differ by `TargetFramework`).
+    pub globals: BTreeMap<String, String>,
+    /// The response file the task handed fsc, as it wrote it: its arguments
+    /// one per line, `--refout:` among them, each `\` and `%` as written.
     pub response_file: String,
     /// The file of the task assembly whose `Fsc` ran.
     pub task_assembly: String,
@@ -152,139 +166,148 @@ impl FscInvocation {
     }
 }
 
-/// The package sources a restore the tests run is pinned to: the devshell's
-/// offline feed (`RestoreSources`, which `flake.nix` exports), or `None`
-/// outside it. The oracle child's environment is scrubbed of it (MSBuild would
-/// read it as a property of every evaluation), so it is handed to the restore
-/// alone, as `-restoreProperty:` hands it to `dotnet msbuild -restore`.
-pub fn restore_sources() -> Option<String> {
-    std::env::var("RestoreSources")
-        .ok()
-        .filter(|s| !s.is_empty())
+/// A real build of a project, as far as fsc is concerned.
+#[derive(Debug, Clone)]
+pub struct FscBuild {
+    /// Whether the whole build succeeded (it may fail after fsc ran: a
+    /// compile error, or a later target).
+    pub succeeded: bool,
+    /// Every `Fsc` invocation for the project itself, in the order they
+    /// started: one per inner build (a single-targeted project has one).
+    pub invocations: Vec<FscInvocation>,
 }
 
-/// The `fscArgs` request for the project on disk at `path` under the global
-/// properties `globals`, its restore pinned to [`restore_sources`].
-pub fn fsc_args_request(path: &Path, globals: &[(String, String)]) -> serde_json::Value {
-    let globals: serde_json::Map<String, serde_json::Value> = globals
-        .iter()
-        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-        .collect();
-    serde_json::json!({
-        "op": "fscArgs",
-        "path": path.to_str().expect("UTF-8 project path"),
-        "globals": if globals.is_empty() { serde_json::Value::Null } else { globals.into() },
-        "restoreSources": restore_sources(),
-    })
-}
-
-/// Why the `fscArgs` op gives no [`FscInvocation`], with MSBuild's messages.
+/// Why [`fsc_args`] gives no [`FscBuild`], with MSBuild's messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FscArgsDecline {
-    /// MSBuild builds nothing for the project, so fsc is handed nothing: it
-    /// rejects the project, or the restore fails, or a real `Build` under the
-    /// caller's globals fails before it starts `Fsc`.
+    /// The build failed before starting `Fsc` for the project, so fsc is
+    /// handed nothing.
     NoBuild(Vec<String>),
-    /// fsc may run, on arguments the op cannot report (another `Build`
-    /// target, `Fsc` run other than once, the op's own settings failing a
-    /// build that runs without them, …).
+    /// fsc may be handed arguments that cannot be reported: the build
+    /// succeeded without starting `Fsc` for the project (a replaced
+    /// `CoreCompile`, say), or an invocation's command line could not be read.
     Unanswered(Vec<String>),
 }
 
-impl FscArgsDecline {
-    /// The op's messages, classified by their head.
-    fn of(errors: Vec<String>) -> FscArgsDecline {
-        const NO_BUILD: &[&str] = &[
-            "MSBuild rejects the project",
-            "the restore failed",
-            "the build failed",
-        ];
-        if errors
-            .first()
-            .is_some_and(|e| NO_BUILD.contains(&e.as_str()))
-        {
-            FscArgsDecline::NoBuild(errors)
-        } else {
-            FscArgsDecline::Unanswered(errors)
-        }
+/// What fsc is handed for the project at `project` (on disk) in a real
+/// `dotnet msbuild -restore -t:Build` under the global properties `globals`,
+/// in [`build_environment`] plus `env`. A global's value may not hold `;` or
+/// `"`, which the command line would split or strip.
+pub fn fsc_args(
+    project: &Path,
+    globals: &[(String, String)],
+    env: &[(String, String)],
+) -> Result<FscBuild, FscArgsDecline> {
+    let project = std::fs::canonicalize(project)
+        .unwrap_or_else(|e| panic!("canonicalise {}: {e}", project.display()));
+    let dir = project.parent().expect("a project file has a directory");
+    let scratch = std::env::temp_dir().join(format!(
+        "borzoi-fsc-args-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&scratch).expect("create the scratch directory");
+    let out = scratch.join("fsc-args.json");
+    let logger = apphost().with_extension("dll");
+
+    let mut cmd = Command::new("dotnet");
+    cmd.current_dir(dir)
+        .args([
+            "msbuild",
+            "-nologo",
+            "-nodeReuse:false",
+            "-restore",
+            "-t:Build",
+        ])
+        .arg(format!(
+            "-p:NonExistentFile={}",
+            scratch.join("__NonExistentFile__").display()
+        ))
+        .arg(format!(
+            "-logger:MsBuildConditionOracle.Program+FscArgsLogger,{};{}",
+            logger.display(),
+            out.display()
+        ));
+    for (name, value) in globals {
+        assert!(
+            !value.contains([';', '"']),
+            "global {name}={value:?} cannot be passed on the command line verbatim"
+        );
+        cmd.arg(format!("-p:{name}={value}"));
     }
+    cmd.arg(&project).env_clear();
+    cmd.envs(build_environment());
+    cmd.envs(env.iter().map(|(name, value)| (name, value)));
+    let output = BoundedCommand::new(cmd)
+        .timeout(FSC_ARGS_TIMEOUT)
+        .run()
+        .unwrap_or_else(|e| panic!("dotnet msbuild of {}: {e}", project.display()));
+    let json = std::fs::read_to_string(&out).unwrap_or_else(|e| {
+        panic!(
+            "dotnet msbuild of {} wrote no fsc arguments ({e}):\n{}\n{}",
+            project.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let _ = std::fs::remove_dir_all(&scratch);
+    parse_logger_output(&project, &json)
 }
 
-/// The `fscArgs` answer: the invocation, or why there is none.
-pub fn parse_fsc_args_response(resp: &serde_json::Value) -> Result<FscInvocation, FscArgsDecline> {
-    let strings = |value: &serde_json::Value, what: &str| -> Vec<String> {
-        value
-            .as_array()
-            .unwrap_or_else(|| panic!("fscArgs response carries a `{what}` array: {resp}"))
-            .iter()
-            .map(|v| v.as_str().expect("each entry is a string").to_string())
-            .collect()
+/// [`fsc_args`]'s reading of what `FscArgsLogger` wrote for `project`.
+fn parse_logger_output(project: &Path, json: &str) -> Result<FscBuild, FscArgsDecline> {
+    let value: serde_json::Value = serde_json::from_str(json).expect("FscArgsLogger writes JSON");
+    let strings = |v: &serde_json::Value| -> BTreeMap<String, String> {
+        v.as_object()
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
     };
-    if resp["ok"].as_bool() != Some(true) {
-        return Err(FscArgsDecline::of(strings(&resp["errors"], "errors")));
-    }
-    Ok(FscInvocation {
-        args: strings(&resp["args"], "args"),
-        response_file: resp["responseFile"]
-            .as_str()
-            .expect("fscArgs response carries the response file")
-            .to_string(),
-        task_assembly: resp["taskAssembly"]
-            .as_str()
-            .expect("fscArgs response names the task assembly")
-            .to_string(),
-        compiler: resp["compiler"]
-            .as_object()
-            .expect("fscArgs response carries a `compiler` object")
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-            .collect(),
-    })
-}
-
-/// A resident `msbuild-condition-oracle` child for `fscArgs` requests.
-pub struct Oracle {
-    child: BatchChild,
-}
-
-impl Oracle {
-    /// An oracle running the MSBuild `dotnet` resolves from `working_dir`,
-    /// in [`scrubbed_environment`] plus `env`.
-    pub fn spawn_in_dir_with_env(working_dir: &Path, env: &[(String, String)]) -> Oracle {
-        let bin = apphost().to_path_buf();
-        let working_dir = working_dir.to_path_buf();
-        let env = env.to_vec();
-        let factory = move || {
-            let mut cmd = Command::new(&bin);
-            cmd.current_dir(&working_dir).env_clear();
-            cmd.envs(scrubbed_environment());
-            cmd.envs(env.iter().map(|(name, value)| (name, value)));
-            cmd
+    let errors: Vec<String> = value["errors"]
+        .as_array()
+        .expect("FscArgsLogger writes its errors")
+        .iter()
+        .map(|e| e.as_str().unwrap_or_default().to_string())
+        .collect();
+    let succeeded = value["succeeded"].as_bool() == Some(true);
+    let canonical = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+    let mut invocations = Vec::new();
+    for run in value["invocations"]
+        .as_array()
+        .expect("FscArgsLogger writes its invocations")
+    {
+        let run_project = canonical(run["project"].as_str().unwrap_or_default());
+        if run_project != project {
+            continue;
+        }
+        let Some(response_file) = run["responseFile"].as_str() else {
+            return Err(FscArgsDecline::Unanswered(vec![format!(
+                "an Fsc invocation's command line could not be read: {}",
+                run["problem"]
+            )]));
         };
-        Oracle {
-            child: BatchChild::with_factory(
-                Box::new(factory),
-                "msbuild-condition-oracle",
-                default_timeout(),
-                2,
-            ),
-        }
+        invocations.push(FscInvocation {
+            project: run_project,
+            globals: strings(&run["globals"]),
+            response_file: response_file.to_string(),
+            task_assembly: run["taskAssembly"].as_str().unwrap_or_default().to_string(),
+            compiler: strings(&run["compiler"]),
+        });
     }
-
-    /// What the `Fsc` task hands fsc for the project on disk at `path` under
-    /// `globals` ([`parse_fsc_args_response`]).
-    pub fn fsc_args(
-        &mut self,
-        path: &Path,
-        globals: &[(String, String)],
-    ) -> Result<FscInvocation, FscArgsDecline> {
-        let line = serde_json::to_string(&fsc_args_request(path, globals)).expect("serialise");
-        let response = self.child.request(&line);
-        let value: serde_json::Value =
-            serde_json::from_str(&response).expect("oracle response is JSON");
-        if let Some(err) = value.get("error") {
-            panic!("oracle errored on {line}: {err}");
-        }
-        parse_fsc_args_response(&value)
+    match (invocations.is_empty(), succeeded) {
+        (false, _) => Ok(FscBuild {
+            succeeded,
+            invocations,
+        }),
+        (true, false) => Err(FscArgsDecline::NoBuild(errors)),
+        (true, true) => Err(FscArgsDecline::Unanswered(vec![
+            "the build succeeded without starting Fsc for the project".to_string(),
+        ])),
     }
 }

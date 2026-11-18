@@ -1,15 +1,19 @@
 //! The F# compiler's arguments as a typed value: the response file the
-//! `Fsc` task hands fsc (the `msbuild-condition-oracle`'s `fscArgs` op
-//! reports it), parsed once, at the boundary, the way fsc reads it
+//! `Fsc` task hands fsc ([`crate::msbuild_oracle::fsc_args`] reads it off a
+//! real build), parsed once, at the boundary, the way fsc reads it
 //! (`CompilerOptions.fs`: `ResponseFile.parseFile`, `parseOption`;
 //! `CompilerConfig.fs`: `DecideNames`).
 //!
 //! fsc reads the file a line at a time (`\r\n`, `\r` or `\n`), drops blank
 //! lines and lines starting `#`, trims the rest, and takes a line for an
 //! option when fsc's own rule does (a leading `-`, or a leading `/` it takes
-//! for a switch), else for a source. An option whose value fsc keeps as one
-//! (`-o:`, `--langversion:`, `--target:`) is honoured last-wins; one it
-//! accumulates (`-r:`, `--define:`) keeps every occurrence, in order.
+//! for a switch), else for a source; a line shaped as an option that names
+//! none it reports as an error, and so does the parse. An option whose value
+//! fsc keeps as one (`-o:`, `--langversion:`, `--target:`) is honoured
+//! last-wins; one it accumulates (`-r:`, `--define:`) keeps every occurrence,
+//! in order. [`FscArguments::options`] holds every option line unvalidated:
+//! one fsc does not know fails the compile, which [`crate::msbuild_oracle`]
+//! reports as a build that did not succeed.
 //! `fsc_args_oracle_calibration` (in `borzoi-msbuild`) holds this reading to
 //! the files real compiling builds write.
 
@@ -34,7 +38,8 @@ pub struct FscArguments {
     pub defines: Vec<String>,
     /// The last `--langversion:`.
     pub lang_version: Option<String>,
-    /// The last `--target:`/`-a`-free spelling (`library`, `exe`, …).
+    /// The target the last `--target:` or `-a` (`--target:library`) sets
+    /// (`library`, `exe`, …).
     pub target: Option<String>,
     /// The lines fsc takes for sources, in order.
     pub sources: Vec<String>,
@@ -48,6 +53,10 @@ pub enum FscArgsError {
     /// A line names another response file (`@file`), whose contents fsc reads
     /// in its place.
     ResponseFile(String),
+    /// A line fsc takes for an option but recognises as none (`--o:x`,
+    /// `-out:x`), which it reports as an error rather than reading as a
+    /// source.
+    UnrecognisedOption(String),
 }
 
 impl FscArguments {
@@ -63,6 +72,9 @@ impl FscArguments {
                 return Err(FscArgsError::ResponseFile(line.to_string()));
             }
             let Some(option) = parse_option(line) else {
+                if line.starts_with('-') || is_slash_option(line) {
+                    return Err(FscArgsError::UnrecognisedOption(line.to_string()));
+                }
                 args.sources.push(line.to_string());
                 continue;
             };
@@ -73,6 +85,7 @@ impl FscArguments {
                 "d" | "define" => args.defines.extend(value),
                 "langversion" => args.lang_version = value.or(args.lang_version),
                 "target" => args.target = value.or(args.target),
+                "a" if option.argument.is_empty() => args.target = Some("library".to_string()),
                 _ => {}
             }
             args.options.push(option);
@@ -103,13 +116,18 @@ pub fn assembly_name_of(path: &str) -> String {
     }
 }
 
-/// fsc's `parseOption`: the option `line` carries, or `None` when fsc takes
-/// it for a source.
+/// fsc's `isSlashOpt`: a leading `/` with no other `/` after it, which fsc
+/// reads as a switch.
+fn is_slash_option(line: &str) -> bool {
+    line.starts_with('/') && !line[1..].contains('/')
+}
+
+/// fsc's `parseOption`: the option `line` carries, or `None` when it carries
+/// none: a source, or a line fsc rejects as an unrecognised option.
 fn parse_option(line: &str) -> Option<FscOption> {
     let chars: Vec<char> = line.chars().collect();
     let argument = line.split(':').skip(1).collect::<Vec<_>>().join(":");
-    let is_slash_opt =
-        chars.first() == Some(&'/') && (chars.len() == 1 || !line[1..].contains('/'));
+    let is_slash_opt = is_slash_option(line);
     let opt: String = if chars.is_empty() || (chars[0] != '-' && chars[0] != '/') {
         String::new()
     } else if line != "--" {
@@ -154,7 +172,7 @@ mod tests {
             Ok(Some("A".into()))
         );
         assert_eq!(name(&["-o:obj/A.dll", "/o:d/B.dll"]), Ok(Some("B".into())));
-        assert_eq!(name(&["-o:obj/A.dll", "--o:B.dll"]), Ok(Some("A".into())));
+        assert!(name(&["-o:obj/A.dll", "--o:B.dll"]).is_err());
         assert_eq!(name(&["-o:obj/A.dll", "--OUT:B.dll"]), Ok(Some("A".into())));
         assert_eq!(
             name(&["-o:obj/A.dll", "#--out:B.dll"]),
@@ -172,6 +190,16 @@ mod tests {
         assert_eq!(name(&["-o:obj/.dll"]), Ok(Some("".into())));
         assert_eq!(name(&["-o:obj/A..dll"]), Ok(Some("A.".into())));
         assert!(name(&["-o:obj/A.dll", "@x.rsp"]).is_err());
+        assert!(name(&["-o:obj/A.dll", "-out:B.dll"]).is_err());
+        assert_eq!(name(&["-o:obj/A.dll", "/abs/x.fs"]), Ok(Some("A".into())));
+    }
+
+    #[test]
+    fn the_short_library_switch_sets_the_target() {
+        let args = FscArguments::parse("--target:exe\n-a\nA.fs").unwrap();
+        assert_eq!(args.target.as_deref(), Some("library"));
+        let args = FscArguments::parse("-a\n--target:exe\nA.fs").unwrap();
+        assert_eq!(args.target.as_deref(), Some("exe"));
     }
 
     #[test]
