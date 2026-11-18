@@ -240,11 +240,12 @@ pub fn fcs_slots_per_pool(requested: usize) -> usize {
 }
 
 /// The number of [`BatchPool`]s in this process: the current oracle's `ast`,
-/// parser-stream and raw-token pools, and the legacy oracle's `ast` and
-/// parser-stream pools. The child budget is split evenly between them.
-/// Asserted in [`BatchPool::new`], so adding a pool without updating this fails
-/// loudly rather than quietly overrunning the budget.
-const FCS_POOLS: usize = 5;
+/// parser-stream, raw-token and `file-batch` pools, and the legacy oracle's
+/// `ast`, parser-stream and `file-batch` pools. The child budget is split
+/// evenly between them. Asserted in [`BatchPool::new`], so adding a pool
+/// without updating this fails loudly rather than quietly overrunning the
+/// budget.
+const FCS_POOLS: usize = 7;
 
 impl BatchPool {
     /// Size the pool to libtest's own default thread count, capped at this pool's
@@ -348,6 +349,33 @@ pub fn fcs_ast_batch_at(source: &Path, lang_text: &str) -> String {
         Oracle::Current => json,
         Oracle::Legacy => oracle::upgrade_legacy_record(&json),
     }
+}
+
+/// FCS's type-check diagnostics of `source` at the `<LangVersion>`
+/// `lang_text`: the `file-batch` oracle's `check-diagnostics` record, from
+/// the oracle that grades `lang_text` ([`Oracle::for_lang_text`]). The file
+/// is checked as a script with the framework references of the runtime the
+/// oracle runs on, so it may use the BCL and FSharp.Core.
+pub fn fcs_check_diagnostics_at(source: &Path, lang_text: &str) -> String {
+    let oracle = Oracle::for_lang_text(lang_text);
+    let request = serde_json::json!({
+        "kind": "check-diagnostics",
+        "path": source.display().to_string(),
+        "refs": [],
+        "langversion": lang_text,
+    });
+    file_batch_pool(oracle).request_line(&request.to_string())
+}
+
+/// `oracle`'s `file-batch` pool.
+fn file_batch_pool(oracle: Oracle) -> &'static BatchPool {
+    static CURRENT: OnceLock<BatchPool> = OnceLock::new();
+    static LEGACY: OnceLock<BatchPool> = OnceLock::new();
+    match oracle {
+        Oracle::Current => &CURRENT,
+        Oracle::Legacy => &LEGACY,
+    }
+    .get_or_init(|| BatchPool::new(oracle, "file-batch"))
 }
 
 /// `oracle`'s `tokens-lexfilter-internal-batch` pool.

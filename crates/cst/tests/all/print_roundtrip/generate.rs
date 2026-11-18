@@ -11,9 +11,11 @@
 
 use borzoi_print::names::{Ident, InfixOperator, LongIdent, Operator, TyparName, ValueName};
 use borzoi_print::tree::{
-    Access, Args, ArrayRank, Attribute, AttributeArgs, Binding, BindingHead, Const, Expr, Float32,
-    Float64, ForDirection, ImplFile, LetBindings, MatchClause, ModuleDecl, NamedModule, Namespace,
-    NamespaceName, NestedModule, Pat, RecordField, Type, TypeDefn, TypeRepr, UnionCase, UnionField,
+    Access, AndBang, Args, ArrayRank, Attribute, AttributeArgs, Binding, BindingHead, Comp,
+    CompClause, CompItem, Const, Context, Expr, Float32, Float64, ForDirection, ForSource,
+    ImplFile, LetBang, LetBindings, ListBody, ListComp, LocalBindings, MatchClause, ModuleDecl,
+    NamedModule, Namespace, NamespaceName, NestedModule, Pat, Range, RecordField, Stmt, StmtExpr,
+    Type, TypeDefn, TypeRepr, UnionCase, UnionField, UseBang, UseBinding, UseName,
 };
 use borzoi_print::vec::{Vec1, Vec2};
 use borzoi_print::version::{Gate, Version};
@@ -88,7 +90,7 @@ const WORDS: &[&str] = &[
     "a+",
 ];
 
-const OPERATORS: &[&str] = &[
+pub(super) const OPERATORS: &[&str] = &[
     "+", "-", "*", "/", "%", "**", "=", "<>", "<", ">", "<=", ">=", "|>", "<|", ">>", "<<", "&&",
     "||", "&", "@", "^", ":=", "!=", "==", ">>=", "<*>", "|||", "&&&", "^^^", "<<<", ">>>", "~~~",
     "~-", "~+", "~-.", "!", "!!", "$", "+.", "-.", "*.", "/.", "..", "?", "?<-", "|", "->", "<-",
@@ -337,6 +339,13 @@ fn binding<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Binding<V>
         .boxed()
 }
 
+/// A `let` group an expression or computation expression takes.
+fn local_bindings<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<LocalBindings<V>> {
+    let_bindings(expr)
+        .prop_filter_map("access or attributes", |b| LocalBindings::new(b).ok())
+        .boxed()
+}
+
 fn let_bindings<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<LetBindings<V>> {
     prop_oneof![
         binding(expr.clone()).prop_map(|b| LetBindings::NonRec(Box::new(b))),
@@ -354,6 +363,277 @@ fn clauses<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Vec1<Match
     )
     .prop_map(|cs| Vec1::from_vec(cs).expect("non-empty"))
     .boxed()
+}
+
+fn comp_clauses<V: Version, K: Context>(
+    expr: BoxedStrategy<Expr<V>>,
+    comp: BoxedStrategy<Comp<V, K>>,
+) -> BoxedStrategy<Vec1<CompClause<V, K>>> {
+    prop::collection::vec(
+        (pat(), prop::option::weighted(0.25, expr), comp)
+            .prop_map(|(pat, guard, body)| CompClause { pat, guard, body }),
+        1..=2,
+    )
+    .prop_map(|cs| Vec1::from_vec(cs).expect("non-empty"))
+    .boxed()
+}
+
+fn range<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Range<V>> {
+    (expr.clone(), prop::option::of(expr.clone()), expr)
+        .prop_map(|(from, step, to)| Range { from, step, to })
+        .boxed()
+}
+
+fn for_source<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<ForSource<V>> {
+    prop_oneof![
+        2 => expr.clone().prop_map(ForSource::Expr),
+        1 => range(expr).prop_map(ForSource::Range),
+    ]
+    .boxed()
+}
+
+/// An expression statement, of an expression `K` takes there.
+fn stmt_expr<V: Version, K: Context>(
+    expr: BoxedStrategy<Expr<V>>,
+) -> BoxedStrategy<StmtExpr<V, K>> {
+    expr.prop_filter_map("a statement-shaped expression", |e| StmtExpr::new(e).ok())
+        .boxed()
+}
+
+/// A list's body: as often a literal's elements as a comprehension, and
+/// sometimes a range.
+fn list_body<V: Version>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<ListBody<V>> {
+    prop_oneof![
+        2 => prop::collection::vec(expr.clone(), 1..=3)
+            .prop_map(|es| ListBody::Elements(Vec1::from_vec(es).expect("non-empty"))),
+        2 => comp(expr.clone())
+            .prop_filter_map("a literal's elements", |c| ListComp::new(c).ok())
+            .prop_map(ListBody::Comp),
+        1 => range(expr).prop_map(ListBody::Range),
+    ]
+    .boxed()
+}
+
+/// What a `use` or `use!` binds, a discard where `G` has one.
+fn use_name<G: Gate>() -> BoxedStrategy<UseName<G>> {
+    match G::WITNESS {
+        Some(gate) => prop_oneof![
+            3 => value_name().prop_map(UseName::Named),
+            1 => Just(UseName::Discard(gate)),
+        ]
+        .boxed(),
+        None => value_name().prop_map(UseName::Named).boxed(),
+    }
+}
+
+/// `items`, each with its weight, where its gate (`None` if absent) allows.
+fn gated<T: std::fmt::Debug + 'static>(
+    items: Vec<(u32, Option<BoxedStrategy<T>>)>,
+) -> BoxedStrategy<T> {
+    proptest::strategy::Union::new_weighted(
+        items
+            .into_iter()
+            .filter_map(|(w, s)| s.map(|s| (w, s)))
+            .collect(),
+    )
+    .boxed()
+}
+
+/// A computation expression's body over the expressions `expr` draws, with
+/// what context `K` takes.
+fn comp<V: Version, K: Context>(expr: BoxedStrategy<Expr<V>>) -> BoxedStrategy<Comp<V, K>> {
+    let e = expr.clone();
+    let bang = K::Bang::WITNESS;
+    let simple = gated(vec![
+        (3, Some(stmt_expr(e.clone()).prop_map(Stmt::Expr).boxed())),
+        (
+            1,
+            bang.map(|gate| {
+                e.clone()
+                    .prop_map(move |expr| Stmt::DoBang { gate, expr })
+                    .boxed()
+            }),
+        ),
+        (
+            1,
+            bang.map(|gate| {
+                e.clone()
+                    .prop_map(move |expr| Stmt::Return { gate, expr })
+                    .boxed()
+            }),
+        ),
+        (
+            1,
+            bang.map(|gate| {
+                e.clone()
+                    .prop_map(move |expr| Stmt::ReturnFrom { gate, expr })
+                    .boxed()
+            }),
+        ),
+        (1, Some(e.clone().prop_map(Stmt::Yield).boxed())),
+        (1, Some(e.clone().prop_map(Stmt::YieldFrom).boxed())),
+    ]);
+    simple
+        .clone()
+        .prop_map(Comp::stmt)
+        .prop_recursive(3, 12, 3, move |inner| {
+            let e = expr.clone();
+            let c = inner.clone().prop_map(Box::new);
+            let stmt = gated(vec![
+                (4, Some(simple.clone())),
+                (
+                    1,
+                    Some(
+                        (e.clone(), c.clone(), prop::option::of(c.clone()))
+                            .prop_map(|(cond, then_branch, else_branch)| Stmt::IfThenElse {
+                                cond,
+                                then_branch,
+                                else_branch,
+                            })
+                            .boxed(),
+                    ),
+                ),
+                (
+                    1,
+                    Some(
+                        (e.clone(), comp_clauses(e.clone(), inner.clone()))
+                            .prop_map(|(scrutinee, clauses)| Stmt::Match { scrutinee, clauses })
+                            .boxed(),
+                    ),
+                ),
+                (
+                    1,
+                    bang.map(|gate| {
+                        (e.clone(), comp_clauses(e.clone(), inner.clone()))
+                            .prop_map(move |(scrutinee, clauses)| Stmt::MatchBang {
+                                gate,
+                                scrutinee,
+                                clauses,
+                            })
+                            .boxed()
+                    }),
+                ),
+                (
+                    1,
+                    Some(
+                        (e.clone(), c.clone())
+                            .prop_map(|(cond, body)| Stmt::While { cond, body })
+                            .boxed(),
+                    ),
+                ),
+                (
+                    1,
+                    V::WhileBang::WITNESS.zip(bang).map(|(gate, bang)| {
+                        (e.clone(), c.clone())
+                            .prop_map(move |(cond, body)| Stmt::WhileBang {
+                                gate,
+                                bang,
+                                cond,
+                                body,
+                            })
+                            .boxed()
+                    }),
+                ),
+                (
+                    1,
+                    Some(
+                        (
+                            ident(),
+                            e.clone(),
+                            prop_oneof![Just(ForDirection::To), Just(ForDirection::Downto)],
+                            e.clone(),
+                            c.clone(),
+                        )
+                            .prop_map(|(var, from, direction, to, body)| Stmt::For {
+                                var,
+                                from,
+                                direction,
+                                to,
+                                body,
+                            })
+                            .boxed(),
+                    ),
+                ),
+                (
+                    1,
+                    Some(
+                        (pat(), for_source(e.clone()), c.clone())
+                            .prop_map(|(pat, source, body)| Stmt::ForEach { pat, source, body })
+                            .boxed(),
+                    ),
+                ),
+                (
+                    1,
+                    K::TryWith::<V>::WITNESS.map(|gate| {
+                        (c.clone(), comp_clauses(e.clone(), inner.clone()))
+                            .prop_map(move |(body, clauses)| Stmt::TryWith {
+                                gate,
+                                body,
+                                clauses,
+                            })
+                            .boxed()
+                    }),
+                ),
+                (
+                    1,
+                    Some(
+                        (c.clone(), e.clone())
+                            .prop_map(|(body, finally)| Stmt::TryFinally { body, finally })
+                            .boxed(),
+                    ),
+                ),
+            ]);
+            let ands = match V::AndBang::WITNESS {
+                Some(gate) => prop::collection::vec(
+                    (pat(), e.clone()).prop_map(move |(pat, value)| AndBang { gate, pat, value }),
+                    0..=2,
+                )
+                .boxed(),
+                None => Just(Vec::new()).boxed(),
+            };
+            let item = gated(vec![
+                (4, Some(stmt.clone().prop_map(CompItem::Stmt).boxed())),
+                (
+                    1,
+                    Some(local_bindings(e.clone()).prop_map(CompItem::Let).boxed()),
+                ),
+                (
+                    1,
+                    Some(
+                        (use_name(), e.clone())
+                            .prop_map(|(name, value)| CompItem::Use(UseBinding { name, value }))
+                            .boxed(),
+                    ),
+                ),
+                (
+                    1,
+                    bang.map(|gate| {
+                        (pat(), e.clone(), ands)
+                            .prop_map(move |(pat, value, ands)| {
+                                CompItem::LetBang(LetBang {
+                                    gate,
+                                    pat,
+                                    value,
+                                    ands,
+                                })
+                            })
+                            .boxed()
+                    }),
+                ),
+                (
+                    1,
+                    bang.map(|gate| {
+                        (use_name(), e.clone())
+                            .prop_map(move |(name, value)| {
+                                CompItem::UseBang(UseBang { gate, name, value })
+                            })
+                            .boxed()
+                    }),
+                ),
+            ]);
+            (prop::collection::vec(item, 0..=3), stmt).prop_map(|(init, last)| Comp { init, last })
+        })
+        .boxed()
 }
 
 pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
@@ -374,7 +654,6 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
     let leaf = proptest::strategy::Union::new_weighted(leaves);
     leaf.prop_recursive(4, 24, 3, |inner| {
         let b = inner.clone().prop_map(Box::new);
-        let items = prop::collection::vec(inner.clone(), 0..=2);
         prop_oneof![
             (b.clone(), b.clone()).prop_map(|(func, arg)| Expr::App { func, arg }),
             // A tuple argument is where `App` and `MethodApp` meet, and a
@@ -394,8 +673,10 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
             }),
             prop::collection::vec(inner.clone(), 2..=3)
                 .prop_map(|es| Expr::Tuple(Vec2::from_vec(es).expect("two"))),
-            items.clone().prop_map(Expr::List),
-            items.prop_map(Expr::Array),
+            prop::option::weighted(0.8, list_body(inner.clone()).prop_map(Box::new))
+                .prop_map(Expr::List),
+            prop::option::weighted(0.8, list_body(inner.clone()).prop_map(Box::new))
+                .prop_map(Expr::Array),
             (
                 prop::option::weighted(0.3, b.clone()),
                 prop::collection::vec((long_ident(), inner.clone()), 1..=2),
@@ -422,7 +703,7 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
                     else_branch,
                 }
             ),
-            (let_bindings(inner.clone()), b.clone())
+            (local_bindings(inner.clone()), b.clone())
                 .prop_map(|(bindings, body)| Expr::LetIn { bindings, body }),
             (b.clone(), b.clone()).prop_map(|(x, y)| Expr::Sequential(x, y)),
             (b.clone(), ty()).prop_map(|(expr, ty)| Expr::Typed { expr, ty }),
@@ -430,7 +711,8 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
             (b.clone(), ty()).prop_map(|(expr, ty)| Expr::Upcast { expr, ty }),
             (b.clone(), ty()).prop_map(|(expr, ty)| Expr::Downcast { expr, ty }),
             (b.clone(), b.clone()).prop_map(|(head, tail)| Expr::Cons { head, tail }),
-            (b.clone(), clauses(inner)).prop_map(|(body, clauses)| Expr::TryWith { body, clauses }),
+            (b.clone(), clauses(inner.clone()))
+                .prop_map(|(body, clauses)| Expr::TryWith { body, clauses }),
             (b.clone(), b.clone()).prop_map(|(body, finally)| Expr::TryFinally { body, finally }),
             (b.clone(), b.clone()).prop_map(|(cond, body)| Expr::While { cond, body }),
             (
@@ -447,11 +729,21 @@ pub fn expr<V: Version>() -> BoxedStrategy<Expr<V>> {
                     to,
                     body,
                 }),
-            (pat(), b.clone(), b.clone()).prop_map(|(pat, source, body)| Expr::ForEach {
-                pat,
-                source,
-                body
-            }),
+            (
+                pat(),
+                for_source(inner.clone()).prop_map(Box::new),
+                b.clone()
+            )
+                .prop_map(|(pat, source, body)| Expr::ForEach { pat, source, body }),
+            (
+                prop_oneof![
+                    3 => long_ident().prop_map(Expr::Name),
+                    1 => inner.clone(),
+                ]
+                .prop_map(Box::new),
+                comp(inner.clone()).prop_map(Box::new),
+            )
+                .prop_map(|(builder, body)| Expr::Computation { builder, body }),
             b.clone().prop_map(Expr::Lazy),
             b.clone().prop_map(Expr::Assert),
             b.prop_map(Expr::Do),

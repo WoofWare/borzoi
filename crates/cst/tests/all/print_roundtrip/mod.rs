@@ -5,6 +5,9 @@
 //! `t` exactly. A generated tree is checked at `preview` too, as every later
 //! version must read it the same way; and each gated construct is checked
 //! against the version below its gate, where FCS must reject it ([`gates`]).
+//! Trees written over [`check`]'s typed names (the gates, and the statement
+//! table, [`statements`]) are type-checked as well: F#'s checker refuses some
+//! of what parses, and must accept them all.
 //! FCS is the authority on what the text means, read in the normalised currency
 //! the parser differential compares in. A printer bug that FCS reads differently from the
 //! tree, or rejects, fails here; so does a value the tree's types admit that F#
@@ -21,12 +24,14 @@
 //! declarations the tree does not model dropped ([`lower`]) at the version a
 //! project without `<LangVersion>` gets.
 
+mod check;
 mod corpus;
 mod fantomas;
 mod gates;
 mod generate;
 mod lower;
 mod names;
+mod statements;
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -182,6 +187,7 @@ mod generated {
     use proptest::prelude::*;
 
     use super::{generate, round_trips_at};
+    use crate::common::fcs_record::on_deep_stack;
 
     /// `default` cases per run, or `BORZOI_PRINT_CASES`. The leaves filter
     /// candidate names through the names' constructors, and a run draws
@@ -200,9 +206,11 @@ mod generated {
 
     /// A tree at `V`, checked at `V` and at the newest version, `preview`:
     /// every version from `V` on must read it the same way, and each gate is a
-    /// threshold, so the two ends stand for the range.
+    /// threshold, so the two ends stand for the range. On a deep stack, as a
+    /// generated tree's record can be deeper than a test thread reads.
     fn check<V: Version>(file: &borzoi_print::tree::ImplFile<V>) -> Result<(), TestCaseError> {
-        round_trips_at(file, &[V::LANGUAGE, LanguageVersion::MAX]).map_err(TestCaseError::fail)
+        on_deep_stack(|| round_trips_at(file, &[V::LANGUAGE, LanguageVersion::MAX]))
+            .map_err(TestCaseError::fail)
     }
 
     /// One module per version, each with the normal run and its deep twin.

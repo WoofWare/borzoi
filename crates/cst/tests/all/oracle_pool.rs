@@ -16,7 +16,7 @@ use crate::common::{effective_fcs_children, fcs_slots_per_pool};
 
 /// The number of pools the budget is divided among. Kept in step with `common`'s
 /// `FCS_POOLS` by [`the_pool_count_matches_the_harness`] below.
-const POOLS: usize = 5;
+const POOLS: usize = 7;
 
 /// **The invariant**: however the budget is set, the children a full complement of
 /// pools can hold must not exceed it. Exhaustive over every setting that could
