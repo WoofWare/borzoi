@@ -28,6 +28,17 @@ fn parse_with_environment(source: &str, environment: &HashMap<String, String>) -
     .expect("well-formed XML parses")
 }
 
+/// The [`ResolvedItem::include`] of an item whose joined path is `joined`:
+/// its lexical full path on a Unix host, and the joined path as it stands
+/// elsewhere.
+fn item_path(joined: &str) -> PathBuf {
+    if cfg!(unix) {
+        crate::imports::normalise(Path::new(joined))
+    } else {
+        PathBuf::from(joined)
+    }
+}
+
 fn paths(items: &[ResolvedItem]) -> Vec<&Path> {
     items.iter().map(|i| i.include.as_path()).collect()
 }
@@ -2536,7 +2547,7 @@ fn reference_metadata_msbuild_reads_its_own_way_is_unknown() {
         let p = parse(&src);
         assert_eq!(
             paths(&p.project_references),
-            [Path::new("/repo/Lib/Lib.fsproj")],
+            [item_path("/repo/proj/../Lib/Lib.fsproj").as_path()],
             "{src:?}"
         );
         assert_eq!(
@@ -2679,7 +2690,7 @@ fn metadata_with_inexact_property_declines_but_keeps_the_item() {
     let p = parse(src);
     assert_eq!(
         paths(&p.project_references),
-        [Path::new("/repo/Lib/Lib.fsproj")]
+        [item_path("/repo/proj/../Lib/Lib.fsproj").as_path()]
     );
     assert_eq!(
         p.project_references[0].exclude_assets,
@@ -3950,7 +3961,7 @@ fn project_reference_lands_in_project_references_bucket() {
     assert_eq!(p.project_references[0].kind, ItemKind::ProjectReference);
     assert_eq!(
         p.project_references[0].include,
-        PathBuf::from("/repo/lib/Lib.csproj"),
+        item_path("/repo/proj/../lib/Lib.csproj"),
     );
     assert!(p.diagnostics.is_empty());
 }
@@ -4142,7 +4153,7 @@ fn a_literal_project_reference_remove_is_applied() {
     assert_eq!(p.project_references.len(), 1);
     assert_eq!(
         p.project_references[0].include,
-        Path::new("/repo/C/C.fsproj")
+        item_path("/repo/proj/../C/C.fsproj")
     );
 
     // `->Exists()` needs the filesystem, which the pure surface never touches.
@@ -5179,7 +5190,10 @@ fn project_reference_and_compile_coexist_in_same_itemgroup() {
         .iter()
         .map(|i| i.include.as_path())
         .collect();
-    assert_eq!(pr_paths, [Path::new("/repo/Other/Other.fsproj")],);
+    assert_eq!(
+        pr_paths,
+        [item_path("/repo/proj/../Other/Other.fsproj").as_path()],
+    );
 }
 
 #[test]
@@ -5195,7 +5209,7 @@ fn project_reference_substitutes_msbuild_thisfiledirectory() {
     // separators but keeps `..` components literal.
     assert_eq!(
         p.project_references[0].include,
-        PathBuf::from("/repo/lib/Lib.csproj"),
+        item_path("/repo/proj/../lib/Lib.csproj"),
     );
     assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
 }
@@ -5215,7 +5229,10 @@ fn project_reference_with_semicolon_list_splits_into_multiple_items() {
         .collect();
     assert_eq!(
         pr_paths,
-        [Path::new("/repo/A/A.csproj"), Path::new("/repo/B/B.csproj"),],
+        [
+            item_path("/repo/proj/../A/A.csproj").as_path(),
+            item_path("/repo/proj/../B/B.csproj").as_path(),
+        ],
     );
 }
 
@@ -5229,7 +5246,7 @@ fn project_reference_backslashes_are_normalised() {
     let p = parse(src);
     assert_eq!(
         p.project_references[0].include,
-        PathBuf::from("/repo/lib/Lib.csproj"),
+        item_path("/repo/proj/../lib/Lib.csproj"),
     );
 }
 
@@ -5261,7 +5278,10 @@ fn project_reference_obeys_condition_gating() {
         .iter()
         .map(|i| i.include.as_path())
         .collect();
-    assert_eq!(pr_paths, [Path::new("/repo/always/Always.csproj")]);
+    assert_eq!(
+        pr_paths,
+        [item_path("/repo/proj/../always/Always.csproj").as_path()]
+    );
     assert!(p.diagnostics.is_empty());
 }
 
@@ -5340,7 +5360,7 @@ fn build_mixed_fsproj(kinds: &[bool]) -> (String, Vec<PathBuf>, Vec<PathBuf>) {
             xml.push_str(&format!(
                 "    <ProjectReference Include=\"../p{i}/P{i}.csproj\" />\n"
             ));
-            pr_paths.push(PathBuf::from(format!("/repo/p{i}/P{i}.csproj")));
+            pr_paths.push(item_path(&format!("/repo/proj/../p{i}/P{i}.csproj")));
         }
     }
     xml.push_str("  </ItemGroup>\n</Project>\n");

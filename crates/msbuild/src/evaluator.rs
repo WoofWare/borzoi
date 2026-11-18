@@ -439,8 +439,12 @@ fn into_resolved_items(items: Vec<OrderedResolvedItem>) -> Vec<ResolvedItem> {
 /// that is not UTF-8 is collapsed by components, its trailing separator
 /// restored. Windows' rule (drive-relative paths, verbatim prefixes, a `:`
 /// inside a segment) is not modelled, so there the path is kept as joined.
+///
+/// A path holding a NUL (a decoded `%00`) has no full path in MSBuild
+/// (`GetFullPath` throws), and is kept as joined too: collapsing a `..` past
+/// its NUL-bearing segment would name a real file MSBuild never names.
 fn item_full_path(path: &Path) -> PathBuf {
-    if !cfg!(unix) {
+    if !cfg!(unix) || path.as_os_str().as_encoded_bytes().contains(&0) {
         return path.to_path_buf();
     }
     if let Some(text) = path.to_str()

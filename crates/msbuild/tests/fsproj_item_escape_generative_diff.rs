@@ -391,68 +391,49 @@ fn check_with(oracle: &mut Oracle, fixture: &Fixture, with_resolver: bool) -> Ou
 }
 
 /// An item whose decoded path holds a NUL has no full path in MSBuild
-/// (`Path.GetFullPath` throws when `FullPath` is read), so neither seam may
-/// commit one, even where a `..` would collapse the NUL-bearing segment away.
+/// (`Path.GetFullPath` throws when `FullPath` is read). Whatever the walk
+/// makes of such an item, its path must keep the NUL: a `..` collapsed past
+/// the NUL-bearing segment would name a real file MSBuild never names. Each
+/// real file here is named once, by a glob, so a second item naming it is
+/// such a collapse.
 #[test]
-fn an_item_path_holding_a_nul_is_declined() {
-    let mut oracle = Oracle::spawn();
-    for include in [
-        "bad%00/../plain.fs",
-        "pl%00ain.fs",
-        "plain.fs;sub/x%00/../c.fs",
-    ] {
-        let fixture = Fixture {
-            esc: "plain.fs".to_string(),
-            pct: "pct%".to_string(),
-            includes: vec![include.to_string()],
-            exclude: None,
-            condition: None,
-            spelling: ProjectSpelling::AsIs,
-        };
-        for with_resolver in [false, true] {
-            assert_ne!(
-                check_with(&mut oracle, &fixture, with_resolver),
-                Outcome::Committed,
-                "{include} (resolver: {with_resolver})"
-            );
-        }
-    }
-}
-
-/// Beside a NUL-bearing literal, the resolver's other matches are kept: the
-/// list is marked uncertain (it is missing the declined item) rather than
-/// emptied, for a Compile set and a reference list alike.
-#[test]
-fn a_nul_beside_a_glob_keeps_the_glob_and_marks_the_list_uncertain() {
+fn a_nul_bearing_item_path_names_no_real_file() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let root = borzoi_msbuild::observed::host_fs::canonicalize(dir.path()).expect("canonicalize");
     std::fs::write(root.join("a.fs"), "module A\n").unwrap();
     std::fs::create_dir_all(root.join("refs")).unwrap();
     std::fs::write(root.join("refs/Good.fsproj"), "<Project />").unwrap();
-    let xml = "<Project>\n  <ItemGroup>\n    <Compile Include=\"*.fs;bad%00\" />\n    \
-               <ProjectReference Include=\"refs/*.fsproj;bad%00\" />\n  </ItemGroup>\n</Project>\n";
+    let xml = "<Project>\n  <ItemGroup>\n    <Compile Include=\"*.fs;bad%00/../a.fs\" />\n    \
+               <Compile Include=\"x%00/../a.fs\" />\n    \
+               <ProjectReference Include=\"refs/*.fsproj;bad%00/../refs/Good.fsproj\" />\n  \
+               </ItemGroup>\n</Project>\n";
     let proj = root.join("Demo.fsproj");
     std::fs::write(&proj, xml).unwrap();
     let resolver: &borzoi_msbuild::GlobResolver<'_> = &glob_resolver::resolve;
-    let parsed = parse_fsproj_with_imports(
-        xml,
-        &proj,
-        &HashMap::new(),
-        &common::oracle_environment(),
-        None,
-        Some(resolver),
-    )
-    .expect("well-formed XML parses");
-    let includes = |items: &[borzoi_msbuild::ResolvedItem]| -> Vec<std::path::PathBuf> {
-        items.iter().map(|i| i.include.clone()).collect()
-    };
-    assert_eq!(includes(&parsed.items), [root.join("a.fs")]);
-    assert!(parsed.items_uncertain);
-    assert_eq!(
-        includes(&parsed.project_references),
-        [root.join("refs/Good.fsproj")]
-    );
-    assert!(parsed.project_references_uncertain);
+    for glob in [None, Some(resolver)] {
+        let parsed = parse_fsproj_with_imports(
+            xml,
+            &proj,
+            &HashMap::new(),
+            &common::oracle_environment(),
+            None,
+            glob,
+        )
+        .expect("well-formed XML parses");
+        let items: Vec<&borzoi_msbuild::ResolvedItem> = parsed
+            .items
+            .iter()
+            .chain(&parsed.project_references)
+            .collect();
+        for real in [root.join("a.fs"), root.join("refs/Good.fsproj")] {
+            assert!(
+                items.iter().filter(|item| item.include == real).count() <= 1,
+                "{} named twice (resolver: {}): {items:#?}",
+                real.display(),
+                glob.is_some()
+            );
+        }
+    }
 }
 
 /// Hand-picked corners: one per finding the three review rounds turned up, and

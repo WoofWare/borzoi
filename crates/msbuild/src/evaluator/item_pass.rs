@@ -4054,10 +4054,6 @@ fn route_item_through_resolver(
     };
     let span = state.effective_span(node.range());
     for path in matched {
-        if holds_nul(&path) {
-            decline_nul_path(&path, kind, node, state);
-            continue;
-        }
         push_resolved_item(
             state,
             placement,
@@ -4128,12 +4124,6 @@ fn push_include_entry(
     // by MSBuild relative to `$(MSBuildProjectDirectory)`.
     // The scans above ran on escaped text; the identity is a point of use.
     let identity = fragment_identity(entry);
-    // Checked on the decoded identity, before a join could collapse a `..`
-    // past the NUL-bearing segment.
-    if identity.contains('\0') {
-        decline_nul_path(Path::new(&identity), kind, node, state);
-        return;
-    }
     // A reference declared directly takes its type's definitions beneath its
     // own metadata.
     #[cfg(any(test, feature = "test-support"))]
@@ -4165,31 +4155,6 @@ fn push_include_entry(
     if let Some(pushed) = bucket_for_placement(state, placement).last_mut() {
         pushed.row = row;
     }
-}
-
-/// Whether `path` holds a NUL (a decoded `%00`), for which MSBuild computes
-/// no `FullPath` (`Path.GetFullPath` throws), so the item's path, which
-/// [`crate::ResolvedItem::include`] is, has no value to commit.
-fn holds_nul(path: &Path) -> bool {
-    path.as_os_str().as_encoded_bytes().contains(&0)
-}
-
-/// Decline an item whose path [`holds_nul`]. `push` marks the Compile set
-/// uncertain in a Compile context; a reference list is marked by hand, since
-/// the declined item is a missing edge.
-fn decline_nul_path(path: &Path, kind: ItemKind, node: Node<'_, '_>, state: &mut State<'_>) {
-    if kind == ItemKind::ProjectReference {
-        state.project_references_uncertain = true;
-    }
-    state.push(
-        DiagnosticKind::UnsupportedConstruct {
-            element: format!(
-                "an item path holding a NUL ({}), whose full path MSBuild cannot compute",
-                path.display()
-            ),
-        },
-        node.range(),
-    );
 }
 
 fn bucket_for_placement<'s, 'r>(
