@@ -3506,7 +3506,7 @@ evaluation it read it from.
 
 **What the parses read** (`semantic::ParseInputs`): the Compile items
 (`CompileBefore`, `Compile`, `CompileAfter`) in the evaluation's order, the
-`#if` symbols (`COMPILED`, `EDITING` and `$(DefineConstants)`), the language
+`#if` symbols (`COMPILED` and `$(DefineConstants)`), the language
 version, and the cause of an untrusted `LangVersion` provenance (the
 version-boundary gate runs exactly when there is one, and a refusal it makes
 names it). Whether the evaluation declines the fold at all is the `Err` of

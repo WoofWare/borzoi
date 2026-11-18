@@ -21,7 +21,7 @@ from outside the file's ancestor chain:
 `Foo.fs`'s ancestors are `/repo/Shared` and `/repo` — neither holds
 `ProjA.fsproj`, so ownership falls back to a directory heuristic. The
 consequence: `symbols_for` hands back the implicit symbol set for the file kind
-(e.g. `{COMPILED, EDITING}`) instead of ProjA's `DefineConstants`, so `Foo.fs`'s
+(e.g. `{COMPILED}`) instead of ProjA's `DefineConstants`, so `Foo.fs`'s
 diagnostics are evaluated against the wrong `#if` branches. This is the
 "consumer #1 tail" flagged in
 [`fsproj-consumption-plan.md`](fsproj-consumption-plan.md).

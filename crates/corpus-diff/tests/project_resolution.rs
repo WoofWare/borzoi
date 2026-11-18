@@ -61,6 +61,34 @@ fn tiny_project() -> (TempDir, PathBuf) {
     (tmp, project)
 }
 
+/// A producer and a consumer that each say one thing under `EDITING` and
+/// another without, with the two branches' types apart. fsc never defines
+/// `EDITING`, so the build compiles only the `#else` branches; FCS's
+/// per-file check does define it.
+fn editing_branch_project() -> (TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = tmp.path().join("Editing.fsproj");
+    write(
+        &project,
+        r#"<Project>
+  <ItemGroup>
+    <Compile Include="A.fs" />
+    <Compile Include="B.fs" />
+  </ItemGroup>
+</Project>
+"#,
+    );
+    write(
+        &tmp.path().join("A.fs"),
+        "module A\n\n#if EDITING\nlet x = \"\"\n#else\nlet x = 1\n#endif\n",
+    );
+    write(
+        &tmp.path().join("B.fs"),
+        "module B\n\n#if EDITING\nlet onlyEditing : string = A.x\n#else\nlet onlyBuild : int = A.x\n#endif\n",
+    );
+    (tmp, project)
+}
+
 /// An attribute whose type is an in-file **abbreviation** of an in-file
 /// attribute class, which is the shape where FCS's general symbol-use stream is
 /// at its most crowded: the attribute's range can carry an entity use *and* a
@@ -2270,6 +2298,55 @@ fn tiny_project_matches_fcs() {
     assert!(
         comparison.matches > 0,
         "fixture should produce at least one exact match"
+    );
+}
+
+/// Every record the `uses-project` oracle returns describes the code the
+/// build compiled, and the LSP reads the same branches. FCS's per-file check
+/// defines `EDITING`, which fsc does not; in [`editing_branch_project`] the
+/// two readings give the files different declarations, and the per-file
+/// reading of `B.fs` is ill-typed, since `A.x` from the build's `A.fs` is an
+/// `int`.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn uses_project_records_read_the_branch_the_build_compiled() {
+    let (_tmp, project) = editing_branch_project();
+    let loaded = load_lsp_project(&project).expect("project should load");
+    let json = UsesProjectOracle::default()
+        .uses_project(&loaded)
+        .expect("fcs-dump uses-project-batch");
+    let sources: Vec<_> = loaded
+        .parses
+        .paths
+        .iter()
+        .cloned()
+        .zip(loaded.parses.texts.iter().cloned())
+        .collect();
+    let fcs = parse_project_uses(&json, &sources).expect("parse FCS uses");
+    let errors: Vec<_> = fcs.iter().flat_map(|f| f.error_diagnostics()).collect();
+    assert!(
+        errors.is_empty(),
+        "no file record holds an error: {errors:?}"
+    );
+    let named = |n: &str| {
+        fcs.iter()
+            .flat_map(|f| f.uses.iter())
+            .any(|u| u.full_name.as_deref() == Some(&format!("B.{n}")))
+    };
+    assert!(
+        named("onlyBuild"),
+        "the build's branch is recorded: {fcs:#?}"
+    );
+    assert!(!named("onlyEditing"), "the EDITING branch is not: {fcs:#?}");
+
+    let comparison = compare(&loaded, &fcs);
+    assert_eq!(comparison.fcs_error_files, Vec::<FcsErrorFile>::new());
+    assert_eq!(comparison.divergences, Vec::new());
+    assert_eq!(comparison.assembly_divergences, Vec::new());
+    assert_eq!(comparison.reverse_divergences, Vec::new());
+    assert!(
+        comparison.matches > 0,
+        "the build's `A.x` in `B.fs` is put to the oracle and matches"
     );
 }
 

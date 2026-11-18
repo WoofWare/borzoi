@@ -307,8 +307,8 @@ fn project_resolution_matches_fcs() {
     // cheaply.)
     let lang_version = Some(workspace.lang_version_for_project(&project).to_string());
 
-    // The `#if` symbols our side parsed each file under (implicit `COMPILED` /
-    // `EDITING` + the project's `$(DefineConstants)`). Threaded through to the FCS
+    // The `#if` symbols our side parsed each file under (implicit `COMPILED`
+    // + the project's `$(DefineConstants)`). Threaded through to the FCS
     // oracle below so both sides take the same conditional-compilation branches —
     // otherwise a project with defines would diverge on `#if`.
     let symbols = workspace.symbols_for_project(&project);

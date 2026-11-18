@@ -2379,8 +2379,8 @@ fn lang_version_for_uri(
 /// Implicit preprocessor symbols for a non-`file:` buffer (`untitled:`, virtual
 /// FS): there is no path to resolve an owning project, but the URI extension
 /// still tells us the file kind, so hand back the same implicit set
-/// [`Workspace::symbols_for`] would (`INTERACTIVE`+`EDITING` for a `.fsx`,
-/// `COMPILED`+`EDITING` otherwise) instead of a now-incomplete `{COMPILED}`.
+/// [`Workspace::symbols_for`] would: `INTERACTIVE` for a `.fsx`, `COMPILED`
+/// otherwise.
 fn implicit_symbols_for_uri(uri: &Uri) -> HashSet<String> {
     let is_script = path_extension(uri).as_deref() == Some("fsx");
     crate::workspace::implicit_symbols(is_script)
@@ -2738,14 +2738,14 @@ mod tests {
     #[test]
     fn non_file_buffer_gets_implicit_defines_by_kind() {
         // A non-`file:` buffer can't resolve a project, but must still get the
-        // implicit defines for its kind — not a bare `{COMPILED}`.
+        // implicit define for its kind.
         assert_eq!(
             implicit_symbols_for_uri(&url("untitled:Untitled-1.fs")),
-            HashSet::from(["COMPILED".to_string(), "EDITING".to_string()]),
+            HashSet::from(["COMPILED".to_string()]),
         );
         assert_eq!(
             implicit_symbols_for_uri(&url("untitled:Untitled-1.fsx")),
-            HashSet::from(["INTERACTIVE".to_string(), "EDITING".to_string()]),
+            HashSet::from(["INTERACTIVE".to_string()]),
         );
     }
 

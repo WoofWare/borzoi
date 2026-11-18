@@ -2363,10 +2363,16 @@ fn ce_cells(fixture: &'static Path, extension: &'static Path, alias: &'static Pa
 /// Whether FCS must check the cell cleanly. A custom operation used as a
 /// value is an error, and so is one used as a statement after a `let` in a
 /// builder with nothing but `Yield` and `Return`, though FCS still records
-/// the operation there.
+/// the operation there. So is any custom operation of `async`'s: an
+/// operation needs its builder to define `Yield`, and `AsyncBuilder` does
+/// not. fsc reports that (FS0708) with no location, which FCS's per-file
+/// check drops and its project check keeps.
 fn ce_expect_clean(kind: CeKind, builder: CeBuilder, use_: CeUse) -> bool {
     match use_ {
-        CeUse::Statement => !(builder.offers() && kind == CeKind::InnerLocal && builder.minimal()),
+        CeUse::Statement => {
+            !(builder.offers_on_async()
+                || builder.offers() && kind == CeKind::InnerLocal && builder.minimal())
+        }
         CeUse::Pattern => true,
         // The nested `async { … }` adds its own operations after the local.
         CeUse::InnerCe if kind == CeKind::InnerLocal => !builder.offers_on_async(),

@@ -52,14 +52,15 @@ struct OracleResponse {
 #[serde(rename_all = "PascalCase")]
 pub struct OracleFile {
     pub path: String,
-    pub ok: bool,
-    pub error: String,
+    /// What the project check reported in this file, and what it reported in
+    /// no file, which the oracle puts in every file's record.
     pub diagnostics: Vec<OracleDiagnostic>,
     pub uses: Vec<OracleUse>,
 }
 
 impl OracleFile {
-    /// Whether FCS reported an error (parse or check) in this file.
+    /// Whether FCS reported an error (parse or check) in this file, or one in
+    /// no file, which bears on every file.
     pub fn has_errors(&self) -> bool {
         self.diagnostics.iter().any(|d| d.severity == "Error")
     }
@@ -168,8 +169,9 @@ pub struct OurProject {
 
 impl OurProject {
     pub fn new(paths: &[PathBuf], texts: Vec<String>, defines: &[&str]) -> Self {
-        // FCS defines `COMPILED` and `EDITING` for a checked `.fs`/`.fsi` on
-        // top of the caller's symbols, as the LSP does; parse the same program.
+        // FCS's project check defines `COMPILED` for a checked `.fs`/`.fsi`
+        // on top of the caller's symbols, as fsc and the LSP do; parse the
+        // same program.
         let mut symbols: HashSet<String> = implicit_symbols(false);
         symbols.extend(defines.iter().map(|d| d.to_string()));
         let mut sources = Vec::new();
@@ -559,11 +561,7 @@ pub fn run_fixture(files: &[(&str, &str)], defines: &[&str]) -> (Vec<Graded>, Ve
         })
         .collect();
     let texts = files.iter().map(|(_, t)| t.to_string()).collect();
-    let (graded, fcs) = check_paths(&paths, texts, defines);
-    for f in &fcs {
-        assert!(f.ok, "FCS could not check {}: {}", f.path, f.error);
-    }
-    (graded, fcs)
+    check_paths(&paths, texts, defines)
 }
 
 /// Check the files at `paths` (whose contents are `texts`) as one project with

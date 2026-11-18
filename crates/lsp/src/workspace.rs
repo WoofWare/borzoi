@@ -73,27 +73,22 @@ use crate::tfm_policy::{self, caller_owns_target_framework, seed_target_framewor
 use borzoi_msbuild::ItemMetadataValue;
 
 const COMPILED: &str = "COMPILED";
-const EDITING: &str = "EDITING";
 const INTERACTIVE: &str = "INTERACTIVE";
 
-/// The implicit preprocessor symbols FCS's *service* parser
-/// (`FSharpChecker.ParseFile`) defines for a file of the given kind, before any
-/// project `DefineConstants` are layered on:
+/// The implicit preprocessor symbol the compiler defines for a file of the
+/// given kind, before any project `DefineConstants` are layered on:
 ///
-/// - a compiled `.fs` / `.fsi` → `COMPILED` + `EDITING`
-/// - a `.fsx` / `.fsscript`    → `INTERACTIVE` + `EDITING`
+/// - a compiled `.fs` / `.fsi` → `COMPILED` (fsc, `Driver/fsc.fs`)
+/// - a `.fsx` / `.fsscript`    → `INTERACTIVE` (fsi)
 ///
-/// `EDITING` is in both because we analyse source *for editing* (an LSP) — the
-/// parse FCS performs in an IDE — not `fsc`'s batch compile. (`COMPILED` mirrors
-/// `Driver/fsc.fs:514`; `INTERACTIVE` is the script counterpart.)
+/// `EDITING` is in neither. FCS's editor-facing parse and per-file check
+/// define it, but fsc and fsi do not, so code under `#if EDITING` is code the
+/// build never compiles, and the LSP reads the branches the build reads.
 ///
 /// Public so the server's non-`file:` buffer fallback and the FCS
-/// differentials share it rather than hand-building an incomplete set.
+/// differentials share it rather than hand-building their own set.
 pub fn implicit_symbols(is_script: bool) -> HashSet<String> {
-    let mut s = HashSet::new();
-    s.insert(EDITING.to_string());
-    s.insert(if is_script { INTERACTIVE } else { COMPILED }.to_string());
-    s
+    HashSet::from([if is_script { INTERACTIVE } else { COMPILED }.to_string()])
 }
 
 /// Whether `file` is an F# script (`.fsx`), which FCS parses with
@@ -1577,15 +1572,15 @@ impl Workspace {
 
     /// The active preprocessor symbol set for `file`.
     ///
-    /// - A script (`.fsx`) gets the script implicit set (`INTERACTIVE`+
-    ///   `EDITING`) — FCS resolves scripts by extension and applies no sibling
+    /// - A script (`.fsx`) gets the script implicit set (`INTERACTIVE`) —
+    ///   FCS resolves scripts by extension and applies no sibling
     ///   project's options — *unless* a project **conclusively** compiles it
     ///   (an explicit `<Compile Include="…fsx">`, which the SDK never globs), in
     ///   which case it gets that project's compiled set. Mere proximity to an
     ///   `.fsproj` does not count: `owning_project`'s nearest-ancestor fallback
     ///   would otherwise claim a standalone script.
     /// - A compiled file (`.fs`/`.fsi`) under a project gets that project's set
-    ///   ([`Self::symbols_for_project`]): `COMPILED`+`EDITING` plus its
+    ///   ([`Self::symbols_for_project`]): `COMPILED` plus its
     ///   `$(DefineConstants)` (best-effort, so a not-yet-listed `.fs` still
     ///   picks up the nearest project's defines). An orphan compiled file, or
     ///   one whose owning `.fsproj` failed to evaluate, gets the compiled base.
@@ -1710,8 +1705,8 @@ impl Workspace {
     }
 
     /// The active preprocessor symbol set for the project at `project_path` —
-    /// `{COMPILED, EDITING} ∪ DefineConstants`. Cached the same way
-    /// [`Self::symbols_for`] is. Returns the implicit `{COMPILED, EDITING}` set
+    /// `{COMPILED} ∪ DefineConstants`. Cached the same way
+    /// [`Self::symbols_for`] is. Returns the implicit `{COMPILED}` set
     /// when the project failed to evaluate.
     ///
     /// `<Compile>` items are compiled `.fs`/`.fsi`, never scripts, so the base
@@ -6742,7 +6737,7 @@ mod tests {
     }
 
     // (The file-outside-project default is covered by
-    // `symbols_for_compiled_file_includes_editing` and
+    // `symbols_for_compiled_file_is_compiled_without_editing` and
     // `symbols_for_script_uses_interactive_not_compiled` above.)
 
     #[test]
@@ -6757,12 +6752,7 @@ mod tests {
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
-            HashSet::from([
-                "COMPILED".to_string(),
-                "EDITING".to_string(),
-                "FOO".to_string(),
-                "BAR".to_string(),
-            ])
+            HashSet::from(["COMPILED".to_string(), "FOO".to_string(), "BAR".to_string(),])
         );
     }
 
@@ -6810,9 +6800,9 @@ mod tests {
     }
 
     #[test]
-    fn symbols_for_compiled_file_includes_editing() {
-        // FCS's service parser defines COMPILED *and* EDITING for a compiled
-        // `.fs`/`.fsi` — we analyse for editing (an LSP), so we must match.
+    fn symbols_for_compiled_file_is_compiled_without_editing() {
+        // fsc defines COMPILED for a compiled `.fs`/`.fsi`, and not EDITING,
+        // which only FCS's editor-facing parse defines.
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("Lib.fs");
         write_file(&file, "");
@@ -6821,15 +6811,15 @@ mod tests {
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
-            HashSet::from(["COMPILED".to_string(), "EDITING".to_string()]),
-            "a compiled .fs must get COMPILED + EDITING, got {symbols:?}"
+            HashSet::from(["COMPILED".to_string()]),
+            "a compiled .fs must get COMPILED alone, got {symbols:?}"
         );
     }
 
     #[test]
     fn symbols_for_script_uses_interactive_not_compiled() {
-        // A `.fsx` script is parsed `isInteractive`, so FCS defines
-        // INTERACTIVE + EDITING and *not* COMPILED.
+        // A `.fsx` script is run by fsi, which defines INTERACTIVE and *not*
+        // COMPILED (nor EDITING).
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("Script.fsx");
         write_file(&file, "");
@@ -6838,8 +6828,8 @@ mod tests {
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
-            HashSet::from(["INTERACTIVE".to_string(), "EDITING".to_string()]),
-            "a .fsx must get INTERACTIVE + EDITING (no COMPILED), got {symbols:?}"
+            HashSet::from(["INTERACTIVE".to_string()]),
+            "a .fsx must get INTERACTIVE alone, got {symbols:?}"
         );
     }
 
@@ -6847,7 +6837,7 @@ mod tests {
     fn symbols_for_script_beside_project_stays_interactive() {
         // A `.fsx` under a project directory is not a `<Compile>` member (SDK
         // projects glob `.fs`), and FCS resolves scripts by extension anyway. It
-        // must stay INTERACTIVE+EDITING — never the project's COMPILED or
+        // must stay INTERACTIVE — never the project's COMPILED or
         // DefineConstants.
         let tmp = TempDir::new().unwrap();
         let proj = tmp.path().join("Sample.fsproj");
@@ -6859,8 +6849,8 @@ mod tests {
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
-            HashSet::from(["INTERACTIVE".to_string(), "EDITING".to_string()]),
-            "a script beside a project must stay INTERACTIVE+EDITING, got {symbols:?}"
+            HashSet::from(["INTERACTIVE".to_string()]),
+            "a script beside a project must stay INTERACTIVE, got {symbols:?}"
         );
     }
 
@@ -6885,11 +6875,7 @@ mod tests {
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
-            HashSet::from([
-                "COMPILED".to_string(),
-                "EDITING".to_string(),
-                "FOO".to_string(),
-            ]),
+            HashSet::from(["COMPILED".to_string(), "FOO".to_string()]),
             "a <Compile>-listed .fsx must be treated as compiled, got {symbols:?}"
         );
     }
@@ -6906,8 +6892,8 @@ mod tests {
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
-            HashSet::from(["INTERACTIVE".to_string(), "EDITING".to_string()]),
-            "a .FSX script must still get INTERACTIVE + EDITING, got {symbols:?}"
+            HashSet::from(["INTERACTIVE".to_string()]),
+            "a .FSX script must still get INTERACTIVE, got {symbols:?}"
         );
     }
 
@@ -6945,7 +6931,7 @@ mod tests {
         write_file(&proj, "<Project><NotClosed>");
         write_file(&file, "");
 
-        let implicit = HashSet::from(["COMPILED".to_string(), "EDITING".to_string()]);
+        let implicit = HashSet::from(["COMPILED".to_string()]);
 
         let mut ws = Workspace::new();
         let symbols = ws.symbols_for(&file);
@@ -6973,12 +6959,7 @@ mod tests {
         let symbols = ws.symbols_for(&file);
         assert_eq!(
             symbols,
-            HashSet::from([
-                "COMPILED".to_string(),
-                "EDITING".to_string(),
-                "FOO".to_string(),
-                "BAR".to_string(),
-            ])
+            HashSet::from(["COMPILED".to_string(), "FOO".to_string(), "BAR".to_string(),])
         );
     }
 
@@ -7506,7 +7487,7 @@ mod tests {
         fn sdkless_projects_unaffected_by_sdk_env() {
             // A bare `<Project>` never invokes the resolver. Whether
             // DOTNET_ROOT is set or not, the symbol set is just
-            // `{COMPILED, EDITING} ∪ body defines`. Pins the no-regression
+            // `{COMPILED} ∪ body defines`. Pins the no-regression
             // guarantee from Stage 8.
             let tmp = TempDir::new().unwrap();
             let dotnet = tmp.path().join("dotnet");
@@ -7520,11 +7501,7 @@ mod tests {
             let symbols = ws.symbols_for(&file);
             assert_eq!(
                 symbols,
-                HashSet::from([
-                    "COMPILED".to_string(),
-                    "EDITING".to_string(),
-                    "FOO".to_string()
-                ])
+                HashSet::from(["COMPILED".to_string(), "FOO".to_string()])
             );
         }
 

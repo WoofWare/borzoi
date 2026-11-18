@@ -6272,6 +6272,66 @@ let private scriptOptionsBatch () =
             Console.Out.Flush()
         line <- Console.In.ReadLine()
 
+/// Which of `paths` the check reported `fileName` in, if any. A diagnostic
+/// that belongs to no source names `startup`, `unknown` or nothing.
+let private checkedFileOf (paths: string[]) (fileName: string) : string option =
+    if String.IsNullOrEmpty fileName then
+        None
+    else
+        let full = Path.GetFullPath fileName
+        paths |> Array.tryFind (fun p -> p = full)
+
+/// A project-check oracle's payload, `{ Files }`, taken from `results`, the
+/// whole-project check of `paths`: each file's record `{ Path, Diagnostics,
+/// Uses }` holds its uses, each projected by `projectUse`, and the
+/// diagnostics the check reports in it.
+///
+/// The records come from the whole-project check because it compiles what
+/// fsc compiles. FCS's per-file check (`ParseAndCheckFileInProject`) does
+/// not: it parses the file it checks with `EDITING` defined, which fsc does
+/// not define, so its records can describe a branch the build never saw.
+///
+/// The project check reports some diagnostics in no file: an error FCS
+/// raises without a location (`range0`, file `unknown`), such as FS0708 for a
+/// computation expression whose builder lacks a method, or FS0193 for an
+/// import that does not resolve. The per-file check drops such a diagnostic,
+/// keeping only those in the file it checks, so a project fsc rejects could
+/// look clean. The project check cannot say which file raised it, so every
+/// file's record carries it: a reader that asks whether a file checked
+/// cleanly then gets no for every file, never a yes the compile did not give.
+///
+/// A use in no file cannot happen, since every use the check reports is in
+/// one of its sources, so one fails the request.
+let private projectCheckRecords
+    (projectUse: FSharpSymbolUse -> 'U)
+    (results: FSharpCheckProjectResults)
+    (paths: string[])
+    =
+    let diagnosticsByFile =
+        results.Diagnostics |> Array.groupBy (fun d -> checkedFileOf paths d.FileName) |> Map.ofArray
+    let diagnosticsIn (file: string option) =
+        match Map.tryFind file diagnosticsByFile with
+        | Some diagnostics -> diagnostics |> Array.map projectDiagnostic
+        | None -> [||]
+    let inNoFile = diagnosticsIn None
+    let usesByFile =
+        results.GetAllUsesOfAllSymbols()
+        |> Array.groupBy (fun u ->
+            match checkedFileOf paths u.FileName with
+            | Some path -> path
+            | None -> failwithf "the project check reported a use in %s, which is not a source file" u.FileName)
+        |> dict
+    let usesIn (path: string) =
+        match usesByFile.TryGetValue path with
+        | true, uses -> uses |> Array.map projectUse
+        | false, _ -> [||]
+    {| Files =
+        paths
+        |> Array.map (fun path ->
+            {| Path = path
+               Diagnostics = Array.append (diagnosticsIn (Some path)) inNoFile
+               Uses = usesIn path |}) |}
+
 /// Project-aware sibling of `dumpUses`: type-check an ordered set of source
 /// files as a *single project* (not isolated scripts), so name resolution sees
 /// cross-file declarations. Reads absolute source paths from stdin, one per
@@ -6285,11 +6345,12 @@ let private scriptOptionsBatch () =
 /// source-file set is exactly the Compile-ordered list given on stdin.
 /// Shared core of the `uses-project` oracle: type-check `paths` (Compile order)
 /// as ONE project against the given `checker`, folding `refArgs` / `defineArgs`
-/// / `langVersionArgs` into the compiler switches, and return the per-file
-/// `{ Path, Diagnostics, Uses }` records. Fails hard on a reference-resolution
-/// error or a per-file abort — the one-shot [`dumpUsesProject`] lets that exit
-/// the process nonzero; the resident [`usesProjectBatchCore`] catches it into a
-/// `BatchError` line so one bad project cannot wedge the resident child.
+/// / `langVersionArgs` into the compiler switches, and return the
+/// whole-project check's [`projectCheckRecords`]. Fails hard on a
+/// reference-resolution error — the one-shot
+/// [`dumpUsesProject`] lets that exit the process nonzero; the resident
+/// [`usesProjectBatchCore`] catches it into a `BatchError` line so one bad
+/// project cannot wedge the resident child.
 ///
 /// The switch handling (verbatim from the pre-refactor one-shot): keep only
 /// compiler switches from the script options (the `-r:` references and flags such
@@ -6367,35 +6428,10 @@ let private usesProjectFiles
             OtherOptions = otherOptions
             UseScriptResolutionRules = false }
 
-    paths
-    |> Array.map (fun absolute ->
-        let sourceText = SourceText.ofString (File.ReadAllText(absolute))
-        let parseResults, checkAnswer =
-            checker.ParseAndCheckFileInProject(
-                absolute,
-                0,
-                sourceText,
-                projOpts,
-                userOpName = "fcs-dump-uses-project")
-            |> Async.RunSynchronously
-
-        let checkResults =
-            match checkAnswer with
-            | FSharpCheckFileAnswer.Succeeded r -> r
-            | FSharpCheckFileAnswer.Aborted ->
-                failwithf "fcs-dump uses-project: type-check aborted for %s" absolute
-
-        let diagnostics =
-            Array.append parseResults.Diagnostics checkResults.Diagnostics
-            |> Array.map projectDiagnostic
-        let uses =
-            checkResults.GetAllUsesOfAllSymbolsInFile()
-            |> Seq.map projectSymbolUse
-            |> Seq.toArray
-
-        {| Path = absolute
-           Diagnostics = diagnostics
-           Uses = uses |})
+    let results =
+        checker.ParseAndCheckProject(projOpts, userOpName = "fcs-dump-uses-project")
+        |> Async.RunSynchronously
+    projectCheckRecords projectSymbolUse results paths
 
 let private dumpUsesProject () =
     let paths =
@@ -6414,7 +6450,7 @@ let private dumpUsesProject () =
     // `;`/newline-separated) as `--define:` flags; the pinned `<LangVersion>`
     // (`BORZOI_FCS_LANGVERSION`) as a `--langversion:` flag. Both are threaded
     // through [`usesProjectFiles`] to *both* script-option discovery and the
-    // per-file check — see its doc-comment. (Unset langversion means the SDK
+    // whole-project check — see its doc-comment. (Unset langversion means the SDK
     // default, which FCS already agrees with, so no flag.)
     let defineArgs : string[] =
         match Option.ofObj (Environment.GetEnvironmentVariable "BORZOI_FCS_DEFINES") with
@@ -6434,8 +6470,7 @@ let private dumpUsesProject () =
         | None -> false
 
     let checker = FSharpChecker.Create()
-    let files = usesProjectFiles checker paths (extraRefArgs ()) exclusiveRefs defineArgs langVersionArgs
-    let payload = {| Files = files |}
+    let payload = usesProjectFiles checker paths (extraRefArgs ()) exclusiveRefs defineArgs langVersionArgs
     let json = JsonSerializer.Serialize(payload, buildOptions ())
     Console.Out.Write(json)
     Console.Out.WriteLine()
@@ -6449,7 +6484,8 @@ let private dumpUsesProject () =
 /// `{ "paths": [<abs .fs>…], "refs": [<dll>…], "defines": [<sym>…],
 /// "langversion": <token|null>, "exclusiveRefs": <bool> }`, Compile order
 /// preserved — and one compact
-/// `{ "Files": [ { Path, Diagnostics, Uses } … ] }` response line: the SAME
+/// `{ "Files": [ { Path, Diagnostics, Uses } … ] }` response line
+/// ([`projectCheckRecords`]): the SAME
 /// payload the one-shot emits (compact rather than indented; the `serde_json`
 /// consumer is whitespace-insensitive). Per-request failures become
 /// `{ "BatchError": <msg> }`, exactly as in `file-batch`.
@@ -6478,9 +6514,9 @@ let private usesProjectBatchCore () =
                 match root.TryGetProperty("exclusiveRefs") with
                 | true, v when v.ValueKind = JsonValueKind.True -> true
                 | _ -> false
-            let files =
+            let payload =
                 usesProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs
-            JsonSerializer.Serialize({| Files = files |}, compact)
+            JsonSerializer.Serialize(payload, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
 
@@ -8412,9 +8448,10 @@ let private projectXmlDocUse (u: FSharpSymbolUse) =
        Error = error |}
 
 /// Type-check `paths` (Compile order) as one project and report each file's
-/// symbol uses with the documentation FCS attaches. The SDK reference switches
-/// (FSharp.Core + the runtime reference pack) come from script resolution on
-/// the first file, per request, so no request's answer depends on another's.
+/// symbol uses with the documentation FCS attaches, from the whole-project
+/// check ([`projectCheckRecords`]). The SDK reference switches (FSharp.Core +
+/// the runtime reference pack) come from script resolution on the first file,
+/// per request, so no request's answer depends on another's.
 let private xmlDocProjectFiles
     (checker: FSharpChecker)
     (paths: string[])
@@ -8452,50 +8489,22 @@ let private xmlDocProjectFiles
                         switches
                 Array.concat [ switches; refArgs; defineArgs; langVersionArgs ]
             UseScriptResolutionRules = false }
-    paths
-    |> Array.map (fun absolute ->
-        try
-            let sourceText = SourceText.ofString (File.ReadAllText absolute)
-            let parseResults, checkAnswer =
-                checker.ParseAndCheckFileInProject(
-                    absolute, 0, sourceText, projOpts, userOpName = "fcs-dump-xmldoc")
-                |> Async.RunSynchronously
-            match checkAnswer with
-            | FSharpCheckFileAnswer.Succeeded r ->
-                let uses =
-                    r.GetAllUsesOfAllSymbolsInFile()
-                    |> Seq.map projectXmlDocUse
-                    |> Seq.toArray
-                {| Path = absolute
-                   Ok = true
-                   Error = ""
-                   Diagnostics =
-                       Array.append parseResults.Diagnostics r.Diagnostics
-                       |> Array.map projectDiagnostic
-                   Uses = uses |}
-            | FSharpCheckFileAnswer.Aborted ->
-                {| Path = absolute
-                   Ok = false
-                   Error = "type-check aborted"
-                   Diagnostics = [||]
-                   Uses = [||] |}
-        with ex ->
-            {| Path = absolute
-               Ok = false
-               Error = ex.Message
-               Diagnostics = [||]
-               Uses = [||] |})
+    let results =
+        checker.ParseAndCheckProject(projOpts, userOpName = "fcs-dump-xmldoc")
+        |> Async.RunSynchronously
+    projectCheckRecords projectXmlDocUse results paths
 
 /// Resident source-XML-doc oracle. One JSON request per stdin line —
 /// `{ "paths": [<abs .fs/.fsi>…], "defines": [<sym>…], "langversion": <token|null>,
 /// "refs": [<dll>…], "exclusiveRefs": <bool> }`, Compile order — type-checked as
 /// ONE project against the SDK references plus `refs` (or `refs` alone, when
 /// `exclusiveRefs`), and
-/// one compact `{ "Files": [ { Path, Ok, Error, Diagnostics, Uses } … ] }` line
-/// back, `Uses` holding every symbol use with its symbol's documentation (see
-/// [`projectXmlDocUse`]). Tolerant: a type error is a diagnostic, never an
-/// abort, so a single isolated corpus file is a valid one-path request. A
-/// request-level failure is `{ "BatchError": <msg> }`.
+/// one compact `{ "Files": [ { Path, Diagnostics, Uses } … ] }` line back
+/// ([`projectCheckRecords`]), `Uses` holding every symbol use with its
+/// symbol's documentation (see [`projectXmlDocUse`]). Tolerant: a
+/// type error is a diagnostic, never an abort, so a single isolated corpus
+/// file is a valid one-path request. A request-level failure is
+/// `{ "BatchError": <msg> }`.
 let private xmlDocBatchCore () =
     let checker = FSharpChecker.Create()
     let compact = buildOptionsCompact ()
@@ -8520,9 +8529,9 @@ let private xmlDocBatchCore () =
                 match root.TryGetProperty("exclusiveRefs") with
                 | true, v when v.ValueKind = JsonValueKind.True -> true
                 | _ -> false
-            let files =
+            let payload =
                 xmlDocProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs
-            JsonSerializer.Serialize({| Files = files |}, compact)
+            JsonSerializer.Serialize(payload, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
     let mutable line = Console.In.ReadLine()
@@ -8574,9 +8583,9 @@ let private usage () =
     eprintfn "  binder-types <source-path>  dump per-binder inferred types (Phase-3 binder-type oracle)"
     eprintfn "  overloads <source-path>  dump the chosen overload at each call node (overload-resolution oracle)"
     eprintfn "  file-batch               resident single-file oracle: one JSON request/line {kind,path,refs,langversion?}, one compact JSON response/line"
-    eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files} response/line"
+    eprintfn "  uses-project-batch       resident project oracle: one JSON request/line {paths,refs,defines,langversion}, one compact {Files} response/line, from the whole-project check"
     eprintfn "  script-options-batch     test oracle: per path on stdin, the shared and the own-directory script resolution {ResolvedAs,Shared,Direct}"
-    eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files} response/line"
+    eprintfn "  xmldoc-batch             resident source-XML-doc oracle: one JSON request/line {paths,defines,langversion}, one compact {Files} response/line, from the whole-project check"
     2
 
 /// Refuse to run as a self-contained publish. Every script-mode check

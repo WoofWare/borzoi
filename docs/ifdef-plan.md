@@ -24,17 +24,18 @@ expression grammar and `#if`-expression lexer follow FCS's `pppars.fsy` /
 `pplex.fsl` (`!` tightest, then `&&`, then `||`; `true`/`false` are ordinary
 identifiers).
 
-**Symbol set** (from the consumer): default `COMPILED` (+ `EDITING`) for
-compiled sources, `INTERACTIVE` (+ `EDITING`) for scripts, plus the project's
-evaluated `<DefineConstants>`.
+**Symbol set** (from the consumer): default `COMPILED` for compiled sources,
+`INTERACTIVE` for scripts, plus the project's evaluated `<DefineConstants>`.
+Not `EDITING`: FCS's editor-facing parse defines it, but fsc and fsi do not,
+so the LSP reads the branches the build compiles.
 
 **Empty-roots semantics** (referenced by
 `crates/lsp/tests/all/ifdef_diagnostics_integration.rs`): if `global.json`
 `sdk.paths` resolves to zero usable roots (an explicit `paths: []`, or the sole
 `$host$` token failing to resolve), `SdkDiscovery::resolve` returns `NotFound`
 and the msbuild walker emits `SdkNotFound`. Body `<DefineConstants>` still
-surface; a compiled file's `#if` symbols are then `{COMPILED, EDITING} ∪
-body_defines` (scripts `{INTERACTIVE, EDITING}`). This is the strict reading of
+surface; a compiled file's `#if` symbols are then `{COMPILED} ∪
+body_defines` (scripts `{INTERACTIVE}`). This is the strict reading of
 the .NET host: omitting `$host$` opts out of the host install, and the LSP must
 not paper over it with a silent fallback, or the symbol set would disagree with
 `dotnet build`.

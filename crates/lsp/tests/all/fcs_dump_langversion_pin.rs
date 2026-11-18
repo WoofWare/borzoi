@@ -48,7 +48,8 @@ fn parse(oracle: &str, line: &str) -> Value {
     v
 }
 
-/// The error numbers of a `{ Files: [ { Diagnostics } ] }` response.
+/// The error numbers of a `{ Files: [ { Diagnostics } ] }` response. A
+/// diagnostic in no file (FS3880 names no source) is in every file's record.
 fn project_codes(v: &Value) -> Vec<i64> {
     v["Files"]
         .as_array()

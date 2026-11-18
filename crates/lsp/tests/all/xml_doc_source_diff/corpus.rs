@@ -126,10 +126,6 @@ fn source_docs_match_fcs_over_corpus() {
                 }
             };
             let oracle = &fcs[0];
-            if !oracle.ok {
-                manifest.push((key, "skipped fcs-not-ok".to_string()));
-                continue;
-            }
             compared += 1;
             let file_census = census(&graded);
             for (k, v) in &file_census {

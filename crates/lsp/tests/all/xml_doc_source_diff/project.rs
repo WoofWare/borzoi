@@ -312,7 +312,7 @@ fn fixture_project_docs_agree_with_fcs() {
     // references beside it; nothing graded here depends on an assembly.
     let fcs = oracle(&loaded, false);
     for f in &fcs {
-        assert!(f.ok && !f.has_errors(), "FCS rejects the fixture: {f:?}");
+        assert!(!f.has_errors(), "FCS rejects the fixture: {f:?}");
     }
     let graded = grade(&loaded.ours, &fcs);
     let named: Vec<(&str, &str)> = files.iter().map(|(n, t)| (*n, *t)).collect();

@@ -64,6 +64,53 @@ fn assert_attached(src: &str, name: &str, expected: &[&str]) {
     );
 }
 
+/// The oracle's records describe the code the build compiled, and so does
+/// our side. FCS's per-file check defines `EDITING`, which fsc does not; here
+/// a producer and a consumer each say one thing under `EDITING` and another
+/// without, and the per-file reading of `B.fs` is ill-typed, since `A.x` from
+/// the build's `A.fs` is an `int`.
+#[test]
+fn docs_are_graded_on_the_branch_the_build_compiled() {
+    let files = [
+        (
+            "A.fs",
+            "module A\n\n#if EDITING\n/// editing\nlet x = \"\"\n#else\n/// build\nlet x = 1\n#endif\n",
+        ),
+        (
+            "B.fs",
+            "module B\n\n#if EDITING\n/// editing\nlet onlyEditing : string = A.x\n#else\n/// build\nlet onlyBuild : int = A.x\n#endif\n",
+        ),
+    ];
+    let (graded, fcs) = run_fixture(&files, &[]);
+    for f in &fcs {
+        assert!(!f.has_errors(), "no file record holds an error: {f:?}");
+        assert!(
+            f.uses.iter().all(|u| u.name != "onlyEditing"),
+            "the EDITING branch is not recorded: {f:?}"
+        );
+    }
+    let build: Vec<_> = graded
+        .iter()
+        .filter(|g| g.name == "onlyBuild" && g.is_definition)
+        .collect();
+    assert_eq!(build.len(), 1, "the build's branch is graded: {graded:?}");
+    assert_eq!(
+        build[0].fcs_lines.as_deref(),
+        Some(&[" build".to_string()][..])
+    );
+    assert_eq!(build[0].verdict, Verdict::Agree { attached: true });
+    let x_uses: Vec<_> = graded
+        .iter()
+        .filter(|g| g.name == "x" && g.file == 1)
+        .collect();
+    assert_eq!(x_uses.len(), 1, "`A.x` in `B.fs` is graded: {graded:?}");
+    assert_eq!(x_uses[0].verdict, Verdict::Agree { attached: true });
+    assert!(
+        graded.iter().all(|g| g.name != "onlyEditing"),
+        "our side reads the build's branch: {graded:?}"
+    );
+}
+
 #[test]
 fn and_binding_takes_the_doc_before_and_over_the_one_after_it() {
     let src = "module M\nlet rec f x = g x\n/// outer\nand\n    /// inner\n    g x = f x\n";
