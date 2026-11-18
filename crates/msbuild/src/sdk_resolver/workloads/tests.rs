@@ -1602,3 +1602,44 @@ fn a_switched_off_resolver_leaves_a_pack_name_to_nuget_and_declines_a_locator() 
         resolve_workload_locator(AUTO, &layout.root, &version_dir, &off, &Observer::new()).is_err()
     );
 }
+
+#[test]
+fn an_unregistered_workload_resolver_declines_what_it_would_answer() {
+    // Without the resolver's manifest under `SdkResolvers`, MSBuild never
+    // loads it, and the workload names fall to resolvers this does not model.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    fs::create_dir_all(layout.root.join("packs/Contoso.Pack/1.0.0")).unwrap();
+    assert!(layout.resolve("Contoso.Pack", &no_user_env()).is_ok());
+    assert!(layout.resolve(AUTO, &no_user_env()).is_ok());
+    fs::remove_dir_all(layout.root.join("sdk/10.0.300/SdkResolvers")).unwrap();
+    for name in ["Contoso.Pack", AUTO] {
+        assert!(
+            matches!(
+                layout.resolve(name, &no_user_env()),
+                Err(SdkResolveError::UnsupportedLayout { .. })
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_versioned_reference_to_a_workload_pack_declines() {
+    // `Name/Version` is the name to the workload resolver under the
+    // `<Project Sdk>` shorthand and the whole spelling under an explicit
+    // import; only a pack of the name makes the two differ.
+    let layout = PackOrLayout::new(CONTOSO_PACK);
+    fs::create_dir_all(layout.root.join("packs/Contoso.Pack/1.0.0")).unwrap();
+    assert!(matches!(
+        layout.resolve("Contoso.Pack/2.0.0", &no_user_env()),
+        Err(SdkResolveError::UnsupportedLayout { .. })
+    ));
+    let other = PackOrLayout::new("{}");
+    assert_eq!(
+        match other.resolve("Contoso.Pack/2.0.0", &no_user_env()) {
+            Ok(SdkResolution::Single(paths)) => paths.root,
+            o => panic!("{o:?}"),
+        },
+        other.nuget.join("contoso.pack/2.0.0/Sdk")
+    );
+}

@@ -293,9 +293,11 @@ pub fn locate_dotnet_sdk(
         if let Some(root) = sdk_directory(sdk_root, observer)? {
             return Ok(sdk_paths(root));
         }
-        // 2. The workload SDK resolver of the running SDK. A locator name
-        //    is [`resolve_sdk`]'s to route before it reaches here.
-        if !workloads::is_workload_locator(name) {
+        // 2. The workload SDK resolver of the running SDK, unless it is
+        //    switched off, when it answers nothing. A locator name is
+        //    [`resolve_sdk`]'s to route before it reaches here.
+        if !workloads::is_workload_locator(name) && !workload_env.resolver_switched_off {
+            workload_resolver_registered(host_dir, observer)?;
             match workloads::resolve_workload_pack(
                 name,
                 dotnet_root,
@@ -304,6 +306,18 @@ pub fn locate_dotnet_sdk(
                 observer,
             )? {
                 workloads::WorkloadPackResolution::NotAPack => {}
+                // The `<Project Sdk="Name/Version">` shorthand hands the
+                // resolver the name, and an explicit `<Import Sdk=...>` the
+                // whole spelling, which names no pack; the resolver is handed
+                // only the spelling, so it cannot tell which.
+                _ if per_import_version.is_some() => {
+                    return Err(SdkResolveError::UnsupportedLayout {
+                        reason: format!(
+                            "{sdk_name} names the workload pack {name}, which only the \
+                             <Project Sdk=...> shorthand would look up"
+                        ),
+                    });
+                }
                 workloads::WorkloadPackResolution::Installed(root) => {
                     return Ok(sdk_paths(root));
                 }
@@ -359,6 +373,33 @@ pub fn locate_dotnet_sdk(
                 available,
             })
         }
+    }
+}
+
+/// Whether the MSBuild of the SDK in `host_dir` loads the workload SDK
+/// resolver, or the decline. `SdkResolverLoader` takes a resolver from its
+/// folder under `SdkResolvers` through the manifest of the folder's name in it,
+/// which every installed SDK ships; without one the resolver is not loaded
+/// and the workload names fall to the resolvers after it, which this does
+/// not model.
+fn workload_resolver_registered(
+    host_dir: &Path,
+    observer: &Observer,
+) -> Result<(), SdkResolveError> {
+    const RESOLVER: &str = "Microsoft.NET.Sdk.WorkloadMSBuildSdkResolver";
+    let manifest = host_dir
+        .join("SdkResolvers")
+        .join(RESOLVER)
+        .join(format!("{RESOLVER}.xml"));
+    if crate::dotnet_io::file_exists(observer, &manifest) {
+        Ok(())
+    } else {
+        Err(SdkResolveError::UnsupportedLayout {
+            reason: format!(
+                "the running SDK registers no workload SDK resolver at {}",
+                manifest.display()
+            ),
+        })
     }
 }
 
@@ -761,6 +802,7 @@ pub fn resolve_sdk(
 ) -> Result<SdkResolution, SdkResolveError> {
     if workloads::is_workload_locator(sdk_name) {
         let version_dir = running_sdk_dir(dotnet_root, spec, observer)?;
+        workload_resolver_registered(&version_dir, observer)?;
         return workloads::resolve_workload_locator(
             sdk_name,
             dotnet_root,

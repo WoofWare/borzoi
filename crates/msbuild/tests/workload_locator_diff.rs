@@ -3545,6 +3545,7 @@ fn the_installed_manifests_imported_packs_resolve_as_their_own_resolvers_do() {
             sdk.display()
         );
         let fresh = FreshPackRoot::new(&sdk);
+        // Installed-pack answers on the fresh root, where every pack is.
         let mut installed = 0;
         for (dotnet_root, user_root, architecture) in [
             (real_root, Some(user_root.as_path()), Some(architecture)),
@@ -3562,7 +3563,10 @@ fn the_installed_manifests_imported_packs_resolve_as_their_own_resolvers_do() {
                 let theirs = theirs_pack(&mut oracle, name, dotnet_root, &version, user_root);
                 match (&ours, &theirs) {
                     (Some(ours), Ok(theirs)) if ours == theirs => {
-                        installed += usize::from(matches!(ours, PackAnswer::Single(_)));
+                        installed += usize::from(
+                            dotnet_root == fresh.dotnet_root
+                                && matches!(ours, PackAnswer::Single(_)),
+                        );
                     }
                     _ => failures.push(format!(
                         "{} under {}: {name}: we say {ours:?}, the resolver {theirs:?}",
@@ -3573,13 +3577,14 @@ fn the_installed_manifests_imported_packs_resolve_as_their_own_resolvers_do() {
             }
         }
         println!(
-            "{}: {} imported pack names, {installed} answers an installed pack",
+            "{}: {} imported pack names, {installed} answers an installed pack on the \
+             fresh root",
             sdk.display(),
             names.len()
         );
         assert!(
             installed > 0,
-            "{}: no answer was an installed pack",
+            "{}: no answer on the fresh root was an installed pack",
             sdk.display()
         );
     }
