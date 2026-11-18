@@ -904,6 +904,37 @@ fn metadata_evaluated_item_by_item_is_not_claimed() {
 }
 
 #[test]
+fn an_import_a_group_may_not_make_does_not_make_a_later_one_a_duplicate() {
+    // In a group MSBuild takes, the first import's own condition is false, so
+    // MSBuild never imports `cs/a.props`, and the second, `CS/a.props`, is no
+    // duplicate: where names are case-sensitive it is another file, which is
+    // malformed. The first import's own condition is undecidable, so it
+    // cannot make the second one a duplicate. Each import's spelling is tried
+    // plain and as a wildcard. A case-insensitive file system cannot hold the
+    // two files, and makes no claim.
+    for first in ["cs/a.props", "cs/*.props"] {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("proj/cs")).unwrap();
+        if crate::observed::host_fs::symlink_metadata(tmp.path().join("proj/CS")).is_ok() {
+            return;
+        }
+        let project_path = project(
+            &tmp,
+            &format!(
+                "  <ImportGroup Condition=\"{UNDECIDED_TRUE}\">\n    <Import Project=\"{first}\" \
+                 Condition=\"$([System.String]::IsNullOrWhiteSpace('x'))\" />\n    \
+                 <Import Project=\"CS/a.props\" />\n  </ImportGroup>"
+            ),
+            &[
+                ("proj/cs/a.props", "<Project />"),
+                ("proj/CS/a.props", "<Project"),
+            ],
+        );
+        assert_withdrawn(&parse_file(&project_path), &["Before", "After"]);
+    }
+}
+
+#[test]
 fn an_undecided_import_with_a_written_backslash_is_judged_as_written_with_a_slash() {
     // MSBuild turns the attribute's own `\` into `/` before expanding it, so
     // `sub\..\there.props` is `there.props` beside the project, which loads.

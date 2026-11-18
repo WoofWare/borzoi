@@ -682,10 +682,18 @@ pub(super) fn undecided_import_group(
         return;
     }
     // The group's imports run in order, so a later one may be a duplicate of an
-    // earlier one MSBuild would have made.
+    // earlier one MSBuild would have made. Only an import MSBuild makes
+    // whenever it takes the group, one with no condition of its own, makes a
+    // later one a duplicate: one under a condition of its own may not be made
+    // at all, so what it would import is judged on its own branch, and a later
+    // import of the same file is judged as though it were the first.
     let mut seen = HashSet::new();
     for child in node.children().filter(|c| c.has_tag_name("Import")) {
-        undecided_import_within(child, current_file_dir, &mut seen, state);
+        if attribute(child, "Condition").is_none() {
+            undecided_import_within(child, current_file_dir, &mut seen, state);
+        } else {
+            undecided_import_within(child, current_file_dir, &mut seen.clone(), state);
+        }
     }
 }
 
@@ -787,45 +795,32 @@ fn may_load_nothing(
 }
 
 /// [`may_load_nothing`] for a wildcard segment, `relative` with its `\` read as
-/// `/`: a wildcard matching nothing loads nothing, silently, but MSBuild loads
-/// each match, so one that does not load fails the project. On Unix MSBuild
-/// loads a match with each `\` of its name read as `/`, which names a file the
-/// walk does not, and a wildcard in the directory part is one the walk does
-/// not expand: both may load nothing.
+/// `/`: the files the walk would import for it ([`super::wildcard_import`]),
+/// each of which MSBuild loads, so one that does not load fails the project.
+/// On Unix MSBuild loads a match with each `\` of its name read as `/`, which
+/// names a file the walk does not; and a shape the walk does not expand, or a
+/// directory it cannot list, may hold anything.
 fn wildcard_may_load_nothing(
     relative: &str,
     current_file_dir: &Path,
     seen: &mut HashSet<String>,
     state: &State<'_>,
 ) -> Option<UnloadableImport> {
-    let path = current_file_dir.join(relative);
-    let pattern = path.file_name()?.to_string_lossy().into_owned();
-    let dir = path.parent()?;
-    if dir.to_string_lossy().contains(['*', '?']) {
-        return Some(UnloadableImport::PathUndecided);
-    }
-    let Ok(entries) = observed::read_dir(state.observer, &normalise(dir)) else {
-        // A missing directory matches nothing; one the walk cannot list may
-        // hold anything.
-        return (observed::link_kind(state.observer, &normalise(dir)).is_ok())
-            .then_some(UnloadableImport::PathUndecided);
-    };
-    entries
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .kind
-                .as_ref()
-                .is_ok_and(|&kind| kind != EntryKind::Dir)
-        })
-        .filter(|entry| super::wildcard_matches(&pattern, &entry.name.to_string_lossy()))
-        .find_map(|entry| {
-            if cfg!(unix) && entry.name.as_encoded_bytes().contains(&b'\\') {
+    match super::wildcard_import(relative, true, current_file_dir, state.observer) {
+        super::WildcardImport::Matches(matches) => matches.iter().find_map(|path| {
+            let name = path
+                .file_name()
+                .map(|n| n.as_encoded_bytes())
+                .unwrap_or_default();
+            if cfg!(unix) && name.contains(&b'\\') {
                 return Some(UnloadableImport::PathUndecided);
             }
-            load_failure(state, &entry.path, seen).map(UnloadableImport::Failed)
-        })
+            load_failure(state, path, seen).map(UnloadableImport::Failed)
+        }),
+        super::WildcardImport::Unmodelled | super::WildcardImport::Unlisted { .. } => {
+            Some(UnloadableImport::PathUndecided)
+        }
+    }
 }
 
 /// Whether the walk cannot compute `project`: it reads a name not

@@ -6377,6 +6377,90 @@ fn follow_wildcard_import(
     span: Range<usize>,
     state: &mut State<'_>,
 ) {
+    match wildcard_import(normalised, collapse, current_file_dir, state.observer) {
+        WildcardImport::Matches(matches) => {
+            for matched in matches {
+                walk_import_file(&matched, span.clone(), collapse, state);
+            }
+        }
+        WildcardImport::Unmodelled => {
+            // Push the diagnostic too, not just the uncertainty: silently
+            // returning would leave `is_partial` false with imports dropped.
+            state.push(
+                DiagnosticKind::UnsupportedConstruct {
+                    element: format!(
+                        "Import Project={normalised:?} (wildcard directory component)"
+                    ),
+                },
+                span.clone(),
+            );
+            state.mark_structural_skip(
+                StructuralCompileItemUncertainty::ImportProjectUnresolved {
+                    project: normalised.to_string(),
+                },
+                span,
+            );
+        }
+        WildcardImport::Unlisted { dir, message } => {
+            // Unreadable directory is NOT zero matches — files may well
+            // be there, and the dropped imports could have carried
+            // anything. Diagnostic + uncertainty, same as the wildcard-
+            // directory arm above.
+            state.push(
+                DiagnosticKind::ImportFailed {
+                    path: dir,
+                    reason: ImportFailReason::Io { message },
+                },
+                span.clone(),
+            );
+            state.mark_structural_skip(
+                StructuralCompileItemUncertainty::ImportProjectUnresolved {
+                    project: normalised.to_string(),
+                },
+                span,
+            );
+        }
+    }
+}
+
+/// What a wildcard import of `normalised` (a path with each `\` read as
+/// `/`) from `current_file_dir` names: the one reading of a wildcard import,
+/// shared by the walk ([`follow_wildcard_import`]) and by the judgement of
+/// one it skipped under a gate it could not decide
+/// (`rejection::may_load_nothing`), so the two cannot differ.
+pub(super) enum WildcardImport {
+    /// The files MSBuild loads, in the order it loads them.
+    Matches(Vec<PathBuf>),
+    /// A wildcard in the directory part, or no file part: a shape the walk
+    /// does not expand.
+    Unmodelled,
+    /// The directory could not be listed.
+    Unlisted { dir: PathBuf, message: String },
+}
+
+/// [`WildcardImport`] of `normalised`. Pinned against `dotnet msbuild`
+/// 10.0.401:
+///
+/// - a spelling ending in a separator matches nothing, and neither does one
+///   whose directory part names a file (or nothing);
+/// - a match is any entry whose target is not a directory: a directory, or
+///   a link to one, is no match, while a dangling link is one (and fails to
+///   load), as is a link to a file;
+/// - matching is case-insensitive, and matches load in ordinal-ignore-case
+///   order (`a.props` before `B.props`).
+///
+/// With `collapse`, the directory is collapsed as text before it is listed,
+/// as MSBuild collapses the fixed part of a wildcard path, so the files
+/// listed are the ones beside a symlink's text, not its target's.
+pub(super) fn wildcard_import(
+    normalised: &str,
+    collapse: bool,
+    current_file_dir: &Path,
+    observer: &observed::Observer,
+) -> WildcardImport {
+    if normalised.ends_with('/') {
+        return WildcardImport::Matches(Vec::new());
+    }
     let path = current_file_dir.join(normalised);
     let file_pattern = path
         .file_name()
@@ -6388,63 +6472,38 @@ fn follow_wildcard_import(
     } else {
         import_open_path(written_dir, collapse)
     };
-    let dir = dir.as_path();
     if dir.to_string_lossy().contains(['*', '?']) || file_pattern.is_empty() {
-        // Push the diagnostic too, not just the uncertainty: silently
-        // returning would leave `is_partial` false with imports dropped.
-        state.push(
-            DiagnosticKind::UnsupportedConstruct {
-                element: format!("Import Project={normalised:?} (wildcard directory component)"),
-            },
-            span.clone(),
-        );
-        state.mark_structural_skip(
-            StructuralCompileItemUncertainty::ImportProjectUnresolved {
-                project: normalised.to_string(),
-            },
-            span,
-        );
-        return;
+        return WildcardImport::Unmodelled;
     }
-    let entries = match observed::read_dir(state.observer, dir) {
+    let entries = match observed::read_dir(observer, &dir) {
         Ok(entries) => entries,
+        // A missing directory, or a file where a directory was named, is
+        // zero matches: MSBuild-silent.
         Err(e)
             if matches!(
                 e.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            // Missing directory (or a file where a directory was named)
-            // ≡ zero matches: MSBuild-silent.
-            return;
+            return WildcardImport::Matches(Vec::new());
         }
         Err(e) => {
-            // Unreadable directory is NOT zero matches — files may well
-            // be there, and the dropped imports could have carried
-            // anything. Diagnostic + uncertainty, same as the wildcard-
-            // directory arm above.
-            state.push(
-                DiagnosticKind::ImportFailed {
-                    path: dir.to_path_buf(),
-                    reason: ImportFailReason::Io {
-                        message: e.to_string(),
-                    },
-                },
-                span.clone(),
-            );
-            state.mark_structural_skip(
-                StructuralCompileItemUncertainty::ImportProjectUnresolved {
-                    project: normalised.to_string(),
-                },
-                span,
-            );
-            return;
+            return WildcardImport::Unlisted {
+                dir,
+                message: e.to_string(),
+            };
         }
     };
     let mut matches: Vec<PathBuf> = entries
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|entry| entry.kind.as_ref().is_ok_and(|&k| k != EntryKind::Dir))
+        .filter(|entry| match entry.kind {
+            Ok(EntryKind::Dir) | Err(_) => false,
+            // A link is a match unless its target is a directory; a dangling
+            // one is (and fails to load).
+            Ok(EntryKind::Symlink) => observed::kind(observer, &entry.path) != Ok(EntryKind::Dir),
+            Ok(EntryKind::File | EntryKind::Other) => true,
+        })
         .filter(|entry| wildcard_matches(&file_pattern, &entry.name.to_string_lossy()))
         .map(|entry| entry.path)
         .collect();
@@ -6461,9 +6520,7 @@ fn follow_wildcard_import(
         };
         key(a).cmp(&key(b)).then_with(|| a.cmp(b))
     });
-    for matched in matches {
-        walk_import_file(&matched, span.clone(), collapse, state);
-    }
+    WildcardImport::Matches(matches)
 }
 
 /// Match `pattern` (with `*` = any run, `?` = any single char) against

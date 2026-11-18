@@ -94,6 +94,15 @@ const IMPORTS: &[(&str, &str)] = &[
     ("glob-nothing", "missing*.props"),
     ("trailing", "sub/i.props/"),
     ("escaped-nul", "sub/i%00.props"),
+    // A wildcard spelt as a directory matches nothing, though `tr` holds a
+    // malformed `bad.props`.
+    ("glob-trailing", "tr/*.props/"),
+    // A wildcard under a file matches nothing.
+    ("glob-under-file", "sub/i.props/*.props"),
+    // `links/d.props` links to a directory, which is no match.
+    ("glob-dir-link", "links/*.props"),
+    // `dl/dangling.props` is a dangling link, which matches and fails.
+    ("glob-dangling", "dl/*.props"),
 ];
 
 /// The imports the walk models, which must commit when ungated.
@@ -108,7 +117,40 @@ const CLEAN_IMPORTS: &[&str] = &[
     "written-backslash",
     "glob",
     "glob-nothing",
+    "glob-trailing",
+    "glob-under-file",
+    "glob-dir-link",
 ];
+
+/// Imports in pairs, gate and all: a gated import and a later one of the same
+/// file, or of the same name in another case, which MSBuild skips as a
+/// duplicate only if it made the first. `{T}` is a condition MSBuild takes and
+/// `{F}` one it does not, both undecidable to the walk. `cs/a.props` loads,
+/// and on a case-sensitive file system `CS/a.props` is malformed.
+const PAIRS: &[(&str, &str)] = &[
+    (
+        "gated-then-ungated",
+        "<Import Project=\"sub/i.props\" Condition=\"{T}\" />\n  <Import Project=\"sub/i.props\" />",
+    ),
+    (
+        "gated-false-then-case-variant",
+        "<Import Project=\"cs/*.props\" Condition=\"{F}\" />\n  <Import Project=\"CS/a.props\" />",
+    ),
+    (
+        "group-false-then-case-variant",
+        "<ImportGroup Condition=\"{T}\">\n    <Import Project=\"cs/*.props\" Condition=\"{F}\" />\n    \
+         <Import Project=\"CS/a.props\" />\n  </ImportGroup>",
+    ),
+    (
+        "group-false-then-same",
+        "<ImportGroup Condition=\"{T}\">\n    <Import Project=\"cs/a.props\" Condition=\"{F}\" />\n    \
+         <Import Project=\"cs/a.props\" />\n  </ImportGroup>",
+    ),
+];
+
+/// The pairs that must commit: whether or not MSBuild makes the first import,
+/// every file named loads.
+const CLEAN_PAIRS: &[&str] = &["gated-then-ungated", "group-false-then-same"];
 
 /// An SDK import's `Project`: root-relative, or the absolute path of
 /// `<case>/abs.props` (`{case}`), which `Path.Combine` takes over the root.
@@ -130,10 +172,15 @@ enum Gate {
 /// The condition the walk cannot decide and MSBuild takes.
 const UNDECIDED: &str = "$([System.String]::IsNullOrWhiteSpace(''))";
 
+/// A condition the walk cannot decide and MSBuild does not take.
+const UNDECIDED_FALSE: &str = "$([System.String]::IsNullOrWhiteSpace('x'))";
+
 #[derive(Debug, Clone)]
 enum Import {
     Plain(usize),
     Sdk(usize),
+    /// A [`PAIRS`] entry, which brings its own gates.
+    Pair(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -155,10 +202,10 @@ impl Case {
         };
         let imports = (0..1 + rng.below(2))
             .map(|_| {
-                let import = if rng.below(4) == 0 {
-                    Import::Sdk(rng.below(SDK_IMPORTS.len()))
-                } else {
-                    Import::Plain(rng.below(IMPORTS.len()))
+                let import = match rng.below(8) {
+                    0 | 1 => Import::Sdk(rng.below(SDK_IMPORTS.len())),
+                    2 => Import::Pair(rng.below(PAIRS.len())),
+                    _ => Import::Plain(rng.below(IMPORTS.len())),
                 };
                 let gate = *rng.pick(&[
                     Gate::None,
@@ -184,23 +231,20 @@ impl Case {
         match import {
             Import::Plain(i) => IMPORTS[*i].0,
             Import::Sdk(i) => SDK_IMPORTS[*i].0,
+            Import::Pair(i) => PAIRS[*i].0,
         }
     }
 
     /// Whether every spelling in the case is one the walk models, so it must
-    /// commit the body's last write. An SDK import is modelled when the root
-    /// holds no `\`, or when the import is absolute and so takes no part of
-    /// the root.
+    /// commit the body's last write, whatever gates its imports: each file it
+    /// may import loads. An SDK import is modelled when the root holds no
+    /// `\`, or when the import is absolute and so takes no part of the root.
     fn must_commit(&self) -> bool {
         CLEAN_PROJECT.contains(&self.project_class())
-            && self.imports.iter().all(|(import, gate)| {
-                *gate == Gate::None
-                    && match import {
-                        Import::Plain(i) => CLEAN_IMPORTS.contains(&IMPORTS[*i].0),
-                        Import::Sdk(i) => {
-                            !self.backslash_sdk || SDK_IMPORTS[*i].0 == "sdk-absolute"
-                        }
-                    }
+            && self.imports.iter().all(|(import, _)| match import {
+                Import::Plain(i) => CLEAN_IMPORTS.contains(&IMPORTS[*i].0),
+                Import::Sdk(i) => !self.backslash_sdk || SDK_IMPORTS[*i].0 == "sdk-absolute",
+                Import::Pair(i) => CLEAN_PAIRS.contains(&PAIRS[*i].0),
             })
     }
 
@@ -222,6 +266,14 @@ impl Case {
              </PropertyGroup>\n",
         );
         for (import, gate) in &self.imports {
+            if let Import::Pair(i) = import {
+                let pair = PAIRS[*i]
+                    .1
+                    .replace("{T}", UNDECIDED)
+                    .replace("{F}", UNDECIDED_FALSE);
+                xml.push_str(&format!("  {pair}\n"));
+                continue;
+            }
             let (attribute, sdk) = match import {
                 Import::Plain(i) => (
                     IMPORTS[*i].1.replace("{dir}", &dir.to_string_lossy()),
@@ -233,6 +285,7 @@ impl Case {
                         .replace("{case}", &case_dir.to_string_lossy()),
                     " Sdk=\"S\"".to_string(),
                 ),
+                Import::Pair(_) => unreachable!("rendered above"),
             };
             let attribute = attribute.replace('&', "&amp;").replace('"', "&quot;");
             let element =
@@ -283,7 +336,13 @@ struct Shared {
 
 impl Shared {
     fn new() -> Shared {
-        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        // `BORZOI_PATH_SPELLING_ROOT` moves the cases to another file system:
+        // the case-variant pairs only tell anything apart where names are
+        // case-sensitive (CI's Linux runners; a case-sensitive volume on
+        // macOS).
+        let base = std::env::var_os("BORZOI_PATH_SPELLING_ROOT")
+            .map_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")), PathBuf::from);
+        let root = base.join(format!(
             "path-spelling-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -346,6 +405,18 @@ fn lay_out(case_dir: &Path, xml: &str) {
         std::fs::write(proj.join(name), imported(marker)).expect("write import");
     }
     std::fs::write(case_dir.join("abs.props"), imported("abs")).expect("write");
+    for dir in ["tr", "links", "dl", "cs", "realdir"] {
+        std::fs::create_dir_all(proj.join(dir)).expect("mkdir");
+    }
+    std::fs::write(proj.join("tr/bad.props"), "<Project").expect("write");
+    std::fs::write(proj.join("links/ok.props"), imported("links-ok")).expect("write");
+    std::os::unix::fs::symlink("../realdir", proj.join("links/d.props")).expect("symlink");
+    std::os::unix::fs::symlink("../nowhere", proj.join("dl/dangling.props")).expect("symlink");
+    std::fs::write(proj.join("cs/a.props"), imported("cs-a")).expect("write");
+    if host_fs::symlink_metadata(proj.join("CS")).is_err() {
+        std::fs::create_dir_all(proj.join("CS")).expect("mkdir");
+        std::fs::write(proj.join("CS/a.props"), "<Project").expect("write");
+    }
     // What the file system reaches for `proj/far/../../proj/sub/i.props`.
     std::fs::create_dir_all(case_dir.join("decoy/proj/sub")).expect("mkdir");
     std::fs::write(case_dir.join("decoy/proj/sub/i.props"), imported("decoy")).expect("write");
@@ -358,6 +429,8 @@ fn lay_out(case_dir: &Path, xml: &str) {
 #[derive(Debug, Default)]
 struct Outcome {
     refused: bool,
+    /// The must-commit obligation was checked.
+    checked_must_commit: bool,
     msbuild_rejected: bool,
     committed: usize,
     findings: Vec<String>,
@@ -393,8 +466,13 @@ fn evaluate(shared: &mut Shared, case: &Case) -> Outcome {
 
     let project = match ProjectFile::read(&spelt, &Observer::new()) {
         Ok(project) => project,
-        Err(_) => {
+        Err(e) => {
             outcome.refused = true;
+            if CLEAN_PROJECT.contains(&case.project_class()) {
+                outcome.findings.push(format!(
+                    "a modelled project spelling was refused: {e}\n{describe}"
+                ));
+            }
             let _ = std::fs::remove_dir_all(&case_dir);
             return outcome;
         }
@@ -458,6 +536,7 @@ fn evaluate(shared: &mut Shared, case: &Case) -> Outcome {
                     ));
                 }
             }
+            outcome.checked_must_commit |= case.must_commit();
             if case.must_commit() && !committed.iter().any(|(name, _)| *name == "After") {
                 outcome.findings.push(format!(
                     "a modelled case did not commit After: {:?} (diagnostics {:?})",
@@ -551,7 +630,7 @@ fn sweep(seed: u64, cases: usize) -> Census {
         } else {
             "declined"
         };
-        census.must_commit += usize::from(case.must_commit());
+        census.must_commit += usize::from(outcome.checked_must_commit);
         let mut routes = vec![format!("project {}", case.project_class())];
         for (import, gate) in &case.imports {
             routes.push(format!(
