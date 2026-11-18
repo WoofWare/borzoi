@@ -1467,9 +1467,12 @@ impl PackOrLayout {
         )
     }
 
+    /// The one root `name` resolves to: an ordinary SDK's, or a workload
+    /// pack's `Sdk` folder.
     fn root_of(&self, name: &str, env: &WorkloadEnvironment<'_>) -> PathBuf {
         match self.resolve(name, env) {
             Ok(SdkResolution::Single(paths)) => paths.root,
+            Ok(SdkResolution::Roots(roots)) if roots.len() == 1 => roots[0].clone(),
             other => panic!("{name} resolves to {other:?}"),
         }
     }
@@ -1633,20 +1636,28 @@ fn a_versioned_reference_to_a_workload_pack_declines() {
 }
 
 #[test]
-fn a_pack_folder_without_an_entry_point_declines() {
+fn a_workload_pack_is_a_root_an_import_resolves_against() {
     // The resolver serves the pack's `Sdk` folder on the pack directory's
-    // existence alone; MSBuild then fails to import a missing entry point.
+    // existence alone, whatever it holds: the import's own `Project` is
+    // judged against it, as for a locator, and `locate_dotnet_sdk`, which
+    // serves only a verified `Sdk.props` and `Sdk.targets`, declines it.
     let layout = PackOrLayout::new(CONTOSO_PACK);
-    let pack = install_contoso_pack(&layout.root);
-    assert!(layout.resolve("Contoso.Pack", &no_user_env()).is_ok());
-    fs::remove_file(pack.join("Sdk/Sdk.targets")).unwrap();
+    let pack = layout.root.join("packs/Contoso.Pack/1.0.0");
+    fs::create_dir_all(&pack).unwrap();
+    assert_eq!(
+        layout.resolve("Contoso.Pack", &no_user_env()).unwrap(),
+        SdkResolution::Roots(vec![pack.join("Sdk")])
+    );
     assert!(matches!(
-        layout.resolve("Contoso.Pack", &no_user_env()),
-        Err(SdkResolveError::UnsupportedLayout { .. })
-    ));
-    fs::remove_dir_all(pack.join("Sdk")).unwrap();
-    assert!(matches!(
-        layout.resolve("Contoso.Pack", &no_user_env()),
+        crate::locate_dotnet_sdk(
+            &layout.root,
+            Some(&layout.nuget),
+            "Contoso.Pack",
+            None,
+            Some(&layout.pins),
+            &no_user_env(),
+            &Observer::new(),
+        ),
         Err(SdkResolveError::UnsupportedLayout { .. })
     ));
 }

@@ -900,8 +900,9 @@ fn the_sweep_keeps_permissions() {
 /// An `<Import Sdk="…"/>` of a workload pack the running SDK does not ship
 /// walks the pack's `Sdk` folder, as MSBuild's workload resolver serves it,
 /// and the read set covers what the resolution read ([`super::sound`] sweeps
-/// the tree, the manifest and the pack directory among it). A pack that is
-/// not installed declines.
+/// the tree, the manifest and the pack directory among it). The pack ships
+/// `Sdk.props` alone, as some real packs do, which an import of it needs. A
+/// pack that is not installed declines.
 #[test]
 fn a_workload_pack_named_as_an_sdk_is_walked_soundly() {
     for installed in [true, false] {
@@ -919,11 +920,6 @@ fn a_workload_pack_named_as_an_sdk_is_walked_soundly() {
                 &dotnet,
                 "packs/Contoso.Pack/1.0.0/Sdk/Sdk.props",
                 "<Project><PropertyGroup><FromPack>yes</FromPack></PropertyGroup></Project>",
-            );
-            write_at(
-                &dotnet,
-                "packs/Contoso.Pack/1.0.0/Sdk/Sdk.targets",
-                "<Project />",
             );
         }
         let source =

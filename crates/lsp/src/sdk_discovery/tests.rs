@@ -1738,7 +1738,7 @@ fn a_workload_pack_resolves_under_the_muxer_s_architecture() {
     fs::write(pack.join("Sdk/Sdk.targets"), "<Project/>").unwrap();
     let observer = Observer::new();
     match disc.resolve("Contoso.Pack", &observer) {
-        Ok(SdkResolution::Single(paths)) => assert_eq!(paths.root, pack.join("Sdk")),
+        Ok(SdkResolution::Roots(roots)) => assert_eq!(roots, vec![pack.join("Sdk")]),
         other => panic!("{other:?}"),
     }
     let (reads, _) = observer.finish();
@@ -1867,8 +1867,13 @@ fn workload_override_detection_follows_upstream_value_semantics() {
     );
     assert!(!with_var("UNRELATED", "x").workload_overrides_present);
     // An additional SDK resolver folder, which `??` takes even when empty.
-    assert!(with_var("MSBUILDADDITIONALSDKRESOLVERSFOLDER_NET", "").workload_overrides_present);
-    assert!(with_var("MSBUILDADDITIONALSDKRESOLVERSFOLDER", "/r").workload_overrides_present);
+    for (name, value) in [
+        ("MSBUILDADDITIONALSDKRESOLVERSFOLDER_NET", ""),
+        ("MSBUILDADDITIONALSDKRESOLVERSFOLDER", "/r"),
+    ] {
+        let env = with_var(name, value);
+        assert!(env.sdk_resolvers_folder_override && !env.workload_overrides_present);
+    }
     // The resolver's own switch: off only at `false`, in any case.
     let switched_off = |value| with_var("MSBuildEnableWorkloadResolver", value);
     assert!(switched_off("FALSE").workload_resolver_switched_off);

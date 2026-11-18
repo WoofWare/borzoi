@@ -122,11 +122,12 @@ pub struct SdkPaths {
 ///
 /// Ordinary on-disk SDKs are [`SdkResolution::Single`]: exactly one
 /// root, with the two well-known entry points the `<Project Sdk="…">`
-/// shorthand needs. So is an installed workload pack named as an SDK, whose
-/// root is the pack's `Sdk` folder. Resolver-backed locator SDKs — today the workload
+/// shorthand needs. Resolver-backed locator SDKs — today the workload
 /// locators `Microsoft.NET.SDK.WorkloadManifestTargetsLocator` /
 /// `Microsoft.NET.SDK.WorkloadAutoImportPropsLocator` — are
-/// [`SdkResolution::Roots`]: zero or more roots, in import order, each
+/// [`SdkResolution::Roots`], and so is an installed workload pack named as
+/// an SDK (its `Sdk` folder, which the workload resolver serves whatever it
+/// holds): zero or more roots, in import order, each
 /// of which the import's `Project` is resolved against (zero roots
 /// means the import cleanly contributes nothing, exactly as MSBuild
 /// treats an empty workload-resolver result). `Roots` carries no

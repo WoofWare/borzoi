@@ -476,8 +476,9 @@ fn resolve_project_sdk(root: Node<'_, '_>, state: &mut State<'_>) -> Option<SdkP
         Ok(SdkResolution::Roots(_)) => {
             // A locator-style resolution has no Sdk.props/Sdk.targets entry
             // points, so it cannot back the `<Project Sdk="…">` shorthand.
-            // No real project names a locator here; degrade like an
-            // unresolvable SDK rather than inventing entry points.
+            // No real project names a locator or a workload pack here;
+            // degrade like an unresolvable SDK rather than inventing entry
+            // points.
             state.push(
                 DiagnosticKind::UnsupportedConstruct {
                     element: format!("Project Sdk={sdk:?} (locator-style resolution)"),

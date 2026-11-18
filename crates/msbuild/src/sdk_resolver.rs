@@ -165,8 +165,10 @@ impl std::error::Error for SdkResolveError {}
 /// - **Workload packs** — the workload SDK resolver (priority 4000, ahead of
 ///   NuGet's 6000) looks the name up as a workload pack id
 ///   ([`workloads::resolve_workload_pack`], under `workload_env`) wherever the
-///   running SDK does not ship it. An installed pack serves its `Sdk` folder;
-///   no pack of the name for the host passes the name on to NuGet. Its
+///   running SDK does not ship it. An installed pack serves its `Sdk` folder
+///   (a root an import resolves against, which [`resolve_sdk`] returns as
+///   [`SdkResolution::Roots`], and this declines, having no entry points to
+///   serve); no pack of the name for the host passes the name on to NuGet. Its
 ///   manifests load before it answers, so a workload state we cannot resolve
 ///   exactly declines every name the running SDK does not ship.
 ///
@@ -244,6 +246,39 @@ pub fn locate_dotnet_sdk(
     workload_env: &workloads::WorkloadEnvironment<'_>,
     observer: &Observer,
 ) -> Result<SdkPaths, SdkResolveError> {
+    match locate(
+        dotnet_root,
+        nuget_packages_dir,
+        sdk_name,
+        spec,
+        msbuild_sdks,
+        workload_env,
+        observer,
+    )? {
+        SdkResolution::Single(paths) => Ok(paths),
+        SdkResolution::Roots(roots) => Err(SdkResolveError::UnsupportedLayout {
+            reason: format!(
+                "{sdk_name} is a workload pack, whose folder {roots:?} an import resolves \
+                 against, with no Sdk.props and Sdk.targets of its own to serve"
+            ),
+        }),
+    }
+}
+
+/// [`locate_dotnet_sdk`], with a workload pack's answer as
+/// [`SdkResolution::Roots`]: the workload resolver serves the pack's `Sdk`
+/// folder on the pack directory's existence alone, so it is a root an import
+/// resolves its `Project` against (and judges it, as for the locators), not
+/// a pair of entry points this has verified.
+fn locate(
+    dotnet_root: &Path,
+    nuget_packages_dir: Option<&Path>,
+    sdk_name: &str,
+    spec: Option<&VersionSpec>,
+    msbuild_sdks: Option<&std::collections::BTreeMap<String, SdkVersion>>,
+    workload_env: &workloads::WorkloadEnvironment<'_>,
+    observer: &Observer,
+) -> Result<SdkResolution, SdkResolveError> {
     // MSBuild allows `Sdk="Name/Version"` (e.g.
     // `Sdk="Microsoft.Build.NoTargets/1.0.80"`): the version half names
     // the package version NuGet's resolver looks for.
@@ -296,7 +331,7 @@ pub fn locate_dotnet_sdk(
         let host_dir = &host_versions[idx].1;
         let sdk_root = host_dir.join("Sdks").join(name).join("Sdk");
         if let Some(root) = sdk_directory(sdk_root, observer)? {
-            return Ok(sdk_paths(root));
+            return Ok(SdkResolution::Single(sdk_paths(root)));
         }
         // 2. The workload SDK resolver of the running SDK, unless it is
         //    switched off, when it answers nothing. A locator name is
@@ -322,17 +357,8 @@ pub fn locate_dotnet_sdk(
                         ),
                     });
                 }
-                // It serves the `Sdk` folder whether or not it exists.
                 workloads::WorkloadPackResolution::Installed(root) => {
-                    return match sdk_directory(root.clone(), observer)? {
-                        Some(root) => Ok(sdk_paths(root)),
-                        None => Err(SdkResolveError::UnsupportedLayout {
-                            reason: format!(
-                                "the workload resolver serves {}, which does not exist",
-                                root.display()
-                            ),
-                        }),
-                    };
+                    return Ok(SdkResolution::Roots(vec![root]));
                 }
                 workloads::WorkloadPackResolution::Missing { version } => {
                     return Err(SdkResolveError::UnsupportedLayout {
@@ -375,7 +401,8 @@ pub fn locate_dotnet_sdk(
                 .iter()
                 .position(|v| v == version)
                 .expect("selection returns a candidate from the slice");
-            nuget_served(nuget_candidates[idx].1.clone(), observer).map(sdk_paths)
+            nuget_served(nuget_candidates[idx].1.clone(), observer)
+                .map(|root| SdkResolution::Single(sdk_paths(root)))
         }
         None if nuget_versions.is_empty() => Err(SdkResolveError::NotFound),
         None => {
@@ -796,7 +823,7 @@ pub fn resolve_sdk(
             observer,
         );
     }
-    locate_dotnet_sdk(
+    locate(
         dotnet_root,
         nuget_packages_dir,
         sdk_name,
@@ -805,7 +832,6 @@ pub fn resolve_sdk(
         workload_env,
         observer,
     )
-    .map(SdkResolution::from)
 }
 
 /// The version of `sdk_name` that [`resolve_sdk`] looks for in the NuGet
