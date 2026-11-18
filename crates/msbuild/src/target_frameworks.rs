@@ -78,8 +78,8 @@ mod tests {
 
     fn parse(source: &str) -> crate::ParsedProject {
         parse_fsproj(
-            source,
-            Path::new("/repo/proj/Demo.fsproj"),
+            &crate::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
         )

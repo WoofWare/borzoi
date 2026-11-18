@@ -43,8 +43,8 @@ use lsp_types::{Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Lo
 
 use borzoi_msbuild::{
     DiagnosticKind, DiagnosticOrigin, GlobResolver, ImportFailReason, LoadTimeError, ParseError,
-    RejectionCause, ResolvedItem, SdkResolver, SdkVersion, UnloadableImport, VersionSpec,
-    parse_fsproj_with_imports,
+    ProjectFile, ProjectFileError, RejectionCause, ResolvedItem, SdkResolver, SdkVersion,
+    UnloadableImport, VersionSpec, parse_fsproj_with_imports,
 };
 
 use crate::paths::lexically_normalize;
@@ -189,24 +189,46 @@ fn buffer_diagnostics_observed(
             diags.extend(lang_version_refusal);
             diags
         }
-        Err(ParseError::Xml(e)) => vec![lsp_error_at_origin(format!("malformed XML: {e}"))],
-        // On Unix a project path holding a `\` (a file name the URL may well
-        // carry) is one the walk cannot evaluate as MSBuild does: MSBuild
-        // loads the file the path names with each `\` read as `/`, and builds
-        // it if it exists. That is no build failure, so a warning.
-        Err(e @ ParseError::BackslashInProjectPath(_)) => {
+        Err(BufferError::Parse(ParseError::Xml(e))) => {
+            vec![lsp_error_at_origin(format!("malformed XML: {e}"))]
+        }
+        // A path the walk cannot pair the buffer with as MSBuild would: on
+        // Unix one holding a `\` (a file name the URL may well carry), which
+        // MSBuild reads as `/` and builds the file so named if it exists, or
+        // one not spelt as its full path, whose file MSBuild names another
+        // way. Neither is a build failure, so a warning.
+        Err(BufferError::Project(
+            e @ (ProjectFileError::Backslash(_) | ProjectFileError::NotFullPath { .. }),
+        )) => {
             let mut warning = lsp_error_at_origin(format!("fsproj not evaluated: {e}"));
             warning.severity = Some(DiagnosticSeverity::WARNING);
             vec![warning]
         }
-        // `parse_fsproj_with_imports` rejects only four other inputs:
-        // a relative `project_path` (we always pass a rooted one from
-        // the LSP URL), one whose full path names no file (the root, a
-        // trailing separator, or a NUL), a reserved or invalid name in
+        // The remaining refusals: a relative path (we always pass a rooted
+        // one from the LSP URL), one naming no file (the root, a trailing
+        // separator, or a NUL), a reserved or invalid name in
         // `extra_properties`, and case-insensitive duplicate
         // `extra_properties` keys (we pass an empty map). Each is surfaced
         // as an error at the document head.
         Err(other) => vec![lsp_error_at_origin(format!("fsproj parse failed: {other}"))],
+    }
+}
+
+/// Why a buffer was not evaluated: its path cannot be paired with its text
+/// as MSBuild would pair them ([`ProjectFile::buffer`]), or the evaluation
+/// refused it.
+#[derive(Debug)]
+enum BufferError {
+    Project(ProjectFileError),
+    Parse(ParseError),
+}
+
+impl std::fmt::Display for BufferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BufferError::Project(e) => e.fmt(f),
+            BufferError::Parse(e) => e.fmt(f),
+        }
     }
 }
 
@@ -231,32 +253,26 @@ fn evaluate_buffer(
     build_properties: &HashMap<String, String>,
     disc: Option<&SdkDiscovery>,
     observer: &Observer,
-) -> Result<borzoi_msbuild::ParsedProject, ParseError> {
+) -> Result<borzoi_msbuild::ParsedProject, BufferError> {
+    let project = ProjectFile::buffer(project_path, text).map_err(BufferError::Project)?;
     // The environment the *caller* declared, not the ambient process: a
     // workspace constructed with an explicit `SdkDiscoveryEnv` has asked not to
     // see host variables, and reading `std::env` here would leak them back into
     // `$(…)` evaluation. `SdkDiscoveryEnv::from_process_env` is what fills this
     // with the real environment for production callers.
     let environment = env.build_environment.clone();
-    parse_buffer(
-        text,
-        project_path,
-        build_properties,
-        &environment,
-        disc,
-        observer,
-    )
-    .map(|pass1| {
-        serve_chosen_tfm(
-            pass1,
-            text,
-            project_path,
-            build_properties,
-            &environment,
-            disc,
-            observer,
-        )
-    })
+    parse_buffer(&project, build_properties, &environment, disc, observer)
+        .map_err(BufferError::Parse)
+        .map(|pass1| {
+            serve_chosen_tfm(
+                pass1,
+                &project,
+                build_properties,
+                &environment,
+                disc,
+                observer,
+            )
+        })
 }
 
 /// Parse the buffer with or without an SDK resolver depending on whether
@@ -266,8 +282,7 @@ fn evaluate_buffer(
 /// Unlike the workspace's counterpart this preserves the [`ParseError`]: a
 /// malformed buffer is the one thing this surface reports as an LSP `ERROR`.
 fn parse_buffer(
-    text: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extras: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     disc: Option<&SdkDiscovery>,
@@ -281,22 +296,14 @@ fn parse_buffer(
         Some(d) => {
             let resolver: &SdkResolver<'_> = &|name, observer| d.resolve(name, observer);
             parse_fsproj_with_imports(
-                text,
-                project_path,
+                project,
                 extras,
                 environment,
                 Some(resolver),
                 Some(glob_resolver),
             )
         }
-        None => parse_fsproj_with_imports(
-            text,
-            project_path,
-            extras,
-            environment,
-            None,
-            Some(glob_resolver),
-        ),
+        None => parse_fsproj_with_imports(project, extras, environment, None, Some(glob_resolver)),
     }
     .inspect(crate::observed::report_evaluation)
     .inspect(|parsed| observer.absorb((parsed.read_set.clone(), parsed.read_counts)))
@@ -333,8 +340,7 @@ fn parse_buffer(
 /// See `docs/completed/fsproj-tfm-selection-plan.md` E7 for why this path stays uncached.
 fn serve_chosen_tfm(
     pass1: borzoi_msbuild::ParsedProject,
-    text: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extras: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     disc: Option<&SdkDiscovery>,
@@ -346,7 +352,7 @@ fn serve_chosen_tfm(
     };
     let mut seeded = extras.clone();
     tfm_policy::seed_target_framework_global(&mut seeded, seed);
-    match parse_buffer(text, project_path, &seeded, environment, disc, observer) {
+    match parse_buffer(project, &seeded, environment, disc, observer) {
         // The document can overwrite the seed mid-evaluation, so the seeded
         // pass is not one inner build, and the workspace discards it too
         // (`ReseedOutcome::Overridable`). Diagnosing it would describe a build

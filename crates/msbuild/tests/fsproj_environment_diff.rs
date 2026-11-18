@@ -251,7 +251,13 @@ impl Ours {
 }
 
 fn run_ours(source: &str, proj: &Path, environment: &HashMap<String, String>) -> Ours {
-    let p = parse_fsproj(source, proj, &HashMap::new(), environment).expect("well-formed XML");
+    let p = parse_fsproj(
+        &borzoi_msbuild::ProjectFile::buffer(proj, source)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        environment,
+    )
+    .expect("well-formed XML");
 
     let mut undefined = Vec::new();
     let mut unsupported = Vec::new();

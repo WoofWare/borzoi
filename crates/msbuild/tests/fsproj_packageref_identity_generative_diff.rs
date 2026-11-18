@@ -248,8 +248,8 @@ fn check(oracle: &mut Oracle, refs: &[Ref]) -> bool {
     std::fs::write(&proj, &xml).expect("write project");
 
     let parsed = parse_fsproj_with_imports(
-        &xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,

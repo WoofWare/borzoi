@@ -127,8 +127,8 @@ fn fixture_read_sets_are_sound_through_the_real_sdk_chain() {
             .collect();
         let evaluate = || {
             parse_fsproj_with_imports(
-                &source,
-                &project,
+                &borzoi_msbuild::ProjectFile::buffer(&project, &source)
+                    .expect("a project path spelt as its full path"),
                 &extras,
                 &common::oracle_environment(),
                 Some(&resolver as &borzoi_msbuild::SdkResolver<'_>),
@@ -160,8 +160,13 @@ fn run_snapshot(rel_fsproj: &str, extras: &[(&str, &str)], snap_name: &str) {
     for (k, v) in extras {
         props.insert((*k).into(), (*v).into());
     }
-    let project = parse_fsproj(&source, &fsproj_path, &props, &HashMap::new())
-        .unwrap_or_else(|e| panic!("parse {}: {e}", fsproj_path.display()));
+    let project = parse_fsproj(
+        &borzoi_msbuild::ProjectFile::buffer(&fsproj_path, &source)
+            .expect("a project path spelt as its full path"),
+        &props,
+        &HashMap::new(),
+    )
+    .unwrap_or_else(|e| panic!("parse {}: {e}", fsproj_path.display()));
 
     assert_compile_items_only(&project.items, rel_fsproj);
     assert_no_duplicate_includes(&project.items, &project_dir, rel_fsproj);

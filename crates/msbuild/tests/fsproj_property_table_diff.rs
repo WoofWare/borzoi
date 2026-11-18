@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
-use borzoi_msbuild::{PropertyRead, RejectionCertainty, parse_fsproj};
+use borzoi_msbuild::{ProjectFileError, PropertyRead, RejectionCertainty, parse_fsproj};
 #[cfg(unix)]
 use common::path_spelling;
 use common::{
@@ -183,22 +183,17 @@ fn check_names_at_path(
     }
 }
 
-/// [`check_names_at_path`] with the project at `project_path`, spelt as the
-/// caller spells it (`None` evaluates the document from text, at a path no
-/// file is at).
+/// [`check_names_at_path`] with the project written at `at`, spelt as the
+/// caller spells it, and read back from there (`None` evaluates the document
+/// from text, at a path no file is at).
 fn check_names_at_project(
     oracle: &mut Oracle,
     xml: &str,
     names: &[String],
     at: Option<&Path>,
 ) -> Vec<String> {
-    let project_path = at.unwrap_or(Path::new("/repo/proj/Demo.fsproj"));
-    let Ok(parsed) = parse_fsproj(
-        xml,
-        project_path,
-        &HashMap::new(),
-        &common::oracle_environment(),
-    ) else {
+    let project = project_at(xml, at);
+    let Ok(parsed) = parse_fsproj(&project, &HashMap::new(), &common::oracle_environment()) else {
         // Malformed XML: both sides reject, nothing to compare.
         return Vec::new();
     };
@@ -461,6 +456,21 @@ fn reserved_path_properties_are_exact_under_every_project_spelling() {
     }
 }
 
+/// The project `xml` as the evaluation reads it: written at `at` and read
+/// back from MSBuild's full path of it, or, with no `at`, a buffer at a path
+/// no file is at.
+fn project_at(xml: &str, at: Option<&Path>) -> borzoi_msbuild::ProjectFile {
+    match at {
+        Some(at) => {
+            std::fs::write(at, xml).expect("write the project");
+            borzoi_msbuild::ProjectFile::read(at, &borzoi_msbuild::observed::Observer::new())
+                .expect("the project reads back")
+        }
+        None => borzoi_msbuild::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), xml)
+            .expect("a full path"),
+    }
+}
+
 /// [`check_names_at_project`] through [`parse_fsproj_with_imports`], which
 /// follows the document's imports, with no SDK or glob resolver.
 #[cfg(unix)]
@@ -471,8 +481,7 @@ fn check_imports_at_project(
     at: &Path,
 ) -> Vec<String> {
     let parsed = match parse_fsproj_with_imports(
-        xml,
-        at,
+        &project_at(xml, Some(at)),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -650,29 +659,17 @@ fn a_project_path_holding_a_backslash_is_refused() {
             }
             None => assert!(theirs.is_none(), "MSBuild loads {}", at.display()),
         }
-        let pure = parse_fsproj(&xml, at, &HashMap::new(), &common::oracle_environment());
+        let buffer = borzoi_msbuild::ProjectFile::buffer(at, &xml);
         assert!(
-            matches!(
-                pure,
-                Err(borzoi_msbuild::ParseError::BackslashInProjectPath(_))
-            ),
-            "{}: {pure:?}",
+            matches!(buffer, Err(ProjectFileError::Backslash(_))),
+            "{}: {buffer:?}",
             at.display()
         );
-        let followed = parse_fsproj_with_imports(
-            &xml,
-            at,
-            &HashMap::new(),
-            &common::oracle_environment(),
-            None,
-            None,
-        );
+        let read =
+            borzoi_msbuild::ProjectFile::read(at, &borzoi_msbuild::observed::Observer::new());
         assert!(
-            matches!(
-                followed,
-                Err(borzoi_msbuild::ParseError::BackslashInProjectPath(_))
-            ),
-            "{}: {followed:?}",
+            matches!(read, Err(ProjectFileError::Backslash(_))),
+            "{}: {read:?}",
             at.display()
         );
     }
@@ -713,12 +710,10 @@ fn a_backslash_before_a_parent_segment_is_read_two_ways_and_refused() {
         .run_ok("dotnet msbuild -getProperty:Which");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "rewrite first");
 
-    let refused = parse_fsproj(&doc("buffer"), &at, &HashMap::new(), &HashMap::new());
+    let refused =
+        borzoi_msbuild::ProjectFile::read(&at, &borzoi_msbuild::observed::Observer::new());
     assert!(
-        matches!(
-            refused,
-            Err(borzoi_msbuild::ParseError::BackslashInProjectPath(_))
-        ),
+        matches!(refused, Err(ProjectFileError::Backslash(_))),
         "{refused:?}"
     );
 }
@@ -735,17 +730,9 @@ fn a_project_path_naming_no_file_is_refused() {
         "/",
         "/work/bad\0/../Demo.fsproj",
     ] {
-        let refused = parse_fsproj(
-            "<Project />",
-            Path::new(at),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let refused = borzoi_msbuild::ProjectFile::buffer(Path::new(at), "<Project />");
         assert!(
-            matches!(
-                refused,
-                Err(borzoi_msbuild::ParseError::ProjectPathNamesNoFile(_))
-            ),
+            matches!(refused, Err(ProjectFileError::NamesNoFile(_))),
             "{at}: {refused:?}"
         );
     }
@@ -950,8 +937,8 @@ fn a_capital_x_reference_refuses_the_project() {
         );
         assert!(
             parse_fsproj(
-                &xml,
-                Path::new("/repo/proj/Demo.fsproj"),
+                &borzoi_msbuild::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), &xml)
+                    .expect("a project path spelt as its full path"),
                 &HashMap::new(),
                 &common::oracle_environment(),
             )
@@ -1088,8 +1075,8 @@ fn reserved_path_shapes_commit_or_degrade_as_pinned() {
             ("Beta", body),
         ]);
         let parsed = parse_fsproj(
-            &xml,
-            &project_path,
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &common::oracle_environment(),
         )
@@ -1248,8 +1235,8 @@ fn duplicate_imports_are_skipped_exactly() {
         std::fs::write(&project_path, xml).unwrap();
 
         let parsed = parse_fsproj_with_imports(
-            xml,
-            &project_path,
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, xml)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &common::oracle_environment(),
             None,
@@ -1491,8 +1478,8 @@ fn conditions_with_raw_whitespace_are_exact_or_declined() {
         if oracle.project(&xml, &names, None, &[]).is_none() {
             rejected += 1;
             let parsed = parse_fsproj(
-                &xml,
-                Path::new("/repo/proj/Demo.fsproj"),
+                &borzoi_msbuild::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), &xml)
+                    .expect("a project path spelt as its full path"),
                 &HashMap::new(),
                 &common::oracle_environment(),
             )
@@ -1551,8 +1538,8 @@ fn an_import_path_holding_a_tab_is_read_as_written() {
         let xml = format!("<Project>\n  {import}\n</Project>\n");
         std::fs::write(&project_path, &xml).unwrap();
         let parsed = parse_fsproj_with_imports(
-            &xml,
-            &project_path,
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &common::oracle_environment(),
             None,
@@ -1749,8 +1736,8 @@ fn check_cdata_document(oracle: &mut Oracle, body: &str, condition: &str, tally:
         ..ReadProbe::default()
     };
     let (_, reads) = parse_fsproj_reads(
-        &xml,
-        &path,
+        &borzoi_msbuild::ProjectFile::buffer(&path, &xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -2072,8 +2059,8 @@ fn import_failures_commit_nothing_for_a_project_msbuild_rejects() {
             );
             std::fs::write(&project_path, &xml).unwrap();
             let parsed = parse_fsproj_with_imports(
-                &xml,
-                &project_path,
+                &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                    .expect("a project path spelt as its full path"),
                 &HashMap::new(),
                 &common::oracle_environment(),
                 None,
@@ -2430,8 +2417,8 @@ fn illegal_conditions_reject_exactly_where_msbuild_evaluates_them() {
             );
             std::fs::write(&project_path, &xml).unwrap();
             let parsed = parse_fsproj_with_imports(
-                &xml,
-                &project_path,
+                &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                    .expect("a project path spelt as its full path"),
                 &HashMap::new(),
                 &common::oracle_environment(),
                 None,
@@ -2729,8 +2716,8 @@ fn load_time_errors_reject_exactly_where_msbuild_loads_them() {
             );
             std::fs::write(&project_path, &xml).unwrap();
             let parsed = parse_fsproj_with_imports(
-                &xml,
-                &project_path,
+                &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                    .expect("a project path spelt as its full path"),
                 &HashMap::new(),
                 &common::oracle_environment(),
                 None,
@@ -3086,8 +3073,8 @@ fn the_loader_schema_rejects_exactly_what_msbuild_refuses() {
         );
         std::fs::write(&project_path, &xml).unwrap();
         let parsed = parse_fsproj_with_imports(
-            &xml,
-            &project_path,
+            &borzoi_msbuild::ProjectFile::buffer(&project_path, &xml)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &common::oracle_environment(),
             None,

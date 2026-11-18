@@ -437,8 +437,8 @@ fn compare_project(project: &Path, host: &DotnetHost) -> ProjectReport {
     let mut extra_properties = HashMap::new();
     extra_properties.insert("DISABLE_ARCADE".to_string(), "true".to_string());
     let parsed = match parse_fsproj_with_imports(
-        &source,
-        &fsproj,
+        &borzoi_msbuild::ProjectFile::buffer(&fsproj, &source)
+            .expect("a project path spelt as its full path"),
         &extra_properties,
         &host.environment,
         Some(&resolver),
@@ -1728,11 +1728,14 @@ mod tests {
     #[test]
     fn declined_project_references_are_not_compared() {
         let parsed = parse_fsproj(
-            r#"<Project><ItemGroup>
+            &borzoi_msbuild::ProjectFile::buffer(
+                Path::new("/repo/proj/Demo.fsproj"),
+                r#"<Project><ItemGroup>
                  <ProjectReference Include="../Core/Core.fsproj" />
                  <ProjectReference Update="@(ProjectReference)" SetTargetFramework="x" />
                </ItemGroup></Project>"#,
-            Path::new("/repo/proj/Demo.fsproj"),
+            )
+            .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
         )
@@ -1757,8 +1760,8 @@ mod tests {
             symbols.join(";")
         );
         parse_fsproj(
-            &source,
-            Path::new("/repo/proj/Demo.fsproj"),
+            &borzoi_msbuild::ProjectFile::buffer(Path::new("/repo/proj/Demo.fsproj"), &source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
         )

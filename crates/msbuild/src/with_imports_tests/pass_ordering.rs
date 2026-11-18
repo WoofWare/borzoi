@@ -148,8 +148,8 @@ fn glob_include_expands_property_defined_later_in_document() {
         Ok(resolved.clone())
     };
     let result = parse_fsproj_with_imports(
-        &crate::observed::host_fs::read_to_string(&project_path).unwrap(),
-        &canon_project,
+        &crate::ProjectFile::read(&canon_project, &crate::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &HashMap::new(),
         None,

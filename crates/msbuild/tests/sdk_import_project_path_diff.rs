@@ -383,9 +383,15 @@ fn evaluate_both_after(
             Err(SdkResolveError::NotFound)
         }
     };
-    let parsed =
-        parse_fsproj_with_imports(&xml, &proj, &HashMap::new(), &env, Some(&resolver), None)
-            .unwrap_or_else(|e| panic!("our parse: {e}\n{xml}"));
+    let parsed = parse_fsproj_with_imports(
+        &borzoi_msbuild::ProjectFile::buffer(&proj, &xml)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &env,
+        Some(&resolver),
+        None,
+    )
+    .unwrap_or_else(|e| panic!("our parse: {e}\n{xml}"));
     let theirs = msbuild_seen(&proj, &env);
     (xml, parsed, theirs)
 }
@@ -872,8 +878,8 @@ fn web_sdk_before_common_targets_is_imported() {
         )
     };
     let parsed = parse_fsproj_with_imports(
-        xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         Some(&resolver),

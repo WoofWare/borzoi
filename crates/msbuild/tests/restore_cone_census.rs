@@ -867,8 +867,8 @@ fn reads(
     };
     let evaluate = |start: Option<&Path>, probe: &ReadProbe| {
         parse_fsproj_reads(
-            &source,
-            &subject.project,
+            &borzoi_msbuild::ProjectFile::buffer(&subject.project, &source)
+                .expect("a project path spelt as its full path"),
             &extra,
             &common::oracle_environment(),
             Some(&resolver),
@@ -885,8 +885,8 @@ fn reads(
     // startup directory or without one (as every evaluation the LSP serves
     // runs).
     let unprobed = common::parse_fsproj_with_imports(
-        &source,
-        &subject.project,
+        &borzoi_msbuild::ProjectFile::buffer(&subject.project, &source)
+            .expect("a project path spelt as its full path"),
         &extra,
         &common::oracle_environment(),
         Some(&resolver),

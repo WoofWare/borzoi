@@ -625,8 +625,8 @@ fn write_and_parse(fixture: &Fixture) -> (Laid, ParsedProject) {
     );
     let parse = || {
         parse_fsproj_with_imports(
-            &project_xml,
-            &proj,
+            &borzoi_msbuild::ProjectFile::buffer(&proj, &project_xml)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &environment,
             Some(&resolver),

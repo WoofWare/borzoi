@@ -55,8 +55,8 @@ fn msbuild_verdict(oracle: &mut Oracle, name: &str) -> (Verdict, String) {
 fn our_verdict(name: &str) -> Verdict {
     let extras = HashMap::from([(name.to_string(), "x".to_string())]);
     match parse_fsproj(
-        "<Project/>",
-        Path::new("/repo/Demo.fsproj"),
+        &borzoi_msbuild::ProjectFile::buffer(Path::new("/repo/Demo.fsproj"), "<Project/>")
+            .expect("a project path spelt as its full path"),
         &extras,
         &HashMap::new(),
     ) {

@@ -29,6 +29,7 @@ mod glob;
 pub mod glob_resolver;
 mod imports;
 pub mod observed;
+mod project_file;
 mod properties;
 mod sdk_resolver;
 mod target_frameworks;
@@ -54,6 +55,7 @@ pub use imports::detect_implicit_imports;
 /// derives a computed property (e.g. `MSBuildUserExtensionsPath`) and hands it
 /// to [`parse_fsproj_with_imports`] through the `environment` map must escape it
 /// this way, or a `%`/`;`/`(` in the path would be mis-decoded.
+pub use project_file::{ProjectFile, ProjectFileError};
 pub use properties::escaping::escape;
 pub use properties::trust::UntrustedCause;
 pub use sdk_resolver::global_json::{
@@ -205,7 +207,7 @@ pub struct GlobRequest<'a> {
     /// The entry project's directory — the base every relative fragment
     /// resolves against (MSBuild resolves item includes relative to
     /// `$(MSBuildProjectDirectory)`, even inside imported files). Always
-    /// absolute (the entry `project_path` is required to be rooted).
+    /// absolute: the directory of the entry [`ProjectFile`]'s full path.
     pub base_dir: &'a Path,
     /// The surviving `Include` fragments in document order,
     /// `$(...)`-expanded, with `@()`/`%()` references removed. May name
@@ -1144,30 +1146,6 @@ pub(crate) fn define_constants_from_escaped(
 pub enum ParseError {
     /// The project file is not well-formed XML.
     Xml(roxmltree::Error),
-    /// `project_path` had no filesystem root (`/foo` on Unix, `C:\foo`
-    /// or `\\server\share\foo` on Windows). Every Include is resolved
-    /// by joining against the project directory, and
-    /// `$(MSBuildProjectDirectory)` substitutes into Include attributes
-    /// — so a path without a root would silently double-join the
-    /// directory component into the final path. We use [`Path::has_root`]
-    /// rather than [`Path::is_absolute`] so that rooted-but-not-drive-
-    /// qualified paths (`/foo` on Windows) — which still *replace* on
-    /// `PathBuf::join`, so don't double-join — are accepted.
-    RelativeProjectPath(PathBuf),
-    /// On a Unix host, `project_path` held a `\`. MSBuild loads a project
-    /// from its path with every backslash read as a separator, so it
-    /// evaluates the file the rewritten path names, which is not the text the
-    /// caller handed over, or refuses the project (MSB4025) where that path
-    /// names no file. Where a `..` follows the backslash, which file even
-    /// depends on the host: `dotnet build` rewrites the backslash before it
-    /// resolves the `..` (`a\b/../p.proj` is `a/p.proj`), the in-process API
-    /// after (`p.proj`).
-    BackslashInProjectPath(PathBuf),
-    /// `project_path` names no file: it holds a NUL, which .NET refuses
-    /// before it resolves any `..`, or (on a Unix host) its full path is the
-    /// file-system root (`/work/..`) or it ends in a separator. MSBuild loads
-    /// no project from any of them.
-    ProjectPathNamesNoFile(PathBuf),
     /// `extra_properties` contained a key that names an MSBuild
     /// reserved property (any spelling, under MSBuild's case-insensitive
     /// comparison, of a name in `ReservedPropertyNames`:
@@ -1197,29 +1175,6 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParseError::Xml(e) => write!(f, "malformed XML: {e}"),
-            ParseError::RelativeProjectPath(p) => {
-                write!(
-                    f,
-                    "project_path must be rooted (have a filesystem root), got {}",
-                    p.display()
-                )
-            }
-            ParseError::BackslashInProjectPath(p) => {
-                write!(
-                    f,
-                    "project_path {} holds a backslash, which MSBuild reads as a separator on \
-                     this host, so it would load another file, or none (MSB4025)",
-                    p.display()
-                )
-            }
-            ParseError::ProjectPathNamesNoFile(p) => {
-                write!(
-                    f,
-                    "project_path {} names no file: its full path is the root, it ends in a \
-                     separator, or it holds a NUL",
-                    p.display()
-                )
-            }
             ParseError::ReservedPropertyInExtras(name) => {
                 write!(
                     f,
@@ -1246,9 +1201,6 @@ impl Error for ParseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             ParseError::Xml(e) => Some(e),
-            ParseError::RelativeProjectPath(_) => None,
-            ParseError::BackslashInProjectPath(_) => None,
-            ParseError::ProjectPathNamesNoFile(_) => None,
             ParseError::ReservedPropertyInExtras(_) => None,
             ParseError::InvalidPropertyNameInExtras(_) => None,
             ParseError::DuplicateExtraProperty { .. } => None,
@@ -1262,14 +1214,13 @@ impl From<roxmltree::Error> for ParseError {
     }
 }
 
-/// Parse a `.fsproj` source string and extract its Compile items.
+/// Evaluate `project` and extract its Compile items.
 ///
-/// `project_path` is used both to resolve `Include` paths relative to
-/// the project file's directory and to seed the well-known MSBuild
-/// path properties (`MSBuildProjectDirectory`, `MSBuildProjectName`,
-/// etc.). **Must be absolute** — see
-/// [`ParseError::RelativeProjectPath`]. No filesystem access is
-/// performed.
+/// The project's full path ([`ProjectFile::path`]) is used both to resolve
+/// `Include` paths relative to the project file's directory and to seed the
+/// well-known MSBuild path properties (`MSBuildProjectDirectory`,
+/// `MSBuildProjectName`, etc.); its text ([`ProjectFile::text`]) is the body
+/// walked. No filesystem access is performed.
 ///
 /// `extra_properties` plays the role of MSBuild's *global properties*:
 /// values supplied here are visible to substitution and cannot be
@@ -1304,16 +1255,15 @@ impl From<roxmltree::Error> for ParseError {
 /// model, a name absent from every input reads as exactly empty
 /// wherever the walk has stayed exact.
 pub fn parse_fsproj(
-    source: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
 ) -> Result<ParsedProject, ParseError> {
-    let project_path = validate_inputs(project_path, extra_properties)?;
-    let doc = crate::document::parse(source)?;
+    validate_inputs(extra_properties)?;
+    let doc = crate::document::parse(project.text())?;
     Ok(evaluator::walk(
         &doc,
-        &project_path,
+        project.path(),
         extra_properties,
         environment,
     ))
@@ -1381,9 +1331,9 @@ pub fn parse_fsproj(
 /// as [`DiagnosticKind::UnsupportedGlob`] and an `Exclude` as
 /// [`DiagnosticKind::UnsupportedItemOperation`] — see [`GlobResolver`].
 ///
-/// Same input validation contract as [`parse_fsproj`]: `project_path`
-/// must be rooted, and `extra_properties` must neither name a reserved
-/// MSBuild property nor contain case-insensitive duplicates.
+/// Same input validation contract as [`parse_fsproj`]: `extra_properties`
+/// must neither name a reserved MSBuild property nor contain
+/// case-insensitive duplicates.
 /// `environment` carries the same semantics as on [`parse_fsproj`]
 /// (overridable environment-backed properties; reserved names ignored).
 ///
@@ -1391,16 +1341,14 @@ pub fn parse_fsproj(
 /// parses every file it imports; [`parse_fsproj_with_imports_reusing`]
 /// reuses the parses of an earlier evaluation.
 pub fn parse_fsproj_with_imports(
-    source: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     sdk_resolver: Option<&SdkResolver<'_>>,
     glob_resolver: Option<&GlobResolver<'_>>,
 ) -> Result<ParsedProject, ParseError> {
     parse_fsproj_probed(
-        source,
-        project_path,
+        project,
         extra_properties,
         environment,
         sdk_resolver,
@@ -1421,8 +1369,7 @@ pub fn parse_fsproj_with_imports(
 /// and a document is reused only for the very bytes it was parsed from
 /// ([`observed::ImportDocuments`]).
 pub fn parse_fsproj_with_imports_reusing(
-    source: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     sdk_resolver: Option<&SdkResolver<'_>>,
@@ -1431,8 +1378,7 @@ pub fn parse_fsproj_with_imports_reusing(
 ) -> Result<ParsedProject, ParseError> {
     let observer = observed::Observer::with_documents(std::mem::take(documents));
     let (walked, kept) = parse_fsproj_observed(
-        source,
-        project_path,
+        project,
         extra_properties,
         environment,
         sdk_resolver,
@@ -1452,16 +1398,14 @@ pub fn parse_fsproj_with_imports_reusing(
 /// document reuse are held to.
 #[cfg(any(test, feature = "test-support"))]
 pub fn parse_fsproj_with_imports_asking_every_time(
-    source: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     sdk_resolver: Option<&SdkResolver<'_>>,
     glob_resolver: Option<&GlobResolver<'_>>,
 ) -> Result<ParsedProject, ParseError> {
     parse_fsproj_observed(
-        source,
-        project_path,
+        project,
         extra_properties,
         environment,
         sdk_resolver,
@@ -1489,8 +1433,7 @@ pub fn parse_fsproj_with_imports_asking_every_time(
 /// what they return never carries a guessed startup directory.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_fsproj_probed(
-    source: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     sdk_resolver: Option<&SdkResolver<'_>>,
@@ -1499,8 +1442,7 @@ pub(crate) fn parse_fsproj_probed(
     #[cfg(any(test, feature = "test-support"))] probe: Option<&evaluator::reads::ReadProbe>,
 ) -> Result<evaluator::Walked, ParseError> {
     parse_fsproj_observed(
-        source,
-        project_path,
+        project,
         extra_properties,
         environment,
         sdk_resolver,
@@ -1517,8 +1459,7 @@ pub(crate) fn parse_fsproj_probed(
 /// holds when the evaluation ends ([`observed::Observer::finish_with_documents`]).
 #[allow(clippy::too_many_arguments)]
 fn parse_fsproj_observed(
-    source: &str,
-    project_path: &Path,
+    project: &ProjectFile,
     extra_properties: &HashMap<String, String>,
     environment: &HashMap<String, String>,
     sdk_resolver: Option<&SdkResolver<'_>>,
@@ -1530,11 +1471,10 @@ fn parse_fsproj_observed(
     Result<evaluator::Walked, ParseError>,
     observed::ImportDocuments,
 ) {
-    let project_path = match validate_inputs(project_path, extra_properties) {
-        Ok(project_path) => project_path,
-        Err(error) => return (Err(error), observer.finish_with_documents().2),
-    };
-    let project_path = project_path.as_path();
+    if let Err(error) = validate_inputs(extra_properties) {
+        return (Err(error), observer.finish_with_documents().2);
+    }
+    let project_path = project.path();
     // Detection only: the walk follows the SDK's own imports of the
     // props/targets files, and holds the files found here as the ones the
     // SDK's discovery names by default. The per-kind `ImplicitImportPresent`
@@ -1559,7 +1499,7 @@ fn parse_fsproj_observed(
             }
         }
     }
-    let doc = match crate::document::parse(source) {
+    let doc = match crate::document::parse(project.text()) {
         Ok(doc) => doc,
         Err(error) => return (Err(error.into()), observer.finish_with_documents().2),
     };
@@ -1585,60 +1525,10 @@ fn parse_fsproj_observed(
 }
 
 /// Input-validation shared between the pure and with-imports entry
-/// points. Both reject the same set of malformed `extra_properties`,
-/// non-rooted project paths, ones naming no file and (on Unix)
-/// backslash-bearing ones up front,
-/// before any XML parsing, and return the project's path as MSBuild takes it.
-///
-/// MSBuild evaluates a project at its full path (`Path.GetFullPath`): `.`
-/// segments dropped, runs of separators collapsed, and each `..` taking the
-/// segment before it, lexically, whatever that segment links to. Every value
-/// the walk derives from the project's path (the reserved `MSBuildProject*`
-/// and `MSBuildThisFile*` names, relative imports, `Exists` probes, item
-/// paths, the duplicate-import key) starts from that path, so a caller's
-/// `dir//p.fsproj` or `dir/x/../p.fsproj` evaluates as `dir/p.fsproj` (on a
-/// Unix host: [`project_full_path`]).
-fn validate_inputs(
-    project_path: &Path,
-    extra_properties: &HashMap<String, String>,
-) -> Result<PathBuf, ParseError> {
-    // We check `has_root`, not `is_absolute`. The hazard we're
-    // guarding against is `project_dir.join(Include)` double-joining
-    // the project directory into the Include path — that only happens
-    // when the joined-onto base is *relative*. On Windows, `/foo` is
-    // rooted-but-not-absolute (no drive prefix); `PathBuf::join`
-    // replaces the base when joining a rooted path, so it doesn't
-    // double-join, and we shouldn't reject it. `is_absolute` would
-    // reject it, breaking tests and Windows callers with no upside.
-    if !project_path.has_root() {
-        return Err(ParseError::RelativeProjectPath(project_path.to_path_buf()));
-    }
-    let spelt = project_path.as_os_str().as_encoded_bytes();
-    if spelt.contains(&0) {
-        return Err(ParseError::ProjectPathNamesNoFile(
-            project_path.to_path_buf(),
-        ));
-    }
-    // On Unix MSBuild reads every `\` of the path it loads a project from as
-    // `/` (`FileUtilities.FixFilePath`), and so loads some other file, or
-    // none. Checked on the path as spelt: `dotnet build` rewrites before it
-    // resolves a `..`, the in-process API after, so a `..` that takes a
-    // backslash-bearing segment away still leaves the file host-dependent.
-    if cfg!(unix) && spelt.contains(&b'\\') {
-        return Err(ParseError::BackslashInProjectPath(
-            project_path.to_path_buf(),
-        ));
-    }
-    // Checked after the backslash, which `dotnet msbuild` rewrites before it
-    // resolves a `..`, so a spelling holding one may collapse to the root yet
-    // name a file. Windows' path rules are not modelled
-    // (`project_full_path`), so there no spelling is claimed to name no file.
-    let full_path = project_full_path(project_path);
-    if cfg!(unix) && (full_path.file_name().is_none() || spelt.last() == Some(&b'/')) {
-        return Err(ParseError::ProjectPathNamesNoFile(
-            project_path.to_path_buf(),
-        ));
-    }
+/// points: both reject the same set of malformed `extra_properties` up front,
+/// before any XML parsing. The project's path was validated when its
+/// [`ProjectFile`] was made.
+fn validate_inputs(extra_properties: &HashMap<String, String>) -> Result<(), ParseError> {
     // Property lookup is OrdinalIgnoreCase, but `HashMap<String,_>` is
     // case-sensitive — so the caller can hand us `Configuration` and
     // `configuration` as two distinct entries, then `State::new`
@@ -1676,19 +1566,7 @@ fn validate_inputs(
             return Err(ParseError::ReservedPropertyInExtras(key.clone()));
         }
     }
-    Ok(full_path)
-}
-
-/// The project's path as MSBuild takes it ([`validate_inputs`]). The lexical
-/// rule is `Path.GetFullPath`'s on a Unix host; Windows' (drive-relative
-/// paths, verbatim `\\?\` prefixes, a `:` inside a segment) is not modelled,
-/// so there the path is taken as the caller spells it.
-fn project_full_path(project_path: &Path) -> PathBuf {
-    if cfg!(unix) {
-        imports::normalise(project_path)
-    } else {
-        project_path.to_path_buf()
-    }
+    Ok(())
 }
 
 #[cfg(test)]

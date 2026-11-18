@@ -63,8 +63,8 @@ fn parse_capturing_glob(
         Ok(out.clone())
     };
     let result = parse_fsproj_with_imports(
-        source,
-        &canon_project,
+        &crate::ProjectFile::buffer(&canon_project, source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
         None,

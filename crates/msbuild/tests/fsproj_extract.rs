@@ -25,8 +25,13 @@ fn fcs_dump_fsproj_extracts_single_program_fs() {
     let path = repo_root().join("tools/fcs-dump/fcs-dump.fsproj");
     let source =
         borzoi_msbuild::observed::host_fs::read_to_string(&path).expect("fcs-dump.fsproj exists");
-    let project =
-        parse_fsproj(&source, &path, &HashMap::new(), &HashMap::new()).expect("well-formed XML");
+    let project = parse_fsproj(
+        &borzoi_msbuild::ProjectFile::buffer(&path, &source)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect("well-formed XML");
 
     // The fixture is SDK-style (`<Project Sdk="Microsoft.NET.Sdk">`),
     // so the pure parser (no SDK resolver) flags the SDK shorthand as

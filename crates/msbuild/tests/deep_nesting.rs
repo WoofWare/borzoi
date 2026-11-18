@@ -419,8 +419,8 @@ fn evaluate_project(body: String) {
     on_small_stack("parse_fsproj", move || {
         let source = format!("<Project>{body}</Project>");
         parse_fsproj(
-            &source,
-            Path::new("/deep/p.fsproj"),
+            &borzoi_msbuild::ProjectFile::buffer(Path::new("/deep/p.fsproj"), &source)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
         )

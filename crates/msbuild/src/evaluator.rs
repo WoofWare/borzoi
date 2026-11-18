@@ -5915,8 +5915,9 @@ fn follow_import_after_gate(node: Node<'_, '_>, current_file_dir: &Path, state: 
             // MSBuild imports `Path.Combine(root, Project)` as an escaped
             // import expression, so the root is re-parsed too: a `$(` expands,
             // a `;` splits it into a list, `*`/`?` glob and `%XX` decodes. A
-            // root holding one names something else to MSBuild; decline.
-            if sdk_root_is_reparsed(root) {
+            // root holding one names something else to MSBuild; decline. A
+            // `Project` written rooted takes the root's place.
+            if !sdk_project_written_rooted(project_attr_raw) && sdk_root_is_reparsed(root) {
                 state.push(
                     DiagnosticKind::UnsupportedConstruct {
                         element: format!(
@@ -6305,11 +6306,19 @@ pub(super) fn unix_adjustment_rewrites(escaped: &str, observer: &Observer) -> bo
 /// `raw` is written rooted, and otherwise the expansion with its leading
 /// separators dropped.
 fn sdk_project_under_root<'a>(raw: &str, relative: &'a str) -> &'a str {
-    if raw.replace('\\', "/").starts_with('/') {
+    if sdk_project_written_rooted(raw) {
         relative
     } else {
         relative.trim_start_matches('/')
     }
+}
+
+/// Whether an SDK import's `Project`, written as `raw`, is rooted as written,
+/// so `Path.Combine(root, Project)` drops the root: no character of the root
+/// reaches MSBuild's import expression, and [`sdk_root_is_reparsed`] has
+/// nothing to say about it.
+fn sdk_project_written_rooted(raw: &str) -> bool {
+    raw.replace('\\', "/").starts_with('/')
 }
 
 /// Whether MSBuild re-parses `root` in an import path, and so names something
@@ -6665,6 +6674,22 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
         state.mark_structural_skip(
             StructuralCompileItemUncertainty::ImportProjectUnresolved {
                 project: path.display().to_string(),
+            },
+            span,
+        );
+        return;
+    }
+    // A path ending in a separator names a directory, which MSBuild never
+    // imports (MSB4019), even when the file without the separator was
+    // imported already: its duplicate key keeps the separator, which the
+    // walk's key, collapsed, would drop.
+    if matches!(path.as_os_str().as_encoded_bytes().last(), Some(b'/'))
+        || (cfg!(windows) && path.as_os_str().as_encoded_bytes().last() == Some(&b'\\'))
+    {
+        state.push(
+            DiagnosticKind::ImportFailed {
+                path: path.to_path_buf(),
+                reason: ImportFailReason::NotFound,
             },
             span,
         );

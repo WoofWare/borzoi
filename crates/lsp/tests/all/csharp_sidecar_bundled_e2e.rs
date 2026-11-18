@@ -46,8 +46,8 @@ fn fsproj_to_csharp_metadata_e2e() {
     let fsproj_src =
         crate::common::host_fs::read_to_string(fixture.fsproj_path()).expect("read fsproj");
     let parsed = parse_fsproj(
-        &fsproj_src,
-        fixture.fsproj_path(),
+        &borzoi_msbuild::ProjectFile::buffer(fixture.fsproj_path(), &fsproj_src)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
     )

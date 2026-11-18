@@ -366,8 +366,8 @@ fn check_with(oracle: &mut Oracle, fixture: &Fixture, with_resolver: bool) -> Ou
 
     let resolver: &borzoi_msbuild::GlobResolver<'_> = &glob_resolver::resolve;
     let parsed = parse_fsproj_with_imports(
-        &xml,
-        &proj,
+        &borzoi_msbuild::ProjectFile::read(&proj, &borzoi_msbuild::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -439,8 +439,8 @@ fn a_nul_bearing_item_path_names_no_real_file() {
     let resolver: &borzoi_msbuild::GlobResolver<'_> = &glob_resolver::resolve;
     for glob in [None, Some(resolver)] {
         let parsed = parse_fsproj_with_imports(
-            xml,
-            &proj,
+            &borzoi_msbuild::ProjectFile::buffer(&proj, xml)
+                .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &common::oracle_environment(),
             None,

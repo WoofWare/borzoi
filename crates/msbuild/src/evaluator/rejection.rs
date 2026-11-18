@@ -106,7 +106,7 @@ use super::observed::{self, EntryKind};
 use super::{
     SdkResolution, State, condition, condition_exists, directory_build, import_dedup_key, loader,
     properties, sdk_import_path, sdk_project_in_alphabet, sdk_project_under_root,
-    sdk_root_is_reparsed,
+    sdk_project_written_rooted, sdk_root_is_reparsed,
 };
 
 impl State<'_> {
@@ -770,12 +770,61 @@ fn may_load_nothing(
     if value.as_escaped().trim().is_empty() && !value.as_escaped().contains(';') {
         return Some(UnloadableImport::NoPath);
     }
-    value
-        .split_list()
-        .filter(|segment| !segment.is_filespec_wildcard())
-        .find_map(|segment| {
-            let path = current_file_dir.join(segment.unescape().replace('\\', "/"));
-            load_failure(state, &path, seen).map(UnloadableImport::Failed)
+    value.split_list().find_map(|segment| {
+        let relative = segment.unescape().replace('\\', "/");
+        if segment.is_filespec_wildcard() {
+            return wildcard_may_load_nothing(&relative, current_file_dir, seen, state);
+        }
+        // `GetFullPath` keeps a trailing separator, and a path ending in one
+        // names a directory, which MSBuild never imports (MSB4019); the
+        // collapse in `load_failure` would drop it.
+        if relative.ends_with('/') {
+            return Some(UnloadableImport::Failed(ImportFailReason::NotFound));
+        }
+        let path = current_file_dir.join(relative);
+        load_failure(state, &path, seen).map(UnloadableImport::Failed)
+    })
+}
+
+/// [`may_load_nothing`] for a wildcard segment, `relative` with its `\` read as
+/// `/`: a wildcard matching nothing loads nothing, silently, but MSBuild loads
+/// each match, so one that does not load fails the project. On Unix MSBuild
+/// loads a match with each `\` of its name read as `/`, which names a file the
+/// walk does not, and a wildcard in the directory part is one the walk does
+/// not expand: both may load nothing.
+fn wildcard_may_load_nothing(
+    relative: &str,
+    current_file_dir: &Path,
+    seen: &mut HashSet<String>,
+    state: &State<'_>,
+) -> Option<UnloadableImport> {
+    let path = current_file_dir.join(relative);
+    let pattern = path.file_name()?.to_string_lossy().into_owned();
+    let dir = path.parent()?;
+    if dir.to_string_lossy().contains(['*', '?']) {
+        return Some(UnloadableImport::PathUndecided);
+    }
+    let Ok(entries) = observed::read_dir(state.observer, &normalise(dir)) else {
+        // A missing directory matches nothing; one the walk cannot list may
+        // hold anything.
+        return (observed::link_kind(state.observer, &normalise(dir)).is_ok())
+            .then_some(UnloadableImport::PathUndecided);
+    };
+    entries
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .kind
+                .as_ref()
+                .is_ok_and(|&kind| kind != EntryKind::Dir)
+        })
+        .filter(|entry| super::wildcard_matches(&pattern, &entry.name.to_string_lossy()))
+        .find_map(|entry| {
+            if cfg!(unix) && entry.name.as_encoded_bytes().contains(&b'\\') {
+                return Some(UnloadableImport::PathUndecided);
+            }
+            load_failure(state, &entry.path, seen).map(UnloadableImport::Failed)
         })
 }
 
@@ -832,7 +881,7 @@ fn sdk_import_may_load_nothing(
         SdkResolution::Roots(roots) => roots,
     };
     roots.iter().find_map(|root| {
-        if sdk_root_is_reparsed(root) {
+        if !sdk_project_written_rooted(project) && sdk_root_is_reparsed(root) {
             return Some(UnloadableImport::PathUndecided);
         }
         match sdk_import_path(root, under_root) {

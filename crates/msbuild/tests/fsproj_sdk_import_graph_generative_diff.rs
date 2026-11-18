@@ -1780,8 +1780,8 @@ fn evaluate(shared: &mut Shared, case: &Case) -> (Outcome, String) {
         ..ReadProbe::default()
     };
     let (parsed, ours) = parse_fsproj_reads(
-        &rendered.project,
-        &spelt,
+        &borzoi_msbuild::ProjectFile::read(&spelt, &borzoi_msbuild::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &environment,
         Some(&resolver),

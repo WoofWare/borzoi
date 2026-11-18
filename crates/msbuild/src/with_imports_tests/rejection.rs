@@ -535,7 +535,13 @@ fn both_walkers(body: &str) -> [ParsedProject; 2] {
     let tmp = TempDir::new().unwrap();
     let project_path = project(&tmp, body, &[]);
     let text = host_fs::read_to_string(&project_path).unwrap();
-    let pure = parse_fsproj(&text, &project_path, &HashMap::new(), &HashMap::new()).unwrap();
+    let pure = parse_fsproj(
+        &crate::ProjectFile::buffer(&project_path, &text)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .unwrap();
     [parse_file(&project_path), pure]
 }
 
@@ -814,7 +820,13 @@ fn an_illegal_condition_after_content_the_walk_did_not_see_may_be_rejected() {
         &[("proj/there.props", "<Project />")],
     );
     let text = host_fs::read_to_string(&project_path).unwrap();
-    let pure = parse_fsproj(&text, &project_path, &HashMap::new(), &HashMap::new()).unwrap();
+    let pure = parse_fsproj(
+        &crate::ProjectFile::buffer(&project_path, &text)
+            .expect("a project path spelt as its full path"),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .unwrap();
     assert_withdrawn(&pure, &["Before", "After"]);
     assert_rejected(&parse_file(&project_path), &["Before", "After"]);
 }

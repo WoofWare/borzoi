@@ -1043,8 +1043,11 @@ mod tests {
 
     fn evaluate(body: &str) -> ParsedProject {
         borzoi_msbuild::parse_fsproj(
-            &format!("<Project><PropertyGroup>{body}</PropertyGroup></Project>"),
-            std::path::Path::new("/w/App.fsproj"),
+            &borzoi_msbuild::ProjectFile::buffer(
+                std::path::Path::new("/w/App.fsproj"),
+                format!("<Project><PropertyGroup>{body}</PropertyGroup></Project>"),
+            )
+            .expect("a project path spelt as its full path"),
             &HashMap::new(),
             &HashMap::new(),
         )

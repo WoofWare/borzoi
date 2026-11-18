@@ -112,8 +112,8 @@ fn a_pre_body_target_framework_read_is_trusted_whatever_the_body_writes() {
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect();
             let result = parse_fsproj_with_imports(
-                &source,
-                &canon(&project_path),
+                &crate::ProjectFile::buffer(&canon(&project_path), &source)
+                    .expect("a project path spelt as its full path"),
                 &globals,
                 &HashMap::new(),
                 Some(&resolver),
@@ -175,8 +175,8 @@ fn a_pre_body_target_framework_read_after_hidden_content_is_not_trusted() {
         }
     };
     let result = parse_fsproj_with_imports(
-        source,
-        &canon(&project_path),
+        &crate::ProjectFile::buffer(&canon(&project_path), source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &HashMap::new(),
         Some(&resolver),

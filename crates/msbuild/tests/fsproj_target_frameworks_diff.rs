@@ -108,8 +108,8 @@ fn run_diff(rel_fsproj: &str, extras: &[(&str, &str)]) {
         )
     };
     let project = parse_fsproj_with_imports(
-        &source,
-        &fsproj,
+        &borzoi_msbuild::ProjectFile::buffer(&fsproj, &source)
+            .expect("a project path spelt as its full path"),
         &props,
         &common::oracle_environment(),
         Some(&resolver),

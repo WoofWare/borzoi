@@ -166,8 +166,8 @@ fn compile_order_metadata_matches_fsharp_source_code_compile_order() {
     }
 
     let project = parse_fsproj_with_imports(
-        source,
-        &fsproj,
+        &borzoi_msbuild::ProjectFile::buffer(&fsproj, source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -235,8 +235,8 @@ fn a_reserved_character_in_the_project_directory_does_not_split_items() {
     assert!(theirs[0].contains("semi;colon/x.fs"), "{theirs:?}");
 
     let project = parse_fsproj_with_imports(
-        source,
-        &fsproj,
+        &borzoi_msbuild::ProjectFile::buffer(&fsproj, source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -289,8 +289,8 @@ fn compile_update_compile_order_matches_fsharp_source_code_compile_order() {
     }
 
     let project = parse_fsproj_with_imports(
-        source,
-        &fsproj,
+        &borzoi_msbuild::ProjectFile::buffer(&fsproj, source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -374,8 +374,8 @@ fn many_deferred_groups_across_alternating_imports_replay_in_order() {
     };
 
     let project = parse_fsproj_with_imports(
-        source,
-        &fsproj,
+        &borzoi_msbuild::ProjectFile::buffer(&fsproj, source)
+            .expect("a project path spelt as its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,
@@ -437,8 +437,8 @@ fn multi_tfm_seeded_target_framework_matches_msbuild() {
         props.insert(k.into(), v.into());
     }
     let project = parse_fsproj_with_imports(
-        source,
-        &fsproj,
+        &borzoi_msbuild::ProjectFile::buffer(&fsproj, source)
+            .expect("a project path spelt as its full path"),
         &props,
         &common::oracle_environment(),
         None,
@@ -485,8 +485,8 @@ fn run_diff(rel_fsproj: &str, extras: &[(&str, &str)]) {
         "missing fixture {}",
         joined.display()
     );
-    // `parse_fsproj` rejects non-rooted paths (see
-    // `ParseError::RelativeProjectPath`), and `BORZOI_CORPUS` is
+    // A `ProjectFile` refuses a non-rooted path (see
+    // `ProjectFileError::Relative`), and `BORZOI_CORPUS` is
     // documented to accept relative paths — so absolutise via the
     // filesystem before handing it over. `canonicalize` also resolves
     // symlinks, which is fine here: MSBuild's `FullPath` does the same,
@@ -515,8 +515,8 @@ fn run_diff(rel_fsproj: &str, extras: &[(&str, &str)]) {
     // `OutputPath` derivations, etc. — and our list would diverge from
     // MSBuild even when the parser itself is correct.
     let project = parse_fsproj_with_imports(
-        &source,
-        &fsproj,
+        &borzoi_msbuild::ProjectFile::buffer(&fsproj, &source)
+            .expect("a project path spelt as its full path"),
         &props,
         &common::oracle_environment(),
         None,
@@ -973,8 +973,8 @@ fn path_derivable_reserved_properties_match_msbuild() {
     let theirs: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
 
     let project = parse_fsproj_with_imports(
-        &source,
-        &fsproj,
+        &borzoi_msbuild::ProjectFile::read(&fsproj, &borzoi_msbuild::observed::Observer::new())
+            .expect("the project reads back from its full path"),
         &HashMap::new(),
         &common::oracle_environment(),
         None,

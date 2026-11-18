@@ -234,17 +234,15 @@ fn default_project() -> PathBuf {
 /// The server's first MSBuild pass over `project`, with the server's
 /// resolvers and default build properties.
 fn evaluate_once(
-    project: &Path,
-    source: &str,
+    project: &borzoi_msbuild::ProjectFile,
     env: &SdkDiscoveryEnv,
     extras: &HashMap<String, String>,
 ) -> ParsedProject {
-    let disc = SdkDiscovery::for_project(project, env, &Observer::new())
+    let disc = SdkDiscovery::for_project(project.path(), env, &Observer::new())
         .expect("SDK discovery succeeds under nix develop");
     let resolver: &SdkResolver<'_> = &|name, observer| disc.resolve(name, observer);
     let glob_resolver: &GlobResolver<'_> = &borzoi_msbuild::glob_resolver::resolve;
     parse_fsproj_with_imports(
-        source,
         project,
         extras,
         &env.build_environment,
@@ -257,18 +255,16 @@ fn evaluate_once(
 /// [`evaluate_once`] through `parse_fsproj_with_imports_reusing`, reusing
 /// the imports `documents` holds and leaving this call's in it.
 fn evaluate_reusing(
-    project: &Path,
-    source: &str,
+    project: &borzoi_msbuild::ProjectFile,
     env: &SdkDiscoveryEnv,
     extras: &HashMap<String, String>,
     documents: &mut ImportDocuments,
 ) -> ParsedProject {
-    let disc = SdkDiscovery::for_project(project, env, &Observer::new())
+    let disc = SdkDiscovery::for_project(project.path(), env, &Observer::new())
         .expect("SDK discovery succeeds under nix develop");
     let resolver: &SdkResolver<'_> = &|name, observer| disc.resolve(name, observer);
     let glob_resolver: &GlobResolver<'_> = &borzoi_msbuild::glob_resolver::resolve;
     parse_fsproj_with_imports_reusing(
-        source,
         project,
         extras,
         &env.build_environment,
@@ -619,20 +615,20 @@ fn main() {
         current
     });
 
-    let source = msbuild_observed::host_fs::read_to_string(&project).expect("the project reads");
+    let project_file =
+        borzoi_msbuild::ProjectFile::read(&project, &Observer::new()).expect("the project reads");
     let parsed = phase("msbuild.evaluate", reps, || {
-        evaluate_once(&project, &source, &env, &extras)
+        evaluate_once(&project_file, &env, &extras)
     });
     let mut documents = ImportDocuments::default();
     drop(evaluate_reusing(
-        &project,
-        &source,
+        &project_file,
         &env,
         &extras,
         &mut documents,
     ));
     phase("msbuild.reusing", reps, || {
-        evaluate_reusing(&project, &source, &env, &extras, &mut documents)
+        evaluate_reusing(&project_file, &env, &extras, &mut documents)
     });
     let counts = parsed.read_counts;
     let reads = parsed.read_set.reads();
