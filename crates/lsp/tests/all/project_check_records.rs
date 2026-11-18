@@ -193,7 +193,7 @@ fn an_unreadable_reference_is_refused() {
 
 /// A resident oracle reads a reference as it is now: one rewritten in place
 /// with its modification time put back is read again, as a fresh child would
-/// read it.
+/// read it, however the request spells its path.
 #[test]
 fn a_reference_rewritten_in_place_is_read() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -205,6 +205,7 @@ fn a_reference_rewritten_in_place_is_read() {
         .expect("the oracle's directory")
         .join("FSharp.Core.dll");
     let lib = dir.path().join("Lib.dll");
+    let lib_respelled = dir.path().join(".").join("Lib.dll");
     for oracle in ORACLES {
         let mut child = resident(oracle);
         std::fs::copy(&fcs, &lib).expect("copy the referenced assembly");
@@ -220,7 +221,7 @@ fn a_reference_rewritten_in_place_is_read() {
         );
         std::fs::copy(&other, &lib).expect("rewrite the referenced assembly");
         host_fs::set_modified(&lib, stamp).expect("restore the modification time");
-        let second = ask_with_refs(&mut child, oracle, &[&a], &[&lib])
+        let second = ask_with_refs(&mut child, oracle, &[&a], &[&lib_respelled])
             .unwrap_or_else(|err| panic!("{oracle} refused: {err}"));
         assert!(
             error_numbers(record(&second, "A.fs")).contains(&39),

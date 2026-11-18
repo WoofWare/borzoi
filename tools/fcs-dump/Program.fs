@@ -6358,6 +6358,17 @@ let private refuseUndescribedSources (paths: string[]) (textOf: string -> string
             failwithf "%s holds #%s, which names code the project check does not read" path ident
         | None -> ()
 
+/// `projOpts` with each reference (`-r:`) named by its full path, so that the
+/// path FCS keeps an assembly by is the path [`referencesChanged`] digests.
+let private withFullReferencePaths (projOpts: FSharpProjectOptions) : FSharpProjectOptions =
+    { projOpts with
+        OtherOptions =
+            projOpts.OtherOptions
+            |> Array.map (fun o ->
+                match [ "-r:"; "/r:"; "--reference:" ] |> List.tryFind (fun prefix -> o.StartsWith prefix) with
+                | Some prefix -> "-r:" + Path.GetFullPath(o.Substring prefix.Length)
+                | None -> o) }
+
 /// The references `projOpts` names (`-r:`), each refused if fsc would reject
 /// it: one that is not a file, or not an assembly (FS0084). FCS's project
 /// check resolves its references without reporting these, so a project with
@@ -6387,7 +6398,9 @@ let private referenceDigests = System.Collections.Generic.Dictionary<string, str
 let private referencesChanged (references: string list) : bool =
     let mutable changed = false
     for path in references do
-        let digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes path))
+        let digest =
+            use stream = File.OpenRead path
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream))
         match referenceDigests.TryGetValue path with
         | true, seen when seen = digest -> ()
         | true, _ ->
@@ -6427,7 +6440,7 @@ let private projectChecker () =
 /// returned release).
 let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOptions) (userOpName: string) =
     let opts =
-        { projOpts with
+        { withFullReferencePaths projOpts with
             Stamp = Some(System.Threading.Interlocked.Increment(&projectCheckRequests)) }
     let release () =
         checker.ClearCache([ opts ])
