@@ -6299,35 +6299,24 @@ let mutable private projectCheckRequests = 0L
 
 /// fsc's line-directive token (`lex.fsl`): `#` and optional blanks, or `#line`
 /// and blanks, then a line number, then an optional quoted file name, then
-/// the end of the line.
+/// the end of the line. Matched without backtracking, so a long run of blanks
+/// costs linear time.
 let private lineDirective =
     System.Text.RegularExpressions.Regex(
         "(#[ \t]*|#line[ \t]+)\\p{Nd}+[ \t]*(@?\"[^\r\n\"]+\")?[ \t]*\r?$",
         System.Text.RegularExpressions.RegexOptions.Multiline
+        ||| System.Text.RegularExpressions.RegexOptions.NonBacktracking
     )
-
-/// Whether a match of [`lineDirective`] whose line holds `prefix` before it is
-/// surely in a line comment: a `//` precedes it, and nothing before it on the
-/// line (`"`, `(*`, `*)`, a double-backtick identifier) could make that `//`
-/// part of a string, a block comment or an identifier. A line that starts
-/// inside a string or a block comment and reaches the match without closing
-/// it holds no directive there either.
-let private inLineComment (prefix: string) : bool =
-    prefix.Contains "//"
-    && not ([ "\""; "(*"; "*)"; "``" ] |> List.exists prefix.Contains)
 
 /// Whether `text` may hold a line directive (`#line 7 "f.fs"`, `# 7`): text
 /// that matches fsc's directive token ([`lineDirective`]), wherever it starts on
-/// its line, since FCS honours a directive after other text, unless it is
-/// surely in a line comment ([`inLineComment`]). The lexer that knows which
-/// match is a directive does not report one, so this reads the text and
-/// over-approximates: a directive in a block comment, a string or an inactive
-/// `#if` branch matches too, which costs only a decline.
-let private mayHoldLineDirective (text: string) : bool =
-    lineDirective.Matches text
-    |> Seq.exists (fun m ->
-        let lineStart = text.LastIndexOf('\n', max 0 (m.Index - 1)) + 1
-        not (inLineComment (text.Substring(lineStart, m.Index - lineStart))))
+/// its line, since FCS honours a directive after other text. Neither FCS
+/// lexer entry point reports which match is a directive, and no reading of
+/// the line short of the lexer can prove a match is in a comment (`//` also
+/// spells operators), so this over-approximates: a directive-shaped match in
+/// a comment, a string or an inactive `#if` branch refuses too, which costs
+/// only a decline.
+let private mayHoldLineDirective (text: string) : bool = lineDirective.IsMatch text
 
 /// The hash directives fsc acts on in a source (`ProcessMetaCommandsFromInput`):
 /// in a script, those at the top of the file and at the top of each module
@@ -6476,10 +6465,10 @@ let private checkProjectNow (checker: FSharpChecker) (projOpts: FSharpProjectOpt
     refuseConflatedSources opts.SourceFiles
     if referencesChanged (readableReferences opts) then
         checker.InvalidateAll()
-    requestSources.Clear()
-    for path in opts.SourceFiles do
-        requestSources[path] <- File.ReadAllText path
     try
+        requestSources.Clear()
+        for path in opts.SourceFiles do
+            requestSources[path] <- File.ReadAllText path
         let results = checker.ParseAndCheckProject(opts, userOpName = userOpName) |> Async.RunSynchronously
         let parsed (path: string) =
             (checker.GetBackgroundParseResultsForFileInProject(path, opts, userOpName = userOpName)

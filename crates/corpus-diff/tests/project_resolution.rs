@@ -3042,6 +3042,7 @@ fn run_attribute_cell(cell: &AttrCell) -> AttrCellOutcome {
     let mut relaxed = fcs.clone();
     for file in &mut relaxed {
         file.diagnostics.clear();
+        file.in_no_file = std::sync::Arc::default();
     }
     let forward = compare(&loaded, &relaxed);
     let attr = attribute_name_range(&cell.src);
@@ -3183,7 +3184,8 @@ fn generated_attribute_shapes_agree_with_the_project_use_stream() {
         // side, and a rule stated on one side only is silent rather than a
         // compile error — so the conditions belong on the assertions, not on
         // which arm the cell fell into.
-        let clean = outcome.runner.fcs_error_files.is_empty();
+        let clean = outcome.runner.fcs_error_files.is_empty()
+            && outcome.runner.fcs_errors_in_no_file.is_empty();
         let attr = attribute_name_range(&cell.src);
         let (named, constructors) = records_at(&outcome.fcs, attr);
         let oracle_speaks_here = named + constructors > 0;

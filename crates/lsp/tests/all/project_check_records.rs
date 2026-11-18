@@ -251,24 +251,28 @@ fn sources_fcs_takes_for_one_file_are_refused() {
     }
 }
 
-/// Text in a line comment that reads like a line directive (`F# 5` at the end
-/// of the line) is not one, and the project is checked.
+/// A line directive after an operator spelled with `//` is a directive, not
+/// a comment, and is refused: no reading of the line short of FCS's lexer
+/// tells the two apart, so any directive-shaped text refuses.
 #[test]
-fn a_directive_like_line_comment_is_checked() {
+fn a_line_directive_after_a_slash_operator_is_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
     let a = dir.path().join("A.fs");
+    let b = dir.path().join("B.fs");
     write(
         &a,
-        "module A\n// used in (+) and (-) since F# 5\n/// needs F# 8\nlet x = 1\n",
+        &format!(
+            "module A\nlet (+//) x y = x + y\nlet t = 1 +// 2 #line 100 \"{}\"\nlet moved : int = \"\"\n",
+            b.display()
+        ),
     );
+    write(&b, "module B\nlet y = 1\n");
     for oracle in ORACLES {
         let mut child = resident(oracle);
-        let answer = check(&mut child, oracle, &[&a]);
-        assert_eq!(
-            error_numbers(record(&answer, "A.fs")),
-            Vec::<i64>::new(),
-            "{oracle}: {answer}"
-        );
+        match ask(&mut child, oracle, &[&a, &b]) {
+            Err(why) if why.contains("line directive") => {}
+            other => panic!("{oracle}: a line directive must be refused: {other:?}"),
+        }
     }
 }
 
