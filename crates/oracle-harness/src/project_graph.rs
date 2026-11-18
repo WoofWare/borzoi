@@ -144,24 +144,6 @@ pub enum OutputKind {
 }
 
 impl OutputKind {
-    /// MSBuild's `$(OutputType)`, compared as MSBuild compares it (ignoring
-    /// case); an empty or absent value is the SDK's default, a library.
-    /// `None` for a value `fsc` would not take.
-    pub fn from_output_type(output_type: Option<&str>) -> Option<Self> {
-        match output_type
-            .map(str::trim)
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "" | "library" => Some(OutputKind::Library),
-            "exe" => Some(OutputKind::Exe),
-            "winexe" => Some(OutputKind::WinExe),
-            "module" => Some(OutputKind::Module),
-            _ => None,
-        }
-    }
-
     fn as_target(self) -> &'static str {
         match self {
             OutputKind::Library => "library",
@@ -806,8 +788,9 @@ const BUILD_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Build `fsprojs` (each a fixture project's [`ProjectGraphFixture::fsproj`])
 /// with one `dotnet build` of a solution listing them all, so MSBuild builds
-/// them in one process and in parallel. Panics, with the build's output, if
-/// it fails.
+/// them in one process and in parallel. Each sits in a solution folder of its
+/// own, so projects of different fixtures may share a name. Panics, with the
+/// build's output, if it fails.
 pub fn build_fixtures(fsprojs: &[PathBuf]) {
     let dir = tempfile::Builder::new()
         .prefix("borzoi-project-graph-build-")
@@ -816,9 +799,10 @@ pub fn build_fixtures(fsprojs: &[PathBuf]) {
     let solution = dir.path().join("fixtures.slnx");
     let entries: String = fsprojs
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             format!(
-                "  <Project Path=\"{}\" />\n",
+                "  <Folder Name=\"/p{i}/\">\n    <Project Path=\"{}\" />\n  </Folder>\n",
                 xml_escape(&p.display().to_string())
             )
         })
@@ -1110,27 +1094,6 @@ mod tests {
             fsproj.contains(&pin),
             "tools/fcs-dump/fcs-dump.fsproj no longer pins FSharp.Core {FIXTURE_FSHARP_CORE}; move FIXTURE_FSHARP_CORE with it"
         );
-    }
-
-    #[test]
-    fn output_types_map_as_msbuild_reads_them() {
-        assert_eq!(
-            OutputKind::from_output_type(None),
-            Some(OutputKind::Library)
-        );
-        assert_eq!(
-            OutputKind::from_output_type(Some(" ")),
-            Some(OutputKind::Library)
-        );
-        assert_eq!(
-            OutputKind::from_output_type(Some("EXE")),
-            Some(OutputKind::Exe)
-        );
-        assert_eq!(
-            OutputKind::from_output_type(Some("WinExe")),
-            Some(OutputKind::WinExe)
-        );
-        assert_eq!(OutputKind::from_output_type(Some("AppContainerExe")), None);
     }
 
     #[test]
