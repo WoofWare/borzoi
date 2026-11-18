@@ -34,9 +34,9 @@ use crate::BoundedCommand;
 pub const FIXTURE_TFM: &str = "net10.0";
 
 /// A name `fcs-dump` accepts as a project id or an assembly name: a non-empty
-/// run of ASCII letters, digits, `.`, `_` and `-`, so it can name a file
-/// without escaping, and an assembly name is a simple name rather than a path
-/// or a display name.
+/// run of ASCII letters, digits, `.`, `_` and `-`, other than `.` and `..`, so
+/// it names one ordinary file or directory without escaping, and an assembly
+/// name is a simple name rather than a path or a display name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PlainName(String);
 
@@ -44,6 +44,8 @@ impl PlainName {
     /// `name`, if it is plain.
     pub fn new(name: &str) -> Result<Self, GraphError> {
         let plain = !name.is_empty()
+            && name != "."
+            && name != ".."
             && name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
@@ -88,6 +90,49 @@ pub struct GraphProject {
     pub exclusive_refs: bool,
     /// The projects of the same request it references from source.
     pub project_refs: Vec<PlainName>,
+    /// What its build produces: FCS's `--target:`.
+    pub target: OutputKind,
+}
+
+/// What a project's build produces, as `fsc`'s `--target:` names it. Always
+/// passed: FCS left to itself checks a project as an executable, which
+/// accepts what a library's build rejects (FS0222, top-level code in a
+/// library's last file).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputKind {
+    Library,
+    Exe,
+    WinExe,
+    Module,
+}
+
+impl OutputKind {
+    /// MSBuild's `$(OutputType)`, compared as MSBuild compares it (ignoring
+    /// case); an empty or absent value is the SDK's default, a library.
+    /// `None` for a value `fsc` would not take.
+    pub fn from_output_type(output_type: Option<&str>) -> Option<Self> {
+        match output_type
+            .map(str::trim)
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "library" => Some(OutputKind::Library),
+            "exe" => Some(OutputKind::Exe),
+            "winexe" => Some(OutputKind::WinExe),
+            "module" => Some(OutputKind::Module),
+            _ => None,
+        }
+    }
+
+    fn as_target(self) -> &'static str {
+        match self {
+            OutputKind::Library => "library",
+            OutputKind::Exe => "exe",
+            OutputKind::WinExe => "winexe",
+            OutputKind::Module => "module",
+        }
+    }
 }
 
 /// Why a [`GraphRequest`] or a [`ProjectGraphFixture`] is not a graph
@@ -114,6 +159,9 @@ pub enum GraphError {
     NoPaths(PlainName),
     /// A source or reference path that is not absolute.
     RelativePath(PathBuf),
+    /// A fixture source name that is not a relative path inside its project
+    /// directory.
+    UncontainedFile(String),
 }
 
 impl fmt::Display for GraphError {
@@ -135,6 +183,9 @@ impl fmt::Display for GraphError {
             GraphError::UnknownCheck(id) => write!(f, "no project {id} to check"),
             GraphError::NoPaths(id) => write!(f, "project {id} has no source files"),
             GraphError::RelativePath(p) => write!(f, "{} is not absolute", p.display()),
+            GraphError::UncontainedFile(n) => {
+                write!(f, "{n:?} is not a relative path inside its project")
+            }
         }
     }
 }
@@ -210,6 +261,7 @@ impl GraphRequest {
                 serde_json::json!({
                     "id": p.id.as_str(),
                     "assemblyName": p.assembly_name.as_str(),
+                    "target": p.target.as_target(),
                     "paths": path_strings(&p.paths),
                     "refs": path_strings(&p.refs),
                     // `--define:` with nothing after it is not a symbol.
@@ -368,11 +420,15 @@ impl ProjectGraphFixture {
                 lang_version: None,
                 exclusive_refs: false,
                 project_refs: p.project_refs.clone(),
+                target: OutputKind::Library,
             })
             .collect();
         for p in &projects {
             if p.files.is_empty() {
                 return Err(GraphError::NoPaths(p.name.clone()));
+            }
+            if let Some(f) = p.files.iter().find(|f| !is_contained(&f.name)) {
+                return Err(GraphError::UncontainedFile(f.name.clone()));
             }
             GraphRequest::new(stand_in.clone(), p.name.clone())?;
         }
@@ -486,6 +542,7 @@ impl ProjectGraphFixture {
             lang_version: None,
             exclusive_refs: false,
             project_refs,
+            target: OutputKind::Library,
         }
     }
 
@@ -530,6 +587,16 @@ impl ProjectGraphFixture {
         let project = self.graph_project(self.project(check), refs, Vec::new());
         GraphRequest::new(vec![project], check.clone()).expect("one project is a graph")
     }
+}
+
+/// Whether `name` is a relative path whose every component is an ordinary
+/// name, so joining it to a project directory stays inside it.
+fn is_contained(name: &str) -> bool {
+    let path = Path::new(name);
+    !name.is_empty()
+        && path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 /// The `.fsproj` for `p`. See [`ProjectGraphFixture`] for what it turns off.
@@ -636,6 +703,7 @@ mod tests {
             lang_version: None,
             exclusive_refs: false,
             project_refs: refs.iter().map(|r| name(r)).collect(),
+            target: OutputKind::Library,
         }
     }
 
@@ -644,7 +712,7 @@ mod tests {
         for ok in ["A", "WoofWare.Expect", "a-b_c.1"] {
             assert!(PlainName::new(ok).is_ok(), "{ok}");
         }
-        for bad in ["", "a b", "a/b", "a,Version=1.0", "é"] {
+        for bad in ["", ".", "..", "a b", "a/b", "a,Version=1.0", "é"] {
             assert_eq!(
                 PlainName::new(bad),
                 Err(GraphError::NotPlain(bad.to_owned()))
@@ -817,6 +885,47 @@ mod tests {
         assert_eq!(refs["C"], ["A", "B"]);
         assert_eq!(refs["B"], ["A"]);
         assert_eq!(refs["A"], Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_fixture_refuses_a_source_outside_its_project() {
+        for bad in ["../Escape.fs", "/abs/Escape.fs", "a/../../b.fs", ""] {
+            let p = FixtureProject {
+                name: name("A"),
+                files: vec![FixtureFile {
+                    name: bad.into(),
+                    text: String::new(),
+                }],
+                project_refs: Vec::new(),
+                defines: Vec::new(),
+            };
+            assert_eq!(
+                ProjectGraphFixture::materialise(vec![p]).map(|_| ()),
+                Err(GraphError::UncontainedFile(bad.into())),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn output_types_map_as_msbuild_reads_them() {
+        assert_eq!(
+            OutputKind::from_output_type(None),
+            Some(OutputKind::Library)
+        );
+        assert_eq!(
+            OutputKind::from_output_type(Some(" ")),
+            Some(OutputKind::Library)
+        );
+        assert_eq!(
+            OutputKind::from_output_type(Some("EXE")),
+            Some(OutputKind::Exe)
+        );
+        assert_eq!(
+            OutputKind::from_output_type(Some("WinExe")),
+            Some(OutputKind::WinExe)
+        );
+        assert_eq!(OutputKind::from_output_type(Some("AppContainerExe")), None);
     }
 
     #[test]

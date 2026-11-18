@@ -5,55 +5,61 @@
 # against FCS with each reference passed from source. A measurement, not a
 # gate: it prints the numbers and fails only if it cannot run.
 #
-#   tools/not-built-census.sh [WORKDIR]
+#   tools/not-built-census.sh [PARENT]
 #
-# The pinned corpus's checkouts must already be materialised in the shared
+# The pinned corpus's repositories must already be materialised in the shared
 # cache, `${BORZOI_PROJECT_CORPUS_CACHE:-~/.cache/borzoi/project-corpus}/v2`
-# (`bash tools/ci/project-corpus-gate.sh` does it). The census copies them into
-# WORKDIR (a fresh temporary directory by default), deletes any build output so
-# every reference is unbuilt, and restores each dependent project from
-# nuget.org into WORKDIR's own packages folder. It never writes the shared
-# cache: restoring a dependent restores its references too, which would
-# rewrite assets files other runs are reading.
+# (`bash tools/ci/project-corpus-gate.sh` does it). The census clones each
+# pinned repository out of that cache at its pinned revision
+# (`nix/project-corpus.json`) into a fresh directory of its own under PARENT
+# (the system temporary directory by default), so nothing that directory
+# already holds is touched, the cache's working trees are never read, and an
+# unbuilt checkout is what is measured. It then restores every project of
+# those repositories from nuget.org into that directory's own packages
+# folder; the shared cache is never written. Which projects are dependents is
+# decided by evaluation, in the census itself.
 #
 # Run it outside `nix develop`: it enters the devshell itself.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 cache="${BORZOI_PROJECT_CORPUS_CACHE:-$HOME/.cache/borzoi/project-corpus}/v2/project-corpus"
-work="${1:-$(mktemp -d)}"
-mkdir -p "$work"
+parent="${1:-${TMPDIR:-/tmp}}"
+mkdir -p "$parent"
+work="$(mktemp -d "$parent/not-built-census.XXXXXX")"
 work="$(cd "$work" && pwd -P)"
+echo "census directory: $work"
 
-if [ ! -d "$cache" ]; then
-  echo "no materialised corpus at $cache; run tools/ci/project-corpus-gate.sh first" >&2
-  exit 1
-fi
+target="${CARGO_TARGET_DIR:-$repo/target}"
+(cd "$repo" && nix develop --command cargo build --locked -p borzoi-stats)
+plan="$work/plan.tsv"
+(cd "$repo" && "$target/debug/borzoi-stats" corpus --pins nix/project-corpus.json --emit plan) >"$plan"
 
-rm -rf "$work/corpus"
-mkdir -p "$work/corpus"
-cp -R "$cache/." "$work/corpus/"
-find "$work/corpus" -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
-
-# A dependent is any project that references an F# project.
-dependents=()
-while IFS= read -r project; do
-  if grep -Eq '<ProjectReference[^>]*\.fsproj' "$project"; then
-    dependents+=("$project")
+while IFS=$'\t' read -r repository revision _project; do
+  dest="$work/corpus/$repository"
+  [ -e "$dest" ] && continue
+  if [ ! -d "$cache/$repository/.git" ]; then
+    echo "$repository is not materialised in $cache; run tools/ci/project-corpus-gate.sh first" >&2
+    exit 1
   fi
-done < <(find "$work/corpus" -name '*.fsproj' -not -path '*/.git/*' | sort)
-echo "dependent projects: ${#dependents[@]}"
+  mkdir -p "$(dirname "$dest")"
+  git clone --quiet --no-checkout "$cache/$repository" "$dest"
+  git -C "$dest" checkout --quiet --detach "$revision"
+  test "$(git -C "$dest" rev-parse HEAD)" = "$revision"
+done <"$plan"
 
-for project in "${dependents[@]}"; do
+# Every project, so the census can evaluate each one and decide by its
+# compile graph whether it is a dependent. A project that fails to restore
+# is reported by the census rather than stopping it.
+while IFS= read -r project; do
   nix develop "$repo" --command env \
     RestoreSources=https://api.nuget.org/v3/index.json \
     NUGET_PACKAGES="$work/packages" \
-    dotnet restore "$project"
-done
+    dotnet restore "$project" || echo "restore failed: $project" >&2
+done < <(find "$work/corpus" -name '*.fsproj' -not -path '*/.git/*' | sort)
 
-list="$(IFS=:; echo "${dependents[*]}")"
 cd "$repo"
 nix develop --command env \
-  BORZOI_NOT_BUILT_PROJECT_LIST="$list" \
+  BORZOI_NOT_BUILT_ROOT="$work/corpus" \
   cargo test --profile gate -p borzoi-corpus-diff --test project_resolution not_built_census \
   -- --ignored --nocapture

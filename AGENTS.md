@@ -516,21 +516,32 @@ This is a Cargo workspace with ten members:
   an F# project and the semantics borzoi resolves project references
   against. A project-reference `-r:` names no file, so nothing is built; every
   project's assembly name is pinned with `-o:`, because FCS otherwise names
-  it after its last source file and no `InternalsVisibleTo` would match. The
+  it after its last source file and no `InternalsVisibleTo` would match, and
+  its output kind with `--target:`, because FCS otherwise checks a library as
+  an executable and accepts what its build rejects. Each project must be
+  handed the references its build compiles against, transitive ones
+  included: FCS does not infer them from a referenced project's own. The
   oracle is held to itself in `tests/project_resolution/source_references.rs`:
-  on generated two-project graphs (every declaration kind a library exports,
-  `.fsi` hiding, `internal` with and without `InternalsVisibleTo`,
-  assembly-level `AutoOpen`, names colliding with FSharp.Core and the BCL),
-  the consumer's records and diagnostics with the library from source must
-  equal those with the library built fresh and referenced as a DLL, and a
-  friend's use of an internal must bind only under its pinned name. Later
-  stages' source-surface-equals-DLL oracles rest on that equality.
+  on generated graphs (every declaration kind a library exports, `.fsi`
+  hiding, `internal` with and without `InternalsVisibleTo`, assembly-level
+  `AutoOpen`, names colliding with FSharp.Core and the BCL, a library reached
+  through a middle project), the consumer's records and diagnostics with the
+  library from source must equal those with the library built fresh and
+  referenced as a DLL, and a friend's use of an internal must bind only under
+  its pinned name. Later stages' source-surface-equals-DLL oracles rest on
+  that equality.
   `BORZOI_SOURCE_REF_CASES` and `BORZOI_SOURCE_REF_SEED` widen the run.
   `not_built_census` (`not_built.rs`, run by `tools/not-built-census.sh`) is
-  the report-only measurement beside it: every project of the corpus's
-  repositories that references an F# project, loaded through the LSP with
-  its references unbuilt (`NotBuilt`), graded against the graph oracle, and
-  each reference's reasons it could not be read from source counted.
+  the report-only measurement beside it: every project of the pinned
+  corpus's repositories whose evaluated compile graph holds an F# project,
+  loaded through the LSP with its references unbuilt (`NotBuilt`) and graded
+  against the graph oracle, and each reference's reasons it could not be read
+  from source counted. It grades only a positive domain: the graph is the env
+  fold's own (`SemanticState::compile_graph_for_project`), and a dependent any
+  of whose request inputs is untrusted (assembly name, output kind, language
+  version, Compile set, defines, a reference's TFM) is reported ungraded with
+  its reason. A grade over an FCS check with errors is kept apart from the
+  clean totals.
 
 Workspace-level files (`tools/`, `docs/`, `flake.nix`) sit at
 the repo root. The LSP is the only crate with a binary, so `cargo run` from the

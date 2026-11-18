@@ -382,27 +382,80 @@ fn the_generated_graphs_cover_every_declaration_kind() {
     );
 }
 
-/// The not-built census: each dependent project of
-/// `BORZOI_NOT_BUILT_PROJECT_LIST` (colon-separated `.fsproj` paths, restored,
-/// their references not built) through the LSP's runtime path, graded against
-/// FCS with every F# reference passed from source. Prints the measurement and
-/// asserts nothing about it; `tools/not-built-census.sh` materialises the
-/// projects and runs it.
+/// The not-built census: every project under `BORZOI_NOT_BUILT_ROOT`
+/// (restored checkouts, nothing built), each a dependent or not by its
+/// evaluated compile graph, every dependent put through the LSP's runtime
+/// path and graded against FCS with every F# reference passed from source.
+/// Prints the measurement and asserts nothing about it;
+/// `tools/not-built-census.sh` materialises the checkouts and runs it.
 #[test]
-#[ignore = "a hand-run measurement; set BORZOI_NOT_BUILT_PROJECT_LIST (tools/not-built-census.sh)"]
+#[ignore = "a hand-run measurement; set BORZOI_NOT_BUILT_ROOT (tools/not-built-census.sh)"]
 fn not_built_census() {
     use borzoi_corpus_diff::not_built::{measure_not_built, render_not_built_totals};
-    let list = std::env::var("BORZOI_NOT_BUILT_PROJECT_LIST")
-        .expect("BORZOI_NOT_BUILT_PROJECT_LIST names the dependent projects to measure");
+    let root = std::env::var_os("BORZOI_NOT_BUILT_ROOT")
+        .expect("BORZOI_NOT_BUILT_ROOT names the directory of restored checkouts to measure");
+    let mut projects = Vec::new();
+    let mut pending = vec![std::path::PathBuf::from(root)];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read a census directory") {
+            let path = entry.expect("read a census directory entry").path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if path.is_dir() {
+                if !matches!(name.as_ref(), ".git" | "bin" | "obj") {
+                    pending.push(path);
+                }
+            } else if name.ends_with(".fsproj") {
+                projects.push(path);
+            }
+        }
+    }
+    projects.sort();
+    assert!(
+        !projects.is_empty(),
+        "no .fsproj under BORZOI_NOT_BUILT_ROOT"
+    );
     let mut oracle = ProjectGraphOracle::default();
-    let reports: Vec<_> = list
-        .split(':')
-        .filter(|p| !p.is_empty())
+    let reports: Vec<_> = projects
+        .iter()
         .map(|p| {
-            let report = measure_not_built(std::path::Path::new(p), &mut oracle);
+            let report = measure_not_built(p, &mut oracle);
             println!("{report}");
             report
         })
         .collect();
     println!("{}", render_not_built_totals(&reports));
+}
+
+/// A referenced project is checked as the library its build makes, so a file
+/// a library's build rejects (top-level code with no module or namespace,
+/// FS0222) is an error from source too, rather than an executable's implicit
+/// module the consumer could bind into.
+#[test]
+#[ignore = "builds/runs FCS; use --ignored for oracle smoke"]
+fn a_referenced_library_is_checked_as_a_library() {
+    let fixture = ProjectGraphFixture::materialise(vec![
+        FixtureProject {
+            name: name("Lib"),
+            files: files(vec![("Lib.fs".into(), "let x = 42\n".into())]),
+            project_refs: Vec::new(),
+            defines: Vec::new(),
+        },
+        FixtureProject {
+            name: name("App"),
+            files: files(vec![("Use.fs".into(), "module Use\n\nlet y = 1\n".into())]),
+            project_refs: vec![name("Lib")],
+            defines: Vec::new(),
+        },
+    ])
+    .expect("a graph");
+    let answer = ProjectGraphOracle::default()
+        .check(&fixture.source_request(&name("App")))
+        .expect("the graph oracle answers");
+    let [library] = answer.referenced.as_slice() else {
+        panic!("one referenced project: {:#?}", answer.referenced)
+    };
+    assert!(
+        library.errors().any(|e| e["ErrorNumber"] == 222),
+        "a library's top-level code is FS0222 from source as in its build: {library:#?}"
+    );
 }
