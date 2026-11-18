@@ -25,13 +25,26 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use borzoi_msbuild::test_support::{ReadProbe, parse_fsproj_reads};
+use borzoi_msbuild::test_support::{EvaluationReads, PropertyRead, ReadProbe, parse_fsproj_reads};
 use common::{Oracle, SplitMix64, soak_parameters};
 use tempfile::TempDir;
 
 /// The names written and read back. `G` is the global: MSBuild ignores a
-/// project's writes to it.
+/// project's writes to it, unless a document opts it out.
 const NAMES: &[&str] = &["Alpha", "Beta", "Gamma", "G"];
+/// Names read back that the steps never write: `R`, which the project's
+/// prelude may bind through a write the walk refuses and then overwrite
+/// cleanly (a value the walk knows, which a gate's certain-inputs test still
+/// counts as unknown), and the copies of `Alpha` and `G` made at the end.
+const DERIVED: &[&str] = &["R", "CopyAlpha", "CopyG"];
+/// The longest candidate the channel keeps, in bytes (`MAX_CANDIDATE_BYTES`).
+const MAX_CANDIDATE_BYTES: usize = 4096;
+/// A value past it.
+const LONG: &str = "LONG";
+/// The file that opts `G` out of global protection. MSBuild keeps the opt-out
+/// past the import; the walk does not (#1041), so after this import the walk
+/// may commit a wrong value of `G`, and the channel must not name one.
+const OPT_OUT: &str = "optout.props";
 /// Names read back but never written: the current file's, whose value is the
 /// file's while the evaluation expands it, and none once it has finished.
 const READ_ONLY: &[&str] = &[
@@ -61,8 +74,10 @@ fn value(rng: &mut SplitMix64) -> String {
         "$(Alpha.Trim())",
         "$([MSBuild]::ValueOrDefault('$(Beta)', 'd'))",
         "$(Gamma.ToUpperInvariant())",
+        LONG,
+        "$(Alpha)$(Alpha)",
     ])
-    .to_string()
+    .replace(LONG, &"x".repeat(MAX_CANDIDATE_BYTES + 1))
 }
 
 /// A gate: none, decided either way, decided by MSBuild on `G` through a
@@ -80,6 +95,8 @@ fn gate(rng: &mut SplitMix64) -> String {
         " Condition=\"'$(G.ToUpperInvariant())' == 'X'\"",
         " Condition=\"'$(G.ToUpperInvariant())' != 'X'\"",
         " Condition=\"'$(G.ToUpperInvariant())' == 'Y'\"",
+        " Condition=\"'$(R)' == 'w'\"",
+        " Condition=\"'$(R)' != 'w'\"",
     ])
     .to_string()
 }
@@ -97,8 +114,14 @@ fn writes(rng: &mut SplitMix64, out: &mut String) {
 }
 
 /// A property group, a `<Choose>`, or (where `imports`) an import of a
-/// sibling file.
+/// sibling file or of [`OPT_OUT`].
 fn step(rng: &mut SplitMix64, imports: bool, out: &mut String) {
+    // Rarely: past it the channel names nothing, so the case grades little
+    // else.
+    if imports && rng.below(40) == 0 {
+        let _ = write!(out, "<Import Project=\"{OPT_OUT}\" />");
+        return;
+    }
     match rng.below(if imports { 5 } else { 4 }) {
         0 => {
             out.push_str("<Choose>");
@@ -155,9 +178,15 @@ fn project(rng: &mut SplitMix64) -> (String, Vec<String>) {
         })
         .collect();
     let mut body = String::new();
+    if rng.below(2) == 0 {
+        body.push_str("<PropertyGroup><R>$(G.ToUpperInvariant())</R><R>v</R></PropertyGroup>");
+    }
     for _ in 0..3 + rng.below(5) {
         step(rng, true, &mut body);
     }
+    body.push_str(
+        "<PropertyGroup><CopyAlpha>$(Alpha)</CopyAlpha><CopyG>$(G)</CopyG></PropertyGroup>",
+    );
     (format!("<Project>{body}</Project>"), sides)
 }
 
@@ -172,7 +201,13 @@ struct Census {
     both_arms: usize,
     /// Reads where the walk said a name may hold anything.
     anything: usize,
+    /// Evaluations past an imported opt-out of `G`, where the channel names
+    /// nothing (#1041).
+    withdrawn: usize,
 }
+
+/// MSBuild's table, and the walk's reads.
+type Evaluated = (HashMap<String, String>, EvaluationReads);
 
 fn evaluate(
     oracle: &mut Oracle,
@@ -180,10 +215,7 @@ fn evaluate(
     path: &Path,
     probe: &ReadProbe,
     g: &str,
-) -> Option<(
-    HashMap<String, String>,
-    BTreeMap<String, Option<BTreeSet<String>>>,
-)> {
+) -> Option<Evaluated> {
     let globals = vec![("G".to_owned(), g.to_owned())];
     let theirs = oracle.project(xml, &probe.properties, Some(path), &globals)?;
     let extra: HashMap<String, String> = globals.into_iter().collect();
@@ -198,7 +230,48 @@ fn evaluate(
         probe,
     )
     .expect("well-formed");
-    Some((theirs, reads.candidates))
+    Some((theirs, reads))
+}
+
+/// The properties the channel holds whatever MSBuild does: a value the walk
+/// commits is its only candidate (an unset one, the empty string), and no
+/// candidate is past the byte budget. `skip` names reads exempt from the first.
+fn assert_channel_consistent(
+    name: &str,
+    read: &PropertyRead,
+    candidates: Option<&BTreeSet<String>>,
+    skip: bool,
+    context: &dyn Fn() -> String,
+) {
+    if let Some(candidates) = candidates {
+        for candidate in candidates {
+            assert!(
+                candidate.len() <= MAX_CANDIDATE_BYTES,
+                "a candidate of {name} is {} bytes, past the budget\n{}",
+                candidate.len(),
+                context()
+            );
+        }
+    }
+    if skip {
+        return;
+    }
+    let committed = match read {
+        PropertyRead::Value(value) => Some(value.as_str()),
+        PropertyRead::Unset => Some(""),
+        PropertyRead::UnsetInexact(_) | PropertyRead::Untrusted(_) => None,
+    };
+    // One past the budget is one the channel keeps none of.
+    if let Some(committed) = committed {
+        let expected = (committed.len() <= MAX_CANDIDATE_BYTES)
+            .then(|| BTreeSet::from([committed.to_owned()]));
+        assert_eq!(
+            candidates,
+            expected.as_ref(),
+            "the walk commits {name} = {committed:?}, so that is its only candidate\n{}",
+            context()
+        );
+    }
 }
 
 fn sweep(oracle: &mut Oracle, rng: &mut SplitMix64, cases: usize) -> Census {
@@ -208,6 +281,7 @@ fn sweep(oracle: &mut Oracle, rng: &mut SplitMix64, cases: usize) -> Census {
     let probe = ReadProbe {
         properties: NAMES
             .iter()
+            .chain(DERIVED)
             .chain(READ_ONLY)
             .map(|n| (*n).to_owned())
             .collect(),
@@ -220,15 +294,34 @@ fn sweep(oracle: &mut Oracle, rng: &mut SplitMix64, cases: usize) -> Census {
         for (name, side) in SIDES.iter().zip(&sides) {
             std::fs::write(dir.join(name), side).unwrap();
         }
+        std::fs::write(
+            dir.join(OPT_OUT),
+            "<Project TreatAsLocalProperty=\"G\"><PropertyGroup><G>fresh</G></PropertyGroup></Project>",
+        )
+        .unwrap();
         let context = || format!("{xml}\n{}", sides.join("\n"));
         census.cases += 1;
         let mut taken: BTreeMap<(&str, Vec<String>), BTreeSet<String>> = BTreeMap::new();
         for g in GLOBALS {
-            let Some((theirs, candidates)) = evaluate(oracle, &xml, &path, &probe, g) else {
+            let Some((theirs, reads)) = evaluate(oracle, &xml, &path, &probe, g) else {
                 continue;
             };
+            let candidates = &reads.candidates;
+            census.withdrawn += usize::from(reads.candidates_withdrawn);
             for name in &probe.properties {
                 let real = theirs.get(name).cloned().unwrap_or_default();
+                // The current file's names read at the end of the walk are a
+                // probe-boundary question of their own (#1043). After an
+                // imported opt-out of `G` the walk may commit a wrong value of
+                // it and of what reads it (#1041), and the channel names none.
+                let skip = READ_ONLY.contains(&name.as_str()) || reads.candidates_withdrawn;
+                assert_channel_consistent(
+                    name,
+                    &reads.properties[name],
+                    candidates[name].as_ref(),
+                    skip,
+                    &context,
+                );
                 match &candidates[name] {
                     None => census.anything += 1,
                     Some(candidates) => {
@@ -265,6 +358,7 @@ fn candidates_contain_what_msbuild_ends_with() {
     // more than one of the same set across the runs.
     assert!(census.several >= 100, "{census:?}");
     assert!(census.both_arms >= 30, "{census:?}");
+    assert!(census.withdrawn >= 10, "{census:?}");
 }
 
 /// Fresh-seed twin of [`candidates_contain_what_msbuild_ends_with`].
@@ -317,6 +411,94 @@ fn a_candidate_that_doubles_gives_up_rather_than_grow() {
 /// value that content rewrote: the write it skips may run, whether the gate is
 /// the write's own (`A`), its group's (`B`), or a `<Choose>` branch's, before
 /// no gate the walk could not decide at all (`C`) or before one (`D`).
+/// The candidates of `name` in `xml`, evaluated without MSBuild.
+fn candidates_alone(xml: &str, name: &str) -> Option<BTreeSet<String>> {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("Demo.fsproj");
+    std::fs::write(&path, xml).unwrap();
+    let probe = ReadProbe {
+        properties: vec![name.to_owned()],
+        ..ReadProbe::default()
+    };
+    let (_, reads) = parse_fsproj_reads(
+        xml,
+        &path,
+        &HashMap::from([("G".to_owned(), "y".to_owned())]),
+        &common::oracle_environment(),
+        None,
+        None,
+        None,
+        &probe,
+    )
+    .expect("well-formed");
+    reads.candidates[name].clone()
+}
+
+/// A first write that may not run, appending to its own name: the name the
+/// walk knows is undefined reads as the empty string in either case.
+#[test]
+fn an_optional_first_append_names_both_values() {
+    let xml = "<Project><PropertyGroup>\
+               <A Condition=\"'$(G.ToUpperInvariant())' == 'X'\">$(A)suffix</A>\
+               </PropertyGroup></Project>";
+    assert_eq!(
+        candidates_alone(xml, "A"),
+        Some(BTreeSet::from(["".to_owned(), "suffix".to_owned()]))
+    );
+}
+
+/// An imported document that opts the caller's global `G` out of protection
+/// leaves the walk holding values of `G`, and of what reads it, that MSBuild
+/// need not (#1041): the channel names no value of any name past it.
+#[test]
+fn an_imported_opt_out_of_a_global_withdraws_the_channel() {
+    let tmp = TempDir::new().unwrap();
+    let dir = borzoi_msbuild::observed::host_fs::canonicalize(tmp.path()).unwrap();
+    let path = dir.join("Demo.fsproj");
+    let xml = format!(
+        "<Project><PropertyGroup><Alpha>a</Alpha></PropertyGroup>\
+         <Import Project=\"{OPT_OUT}\" />\
+         <PropertyGroup><G>other</G><CopyG>$(G)</CopyG><Beta>b</Beta></PropertyGroup></Project>"
+    );
+    std::fs::write(&path, &xml).unwrap();
+    std::fs::write(
+        dir.join(OPT_OUT),
+        "<Project TreatAsLocalProperty=\"G\"><PropertyGroup><G>fresh</G></PropertyGroup></Project>",
+    )
+    .unwrap();
+    let probe = ReadProbe {
+        properties: ["G", "CopyG", "Alpha", "Beta"].map(str::to_owned).to_vec(),
+        ..ReadProbe::default()
+    };
+    let mut oracle = Oracle::spawn();
+    let (theirs, reads) =
+        evaluate(&mut oracle, &xml, &path, &probe, "x").expect("MSBuild evaluates it");
+    assert!(reads.candidates_withdrawn);
+    let candidates = reads.candidates;
+    assert_eq!(
+        theirs.get("CopyG").map(String::as_str),
+        Some("other"),
+        "MSBuild applies the entry project's write past the opted-out import"
+    );
+    for name in &probe.properties {
+        assert_eq!(candidates[name], None, "{name}");
+    }
+}
+
+/// Each `<Choose>` the walk cannot decide widens what its branches write
+/// once: four optional appends name the five strings they can make.
+#[test]
+fn each_undecided_choose_widens_once() {
+    let choose = "<Choose><When Condition=\"'$(G.ToUpperInvariant())' == 'X'\">\
+                  <PropertyGroup><A>$(A)y</A></PropertyGroup></When></Choose>";
+    let xml = format!(
+        "<Project><PropertyGroup><A></A></PropertyGroup>{}</Project>",
+        choose.repeat(4)
+    );
+    let expected: BTreeSet<String> = (0..5).map(|n| "y".repeat(n)).collect();
+    assert_eq!(candidates_alone(&xml, "A"), Some(expected));
+}
+
 #[test]
 fn a_gate_reading_a_stale_value_may_take_the_write_it_skips() {
     let tmp = TempDir::new().unwrap();
@@ -345,7 +527,8 @@ fn a_gate_reading_a_stale_value_may_take_the_write_it_skips() {
     let mut oracle = Oracle::spawn();
     let mut values = BTreeSet::new();
     for g in GLOBALS {
-        let (theirs, ours) = evaluate(&mut oracle, xml, &path, &probe, g).expect("evaluates");
+        let (theirs, reads) = evaluate(&mut oracle, xml, &path, &probe, g).expect("evaluates");
+        let ours = reads.candidates;
         for name in &probe.properties {
             let real = theirs.get(name).cloned().unwrap_or_default();
             if let Some(candidates) = &ours[name] {

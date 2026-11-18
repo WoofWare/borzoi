@@ -1,38 +1,44 @@
 //! The walk's candidate channel ([`crate::properties::candidates`]): what each
 //! name may hold in the real build where the walk is not certain which value.
 //!
-//! The walk records a name's candidates wherever the real build may hold
-//! something other than what the walk does, and the walk can bound it:
+//! A name the walk holds exactly ([`State::held_exactly`], the test on which
+//! the end of the walk commits a value or an unset) has that value as its one
+//! candidate, whatever is recorded for it: the channel's certainty is the
+//! walk's. A refused or stale name the walk does not hold exactly may hold
+//! anything. Every other name reads as what the walk recorded for it, or as
+//! anything where it recorded nothing:
 //!
 //! - a write it ran on a gate it did not decide from certain inputs (its own,
 //!   or an enclosing group's, `<Choose>`'s or import's): the candidates the
 //!   name held before, and those of the value written;
-//! - a write it ran on certain gates, of a value read from names it is not
-//!   certain of: the candidates of that value;
+//! - a write it ran on certain gates, of a value read from names it does not
+//!   hold exactly: the candidates of that value;
 //! - a write it skipped, or a `<Choose>` branch it did not take, on a gate it
-//!   did not decide from certain inputs: the candidates the name held before,
-//!   and those of the value the write would have written.
+//!   did not decide from certain inputs for a reason that leaves the name no
+//!   mark (a stale value read leaves it stale, a diagnostic unpinned): the
+//!   candidates the name held before, and those of the value the write would
+//!   have written.
 //!
-//! A name with no record reads as the value the walk holds, where it is
-//! certain of that, and as [`Candidates::Anything`] otherwise; so do refused
-//! and stale names, whose writes the walk could not compute or see, and every
-//! name after content the walk could not see (the table drops each record
-//! then).
+//! The table drops every record when the walk passes content it could not see.
+//! And once an imported document opts a caller global out of protection, the
+//! channel names nothing at all ([`State::candidates_withdrawn`], #1041).
 //!
-//! A value's candidates are the products of the candidates of the names it
-//! reads, expanded as the walk expands the value, where it only splices plain
-//! references (`$(A)x$(B)`); where every name it reads is certain, the walk's
-//! expansion of it; [`Candidates::Anything`] otherwise, and past
-//! [`MAX_CANDIDATES`] or [`MAX_CANDIDATE_BYTES`].
+//! A value is expanded speculatively only where it splices plain references
+//! (`$(A)x$(B)`): its candidates are the products of the candidates of the
+//! names it reads, expanded as the walk expands the value, each product's
+//! length bounded before it is built. Any other value, and any past
+//! [`MAX_CANDIDATES`] or [`MAX_CANDIDATE_BYTES`], is [`Candidates::Anything`].
 //!
 //! The channel shares the walk's assumptions about MSBuild's process: that a
 //! relative path the Unix path adjustment probes names nothing in its working
 //! directory (`properties::Relative::MissForProjectText`).
 //!
-//! Nothing decides on candidates yet. `tests/fsproj_candidates_diff.rs` and
+//! Nothing decides on candidates yet. `tests/fsproj_candidates_diff.rs`,
+//! `tests/fsproj_stale_gate_diff.rs` and
 //! `tests/fsproj_global_perturbation_diff.rs` hold the channel to MSBuild:
 //! under globals that steer gates the walk cannot decide, the value MSBuild
-//! ends with is always among a name's candidates.
+//! ends with is always among a name's candidates, and a value the walk commits
+//! is its only one.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -42,31 +48,41 @@ use crate::properties::candidates::{Candidate, Candidates, MAX_CANDIDATE_BYTES, 
 use crate::properties::escaping::Escaped;
 use crate::properties::{self, Origin, PropertyMap};
 
-use super::{State, attribute, collect_element_text, directory_build};
+use super::{State, collect_element_text, directory_build};
 
 impl State<'_> {
-    /// What `name` may hold in the real build now.
+    /// What `name` may hold in the real build now: the value the walk holds,
+    /// where it holds it exactly; what the walk recorded, where it doubts it;
+    /// anything otherwise.
     pub(super) fn candidates_of(&self, name: &str) -> Candidates {
-        let trust = self.trust_of(name);
-        if trust.stale().is_some() || trust.refused() {
-            return Candidates::Anything;
-        }
-        if let Some(recorded) = self.lookup.recorded_candidates(name) {
-            return recorded.clone();
-        }
-        if directory_build::is_certain(self, name) {
+        if self.held_exactly_for_candidates(name) {
             return Candidates::one(
                 self.lookup
                     .held_candidate(name)
                     .unwrap_or_else(Candidate::undefined),
             );
         }
-        Candidates::Anything
+        let trust = self.trust_of(name);
+        if self.candidates_withdrawn || trust.stale().is_some() || trust.refused() {
+            return Candidates::Anything;
+        }
+        self.lookup
+            .recorded_candidates(name)
+            .cloned()
+            .unwrap_or(Candidates::Anything)
     }
 
-    /// Whether every name `raw` reads is one the walk is certain of.
+    /// Whether the walk holds `name` exactly ([`State::held_exactly`]), as
+    /// the channel takes it: never once the channel is withdrawn
+    /// ([`State::candidates_withdrawn`], #1041).
+    pub(super) fn held_exactly_for_candidates(&self, name: &str) -> bool {
+        !self.candidates_withdrawn && self.held_exactly(name)
+    }
+
+    /// Whether the walk holds every name `raw` reads exactly
+    /// ([`Self::held_exactly_for_candidates`]).
     pub(super) fn reads_only_certain(&self, raw: &str) -> bool {
-        properties::property_references(raw).all(|name| directory_build::is_certain(self, name))
+        properties::property_references(raw).all(|name| self.held_exactly_for_candidates(name))
     }
 
     /// Whether the walk is inside a gate it did not decide from certain
@@ -75,21 +91,10 @@ impl State<'_> {
         self.reach_doubted > 0 || !directory_build::reached_for_certain(self)
     }
 
-    /// The candidates of a value spelt `raw`.
+    /// The candidates of a value spelt `raw`, expanded speculatively: only
+    /// text that splices plain references is, whose length the candidates it
+    /// splices bound before it is built.
     pub(super) fn value_candidates(&self, raw: &str) -> Candidates {
-        if self.reads_only_certain(raw) {
-            let (value, issues) = self.expand_for_candidates(raw, &self.lookup);
-            return if issues.is_empty() && value.trust().is_certain() {
-                let value = value.into_ignoring_trust();
-                if value.as_escaped().len() > MAX_CANDIDATE_BYTES {
-                    Candidates::Anything
-                } else {
-                    Candidates::one(Candidate::new(&value, Origin::Expansion))
-                }
-            } else {
-                Candidates::Anything
-            };
-        }
         if !splices_plain_references_only(raw) {
             return Candidates::Anything;
         }
@@ -226,7 +231,8 @@ impl State<'_> {
         value: Option<Candidates>,
         carried_certain: bool,
     ) {
-        if before.is_none() && value.is_none() && directory_build::is_certain(self, name) {
+        if before.is_none() && value.is_none() && self.held_exactly_for_candidates(name) {
+            // What it holds is its only candidate already.
             return;
         }
         let value = value.unwrap_or_else(|| match self.lookup.held_candidate(name) {
@@ -236,14 +242,6 @@ impl State<'_> {
         let candidates = before.map_or(value.clone(), |before| before.union(value));
         self.lookup.record_candidates(name, candidates);
     }
-}
-
-/// Whether a property element's own gate is decided from values the walk is
-/// certain of: absent, or decided whatever the others hold.
-pub(super) fn own_gate_is_certain(state: &State<'_>, element: Node<'_, '_>) -> bool {
-    attribute(element, "Condition").is_none_or(|condition| {
-        directory_build::decided_from_certain_inputs(state, &condition, &state.entry_project_dir)
-    })
 }
 
 /// Whether every `$(` in `raw` opens a plain reference, `$(Name)`, and nothing

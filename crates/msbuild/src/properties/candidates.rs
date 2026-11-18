@@ -68,8 +68,9 @@ pub(crate) enum Candidates {
 }
 
 impl Candidates {
+    /// `candidate` alone, or [`Candidates::Anything`] past the byte bound.
     pub(crate) fn one(candidate: Candidate) -> Self {
-        Candidates::OneOf(BTreeSet::from([candidate]))
+        Candidates::bounded(BTreeSet::from([candidate]))
     }
 
     /// The values either may hold.
@@ -83,10 +84,14 @@ impl Candidates {
         }
     }
 
-    /// `values` as candidates, or [`Candidates::Anything`] past the bound.
+    /// `values` as candidates, or [`Candidates::Anything`] past either bound.
     pub(crate) fn bounded(values: BTreeSet<Candidate>) -> Candidates {
         debug_assert!(!values.is_empty(), "a name holds some value");
-        if values.len() > MAX_CANDIDATES {
+        if values.len() > MAX_CANDIDATES
+            || values
+                .iter()
+                .any(|candidate| candidate.text.len() > MAX_CANDIDATE_BYTES)
+        {
             Candidates::Anything
         } else {
             Candidates::OneOf(values)

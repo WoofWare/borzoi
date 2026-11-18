@@ -568,33 +568,25 @@ pub(crate) fn this_file_seeds(path: &Path) -> [(&'static str, Escaped); 6] {
     let path = normalised.as_path();
     let parent = path.parent();
     let (name, extension) = split_file_name(path);
-    [
-        (
-            "MSBuildThisFile",
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
+    let values = [
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        with_trailing_separator(
+            parent
+                .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         ),
-        (
-            "MSBuildThisFileDirectory",
-            with_trailing_separator(
-                parent
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            ),
-        ),
-        (
-            "MSBuildThisFileDirectoryNoRoot",
-            with_trailing_separator_always(parent.map(no_root).unwrap_or_default()),
-        ),
-        (
-            "MSBuildThisFileFullPath",
-            path.to_string_lossy().into_owned(),
-        ),
-        ("MSBuildThisFileName", name),
-        ("MSBuildThisFileExtension", extension),
-    ]
-    .map(|(key, value)| (key, Escaped::from_xml(value)))
+        with_trailing_separator_always(parent.map(no_root).unwrap_or_default()),
+        path.to_string_lossy().into_owned(),
+        name,
+        extension,
+    ];
+    let mut values = values.into_iter();
+    THIS_FILE_NAMES.map(|key| {
+        let value = values.next().expect("a value per name");
+        (key, Escaped::from_xml(value))
+    })
 }
 
 /// `path` with `.` segments dropped and `..` segments resolved against what
@@ -2441,7 +2433,6 @@ mod tests {
         assert_eq!(with_trailing_separator("/a".into()), "/a/");
         assert_eq!(with_trailing_separator_always("".into()), "/");
         let seeds = this_file_seeds(std::path::Path::new("/Imp.props"));
-        assert_eq!(seeds.each_ref().map(|(name, _)| *name), THIS_FILE_NAMES);
         let get = |k| {
             seeds
                 .iter()

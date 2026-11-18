@@ -860,6 +860,12 @@ struct State<'r> {
     /// Consulted only by the target executor ([`executor`]).
     #[cfg(any(test, feature = "test-support"))]
     sticky_globals: HashSet<String>,
+    /// Whether an imported document has opted a caller global out of
+    /// protection (`TreatAsLocalProperty`). MSBuild keeps the opt-out past
+    /// the import and the walk does not (#1041), so from then on a value the
+    /// walk holds of that global, or computes from it, may not be MSBuild's,
+    /// and the candidate channel names no value at all ([`candidates`]).
+    candidates_withdrawn: bool,
     /// What the caller's environment said about `MSBuildExtensionsPath`, held
     /// aside rather than promoted: whether that value survives is the one
     /// toolset behaviour that differs across the SDKs we support, so it cannot
@@ -1625,6 +1631,7 @@ impl<'r> State<'r> {
             reserved,
             #[cfg(any(test, feature = "test-support"))]
             sticky_globals,
+            candidates_withdrawn: false,
             env_extensions_path,
             written: HashMap::new(),
             compile_first: Vec::new(),
@@ -2106,6 +2113,7 @@ impl<'r> State<'r> {
             reserved: _,
             #[cfg(any(test, feature = "test-support"))]
                 sticky_globals: _,
+            candidates_withdrawn: _,
             env_extensions_path: _,
             written,
             compile_first,
@@ -2766,7 +2774,9 @@ impl<'r> State<'r> {
         let resolved = self.resolve_provenance(provenance);
         self.lookup.apply_provenance(name, resolved);
         // A verdict without a value leaves no candidates the walk can name; a
-        // caller that can name them records them after ([`candidates`]).
+        // caller that can name them records them after. A name the walk still
+        // holds exactly reads as its value whatever is recorded
+        // ([`candidates`]).
         self.lookup
             .record_candidates(name, properties::candidates::Candidates::Anything);
     }
@@ -4491,8 +4501,9 @@ fn walk_property_child_inner(
             // the name holds what it held. A gate that raised a diagnostic, or
             // is undecided for a reason that leaves no stale mark, may let it
             // run: the name may hold either ([`candidates`]).
-            let widened = (own_condition_maybe_wrong || (!own_gate_decided && stale_gate.is_none()))
-                .then(|| state.widened_candidates(node));
+            let widened = (own_condition_maybe_wrong
+                || (!own_gate_decided && stale_gate.is_none()))
+            .then(|| state.widened_candidates(node));
             let kept = state.lookup.recorded_candidates(&name).cloned();
             state.apply_property_provenance(
                 &name,
@@ -7123,6 +7134,7 @@ fn walk_import_file(path: &Path, span: Range<usize>, collapse: bool, state: &mut
         .into_iter()
         .filter(|name| !state.reserved.contains(name) && state.protected.remove(name))
         .collect();
+    state.candidates_withdrawn |= !unprotected.is_empty();
     // Nested SDK roots are spliced through the same machinery the
     // entry project uses: `resolve_project_sdk` returns paths on a
     // happy resolve and pushes the appropriate diagnostic for every

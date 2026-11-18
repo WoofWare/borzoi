@@ -138,6 +138,16 @@ impl PropertyReads {
 }
 
 impl State<'_> {
+    /// Whether a read of `name` now sees the real build's value, or its
+    /// absence: the test on which [`Self::read_property`] commits a value or an
+    /// unset, but for a rejection, which withdraws every read at once.
+    pub(super) fn held_exactly(&self, name: &str) -> bool {
+        let trust = self.trust_of(name);
+        !trust.reference_is_untrusted()
+            && trust.stale().is_none()
+            && (self.lookup.is_bound(name) || self.undefined_read_is_exact(name))
+    }
+
     /// What a read of `name` sees at the end of the walk.
     pub(super) fn read_property(&self, name: &str) -> PropertyRead {
         // MSBuild may hold no value for anything (`ParsedProject::rejection`).

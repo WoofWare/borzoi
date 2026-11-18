@@ -136,7 +136,7 @@ use std::path::{Path, PathBuf};
 
 use crate::common::parse_fsproj_with_imports;
 use borzoi_msbuild::observed::host_fs;
-use borzoi_msbuild::test_support::{EvaluationReads, ReadProbe, parse_fsproj_reads};
+use borzoi_msbuild::test_support::{EvaluationReads, PropertyRead, ReadProbe, parse_fsproj_reads};
 use borzoi_msbuild::{ParsedProject, resolve_sdk, workloads};
 use common::{Oracle, SplitMix64};
 use tempfile::TempDir;
@@ -613,6 +613,27 @@ fn assert_among_candidates(
     globals: &[(String, String)],
     xml: &str,
 ) {
+    // A value the walk commits is its only candidate, whatever MSBuild does,
+    // unless the channel is withdrawn (#1041).
+    for (name, candidates) in reads
+        .candidates
+        .iter()
+        .filter(|_| !reads.candidates_withdrawn)
+    {
+        let committed = match &reads.properties[name] {
+            PropertyRead::Value(value) => Some(value.clone()),
+            PropertyRead::Unset => Some(String::new()),
+            PropertyRead::UnsetInexact(_) | PropertyRead::Untrusted(_) => None,
+        };
+        if let Some(committed) = committed {
+            assert_eq!(
+                candidates.as_ref(),
+                Some(&BTreeSet::from([committed.clone()])),
+                "{what}: we commit ${{{name}}} = {committed:?} under globals {globals:?}, so \
+                 that is its only candidate\n--- xml ---\n{xml}"
+            );
+        }
+    }
     let Some(theirs) = theirs else {
         return;
     };

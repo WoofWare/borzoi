@@ -50,6 +50,9 @@ pub struct EvaluationReads {
     /// of the walk, unescaped (its *candidates*, #1009); `None` where it may
     /// hold any.
     pub candidates: BTreeMap<String, Option<BTreeSet<String>>>,
+    /// Whether the candidate channel names no value of any name, an imported
+    /// document having opted a caller global out of protection (#1041).
+    pub candidates_withdrawn: bool,
     pub items: BTreeMap<String, ItemRead>,
     pub targets: BTreeMap<String, TargetRead>,
     /// The run [`ReadProbe::execute`] asked for, if it asked.
@@ -180,6 +183,7 @@ impl State<'_> {
         EvaluationReads {
             properties,
             candidates,
+            candidates_withdrawn: self.candidates_withdrawn,
             items,
             targets,
             execution,
