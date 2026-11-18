@@ -75,16 +75,14 @@ run_step() { # name
       # project-graph oracle held to itself (a reference from source against
       # the same reference built fresh, on generated two-project graphs). They
       # are `#[ignore]`d only because they drive FCS, so every ignored test
-      # runs except the three that take projects from the environment:
+      # runs except the two that take a project from the environment:
       # `project_corpus_resolution_diff` is the `resolution` step in a debug
-      # build (and would read BORZOI_PROJECT_LIST), `explain_token_at_position`
-      # is a hand-run trace, and `not_built_census` is a hand-run measurement
-      # (`tools/not-built-census.sh`).
+      # build (and would read BORZOI_PROJECT_LIST), and
+      # `explain_token_at_position` is a hand-run trace.
       nix develop --command cargo test -p borzoi-corpus-diff --features surface-reference -- \
         --include-ignored \
         --skip project_corpus_resolution_diff \
-        --skip explain_token_at_position \
-        --skip not_built_census
+        --skip explain_token_at_position
       ;;
     assembly-projection)
       # This sweep wants a populated package cache rather than a fixture, and

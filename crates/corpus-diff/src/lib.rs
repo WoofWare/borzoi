@@ -53,7 +53,6 @@ pub mod deferral_shape;
 pub mod handler_diff;
 pub mod lsp_client;
 pub mod manifest;
-pub mod not_built;
 pub mod perturb;
 pub mod utf16;
 
@@ -831,15 +830,8 @@ pub struct ProjectGraphOracle {
 
 impl ProjectGraphOracle {
     /// FCS's answer to `request`: the checked project's `uses-project` records
-    /// and the projects it referenced.
+    /// and whole-project diagnostics, and the projects it referenced.
     pub fn check(&mut self, request: &GraphRequest) -> Result<GraphResponse, FcsInvokeError> {
-        self.check_raw(request)
-            .and_then(|line| parse_graph_response(&line).map_err(FcsInvokeError::Refused))
-    }
-
-    /// [`Self::check`]'s response line, unparsed: what [`parse_project_uses`]
-    /// reads, since its `Files` are the `uses-project` payload.
-    pub fn check_raw(&mut self, request: &GraphRequest) -> Result<String, FcsInvokeError> {
         if self.child.is_none() {
             self.child = Some(spawn_project_batch("uses-project-graph-batch")?);
         }
@@ -849,7 +841,7 @@ impl ProjectGraphOracle {
             .map_err(FcsInvokeError::Oracle)?;
         match batch_error(&line) {
             Some(message) => Err(FcsInvokeError::Refused(message)),
-            None => Ok(line),
+            None => parse_graph_response(&line).map_err(FcsInvokeError::Refused),
         }
     }
 }
