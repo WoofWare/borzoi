@@ -278,7 +278,7 @@ pub fn cells() -> Vec<Cell> {
         ),
         one(
             "extension_compiled_name_property",
-            "namespace ExtCnP\nopen System.Runtime.CompilerServices\ntype Holder =\n    [<Extension; CompiledName(\"RenamedProp\")>]\n    static member P(s: string) = 1\nmodule M =\n    type System.String with\n        [<CompiledName(\"RenamedGetter\")>]\n        member s.Prop = 1\n        [<CompiledName(\"RenamedStatic\")>]\n        static member SProp with get () = 1 and set (v: int) = ()\n",
+            "namespace ExtCnP\nopen System.Runtime.CompilerServices\ntype Holder =\n    [<Extension; CompiledName(\"RenamedProp\")>]\n    static member P(s: string) = 1\n    [<Extension; CompiledName(\"RenamedCsProp\")>]\n    static member Q = 1\nmodule M =\n    type System.String with\n        [<CompiledName(\"RenamedGetter\")>]\n        member s.Prop = 1\n        [<CompiledName(\"RenamedStatic\")>]\n        static member SProp with get () = 1 and set (v: int) = ()\n",
         ),
         one(
             "extension_active_pattern",
