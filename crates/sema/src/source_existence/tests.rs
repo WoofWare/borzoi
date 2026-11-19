@@ -51,8 +51,8 @@ fn bare_member_heads_are_named() {
 
 /// [`project`] with `defines` defined.
 fn project_with(files: &[(&str, &str)], defines: &[&str]) -> Vec<ProjectFile> {
-    let symbols: std::collections::HashSet<String> =
-        defines.iter().map(|d| (*d).to_owned()).collect();
+    // The parser's own set type, inferred from `ParseOptions::symbols`.
+    let symbols = defines.iter().map(|d| (*d).to_owned()).collect();
     let mut parsed = Vec::new();
     let mut recoveries = Vec::new();
     for (name, text) in files {
