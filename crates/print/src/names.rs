@@ -317,8 +317,8 @@ fn leads_uppercase(name: &EntityName) -> bool {
 /// resolves. Its rule asks the .NET runtime's Unicode tables, whose version
 /// differs from Rust's, so only a first character every version agrees is
 /// not upper case is admitted: an ASCII character other than a capital, or a
-/// lower-case letter of Latin-1, basic Greek or basic Cyrillic. A name with a
-/// `|` is refused too, as FCS reads it as an active pattern's (FS1209).
+/// lower-case letter of Latin-1, basic Greek or basic Cyrillic. A name spelled
+/// as an active pattern's is refused too ([`is_active_pattern_spelling`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VarName(Ident);
 
@@ -330,9 +330,10 @@ impl VarName {
             (c.is_ascii() && !c.is_ascii_uppercase())
                 || (matches!(c, 'ß'..='ÿ' | 'α'..='ω' | 'а'..='џ') && c.is_lowercase())
         });
-        // FCS reads a name with `|` as an active pattern's, quoted or not.
-        let active = ident.as_str().contains('|');
-        if stable && !active && !borzoi_cst::parser::ident_leads_uppercase(ident.as_str()) {
+        if stable
+            && !is_active_pattern_spelling(ident.as_str())
+            && !borzoi_cst::parser::ident_leads_uppercase(ident.as_str())
+        {
             Ok(VarName(ident))
         } else {
             Err(ident)
@@ -346,6 +347,14 @@ impl VarName {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+}
+
+/// Whether FCS may read `text` as an active pattern's name, quoted or not, as
+/// it reads `|A|B|`: a superset of its `IsActivePatternName`, any text of
+/// three characters or more between `|`s, so a pattern bound to such a name
+/// matches by an active pattern rather than binding (FS1209).
+pub fn is_active_pattern_spelling(text: &str) -> bool {
+    text.len() >= 3 && text.starts_with('|') && text.ends_with('|')
 }
 
 /// A dotted path of identifiers, `A.B.c`.

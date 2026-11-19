@@ -417,6 +417,11 @@ fn binding_body<V: Version>(b: &NormalisedBinding) -> L<Binding<V>> {
             if b.is_mutable || access.is_some() {
                 return decline("mutable or access on a pattern binding");
             }
+            if is_parenthesised_wildcard(p) {
+                // The tree prints `_` bare, which a recursive group admits
+                // and `(_)` it refuses (FS3521).
+                return decline("pat: a parenthesised `_` binding");
+            }
             BindingHead::Pattern(pat(p)?)
         }
     };
@@ -1289,6 +1294,18 @@ fn pat<V: Version>(p: &NormalisedPat) -> L<Pat<V>> {
         P::QuoteExpr(_) => return decline("pat: quotation"),
         P::FromParseError(_) => return decline("pat: error"),
     })
+}
+
+/// Whether `p` is `(_)`, `((_))`, ….
+fn is_parenthesised_wildcard(p: &NormalisedPat) -> bool {
+    let NormalisedPat::Paren(first) = p else {
+        return false;
+    };
+    let mut inner: &NormalisedPat = first;
+    while let NormalisedPat::Paren(next) = inner {
+        inner = next;
+    }
+    matches!(inner, NormalisedPat::Wildcard)
 }
 
 /// Whether `p` is `(:? t)`, `((:? t))`, ….

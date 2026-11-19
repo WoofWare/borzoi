@@ -2584,10 +2584,11 @@ fn fresh_group<V: Version>(decls: &[ModuleDecl<V>], sc: &Scope) -> bool {
     let distinct = |xs: &[String]| xs.iter().collect::<BTreeSet<_>>().len() == xs.len();
     distinct(&values)
         && distinct(&modules)
+        // Any path's last name, which an `open` in the group may bring in bare.
         && !values.iter().any(|v| {
             sc.vars
                 .iter()
-                .any(|w| matches!(w.path.segments(), [only] if only.as_str() == v))
+                .any(|w| w.path.segments().last().is_some_and(|l| l.as_str() == v))
         })
         && !modules
             .iter()
@@ -2805,16 +2806,18 @@ fn every_admitted_case_initial_checks() {
     assert!(refused.is_empty(), "{}", refused.join("\n"));
 }
 
-/// Every name [`VarName::new`] admits must be one FCS reads as a variable
-/// after `as`, where before F# 6 nothing else may stand: each candidate it
-/// admits is checked as `match x with _ as v -> ()` at F# 5 and at preview.
+/// Every alias the tree admits must be one FCS accepts after `as`: each name
+/// [`VarName::new`] admits, as `match x with _ as v -> ()` at F# 5 (where
+/// only a variable may stand there) and at preview, and each name
+/// [`AliasPat::new`] admits as a pattern, at preview.
 #[test]
-fn every_admitted_variable_alias_checks() {
-    use borzoi_print::version::{Preview, V5_0};
+fn every_admitted_alias_checks() {
+    use borzoi_print::version::{Available, Preview, V5_0};
 
     const CANDIDATES: &[&str] = &[
         "|A|B|",
         "|A|_|",
+        "|A|",
         "a|b",
         "_x",
         "1a",
@@ -2830,14 +2833,14 @@ fn every_admitted_variable_alias_checks() {
         "Item",
         "Ä",
     ];
-    fn file<V: Version>(v: &VarName) -> ImplFile<V> {
+    fn file<V: Version>(alias: AsAlias<V>) -> ImplFile<V> {
         let body = Expr::Match {
             scrutinee: bx(name("x")),
             clauses: Vec1::new(
                 MatchClause {
                     pat: Pat::As {
                         pat: Box::new(Pat::Wildcard),
-                        alias: AsAlias::Var(v.clone()),
+                        alias,
                     },
                     guard: None,
                     result: Expr::Const(Const::Unit),
@@ -2864,23 +2867,43 @@ fn every_admitted_variable_alias_checks() {
         let group = ModuleBindings::new(LetBindings::NonRec(Box::new(binding))).expect("a group");
         ImplFile::AnonModule(vec![ModuleDecl::Let(group)])
     }
-    let admitted: Vec<VarName> = CANDIDATES
+    let names: Vec<Ident> = CANDIDATES
         .iter()
         .chain(BINDERS)
-        .filter_map(|s| VarName::new(Ident::new(s).ok()?).ok())
+        .filter_map(|s| Ident::new(s).ok())
         .collect();
+    let vars: Vec<VarName> = names
+        .iter()
+        .filter_map(|n| VarName::new(n.clone()).ok())
+        .collect();
+    assert!(vars.len() > 10, "too few variables admitted: {vars:?}");
     assert!(
-        admitted.len() > 10,
-        "too few aliases admitted: {admitted:?}"
+        vars.iter().any(|v| v.as_str() == "a|b"),
+        "`a|b`, which FCS reads as a variable, refused"
     );
-    let old: Vec<ImplFile<V5_0>> = admitted.iter().map(file).collect();
-    let new: Vec<ImplFile<Preview>> = admitted.iter().map(file).collect();
+    let pats: Vec<AliasPat<Preview>> = names
+        .iter()
+        .filter_map(|n| AliasPat::new(Available, Pat::Name(LongIdent::single(n.clone()))).ok())
+        .collect();
+    assert!(!pats.is_empty(), "no name admitted as a pattern");
+    let old: Vec<ImplFile<V5_0>> = vars.iter().map(|v| file(AsAlias::Var(v.clone()))).collect();
+    let new: Vec<ImplFile<Preview>> = vars
+        .iter()
+        .map(|v| file(AsAlias::Var(v.clone())))
+        .chain(pats.iter().map(|p| file(AsAlias::Pat(p.clone()))))
+        .collect();
+    let labels: Vec<String> = vars
+        .iter()
+        .map(|v| format!("{v:?} at 5.0"))
+        .chain(vars.iter().map(|v| format!("{v:?} at preview")))
+        .chain(pats.iter().map(|p| format!("{:?} at preview", p.pat())))
+        .collect();
     let failures: Vec<String> = super::check::check_errors(&old, V5_0::LANGUAGE)
         .into_iter()
         .chain(super::check::check_errors(&new, Preview::LANGUAGE))
-        .zip(admitted.iter().chain(&admitted))
+        .zip(labels)
         .filter(|(errors, _)| !errors.is_empty())
-        .map(|(errors, v)| format!("{v:?}: {errors:?}"))
+        .map(|(errors, label)| format!("{label}: {errors:?}"))
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
