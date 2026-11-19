@@ -9,9 +9,17 @@
 //! the same name recurs (a module beside a type of its name, duplicates
 //! across files, an augmentation of a local type).
 
+use borzoi_oracle_harness::hostile::census::Census;
+use borzoi_oracle_harness::hostile::{self, Dimension, Kind as HostileKind, coverage, source};
+use borzoi_oracle_harness::manifest::Manifest;
 use borzoi_oracle_harness::project_graph::Target;
 
-use crate::source_existence_diff::Cell;
+use crate::common::corpus_manifest::{check_manifest, regenerate};
+use crate::source_existence_diff::{Cell, grade_cells};
+
+/// The hostile dimensions mixed into a cell's source, which the cell
+/// carries to where the walk reads it.
+pub type Hostile = std::collections::BTreeSet<Dimension>;
 
 /// A small deterministic generator (xorshift64*), so a case is its seed.
 pub struct Rng(u64);
@@ -516,9 +524,156 @@ pub fn cell(seed: u64) -> Cell {
         files.push((format!("F{i}.fs"), text));
     }
     let mut cell = Cell::new(format!("gen_{seed}"), &[]);
+    // One case in `hostile::RATE` has a hostile source state mixed into one
+    // of its files, by dimension in turn so a short run reaches each.
+    if hostile::mixes(seed) {
+        let dimensions: Vec<Dimension> = HostileKind::SourceText
+            .dimensions()
+            .filter(|d| *d != Dimension::NotText)
+            .collect();
+        let turn = seed / hostile::RATE;
+        let dimension = dimensions[turn as usize % dimensions.len()];
+        let entries: Vec<_> = source::alphabet().of(dimension).collect();
+        let entry = entries[(turn as usize / dimensions.len()) % entries.len()];
+        let at = (turn as usize) % files.len();
+        let text = &files[at].1;
+        if entry.value.varies(text) {
+            let mutated = String::from_utf8(entry.value.apply(text))
+                .expect("a mutation of a text dimension keeps the file UTF-8");
+            files[at].1 = mutated;
+            cell.hostile.insert(entry.dimension);
+        }
+    }
     cell.files = files;
     if headerless {
         cell.target = Target::Exe;
     }
     cell
+}
+
+/// The census of the source mutations the generator mixes in.
+fn open_census() -> Census {
+    coverage::open(
+        file!(),
+        "source_existence_gen",
+        &[(
+            Dimension::NotText,
+            "a cell's files are text: a Compile item that is not UTF-8 is one the \
+             caller cannot read, the `UnreadableItem` channel, which the walk's \
+             inventory witnesses",
+        )],
+    )
+}
+
+/// Record each graded cell's mutation, with the certified verdict's first
+/// word as the outcome, once both readings have run.
+fn record(census: &Census, cells: &[Cell], entries: &[(String, String)]) {
+    for cell in cells {
+        let outcome = entries
+            .iter()
+            .find(|(name, _)| *name == cell.name)
+            .and_then(|(_, verdict)| verdict.strip_prefix("certified: "))
+            .and_then(|v| v.split([' ', ',']).next())
+            .unwrap_or("failed");
+        census.reached(&cell.hostile, outcome);
+    }
+}
+
+/// The cells the generator makes from seeds `first..first + count`.
+fn generated(first: u64, count: u64) -> Vec<Cell> {
+    (first..first + count).map(cell).collect()
+}
+
+/// The pinned default run of the generator: its seeds are fixed, so each
+/// case's verdict is pinned in `source_existence_gen.txt`.
+#[test]
+fn source_rows_are_fcs_rows_over_generated_projects() {
+    let census = open_census();
+    let cells = generated(0, 60);
+    let (entries, failures) = grade_cells(&cells);
+    record(&census, &cells, &entries);
+    if !failures.is_empty() {
+        for c in &cells {
+            if failures.iter().any(|f| f.contains(&format!("{}:", c.name))) {
+                for (name, text) in &c.files {
+                    eprintln!("--- {} {name}\n{text}", c.name);
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    let manifest = Manifest::from_keyed(entries).expect("well-formed entries");
+    check_manifest(
+        "source_existence_gen",
+        &manifest,
+        &regenerate("source_existence_gen::source_rows_are_fcs_rows_over_generated_projects"),
+    );
+    census.finish(&regenerate(
+        "source_existence_gen::source_rows_are_fcs_rows_over_generated_projects",
+    ));
+}
+
+/// The generator over more seeds: `BORZOI_SOURCE_EXISTENCE_SEED` (default
+/// 1000) and `BORZOI_SOURCE_EXISTENCE_CASES` (default 400). Pins nothing:
+/// every property must hold.
+#[test]
+#[ignore = "hundreds of FCS checks; the default run is the gate"]
+fn deep_source_rows_are_fcs_rows_over_generated_projects() {
+    let var = |name: &str, default: u64| {
+        std::env::var(name)
+            .ok()
+            .map(|v| v.parse().expect("a count"))
+            .unwrap_or(default)
+    };
+    let first = var("BORZOI_SOURCE_EXISTENCE_SEED", 1000);
+    let count = var("BORZOI_SOURCE_EXISTENCE_CASES", 400);
+    eprintln!("seeds {first}..{}", first + count);
+    let census = open_census();
+    let cells = generated(first, count);
+    let (entries, failures) = grade_cells(&cells);
+    record(&census, &cells, &entries);
+    let exact = entries
+        .iter()
+        .filter(|(_, v)| v.starts_with("certified: exact"))
+        .count();
+    eprintln!(
+        "{} cases, {exact} exact under the certificate",
+        entries.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    census.finish(&regenerate(
+        "source_existence_gen::deep_source_rows_are_fcs_rows_over_generated_projects",
+    ));
+}
+
+/// Print the generated cell `BORZOI_SOURCE_EXISTENCE_SEED`, our reading of
+/// it, and FCS's diagnostics: the tool for reading a generated failure.
+#[test]
+#[ignore = "a debugging aid, run by hand"]
+fn show_generated_cell() {
+    let seed: u64 = std::env::var("BORZOI_SOURCE_EXISTENCE_SEED")
+        .expect("BORZOI_SOURCE_EXISTENCE_SEED")
+        .parse()
+        .expect("a seed");
+    let cell = cell(seed);
+    for (name, text) in &cell.files {
+        eprintln!("--- {name}\n{text}");
+    }
+    let (ours, _) = crate::source_existence_diff::ours(&cell, None);
+    match &ours {
+        borzoi_sema::SourceExistence::Unread(why) => eprintln!("ours: unread {why:?}"),
+        borzoi_sema::SourceExistence::Read(s) => eprintln!("ours: read, {:?}", s.approximations),
+    }
+    let fcs = crate::source_existence_diff::fcs(&cell);
+    eprintln!("FCS errors: {:?}", fcs.errors);
 }

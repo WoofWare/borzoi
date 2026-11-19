@@ -82,6 +82,8 @@ pub struct Cell {
     pub refs: Vec<RefLib>,
     pub certificate: Certificate,
     pub target: Target,
+    /// The hostile dimensions mixed into the cell's source.
+    pub hostile: crate::source_existence_gen::Hostile,
 }
 
 impl Cell {
@@ -96,6 +98,7 @@ impl Cell {
             refs: Vec::new(),
             certificate: Certificate::BySpelling,
             target: Target::Library,
+            hostile: Default::default(),
         }
     }
 }
@@ -131,8 +134,17 @@ pub struct Fcs {
     pub compile_errors: Vec<String>,
     /// The entities of a clean A whose members FCS's view could not read.
     pub view_unread: Vec<String>,
+    /// Why the oracle describes no CCU for A, where it refuses.
+    pub refused: Option<Refusal>,
+}
+
+/// Why the oracle describes no CCU for a producer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
     /// FCS reads A from its DLL (a type provider), not from source.
-    pub reads_dll: bool,
+    ReadsDll,
+    /// A source holds a `#r` or `#load` fsc acts on.
+    NamesUnreadCode,
 }
 
 fn plain(s: &str) -> PlainName {
@@ -238,8 +250,12 @@ pub fn fcs(cell: &Cell) -> Fcs {
     let response: ReferencedResponse = match request(&line) {
         Ok(r) => r,
         // FCS reads a type-provider assembly from its DLL, never from its
-        // source: the walk must decline it.
-        Err(e) if e.contains("FCS reads it from its DLL") => {
+        // source; and a source with a `#r` or `#load` fsc acts on names code
+        // the check does not read. The walk must decline either.
+        Err(e)
+            if e.contains("FCS reads it from its DLL")
+                || e.contains("names code the project check does not read") =>
+        {
             return Fcs {
                 memory: Rows {
                     entities: Vec::new(),
@@ -251,7 +267,11 @@ pub fn fcs(cell: &Cell) -> Fcs {
                 errors: Vec::new(),
                 compile_errors: Vec::new(),
                 view_unread: Vec::new(),
-                reads_dll: true,
+                refused: Some(if e.contains("FCS reads it from its DLL") {
+                    Refusal::ReadsDll
+                } else {
+                    Refusal::NamesUnreadCode
+                }),
             };
         }
         Err(e) => panic!("{}: referenced: {e}", cell.name),
@@ -394,9 +414,20 @@ pub fn fcs(cell: &Cell) -> Fcs {
     // compiled name): there is then no DLL to hold the signature to.
     let mut compile_errors = Vec::new();
     let mut compile_output: Option<PathBuf> = None;
-    if errors.is_empty() {
+    // The compile op refuses a source that may hold a line directive (its
+    // diagnostics' ranges would move): such a producer has no DLL to hold the
+    // signature to, and its D1 is not checked.
+    let compiled: Option<CompileResponse> = if errors.is_empty() {
         let line = fixture.compile_request(&plain(PRODUCER), &framework, &BTreeMap::new());
-        let out: CompileResponse = request(line.as_line()).expect("compile the producer");
+        match request(line.as_line()) {
+            Ok(out) => Some(out),
+            Err(e) if e.contains("may hold a line directive") => None,
+            Err(e) => panic!("compile the producer: {e}"),
+        }
+    } else {
+        None
+    };
+    if let Some(out) = compiled {
         compile_errors = out
             .errors()
             .map(|d| format!("FS{}", d["ErrorNumber"]))
@@ -453,7 +484,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
         errors,
         compile_errors,
         view_unread,
-        reads_dll: false,
+        refused: None,
     }
 }
 
@@ -532,16 +563,21 @@ fn lines<T: std::fmt::Debug>(rows: &[T]) -> String {
 
 /// Grade `ours` against FCS's rows: the verdict, or why a property fails.
 pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, String> {
-    if fcs.reads_dll {
-        return match ours {
-            SourceExistence::Unread(ExistenceUnread::TypeProvider(_)) => {
-                Ok("unread TypeProvider, FCS reads the DLL".to_owned())
-            }
-            other => Err(format!(
-                "{}: FCS reads A from its DLL (a type provider), and ours is {other:?}",
+    match (fcs.refused, ours) {
+        (None, _) => {}
+        (Some(Refusal::ReadsDll), SourceExistence::Unread(ExistenceUnread::TypeProvider(_))) => {
+            return Ok("unread TypeProvider, FCS reads the DLL".to_owned());
+        }
+        (
+            Some(Refusal::NamesUnreadCode),
+            SourceExistence::Unread(ExistenceUnread::HashReference(_)),
+        ) => return Ok("unread HashReference, a source names code".to_owned()),
+        (Some(why), other) => {
+            return Err(format!(
+                "{}: the oracle refuses A ({why:?}), and ours is {other:?}",
                 cell.name
-            )),
-        };
+            ));
+        }
     }
     let surface = match ours {
         SourceExistence::Unread(why) => return Ok(format!("unread {why:?}")),
@@ -835,97 +871,6 @@ fn grid_cells_by_name() {
         failures.len(),
         failures.join("\n")
     );
-}
-
-/// The cells the generator makes from seeds `first..first + count`.
-fn generated(first: u64, count: u64) -> Vec<Cell> {
-    (first..first + count)
-        .map(crate::source_existence_gen::cell)
-        .collect()
-}
-
-/// The pinned default run of the generator: its seeds are fixed, so each
-/// case's verdict is pinned in `source_existence_gen.txt`.
-#[test]
-fn source_rows_are_fcs_rows_over_generated_projects() {
-    let cells = generated(0, 60);
-    let (entries, failures) = grade_cells(&cells);
-    if !failures.is_empty() {
-        for c in &cells {
-            if failures.iter().any(|f| f.contains(&format!("{}:", c.name))) {
-                for (name, text) in &c.files {
-                    eprintln!("--- {} {name}\n{text}", c.name);
-                }
-            }
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "{} failures:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
-    let manifest = Manifest::from_keyed(entries).expect("well-formed entries");
-    check_manifest(
-        "source_existence_gen",
-        &manifest,
-        &regenerate("source_existence_diff::source_rows_are_fcs_rows_over_generated_projects"),
-    );
-}
-
-/// The generator over more seeds: `BORZOI_SOURCE_EXISTENCE_SEED` (default
-/// 1000) and `BORZOI_SOURCE_EXISTENCE_CASES` (default 400). Pins nothing:
-/// every property must hold.
-#[test]
-#[ignore = "hundreds of FCS checks; the default run is the gate"]
-fn deep_source_rows_are_fcs_rows_over_generated_projects() {
-    let var = |name: &str, default: u64| {
-        std::env::var(name)
-            .ok()
-            .map(|v| v.parse().expect("a count"))
-            .unwrap_or(default)
-    };
-    let first = var("BORZOI_SOURCE_EXISTENCE_SEED", 1000);
-    let count = var("BORZOI_SOURCE_EXISTENCE_CASES", 400);
-    eprintln!("seeds {first}..{}", first + count);
-    let cells = generated(first, count);
-    let (entries, failures) = grade_cells(&cells);
-    let exact = entries
-        .iter()
-        .filter(|(_, v)| v.starts_with("certified: exact"))
-        .count();
-    eprintln!(
-        "{} cases, {exact} exact under the certificate",
-        entries.len()
-    );
-    assert!(
-        failures.is_empty(),
-        "{} failures:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
-}
-
-/// Print the generated cell `BORZOI_SOURCE_EXISTENCE_SEED`, our reading of
-/// it, and FCS's diagnostics: the tool for reading a generated failure.
-#[test]
-#[ignore = "a debugging aid, run by hand"]
-fn show_generated_cell() {
-    let seed: u64 = std::env::var("BORZOI_SOURCE_EXISTENCE_SEED")
-        .expect("BORZOI_SOURCE_EXISTENCE_SEED")
-        .parse()
-        .expect("a seed");
-    let cell = crate::source_existence_gen::cell(seed);
-    for (name, text) in &cell.files {
-        eprintln!("--- {name}\n{text}");
-    }
-    let (ours, _) = ours(&cell, None);
-    match &ours {
-        SourceExistence::Unread(why) => eprintln!("ours: unread {why:?}"),
-        SourceExistence::Read(s) => eprintln!("ours: read, {:?}", s.approximations),
-    }
-    let fcs = fcs(&cell);
-    eprintln!("FCS errors: {:?}", fcs.errors);
 }
 
 /// Every name the walk takes as a type FSharp.Core declares in a namespace

@@ -1,6 +1,6 @@
 # Generated; do not edit by hand. One line per graded item, sorted.
 # Regenerate with:
-#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_diff::source_rows_are_fcs_rows_over_generated_projects
+#   BORZOI_UPDATE_MANIFESTS=1 nix develop -c cargo test -p borzoi-sema --test all source_existence_gen::source_rows_are_fcs_rows_over_generated_projects
 gen_0	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute] [FCS: FS927,FS940]
 gen_1	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 10) [AbbreviationOrUnion]; unknown: unread TypeProvider(0)
 gen_10	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute]
@@ -31,7 +31,7 @@ gen_32	certified: covers, FCS rejects surplus(prefix 11, entity 10, lends 3, len
 gen_33	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 7, lender 0, auto-open 0, extension 4) [UncertainAttribute]
 gen_34	certified: covers, FCS rejects surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 162) [BindingPattern,ClassLetName]; unknown: unread TypeProvider(1) [FCS: FS37]
 gen_35	certified: exact []; unknown: unread TypeProvider(0)
-gen_36	certified: exact []; unknown: covers surplus(prefix 1, entity 1, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+gen_36	certified: unread HashReference(0); unknown: unread HashReference(0) [FCS: FS76]
 gen_37	certified: exact []; unknown: exact []
 gen_38	certified: unread Recovered(1); unknown: unread Recovered(1) [FCS: FS10]
 gen_39	certified: exact, FCS rejects []; unknown: unread TypeProvider(0) [FCS: FS927,FS927,FS927,FS927,FS927,FS927]
@@ -49,15 +49,15 @@ gen_49	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(pr
 gen_5	certified: exact [AbbreviationOrUnion]; unknown: unread TypeProvider(1)
 gen_50	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute] [FCS: FS37]
 gen_51	certified: exact []; unknown: exact []
-gen_52	certified: exact, FCS rejects []; unknown: unread TypeProvider(0) [FCS: FS37]
+gen_52	certified: unread Recovered(1); unknown: unread TypeProvider(0) [FCS: FS37,FS10]
 gen_53	certified: covers surplus(prefix 1, entity 1, lends 1, lender 0, auto-open 0, extension 0) [UncertainAttribute]; unknown: covers surplus(prefix 1, entity 1, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute]
 gen_54	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute]
 gen_55	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 3, lender 0, auto-open 0, extension 0) [UncertainAttribute]
-gen_56	certified: covers, FCS rejects surplus(prefix 4, entity 1, lends 0, lender 0, auto-open 0, extension 20) [ClassLetName]; unknown: covers, FCS rejects surplus(prefix 4, entity 1, lends 2, lender 0, auto-open 0, extension 20) [UncertainAttribute,ClassLetName] [FCS: FS38,FS37]
+gen_56	certified: unread LineDirective(0); unknown: unread LineDirective(0) [FCS: FS38,FS37]
 gen_57	certified: unread Recovered(1); unknown: unread Recovered(1) [FCS: FS10,FS37]
 gen_58	certified: unread TypeProvider(0); unknown: unread TypeProvider(0) [FCS: FS849,FS849]
 gen_59	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 10) []; unknown: unread TypeProvider(1)
 gen_6	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 6, lender 2, auto-open 0, extension 4) [UncertainAttribute]
 gen_7	certified: exact, FCS rejects [AbbreviationOrUnion]; unknown: unread TypeProvider(1) [FCS: FS37,FS33,FS33]
-gen_8	certified: exact []; unknown: unread TypeProvider(1)
+gen_8	certified: unread HashReference(2); unknown: unread TypeProvider(1) [FCS: FS76]
 gen_9	certified: exact, FCS rejects []; unknown: covers, FCS rejects surplus(prefix 0, entity 0, lends 6, lender 0, auto-open 0, extension 0) [UncertainAttribute] [FCS: FS37]

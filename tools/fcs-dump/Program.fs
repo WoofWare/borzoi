@@ -6441,16 +6441,23 @@ let private sourceReferenceDirectives = set [ "r"; "reference"; "load"; "I"; "i"
 /// Refuse a project whose meaning the project check cannot describe as fsc
 /// sees it:
 ///
-/// - a source that may hold a line directive ([`mayHoldLineDirective`]). A
-///   `#line` changes where fsc reports a range and what `__SOURCE_FILE__` and
-///   `__LINE__` are, so the check must apply it, and then a record cannot say
-///   which file holds what it reports.
+/// - a source that may hold a line directive ([`mayHoldLineDirective`]),
+///   unless `rangesRead` is false. A `#line` changes where fsc reports a
+///   range and what `__SOURCE_FILE__` and `__LINE__` are, so the check must
+///   apply it, and then a record cannot say which file holds what it
+///   reports; an op that reads no range (a signature's contents) is told
+///   the truth by the check either way.
 /// - a directive in [`sourceReferenceDirectives`] that fsc acts on
 ///   ([`processedHashDirectives`]), read from the check's own parse
 ///   (`parsed`), so one under `#if EDITING` is in no branch it parsed.
-let private refuseUndescribedSources (paths: string[]) (textOf: string -> string) (parsed: string -> ParsedInput) =
+let private refuseUndescribedSources
+    (rangesRead: bool)
+    (paths: string[])
+    (textOf: string -> string)
+    (parsed: string -> ParsedInput)
+    =
     for path in paths do
-        if mayHoldLineDirective (textOf path) then
+        if rangesRead && mayHoldLineDirective (textOf path) then
             failwithf "%s may hold a line directive, which moves the ranges the project check reports to another place than the text" path
         match
             processedHashDirectives (parsed path)
@@ -6691,7 +6698,11 @@ let private admitProjectCheck (inputsMayChange: bool) =
 /// and type providers refused ([`refuseTypeProvider`]); otherwise the caller
 /// answers for their freshness: a fresh child ([`admitProjectCheck`]), or the
 /// project-graph oracle's clearing of FCS's caches before every request.
-let private checkProjectNowWith
+///
+/// `rangesRead`: whether the caller reads the check's ranges, which a line
+/// directive moves ([`refuseUndescribedSources`]).
+let private checkProjectNowWithRanges
+    (rangesRead: bool)
     (fixture: bool)
     (checker: FSharpChecker)
     (projOpts: FSharpProjectOptions)
@@ -6738,11 +6749,15 @@ let private checkProjectNowWith
                 (checker.GetBackgroundParseResultsForFileInProject(path, o, userOpName = userOpName)
                  |> Async.RunSynchronously)
                     .ParseTree
-            refuseUndescribedSources o.SourceFiles (fun path -> requestSources[path]) (if obj.ReferenceEquals(o, opts) then parsed else parsedIn)
+            refuseUndescribedSources rangesRead o.SourceFiles (fun path -> requestSources[path]) (if obj.ReferenceEquals(o, opts) then parsed else parsedIn)
         results, release
     with _ ->
         release ()
         reraise ()
+
+/// [`checkProjectNowWithRanges`] for an op that reads the check's ranges.
+let private checkProjectNowWith fixture checker projOpts userOpName =
+    checkProjectNowWithRanges true fixture checker projOpts userOpName
 
 /// [`checkProjectNowWith`] for a request of the uses-project or xml-doc
 /// oracle: a fixture request unless its inputs may change (the module doc).
@@ -9182,7 +9197,8 @@ let private respondGraphReferenced (checker: FSharpChecker) (root: JsonElement) 
         failwithf "invariant: %s exists, so a project reference could be read from disk" unwrittenRoot
     let built, outputOf = graphOptions graph
     let checkedResults, release =
-        checkProjectNowWith false checker built.[graph.Check.Id] "fcs-dump-graph-referenced"
+        // A signature's contents carry no range a line directive moves.
+        checkProjectNowWithRanges false false checker built.[graph.Check.Id] "fcs-dump-graph-referenced"
     try
         let producer = graph.ById.[target]
         let producerResults =
