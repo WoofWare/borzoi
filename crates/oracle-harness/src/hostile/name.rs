@@ -30,7 +30,8 @@ pub enum Part {
     ExtRecased,
     /// These bytes.
     Lit(&'static [u8]),
-    /// As many `x` as bring the whole name to this many bytes.
+    /// As many `x` as bring the whole name to this many bytes: none where it
+    /// is that long already.
     PadTo(usize),
 }
 
@@ -76,12 +77,10 @@ fn render_parts(parts: &[Part], stem: &str, ext: &str) -> Rendered {
     let mut out = Vec::new();
     for part in parts {
         match part {
+            // A name already that long takes no padding, and the template
+            // does not vary it.
             Part::PadTo(total) => {
-                assert!(
-                    *total >= fixed_len,
-                    "the stem and extension are already longer than the {total} bytes asked for"
-                );
-                out.extend(std::iter::repeat_n(b'x', total - fixed_len));
+                out.extend(std::iter::repeat_n(b'x', total.saturating_sub(fixed_len)));
             }
             other => out.extend(fixed(other)),
         }
@@ -782,6 +781,20 @@ mod tests {
     fn the_alphabet_covers_every_name_dimension() {
         // `Alphabet::new` panics on a dimension with no entry.
         assert_eq!(alphabet().kind(), Kind::FileName);
+    }
+
+    /// A place that carries text takes a name of any length: a template
+    /// that pads to fewer bytes than the name has does not vary it, and is
+    /// left out, and the others render.
+    #[test]
+    fn a_name_longer_than_a_padding_asks_for_is_not_padded() {
+        let stem = "s".repeat(300);
+        let entries = as_text(&stem, ".fs");
+        assert!(!entries.is_empty());
+        assert!(
+            entries.iter().all(|e| e.dimension != Dimension::Long),
+            "nothing is left to pad"
+        );
     }
 
     #[test]
