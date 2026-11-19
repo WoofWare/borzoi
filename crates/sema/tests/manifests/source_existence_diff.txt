@@ -17,7 +17,9 @@ assembly_auto_open_without_target_in_module	certified: exact []; unknown: unread
 assembly_other_attribute	certified: exact []; unknown: unread TypeProvider(0)
 attribute_target_assembly_on_type	certified: covers, FCS rejects surplus(prefix 1, entity 1, lends 1, lender 0, auto-open 1, extension 0) [ModuleSuffix]; unknown: unread TypeProvider(0) [FCS: FS841,FS841,FS841]
 attribute_target_module	certified: unread Recovered(0); unknown: unread Recovered(0) [FCS: FS10]
+attribute_target_return_on_constructor_and_slot	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 1, lender 0, auto-open 0, extension 4) [UncertainAttribute]
 attribute_target_return_on_entities	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 0) [UncertainAttribute]
+attribute_target_return_on_signature_val	certified: exact [SignaturePair]; unknown: exact [SignaturePair,UncertainAttribute]
 attribute_targets	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 2, lender 0, auto-open 0, extension 4) [UncertainAttribute]
 augmentation_of_local_exception	certified: exact []; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 4) [UncertainAttribute]
 augmentation_of_single_case_abbreviation	certified: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 2) [AbbreviationOrUnion,AugmentationKind]; unknown: covers surplus(prefix 0, entity 0, lends 0, lender 0, auto-open 0, extension 10) [UncertainAttribute,AbbreviationOrUnion,AugmentationKind]
