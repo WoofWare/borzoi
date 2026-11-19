@@ -11,7 +11,11 @@
 //! module at column zero, which is a declaration a namespace takes as well
 //! as a module does (a `let` is not), so the file it is appended to may end
 //! in either. The mutations are for implementation files: a signature file
-//! takes none of these declarations.
+//! takes none of these declarations. Nor is every mutation one the compiler
+//! accepts of every file (a module after an `[<EntryPoint>]` is an error, and
+//! so are bare carriage returns between some tokens): a harness grades the
+//! mutated file against its oracle's verdict on the mutated file, never
+//! against the original's.
 
 use std::sync::OnceLock;
 

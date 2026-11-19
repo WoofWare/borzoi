@@ -236,7 +236,9 @@ impl Unmakeable {
             } => Some(Dimension::NonUtf8),
             Unmakeable::Name { .. } => None,
             Unmakeable::State { state, whole, .. } => whole.then(|| state.dimension()),
-            Unmakeable::Change { change, .. } => Some(change.dimension()),
+            // One stamp the file system did not keep says nothing of the
+            // stamps it does keep.
+            Unmakeable::Change { .. } => None,
         }
     }
 }
@@ -372,15 +374,17 @@ impl HostileFs {
         };
         let (a, b) = (name(a)?, name(b)?);
         let dir = self.target_dir(&self.aside);
-        fs::write(dir.join(&a), b"").map_err(|e| match name_refusal(&e) {
+        write_new(&dir.join(&a), b"").map_err(|e| match name_refusal(&e) {
             Some(why) => Unmakeable::Name { why },
             None => panic!("probe {a:?}: {e}"),
         })?;
-        match fs::symlink_metadata(dir.join(&b)) {
-            Ok(_) => Err(Unmakeable::Name {
+        // Made, not looked up: a name that cannot be found may still be one
+        // that cannot be made.
+        match write_new(&dir.join(&b), b"") {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(Unmakeable::Name {
                 why: NameRefusal::Folded,
             }),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => match name_refusal(&e) {
                 Some(why) => Err(Unmakeable::Name { why }),
                 None => panic!("probe {b:?}: {e}"),
@@ -506,7 +510,7 @@ impl HostileFs {
                 io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
             );
             if unpermitted && name_refusal(&e).is_none() {
-                made(fs::write(&path, b""))?;
+                made(write_new(&path, b""))?;
                 fs::remove_file(&path).expect("remove the probe file");
                 return Err(Unmakeable::State {
                     state,
@@ -518,12 +522,12 @@ impl HostileFs {
         };
         let mut target = None;
         match state {
-            State::Regular => made(fs::write(&path, content))?,
-            State::Empty => made(fs::write(&path, b""))?,
+            State::Regular => made(write_new(&path, content))?,
+            State::Empty => made(write_new(&path, b""))?,
             State::Missing => {
                 // Whether the name could exist is still the platform's to
                 // say: a name it refuses is not "missing" but unmakeable.
-                made(fs::write(&path, b""))?;
+                made(write_new(&path, b""))?;
                 fs::remove_file(&path).expect("remove the probe file");
             }
             State::Directory => made(fs::create_dir(&path))?,
@@ -568,7 +572,7 @@ impl HostileFs {
             }
             State::SymlinkLoop => special(symlink(component, &path))?,
             State::Unreadable => {
-                made(fs::write(&path, content))?;
+                made(write_new(&path, content))?;
                 fs::set_permissions(&path, Permissions::from_mode(0o000))
                     .expect("clear the file's mode");
                 if File::open(&path).is_ok() {
@@ -581,7 +585,7 @@ impl HostileFs {
                 }
             }
             State::ReadOnly => {
-                made(fs::write(&path, content))?;
+                made(write_new(&path, content))?;
                 fs::set_permissions(&path, Permissions::from_mode(0o444))
                     .expect("make the file read-only");
                 if File::options().write(true).open(&path).is_ok() {
@@ -632,7 +636,7 @@ impl HostileFs {
                     "{} is there already",
                     path.display()
                 );
-                fs::write(path, new).expect("write the file that appears");
+                write_new(path, new).expect("write the file that appears");
             }
             Change::Disappears => {
                 fs::remove_file(path).expect("remove the file that disappears");
@@ -640,6 +644,17 @@ impl HostileFs {
             Change::SameStampRewrite | Change::SameStampResize | Change::SameStampReplace => {
                 let before = fs::symlink_metadata(path).expect("stat the file to change");
                 assert!(before.is_file(), "{} is no regular file", path.display());
+                if change != Change::SameStampReplace {
+                    use std::os::unix::fs::MetadataExt;
+                    // A rewrite in place rewrites every name the file has,
+                    // and another of them may be outside the tree.
+                    assert_eq!(
+                        before.nlink(),
+                        1,
+                        "{} has other hard links, which a rewrite in place would change too",
+                        path.display()
+                    );
+                }
                 let old = fs::read(path).expect("read the file to change");
                 assert_ne!(old, new, "the change must change the bytes");
                 match change {
@@ -676,6 +691,14 @@ impl HostileFs {
         }
         Ok(())
     }
+}
+
+/// Write `content` to a file made at `path`, where nothing may be: two
+/// placements of one name collide here instead of one silently replacing the
+/// other.
+fn write_new(path: &Path, content: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    File::create_new(path)?.write_all(content)
 }
 
 /// Set `path`'s modification time.
@@ -1028,6 +1051,31 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "has other hard links")]
+    fn a_rewrite_in_place_of_a_file_with_another_link_is_refused() {
+        let fs_ = HostileFs::new();
+        let path = fs_
+            .place("", &plain("f"), State::Regular, b"abc")
+            .unwrap()
+            .path;
+        fs::hard_link(&path, fs_.aside().join("other-name")).unwrap();
+        let _ = fs_.change(&path, Change::SameStampRewrite, b"abd");
+    }
+
+    #[test]
+    fn twins_are_held_apart_only_if_both_can_be_made() {
+        let fs_ = HostileFs::new();
+        assert_eq!(fs_.holds_apart(&plain("a"), &plain("b")), Ok(()));
+        // The same name twice is one file, whatever the file system.
+        assert_eq!(
+            fs_.holds_apart(&plain("a"), &plain("a")),
+            Err(Unmakeable::Name {
+                why: NameRefusal::Folded
+            })
+        );
+    }
+
+    #[test]
     fn only_a_refusal_of_every_value_excuses_a_dimension() {
         let name = |why| Unmakeable::Name { why };
         assert_eq!(
@@ -1047,6 +1095,11 @@ mod tests {
         };
         assert_eq!(state(true).excuses(), Some(Dimension::Socket));
         assert_eq!(state(false).excuses(), None);
+        let change = Unmakeable::Change {
+            change: Change::SameStampRewrite,
+            reason: String::new(),
+        };
+        assert_eq!(change.excuses(), None);
     }
 
     #[test]

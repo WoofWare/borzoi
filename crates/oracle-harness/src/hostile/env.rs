@@ -6,8 +6,12 @@
 //! is an input like any other: a subject that reads one must be graded under
 //! each, and an oracle child must be started under the same one.
 //!
-//! No entry stops a tool from starting at all (a variable that makes MSBuild
-//! wait for a debugger, say): such a value says nothing about the subject.
+//! Some entries stop the toolchain itself from starting where they are set
+//! for the whole process (a `DOTNET_ROOT` that holds no runtime). That is a
+//! result for a subject that starts the toolchain, and no result at all for
+//! an oracle child that could not start: a harness applies such an entry to
+//! what the oracle evaluates, not to the oracle's own host. No entry makes a
+//! tool wait for input (a variable that has MSBuild wait for a debugger).
 
 use std::sync::OnceLock;
 
