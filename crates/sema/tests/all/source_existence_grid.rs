@@ -460,6 +460,21 @@ pub fn cells() -> Vec<Cell> {
             "attribute_target_return_on_entities",
             "namespace RetEnt\n[<return: AutoOpen>]\nmodule M =\n    let x = 1\n[<return: CompiledName(\"Renamed\")>]\ntype T = { X: int }\n",
         ),
+        // So do a primary constructor and a signature.
+        one(
+            "attribute_target_return_on_constructor_and_slot",
+            "module RetCtor\n[<AbstractClass>]\ntype T [<return: System.Runtime.CompilerServices.Extension>] (x: int) =\n    [<return: System.Runtime.CompilerServices.Extension>]\n    abstract M: string -> string\n    member _.X = x\n",
+        ),
+        Cell::new(
+            "attribute_target_return_on_signature_val",
+            &[
+                (
+                    "Lib.fsi",
+                    "module RetSig\n[<return: System.Runtime.CompilerServices.Extension>]\nval f: string -> string\n",
+                ),
+                ("Lib.fs", "module RetSig\nlet f (s: string) = s\n"),
+            ],
+        ),
         // A standalone attribute with no target is the assembly's when the
         // attribute allows it, as `[<AutoOpen>]` does.
         one(

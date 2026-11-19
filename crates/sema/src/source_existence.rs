@@ -692,14 +692,15 @@ impl MarkerRoutes {
         }
     }
 
-    /// What `lists` on a member, a binding or a value say: a `return:`
+    /// What `lists` on a member or a `let` definition say: a `return:`
     /// attribute is the return value's.
     fn marks<'l>(&self, lists: impl IntoIterator<Item = &'l AttributeList>) -> Marks {
         self.marks_on(lists, true)
     }
 
-    /// What `lists` on a module, a type or an exception say: one with no
-    /// return value keeps a `return:` attribute too.
+    /// What `lists` on a carrier FCS gives a `return:` attribute to say: a
+    /// module, a type, an exception, a primary constructor, and a signature
+    /// (`val`, member signature, abstract slot).
     fn entity_marks<'l>(&self, lists: impl IntoIterator<Item = &'l AttributeList>) -> Marks {
         self.marks_on(lists, false)
     }
@@ -1145,7 +1146,7 @@ impl FileWalk<'_> {
             }
             SigDecl::Val(v) => {
                 let lists: Vec<AttributeList> = v.attributes().collect();
-                let marks = self.routes.marks(&lists);
+                let marks = self.routes.entity_marks(&lists);
                 if !marks.may(Marker::Extension) {
                     return Ok(());
                 }
@@ -1323,7 +1324,7 @@ impl FileWalk<'_> {
     ) -> Result<(), ExistenceUnread> {
         if let Some(ctor) = defn.implicit_ctor() {
             let lists: Vec<AttributeList> = ctor.attributes().collect();
-            let marks = self.routes.marks(&lists);
+            let marks = self.routes.entity_marks(&lists);
             if marks.may(Marker::Extension) {
                 self.csharp_row(inner, ".ctor", &marks)?;
             }
@@ -1518,7 +1519,9 @@ impl FileWalk<'_> {
                     (vals, role)
                 }
             };
-            let member_marks = self.routes.marks(&lists);
+            // A signature keeps its `return:` attributes.
+            let signature = matches!(m, MemberDefn::AbstractSlot(_) | MemberDefn::MemberSig(_));
+            let member_marks = self.routes.marks_on(&lists, !signature);
             // A `[<CLIEvent>]` property compiles to its event's accessors
             // too, which `[<CompiledName>]` does not rename.
             let mut vals = vals;
@@ -1556,7 +1559,7 @@ impl FileWalk<'_> {
             for v in vals {
                 let mut all = lists.clone();
                 all.extend(v.own_lists.iter().cloned());
-                let marks = self.routes.marks(&all);
+                let marks = self.routes.marks_on(&all, !signature);
                 let marked = marks.get(Marker::Extension);
                 if augmented.is_none() && marked == Maybe::No {
                     continue;
