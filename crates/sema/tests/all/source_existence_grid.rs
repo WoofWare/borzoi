@@ -223,6 +223,85 @@ pub fn cells() -> Vec<Cell> {
             "extension_class_let_and_interface",
             "module LetExt\nopen System.Runtime.CompilerServices\ntype T() =\n    [<Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n",
         ),
+        // A class `let` is a method val only when it takes arguments, and
+        // its name is mangled (`f@line[-k]`) when an earlier name in the
+        // class's representation took it.
+        one(
+            "class_let_duplicate_names",
+            "module LetDup\nopen System.Runtime.CompilerServices\ntype Dup() =\n    [<Extension>]\n    static let f (s: string) = s\n    [<Extension>]\n    static let f (s: string) = s + f s\n    [<Extension>]\n    static let f (s: string) = s + f s\n    member _.G = f \"x\"\n",
+        ),
+        one(
+            "class_let_ctor_argument",
+            "module LetArg\nopen System.Runtime.CompilerServices\ntype A(f: string) =\n    [<Extension>]\n    let f (s: string) = s + f\n    member _.G = f \"x\"\n",
+        ),
+        one(
+            "class_let_self_identifier",
+            "module LetSelf\nopen System.Runtime.CompilerServices\ntype S() as f =\n    [<Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n    member _.H = f\n",
+        ),
+        one(
+            "class_let_field",
+            "module LetField\nopen System.Runtime.CompilerServices\ntype F() =\n    [<DefaultValue>]\n    static val mutable private f: int\n    [<Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n",
+        ),
+        one(
+            "class_let_after_destructuring",
+            "module LetDestruct\nopen System.Runtime.CompilerServices\ntype D() =\n    static let f, g = 1, 2\n    [<Extension>]\n    static let f (s: string) = s\n    [<Extension>]\n    static let patternInput (s: string) = s\n    member _.G = f \"x\" + string g + patternInput \"y\"\n",
+        ),
+        one(
+            "class_let_values",
+            "module LetValues\nopen System.Runtime.CompilerServices\ntype V() =\n    [<Extension>]\n    static let v = 1\n    [<Extension>]\n    static let mutable m = fun (s: string) -> s\n    [<Extension>]\n    static let l = fun (s: string) -> s\n    [<Extension>]\n    static let t : string -> string = id\n    [<Extension>]\n    static let p = (fun (s: string) -> s)\n    member _.G = v + (m \"x\").Length + (l \"x\").Length + (t \"x\").Length + (p \"x\").Length\n",
+        ),
+        one(
+            "class_let_parenthesised_heads",
+            "module LetParen\nopen System.Runtime.CompilerServices\ntype H() =\n    [<Extension>]\n    static let (f: string -> string) = fun s -> s\n    [<Extension>]\n    static let (g) = fun (s: string) -> s\n    member _.G = f \"x\" + g \"y\"\n",
+        ),
+        one(
+            "class_let_ident_on_next_line",
+            "module LetNextLine\nopen System.Runtime.CompilerServices\ntype N() =\n    static let f (s: string) = s\n    [<Extension>]\n    static let\n        f (s: string) = s\n    member _.G = f \"x\"\n",
+        ),
+        one(
+            "class_let_compiled_name_taken",
+            "module LetCompiled\nopen System.Runtime.CompilerServices\ntype C() =\n    [<Extension>]\n    static let Q (s: string) = s\n    [<CompiledName(\"Q\")>]\n    member _.R() = Q \"x\"\n",
+        ),
+        one(
+            "class_let_accessor_name_taken",
+            "module LetAccessor\nopen System.Runtime.CompilerServices\ntype C() =\n    [<Extension>]\n    static let get_P (s: string) = s\n    member _.P = get_P \"x\"\n",
+        ),
+        one(
+            "class_let_unused_self_identifier",
+            "module LetSelfUnused\nopen System.Runtime.CompilerServices\ntype S() as f =\n    [<Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n",
+        ),
+        one(
+            "class_let_record_field",
+            "module LetRecord\nopen System.Runtime.CompilerServices\ntype R =\n    { f: int }\n    [<Extension>]\n    static let f (s: string) = s\n    static member G = f \"x\"\n",
+        ),
+        one(
+            "class_let_union_generated_names",
+            "module LetUnion\nopen System.Runtime.CompilerServices\ntype U =\n    | A\n    | B of int\n    [<Extension>]\n    static let get_IsA (s: string) = s\n    [<Extension>]\n    static let get_Tag (s: string) = s\n    [<Extension>]\n    static let NewB (s: string) = s\n    static member G = get_IsA \"x\" + get_Tag \"y\" + NewB \"z\"\n",
+        ),
+        one(
+            "class_let_named_like_a_mangled_name",
+            "module LetMangled\nopen System.Runtime.CompilerServices\ntype M() =\n    static let f (s: string) = s\n    static let f (s: string) = s\n    [<Extension>]\n    static let ``f@5`` (s: string) = s\n    member _.G = f \"x\" + ``f@5`` \"y\"\n",
+        ),
+        one(
+            "class_let_interface_member_name",
+            "module LetIface\nopen System.Runtime.CompilerServices\ntype I =\n    abstract m: unit -> int\ntype C() =\n    [<Extension>]\n    static let m (s: string) = s\n    member _.G = m \"x\"\n    interface I with\n        member _.m() = 1\n",
+        ),
+        one(
+            "class_let_wildcard_argument",
+            "module LetWild\nopen System.Runtime.CompilerServices\ntype W(_: int, f: int) =\n    [<Extension>]\n    static let f (s: string) = s\n    [<Extension>]\n    static let g (s: string) = s\n    member _.G = f \"x\" + g \"y\"\n",
+        ),
+        one(
+            "rec_module_class_with_constructor",
+            "module rec RecCtor\ntype T() =\n    static let h (s: string) = s\n    [<System.Runtime.CompilerServices.Extension>]\n    new(s: string) = T()\n    member _.U = h \"x\"\n",
+        ),
+        one(
+            "rec_module_class_with_constructor_nested",
+            "namespace RecCtorNested\nmodule Outer =\n    module rec Inner =\n        type T() =\n            static let h (s: string) = s\n            [<System.Runtime.CompilerServices.Extension>]\n            new(s: string) = T()\n            member _.U = h \"x\"\n",
+        ),
+        one(
+            "rec_module_class_with_constructor_and_let",
+            "namespace RecCtorLet\nmodule Outer =\n    module rec Inner =\n        type T() =\n            static let h (s: string) = s\n            [<System.Runtime.CompilerServices.Extension>]\n            new(s: string) = T()\n            member _.U = h \"x\"\n        [<System.Runtime.CompilerServices.Extension>]\n        let f (s: string) = s\n",
+        ),
         one(
             "extension_interface_implementation",
             "module IfaceExt\nopen System.Runtime.CompilerServices\ntype I =\n    abstract M: string -> string\ntype T() =\n    interface I with\n        [<Extension>]\n        member _.M(s) = s\n",

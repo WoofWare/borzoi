@@ -414,6 +414,30 @@ fn witness(channel: Channel) -> Observed {
             one("module M\ntype System.String with\n    abstract M: int\n"),
             |_| true,
         ),
+        // The second `f` takes `f@7`, and the value `v` is no method.
+        Channel::ClassLet => observe(
+            one(
+                "module M\nopen System.Runtime.CompilerServices\ntype T() =\n    [<Extension>]\n    static let f (s: string) = s\n    [<Extension>]\n    static let f (s: string) = s\n    [<Extension>]\n    static let v = 1\n    member _.G = f \"x\" + string v\n",
+            ),
+            |r| {
+                let mut names = extension_names(r);
+                names.sort();
+                names == [vec!["f".to_owned()], vec!["f@7".to_owned()]]
+            },
+        ),
+        // `f@5` may be a name FCS generated that the walk does not track.
+        Channel::ClassLetName => observe(
+            one(
+                "module M\ntype T() =\n    [<System.Runtime.CompilerServices.Extension>]\n    static let ``f@5`` (s: string) = s\n    member _.G = ``f@5`` \"x\"\n",
+            ),
+            |_| true,
+        ),
+        Channel::LineDirective => observe(
+            one(
+                "module M\n# 10 \"Other.fs\"\ntype T() =\n    [<System.Runtime.CompilerServices.Extension>]\n    static let f (s: string) = s\n    member _.G = f \"x\"\n",
+            ),
+            |_| true,
+        ),
     }
 }
 
@@ -466,6 +490,7 @@ fn every_decline_and_approximation_is_a_channel() {
         Approximation::CompilationRepresentationArgument,
         Approximation::BindingPattern,
         Approximation::RejectedShape,
+        Approximation::ClassLetName,
     ] {
         // An exhaustive match: a new approximation must be listed here.
         match a {
@@ -475,7 +500,8 @@ fn every_decline_and_approximation_is_a_channel() {
             | Approximation::AugmentationKind
             | Approximation::CompilationRepresentationArgument
             | Approximation::BindingPattern
-            | Approximation::RejectedShape => {}
+            | Approximation::RejectedShape
+            | Approximation::ClassLetName => {}
         }
         assert!(approximations.contains(&a), "{a:?} is no channel's");
     }
@@ -512,6 +538,7 @@ fn every_decline_and_approximation_is_a_channel() {
             Channel::AnonymousModuleName,
         ),
         (ExistenceUnread::TooManyReadings, Channel::ReadingsBudget),
+        (ExistenceUnread::LineDirective(0), Channel::LineDirective),
     ];
     for (why, channel) in &declines {
         match why {
@@ -525,7 +552,8 @@ fn every_decline_and_approximation_is_a_channel() {
             | ExistenceUnread::UnreadableCompiledName(_)
             | ExistenceUnread::UnnamedDeclaration(_)
             | ExistenceUnread::AnonymousModuleName(_)
-            | ExistenceUnread::TooManyReadings => {}
+            | ExistenceUnread::TooManyReadings
+            | ExistenceUnread::LineDirective(_) => {}
         }
         assert_eq!(channel.treatment(), Treatment::Declined, "{why:?}");
         match witness(*channel) {

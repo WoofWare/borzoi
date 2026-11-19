@@ -86,6 +86,20 @@ const NAMESPACE_NAMES: &[&str] = &[
 /// Member names an augmentation or a type declares.
 const MEMBER_NAMES: &[&str] = &["M", "Length", "Item", "ToString", "``odd member``", "Ωp"];
 
+/// Names a type's `let`s, constructor arguments, self identifier, fields and
+/// `[<CompiledName>]`s share, so that one takes another's (and FCS mangles
+/// it, `f@7`).
+const LET_NAMES: &[&str] = &[
+    "f",
+    "g",
+    "arg",
+    "self",
+    "fld",
+    "Q",
+    "patternInput",
+    "``f@4``",
+];
+
 /// What an augmentation may extend.
 const EXTENDED: &[&str] = &[
     "System.String",
@@ -256,16 +270,59 @@ impl Gen {
                 let type_name = name.clone();
                 let name = *self.rng.pick(MEMBER_NAMES);
                 let n = self.rng.below(1000);
-                let mut body = format!("() =\n{indent}    static let helper{n} (s: string) = s\n");
+                // The primary constructor's arguments and self identifier,
+                // which take their names before any `let`.
+                let arg = *self.rng.pick(LET_NAMES);
+                let (ctor, call) = match self.rng.below(3) {
+                    0 => ("()".to_owned(), "()"),
+                    1 => (format!("({arg}: int)"), "(1)"),
+                    _ => (format!("({arg}: int, q: int)"), "(1, 2)"),
+                };
+                let self_id = if self.rng.below(4) == 0 {
+                    format!(" as {}", self.rng.pick(LET_NAMES))
+                } else {
+                    String::new()
+                };
+                let mut body = format!(
+                    "{ctor}{self_id} =\n{indent}    static let helper{n} (s: string) = s\n"
+                );
+                // The `let`s, before every member: functions (methods),
+                // values, lambdas, a `mutable` (a field), patterns, under
+                // names that collide.
+                for _ in 0..self.rng.below(4) {
+                    let let_name = *self.rng.pick(LET_NAMES);
+                    let other = *self.rng.pick(LET_NAMES);
+                    let binding = match self.rng.below(7) {
+                        0 => format!("{ext}\n{indent}    static let {let_name} (s: string) = s"),
+                        1 => format!("{ext}\n{indent}    static let {let_name} = 1"),
+                        2 => format!(
+                            "{ext}\n{indent}    static let {let_name} = fun (s: string) -> s"
+                        ),
+                        3 => format!(
+                            "{ext}\n{indent}    static let mutable {let_name} = fun (s: string) -> s"
+                        ),
+                        4 => format!("static let {let_name} (s: string) = s"),
+                        5 => format!("static let {let_name}, {other} = 1, 2"),
+                        _ => format!("{ext}\n{indent}    let {let_name} (s: string) = s"),
+                    };
+                    body.push_str(&format!("{indent}    {binding}\n"));
+                }
                 for _ in 0..1 + self.rng.below(3) {
-                    let member = match self.rng.below(9) {
+                    let member = match self.rng.below(10) {
                         0 => format!("{ext}\n{indent}    static member {name}(s: string) = s"),
                         1 => format!("{ext}\n{indent}    static member {name} = 1"),
                         2 => format!(
                             "static member {name} with {ext} get () = 1 and set (v: int) = ()"
                         ),
-                        3 => format!("{ext}\n{indent}    new(s: string) = {type_name}()"),
-                        4 => format!("{ext}\n{indent}    static let f{n} (s: string) = s"),
+                        3 => format!("{ext}\n{indent}    new(s: string) = {type_name}{call}"),
+                        4 => format!(
+                            "[<DefaultValue>]\n{indent}    static val mutable private {}: int",
+                            self.rng.pick(LET_NAMES)
+                        ),
+                        9 => format!(
+                            "[<CompiledName(\"{}\")>]\n{indent}    static member R{n}(s: string) = s",
+                            self.rng.pick(LET_NAMES)
+                        ),
                         5 => format!(
                             "{ext}\n{indent}    [<CompiledName(\"Renamed{n}\")>]\n{indent}    static member {name}X(s: string) = s"
                         ),

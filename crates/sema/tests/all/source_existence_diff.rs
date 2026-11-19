@@ -31,7 +31,7 @@
 //! ([`certify_by_spelling`] when A's references add no route to a marker,
 //! a hand-written one otherwise) and under [`MarkerRoutes::Unknown`].
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use borzoi_assembly::existence::{
@@ -127,6 +127,8 @@ pub struct Fcs {
     pub errors: Vec<String>,
     /// The errors of FCS's compile of a clean A, which then wrote no DLL.
     pub compile_errors: Vec<String>,
+    /// The entities of a clean A whose members FCS's view could not read.
+    pub view_unread: Vec<String>,
 }
 
 fn plain(s: &str) -> PlainName {
@@ -332,12 +334,17 @@ pub fn fcs(cell: &Cell) -> Fcs {
         "{}: the decoded in-memory signature is not FCS's view of it\n  decoded: {decoded:#?}\n  FCS: {theirs:#?}",
         cell.name
     );
-    assert!(
-        response.read_errors.is_empty() || !errors.is_empty(),
-        "{}: FCS could not read {:?}",
-        cell.name,
-        response.read_errors
-    );
+    // FCS's view may fail to read an entity's members (its API throws on a
+    // class with a constructor in a `module rec` that also holds an
+    // `[<Extension>]` `let`). The rows are graded from the decoded
+    // signature regardless; only the cross-check below loses that entity, so
+    // each such entity is pinned in the cell's verdict.
+    let view_unread: Vec<String> = response
+        .read_errors
+        .iter()
+        .filter(|_| errors.is_empty())
+        .map(|e| e.split(':').next().unwrap_or(e).trim().to_owned())
+        .collect();
     // And every extension member FCS reads is a decoded row, as
     // `assembly_entities_diff` holds a DLL's (one way only: FCS's view lists
     // no class `let`, whose val the pickle holds).
@@ -422,6 +429,7 @@ pub fn fcs(cell: &Cell) -> Fcs {
         clean: errors.is_empty(),
         errors,
         compile_errors,
+        view_unread,
     }
 }
 
@@ -536,28 +544,27 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
     // kinds and flags the walk does not model exactly. Ours must still cover
     // every fact an existence question reads of it, in the direction that
     // answers "something may be there" more often. Per entity path (place
-    // and both names), as `ExistenceSet` unions every row at one path: the
+    // and logical name), as `ExistenceSet` unions every row at one path: the
     // `[<AutoOpen>]` and `[<Extension>]` flags and being an abbreviation
     // (what lends names) where FCS's row has them, which recovery may merge
-    // from duplicate definitions. Every extension's place and names, of
-    // either staticness where FCS's says, but for a val recovery renamed
-    // (`f@13`: its name holds an `@`, which only recovery writes for a
-    // source-named val here). Every auto-open path.
+    // from duplicate definitions, even of different compiled names (FS0249
+    // keeps one definition's compiled name and may keep another's flags);
+    // and each compiled name FCS's rows give the path. Every extension's
+    // place and names, of either staticness where FCS's says, but for a val
+    // recovery renamed (`f@13`: its name holds an `@`, which only recovery
+    // writes for a source-named val here). Every auto-open path.
     if !fcs.clean {
-        type Path<'r> = (&'r [String], &'r [String], &'r str, &'r str);
-        let mut ours_paths: BTreeMap<Path<'_>, (bool, bool, bool)> = BTreeMap::new();
+        type Path<'r> = (&'r [String], &'r [String], &'r str);
+        type Facts<'r> = (bool, bool, bool, BTreeSet<&'r str>);
+        let mut ours_paths: BTreeMap<Path<'_>, Facts<'_>> = BTreeMap::new();
         for r in &mine.entities {
             let facts = ours_paths
-                .entry((
-                    &r.namespace,
-                    &r.enclosing,
-                    &r.logical_name,
-                    &r.compiled_name,
-                ))
+                .entry((&r.namespace, &r.enclosing, &r.logical_name))
                 .or_default();
             facts.0 |= r.auto_open;
             facts.1 |= r.extension;
             facts.2 |= r.kind == PickledEntityKind::Abbreviation;
+            facts.3.insert(&r.compiled_name);
         }
         let covers_entity = |f: &PickledEntityRow| {
             ours_paths
@@ -565,12 +572,12 @@ pub fn grade(cell: &Cell, fcs: &Fcs, ours: &SourceExistence) -> Result<String, S
                     f.namespace.as_slice(),
                     f.enclosing.as_slice(),
                     f.logical_name.as_str(),
-                    f.compiled_name.as_str(),
                 ))
-                .is_some_and(|&(auto_open, extension, abbreviation)| {
-                    (auto_open || !f.auto_open)
-                        && (extension || !f.extension)
-                        && (abbreviation || f.kind != PickledEntityKind::Abbreviation)
+                .is_some_and(|(auto_open, extension, abbreviation, compiled)| {
+                    (*auto_open || !f.auto_open)
+                        && (*extension || !f.extension)
+                        && (*abbreviation || f.kind != PickledEntityKind::Abbreviation)
+                        && compiled.contains(f.compiled_name.as_str())
                 })
         };
         let covers_extension = |f: &ExtensionRow| {
@@ -674,6 +681,7 @@ pub fn grade_cells(cells: &[Cell]) -> (Vec<(String, String)>, Vec<String>) {
             let u = grade(cell, &fcs, &unknown);
             let mut errors = fcs.errors.clone();
             errors.extend(fcs.compile_errors.iter().map(|e| format!("compile {e}")));
+            errors.extend(fcs.view_unread.iter().map(|e| format!("view-unread {e}")));
             (c, u, errors)
         }));
         match graded {
@@ -734,6 +742,28 @@ fn source_rows_are_fcs_rows_over_the_grid() {
         "source_existence_diff",
         &manifest,
         &regenerate("source_existence_diff::source_rows_are_fcs_rows_over_the_grid"),
+    );
+}
+
+/// The grid's cells whose names start with `BORZOI_SOURCE_EXISTENCE_CELL`,
+/// graded without the manifest: the inner loop on a handful of cells.
+#[test]
+#[ignore = "an inner-loop aid; set BORZOI_SOURCE_EXISTENCE_CELL"]
+fn grid_cells_by_name() {
+    let prefix = std::env::var("BORZOI_SOURCE_EXISTENCE_CELL").unwrap_or_default();
+    let cells: Vec<Cell> = grid()
+        .into_iter()
+        .filter(|c| c.name.starts_with(&prefix))
+        .collect();
+    let (entries, failures) = grade_cells(&cells);
+    for e in &entries {
+        println!("{e:?}");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
     );
 }
 

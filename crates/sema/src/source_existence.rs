@@ -44,9 +44,9 @@ use borzoi_assembly::existence::{
     ExistenceIndex, ExtensionRow, IndexLayer, PickleLayer, PickledEntityKind, PickledEntityRow,
 };
 use borzoi_cst::syntax::{
-    AstNode, Attribute, AttributeList, Expr, LongIdent, MemberDefn, ModuleDecl, ModuleOrNamespace,
-    ModuleOrNamespaceKind, Pat, SigDecl, SyntaxKind, SyntaxNode, SyntaxToken, Type, TypeDefn,
-    TypeDefnRepr,
+    AstNode, Attribute, AttributeList, Binding, Expr, LongIdent, MemberDefn, MemberLetBindings,
+    ModuleDecl, ModuleOrNamespace, ModuleOrNamespaceKind, Pat, RecordReprItem, SigDecl, SyntaxKind,
+    SyntaxNode, SyntaxToken, TextSize, Type, TypeDefn, TypeDefnRepr,
 };
 
 use crate::def::id_text;
@@ -55,6 +55,7 @@ use crate::resolve::extension_names::{
     MemberRole, MemberShape, MemberVal, active_pattern_name, member_shape, val_sig_name,
 };
 use crate::resolve::{ProjectFile, SourceFile, signature_partners};
+use class_lets::LetNames;
 
 /// A producer project, as the caller evaluated it for the dependant that
 /// references it.
@@ -205,6 +206,10 @@ pub enum ExistenceUnread {
     /// The readings the walk must cover exceed [`MAX_ROWS`] rows: each
     /// uncertain module suffix doubles the paths under it.
     TooManyReadings,
+    /// A type's `[<Extension>]` `let`, whose compiled name may carry its
+    /// line (`f@7`), in a file whose `#line` directives may move the lines
+    /// FCS reports.
+    LineDirective(usize),
 }
 
 /// A place the walk emitted more than one reading, or a superset.
@@ -226,6 +231,9 @@ pub enum Approximation {
     BindingPattern,
     /// A declaration FCS rejects in its position, read as written.
     RejectedShape,
+    /// A type's `let` whose compiled name an earlier name of the type may
+    /// or may not have taken: its own, and each name FCS would generate.
+    ClassLetName,
 }
 
 /// What [`source_existence`] read.
@@ -361,6 +369,14 @@ channels! {
     ExtensionBinding,
     /// An `[<Extension>]` binding whose pattern is not one name.
     BindingPattern,
+    /// A type's `let` under `[<Extension>]`: a method val when it takes
+    /// arguments, under the name it takes after the type's members, fields,
+    /// constructor arguments and earlier `let`s (`f@7` when one took `f`).
+    ClassLet,
+    /// A type's `let` whose name an earlier one may have taken.
+    ClassLetName,
+    /// A `#line` directive in a file with a type's `[<Extension>]` `let`.
+    LineDirective,
     /// The `[<Extension>]` FCS adds to a type or module from its members.
     ImpliedExtensionAttribute,
     /// A member or declaration the walk cannot name.
@@ -387,7 +403,8 @@ impl Channel {
             | Channel::AssemblyAutoOpenUnreadable
             | Channel::TypeProviderAssembly
             | Channel::UnnamedDeclaration
-            | Channel::ReadingsBudget => Treatment::Declined,
+            | Channel::ReadingsBudget
+            | Channel::LineDirective => Treatment::Declined,
             Channel::Defines | Channel::LanguageVersion | Channel::GeneratedItems => {
                 Treatment::Caller
             }
@@ -399,6 +416,7 @@ impl Channel {
             Channel::UncertifiedAttribute => Treatment::Approximated(A::UncertainAttribute),
             Channel::AugmentationKind => Treatment::Approximated(A::AugmentationKind),
             Channel::BindingPattern => Treatment::Approximated(A::BindingPattern),
+            Channel::ClassLetName => Treatment::Approximated(A::ClassLetName),
             Channel::RejectedShape => Treatment::Approximated(A::RejectedShape),
             Channel::HeaderlessFile
             | Channel::Namespace
@@ -420,6 +438,7 @@ impl Channel {
             | Channel::IntrinsicAugmentation
             | Channel::CSharpExtensionMember
             | Channel::ExtensionBinding
+            | Channel::ClassLet
             | Channel::ImpliedExtensionAttribute => Treatment::Modelled,
         }
     }
@@ -494,6 +513,7 @@ fn walk_project(
             index: i,
             routes,
             out: Out::default(),
+            lines: Lines::of(root).map(std::rc::Rc::new),
         };
         file.walk(pf)?;
         out.namespaces.extend(file.out.namespaces);
@@ -909,6 +929,8 @@ struct FileWalk<'r> {
     index: usize,
     routes: &'r MarkerRoutes,
     out: Out,
+    /// The file's lines, or `None` when a `#line` directive may move them.
+    lines: Option<std::rc::Rc<Lines>>,
 }
 
 /// A declaration list being walked: impl decls or sig decls.
@@ -1670,18 +1692,9 @@ impl FileWalk<'_> {
                 self.csharp_row(inner, ".ctor", &marks)?;
             }
         }
+        self.class_lets(inner, defn, members)?;
         for m in members {
             match m {
-                MemberDefn::LetBindings(l) => {
-                    let lists: Vec<AttributeList> = l.attributes().collect();
-                    for (k, b) in l.bindings().enumerate() {
-                        let mut own: Vec<AttributeList> = b.attributes().collect();
-                        if k == 0 {
-                            own.extend(lists.iter().cloned());
-                        }
-                        self.binding_extension(inner, &own, b.pat())?;
-                    }
-                }
                 MemberDefn::Interface(i) => {
                     for im in i.members() {
                         let (lists, _) = member_shape(&im);
@@ -1695,6 +1708,215 @@ impl FileWalk<'_> {
         }
         Ok(())
     }
+    /// The C#-style rows of a type's `let`s under `[<Extension>]`: one per
+    /// compiled name each may take ([`class_lets`]), for a `let` FCS
+    /// represents as a method (one that takes arguments; a value is a field
+    /// or a local, with no val).
+    fn class_lets(
+        &mut self,
+        inner: &Scope,
+        defn: &TypeDefn,
+        members: &[MemberDefn],
+    ) -> Result<(), ExistenceUnread> {
+        let mut lets: Vec<&MemberLetBindings> = members
+            .iter()
+            .filter_map(|m| match m {
+                MemberDefn::LetBindings(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        lets.sort_by_key(|l| l.syntax().text_range().start());
+        // Each binding with its attribute lists: a group's own lists mark
+        // its first binding.
+        let bindings: Vec<(Binding, Vec<AttributeList>)> = lets
+            .iter()
+            .flat_map(|l| {
+                let lists: Vec<AttributeList> = l.attributes().collect();
+                l.bindings().enumerate().map(move |(k, b)| {
+                    let mut own: Vec<AttributeList> = b.attributes().collect();
+                    if k == 0 {
+                        own.extend(lists.iter().cloned());
+                    }
+                    (b, own)
+                })
+            })
+            .collect();
+        if bindings
+            .iter()
+            .all(|(_, lists)| self.routes.marks(lists).get(Marker::Extension) == Maybe::No)
+        {
+            return Ok(());
+        }
+        let Some(lines) = self.lines.clone() else {
+            return Err(ExistenceUnread::LineDirective(self.index));
+        };
+        let line = |at: TextSize| lines.line(at);
+        let mut names = LetNames::default();
+        // What the type's members and fields take.
+        for m in members {
+            match m {
+                MemberDefn::Interface(i) => {
+                    names.interface_present();
+                    for im in i.members() {
+                        self.take_member_names(&mut names, &im);
+                    }
+                }
+                _ => self.take_member_names(&mut names, m),
+            }
+        }
+        if let Some(TypeDefnRepr::Record(r)) = defn.repr() {
+            for item in r.items() {
+                match item {
+                    RecordReprItem::Field(f) => match f.ident() {
+                        Some(t) => names.take(&id_text(&t)),
+                        None => names.take_unknown(),
+                    },
+                    RecordReprItem::Spread(_) => names.take_unknown(),
+                }
+            }
+        }
+        // The primary constructor's arguments, then its self identifier.
+        if let Some(ctor) = defn.implicit_ctor() {
+            let mut args = Vec::new();
+            match ctor.args() {
+                Some(p) => ctor_binders(&p, &mut args),
+                None => args.push(None),
+            }
+            for arg in args {
+                match arg {
+                    Some(t) => {
+                        names.bind(&id_text(&t), line(t.text_range().start()));
+                    }
+                    None => names.bind_unknown(),
+                }
+            }
+            if let Some(t) = ctor.self_id() {
+                names.bind(&id_text(&t), line(t.text_range().start()));
+            }
+        }
+        // Each binding in order: every name it may take, and a row per name
+        // when it is a method under `[<Extension>]`.
+        for (b, lists) in &bindings {
+            let marks = self.routes.marks(lists);
+            // FCS's `InferValReprInfoOfBinding`: arguments in the head, or a
+            // lambda for the body; a `mutable` is always a field.
+            let method = |args: bool| {
+                !b.is_mutable() && (args || b.expr().is_some_and(|e| is_lambda(&e)))
+            };
+            let Some(pat) = b.pat() else {
+                return Err(ExistenceUnread::UnnamedDeclaration(self.index));
+            };
+            let (row_names, certain) = match class_binder(&pat, true) {
+                ClassBinder::Single { name, at, args } => {
+                    let taken = names.bind(&name, line(at));
+                    (Some(taken).filter(|_| method(args)), true)
+                }
+                ClassBinder::Possible { name, at, args } => {
+                    // A union case's pattern instead, if `name` is one:
+                    // its arguments' binders and the matched value.
+                    let taken = names.possibly_bind(&name, line(at));
+                    for (n, a) in pattern_idents(&pat) {
+                        if a != at {
+                            names.possibly_bind(&n, line(a));
+                        }
+                    }
+                    let start = pat.syntax().text_range().start();
+                    names.possibly_bind("patternInput", line(start));
+                    (Some(taken).filter(|_| method(args)), false)
+                }
+                ClassBinder::Pattern => {
+                    // A pattern's values are fields or locals, never methods:
+                    // each takes its name, beside the matched value's
+                    // `patternInput`. Its identifiers over-approximate its
+                    // binders (a case or type name among them).
+                    for (n, at) in pattern_idents(&pat) {
+                        names.possibly_bind(&n, line(at));
+                    }
+                    let at = pat.syntax().text_range().start();
+                    names.possibly_bind("patternInput", line(at));
+                    (None, true)
+                }
+            };
+            let Some(row_names) = row_names else {
+                continue;
+            };
+            if marks.get(Marker::Extension) == Maybe::No {
+                continue;
+            }
+            if !certain {
+                self.out
+                    .approximations
+                    .insert(Approximation::BindingPattern);
+            }
+            if row_names.len() > 1 {
+                self.out.approximations.insert(Approximation::ClassLetName);
+            }
+            for n in row_names {
+                self.csharp_row(inner, &n, &marks)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// What member `m` takes of a type's names: its vals' logical names,
+    /// a property accessor's property name, a method's `[<CompiledName>]`,
+    /// a constructor's `.ctor`, a field's name.
+    fn take_member_names(&self, names: &mut LetNames, m: &MemberDefn) {
+        // An abstract slot binds nothing (its default implementation is a
+        // member of its own).
+        if matches!(m, MemberDefn::AbstractSlot(_)) {
+            return;
+        }
+        let (lists, shape) = member_shape(m);
+        match shape {
+            MemberShape::NoVal | MemberShape::Inherit => {}
+            MemberShape::Unnamed => names.take_unknown(),
+            MemberShape::Named { name, vals, role, .. } => match role {
+                MemberRole::Field => names.take(&name),
+                MemberRole::Constructor => {
+                    names.members_present();
+                    names.take(".ctor");
+                    names.possibly_take("new");
+                }
+                MemberRole::Member => {
+                    names.members_present();
+                    let marks = self.routes.marks(&lists);
+                    if marks.compiled_name_unreadable {
+                        names.take_unknown();
+                    }
+                    let event = marks.get(Marker::CliEvent) != Maybe::No;
+                    for v in &vals {
+                        names.take(&v.logical);
+                        match v.accessor {
+                            Some(prefix) => {
+                                if let Some(bare) = v.logical.strip_prefix(prefix) {
+                                    names.take(bare);
+                                    // An event's accessors, which FCS may
+                                    // bind beside the property.
+                                    if event && prefix == "get_" {
+                                        names.possibly_take(&format!("add_{bare}"));
+                                        names.possibly_take(&format!("remove_{bare}"));
+                                    }
+                                }
+                            }
+                            None => {
+                                let certain =
+                                    marks.compiled_name_certain && marks.compiled_names.len() == 1;
+                                for c in &marks.compiled_names {
+                                    if certain {
+                                        names.take(c);
+                                    } else {
+                                        names.possibly_take(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+
     /// The extension rows of members `members` of a type (or of an
     /// augmentation, `augmented`: the extended type's logical-name
     /// spellings): an optional extension's every member, and any member that
@@ -2267,6 +2489,164 @@ fn has_static_argument(ty: &Type) -> bool {
 
 /// A module `let` binding's single name: `let f …`, `let x`, `let (|A|_|) …`,
 /// an operator, under parentheses or a type annotation.
+/// The 1-based line of each offset of one file, in FCS's sense: a line
+/// starts after every `\n` (`newline = '\n' | '\r' '\n'`), wherever it
+/// sits.
+struct Lines {
+    /// The offset of each `\n`, ascending.
+    newlines: Vec<TextSize>,
+}
+
+impl Lines {
+    /// The table of `root`'s file, or `None` when a `#line` directive may
+    /// move the lines FCS reports.
+    fn of(root: &SyntaxNode) -> Option<Lines> {
+        let mut newlines = Vec::new();
+        for el in root.descendants_with_tokens() {
+            let Some(t) = el.into_token() else { continue };
+            if t.kind() == SyntaxKind::HASH_LINE {
+                return None;
+            }
+            let start = t.text_range().start();
+            for (i, _) in t.text().match_indices('\n') {
+                // In range: a file is under 4 GiB.
+                newlines.push(start + TextSize::new(i as u32));
+            }
+        }
+        Some(Lines { newlines })
+    }
+
+    fn line(&self, at: TextSize) -> u32 {
+        // In range: a file is under 4 GiB.
+        self.newlines.partition_point(|&n| n < at) as u32 + 1
+    }
+}
+
+/// What a type's `let` binding binds, as FCS represents it.
+enum ClassBinder {
+    /// One value, named `name` at `at`; `args` when the head takes
+    /// arguments.
+    Single {
+        name: String,
+        at: TextSize,
+        args: bool,
+    },
+    /// One value as [`ClassBinder::Single`], unless `name` is a union case
+    /// in scope, when the binding is a pattern.
+    Possible {
+        name: String,
+        at: TextSize,
+        args: bool,
+    },
+    /// A pattern binding several values or none.
+    Pattern,
+}
+
+/// [`ClassBinder`] of a binding's head `pat`; `top` when `pat` is the
+/// whole head, the one place a head with arguments is a function (`let
+/// (f x) = …` matches a case `f`).
+fn class_binder(pat: &Pat, top: bool) -> ClassBinder {
+    match pat {
+        Pat::Paren(p) => p
+            .inner()
+            .map_or(ClassBinder::Pattern, |i| class_binder(&i, false)),
+        Pat::Typed(t) => t
+            .pat()
+            .map_or(ClassBinder::Pattern, |i| class_binder(&i, false)),
+        Pat::Named(n) => match (n.active_pat_name(), n.ident()) {
+            (Some(ap), _) => ClassBinder::Single {
+                name: active_pattern_name(&ap),
+                at: n.syntax().text_range().start(),
+                args: false,
+            },
+            (None, Some(t)) => ClassBinder::Single {
+                name: id_text(&t).into_owned(),
+                at: t.text_range().start(),
+                args: false,
+            },
+            (None, None) => ClassBinder::Pattern,
+        },
+        Pat::LongIdent(l) => {
+            let args = l.args().next().is_some() || l.name_pat_pairs().is_some();
+            if args && !top {
+                return ClassBinder::Pattern;
+            }
+            if let Some(ap) = l.active_pat_name() {
+                return ClassBinder::Single {
+                    name: active_pattern_name(&ap),
+                    at: l.syntax().text_range().start(),
+                    args,
+                };
+            }
+            let idents: Vec<SyntaxToken> =
+                l.head().map_or_else(Vec::new, |h| h.idents().collect());
+            match idents.as_slice() {
+                [t] => {
+                    let name = id_text(t).into_owned();
+                    let at = t.text_range().start();
+                    // A lower-case head is no union case.
+                    if name.chars().next().is_some_and(char::is_lowercase) {
+                        ClassBinder::Single { name, at, args }
+                    } else {
+                        ClassBinder::Possible { name, at, args }
+                    }
+                }
+                _ => ClassBinder::Pattern,
+            }
+        }
+        _ => ClassBinder::Pattern,
+    }
+}
+
+/// Every identifier in `pat`, with its offset: a superset of its binders.
+fn pattern_idents(pat: &Pat) -> Vec<(String, TextSize)> {
+    pat.syntax()
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .filter(|t| t.kind() == SyntaxKind::IDENT_TOK)
+        .map(|t| (id_text(&t).into_owned(), t.text_range().start()))
+        .collect()
+}
+
+/// The primary constructor's argument binders in `pat`, in order: `None`
+/// for one the walk cannot name (a wildcard, which FCS names itself).
+fn ctor_binders(pat: &Pat, out: &mut Vec<Option<SyntaxToken>>) {
+    match pat {
+        Pat::Const(_) => {}
+        Pat::Paren(p) => match p.inner() {
+            Some(i) => ctor_binders(&i, out),
+            None => out.push(None),
+        },
+        Pat::Typed(t) => match t.pat() {
+            Some(i) => ctor_binders(&i, out),
+            None => out.push(None),
+        },
+        Pat::Attrib(a) => match a.pat() {
+            Some(i) => ctor_binders(&i, out),
+            None => out.push(None),
+        },
+        Pat::Tuple(t) => {
+            for e in t.elements() {
+                ctor_binders(&e, out);
+            }
+        }
+        Pat::Named(n) if n.active_pat_name().is_none() => out.push(n.ident()),
+        Pat::OptionalVal(o) => out.push(o.ident()),
+        _ => out.push(None),
+    }
+}
+
+/// Whether `e` is a lambda to FCS's arity inference, through parentheses
+/// and annotations.
+fn is_lambda(e: &Expr) -> bool {
+    match e {
+        Expr::Fun(_) | Expr::MatchLambda(_) | Expr::DotLambda(_) => true,
+        Expr::Paren(p) => p.inner().is_some_and(|i| is_lambda(&i)),
+        Expr::Typed(t) => t.expr().is_some_and(|i| is_lambda(&i)),
+        _ => false,
+    }
+}
+
 fn binding_name(pat: &Pat) -> Option<String> {
     binding_name_at(pat, true)
 }
@@ -2387,5 +2767,6 @@ pub fn certify_by_spelling(files: &[&ProjectFile]) -> MarkerRoutes {
     MarkerRoutes::Certified(map)
 }
 
+mod class_lets;
 #[cfg(test)]
 mod tests;
