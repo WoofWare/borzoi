@@ -65,8 +65,7 @@ cat >"$config" <<'EOF'
 </configuration>
 EOF
 
-# Every project cargo test shells out to dotnet for (see AGENTS.md "Core" scope:
-# the fcs-dump corpus differential sweep is #[ignore]'d and excluded).
+# Every project cargo test shells out to dotnet for.
 project_list="$work/projects.txt"
 {
   echo tools/csharp-sidecar/csharp-sidecar.csproj

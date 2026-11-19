@@ -4,7 +4,7 @@
 > property, item spec and metadatum *escaped* and unescape it exactly once at
 > its point of use. E4 carries item fragments across the glob-resolver seam
 > still split and still escaped, and E5 deleted the declines that seam needed,
-> so no escape-motivated decline is left. AGENTS.md points here for the durable
+> so no escape-motivated decline is left. `crates/msbuild/AGENTS.md` points here for the durable
 > rule (*scan and split before you decode; trim in the domain; decode at the
 > leaf*), restated next, and for where an escaped wildcard is data ("Filespec
 > classification").
