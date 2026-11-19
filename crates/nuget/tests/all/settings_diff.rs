@@ -448,12 +448,13 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
     // Mostly present: the model declines where there is no user config,
     // which NuGet would write.
     if rng.below(8) != 0 {
-        let spelling = *rng.pick(&[
-            "NuGet.Config",
-            "NuGet.Config",
-            "NuGet.Config",
-            "nuget.config",
-        ]);
+        // Mostly the spelling NuGet loads on every platform: on Linux the
+        // other is no user config, which the model declines.
+        let spelling = if rng.below(8) == 0 {
+            "nuget.config"
+        } else {
+            "NuGet.Config"
+        };
         files.push((format!("{home}/.nuget/NuGet/{spelling}"), config(rng)));
     }
     let mut listed = |folder: &str, rng: &mut SplitMix64| {
