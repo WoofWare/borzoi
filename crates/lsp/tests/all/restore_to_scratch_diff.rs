@@ -112,6 +112,8 @@ fn write_project(tag: &str, item_group: &str) -> PathBuf {
 /// Assert the scratch restore reproduces the `obj/` restore's DLL set exactly,
 /// and never wrote the project's `obj/`.
 fn assert_scratch_matches_obj(project: &Path) {
+    // Both restores run under the host's own environment.
+    crate::common::assert_host_has_a_user_nuget_config();
     let root = dotnet_root();
     let mut workspace = crate::common::workspace(SdkDiscoveryEnv::from_process_env());
     let served = workspace.served_tfm_for_project(project);
