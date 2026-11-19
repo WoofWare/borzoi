@@ -21,9 +21,12 @@
 //!   and to the reference between two requests, each hostile name for a
 //!   source (alone, and beside its twin), each spelling of a source's path
 //!   and of the reference's after a change the stamp does not show, and each
-//!   source-text mutation. The resident child must answer exactly as a fresh
-//!   child answers the same world, and a successful answer must describe the
-//!   files as they are ([`check_records`]).
+//!   source-text mutation; and, to `file-batch`, a script whose `#r` names
+//!   a file in each state (FCS resolves a script's references itself). The
+//!   resident child must answer the same request twice alike (a check it
+//!   made around a refusal is no answer the second time), exactly as a fresh
+//!   child answers the same world, and a successful project answer must
+//!   describe the files as they are ([`check_records`]).
 //!
 //! Both are `#[ignore]`d because they drive FCS, as this crate's other FCS
 //! tests are; the whole-project gate runs them.
@@ -513,6 +516,9 @@ const LIB_FS_REWRITTEN: &[u8] =
 /// [`LIB_FS`] rewritten to bytes of another length.
 const LIB_FS_RESIZED: &[u8] =
     b"module Lib\nlet longer = A.a + 1\nlet t = typeof<System.CommandLine.RootCommand>\n";
+/// A script whose `#r` names `Hostile.dll` beside it, which
+/// [`Case::ScriptReferenceState`] puts in each state.
+const SCRIPT_REFERENCING: &[u8] = b"#r \"Hostile.dll\"\nlet z = 1\n";
 /// A source beside a hostile name's twin.
 const TWIN_FS: &[u8] = b"module Twin\nlet z = 0\n";
 /// What follows each source mutation: a declaration FCS reports an error in.
@@ -629,6 +635,9 @@ enum Case {
     /// The second source a script (`.fsx`), mutated after a first request: a
     /// script reads `#r` and `#load` where a compiled source refuses them.
     ScriptMutation(&'static Entry<Mutation>),
+    /// A script whose `#r` names a file in a state, checked by `file-batch`,
+    /// which resolves a script's references itself (so FCS opens the file).
+    ScriptReferenceState(State),
 }
 
 impl Case {
@@ -636,7 +645,9 @@ impl Case {
         let one = |d: Dimension| BTreeSet::from([d]);
         match self {
             Case::Plain => BTreeSet::new(),
-            Case::SourceState(s) | Case::ReferenceState(s) => one(s.dimension()),
+            Case::SourceState(s) | Case::ReferenceState(s) | Case::ScriptReferenceState(s) => {
+                one(s.dimension())
+            }
             Case::SourceChange(c) | Case::ReferenceChange(c) => one(c.dimension()),
             Case::SourceName(e) | Case::SourceTwins(e) => one(e.dimension),
             Case::SourceSpelling(e) | Case::ReferenceSpelling(e) => one(e.dimension),
@@ -649,6 +660,7 @@ impl Case {
         let mut cases = vec![Case::Plain];
         cases.extend(State::ALL.iter().map(|s| Case::SourceState(*s)));
         cases.extend(State::ALL.iter().map(|s| Case::ReferenceState(*s)));
+        cases.extend(State::ALL.iter().map(|s| Case::ScriptReferenceState(*s)));
         cases.extend(Change::ALL.iter().map(|c| Case::SourceChange(*c)));
         cases.extend(Change::ALL.iter().map(|c| Case::ReferenceChange(*c)));
         for entry in name::alphabet().entries() {
@@ -690,6 +702,8 @@ impl Case {
 /// is answered.
 struct World {
     fs: HostileFs,
+    /// The op both children are asked through.
+    op: &'static str,
     /// The request a resident child is asked first, if the case has one.
     prime: Option<String>,
     /// The request both children are asked.
@@ -931,10 +945,38 @@ fn build(case: Case) -> Result<(World, Option<Mutate>), Unmakeable> {
                 })),
             )
         }
+        Case::ScriptReferenceState(state) => {
+            fs.place(
+                "src",
+                &plain("Hostile", ".dll"),
+                state,
+                reference_assembly(),
+            )?;
+            let script = text_of(
+                &fs.place(
+                    "src",
+                    &plain("Refs", ".fsx"),
+                    State::Regular,
+                    SCRIPT_REFERENCING,
+                )?
+                .path,
+            );
+            (
+                None,
+                json!({"kind": "uses", "path": script, "refs": []}).to_string(),
+                Vec::new(),
+                None,
+            )
+        }
+    };
+    let op = match case {
+        Case::ScriptReferenceState(_) => "file-batch",
+        _ => "uses-project-batch",
     };
     Ok((
         World {
             fs,
+            op,
             prime,
             request,
             texts,
@@ -1086,12 +1128,13 @@ enum Verdict {
 }
 
 /// Run `case` against `resident` and a fresh child.
-fn run_case(resident: &mut BatchChild, case: Case) -> Result<Verdict, String> {
+fn run_case(residents: &mut Residents, case: Case) -> Result<Verdict, String> {
     let (world, change) = match build(case) {
         Ok(built) => built,
         Err(refusal) => return Ok(Verdict::Unmakeable(refusal)),
     };
-    let op = "uses-project-batch";
+    let op = world.op;
+    let resident = residents.of(op);
     let mut texts = world.texts;
     if let Some(prime) = &world.prime {
         let primed = resident
@@ -1132,6 +1175,18 @@ fn run_case(resident: &mut BatchChild, case: Case) -> Result<Verdict, String> {
     let resident_answer = resident
         .try_request(&world.request)
         .map_err(|e| format!("the resident child: {e}"))?;
+    // Asked again, a warm child answers as it did: a check it made around a
+    // refusal must not be served the second time as an answer.
+    let again = resident
+        .try_request(&world.request)
+        .map_err(|e| format!("the resident child, asked again: {e}"))?;
+    if again != resident_answer {
+        return Err(format!(
+            "the resident child answered\n    {}\n  and, asked again,\n    {}",
+            resident_answer.trim_end(),
+            again.trim_end()
+        ));
+    }
     let fresh = fresh_answer(op, &world.request).map_err(|e| format!("a fresh child: {e}"))?;
     if resident_answer != fresh {
         return Err(format!(
@@ -1162,6 +1217,11 @@ fn run_case(resident: &mut BatchChild, case: Case) -> Result<Verdict, String> {
             State::Regular | State::Symlink | State::SymlinkOutOfTree | State::ReadOnly
         ),
         Case::SourceChange(Change::Disappears) | Case::ReferenceChange(Change::Disappears) => true,
+        // A reference FCS cannot open as an assembly is no reference it read.
+        Case::ScriptReferenceState(s) => !matches!(
+            s,
+            State::Regular | State::Symlink | State::SymlinkOutOfTree | State::ReadOnly
+        ),
         Case::ScriptMutation(e) => {
             e.dimension == Dimension::ScriptDirective
                 && !e.value.apply("").windows(3).any(|w| w == b"#if")
@@ -1178,6 +1238,9 @@ fn run_case(resident: &mut BatchChild, case: Case) -> Result<Verdict, String> {
             ));
         }
         return Ok(Verdict::Reached("refused"));
+    }
+    if op == "file-batch" {
+        return Ok(Verdict::Reached("answered"));
     }
     let value: Value = serde_json::from_str(&fresh).expect("an answer is JSON");
     check_records(&value, &texts)?;
@@ -1196,6 +1259,29 @@ fn run_case(resident: &mut BatchChild, case: Case) -> Result<Verdict, String> {
     } else {
         "answered"
     }))
+}
+
+/// One worker's resident children, one per op the cases are put to.
+struct Residents {
+    project: BatchChild,
+    file: BatchChild,
+}
+
+impl Residents {
+    fn new() -> Self {
+        Residents {
+            project: driver("uses-project-batch"),
+            file: driver("file-batch"),
+        }
+    }
+
+    fn of(&mut self, op: &str) -> &mut BatchChild {
+        match op {
+            "uses-project-batch" => &mut self.project,
+            "file-batch" => &mut self.file,
+            other => panic!("no resident child for {other}"),
+        }
+    }
 }
 
 /// How many resident children share the cases, each taking every
@@ -1228,9 +1314,9 @@ fn every_hostile_project_is_answered_as_a_fresh_oracle_answers_it() {
         for worker in 0..RESIDENTS {
             let (cases, census, failures) = (&cases, &census, &failures);
             scope.spawn(move || {
-                let mut resident = driver("uses-project-batch");
+                let mut residents = Residents::new();
                 for case in cases.iter().skip(worker).step_by(RESIDENTS) {
-                    match run_case(&mut resident, *case) {
+                    match run_case(&mut residents, *case) {
                         Ok(Verdict::Reached(outcome)) => census.reached(&case.hostile(), outcome),
                         Ok(Verdict::Unmakeable(refusal)) => census.unmakeable(&refusal),
                         Err(why) => {
@@ -1239,7 +1325,7 @@ fn every_hostile_project_is_answered_as_a_fresh_oracle_answers_it() {
                                 .unwrap_or_else(|p| p.into_inner())
                                 .push(format!("{case:?}: {why}"));
                             // The next case gets a child no failure touched.
-                            resident = driver("uses-project-batch");
+                            residents = Residents::new();
                         }
                     }
                 }
