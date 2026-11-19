@@ -1,0 +1,214 @@
+# The review findings the hostile-value library was built from: every finding
+# of the 2026-11-19 audit of codex review logs that needed a contrived input
+# (crates/oracle-harness/src/hostile/seed.rs, which checks this table).
+#
+# id<TAB>where<TAB>dimension<TAB>outcome<TAB>the finding's title, sorted by id:
+#   id         the audit's model and the finding's log and position
+#   where      the file the finding cites, or - where the audit recorded none
+#   dimension  the dimension that generates the finding's input, or
+#              `none: <reason>` (seed.rs lists the reasons)
+#   outcome    reproduces: <census>   a generated case fails with the fix reverted
+#              declines: <census>     the subject declines the generated case
+#              out-of-scope: <why>
+#              pending                on main, and no harness draws the dimension yet
+#              branch: <name>         the code reviewed is on a branch not yet merged
+gpt6/2a1a	-	none: assembly-shape	pending	Include extension accessors in the universe
+gpt6/2a2a	-	none: assembly-shape	pending	Preserve source accessor names in the extension universe
+gpt6/2a2b	-	none: assembly-shape	pending	Include extension accessors when enumerating project namespaces
+gpt6/2a2c	-	none: assembly-shape	pending	Check dropped assembly paths for project-module opens
+gpt6/2a3a	-	none: assembly-shape	pending	Account for silently omitted F# extension methods
+gpt6/2a4a	-	none: assembly-shape	pending	Account for witness-filtered extensions before proving absence
+gpt6/2a5a	-	none: assembly-shape	pending	Track hidden extensions by method identity, not compiled name
+gpt6/2a6a	-	none: assembly-shape	pending	Check dropped types against the resolved module path
+gpt6/2a7a	-	none: assembly-shape	pending	Treat assembly-module aliases as unenumerated opens
+gpt6/2a8a	-	none: assembly-shape	pending	Account for unmarked targets of attributed abbreviations
+gpt6/ai1a	-	none: assembly-shape	pending	Include internal assembly modules in the absence check
+gpt6/ai2a	-	none: assembly-shape	pending	Reject namespace opens that also name internal assembly modules
+gpt6/ai3a	-	none: assembly-shape	pending	Check the namespace half of certified project-module opens
+gpt6/ai4a	-	none: assembly-shape	pending	Check hidden relative readings before certifying an open
+gpt6/pr1-1a	-	none: assembly-shape	pending	Include generated CLI-event accessor names
+gpt6/r6a	-	none: assembly-shape	pending	Account for internal abbreviations before certifying project opens
+gpt6/r7a	-	none: assembly-shape	pending	Mark non-public AutoOpen abbreviations as unlisted too
+gpt6/r7b	-	none: assembly-shape	pending	Include unlisted namespaces in the path-absence proof
+gpt6/s1r1b	-	none: assembly-shape	pending	Compare attribute names in the same domain on both sides
+gpt6/s1r1c	-	none: assembly-shape	pending	Resolve attribute MemberReferences with TypeDefinition parents
+gpt6/s2r1a	-	none: assembly-shape	pending	Check raw existence for module-shaped auto-opens
+gpt6/s2r3a	-	none: assembly-shape	pending	Bound nesting before expanding existence paths
+gpt6/s2r4b	-	none: assembly-shape	pending	Preserve the owning namespace for nested abbreviations
+gpt6/s2r5a	-	none: assembly-shape	pending	Require existence data for projected-assembly constructors
+gpt6/s2r6a	-	none: assembly-shape	pending	Include contested auto-opens in the certification prefixes
+gpt6/s3r2a	-	none: assembly-shape	pending	Include the CCU root's values in the extension universe
+gpt6/s3r2b	-	none: assembly-shape	pending	Preserve auto-open uncertainty for rootless projections
+gpt6/st0-1b	-	name.edge-dot-or-space	branch: source-refs-stage-0	Preserve assembly identities when forming oracle requests
+gpt62/codex1.log#1	crates/msbuild/src/fsc.rs	value.option	branch: fsc-args-1007	Check SDK-generated source paths before committing the assembly name
+gpt62/codex1.log#2	crates/msbuild/src/fsc.rs	value.option-after-line-break	branch: fsc-args-1007	Account for defines the SDK adds at build time
+gpt62/codex1.log#3	crates/msbuild/src/fsc.rs	value.overwritten-later	branch: fsc-args-1007	Validate the intermediate prefix at the point the SDK captures it
+gpt62/codex1.log#4	tools/msbuild-condition-oracle/Program.fs	none: build-logic	branch: fsc-args-1007	Preserve project-reference target semantics in the fsc oracle
+gpt62/codex2.log#1	crates/msbuild/src/fsc.rs	name.backslash	branch: fsc-args-1007	Check the slash-normalized spelling of OtherFlags
+gpt62/codex2.log#2	crates/msbuild/src/fsc.rs	none: build-logic	branch: fsc-args-1007	Decline cross-targeting outer builds before reading TargetName
+gpt62/codex2.log#3	crates/msbuild/src/fsc.rs	value.overwritten-later	branch: fsc-args-1007	Check generated paths captured before the final directory write
+gpt62/codex2.log#4	crates/msbuild/src/fsc.rs	name.switch-shaped	branch: fsc-args-1007	Account for project-supplied generated-source items
+gpt62/codex2.log#5	crates/msbuild/src/fsc.rs	value.option-after-line-break	branch: fsc-args-1007	Reject overrides of IntermediateRefAssembly too
+gpt62/codex2.log#6	crates/msbuild/src/fsc.rs	value.option-after-line-break	branch: fsc-args-1007	Include resource metadata in the verbatim-argument check
+gpt62/codex2.log#7	tools/msbuild-condition-oracle/Program.fs	none: build-logic	branch: fsc-args-1007	Don't treat skipped-dependency failures as proof of no build
+gpt62/codex3.log#1	tools/msbuild-condition-oracle/Program.fs	value.self-set-property	branch: fsc-args-1007	Use MSBuild's restore request semantics before declaring NoBuild
+gpt62/codex3.log#10	tools/msbuild-condition-oracle/Program.fs	none: build-logic	branch: fsc-args-1007	Match build-graph anchor names case-insensitively
+gpt62/codex3.log#3	tools/msbuild-condition-oracle/Program.fs	none: build-logic	branch: fsc-args-1007	Confirm build failures against the original filesystem state
+gpt62/codex3.log#4	tools/msbuild-condition-oracle/Program.fs	none: build-logic	branch: fsc-args-1007	Keep restore-only properties separate from build globals
+gpt62/codex3.log#5	tools/msbuild-condition-oracle/Program.fs	name.percent-escape	branch: fsc-args-1007	Split target lists before unescaping target names
+gpt62/codex3.log#6	tools/msbuild-condition-oracle/Program.fs	value.overwritten-later	branch: fsc-args-1007	Observe target dependencies when MSBuild expands them
+gpt62/codex3.log#7	crates/oracle-harness/src/fsc_args.rs	value.option	branch: fsc-args-1007	Apply fsc's -a shorthand to the parsed target
+gpt62/codex3.log#8	crates/oracle-harness/src/fsc_args.rs	value.option	branch: fsc-args-1007	Keep rejected switch spellings out of the source list
+gpt62/codex4.log#1	tools/msbuild-condition-oracle/Program.fs	none: build-logic	branch: fsc-args-1007	Exclude skipped compiler executions from the oracle answer
+gpt62/codex4.log#2	crates/oracle-harness/src/msbuild_oracle.rs	value.self-set-property	branch: fsc-args-1007	Keep the force-recompile property out of authoritative builds
+gpt62/codex4.log#3	crates/oracle-harness/src/msbuild_oracle.rs	spelling.through-link	branch: fsc-args-1007	Build the requested project path without resolving its symlink
+gpt62/codex4.log#4	crates/oracle-harness/src/msbuild_oracle.rs	name.list-separator	branch: fsc-args-1007	Prevent commas from splitting a caller's global property
+gpt62/codex4.log#7	crates/msbuild/tests/fsc_args_oracle_calibration.rs	name.percent-escape	branch: fsc-args-1007	Unescape only the response-file side of the calibration
+gpt62/codex5.log#1	crates/oracle-harness/src/msbuild_oracle.rs	value.self-set-property	branch: fsc-args-1007	Request task inputs without changing the build environment
+gpt62/codex5.log#2	crates/oracle-harness/src/msbuild_oracle.rs	spelling.dotdot	branch: fsc-args-1007	Match project paths after MSBuild's lexical normalization
+gpt62/codex5.log#3	tools/msbuild-condition-oracle/Program.fs	env.compiler-selector	branch: fsc-args-1007	Distinguish a logged compiler command from a successful launch
+gpt62/codex5.log#4	tools/msbuild-condition-oracle/Program.fs	env.compiler-selector	branch: fsc-args-1007	Account for compiler arguments outside the response file
+gpt62/codex5.log#5	crates/oracle-harness/src/msbuild_oracle.rs	none: fixture-logic	branch: fsc-args-1007	Do not infer NoBuild from a missing logger report
+gpt62/codex5.log#6	crates/oracle-harness/src/fsc_args.rs	name.quote	branch: fsc-args-1007	Strip filename quotes when recording compiler source paths
+gpt62/codex6.log#1	crates/oracle-harness/src/msbuild_oracle.rs	value.self-set-property	branch: fsc-args-1007	Collect task inputs without changing the build environment
+gpt62/codex6.log#2	tools/msbuild-condition-oracle/Program.fs	env.compiler-selector	branch: fsc-args-1007	Distinguish starting dotnet from starting fsc
+gpt62/codex6.log#3	tools/msbuild-condition-oracle/Program.fs	none: build-logic	branch: fsc-args-1007	Account for suppressed SkipCompilerExecution logging
+gpt62/codex6.log#4	crates/oracle-harness/src/msbuild_oracle.rs	none: build-logic	branch: fsc-args-1007	Avoid claiming no compilation from an empty Fsc task list
+gpt62/codex6.log#5	tools/msbuild-condition-oracle/Program.fs	env.compiler-selector	branch: fsc-args-1007	Match the single separator for direct compiler invocations
+gpt62/codex6.log#6	crates/oracle-harness/src/fsc_args.rs	name.kind-by-extension	branch: fsc-args-1007	Keep positional DLL arguments out of the source list
+gpt62/codex7.log#1	crates/oracle-harness/src/msbuild_oracle.rs	none: build-logic	branch: fsc-args-1007	Require evidence that this Fsc invocation wrote the output
+gpt62/codex7.log#2	crates/oracle-harness/src/msbuild_oracle.rs	value.response-file	branch: fsc-args-1007	Decline instead of returning a partial multi-target build
+gpt62/codex7.log#3	tools/msbuild-condition-oracle/Program.fs	none: build-logic	branch: fsc-args-1007	Distinguish an unlogged compiler path from an empty one
+gpt62/codex7.log#4	tools/msbuild-condition-oracle/Program.fs	env.compiler-selector	branch: fsc-args-1007	Verify the compiler launcher before trusting its arguments
+gpt62/codex7.log#5	crates/oracle-harness/src/msbuild_oracle.rs	value.reads-the-build	branch: fsc-args-1007	Account for projects that inspect the MSBuild command line
+gpt62/codex7.log#7	crates/oracle-harness/src/fsc_args.rs	name.kind-by-extension	branch: fsc-args-1007	Reject positional resource files as fsc does
+gpt62/codex8.log#1	crates/oracle-harness/src/msbuild_oracle.rs	race.appears-during-request	branch: fsc-args-1007	Isolate replay instead of deleting new files from the caller's tree
+gpt62/codex8.log#2	crates/oracle-harness/src/msbuild_oracle.rs	value.self-set-property	branch: fsc-args-1007	Don't infer identical compiler arguments from identical artifacts
+gpt62/codex8.log#3	crates/oracle-harness/src/msbuild_oracle.rs	env.compiler-selector	branch: fsc-args-1007	Verify the compiler against the SDK running MSBuild
+gpt62/codex8.log#4	crates/oracle-harness/src/msbuild_oracle.rs	none: build-logic	branch: fsc-args-1007	Compare the plain build's exit status as well as its files
+gpt62/codex8.log#5	crates/oracle-harness/src/msbuild_oracle.rs	fs.fifo	branch: fsc-args-1007	Refuse non-regular files before reading build outputs
+gpt62/codex8.log#7	crates/oracle-harness/src/msbuild_oracle.rs	spelling.relative	branch: fsc-args-1007	Resolve relative compiler paths in the build's working directory
+gpt62/codex8.log#8	crates/oracle-harness/src/msbuild_oracle.rs	name.list-separator	branch: fsc-args-1007	Handle MSBuild delimiters in the logger assembly path
+gpt62/codex9.log#1	tools/msbuild-condition-oracle/Program.fs	env.compiler-selector	branch: fsc-args-1007	Identify the compiler host independently of DOTNET_HOST_PATH
+gpt62/codex9.log#2	crates/oracle-harness/src/msbuild_oracle.rs	fs.unreadable	branch: fsc-args-1007	Refuse incomplete snapshots before deleting build outputs
+gpt62/codex9.log#3	crates/oracle-harness/src/msbuild_oracle.rs	value.reads-the-build	branch: fsc-args-1007	Run the control build without driver-only switches
+gpt62/codex9.log#4	crates/oracle-harness/src/msbuild_oracle.rs	change.same-stamp-rewrite	branch: fsc-args-1007	Detect content changes to pre-existing fixture files
+gpt62/codex9.log#5	crates/oracle-harness/src/msbuild_oracle.rs	change.disappears	branch: fsc-args-1007	Verify the directory tree was restored before the control build
+gpt62/codex9.log#6	crates/oracle-harness/src/msbuild_oracle.rs	value.self-set-property	branch: fsc-args-1007	Check secondary compiler outputs against the comparison tree
+gpt62/codex9.log#7	crates/oracle-harness/src/msbuild_oracle.rs	spelling.through-link	branch: fsc-args-1007	Check physical containment of started projects
+gpt62/codex9.log#8	crates/oracle-harness/src/msbuild_oracle.rs	value.self-set-property	branch: fsc-args-1007	Limit the restore exemption to the SDK project that needs it
+gpt62/codex9.log#9	crates/oracle-harness/src/msbuild_oracle.rs	value.option	branch: fsc-args-1007	Exempt only the actual ResolveAssemblyReference state cache
+gpt62/fa1007-codex1.log#1	crates/msbuild/src/fsc.rs	value.reads-the-build	branch: fsc-args-1007	Certify the post-restore evaluation, not the pre-restore name
+gpt62/fa1007-codex1.log#2	crates/msbuild/src/fsc.rs	none: command-line-file	branch: fsc-args-1007	Require the build’s effective globals before committing a name
+gpt62/fa1007-codex1.log#3	crates/oracle-harness/src/msbuild_oracle.rs	value.reads-the-build	branch: fsc-args-1007	Restrict oracle fixtures before claiming output equivalence
+gpt62/fa1007-codex1.log#4	crates/oracle-harness/src/msbuild_oracle.rs	spelling.rooted	branch: fsc-args-1007	Prevent the copied build from writing into the original tree
+gpt62/fa1007-codex1.log#5	crates/msbuild/src/lib.rs	none: document-structure	branch: fsc-args-1007	Classify item metadata before special-casing the Project tag
+gpt62/fa1007-codex1.log#6	crates/oracle-harness/src/msbuild_oracle.rs	env.compiler-selector	branch: fsc-args-1007	Refuse compiler and restore selectors in build inputs
+gpt62/fa1007-codex1.log#7	crates/oracle-harness/src/msbuild_oracle.rs	fs.fifo	branch: fsc-args-1007	Avoid blocking on non-regular compiler outputs
+gpt62/issue-1031/i1031-codex1.log#1	tools/fcs-dump/Program.fs	source.script-directive	pending	Resolve references under the same defines as the project check
+gpt62/issue-1031/i1031-codex1.log#2	tools/fcs-dump/Program.fs	source.line-directive	pending	Attribute diagnostics to the physical source before #line remapping
+gpt62/issue-1031/i1031-codex1.log#3	tools/fcs-dump/Program.fs	change.same-stamp-replace	pending	Invalidate resident project results when source bytes change
+gpt62/issue-1031/i1031-codex10.log#1	tools/fcs-dump/Program.fs	source.directive-lookalike	pending	Distinguish slashes in F# operators from line comments
+gpt62/issue-1031/i1031-codex10.log#3	tools/fcs-dump/Program.fs	source.long-run	pending	Make the line-directive scan linear on nonmatches
+gpt62/issue-1031/i1031-codex2.log#1	tools/fcs-dump/Program.fs	source.script-directive	pending	Honor active script references in project checks
+gpt62/issue-1031/i1031-codex2.log#2	tools/fcs-dump/Program.fs	source.line-directive	pending	Preserve #line semantics when locating project records
+gpt62/issue-1031/i1031-codex3.log#2	tools/fcs-dump/Program.fs	source.line-directive	pending	Detect line directives after other tokens on the same line
+gpt62/issue-1031/i1031-codex3.log#3	crates/corpus-diff/src/lib.rs	none: fixture-logic	pending	Require the whole-project diagnostics field from the oracle
+gpt62/issue-1031/i1031-codex3.log#5	tools/fcs-dump/Program.fs	source.script-directive	pending	Do not refuse references that fsc ignores in nested modules
+gpt62/issue-1031/i1031-codex4.log#1	tools/fcs-dump/Program.fs	fs.missing	pending	Preserve reference-resolution errors in project-check records
+gpt62/issue-1031/i1031-codex6.log#2	tools/fcs-dump/Program.fs	change.same-stamp-replace	pending	Invalidate cached metadata when a referenced DLL changes
+gpt62/issue-1031/i1031-codex6.log#3	tools/fcs-dump/Program.fs	race.rewritten-during-request	pending	Scan the same source text that FCS checks for line directives
+gpt62/issue-1031/i1031-codex7.log#2	tools/fcs-dump/Program.fs	spelling.curdir	pending	Normalize reference paths before looking up their digests
+gpt62/issue-1031/i1031-codex7.log#3	tools/fcs-dump/Program.fs	race.replaced-after-hash	pending	Make FCS read the reference bytes that were digested
+gpt62/issue-1031/i1031-codex8.log#2	tools/fcs-dump/Program.fs	name.invisible	pending	Refuse source paths that FCS maps to the same file slot
+gpt62/issue-1031/i1031-codexs1.log#2	tools/fcs-dump/Program.fs	none: fixture-logic	branch: fcs-dump-reference-snapshots	Create the reference store as a fresh private directory
+gpt62/issue-1031/i1031-codexs1.log#5	tools/fcs-dump/Program.fs	fs.char-device	branch: fcs-dump-reference-snapshots	Reject non-regular references before hashing them
+gpt62/issue-1031/i1031-codexs2.log#1	tools/fcs-dump/Program.fs	fs.symlink	branch: fcs-dump-reference-snapshots	Measure the reference target, not the symbolic link
+gpt62/issue-1031/i1031-codexs2.log#2	tools/fcs-dump/Program.fs	none: assembly-shape	branch: fcs-dump-reference-snapshots	Preserve FCS framework classification when relocating references
+gpt62/issue-1031/i1031-codexs2.log#4	tools/fcs-dump/Program.fs	race.replaced-after-hash	branch: fcs-dump-reference-snapshots	Snapshot the same bytes on cache hits and misses
+gpt62/issue-1031/i1031-codexs2.log#5	tools/fcs-dump/Program.fs	none: assembly-shape	branch: fcs-dump-reference-snapshots	Keep external FSharp.Core metadata with the snapshot
+gpt62/issue-1031/i1031-codexs2.log#6	tools/fcs-dump/Program.fs	none: fixture-logic	branch: fcs-dump-reference-snapshots	Require proof of ownership before deleting a reference store
+gpt62/issue-1031/i1031-codexs3.log#1	tools/fcs-dump/Program.fs	change.same-stamp-replace	branch: fcs-dump-reference-snapshots	Invalidate FCS's framework cache when reference content changes
+gpt62/issue-1031/i1031-codexs3.log#2	tools/fcs-dump/Program.fs	race.deleted-after-listing	branch: fcs-dump-reference-snapshots	Validate reference changes even when FCS skips the open
+gpt62/issue-1031/i1031-codexs3.log#3	tools/fcs-dump/Program.fs	change.same-stamp-rewrite	branch: fcs-dump-reference-snapshots	Snapshot linked netmodules or refuse multi-module assemblies
+gpt62/issue-1031/i1031-codexs3.log#4	tools/fcs-dump/Program.fs	fs.fifo	branch: fcs-dump-reference-snapshots	Reject non-regular reference files before a blocking open
+gpt62/issue-1031/i1031-codexs3.log#5	tools/fcs-dump/Program.fs	none: assembly-shape	branch: fcs-dump-reference-snapshots	Refuse attribute constructors whose declaring type is unknown
+gpt62/issue-1031/i1031-codexs4.log#1	tools/fcs-dump/Program.fs	change.same-stamp-rewrite	branch: fcs-dump-reference-snapshots	Preserve pending cache invalidation across refused requests
+gpt62/issue-1031/i1031-codexs4.log#2	tools/fcs-dump/Program.fs	change.appears	branch: fcs-dump-reference-snapshots	Revalidate companion files before reusing framework imports
+gpt62/issue-1031/i1031-codexs4.log#3	tools/fcs-dump/Program.fs	race.rewritten-during-request	branch: fcs-dump-reference-snapshots	Detect mid-request reference replacements on cache hits
+gpt62/issue-1031/i1031-codexs4.log#4	tools/fcs-dump/Program.fs	fs.fifo	branch: fcs-dump-reference-snapshots	Refuse nonregular files before opening them for a snapshot
+gpt62/issue-1031/i1031-codexs4.log#5	tools/fcs-dump/Program.fs	race.appears-during-request	branch: fcs-dump-reference-snapshots	Keep files recorded as absent out of snapshot reads
+gpt62/issue-1031/i1031-codexs4.log#6	tools/fcs-dump/Program.fs	none: assembly-shape	branch: fcs-dump-reference-snapshots	Compare provider attribute names using FCS's name semantics
+gpt62/issue-1031/i1031-codexs4.log#7	tools/fcs-dump/Program.fs	none: assembly-shape	branch: fcs-dump-reference-snapshots	Bound the walk through attribute type specifications
+gpt62/issue-1031/i1031-codexs5.log#1	tools/fcs-dump/Program.fs	change.appears	branch: fcs-dump-reference-snapshots	Track XML documentation through symbol projection
+gpt62/issue-1031/i1031-codexs5.log#2	tools/fcs-dump/Program.fs	change.appears	branch: fcs-dump-reference-snapshots	Preserve observed companion-file absences during the check
+gpt62/issue-1031/i1031-codexs5.log#3	tools/fcs-dump/Program.fs	none: request-semantics	branch: fcs-dump-reference-snapshots	Account for FCS's implicit FSharp.Core reference
+gpt62/stage-f/codex-2.log#1	crates/msbuild/src/imports.rs	none: command-line-file	branch: fsc-args-1007	Check for MSBuild.rsp beside the project
+gpt62/stage-f/codex-2.log#2	crates/msbuild/src/fsc.rs	none: document-structure	branch: fsc-args-1007	Require restore evidence that the project cannot supply itself
+gpt62/stage-f/codex-2.log#3	crates/msbuild/src/fsc.rs	name.line-break	branch: fsc-args-1007	Include SDK-discovered resources in the name check
+gpt62/stage-f/codex-2.log#4	crates/msbuild/src/fsc.rs	xml.char-ref	branch: fsc-args-1007	Validate property values before the SDK consumes them
+gpt62/stage-f/codex-2.log#5	crates/msbuild/src/fsc.rs	value.option	branch: fsc-args-1007	Apply the path grammar to Pkg-prefixed properties
+gpt62/stage-f/codex-2.log#7	crates/oracle-harness/src/msbuild_oracle.rs	none: request-semantics	branch: fsc-args-1007	Reject build-control properties in BuildInputs
+gpt62/stage-f/codex-2.log#8	crates/oracle-harness/src/msbuild_oracle.rs	none: command-line-file	branch: fsc-args-1007	Return a decline for switches rejected from a fixture's rsp
+gpt62/stage-f/codex-2.log#9	crates/oracle-harness/src/fsc_args.rs	name.early-colon	branch: fsc-args-1007	Preserve slash-prefixed sources that match no fsc option
+gpt62/stage-f/codex-3.log#1	crates/msbuild/src/fsc.rs	none: restore-staleness	branch: fsc-args-1007	Require a restore that matches the current project inputs
+gpt62/stage-f/codex-3.log#2	crates/msbuild/src/fsc.rs	name.line-break	branch: fsc-args-1007	Decline unchecked package compile-asset paths
+gpt62/stage-f/codex-3.log#6	crates/oracle-harness/src/fsc_args.rs	name.early-colon	branch: fsc-args-1007	Match slash options by argument shape as well as name
+gpt62/stage-f/codex-4.log#1	crates/msbuild/src/fsc.rs	name.switch-shaped	branch: fsc-args-1007	Account for NuGet-preprocessed sources before certifying the name
+gpt62/stage-f/codex-4.log#2	crates/msbuild/src/evaluator.rs	env.toolchain-variable	branch: fsc-args-1007	Do not trust user-local workload manifests by SDK version alone
+gpt62/stage-f/codex-4.log#3	crates/msbuild/src/fsc.rs	name.kind-by-extension	branch: fsc-args-1007	Reject Compile items fsc classifies as assemblies or resources
+gpt62/stage-i/codex2.log#1	crates/sema/src/assembly_env.rs	none: assembly-shape	branch: stage-i-friend-assemblies	Mark friend containers that exist only in the F# signature
+gpt62/stage-i/codex2.log#3	crates/assembly/src/friends.rs	none: assembly-shape	branch: stage-i-friend-assemblies	Match the full IL attribute name the way FCS does
+gpt62/stage-i/codex3.log#1	crates/lsp/src/workspace.rs	none: build-logic	branch: stage-i-friend-assemblies	Read the consumer name from the actual IntermediateAssembly
+gpt62/stage-i/codex3.log#2	crates/lsp/src/workspace.rs	value.option	branch: stage-i-friend-assemblies	Account for output switches supplied through OtherFlags
+gpt62/stage-i/codex3.log#3	crates/lsp/src/workspace.rs	value.path-separator	branch: stage-i-friend-assemblies	Do not constrain the consumer stem across a path separator
+gpt62/stage-i/codex4.log#2	crates/lsp/src/workspace.rs	none: build-logic	branch: stage-i-friend-assemblies	Verify the SDK compile target before trusting the consumer name
+gpt62/stage-i/codex4.log#3	crates/lsp/src/workspace.rs	value.quoted-argument	branch: stage-i-friend-assemblies	Account for quotes inside compiler output switches
+gpt62/stage-i/codex4.log#4	crates/lsp/src/workspace.rs	value.option	branch: stage-i-friend-assemblies	Distinguish the optimization switch `-O` from output `-o`
+gpt62/stage-i/codex5.log#1	crates/sema/src/assembly_env.rs	none: assembly-shape	branch: stage-i-friend-assemblies	Mark parent namespaces of internal types in friend assemblies
+gpt62/stage-i/codex5.log#2	crates/lsp/src/workspace.rs	none: build-logic	branch: stage-i-friend-assemblies	Verify the build invocation before trusting the consumer name
+gpt62/stage-i/codex5.log#3	crates/lsp/src/workspace.rs	name.glob-char	branch: stage-i-friend-assemblies	Reject item globs when deriving the compiler's output name
+gpt62/stage-i/codex6.log#1	crates/lsp/src/workspace.rs	env.compiler-selector	branch: stage-i-friend-assemblies	Check compiler selectors before certifying the consumer name
+gpt62/stage-i/codex6.log#3	crates/lsp/src/workspace.rs	value.quoted-argument	branch: stage-i-friend-assemblies	Respect quoted arguments when checking for output switches
+gpt62/stage-i/codex7.log#2	crates/lsp/src/workspace.rs	value.path-separator	branch: stage-i-friend-assemblies	Derive the consumer name from the intermediate assembly item
+gpt62/stage-i/codex7.log#3	crates/lsp/src/workspace.rs	env.compiler-selector	branch: stage-i-friend-assemblies	Check compiler selectors supplied by the environment
+gpt62/stage-i/codex7.log#4	crates/lsp/src/workspace.rs	value.quoted-argument	branch: stage-i-friend-assemblies	Account for response-file line breaks inside quoted OtherFlags
+gpt62/stage-i/codex7.log#5	crates/lsp/src/workspace.rs	name.switch-shaped	branch: stage-i-friend-assemblies	Check source arguments before certifying the compiler output
+gpt62/stage0/codex10.log#2	crates/oracle-harness/src/project_graph.rs	value.padded	branch: source-refs-stage-0	Preserve whitespace when interpreting OutputType
+gpt62/stage0/codex10.log#4	tools/fcs-dump/Program.fs	wire.wrong-type	branch: source-refs-stage-0	Reject mistyped graph options instead of changing the check
+gpt62/stage0/codex11.log#4	tools/fcs-dump/Program.fs	spelling.relative	branch: source-refs-stage-0	Reject relative source paths on the graph wire
+gpt62/stage0/codex11.log#5	tools/fcs-dump/Program.fs	none: request-semantics	branch: source-refs-stage-0	Validate graph edges outside the checked project's closure
+gpt62/stage0/codex12.log#3	tools/fcs-dump/Program.fs	change.same-stamp-rewrite	branch: source-refs-stage-0	Invalidate cached project signatures between graph requests
+gpt62/stage0/codex12.log#4	crates/oracle-harness/src/project_graph.rs	name.non-utf8	branch: source-refs-stage-0	Reject graph paths that JSON cannot represent losslessly
+gpt62/stage0/codex13.log#3	tools/fcs-dump/Program.fs	change.same-stamp-rewrite	branch: source-refs-stage-0	Invalidate binary references as well as project options
+gpt62/stage0/codex13.log#4	tools/fcs-dump/Program.fs	none: request-semantics	branch: source-refs-stage-0	Check the registered edge name for FSharp.Core
+gpt62/stage0/codex13.log#5	crates/oracle-harness/src/project_graph.rs	value.option-after-line-break	branch: source-refs-stage-0	Split response files on bare carriage returns too
+gpt62/stage0/codex13.log#6	tools/fcs-dump/Program.fs	value.option	branch: source-refs-stage-0	Validate reference-output switches before dropping them
+gpt62/stage0/codex13.log#7	tools/fcs-dump/Program.fs	value.option	branch: source-refs-stage-0	Require a nonempty output argument before normalizing it
+gpt62/stage0/codex13.log#8	crates/corpus-diff/src/lib.rs	wire.multi-line	branch: source-refs-stage-0	Enforce one nonblank request line in check_json
+gpt62/stage0/codex15.log#1	tools/fcs-dump/Program.fs	none: request-semantics	branch: source-refs-stage-0	Require an explicit FSharp.Core reference in graph requests
+gpt62/stage0/codex15.log#2	tools/fcs-dump/Program.fs	spelling.curdir	branch: source-refs-stage-0	Reject source arguments that collapse to the same absolute path
+gpt62/stage0/codex15.log#4	tools/fcs-dump/Program.fs	value.option	branch: source-refs-stage-0	Validate the preferred-32-bit platform against the target
+gpt62/stage0/codex17.log#5	tools/fcs-dump/Program.fs	value.option	branch: source-refs-stage-0	Reject checked netmodules unless their signatures can be read
+gpt62/stage0/codex18.log#2	tools/fcs-dump/Program.fs	none: request-semantics	branch: source-refs-stage-0	Refuse requests that leave framework references implicit
+gpt62/stage0/codex18.log#4	tools/fcs-dump/Program.fs	none: program-shape	branch: source-refs-stage-0	Recognize only actual FSharp.Core measure operators
+gpt62/stage0/codex5.log#12	crates/oracle-harness/src/project_graph.rs	spelling.parent-escape	branch: source-refs-stage-0	Keep fixture writes inside the temporary project directory
+gpt62/stage0/codex6.log#1	tools/fcs-dump/Program.fs	none: program-shape	branch: source-refs-stage-0	Collect whole-project diagnostics for the checked project
+gpt62/stage0/codex7.log#9	crates/corpus-diff/tests/project_resolution/source_references.rs	fs.symlink-out-of-tree	branch: source-refs-stage-0	Keep census discovery inside the pinned checkouts
+gpt62/stage0/codex8.log#2	crates/oracle-harness/src/project_graph.rs	none: fixture-logic	branch: source-refs-stage-0	Use the fixture build's reference order, not DFS order
+gpt62/stage0/codex8.log#5	tools/fcs-dump/Program.fs	name.kind-by-extension	branch: source-refs-stage-0	Reject netmodule targets used as assembly references
+gpt62/stage0/codex8.log#6	tools/fcs-dump/Program.fs	none: request-semantics	branch: source-refs-stage-0	Enforce the language support floor at the graph oracle endpoint
+gpt62/stage0/codex8.log#7	crates/oracle-harness/src/project_graph.rs	name.list-separator	branch: source-refs-stage-0	Escape fixture source names as MSBuild item specs
+gpt62/stage0/codex9.log#2	tools/fcs-dump/Program.fs	value.option	branch: source-refs-stage-0	Reject the language-version help switch before invoking FCS
+gpt62/stage0/codex9.log#3	crates/oracle-harness/src/project_graph.rs	name.backslash	branch: source-refs-stage-0	Reject fixture paths that MSBuild interprets differently
+gpt62/stage0/codexd1.log#1	tools/fcs-dump/Program.fs	change.same-stamp-replace	branch: source-refs-stage-0	Clear FCS caches before compiling a graph project
+gpt62/stage0/codexd1.log#2	tools/fcs-dump/Program.fs	none: request-semantics	branch: source-refs-stage-0	Verify that the consumer actually imported the source reference
+gpt62/stage0/codexd1.log#8	crates/oracle-harness/src/project_graph.rs	spelling.dotdot	branch: source-refs-stage-0	Align Rust path validation with the wire parser
+gpt62/stage0/codexd1.log#9	crates/oracle-harness/src/project_graph.rs	name.case-fold	branch: source-refs-stage-0	Refuse fixture paths that alias on the host filesystem
+gpt62/stage0/codexd2.log#1	tools/fcs-dump/Program.fs	fs.missing	branch: source-refs-stage-0	Reject missing DLLs before checking the graph
+gpt62/stage0/codexd2.log#2	tools/fcs-dump/Program.fs	none: assembly-shape	branch: source-refs-stage-0	Check assembly identity from DLL metadata, not the filename
+gpt62/stage0/codexd2.log#4	crates/corpus-diff/src/lib.rs	none: request-semantics	branch: source-refs-stage-0	Prevent raw check requests from executing a compile
+gpt62/stage0/codexd3.log#1	tools/fcs-dump/Program.fs	name.invisible	branch: source-refs-stage-0	Reject source paths that FCS treats as the same file
+gpt62/stage0/codexd3.log#2	tools/fcs-dump/Program.fs	source.line-directive	branch: source-refs-stage-0	Refuse line directives before grouping graph diagnostics
+gpt62/stage0/codexd3.log#3	crates/corpus-diff/src/lib.rs	wire.trailing-unicode-whitespace	branch: source-refs-stage-0	Fail closed when validating raw check requests
+gpt62/stage0/codexd3.log#5	tools/fcs-dump/Program.fs	fs.fifo	branch: source-refs-stage-0	Refuse non-regular DLL references without opening them

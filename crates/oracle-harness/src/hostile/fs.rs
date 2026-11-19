@@ -1,0 +1,853 @@
+//! Hostile file-system states, and the fixture builder that makes them
+//! ([`Kind::FsState`](super::Kind::FsState),
+//! [`Kind::FsChange`](super::Kind::FsChange),
+//! [`Kind::FsRace`](super::Kind::FsRace)).
+//!
+//! [`HostileFs`] puts any [`State`] at any name under a tree, and applies any
+//! [`Change`] to a file between two requests. A state or a name the platform
+//! cannot make comes back as [`Unmakeable`] with the reason, which the caller
+//! hands to its census ([`super::census::Census::unmakeable`]): a state is
+//! never skipped silently, and an error the builder does not expect is a
+//! panic, not a skip.
+//!
+//! The states of [`Race`] happen *during* a request, so no builder outside
+//! the subject can make them: each boundary makes them with a hook in its own
+//! file-system layer.
+
+use std::ffi::OsStr;
+use std::fs::{self, File, Permissions};
+use std::io;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt, symlink};
+use std::os::unix::net::UnixListener;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::SystemTime;
+
+use super::Dimension;
+use super::name::{NotAComponent, Rendered};
+
+/// What sits at a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum State {
+    /// A regular file holding the content.
+    Regular,
+    /// A regular file of no bytes.
+    Empty,
+    /// A FIFO.
+    Fifo,
+    /// A socket.
+    Socket,
+    /// A link to `/dev/null`: a character device to whatever follows links.
+    CharDevice,
+    /// A link to a regular file in the tree, which holds the content.
+    Symlink,
+    /// A link to a path where nothing is.
+    DanglingSymlink,
+    /// A link to itself.
+    SymlinkLoop,
+    /// A link to a regular file outside the tree, which holds the content.
+    SymlinkOutOfTree,
+    /// An empty directory.
+    Directory,
+    /// A regular file holding the content, which its owner may not read.
+    Unreadable,
+    /// A regular file holding the content, which its owner may not write.
+    ReadOnly,
+    /// Nothing, in a directory that exists.
+    Missing,
+}
+
+impl State {
+    /// Every state.
+    pub const ALL: &'static [State] = &[
+        State::Regular,
+        State::Empty,
+        State::Fifo,
+        State::Socket,
+        State::CharDevice,
+        State::Symlink,
+        State::DanglingSymlink,
+        State::SymlinkLoop,
+        State::SymlinkOutOfTree,
+        State::Directory,
+        State::Unreadable,
+        State::ReadOnly,
+        State::Missing,
+    ];
+
+    /// The state's dimension.
+    pub fn dimension(self) -> Dimension {
+        match self {
+            State::Regular => Dimension::Regular,
+            State::Empty => Dimension::Empty,
+            State::Fifo => Dimension::Fifo,
+            State::Socket => Dimension::Socket,
+            State::CharDevice => Dimension::CharDevice,
+            State::Symlink => Dimension::Symlink,
+            State::DanglingSymlink => Dimension::DanglingSymlink,
+            State::SymlinkLoop => Dimension::SymlinkLoop,
+            State::SymlinkOutOfTree => Dimension::SymlinkOutOfTree,
+            State::Directory => Dimension::Directory,
+            State::Unreadable => Dimension::Unreadable,
+            State::ReadOnly => Dimension::ReadOnly,
+            State::Missing => Dimension::Missing,
+        }
+    }
+}
+
+/// A file changing between two requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Change {
+    /// Rewritten in place with other bytes of the same length, the
+    /// modification time put back.
+    SameStampRewrite,
+    /// Rewritten in place with bytes of another length, the modification
+    /// time put back.
+    SameStampResize,
+    /// Replaced by renaming another file over it, which is given the old
+    /// modification time.
+    SameStampReplace,
+    /// Created where nothing was.
+    Appears,
+    /// Removed.
+    Disappears,
+}
+
+impl Change {
+    /// Every change.
+    pub const ALL: &'static [Change] = &[
+        Change::SameStampRewrite,
+        Change::SameStampResize,
+        Change::SameStampReplace,
+        Change::Appears,
+        Change::Disappears,
+    ];
+
+    /// The change's dimension.
+    pub fn dimension(self) -> Dimension {
+        match self {
+            Change::SameStampRewrite => Dimension::SameStampRewrite,
+            Change::SameStampResize => Dimension::SameStampResize,
+            Change::SameStampReplace => Dimension::SameStampReplace,
+            Change::Appears => Dimension::Appears,
+            Change::Disappears => Dimension::Disappears,
+        }
+    }
+}
+
+/// A file changing while one request reads it. Made by a hook in the
+/// boundary's own file-system layer, not by [`HostileFs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Race {
+    /// Deleted between the listing that named it and the open.
+    DeletedAfterListing,
+    /// Rewritten between two reads of one request.
+    RewrittenDuringRequest,
+    /// Replaced between the read that identified it and the read that used
+    /// it.
+    ReplacedAfterHash,
+    /// Recorded absent, and present before the request ends.
+    AppearsDuringRequest,
+}
+
+impl Race {
+    /// Every race.
+    pub const ALL: &'static [Race] = &[
+        Race::DeletedAfterListing,
+        Race::RewrittenDuringRequest,
+        Race::ReplacedAfterHash,
+        Race::AppearsDuringRequest,
+    ];
+
+    /// The race's dimension.
+    pub fn dimension(self) -> Dimension {
+        match self {
+            Race::DeletedAfterListing => Dimension::DeletedAfterListing,
+            Race::RewrittenDuringRequest => Dimension::RewrittenDuringRequest,
+            Race::ReplacedAfterHash => Dimension::ReplacedAfterHash,
+            Race::AppearsDuringRequest => Dimension::AppearsDuringRequest,
+        }
+    }
+}
+
+/// What the platform could not make, and why. Printed by the census that is
+/// handed it; never dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unmakeable {
+    /// No file can have the name here.
+    Name {
+        /// Why.
+        reason: String,
+    },
+    /// The name is fine and the state cannot be made here.
+    State {
+        /// The state.
+        state: State,
+        /// Why.
+        reason: String,
+    },
+    /// The change cannot be made here.
+    Change {
+        /// The change.
+        change: Change,
+        /// Why.
+        reason: String,
+    },
+}
+
+impl Unmakeable {
+    /// Why.
+    pub fn reason(&self) -> &str {
+        match self {
+            Unmakeable::Name { reason }
+            | Unmakeable::State { reason, .. }
+            | Unmakeable::Change { reason, .. } => reason,
+        }
+    }
+}
+
+impl std::fmt::Display for Unmakeable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unmakeable::Name { reason } => write!(f, "the name cannot be made: {reason}"),
+            Unmakeable::State { state, reason } => {
+                write!(f, "{} cannot be made: {reason}", state.dimension())
+            }
+            Unmakeable::Change { change, reason } => {
+                write!(f, "{} cannot be made: {reason}", change.dimension())
+            }
+        }
+    }
+}
+
+/// What [`HostileFs::place`] made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placed {
+    /// The path the state sits at.
+    pub path: PathBuf,
+    /// The file a link points at, where the state is a link to a file that
+    /// exists.
+    pub target: Option<PathBuf>,
+}
+
+/// A fixture tree that can hold every [`State`].
+///
+/// It has two directories: the *tree*, which is what the subject is shown,
+/// and a directory *aside* from it, where the targets of links out of the
+/// tree live. A link to a file in the tree points into `linked/` under the
+/// tree's root, so a subject that walks the whole tree meets those targets as
+/// files in their own right.
+#[derive(Debug)]
+pub struct HostileFs {
+    tree: PathBuf,
+    aside: PathBuf,
+    /// Numbers the link targets, so two links never share one.
+    next: AtomicUsize,
+    /// Owns the directories when the fixture made them.
+    _owned: Option<tempfile::TempDir>,
+}
+
+/// The directory under the tree's root holding the targets of
+/// [`State::Symlink`].
+pub const LINKED: &str = "linked";
+
+impl Default for HostileFs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HostileFs {
+    /// A fresh fixture in a temporary directory of its own.
+    pub fn new() -> Self {
+        let owned = tempfile::tempdir().expect("create a temporary directory");
+        // The canonical path: a harness compares paths with a subject that
+        // may canonicalise, and macOS's temporary directory is behind a link.
+        let root = owned
+            .path()
+            .canonicalize()
+            .expect("canonicalise the temporary directory");
+        let (tree, aside) = (root.join("tree"), root.join("aside"));
+        fs::create_dir(&tree).expect("create the tree");
+        fs::create_dir(&aside).expect("create the directory aside");
+        HostileFs {
+            tree,
+            aside,
+            next: AtomicUsize::new(0),
+            _owned: Some(owned),
+        }
+    }
+
+    /// A fixture over a tree the harness made, with `aside` a directory
+    /// outside it on the same file system.
+    ///
+    /// # Panics
+    ///
+    /// If `aside` is inside `tree`: a link "out of the tree" would then point
+    /// into it.
+    pub fn over(tree: PathBuf, aside: PathBuf) -> Self {
+        assert!(
+            !aside.starts_with(&tree),
+            "{} is inside the tree {}",
+            aside.display(),
+            tree.display()
+        );
+        HostileFs {
+            tree,
+            aside,
+            next: AtomicUsize::new(0),
+            _owned: None,
+        }
+    }
+
+    /// The tree's root.
+    pub fn tree(&self) -> &Path {
+        &self.tree
+    }
+
+    /// The directory aside from the tree, where the targets of links out of
+    /// it live.
+    pub fn aside(&self) -> &Path {
+        &self.aside
+    }
+
+    /// Whether the tree's file system holds `a` and `b` apart as two names.
+    /// A name and its twin ([`super::name::Name::twin`]) are one file to a
+    /// file system that folds case or normal forms, and a fixture cannot
+    /// hold both there.
+    ///
+    /// # Errors
+    ///
+    /// [`Unmakeable::Name`] if either name cannot be made, or if the file
+    /// system takes the two for one.
+    pub fn holds_apart(&self, a: &Rendered, b: &Rendered) -> Result<(), Unmakeable> {
+        let name = |r: &Rendered| {
+            r.component()
+                .map(ToOwned::to_owned)
+                .map_err(|why| Unmakeable::Name {
+                    reason: why.to_string(),
+                })
+        };
+        let (a, b) = (name(a)?, name(b)?);
+        let dir = self.target_dir(&self.aside);
+        fs::write(dir.join(&a), b"").map_err(|e| match name_refusal(&e) {
+            Some(reason) => Unmakeable::Name { reason },
+            None => panic!("probe {a:?}: {e}"),
+        })?;
+        match fs::symlink_metadata(dir.join(&b)) {
+            Ok(_) => Err(Unmakeable::Name {
+                reason: "the file system takes the name and its twin for one file".into(),
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => match name_refusal(&e) {
+                Some(reason) => Err(Unmakeable::Name { reason }),
+                None => panic!("probe {b:?}: {e}"),
+            },
+        }
+    }
+
+    /// The directory `dir` names under the tree, created if need be.
+    ///
+    /// # Panics
+    ///
+    /// If `dir` could name a directory outside the tree: if it is rooted, or
+    /// holds a `..`. A fixture must not write outside its own directory,
+    /// whatever its caller generated.
+    fn directory(&self, dir: &Path) -> PathBuf {
+        assert!(
+            dir.components().all(|c| matches!(c, Component::Normal(_))),
+            "{dir:?} is not a plain relative path, so it may name a directory outside the tree"
+        );
+        let path = self.tree.join(dir);
+        fs::create_dir_all(&path).unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        path
+    }
+
+    /// A fresh directory for one link's target, under `base`.
+    fn target_dir(&self, base: &Path) -> PathBuf {
+        let n = self.next.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(n.to_string());
+        fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+        dir
+    }
+
+    /// Put `state` at `name` in the directory `dir` under the tree. `content`
+    /// is what a regular file there holds, or the file a link there points
+    /// at; the states with no content ignore it.
+    ///
+    /// # Errors
+    ///
+    /// [`Unmakeable`] if the platform cannot hold the name or make the state.
+    /// Nothing is left at the path then.
+    ///
+    /// # Panics
+    ///
+    /// If something is at the path already, if `dir` is not a plain relative
+    /// path, or on any error other than the platform refusing the name or
+    /// the state.
+    pub fn place(
+        &self,
+        dir: impl AsRef<Path>,
+        name: &Rendered,
+        state: State,
+        content: &[u8],
+    ) -> Result<Placed, Unmakeable> {
+        let component = name
+            .component()
+            .map_err(|why: NotAComponent| Unmakeable::Name {
+                reason: why.to_string(),
+            })?;
+        let parent = self.directory(dir.as_ref());
+        let path = parent.join(component);
+        assert!(
+            fs::symlink_metadata(&path)
+                .is_err_and(|e| e.kind() == io::ErrorKind::NotFound || name_refusal(&e).is_some()),
+            "{} exists already",
+            path.display()
+        );
+        let made = |result: io::Result<()>| -> Result<(), Unmakeable> {
+            result.map_err(|e| match name_refusal(&e) {
+                Some(reason) => Unmakeable::Name { reason },
+                None => panic!("make {state:?} at {}: {e}", path.display()),
+            })
+        };
+        let mut target = None;
+        match state {
+            State::Regular => made(fs::write(&path, content))?,
+            State::Empty => made(fs::write(&path, b""))?,
+            State::Missing => {
+                // Whether the name could exist is still the platform's to
+                // say: a name it refuses is not "missing" but unmakeable.
+                made(fs::write(&path, b""))?;
+                fs::remove_file(&path).expect("remove the probe file");
+            }
+            State::Directory => made(fs::create_dir(&path))?,
+            State::Fifo => made(mkfifo(&path))?,
+            State::Socket => match bind_socket(&parent, component) {
+                Ok(()) => {}
+                Err(SocketFailure::Path(reason)) => {
+                    return Err(Unmakeable::State { state, reason });
+                }
+                Err(SocketFailure::Io(e)) => made(Err(e))?,
+            },
+            State::CharDevice => {
+                let null = Path::new("/dev/null");
+                if !fs::metadata(null).is_ok_and(|m| m.file_type().is_char_device()) {
+                    return Err(Unmakeable::State {
+                        state,
+                        reason: "/dev/null is not a character device here".into(),
+                    });
+                }
+                made(symlink(null, &path))?;
+            }
+            State::Symlink | State::SymlinkOutOfTree => {
+                let base = if state == State::Symlink {
+                    self.tree.join(LINKED)
+                } else {
+                    self.aside.clone()
+                };
+                let to = self.target_dir(&base).join(component);
+                made(fs::write(&to, content))?;
+                made(symlink(&to, &path))?;
+                target = Some(to);
+            }
+            State::DanglingSymlink => {
+                let nowhere = self.target_dir(&self.aside).join("nowhere");
+                made(symlink(&nowhere, &path))?;
+            }
+            State::SymlinkLoop => made(symlink(component, &path))?,
+            State::Unreadable => {
+                made(fs::write(&path, content))?;
+                fs::set_permissions(&path, Permissions::from_mode(0o000))
+                    .expect("clear the file's mode");
+                if File::open(&path).is_ok() {
+                    fs::remove_file(&path).expect("remove the readable file");
+                    return Err(Unmakeable::State {
+                        state,
+                        reason: "this user reads a file whatever its mode (root?)".into(),
+                    });
+                }
+            }
+            State::ReadOnly => {
+                made(fs::write(&path, content))?;
+                fs::set_permissions(&path, Permissions::from_mode(0o444))
+                    .expect("make the file read-only");
+                if File::options().write(true).open(&path).is_ok() {
+                    fs::remove_file(&path).expect("remove the writable file");
+                    return Err(Unmakeable::State {
+                        state,
+                        reason: "this user writes a file whatever its mode (root?)".into(),
+                    });
+                }
+            }
+        }
+        Ok(Placed { path, target })
+    }
+
+    /// Apply `change` to the file at `path`, which must be under the tree.
+    /// `new` is what the file holds afterwards (ignored by
+    /// [`Change::Disappears`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Unmakeable`] if the file system does not give back the stamp it was
+    /// asked to keep.
+    ///
+    /// # Panics
+    ///
+    /// If the file is not in the state the change starts from (a rewrite
+    /// needs a regular file and new bytes that differ, of the same length or
+    /// not as the change says; an appearance needs nothing at the path), or
+    /// on an I/O error.
+    pub fn change(&self, path: &Path, change: Change, new: &[u8]) -> Result<(), Unmakeable> {
+        assert!(
+            path.starts_with(&self.tree),
+            "{} is outside the tree",
+            path.display()
+        );
+        let unkept = |reason: String| Unmakeable::Change { change, reason };
+        match change {
+            Change::Appears => {
+                assert!(
+                    fs::symlink_metadata(path).is_err(),
+                    "{} is there already",
+                    path.display()
+                );
+                fs::write(path, new).expect("write the file that appears");
+            }
+            Change::Disappears => {
+                fs::remove_file(path).expect("remove the file that disappears");
+            }
+            Change::SameStampRewrite | Change::SameStampResize | Change::SameStampReplace => {
+                let before = fs::symlink_metadata(path).expect("stat the file to change");
+                assert!(before.is_file(), "{} is no regular file", path.display());
+                let old = fs::read(path).expect("read the file to change");
+                assert_ne!(old, new, "the change must change the bytes");
+                match change {
+                    Change::SameStampRewrite => assert_eq!(
+                        old.len(),
+                        new.len(),
+                        "a same-stamp rewrite keeps the length"
+                    ),
+                    Change::SameStampResize => assert_ne!(
+                        old.len(),
+                        new.len(),
+                        "a same-stamp resize changes the length"
+                    ),
+                    _ => {}
+                }
+                let stamp = before.modified().expect("the file's modification time");
+                if change == Change::SameStampReplace {
+                    let staged = self.target_dir(&self.aside).join("staged");
+                    fs::write(&staged, new).expect("write the replacement");
+                    set_modified(&staged, stamp);
+                    fs::rename(&staged, path).expect("rename the replacement into place");
+                } else {
+                    fs::write(path, new).expect("rewrite the file");
+                    set_modified(path, stamp);
+                }
+                let after = fs::symlink_metadata(path).expect("stat the changed file");
+                let kept = after.modified().expect("the file's modification time");
+                if kept != stamp {
+                    return Err(unkept(format!(
+                        "the file system gave back {kept:?} for the modification time {stamp:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Set `path`'s modification time.
+fn set_modified(path: &Path, stamp: SystemTime) {
+    File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(stamp))
+        .unwrap_or_else(|e| panic!("set the modification time of {}: {e}", path.display()));
+}
+
+/// Why the platform refused to make a file of some name, if `error` is that
+/// refusal: the name is too long, or is not text on a file system that
+/// requires text (APFS).
+fn name_refusal(error: &io::Error) -> Option<String> {
+    match error.raw_os_error()? {
+        libc::ENAMETOOLONG => Some("the file system takes no name this long".into()),
+        libc::EILSEQ => Some("the file system takes no name that is not UTF-8".into()),
+        _ => None,
+    }
+}
+
+fn mkfifo(path: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .expect("a path holding a NUL was refused as a component");
+    // SAFETY: `c` is a NUL-terminated string that outlives the call.
+    if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+enum SocketFailure {
+    /// The socket's path does not fit a socket address.
+    Path(String),
+    Io(io::Error),
+}
+
+/// Bind a socket named `name` in `dir`, and leave it there.
+///
+/// A socket address holds about a hundred bytes of path, fewer than a
+/// temporary directory's own path on macOS, so the bind goes through a short
+/// link to `dir`.
+fn bind_socket(dir: &Path, name: &OsStr) -> Result<(), SocketFailure> {
+    let short = tempfile::Builder::new()
+        .prefix("s")
+        .tempdir()
+        .map_err(SocketFailure::Io)?;
+    let link = short.path().join("d");
+    symlink(dir, &link).map_err(SocketFailure::Io)?;
+    match UnixListener::bind(link.join(name)) {
+        Ok(_listener) => Ok(()),
+        // The standard library refuses a path that does not fit before it
+        // asks the operating system.
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Err(SocketFailure::Path(format!(
+            "a socket address has no room for the path: {e}"
+        ))),
+        Err(e) => Err(SocketFailure::Io(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hostile::name::{self, PLAIN};
+
+    fn plain(text: &str) -> Rendered {
+        name::Name {
+            parts: PLAIN,
+            twin: None,
+        }
+        .render(text, "")
+    }
+
+    /// What the file system says is at `path`: the state as a reader meets it.
+    fn observed(path: &Path) -> &'static str {
+        let Ok(link) = fs::symlink_metadata(path) else {
+            return "nothing";
+        };
+        let kind = link.file_type();
+        if kind.is_symlink() {
+            return match fs::metadata(path) {
+                Ok(m) if m.file_type().is_char_device() => "link to a character device",
+                Ok(m) if m.is_file() => "link to a file",
+                Ok(_) => "link to something else",
+                Err(e) if e.kind() == io::ErrorKind::NotFound => "dangling link",
+                Err(_) => "unresolvable link",
+            };
+        }
+        if kind.is_fifo() {
+            "fifo"
+        } else if kind.is_socket() {
+            "socket"
+        } else if kind.is_dir() {
+            "directory"
+        } else if link.len() == 0 {
+            "empty file"
+        } else {
+            match link.permissions().mode() & 0o777 {
+                0o000 => "unreadable file",
+                0o444 => "read-only file",
+                _ => "file",
+            }
+        }
+    }
+
+    #[test]
+    fn every_state_is_what_it_says() {
+        let fs_ = HostileFs::new();
+        for (i, state) in State::ALL.iter().enumerate() {
+            let placed = match fs_.place("d", &plain(&format!("f{i}")), *state, b"content") {
+                Ok(placed) => placed,
+                Err(unmakeable) => {
+                    // Only the two permission states may be unmakeable on a
+                    // platform this suite runs on, and only for root.
+                    assert!(
+                        matches!(state, State::Unreadable | State::ReadOnly),
+                        "{unmakeable}"
+                    );
+                    eprintln!("hostile fs: {unmakeable}");
+                    continue;
+                }
+            };
+            let expected = match state {
+                State::Regular => "file",
+                State::Empty => "empty file",
+                State::Fifo => "fifo",
+                State::Socket => "socket",
+                State::CharDevice => "link to a character device",
+                State::Symlink | State::SymlinkOutOfTree => "link to a file",
+                State::DanglingSymlink => "dangling link",
+                State::SymlinkLoop => "unresolvable link",
+                State::Directory => "directory",
+                State::Unreadable => "unreadable file",
+                State::ReadOnly => "read-only file",
+                State::Missing => "nothing",
+            };
+            assert_eq!(observed(&placed.path), expected, "{state:?}");
+            assert!(placed.path.starts_with(fs_.tree()));
+            match (state, &placed.target) {
+                (State::Symlink, Some(target)) => {
+                    assert!(target.starts_with(fs_.tree().join(LINKED)));
+                    assert_eq!(fs::read(target).unwrap(), b"content");
+                }
+                (State::SymlinkOutOfTree, Some(target)) => {
+                    assert!(!target.starts_with(fs_.tree()));
+                    assert_eq!(fs::read(target).unwrap(), b"content");
+                }
+                (_, target) => assert_eq!(*target, None, "{state:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_state_has_its_own_dimension_and_every_fs_dimension_a_state() {
+        use crate::hostile::Kind;
+        use std::collections::BTreeSet;
+        let states: BTreeSet<_> = State::ALL.iter().map(|s| s.dimension()).collect();
+        assert_eq!(states.len(), State::ALL.len());
+        assert_eq!(states, Kind::FsState.dimensions().collect());
+        let changes: BTreeSet<_> = Change::ALL.iter().map(|c| c.dimension()).collect();
+        assert_eq!(changes.len(), Change::ALL.len());
+        assert_eq!(changes, Kind::FsChange.dimensions().collect());
+        let races: BTreeSet<_> = Race::ALL.iter().map(|r| r.dimension()).collect();
+        assert_eq!(races.len(), Race::ALL.len());
+        assert_eq!(races, Kind::FsRace.dimensions().collect());
+    }
+
+    /// Every name of the alphabet is made, or refused for a reason that is
+    /// the name's: nothing else stops a hostile name from being a file.
+    #[test]
+    fn every_hostile_name_is_made_or_refused_by_name() {
+        let fs_ = HostileFs::new();
+        let (mut made, mut refused) = (0, Vec::new());
+        for (i, entry) in name::alphabet().entries().iter().enumerate() {
+            let rendered = entry.value.render("Lib", ".fs");
+            // A directory each: a file system that folds case or normal forms
+            // holds some of these names as one.
+            match fs_.place(format!("names/{i}"), &rendered, State::Regular, b"x") {
+                Ok(placed) => {
+                    made += 1;
+                    assert_eq!(fs::read(&placed.path).unwrap(), b"x");
+                    assert_eq!(
+                        placed.path.file_name().map(|n| n.to_owned()),
+                        Some(rendered.to_os_string()),
+                        "the file has the name asked for"
+                    );
+                }
+                Err(Unmakeable::Name { reason }) => refused.push((entry.dimension, reason)),
+                Err(other) => panic!("{rendered:?}: {other}"),
+            }
+        }
+        // What no platform makes: `.`, `..`, the NUL-bearing name and the
+        // 256-byte one. A platform may refuse more (APFS, the names that are
+        // not UTF-8), and must say so.
+        assert!(refused.len() >= 4, "{refused:?}");
+        assert!(made > refused.len(), "{made} made, refused {refused:?}");
+        for (dimension, reason) in &refused {
+            eprintln!("hostile fs: a {dimension} name cannot be made: {reason}");
+        }
+        for must in [
+            Dimension::SwitchShaped,
+            Dimension::LineBreak,
+            Dimension::Backslash,
+        ] {
+            assert!(
+                refused.iter().all(|(d, _)| *d != must),
+                "every {must} name is a legal file name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_same_stamp_change_changes_the_bytes_and_keeps_the_stamp() {
+        let fs_ = HostileFs::new();
+        for (change, new) in [
+            (Change::SameStampRewrite, &b"abd"[..]),
+            (Change::SameStampResize, b"abcd"),
+            (Change::SameStampReplace, b"xyz"),
+        ] {
+            let name = plain(&format!("{change:?}"));
+            let path = fs_.place("", &name, State::Regular, b"abc").unwrap().path;
+            // A stamp well in the past, so that "now" could not pass for it.
+            let stamp = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+            set_modified(&path, stamp);
+            let inode = {
+                use std::os::unix::fs::MetadataExt;
+                fs::metadata(&path).unwrap().ino()
+            };
+            fs_.change(&path, change, new).unwrap();
+            let after = fs::metadata(&path).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), new);
+            assert_eq!(after.modified().unwrap(), stamp, "{change:?}");
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(
+                    after.ino() != inode,
+                    change == Change::SameStampReplace,
+                    "{change:?}: only a replacement is a new file"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_appears_and_disappears() {
+        let fs_ = HostileFs::new();
+        let path = fs_
+            .place("", &plain("f"), State::Missing, b"")
+            .unwrap()
+            .path;
+        fs_.change(&path, Change::Appears, b"here").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"here");
+        fs_.change(&path, Change::Disappears, b"").unwrap();
+        assert_eq!(observed(&path), "nothing");
+    }
+
+    #[test]
+    #[should_panic(expected = "may name a directory outside the tree")]
+    fn a_directory_that_climbs_out_of_the_tree_is_refused() {
+        let _ = HostileFs::new().place("../escape", &plain("f"), State::Regular, b"");
+    }
+
+    #[test]
+    #[should_panic(expected = "may name a directory outside the tree")]
+    fn a_rooted_directory_is_refused() {
+        let _ = HostileFs::new().place("/tmp", &plain("f"), State::Regular, b"");
+    }
+
+    #[test]
+    fn a_name_that_is_several_components_is_unmakeable_not_made_elsewhere() {
+        let fs_ = HostileFs::new();
+        let name = name::Name {
+            parts: &[name::Part::Lit(b"../escape")],
+            twin: None,
+        }
+        .render("", "");
+        assert!(matches!(
+            fs_.place("d", &name, State::Regular, b""),
+            Err(Unmakeable::Name { .. })
+        ));
+        assert!(!fs_.tree().join("escape").exists());
+    }
+
+    #[test]
+    #[should_panic(expected = "exists already")]
+    fn placing_over_an_existing_file_is_refused() {
+        let fs_ = HostileFs::new();
+        fs_.place("", &plain("f"), State::Regular, b"").unwrap();
+        let _ = fs_.place("", &plain("f"), State::Fifo, b"");
+    }
+}
