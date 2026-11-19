@@ -214,6 +214,11 @@ struct Case {
     /// folder the test does not own), if it does not: NuGet is then not
     /// asked, and the model must decline.
     unanswerable: Option<&'static str>,
+    /// The name a file or a hostile state is put under at the user config's
+    /// place, where the case puts anything there. As a file, `NuGet.Config`
+    /// is loaded on every platform, and `nuget.config` only where the file
+    /// system ignores case.
+    user_config: Option<&'static str>,
 }
 
 impl Case {
@@ -235,6 +240,7 @@ impl Case {
             placements: Vec::new(),
             hostile: BTreeSet::new(),
             unanswerable: None,
+            user_config: Some("NuGet.Config"),
         }
     }
 
@@ -786,10 +792,9 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
     let home = if cli_home { "cli-home" } else { "home" };
     // Mostly present: the model declines where there is no user config,
     // which NuGet would write.
-    if rng.below(8) != 0 {
+    let user_config = (rng.below(8) != 0).then(|| {
         // Mostly the spelling NuGet loads on every platform: on Linux the
-        // other is no user config, which the model declines, and the
-        // generator's commits must stay above its floor there too.
+        // other is no user config.
         let spelling = if rng.below(16) == 0 {
             "nuget.config"
         } else {
@@ -821,7 +826,8 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
                 files.push((format!("{home}/.nuget/NuGet/{spelling}"), bytes));
             }
         }
-    }
+        spelling
+    });
     let mut listed = |folder: &str, rng: &mut SplitMix64, hostile: &mut BTreeSet<Dimension>| {
         let mut names = BTreeSet::new();
         // At most one hostile name per folder: two may be one file to a file
@@ -897,6 +903,7 @@ fn gen_case(rng: &mut SplitMix64, base: &Path, cli_home: bool) -> Case {
         placements,
         hostile,
         unanswerable,
+        user_config,
     };
     if let Some(entry) = hostile::sample(request_environments(), draw(rng)) {
         case.hostile.insert(entry.dimension);
@@ -1085,9 +1092,11 @@ fn cover(census: &Census) {
 #[derive(Default, Debug)]
 struct Tally {
     cases: usize,
-    /// The cases of no hostile value, and how many of them committed: the
-    /// generator's own space, which most hostile values take out of the
-    /// model's domain.
+    /// The cases of no hostile value whose user config is spelt as every
+    /// platform loads it, and how many cases of no hostile value committed.
+    /// That is the generator's own space where a commit is possible wherever
+    /// the sweep runs: most hostile values take a case out of the model's
+    /// domain, and without a user config the model declines.
     plain_cases: usize,
     plain_committed: usize,
     environment: usize,
@@ -1128,8 +1137,16 @@ fn run_case(harness: &mut Harness, census: &Census, tally: &mut Tally, case: &Ca
     census.reached(&case.hostile, outcome);
     tally.cases += 1;
     if case.hostile.is_empty() {
-        tally.plain_cases += 1;
+        tally.plain_cases += usize::from(case.user_config == Some("NuGet.Config"));
         tally.plain_committed += usize::from(matches!(verdict, Verdict::Committed(_)));
+        // NuGet writes a user config where there is none, and answers. The
+        // model does not know that NuGet can write one, so no agreement with
+        // NuGet's answer makes a commit there sound.
+        assert!(
+            case.user_config.is_some() || matches!(verdict, Verdict::Declined { .. }),
+            "the model committed where there is no user config: {verdict:?}\n{}",
+            case.describe()
+        );
     }
     match verdict {
         Verdict::Committed(committed) => {
@@ -1210,7 +1227,7 @@ fn cases(default: usize) -> usize {
 fn assert_floors(tally: &Tally) {
     assert!(
         tally.plain_committed * 3 >= tally.plain_cases,
-        "fewer than a third of the cases of no hostile value committed: {tally:#?}"
+        "fewer than a third of the cases of no hostile value and with a user config committed: {tally:#?}"
     );
     for (what, count) in [
         ("from NUGET_PACKAGES", tally.environment),
