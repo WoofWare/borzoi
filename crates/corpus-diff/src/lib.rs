@@ -1078,6 +1078,21 @@ fn fcs_dump_command(subcommand: &str) -> Result<Command, FcsInvokeError> {
 /// failing to load them. The lock is held across the build, so a caller arriving
 /// mid-build waits for it rather than starting a second; a failed build caches
 /// nothing, and the next caller tries again.
+/// The directory of the `fcs-dump` every oracle here runs ([`fcs_dump_command`]):
+/// `BORZOI_FCS_DUMP`'s, or that of the build this process made. It holds the
+/// FSharp.Core and FSharp.Compiler.Service that oracle loads, which a test may
+/// take as reference assemblies built for the same runtime.
+pub fn fcs_dump_directory() -> Result<PathBuf, FcsInvokeError> {
+    let program = match std::env::var_os("BORZOI_FCS_DUMP") {
+        Some(bin) => PathBuf::from(bin),
+        None => fcs_dump_built()?,
+    };
+    Ok(program
+        .parent()
+        .expect("an fcs-dump program has a directory")
+        .to_path_buf())
+}
+
 fn fcs_dump_built() -> Result<PathBuf, FcsInvokeError> {
     static BUILT: Mutex<Option<PathBuf>> = Mutex::new(None);
     let mut built = BUILT

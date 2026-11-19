@@ -305,20 +305,76 @@ let private pinnedLangVersionArgs (requested: string option) : string[] =
         [| "--langversion:" + s |]
     | _ -> [||]
 
-/// A request's optional boolean field `name`: `false` when absent, and the
-/// request refused when present as anything but `true` or `false`, so a
-/// caller's misspelt value never selects a mode it did not ask for.
-let private requestFlag (root: JsonElement) (name: string) : bool =
-    match root.TryGetProperty(name) with
-    | true, v when v.ValueKind = JsonValueKind.True -> true
-    | true, v when v.ValueKind = JsonValueKind.False -> false
-    | true, v -> failwithf "request: field %s must be true or false, not %s" name (v.GetRawText())
-    | false, _ -> false
+/// The properties of JSON object `e`, refusing a value that is not an object,
+/// a property not in `allowed` and a property given twice: an unknown or
+/// repeated field is a request for something the parser does not do.
+let private strictObject (where: string) (allowed: string list) (e: JsonElement) =
+    if e.ValueKind <> JsonValueKind.Object then
+        failwithf "%s: expected an object" where
+    let seen = System.Collections.Generic.Dictionary<string, JsonElement>()
+    for p in e.EnumerateObject() do
+        if not (List.contains p.Name allowed) then
+            failwithf "%s: unknown field %s" where p.Name
+        if not (seen.TryAdd(p.Name, p.Value)) then
+            failwithf "%s: field %s given twice" where p.Name
+    seen
 
-/// A project-check request's optional `inputsMayChange` field: `true` from the
-/// paths that read real projects, whose files may change during a run (see
-/// the module doc).
-let private requestInputsMayChange (root: JsonElement) : bool = requestFlag root "inputsMayChange"
+let private strictString (where: string) (e: JsonElement) : string =
+    match e.ValueKind with
+    | JsonValueKind.String -> Option.ofObj (e.GetString()) |> Option.defaultValue ""
+    | _ -> failwithf "%s: expected a string" where
+
+let private strictArray (where: string) (e: JsonElement) : JsonElement list =
+    match e.ValueKind with
+    | JsonValueKind.Array -> e.EnumerateArray() |> Seq.toList
+    | _ -> failwithf "%s: expected an array" where
+
+/// A request of the project-check oracles (`uses-project-batch`,
+/// `xmldoc-batch`), as [`parseProjectCheckRequest`] reads it.
+type private ProjectCheckRequest =
+    { /// Full paths, in Compile order; never empty.
+      Paths: string[]
+      Refs: string list
+      Defines: string[]
+      LangVersion: string option
+      /// `refs` is the whole reference set (`--noframework`).
+      ExclusiveRefs: bool
+      /// The inputs may change during a run (see the module doc).
+      InputsMayChange: bool }
+
+/// Read a project-check request, refusing anything it does not describe
+/// exactly: a field it does not know or given twice ([`strictObject`]), a
+/// value of the wrong kind (a non-string in a list, a flag that is not `true`
+/// or `false`), and a request with no paths. Every field but `paths` is
+/// optional: an absent list is empty, an absent or null `langversion` is no
+/// pin, and an absent flag is `false`. So no misspelt or ill-typed field
+/// silently selects a mode or a reference set the caller did not ask for.
+let private parseProjectCheckRequest (root: JsonElement) : ProjectCheckRequest =
+    let fields =
+        strictObject "request" [ "paths"; "refs"; "defines"; "langversion"; "exclusiveRefs"; "inputsMayChange" ] root
+    let strings (name: string) : string[] =
+        match fields.TryGetValue name with
+        | true, v -> strictArray name v |> List.map (strictString name) |> Array.ofList
+        | false, _ -> [||]
+    let flag (name: string) : bool =
+        match fields.TryGetValue name with
+        | true, v when v.ValueKind = JsonValueKind.True -> true
+        | true, v when v.ValueKind = JsonValueKind.False -> false
+        | true, v -> failwithf "request: field %s must be true or false, not %s" name (v.GetRawText())
+        | false, _ -> false
+    let paths = strings "paths" |> Array.map Path.GetFullPath
+    if Array.isEmpty paths then
+        failwith "no paths in request"
+    { Paths = paths
+      Refs = strings "refs" |> Array.toList
+      Defines = strings "defines"
+      LangVersion =
+        match fields.TryGetValue "langversion" with
+        | true, v when v.ValueKind = JsonValueKind.Null -> None
+        | true, v -> Some(strictString "langversion" v)
+        | false, _ -> None
+      ExclusiveRefs = flag "exclusiveRefs"
+      InputsMayChange = flag "inputsMayChange" }
 
 /// A request's optional `langversion` string field, `None` when absent or not a
 /// string.
@@ -6929,24 +6985,16 @@ let private usesProjectBatchCore () =
     let respond (line: string) : string =
         try
             use doc = JsonDocument.Parse(line: string)
-            let root = doc.RootElement
-            let strArray (name: string) : string[] =
-                match root.TryGetProperty(name) with
-                | true, arr when arr.ValueKind = JsonValueKind.Array ->
-                    arr.EnumerateArray()
-                    |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
-                    |> Seq.toArray
-                | _ -> [||]
-            let paths = strArray "paths" |> Array.map Path.GetFullPath
-            if Array.isEmpty paths then
-                failwith "no paths in request"
-            let refArgs = strArray "refs" |> Array.toList |> extraRefArgsOf
-            let defineArgs = strArray "defines" |> Array.map (fun d -> "--define:" + d.Trim())
-            let langVersionArgs = pinnedLangVersionArgs (requestLangVersion root)
-            let exclusiveRefs =
-                requestFlag root "exclusiveRefs"
+            let request = parseProjectCheckRequest doc.RootElement
             let payload =
-                usesProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs (requestInputsMayChange root)
+                usesProjectFiles
+                    checker
+                    request.Paths
+                    (extraRefArgsOf request.Refs)
+                    request.ExclusiveRefs
+                    (request.Defines |> Array.map (fun d -> "--define:" + d.Trim()))
+                    (pinnedLangVersionArgs request.LangVersion)
+                    request.InputsMayChange
             JsonSerializer.Serialize(payload, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)
@@ -6975,30 +7023,6 @@ let private usesProjectBatch () =
     match captured with
     | Some ex -> raise ex
     | None -> ()
-
-/// The properties of JSON object `e`, refusing a value that is not an object,
-/// a property not in `allowed` and a property given twice: an unknown or
-/// repeated field is a request for something the parser does not do.
-let private strictObject (where: string) (allowed: string list) (e: JsonElement) =
-    if e.ValueKind <> JsonValueKind.Object then
-        failwithf "%s: expected an object" where
-    let seen = System.Collections.Generic.Dictionary<string, JsonElement>()
-    for p in e.EnumerateObject() do
-        if not (List.contains p.Name allowed) then
-            failwithf "%s: unknown field %s" where p.Name
-        if not (seen.TryAdd(p.Name, p.Value)) then
-            failwithf "%s: field %s given twice" where p.Name
-    seen
-
-let private strictString (where: string) (e: JsonElement) : string =
-    match e.ValueKind with
-    | JsonValueKind.String -> Option.ofObj (e.GetString()) |> Option.defaultValue ""
-    | _ -> failwithf "%s: expected a string" where
-
-let private strictArray (where: string) (e: JsonElement) : JsonElement list =
-    match e.ValueKind with
-    | JsonValueKind.Array -> e.EnumerateArray() |> Seq.toList
-    | _ -> failwithf "%s: expected an array" where
 
 let private required (where: string) (name: string) (fields: System.Collections.Generic.Dictionary<string, JsonElement>) =
     match fields.TryGetValue name with
@@ -9548,24 +9572,16 @@ let private xmlDocBatchCore () =
     let respond (line: string) : string =
         try
             use doc = JsonDocument.Parse(line: string)
-            let root = doc.RootElement
-            let strArray (name: string) : string[] =
-                match root.TryGetProperty(name) with
-                | true, arr when arr.ValueKind = JsonValueKind.Array ->
-                    arr.EnumerateArray()
-                    |> Seq.choose (fun e -> Option.ofObj (e.GetString()))
-                    |> Seq.toArray
-                | _ -> [||]
-            let paths = strArray "paths" |> Array.map Path.GetFullPath
-            if Array.isEmpty paths then
-                failwith "no paths in request"
-            let defineArgs = strArray "defines" |> Array.map (fun d -> "--define:" + d.Trim())
-            let langVersionArgs = pinnedLangVersionArgs (requestLangVersion root)
-            let refArgs = strArray "refs" |> Array.toList |> extraRefArgsOf
-            let exclusiveRefs =
-                requestFlag root "exclusiveRefs"
+            let request = parseProjectCheckRequest doc.RootElement
             let payload =
-                xmlDocProjectFiles checker paths refArgs exclusiveRefs defineArgs langVersionArgs (requestInputsMayChange root)
+                xmlDocProjectFiles
+                    checker
+                    request.Paths
+                    (extraRefArgsOf request.Refs)
+                    request.ExclusiveRefs
+                    (request.Defines |> Array.map (fun d -> "--define:" + d.Trim()))
+                    (pinnedLangVersionArgs request.LangVersion)
+                    request.InputsMayChange
             JsonSerializer.Serialize(payload, compact)
         with ex ->
             JsonSerializer.Serialize({| BatchError = ex.Message |}, compact)

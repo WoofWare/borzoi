@@ -252,32 +252,56 @@ fn a_request_whose_inputs_may_change_is_a_fresh_childs_only_one() {
     }
 }
 
-/// A request's mode flags are JSON booleans or absent: any other value is
-/// refused, so a caller's misspelt `inputsMayChange` (or `exclusiveRefs`)
-/// never selects a mode it did not ask for, and a refused request leaves the
-/// child fresh.
+/// A request the oracle cannot read exactly is refused: a field it does not
+/// know (a misspelt `inputsMayChange`) or given twice, a mode flag that is
+/// not `true` or `false`, and a list holding something other than strings.
+/// So no caller's mistake selects a mode or a reference set it did not ask
+/// for, and a refused request leaves the child fresh.
 #[test]
-fn a_mode_flag_that_is_not_a_boolean_is_refused() {
+fn a_request_the_oracle_cannot_read_exactly_is_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
     let a = dir.path().join("A.fs");
     write(&a, "module A\nlet y = 1\n");
+    let paths = serde_json::json!([a.display().to_string()]);
+    // Each request's text, and what its refusal must name.
+    let cases: Vec<(String, &str)> = [
+        (r#""inputMayChange":true"#, "unknown field inputMayChange"),
+        (
+            r#""inputsMayChange":true,"inputsMayChange":false"#,
+            "field inputsMayChange given twice",
+        ),
+        (
+            r#""inputsMayChange":"true""#,
+            "inputsMayChange must be true or false",
+        ),
+        (
+            r#""inputsMayChange":1"#,
+            "inputsMayChange must be true or false",
+        ),
+        (
+            r#""inputsMayChange":null"#,
+            "inputsMayChange must be true or false",
+        ),
+        (
+            r#""exclusiveRefs":"true""#,
+            "exclusiveRefs must be true or false",
+        ),
+        (r#""refs":"Lib.dll""#, "refs: expected an array"),
+        (r#""refs":[1]"#, "refs: expected a string"),
+        (r#""defines":[null]"#, "defines: expected a string"),
+        (r#""langversion":8"#, "langversion: expected a string"),
+    ]
+    .into_iter()
+    .map(|(field, why)| (format!(r#"{{"paths":{paths},{field}}}"#), why))
+    .collect();
     for oracle in ORACLES {
         let mut child = fcs_dump_batch_child(oracle);
-        for (flag, value) in [
-            ("inputsMayChange", serde_json::json!("true")),
-            ("inputsMayChange", serde_json::json!(1)),
-            ("inputsMayChange", Value::Null),
-            ("exclusiveRefs", serde_json::json!("true")),
-        ] {
-            let request = serde_json::json!({
-                "paths": [a.display().to_string()],
-                (flag): value,
-            });
-            let line = child.request(&request.to_string());
+        for (request, why) in &cases {
+            let line = child.request(request);
             let v: Value = serde_json::from_str(&line).expect("a JSON response");
             match v.get("BatchError").and_then(Value::as_str) {
-                Some(why) if why.contains(flag) && why.contains("true or false") => {}
-                _ => panic!("{oracle}: {flag} = {value} must be refused: {line}"),
+                Some(err) if err.contains(why) => {}
+                _ => panic!("{oracle}: {request} must be refused ({why}): {line}"),
             }
         }
         ask_real(&mut child, oracle, &[&a], &[])

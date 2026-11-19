@@ -2381,13 +2381,7 @@ fn a_real_projects_reference_rewritten_in_place_is_read() {
     );
     let mut loaded = load_lsp_project(&project).expect("project should load");
     let mut oracle = UsesProjectOracle::default();
-    // The first request builds the oracle, whose output holds the assemblies
-    // the reference set takes.
-    oracle
-        .uses_project(&loaded)
-        .expect("the oracle is built and answers");
-    let out =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fcs-dump/bin/Release/net10.0");
+    let out = borzoi_corpus_diff::fcs_dump_directory().expect("the oracle's directory");
     let lib = tmp.path().join("lib").join("Lib.dll");
     fs::create_dir_all(lib.parent().expect("a parent")).expect("mkdir");
     fs::copy(out.join("FSharp.Compiler.Service.dll"), &lib).expect("copy the referenced assembly");
