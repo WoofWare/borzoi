@@ -2255,7 +2255,17 @@ impl<'src> Parser<'src> {
             };
         }
         i += 1;
-        // Consume the rest of a dotted longident: (DOT Ident)*.
+        // Consume the rest of a dotted longident: (DOT Ident)*. Each `.` and
+        // ident must also be the next significant *raw* token: past this
+        // brace's swallowed `}` (and the closers around it) the filtered stream
+        // holds the enclosing expression, whose `.M` of `(builder { a }).M = b`
+        // is no part of this head.
+        let raw_next_after = |idx: usize| {
+            self.filtered
+                .tokens()
+                .get(idx)
+                .and_then(|(_, span)| self.next_non_trivia_raw_after(span.end))
+        };
         while (self.filtered.tokens().kind_at(i) == Some(FilteredKind::Token(TokenKind::Dot)))
             && matches!(
                 self.filtered.tokens().get(i + 1),
@@ -2263,6 +2273,11 @@ impl<'src> Parser<'src> {
                     Ok(FilteredToken::Raw(Token::Ident(_) | Token::QuotedIdent(_))),
                     _
                 ))
+            )
+            && matches!(raw_next_after(i - 1), Some(Token::Dot))
+            && matches!(
+                raw_next_after(i),
+                Some(Token::Ident(_) | Token::QuotedIdent(_))
             )
         {
             i += 2;
@@ -2278,11 +2293,7 @@ impl<'src> Parser<'src> {
         // significant token after the head longident (no swallowed closer sits
         // between), the same nesting guard the object-expression handler
         // applies.
-        let head_next_raw = self
-            .filtered
-            .tokens()
-            .get(i - 1)
-            .and_then(|(_, head_span)| self.next_non_trivia_raw_after(head_span.end));
+        let head_next_raw = raw_next_after(i - 1);
         // The body is the head longident alone (`{ x }`, `{ a.b }`): a
         // computation expression, whatever follows its `}`.
         if matches!(head_next_raw, Some(Token::RBrace)) {

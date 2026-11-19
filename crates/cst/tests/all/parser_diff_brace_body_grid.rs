@@ -11,14 +11,15 @@
 //! bodies of each shape into contexts where such a token follows each kind of
 //! closer, and FCS decides every cell.
 //!
-//! Each cell goes to [`assert_parse_verdicts_match`]: a cell we wrongly reject,
-//! wrongly accept or accept with a divergent tree fails. A cell both reject is
-//! followed by a declaration that FCS keeps, and the recovered trees are
-//! graded on it ([`assert_recovered_trees_agree`]).
+//! Each cell goes to [`grade_cell`]: a cell we wrongly reject, wrongly accept
+//! or accept with a divergent tree fails. A cell both reject is followed by a
+//! declaration that FCS keeps; the recovered trees are graded
+//! ([`assert_recovered_trees_agree`]) and that declaration must survive ours.
 
-use crate::common::assert_parse_verdicts_match;
-use crate::common::recovery::assert_recovered_trees_agree;
+use crate::common::recovery::{assert_recovered_trees_agree, fcs_units, our_units};
+use crate::common::{assert_parse_verdicts_match, fcs_ast_batch, fcs_parse_had_errors};
 use borzoi_oracle_harness::panic_silence::{catch_unwind_silent, take_silenced_panic};
+use std::io::Write;
 
 /// The hole each template's shape fills.
 const HOLE: &str = "@";
@@ -26,16 +27,64 @@ const HOLE: &str = "@";
 /// A declaration after every cell, outside any damage a cell's shape causes.
 const AFTER: &str = "let after = 1\n";
 
-/// Run every cell through the verdict oracle, and every cell both reject
-/// through the recovery oracle, collecting (rather than stopping at)
-/// divergences, and assert both verdicts were exercised.
+/// How a cell's two parses relate, when they do not diverge in any other way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Outcome {
+    /// Both parse cleanly, to the same normalised tree.
+    BothAccept,
+    /// Both report errors, the recovered trees agree, and every declaration
+    /// FCS keeps from [`AFTER`] on is one of ours.
+    BothReject,
+    /// We parse cleanly and FCS reports errors: the one divergence a known
+    /// cell may show.
+    OnlyFcsRejects,
+}
+
+/// Grade one cell against FCS, panicking on any divergence other than
+/// [`Outcome::OnlyFcsRejects`].
+fn grade_cell(source: &str) -> Outcome {
+    let json = {
+        let mut tmp = tempfile::NamedTempFile::with_suffix(".fs").expect("create tempfile");
+        tmp.write_all(source.as_bytes()).expect("write source");
+        fcs_ast_batch(tmp.path())
+    };
+    let parse = borzoi_cst::parser::parse(source);
+    if fcs_parse_had_errors(&json) && parse.errors.is_empty() {
+        return Outcome::OnlyFcsRejects;
+    }
+    if assert_parse_verdicts_match(source) {
+        return Outcome::BothAccept;
+    }
+    assert_recovered_trees_agree(source, 0);
+    // The recovery oracle grades only declarations outside both sides'
+    // damage, so a recovery that swallowed `after` under a wider error span
+    // would still agree; hold the declarations FCS keeps there to ours.
+    let after = source.rfind(AFTER).expect("every cell ends with AFTER");
+    let ours = our_units(&parse);
+    for unit in fcs_units(&json, source)
+        .iter()
+        .filter(|u| u.key.start >= after)
+    {
+        assert!(
+            ours.iter().any(|o| o.key == unit.key),
+            "recovery loses `{}`, which FCS keeps, in {source:?}",
+            source[unit.key.start..].lines().next().unwrap_or(""),
+        );
+    }
+    Outcome::BothReject
+}
+
+/// Grade every cell, collecting (rather than stopping at) divergences, and
+/// assert both shared verdicts were exercised.
 ///
 /// `known` lists cells (the declaration, without the module header and the
-/// trailing [`AFTER`]) that diverge for reasons outside this grid's subject.
-/// Each must still diverge, so the list cannot outlive the defect it records.
+/// trailing [`AFTER`]) that diverge for reasons outside this grid's subject,
+/// as [`Outcome::OnlyFcsRejects`] and in no other way. Each must still
+/// diverge, so the list cannot outlive the defect it records.
 fn sweep(what: &str, cells: impl IntoIterator<Item = String>, known: &[String]) {
     let mut total = 0;
     let mut accepted = 0;
+    let mut rejected = 0;
     let mut failures = Vec::new();
     let mut known_now_agreeing = Vec::new();
     let mut known_seen = 0;
@@ -46,17 +95,17 @@ fn sweep(what: &str, cells: impl IntoIterator<Item = String>, known: &[String]) 
             known_seen += 1;
         }
         let source = format!("module M\n{body}{AFTER}");
-        let graded = catch_unwind_silent(|| {
-            let fcs_accepts = assert_parse_verdicts_match(&source);
-            if !fcs_accepts {
-                assert_recovered_trees_agree(&source, 0);
+        match catch_unwind_silent(|| grade_cell(&source)) {
+            Ok(Outcome::OnlyFcsRejects) => {
+                if !is_known {
+                    failures.push(format!("we accept, FCS rejects: {source:?}"));
+                }
             }
-            fcs_accepts
-        });
-        match graded {
-            Ok(fcs_accepts) => {
-                if fcs_accepts {
-                    accepted += 1;
+            Ok(outcome) => {
+                match outcome {
+                    Outcome::BothAccept => accepted += 1,
+                    Outcome::BothReject => rejected += 1,
+                    Outcome::OnlyFcsRejects => unreachable!("matched above"),
                 }
                 if is_known {
                     known_now_agreeing.push(body);
@@ -64,10 +113,8 @@ fn sweep(what: &str, cells: impl IntoIterator<Item = String>, known: &[String]) 
             }
             Err(_) => {
                 let message = take_silenced_panic().map_or_else(String::new, |p| p.message);
-                if !is_known {
-                    let first_line = message.lines().next().unwrap_or_default().to_owned();
-                    failures.push(first_line);
-                }
+                let first_line = message.lines().next().unwrap_or_default().to_owned();
+                failures.push(first_line);
             }
         }
     }
@@ -88,8 +135,9 @@ fn sweep(what: &str, cells: impl IntoIterator<Item = String>, known: &[String]) 
          remove them from the list:\n{known_now_agreeing:#?}",
     );
     assert!(
-        accepted > 0 && accepted < total,
-        "the {what} sweep should both accept and reject, but accepted {accepted} of {total}",
+        accepted > 0 && rejected > 0,
+        "the {what} sweep should both accept and reject, but of {total} cells both \
+         parsers accepted {accepted} and both rejected {rejected}",
     );
 }
 
@@ -153,6 +201,10 @@ const CONTEXTS: &[&str] = &[
     "let x = (@) <> b\n",
     "let x = (@) b\n",
     "let x = (@).M\n",
+    "let x = (@).M = b\n",
+    "let x = (@).M.N = b\n",
+    "let x = f (@).M = b\n",
+    "let x = { (@).M with R = 1 }\n",
     "let x = (@) :: b\n",
     "let x = [@; c] = b\n",
     "let x = (@) == b\n",
