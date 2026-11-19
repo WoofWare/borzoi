@@ -21,6 +21,7 @@ mod evaluation_cutoff;
 mod fcs_bridge;
 mod fcs_dump_langversion_pin;
 mod fcs_dump_request_lines;
+mod fcs_dump_special_files;
 mod fsharp_name_lexes_back;
 mod goto_source_fsharp_core;
 mod goto_source_sidecar;
