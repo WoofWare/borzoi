@@ -16,13 +16,13 @@
 //! - the **platform** could not make any value of it on this run
 //!   ([`Census::unmakeable`]), which is printed.
 //!
-//! What became of each dimension is pinned as an exact manifest, one keyed
-//! line per dimension, so a reviewer sees a dimension gained, lost or
-//! excluded as a line of the diff. The manifest records `reached`, `excluded`
-//! and `unmade`, and not what the subject did: outcomes are printed with
-//! their counts, and may differ between platforms where the manifest must
-//! not. A dimension this platform could not make keeps the line another
-//! platform pinned for it.
+//! What each census answers for is pinned as an exact manifest, one keyed
+//! line per dimension: `owed`, or `excluded` with the reason. A reviewer sees
+//! a dimension gained by the library, or excluded by the harness, as a line
+//! of the diff. The manifest does not record what a run saw (whether a
+//! platform could make a value, what the subject did with it): that differs
+//! between platforms, where the manifest must not, and is what every run
+//! checks and prints.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -263,43 +263,20 @@ impl Census {
         out
     }
 
-    /// The manifest of this run, given the manifest checked in (if any): one
-    /// line per dimension owed or excluded.
-    fn manifest(&self, pinned: Option<&Manifest>) -> Manifest {
-        let counts = self.counts();
-        let pinned: BTreeMap<&str, &str> = pinned
-            .map(|m| {
-                m.entries()
-                    .iter()
-                    .filter_map(|e| e.split_once(manifest::KEY_SEPARATOR))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut entries = vec![format!("{PLAIN_KEY}\treached")];
+    /// The census's manifest: one line per dimension, `owed` or `excluded`
+    /// with the reason. It says what the census answers for, not what one
+    /// run on one platform saw, so every platform pins the same lines;
+    /// [`Self::violations`] is what holds a run to it.
+    fn manifest(&self) -> Manifest {
+        let mut entries = vec![format!("{PLAIN_KEY}\towed")];
         let mut all: BTreeSet<Dimension> = self.owed();
         all.extend(self.excluded.keys());
         for dimension in all {
-            let key = dimension.key();
-            let value = if let Some(reason) = self.excluded.get(&dimension) {
-                format!("excluded: {reason}")
-            } else if counts.reached.contains_key(&dimension) {
-                "reached".to_owned()
-            } else if let Some(reasons) = counts.unmakeable.get(&dimension) {
-                // Another platform's observation stands where this one has
-                // none. Only an observation: a pinned exclusion was the
-                // harness's decision, which it has since withdrawn.
-                match pinned.get(key.as_str()) {
-                    Some(line) if *line == "reached" => (*line).to_owned(),
-                    _ => format!(
-                        "unmade: {}",
-                        reasons.iter().cloned().collect::<Vec<_>>().join("; ")
-                    ),
-                }
-            } else {
-                // Reported by `violations`; the manifest still needs a line.
-                "never reached".to_owned()
+            let value = match self.excluded.get(&dimension) {
+                Some(reason) => format!("excluded: {reason}"),
+                None => "owed".to_owned(),
             };
-            entries.push(format!("{key}\t{value}"));
+            entries.push(format!("{}\t{value}", dimension.key()));
         }
         Manifest::from_entries(entries).expect("dimension keys are distinct single lines")
     }
@@ -331,10 +308,7 @@ impl Census {
             self.declared.census,
             violations.join("\n  ")
         );
-        let pinned = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| Manifest::parse(&text).ok());
-        manifest::check(path, &self.manifest(pinned.as_ref()), regenerate);
+        manifest::check(path, &self.manifest(), regenerate);
     }
 }
 
@@ -364,12 +338,12 @@ mod tests {
         let census = Census::new(declared(&[Kind::FsChange, Kind::WorkingDirectory]), &[]);
         reach_all(&census, &[]);
         assert_eq!(census.violations(), Vec::<String>::new());
-        let manifest = census.manifest(None);
+        let manifest = census.manifest();
         assert_eq!(
             manifest.entries().len(),
             1 + Kind::FsChange.dimensions().count() + Kind::WorkingDirectory.dimensions().count()
         );
-        assert!(manifest.entries().iter().all(|e| e.ends_with("\treached")));
+        assert!(manifest.entries().iter().all(|e| e.ends_with("\towed")));
     }
 
     #[test]
@@ -398,7 +372,7 @@ mod tests {
         reach_all(&census, &[]);
         assert_eq!(census.violations(), Vec::<String>::new());
         assert!(
-            census.manifest(None).entries().contains(
+            census.manifest().entries().contains(
                 &"change.appears\texcluded: the subject is handed one snapshot".to_owned()
             )
         );
@@ -415,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dimension_the_platform_cannot_make_keeps_another_platforms_line() {
+    fn a_dimension_the_platform_cannot_make_is_excused_and_pinned_alike() {
         let census = Census::new(declared(&[Kind::FsState]), &[]);
         reach_all(&census, &[Dimension::Socket]);
         let refusal = crate::hostile::fs::Unmakeable::State {
@@ -425,32 +399,11 @@ mod tests {
         };
         census.unmakeable(&refusal);
         assert_eq!(census.violations(), Vec::<String>::new());
-        // With nothing pinned, the line says so, and a platform that reaches
-        // the dimension then fails against it.
-        assert!(census.manifest(None).entries().contains(
-            &"fs.socket\tunmade: fs.socket cannot be made: no such thing here".to_owned()
-        ));
-        let elsewhere = Manifest::from_entries(["fs.socket\treached".to_owned()]).unwrap();
-        assert!(
-            census
-                .manifest(Some(&elsewhere))
-                .entries()
-                .contains(&"fs.socket\treached".to_owned())
-        );
-        // A pinned exclusion is not an observation, and does not stand.
-        let excluded = Manifest::from_entries(["fs.socket\texcluded: once".to_owned()]).unwrap();
-        assert!(
-            census
-                .manifest(Some(&excluded))
-                .entries()
-                .iter()
-                .any(|e| e.starts_with("fs.socket\tunmade: "))
-        );
-        // A pinned `unmade` line is replaced by this platform's own reason.
-        let unmade = Manifest::from_entries(["fs.socket\tunmade: other".to_owned()]).unwrap();
-        assert!(census.manifest(Some(&unmade)).entries().contains(
-            &"fs.socket\tunmade: fs.socket cannot be made: no such thing here".to_owned()
-        ));
+        assert!(census.report().contains("fs.socket: not made here"));
+        // The manifest is the one a platform that makes sockets pins.
+        let elsewhere = Census::new(declared(&[Kind::FsState]), &[]);
+        reach_all(&elsewhere, &[]);
+        assert_eq!(census.manifest(), elsewhere.manifest());
     }
 
     /// A refusal of one value excuses nothing: the rest of its dimension is
@@ -495,7 +448,7 @@ mod tests {
         let path = dir.path().join("census.txt");
         let first = Census::new(declared(&[Kind::FsChange]), &[]);
         reach_all(&first, &[]);
-        manifest::compare_with(&path, &first.manifest(None), "regen", true).unwrap();
+        manifest::compare_with(&path, &first.manifest(), "regen", true).unwrap();
         let census = Census::new(declared(&[Kind::FsChange]), &[]).owing_a_finish();
         reach_all(&census, &[]);
         census.finish_at(&path, "regen");
@@ -505,21 +458,18 @@ mod tests {
     fn finishing_pins_the_manifest_and_fails_on_movement() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("census.txt");
-        let run = |except: &[Dimension], excluded: &[(Dimension, &'static str)]| {
+        let run = |excluded: &[(Dimension, &'static str)]| {
             let census = Census::new(declared(&[Kind::FsChange]), excluded);
-            reach_all(&census, except);
-            let pinned = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| Manifest::parse(&t).ok());
-            manifest::compare_with(&path, &census.manifest(pinned.as_ref()), "regen", false)
+            reach_all(&census, &[]);
+            manifest::compare_with(&path, &census.manifest(), "regen", false)
         };
         // Written once, as a regeneration does.
         let first = Census::new(declared(&[Kind::FsChange]), &[]);
         reach_all(&first, &[]);
-        manifest::compare_with(&path, &first.manifest(None), "regen", true).unwrap();
-        assert_eq!(run(&[], &[]), Ok(()));
+        manifest::compare_with(&path, &first.manifest(), "regen", true).unwrap();
+        assert_eq!(run(&[]), Ok(()));
         // Excluding a dimension moves its line.
-        let moved = run(&[], &[(Dimension::Appears, "why")]).unwrap_err();
+        let moved = run(&[(Dimension::Appears, "why")]).unwrap_err();
         assert!(moved.contains("change.appears"), "{moved}");
         // The whole of `finish`, against the same file.
         let whole = Census::new(declared(&[Kind::FsChange]), &[]);

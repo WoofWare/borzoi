@@ -140,6 +140,12 @@ impl std::fmt::Display for NotAComponent {
 }
 
 impl Rendered {
+    /// A name of exactly these bytes, for a harness's own name beside the
+    /// alphabet's.
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Rendered(bytes.into())
+    }
+
     /// The bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.0

@@ -59,11 +59,22 @@ use std::fmt;
 
 use proptest::strategy::{BoxedStrategy, Strategy};
 
-/// One draw in this many is hostile, where a generator mixes hostile values
-/// into its own ([`Alphabet::sample`], [`Alphabet::strategy`]). The rest are
-/// the generator's own values, so the space it already modelled still
-/// dominates its run.
+/// One in this many is hostile, where a generator mixes hostile values into
+/// its own. The rest are the generator's own values, so the space it already
+/// modelled still dominates its run.
+///
+/// The unit is the *case*. A generator that builds a case from one draw can
+/// draw at the rate ([`Alphabet::sample`], [`Alphabet::strategy`]). One that
+/// builds a case from many draws decides once per case whether it mixes
+/// ([`mixes`]) and, in a case that does, takes hostile entries where it
+/// likes ([`Alphabet::pick`]): ten draws each hostile at this rate would
+/// leave hardly a case plain.
 pub const RATE: u64 = 4;
+
+/// Whether a case mixes hostile values in: so for one `entropy` in [`RATE`].
+pub fn mixes(entropy: u64) -> bool {
+    entropy.is_multiple_of(RATE)
+}
 
 /// The kind of input a generator hands its subject. A generator declares the
 /// kinds it consumes; each kind has one alphabet.
@@ -579,6 +590,11 @@ impl<V: Clone + fmt::Debug + PartialEq> Alphabet<V> {
         sample(&self.entries, entropy)
     }
 
+    /// An entry chosen by `entropy`, for a case that [`mixes`].
+    pub fn pick(&self, entropy: u64) -> &Entry<V> {
+        &self.entries[(entropy % self.entries.len() as u64) as usize]
+    }
+
     /// A proptest strategy: `plain`'s values, with a hostile entry mixed in
     /// at [`RATE`].
     pub fn strategy(&self, plain: impl Strategy<Value = V> + 'static) -> BoxedStrategy<Drawn<V>>
@@ -669,6 +685,16 @@ mod tests {
             "every entry is drawn"
         );
         assert!(sample::<u32>(&[], 0).is_none());
+        assert_eq!((0..RATE * 100).filter(|e| mixes(*e)).count(), 100);
+        let alphabet = fs::alphabet();
+        let picked: BTreeSet<_> = (0..alphabet.entries().len() as u64 * 2)
+            .map(|e| alphabet.pick(e).dimension)
+            .collect();
+        assert_eq!(
+            picked.len(),
+            alphabet.entries().len(),
+            "every entry is picked"
+        );
     }
 
     #[test]
